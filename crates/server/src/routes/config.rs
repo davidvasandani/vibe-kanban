@@ -101,6 +101,11 @@ pub struct UserSystemInfo {
     pub preview_proxy_port: Option<u16>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub single_user_mode: bool,
+    /// Whether the local deployment can accept attachment uploads.
+    /// Always true today (filesystem-backed); kept as a capability flag so
+    /// the frontend can render a unified "Attachments" status alongside the
+    /// remote deployment's `attachments_enabled`.
+    pub attachments_enabled: bool,
 }
 
 // TODO: update frontend, BE schema has changed, this replaces GET /config and /config/constants
@@ -175,6 +180,7 @@ async fn get_user_system_info(
         shared_api_base: deployment.remote_info().get_api_base(),
         preview_proxy_port: deployment.client_info().get_preview_proxy_port(),
         single_user_mode: deployment.single_user_mode(),
+        attachments_enabled: true,
     };
 
     ResponseJson(ApiResponse::success(user_system_info))

@@ -53,6 +53,7 @@ export function useUserSystemController({
       BaseAgentCapability[]
     > | null) || null;
   const singleUserMode = userSystemInfo?.single_user_mode || false;
+  const attachmentsEnabled = userSystemInfo?.attachments_enabled ?? true;
   const loading = loadingOverride ?? isLoading;
 
   const updateConfig = useCallback(
@@ -154,6 +155,7 @@ export function useUserSystemController({
         machineId,
         loginStatus,
         remoteAuthDegraded,
+        attachmentsEnabled,
       },
       appVersion,
       previewProxyPort,
@@ -173,6 +175,7 @@ export function useUserSystemController({
       reloadSystem,
       loading,
       singleUserMode,
+      attachmentsEnabled,
     }),
     [
       machineId,
@@ -192,6 +195,7 @@ export function useUserSystemController({
       setProfiles,
       updateAndSaveConfig,
       singleUserMode,
+      attachmentsEnabled,
       updateConfig,
     ]
   );

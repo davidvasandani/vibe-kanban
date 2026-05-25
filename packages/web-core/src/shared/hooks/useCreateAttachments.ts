@@ -5,6 +5,7 @@ import {
   buildWorkspaceAttachmentMarkdown,
   toLocalAttachmentMetadata,
 } from '@/shared/lib/workspaceAttachments';
+import { useStorageCapability } from '@/shared/hooks/useStorageCapability';
 import type { DraftWorkspaceAttachment } from 'shared/types';
 
 /**
@@ -18,6 +19,7 @@ export function useCreateAttachments(
   initialAttachments?: DraftWorkspaceAttachment[],
   onAttachmentsChange?: (attachments: DraftWorkspaceAttachment[]) => void
 ) {
+  const storageCapability = useStorageCapability('filesystem');
   const [attachments, setAttachments] = useState<DraftWorkspaceAttachment[]>(
     initialAttachments ?? []
   );
@@ -37,6 +39,13 @@ export function useCreateAttachments(
 
   const uploadFiles = useCallback(
     async (selectedFiles: File[]) => {
+      if (
+        !storageCapability.isLoading &&
+        !storageCapability.attachmentsEnabled
+      ) {
+        return;
+      }
+
       const uploadResults: DraftWorkspaceAttachment[] = [];
 
       for (const attachment of selectedFiles) {
@@ -62,7 +71,11 @@ export function useCreateAttachments(
         onInsertMarkdown(allMarkdown);
       }
     },
-    [onInsertMarkdown]
+    [
+      onInsertMarkdown,
+      storageCapability.attachmentsEnabled,
+      storageCapability.isLoading,
+    ]
   );
 
   const getAttachmentIds = useCallback(() => {
@@ -87,5 +100,7 @@ export function useCreateAttachments(
     getAttachmentIds,
     clearAttachments,
     localAttachments,
+    attachmentsEnabled:
+      storageCapability.isLoading || storageCapability.attachmentsEnabled,
   };
 }

@@ -10,6 +10,7 @@ import { attachmentsApi } from '@/shared/lib/api';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
 import { useWorkspaceExecution } from '@/shared/hooks/useWorkspaceExecution';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
+import { useStorageCapability } from '@/shared/hooks/useStorageCapability';
 import { useBranchStatus } from '@/shared/hooks/useBranchStatus';
 import { useVariant } from '@/shared/hooks/useVariant';
 import { useRetryProcess } from '@/shared/hooks/useRetryProcess';
@@ -32,6 +33,9 @@ export function RetryEditorInline({
   const { isAttemptRunning, attemptData } = useWorkspaceExecution(workspaceId);
   const { data: branchStatus } = useBranchStatus(workspaceId);
   const { profiles } = useUserSystem();
+  const storageCapability = useStorageCapability('filesystem');
+  const attachmentsEnabled =
+    storageCapability.isLoading || storageCapability.attachmentsEnabled;
 
   const [message, setMessage] = useState(initialContent);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -105,6 +109,12 @@ export function RetryEditorInline({
         );
         return;
       }
+      if (
+        !storageCapability.isLoading &&
+        !storageCapability.attachmentsEnabled
+      ) {
+        return;
+      }
 
       for (const file of files) {
         try {
@@ -122,7 +132,12 @@ export function RetryEditorInline({
         }
       }
     },
-    [attempt.session?.id, workspaceId]
+    [
+      attempt.session?.id,
+      workspaceId,
+      storageCapability.attachmentsEnabled,
+      storageCapability.isLoading,
+    ]
   );
 
   // Attachment button handlers
@@ -179,8 +194,12 @@ export function RetryEditorInline({
           <Button
             variant="outline"
             onClick={handleAttachClick}
-            disabled={isSending}
-            title="Attach file"
+            disabled={isSending || !attachmentsEnabled}
+            title={
+              attachmentsEnabled
+                ? 'Attach file'
+                : t('attachments.storageDisabled', { ns: 'common' })
+            }
             aria-label="Attach file"
           >
             <Paperclip className="h-3 w-3" />

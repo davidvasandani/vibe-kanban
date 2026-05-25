@@ -32,7 +32,9 @@
         "remote-projects": "Projects",
         "remote-projectsDesc": "Manage projects",
         "relay": "Remote Access",
-        "relayDesc": "Relay tunnel and enrollment"
+        "relayDesc": "Relay tunnel and enrollment",
+        "attachments": "Attachments",
+        "attachmentsDesc": "Attachment storage status"
       }
     },
     "hostPicker": {
@@ -528,6 +530,26 @@
         "unsavedChanges": "You have unsaved changes",
         "discard": "Discard",
         "confirmSwitch": "You have unsaved changes. Are you sure you want to switch repositories? Your changes will be lost."
+      }
+    },
+    "attachments": {
+      "title": "Attachments",
+      "description": "Status of attachment storage for this deployment.",
+      "status": {
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "loading": "Checking…"
+      },
+      "backend": {
+        "label": "Storage backend",
+        "azure": "Azure Blob Storage",
+        "filesystem": "Local filesystem"
+      },
+      "disabledHelp": "Attachment uploads are disabled. Set the following environment variables on the server to enable them:",
+      "envVars": {
+        "azureAccount": "AZURE_STORAGE_ACCOUNT_NAME (required)",
+        "azureKey": "AZURE_STORAGE_ACCOUNT_KEY (required)",
+        "azureContainer": "AZURE_STORAGE_CONTAINER_NAME (optional, defaults to 'attachments')"
       }
     },
     "relay": {

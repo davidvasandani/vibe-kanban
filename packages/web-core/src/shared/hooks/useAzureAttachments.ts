@@ -8,6 +8,7 @@ import {
   initAttachmentUpload,
   uploadToAzure,
 } from '@/shared/lib/remoteApi';
+import { useStorageCapability } from '@/shared/hooks/useStorageCapability';
 import { buildAttachmentMarkdown } from '@/shared/lib/workspaceAttachments';
 
 // ---------------------------------------------------------------------------
@@ -57,6 +58,7 @@ interface UseAzureAttachmentsReturn {
   uploadError: string | null;
   clearUploadError: () => void;
   localAttachments: LocalAttachmentMetadata[];
+  attachmentsEnabled: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +110,7 @@ export function useAzureAttachments({
   onError,
 }: UseAzureAttachmentsOptions): UseAzureAttachmentsReturn {
   const { t } = useTranslation('common');
+  const storageCapability = useStorageCapability('azure');
   const [pendingAttachments, setPendingAttachments] = useState<
     PendingAttachment[]
   >([]);
@@ -158,6 +161,14 @@ export function useAzureAttachments({
       };
 
       setUploadError(null);
+
+      if (
+        !storageCapability.isLoading &&
+        !storageCapability.attachmentsEnabled
+      ) {
+        reportErrorMessage(t('attachments.storageDisabled'));
+        return;
+      }
 
       if (files.length > MAX_BATCH_SIZE) {
         reportErrorMessage(
@@ -372,7 +383,12 @@ export function useAzureAttachments({
 
       setIsUploading(false);
     },
-    [projectId, t]
+    [
+      projectId,
+      t,
+      storageCapability.attachmentsEnabled,
+      storageCapability.isLoading,
+    ]
   );
 
   const getAttachmentIds = useCallback(
@@ -405,5 +421,7 @@ export function useAzureAttachments({
     uploadError,
     clearUploadError,
     localAttachments,
+    attachmentsEnabled:
+      storageCapability.isLoading || storageCapability.attachmentsEnabled,
   };
 }

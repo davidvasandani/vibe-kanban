@@ -18,6 +18,7 @@ export interface UserSystemState {
   machineId: string | null;
   loginStatus: LoginStatus | null;
   remoteAuthDegraded: string | null;
+  attachmentsEnabled: boolean;
 }
 
 export interface UserSystemContextType {
@@ -45,6 +46,9 @@ export interface UserSystemContextType {
 
   // Single-user mode (fork feature)
   singleUserMode: boolean;
+
+  // Whether the local deployment can accept attachment uploads.
+  attachmentsEnabled: boolean;
 
   // Reload system data
   reloadSystem: () => Promise<void>;
