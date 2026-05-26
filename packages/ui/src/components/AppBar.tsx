@@ -24,7 +24,6 @@ import {
 import { Tooltip } from './Tooltip';
 import { useTranslation } from 'react-i18next';
 
-
 function getProjectInitials(name: string): string {
   const trimmed = name.trim();
   if (!trimmed) return '??';

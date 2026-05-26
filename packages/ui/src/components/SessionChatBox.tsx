@@ -461,7 +461,9 @@ export function SessionChatBox<TExecutor extends string = string>({
                   variant="secondary"
                   onClick={approvalMode.onClearContextAndAccept}
                   disabled={approvalMode?.isSubmitting}
-                  actionIcon={approvalMode?.isSubmitting ? 'spinner' : undefined}
+                  actionIcon={
+                    approvalMode?.isSubmitting ? 'spinner' : undefined
+                  }
                   value={t('conversation.actions.forkNewWorkspace')}
                 />
               )}
