@@ -11,6 +11,7 @@ import { siDiscord, siGithub } from "simple-icons";
 import { AppBar, type AppBarHostStatus } from "@vibe/ui/components/AppBar";
 import { XIcon, PlusIcon, HouseIcon, KanbanIcon } from "@phosphor-icons/react";
 import { MobileDrawer } from "@vibe/ui/components/MobileDrawer";
+import { OrgSwitcher } from "./OrgSwitcher";
 import type { Project } from "shared/remote-types";
 import { useIsMobile } from "@/shared/hooks/useIsMobile";
 import { cn } from "@/shared/lib/utils";
@@ -300,15 +301,22 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
           onClose={() => setIsDrawerOpen(false)}
         >
           <div className="flex flex-col h-full">
-            {/* Header: org name + close button */}
-            <div className="flex items-center justify-between p-4 border-b border-border">
-              <span className="text-sm font-medium text-high truncate">
-                {selectedOrgName ?? "Organization"}
-              </span>
+            {/* Header: org name + org switcher + close button */}
+            <div className="flex items-center justify-between p-4 border-b border-border gap-2">
+              <div className="flex items-center gap-1 min-w-0 flex-1">
+                <span className="text-sm font-medium text-high truncate">
+                  {selectedOrgName ?? "Organization"}
+                </span>
+                <OrgSwitcher
+                  organizations={organizations}
+                  selectedOrgId={selectedOrgId}
+                  onSelect={setSelectedOrgId}
+                />
+              </div>
               <button
                 type="button"
                 onClick={() => setIsDrawerOpen(false)}
-                className="p-1 rounded-sm text-low hover:text-normal cursor-pointer"
+                className="p-1 rounded-sm text-low hover:text-normal cursor-pointer shrink-0"
               >
                 <XIcon className="h-4 w-4" weight="bold" />
               </button>
