@@ -1,8 +1,4 @@
-import {
-  BuildingsIcon,
-  CaretDownIcon,
-  CheckIcon,
-} from "@phosphor-icons/react";
+import { BuildingsIcon, CaretDownIcon, CheckIcon } from "@phosphor-icons/react";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
