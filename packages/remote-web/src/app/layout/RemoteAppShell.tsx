@@ -9,22 +9,9 @@ import { useQuery } from "@tanstack/react-query";
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import { siDiscord, siGithub } from "simple-icons";
 import { AppBar, type AppBarHostStatus } from "@vibe/ui/components/AppBar";
-import {
-  XIcon,
-  PlusIcon,
-  HouseIcon,
-  KanbanIcon,
-  CaretDownIcon,
-  CheckIcon,
-  BuildingsIcon,
-} from "@phosphor-icons/react";
+import { XIcon, PlusIcon, HouseIcon, KanbanIcon } from "@phosphor-icons/react";
 import { MobileDrawer } from "@vibe/ui/components/MobileDrawer";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-} from "@vibe/ui/components/Dropdown";
+import { OrgSwitcher } from "./OrgSwitcher";
 import type { Project } from "shared/remote-types";
 import { useIsMobile } from "@/shared/hooks/useIsMobile";
 import { cn } from "@/shared/lib/utils";
@@ -320,39 +307,11 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
                 <span className="text-sm font-medium text-high truncate">
                   {selectedOrgName ?? "Organization"}
                 </span>
-                {organizations.length > 1 && (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <button
-                        type="button"
-                        className="p-1 rounded-sm text-low hover:text-normal cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
-                        aria-label="Switch organization"
-                      >
-                        <CaretDownIcon className="h-3.5 w-3.5" weight="bold" />
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent
-                      side="bottom"
-                      align="start"
-                      className="min-w-[200px]"
-                    >
-                      {organizations.map((org) => (
-                        <DropdownMenuItem
-                          key={org.id}
-                          icon={
-                            org.id === selectedOrgId ? CheckIcon : BuildingsIcon
-                          }
-                          onClick={() => setSelectedOrgId(org.id)}
-                          className={cn(
-                            org.id === selectedOrgId && "bg-brand/10",
-                          )}
-                        >
-                          {org.name}
-                        </DropdownMenuItem>
-                      ))}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                )}
+                <OrgSwitcher
+                  organizations={organizations}
+                  selectedOrgId={selectedOrgId}
+                  onSelect={setSelectedOrgId}
+                />
               </div>
               <button
                 type="button"
