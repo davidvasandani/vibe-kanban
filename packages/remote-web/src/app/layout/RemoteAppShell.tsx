@@ -60,7 +60,8 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
   const isProjectRoute = /^\/projects\/[^/]+/.test(location.pathname);
   const isExportRoute = location.pathname === "/export";
   // Fork: disabled cloud shutdown banner for self-hosting (set VITE_SHOW_CLOUD_SHUTDOWN_BANNER=1 to re-enable)
-  const showCloudShutdownBanner = import.meta.env.VITE_SHOW_CLOUD_SHUTDOWN_BANNER
+  const showCloudShutdownBanner = import.meta.env
+    .VITE_SHOW_CLOUD_SHUTDOWN_BANNER
     ? isExportRoute || (isSignedIn && isProjectRoute)
     : false;
 
