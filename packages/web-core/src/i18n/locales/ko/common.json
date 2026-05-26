@@ -553,5 +553,8 @@
     "submitting": "답변 제출 중...",
     "answeredCount": "{{count}}개의 질문에 답변함",
     "answeredCount_other": "{{count}}개의 질문에 답변함"
+  },
+  "attachments": {
+    "storageDisabled": "첨부 파일 업로드가 비활성화되어 있습니다. 관리자에게 첨부 파일 저장소를 활성화하도록 요청하세요."
   }
 }

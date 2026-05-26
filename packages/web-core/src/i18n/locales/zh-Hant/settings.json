@@ -32,7 +32,9 @@
         "machineSettings": "Machine Settings",
         "accountSettings": "Account Settings",
         "pairOtherMachines": "Pair other machines",
-        "selectHost": "Select host"
+        "selectHost": "Select host",
+        "attachments": "附件",
+        "attachmentsDesc": "附件儲存狀態"
       }
     },
     "general": {
@@ -603,6 +605,26 @@
       "noHostAvailable": "No host is available for host-specific settings yet.",
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
+    },
+    "attachments": {
+      "title": "附件",
+      "description": "此部署的附件儲存狀態。",
+      "status": {
+        "enabled": "已啟用",
+        "disabled": "已停用",
+        "loading": "檢查中…"
+      },
+      "backend": {
+        "label": "儲存後端",
+        "azure": "Azure Blob Storage",
+        "filesystem": "本機檔案系統"
+      },
+      "disabledHelp": "附件上傳已停用。請在伺服器上設定以下環境變數以啟用：",
+      "envVars": {
+        "azureAccount": "AZURE_STORAGE_ACCOUNT_NAME (必填)",
+        "azureKey": "AZURE_STORAGE_ACCOUNT_KEY (必填)",
+        "azureContainer": "AZURE_STORAGE_CONTAINER_NAME (選填，預設為 'attachments')"
+      }
     }
   },
   "integrations": {

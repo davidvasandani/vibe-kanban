@@ -32,7 +32,9 @@
         "machineSettings": "Machine Settings",
         "accountSettings": "Account Settings",
         "pairOtherMachines": "Pair other machines",
-        "selectHost": "Select host"
+        "selectHost": "Select host",
+        "attachments": "Archivos adjuntos",
+        "attachmentsDesc": "Estado del almacenamiento de archivos adjuntos"
       }
     },
     "general": {
@@ -603,6 +605,26 @@
       "noHostAvailable": "No host is available for host-specific settings yet.",
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
+    },
+    "attachments": {
+      "title": "Archivos adjuntos",
+      "description": "Estado del almacenamiento de archivos adjuntos para esta implementación.",
+      "status": {
+        "enabled": "Habilitado",
+        "disabled": "Deshabilitado",
+        "loading": "Comprobando…"
+      },
+      "backend": {
+        "label": "Backend de almacenamiento",
+        "azure": "Azure Blob Storage",
+        "filesystem": "Sistema de archivos local"
+      },
+      "disabledHelp": "Las cargas de archivos adjuntos están desactivadas. Establece las siguientes variables de entorno en el servidor para habilitarlas:",
+      "envVars": {
+        "azureAccount": "AZURE_STORAGE_ACCOUNT_NAME (obligatorio)",
+        "azureKey": "AZURE_STORAGE_ACCOUNT_KEY (obligatorio)",
+        "azureContainer": "AZURE_STORAGE_CONTAINER_NAME (opcional, predeterminado: 'attachments')"
+      }
     }
   },
   "integrations": {
