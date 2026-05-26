@@ -32,7 +32,9 @@
         "machineSettings": "Machine Settings",
         "accountSettings": "Account Settings",
         "pairOtherMachines": "Pair other machines",
-        "selectHost": "Select host"
+        "selectHost": "Select host",
+        "attachments": "Pièces jointes",
+        "attachmentsDesc": "État du stockage des pièces jointes"
       }
     },
     "general": {
@@ -603,6 +605,26 @@
       "noHostAvailable": "No host is available for host-specific settings yet.",
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
+    },
+    "attachments": {
+      "title": "Pièces jointes",
+      "description": "État du stockage des pièces jointes pour ce déploiement.",
+      "status": {
+        "enabled": "Activé",
+        "disabled": "Désactivé",
+        "loading": "Vérification…"
+      },
+      "backend": {
+        "label": "Backend de stockage",
+        "azure": "Azure Blob Storage",
+        "filesystem": "Système de fichiers local"
+      },
+      "disabledHelp": "Le téléversement de pièces jointes est désactivé. Définissez les variables d'environnement suivantes sur le serveur pour les activer :",
+      "envVars": {
+        "azureAccount": "AZURE_STORAGE_ACCOUNT_NAME (requis)",
+        "azureKey": "AZURE_STORAGE_ACCOUNT_KEY (requis)",
+        "azureContainer": "AZURE_STORAGE_CONTAINER_NAME (optionnel, par défaut 'attachments')"
+      }
     }
   },
   "integrations": {

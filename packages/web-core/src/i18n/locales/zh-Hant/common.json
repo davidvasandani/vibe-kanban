@@ -553,5 +553,8 @@
     "submitting": "正在提交回答...",
     "answeredCount": "已回答{{count}}個問題",
     "answeredCount_other": "已回答{{count}}個問題"
+  },
+  "attachments": {
+    "storageDisabled": "附件上傳已停用。請聯絡管理員啟用附件儲存。"
   }
 }

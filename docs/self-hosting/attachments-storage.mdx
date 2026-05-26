@@ -1,0 +1,110 @@
+---
+title: "Attachments Storage"
+description: "Configure attachment storage for local and remote deployments"
+---
+
+Vibe Kanban lets you attach images and files to issues and chat messages. Where those uploads are stored depends on which deployment you run.
+
+## Storage backends
+
+<CardGroup cols={2}>
+<Card title="Local deployment" icon="laptop">
+  Attachments are written to the local filesystem alongside your other workspace data. No configuration required — uploads are always available.
+</Card>
+
+<Card title="Remote (Cloud) deployment" icon="cloud">
+  Attachments are stored in Azure Blob Storage. Uploads are disabled until you configure the required environment variables on the server.
+</Card>
+</CardGroup>
+
+## Check the current status
+
+Open **Settings → Attachments** in the app. The section shows the active backend and one of three states:
+
+- **Enabled** — uploads are accepted
+- **Disabled** — the backend is not configured; the upload button is greyed out across the app
+- **Checking…** — the capability flag is still loading
+
+When uploads are disabled, the attach button on issues, chat, and the retry editor is disabled with a tooltip explaining that an administrator needs to enable storage.
+
+## Configure Azure Blob Storage (remote deployment)
+
+To enable attachments on a remote deployment, set the following environment variables on the remote server before starting it:
+
+<ParamField path="AZURE_STORAGE_ACCOUNT_NAME" type="string" required>
+The Azure Storage account that hosts the attachments container.
+</ParamField>
+
+<ParamField path="AZURE_STORAGE_ACCOUNT_KEY" type="string" required>
+The access key for the storage account. Treat this as a secret.
+</ParamField>
+
+<ParamField path="AZURE_STORAGE_CONTAINER_NAME" type="string" default="attachments">
+Name of the blob container that holds uploads. Defaults to `attachments`. The Docker Compose example uses `issue-attachments`.
+</ParamField>
+
+<ParamField path="AZURE_STORAGE_ENDPOINT_URL" type="string">
+Optional custom endpoint, for example when using Azurite locally or a non-default Azure cloud.
+</ParamField>
+
+<ParamField path="AZURE_STORAGE_PUBLIC_ENDPOINT_URL" type="string">
+Optional public endpoint used to generate URLs returned to clients. Set this when the server reaches blob storage through a different hostname than browsers do.
+</ParamField>
+
+<Note>
+The remote server reads these variables once at boot. After changing them, restart the remote service so the new configuration is picked up.
+</Note>
+
+### Example: Docker Compose
+
+```bash .env
+# Attachments — required to enable uploads on a remote deployment
+AZURE_STORAGE_ACCOUNT_NAME=your-account
+AZURE_STORAGE_ACCOUNT_KEY=your-key
+AZURE_STORAGE_CONTAINER_NAME=issue-attachments
+# Optional
+AZURE_STORAGE_ENDPOINT_URL=
+AZURE_STORAGE_PUBLIC_ENDPOINT_URL=
+```
+
+For the full Docker Compose service definition, see [Deploy with Docker Compose](/self-hosting/deploy-docker).
+
+## Verify the configuration
+
+After restarting the server, confirm that storage is reported as available:
+
+<Steps>
+<Step title="Hit the public health endpoint">
+  ```bash
+  curl https://your-domain.com/v1/health
+  ```
+
+  <Check>
+  The response should include `"attachments_enabled": true`.
+  </Check>
+</Step>
+
+<Step title="Open Settings → Attachments">
+  The status badge should switch from **Disabled** to **Enabled** and the env-var instruction panel should disappear.
+</Step>
+
+<Step title="Upload a test file">
+  Open any issue and drop an image into the description. The upload should complete without a 503 error.
+</Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+<Accordion title="Upload fails with 'Attachment storage not available'">
+  The remote server booted without `AZURE_STORAGE_ACCOUNT_NAME` set. Check the value on the server, restart it, and reload the page so the client picks up the refreshed capability flag.
+</Accordion>
+
+<Accordion title="Settings shows 'Enabled' but uploads still fail">
+  The capability flag only reflects whether the credentials are configured, not whether they are valid. Check the server logs for errors from the Azure SDK (typical causes: wrong key, container not created, network egress blocked).
+</Accordion>
+
+<Accordion title="Local deployment shows 'Disabled'">
+  Local deployments always report `attachments_enabled: true`. If you see **Disabled** in the local app, the `/api/info` response is being overridden somewhere — check for proxies or custom builds.
+</Accordion>
+</AccordionGroup>

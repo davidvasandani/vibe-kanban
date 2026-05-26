@@ -5,6 +5,7 @@ import {
   buildWorkspaceAttachmentMarkdown,
   toLocalAttachmentMetadata,
 } from '@/shared/lib/workspaceAttachments';
+import { useStorageCapability } from '@/shared/hooks/useStorageCapability';
 import type { AttachmentResponse } from 'shared/types';
 
 /**
@@ -17,6 +18,7 @@ export function useSessionAttachments(
   sessionId: string | undefined,
   onInsertMarkdown: (markdown: string) => void
 ) {
+  const storageCapability = useStorageCapability('filesystem');
   const [uploadedAttachments, setUploadedAttachments] = useState<
     AttachmentResponse[]
   >([]);
@@ -24,6 +26,12 @@ export function useSessionAttachments(
   const uploadFiles = useCallback(
     async (files: File[]) => {
       if (!workspaceId || !sessionId) return;
+      if (
+        !storageCapability.isLoading &&
+        !storageCapability.attachmentsEnabled
+      ) {
+        return;
+      }
 
       const uploadResults: AttachmentResponse[] = [];
 
@@ -48,7 +56,13 @@ export function useSessionAttachments(
         onInsertMarkdown(allMarkdown);
       }
     },
-    [workspaceId, sessionId, onInsertMarkdown]
+    [
+      workspaceId,
+      sessionId,
+      onInsertMarkdown,
+      storageCapability.attachmentsEnabled,
+      storageCapability.isLoading,
+    ]
   );
 
   const clearUploadedAttachments = useCallback(() => {
@@ -59,5 +73,11 @@ export function useSessionAttachments(
     toLocalAttachmentMetadata
   );
 
-  return { uploadFiles, localAttachments, clearUploadedAttachments };
+  return {
+    uploadFiles,
+    localAttachments,
+    clearUploadedAttachments,
+    attachmentsEnabled:
+      storageCapability.isLoading || storageCapability.attachmentsEnabled,
+  };
 }

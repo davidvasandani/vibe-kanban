@@ -177,6 +177,7 @@ struct HealthResponse {
     version: &'static str,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     single_user_mode: bool,
+    attachments_enabled: bool,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -184,6 +185,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         single_user_mode: state.single_user_mode(),
+        attachments_enabled: state.azure_blob().is_some(),
     })
 }
 

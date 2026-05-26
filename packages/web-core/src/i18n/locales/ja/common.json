@@ -553,5 +553,8 @@
     "submitting": "回答を送信中...",
     "answeredCount": "{{count}}件の質問に回答済み",
     "answeredCount_other": "{{count}}件の質問に回答済み"
+  },
+  "attachments": {
+    "storageDisabled": "添付ファイルのアップロードは無効になっています。管理者に添付ファイルストレージの有効化を依頼してください。"
   }
 }

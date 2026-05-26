@@ -553,5 +553,8 @@
     "submitting": "Enviando respuestas...",
     "answeredCount": "Respondió {{count}} pregunta",
     "answeredCount_other": "Respondió {{count}} preguntas"
+  },
+  "attachments": {
+    "storageDisabled": "Las cargas de archivos adjuntos están desactivadas. Pide a un administrador que habilite el almacenamiento de archivos adjuntos."
   }
 }

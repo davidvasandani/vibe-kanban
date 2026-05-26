@@ -270,7 +270,14 @@ export type UserSystemInfo = { version: string, config: Config, machine_id: stri
 /**
  * Capabilities supported per executor (e.g., { "CLAUDE_CODE": ["SESSION_FORK"] })
  */
-capabilities: { [key in string]?: Array<BaseAgentCapability> }, shared_api_base: string | null, preview_proxy_port: number | null, single_user_mode: boolean, executors: { [key in BaseCodingAgent]?: ExecutorProfile }, };
+capabilities: { [key in string]?: Array<BaseAgentCapability> }, shared_api_base: string | null, preview_proxy_port: number | null, single_user_mode: boolean, 
+/**
+ * Whether the local deployment can accept attachment uploads.
+ * Always true today (filesystem-backed); kept as a capability flag so
+ * the frontend can render a unified "Attachments" status alongside the
+ * remote deployment's `attachments_enabled`.
+ */
+attachments_enabled: boolean, executors: { [key in BaseCodingAgent]?: ExecutorProfile }, };
 
 export type Environment = { os_type: string, os_version: string, os_architecture: string, bitness: string, };
 

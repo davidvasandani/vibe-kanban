@@ -26,6 +26,9 @@
     "notSpecified": "Not specified",
     "selectOption": "Select an option..."
   },
+  "attachments": {
+    "storageDisabled": "Attachment uploads are disabled. Ask an administrator to enable attachment storage."
+  },
   "states": {
     "loading": "Loading..."
   },

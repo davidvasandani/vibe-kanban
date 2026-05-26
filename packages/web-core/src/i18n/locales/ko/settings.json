@@ -32,7 +32,9 @@
         "machineSettings": "Machine Settings",
         "accountSettings": "Account Settings",
         "pairOtherMachines": "Pair other machines",
-        "selectHost": "Select host"
+        "selectHost": "Select host",
+        "attachments": "첨부 파일",
+        "attachmentsDesc": "첨부 파일 저장소 상태"
       }
     },
     "general": {
@@ -603,6 +605,26 @@
       "noHostAvailable": "No host is available for host-specific settings yet.",
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
+    },
+    "attachments": {
+      "title": "첨부 파일",
+      "description": "이 배포의 첨부 파일 저장소 상태입니다.",
+      "status": {
+        "enabled": "활성화됨",
+        "disabled": "비활성화됨",
+        "loading": "확인 중…"
+      },
+      "backend": {
+        "label": "저장소 백엔드",
+        "azure": "Azure Blob Storage",
+        "filesystem": "로컬 파일 시스템"
+      },
+      "disabledHelp": "첨부 파일 업로드가 비활성화되어 있습니다. 활성화하려면 서버에서 다음 환경 변수를 설정하세요:",
+      "envVars": {
+        "azureAccount": "AZURE_STORAGE_ACCOUNT_NAME (필수)",
+        "azureKey": "AZURE_STORAGE_ACCOUNT_KEY (필수)",
+        "azureContainer": "AZURE_STORAGE_CONTAINER_NAME (선택, 기본값 'attachments')"
+      }
     }
   },
   "integrations": {

@@ -32,7 +32,9 @@
         "machineSettings": "Machine Settings",
         "accountSettings": "Account Settings",
         "pairOtherMachines": "Pair other machines",
-        "selectHost": "Select host"
+        "selectHost": "Select host",
+        "attachments": "添付ファイル",
+        "attachmentsDesc": "添付ファイルストレージのステータス"
       }
     },
     "general": {
@@ -603,6 +605,26 @@
       "noHostAvailable": "No host is available for host-specific settings yet.",
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
+    },
+    "attachments": {
+      "title": "添付ファイル",
+      "description": "このデプロイの添付ファイルストレージのステータス。",
+      "status": {
+        "enabled": "有効",
+        "disabled": "無効",
+        "loading": "確認中…"
+      },
+      "backend": {
+        "label": "ストレージバックエンド",
+        "azure": "Azure Blob Storage",
+        "filesystem": "ローカルファイルシステム"
+      },
+      "disabledHelp": "添付ファイルのアップロードは無効です。サーバーで以下の環境変数を設定して有効化してください:",
+      "envVars": {
+        "azureAccount": "AZURE_STORAGE_ACCOUNT_NAME (必須)",
+        "azureKey": "AZURE_STORAGE_ACCOUNT_KEY (必須)",
+        "azureContainer": "AZURE_STORAGE_CONTAINER_NAME (任意、デフォルトは 'attachments')"
+      }
     }
   },
   "integrations": {

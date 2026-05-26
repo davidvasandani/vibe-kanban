@@ -145,6 +145,8 @@ pub struct RemoteHealthResponse {
     pub version: String,
     #[serde(default)]
     pub single_user_mode: bool,
+    #[serde(default)]
+    pub attachments_enabled: bool,
 }
 
 /// HTTP client for the remote OAuth server with automatic retries.
