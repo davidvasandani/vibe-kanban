@@ -1,10 +1,27 @@
 #!/usr/bin/env node
 
-const { execSync } = require('child_process');
+const { execSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
 const checkMode = process.argv.includes('--check');
+
+// Keep in sync with .github/actions/cargo-checks-common-setup/action.yml.
+// sqlx-cli 0.9.0 requires rustc >= 1.94, but rust-toolchain.toml pins
+// nightly-2025-12-04 (rustc 1.93), so we pin to the last 0.8.x release.
+const SQLX_CLI_VERSION = '0.8.6';
+
+function ensureSqlxCli() {
+  const check = spawnSync('cargo', ['sqlx', '--version'], { stdio: 'ignore' });
+  if (check.status === 0) return;
+  console.log(`cargo-sqlx not found; installing sqlx-cli@${SQLX_CLI_VERSION}...`);
+  execSync(
+    `cargo install sqlx-cli --version ${SQLX_CLI_VERSION} --no-default-features --features sqlite,postgres --locked`,
+    { stdio: 'inherit' }
+  );
+}
+
+ensureSqlxCli();
 
 console.log(checkMode ? 'Checking SQLx prepared queries...' : 'Preparing database for SQLx...');
 
