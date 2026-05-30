@@ -54,8 +54,11 @@ echo "🔨 Building web app..."
 (cd packages/local-web && npm run build)
 
 echo "🔨 Building Rust binaries..."
-cargo build --release --manifest-path Cargo.toml
-cargo build --release --bin vibe-kanban-mcp --manifest-path Cargo.toml
+# Build only the CLI binaries. Building the whole workspace pulls in
+# crates/tauri-app, whose GTK/glib system deps aren't installed on the
+# headless Linux CI runner. The Tauri build is opt-in below via --desktop.
+cargo build --release --manifest-path Cargo.toml \
+  --bin server --bin vibe-kanban-mcp --bin review
 
 echo "📦 Creating distribution package..."
 
