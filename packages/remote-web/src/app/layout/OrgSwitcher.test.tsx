@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { OrgSwitcher } from "./OrgSwitcher";
+import { OrgSwitcher } from "@vibe/ui/components/OrgSwitcher";
 
 const orgs = [
   { id: "org-1", name: "Acme" },
