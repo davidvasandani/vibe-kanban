@@ -15,6 +15,7 @@ import { workspaceSessionKeys } from '@/shared/hooks/workspaceSessionKeys';
 import { useWorkspaceExecution } from '@/shared/hooks/useWorkspaceExecution';
 import { useWorkspaceRepo } from '@/shared/hooks/useWorkspaceRepo';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
+import { useIsRealMobile } from '@/shared/hooks/useIsMobile';
 import WYSIWYGEditor from '@/shared/components/WYSIWYGEditor';
 import { useApprovalFeedbackOptional } from '../model/contexts/ApprovalFeedbackContext';
 import { useMessageEditContext } from '../model/contexts/MessageEditContext';
@@ -383,6 +384,12 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
 
   // User profiles, config preference, and latest executor from processes
   const { profiles, config, capabilities } = useUserSystem();
+  const isMobile = useIsRealMobile();
+  // On mobile keyboards there is no Shift+Enter, so force ModifierEnter mode
+  // (plain Enter inserts a newline; user taps the Send button to send).
+  const effectiveSendShortcut = isMobile
+    ? 'ModifierEnter'
+    : config?.send_message_shortcut;
 
   // Fetch processes from last session to get full profile (only in new session mode)
   const lastSessionId = isNewSessionMode ? sessions?.[0]?.id : undefined;
@@ -977,10 +984,10 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
         autoFocus
         onPasteFiles={onPasteFiles}
         localAttachments={localAttachments}
-        sendShortcut={config?.send_message_shortcut}
+        sendShortcut={effectiveSendShortcut}
       />
     ),
-    [config?.send_message_shortcut, sessionId]
+    [effectiveSendShortcut, sessionId]
   );
 
   const modelSelectorNode = effectiveExecutor ? (
