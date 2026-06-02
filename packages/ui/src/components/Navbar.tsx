@@ -154,6 +154,8 @@ function NavbarBreadcrumbs({
 
 export interface NavbarProps {
   workspaceTitle?: string;
+  // Optional content rendered immediately after workspaceTitle (e.g. org switcher caret)
+  afterTitleSlot?: ReactNode;
   breadcrumbs?: NavbarBreadcrumbItem[];
   // Items for left side of navbar
   leftItems?: NavbarSectionItem[];
@@ -184,6 +186,7 @@ export interface NavbarProps {
 
 export function Navbar({
   workspaceTitle,
+  afterTitleSlot,
   breadcrumbs,
   leftItems = [],
   rightItems = [],
@@ -266,6 +269,7 @@ export function Navbar({
               <p className="text-base text-normal font-medium truncate cursor-default select-none">
                 {workspaceTitle}
               </p>
+              {afterTitleSlot}
             </div>
           ) : (
             <div className="flex items-center gap-0.5 overflow-x-auto">
@@ -447,12 +451,18 @@ export function Navbar({
             textClassName="text-base"
           />
         ) : (
-          <p
+          <div
             data-tauri-drag-region
-            className="text-base text-low truncate cursor-default select-none"
+            className="flex items-center gap-1 min-w-0"
           >
-            {workspaceTitle ?? ''}
-          </p>
+            <p
+              data-tauri-drag-region
+              className="text-base text-low truncate cursor-default select-none"
+            >
+              {workspaceTitle ?? ''}
+            </p>
+            {afterTitleSlot}
+          </div>
         )}
       </div>
 

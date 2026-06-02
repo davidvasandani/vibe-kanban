@@ -1,11 +1,11 @@
-import { BuildingsIcon, CaretDownIcon, CheckIcon } from "@phosphor-icons/react";
+import { BuildingsIcon, CaretDownIcon, CheckIcon } from '@phosphor-icons/react';
+import { cn } from '../lib/cn';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
-} from "@vibe/ui/components/Dropdown";
-import { cn } from "@/shared/lib/utils";
+} from './Dropdown';
 
 export interface OrgSwitcherOrganization {
   id: string;
@@ -48,7 +48,7 @@ export function OrgSwitcher({
             key={org.id}
             icon={org.id === selectedOrgId ? CheckIcon : BuildingsIcon}
             onClick={() => onSelect(org.id)}
-            className={cn(org.id === selectedOrgId && "bg-brand/10")}
+            className={cn(org.id === selectedOrgId && 'bg-brand/10')}
           >
             {org.name}
           </DropdownMenuItem>
