@@ -170,11 +170,14 @@ echo "Publishing build to npx-cli/dist..."
 rm -rf npx-cli/dist
 mv "$DIST_STAGING" npx-cli/dist
 
-# Make artifacts readable/traversable by the non-builder service users
-# (vibe-kanban-dev, vibe-kanban-remote) regardless of the build umask, and
-# keep node_modules readable so cli.js can load adm-zip to extract the server
-# zip at runtime.
-chmod -R go+rX npx-cli/dist npx-cli/node_modules
+# Make the published artifacts readable/traversable by the non-builder service
+# users (vibe-kanban-dev, vibe-kanban-remote) regardless of the build umask.
+# Scoped to dist, which we just created and therefore own. node_modules is
+# intentionally excluded: it can contain files owned by a different user (from
+# a prior local build), so chmod -R would EPERM and abort the build under
+# set -e; its readability is handled on the deploy host. Never fail the publish
+# over a cosmetic perms tweak.
+chmod -R go+rX npx-cli/dist || true
 
 echo ""
 echo "🚀 To test locally, run:"
