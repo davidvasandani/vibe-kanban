@@ -47,8 +47,16 @@ export VK_SHARED_API_BASE="https://api.vibekanban.com"
 export VITE_VK_SHARED_API_BASE="https://api.vibekanban.com"
 
 echo "🧹 Cleaning previous builds..."
-rm -rf npx-cli/dist
-mkdir -p npx-cli/dist/$PLATFORM
+# Build artifacts into a staging dir and swap it into place only after every
+# binary has been produced (see the publish step at the end of this script).
+# This guarantees the live npx-cli/dist -- which a running vibe-kanban or
+# remote service may be serving from -- is never left empty by a build that
+# fails partway. Previously "rm -rf npx-cli/dist" ran up front, so any later
+# failure (web build, cargo, ...) wiped the running deployment and left the
+# service crash-looping on a missing binary.
+DIST_STAGING="npx-cli/.dist-staging"
+rm -rf "$DIST_STAGING"
+mkdir -p "$DIST_STAGING/$PLATFORM"
 
 echo "🔨 Building web app..."
 (cd packages/local-web && npm run build)
@@ -60,25 +68,37 @@ echo "🔨 Building Rust binaries..."
 cargo build --release --manifest-path Cargo.toml \
   --bin server --bin vibe-kanban-mcp --bin review
 
+echo "Building Remote API binary..."
+# crates/remote is excluded from the cargo workspace (exclude = [...]), so it
+# has to be built via its own manifest. --target-dir keeps its output next to
+# the workspace bins regardless of whether CARGO_TARGET_DIR is exported.
+cargo build --release --manifest-path crates/remote/Cargo.toml \
+  --target-dir "$CARGO_TARGET_DIR" --bin remote
+
 echo "📦 Creating distribution package..."
 
 # Copy the main binary
 cp ${CARGO_TARGET_DIR}/release/server vibe-kanban
 zip -q vibe-kanban.zip vibe-kanban
 rm -f vibe-kanban 
-mv vibe-kanban.zip npx-cli/dist/$PLATFORM/vibe-kanban.zip
+mv vibe-kanban.zip "$DIST_STAGING/$PLATFORM/vibe-kanban.zip"
 
 # Copy the MCP binary
 cp ${CARGO_TARGET_DIR}/release/vibe-kanban-mcp vibe-kanban-mcp
 zip -q vibe-kanban-mcp.zip vibe-kanban-mcp
 rm -f vibe-kanban-mcp
-mv vibe-kanban-mcp.zip npx-cli/dist/$PLATFORM/vibe-kanban-mcp.zip
+mv vibe-kanban-mcp.zip "$DIST_STAGING/$PLATFORM/vibe-kanban-mcp.zip"
 
 # Copy the Review CLI binary
 cp ${CARGO_TARGET_DIR}/release/review vibe-kanban-review
 zip -q vibe-kanban-review.zip vibe-kanban-review
 rm -f vibe-kanban-review
-mv vibe-kanban-review.zip npx-cli/dist/$PLATFORM/vibe-kanban-review.zip
+mv vibe-kanban-review.zip "$DIST_STAGING/$PLATFORM/vibe-kanban-review.zip"
+
+# Copy the Remote API binary (self-hosted OAuth + team management backend).
+# It is run directly by the remote service, so it ships unzipped + executable.
+cp ${CARGO_TARGET_DIR}/release/remote "$DIST_STAGING/$PLATFORM/remote"
+chmod +x "$DIST_STAGING/$PLATFORM/remote"
 
 echo "✅ CLI build complete!"
 echo "📁 Files created:"
@@ -121,7 +141,7 @@ if [[ "$1" == "--desktop" || "$1" == "--all" ]]; then
   # Restore tauri.conf.json
   git checkout -- "$TAURI_CONF"
 
-  TAURI_DIST="npx-cli/dist/tauri/$TAURI_PLATFORM"
+  TAURI_DIST="$DIST_STAGING/tauri/$TAURI_PLATFORM"
   mkdir -p "$TAURI_DIST"
 
   BUNDLE_DIR="${CARGO_TARGET_DIR}/release/bundle"
@@ -141,6 +161,20 @@ echo "📦 Installing npx-cli dependencies..."
 echo ""
 echo "🔨 Building npx-cli TypeScript..."
 (cd npx-cli && npm run build)
+
+# --- Atomic publish -------------------------------------------------------
+# Only now that every binary built successfully do we replace the live dist.
+# Any failure above aborts the script (set -e) leaving the previous, working
+# npx-cli/dist untouched, so a running service keeps serving.
+echo "Publishing build to npx-cli/dist..."
+rm -rf npx-cli/dist
+mv "$DIST_STAGING" npx-cli/dist
+
+# Make artifacts readable/traversable by the non-builder service users
+# (vibe-kanban-dev, vibe-kanban-remote) regardless of the build umask, and
+# keep node_modules readable so cli.js can load adm-zip to extract the server
+# zip at runtime.
+chmod -R go+rX npx-cli/dist npx-cli/node_modules
 
 echo ""
 echo "🚀 To test locally, run:"
