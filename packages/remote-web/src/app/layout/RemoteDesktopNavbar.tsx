@@ -6,6 +6,7 @@ import { useSyncErrorContext } from "@/shared/hooks/useSyncErrorContext";
 import { useUserOrganizations } from "@/shared/hooks/useUserOrganizations";
 import { useOrganizationStore } from "@/shared/stores/useOrganizationStore";
 import { Navbar, type NavbarSectionItem } from "@vibe/ui/components/Navbar";
+import { OrgSwitcher } from "@vibe/ui/components/OrgSwitcher";
 import { NavbarActionGroups } from "@/shared/actions";
 import {
   NavbarDivider,
@@ -112,8 +113,9 @@ export function RemoteDesktopNavbar() {
 
   const { data: orgsData } = useUserOrganizations();
   const selectedOrgId = useOrganizationStore((s) => s.selectedOrgId);
-  const orgName =
-    orgsData?.organizations.find((o) => o.id === selectedOrgId)?.name ?? "";
+  const setSelectedOrgId = useOrganizationStore((s) => s.setSelectedOrgId);
+  const organizations = orgsData?.organizations ?? [];
+  const orgName = organizations.find((o) => o.id === selectedOrgId)?.name ?? "";
 
   const actionCtx = useActionVisibilityContext();
 
@@ -161,6 +163,15 @@ export function RemoteDesktopNavbar() {
   return (
     <Navbar
       workspaceTitle={navbarTitle}
+      afterTitleSlot={
+        isOnProjectPage ? (
+          <OrgSwitcher
+            organizations={organizations}
+            selectedOrgId={selectedOrgId}
+            onSelect={setSelectedOrgId}
+          />
+        ) : null
+      }
       leftItems={leftItems}
       rightItems={rightItems}
       syncErrors={syncErrorContext?.errors}
