@@ -52,8 +52,9 @@ Do not manually edit shared/remote-types.ts, instead edit crates/remote/src/bin/
 - Web app: ensure `pnpm run check` and `pnpm run lint` pass. If adding runtime logic, include lightweight tests (e.g., Vitest) in the same directory.
 
 ## Dependencies
-- Cargo, npm, and GitHub Actions versions are updated by Renovate (see `renovate.json`).
-- Several agent CLIs are pinned **inside Rust source** as `npx -y <pkg>@<version>` strings (e.g. `@anthropic-ai/claude-code`, `@musistudio/claude-code-router`, `@openai/codex`, `@google/gemini-cli`, `@github/copilot`, `@qwen-code/qwen-code`, `opencode-ai` in `crates/executors/src/executors/*.rs`). These are picked up by a Renovate custom regex manager — **do not hand-bump them**; let Renovate open the PR. Bumping `@anthropic-ai/claude-code` in particular can silently change which model the `opus` / `sonnet` / `haiku` aliases resolve to, so review the CLI's release notes before merging.
+- Cargo, npm, and GitHub Actions versions are updated by Renovate (see `renovate.json`). Renovate opens PRs automatically and **auto-merges them once CI is green** — except the two carve-outs below, which wait for a human.
+- Several agent CLIs are pinned **inside Rust source** as `npx -y <pkg>@<version>` strings (e.g. `@anthropic-ai/claude-code`, `@musistudio/claude-code-router`, `@openai/codex`, `@google/gemini-cli`, `@github/copilot`, `@qwen-code/qwen-code`, `opencode-ai` in `crates/executors/src/executors/*.rs`). These are picked up by a Renovate custom regex manager — **do not hand-bump them**; let Renovate open the PR.
+- Carve-outs that are **not** auto-merged and require human review (labeled `needs-review`): **major** updates (a green suite is weak evidence for a major bump), and **`@anthropic-ai/claude-code`** specifically — bumping it can silently change which model the `opus` / `sonnet` / `haiku` aliases resolve to, which CI does not catch, so review the CLI's release notes before merging.
 
 ## Security & Config Tips
 - Use `.env` for local overrides; never commit secrets. Key envs: `FRONTEND_PORT`, `BACKEND_PORT`, `HOST` 

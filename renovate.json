@@ -27,22 +27,30 @@
   ],
   "packageRules": [
     {
-      "description": "Group each Rust-embedded npm CLI pin into its own PR; require human review.",
+      "description": "Group each Rust-embedded npm CLI pin into its own PR; auto-merge once tests pass.",
       "matchManagers": ["custom.regex"],
       "matchDatasources": ["npm"],
       "groupName": "{{depName}}",
-      "automerge": false,
+      "automerge": true,
       "prBodyNotes": [
         "This dependency is pinned inside Rust source (see `crates/executors/src/executors/*.rs`) and is managed by a Renovate custom manager — do not hand-edit the version."
       ]
     },
     {
-      "description": "Extra reviewer note for the Claude Code CLI — model aliases can shift between versions.",
+      "description": "Major updates carry risk a green test run can't fully vouch for — require human review.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "addLabels": ["needs-review"]
+    },
+    {
+      "description": "Claude Code CLI: never auto-merge — a passing test suite cannot detect a model-alias change (this is the failure mode that motivated managing these pins).",
       "matchManagers": ["custom.regex"],
       "matchDatasources": ["npm"],
       "matchPackageNames": ["@anthropic-ai/claude-code"],
+      "automerge": false,
+      "addLabels": ["needs-review"],
       "prBodyNotes": [
-        ":warning: **Model alias check:** Bumping `@anthropic-ai/claude-code` can change which model the `opus`, `sonnet`, and `haiku` aliases resolve to. Glance at the CLI release notes / changelog for model-mapping changes before approving."
+        ":warning: **Model alias check:** Bumping `@anthropic-ai/claude-code` can change which model the `opus`, `sonnet`, and `haiku` aliases resolve to. A green CI run does **not** catch this. Glance at the CLI release notes / changelog for model-mapping changes before approving."
       ]
     }
   ]
