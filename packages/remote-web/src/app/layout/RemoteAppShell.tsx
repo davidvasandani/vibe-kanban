@@ -12,6 +12,7 @@ import { AppBar, type AppBarHostStatus } from "@vibe/ui/components/AppBar";
 import { XIcon, PlusIcon, HouseIcon, KanbanIcon } from "@phosphor-icons/react";
 import { MobileDrawer } from "@vibe/ui/components/MobileDrawer";
 import { OrgSwitcher } from "@vibe/ui/components/OrgSwitcher";
+import { AppBarOrgTile } from "@vibe/ui/components/AppBarOrgTile";
 import type { Project } from "shared/remote-types";
 import { useIsMobile } from "@/shared/hooks/useIsMobile";
 import { cn } from "@/shared/lib/utils";
@@ -27,7 +28,7 @@ import { useCommandBarShortcut } from "@/shared/hooks/useCommandBarShortcut";
 import { listOrganizationProjects } from "@remote/shared/lib/api";
 import { RemoteAppBarUserPopoverContainer } from "@remote/app/layout/RemoteAppBarUserPopoverContainer";
 import { RemoteNavbarContainer } from "@remote/app/layout/RemoteNavbarContainer";
-import { RemoteDesktopNavbar } from "@remote/app/layout/RemoteDesktopNavbar";
+import { RemoteWorkspaceRail } from "@remote/app/layout/RemoteWorkspaceRail";
 import {
   resolveRelayNavigationHostId,
   useRelayAppBarHosts,
@@ -161,6 +162,14 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
     });
   }, []);
 
+  const handleOpenSettings = useCallback(() => {
+    void SettingsDialog.show();
+  }, []);
+
+  const handleOpenCommandBar = useCallback(() => {
+    void CommandBarDialog.show();
+  }, []);
+
   const handleWorkspacesClick = useCallback(() => {
     if (preferredHostId) {
       navigate({
@@ -279,6 +288,17 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
             onSignIn={() => {
               navigate({ to: "/account" });
             }}
+            orgSlot={
+              isSignedIn ? (
+                <AppBarOrgTile
+                  organizations={organizations}
+                  selectedOrgId={selectedOrgId}
+                  onSelect={setSelectedOrgId}
+                />
+              ) : undefined
+            }
+            onOpenSettings={isSignedIn ? handleOpenSettings : undefined}
+            onOpenCommandBar={isSignedIn ? handleOpenCommandBar : undefined}
             notificationBell={
               isSignedIn ? <AppBarNotificationBellContainer /> : undefined
             }
@@ -294,6 +314,10 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
             githubIconPath={siGithub.path}
             discordIconPath={siDiscord.path}
           />
+        )}
+
+        {!isMobile && (isWorkspaceContextRoute || isProjectRoute) && (
+          <RemoteWorkspaceRail />
         )}
 
         <MobileDrawer
@@ -497,9 +521,6 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
               onOpenDrawer={() => setIsDrawerOpen(true)}
               mobileUserSlot={mobileUserSlot}
             />
-          )}
-          {!isMobile && (isWorkspaceContextRoute || isProjectRoute) && (
-            <RemoteDesktopNavbar />
           )}
           <div className="min-h-0 flex-1">{children}</div>
         </div>
