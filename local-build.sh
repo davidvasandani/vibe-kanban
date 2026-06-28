@@ -2,6 +2,19 @@
 
 set -e  # Exit on any error
 
+# Make every file we create group-writable. Two builders (CI runner +
+# local rebuild service) can both produce artifacts on the same host;
+# keeping them group-writable means whoever runs next can overwrite
+# what the previous run left behind, rather than EPERM'ing on chmod.
+umask 002
+
+# Per-process staging suffix so two concurrent builds don't clobber each
+# other's .dist-staging tree. The publish step (see end of file) takes a
+# small flock around the rename into place, so only the actual swap is
+# serialized — both builds can compile in parallel against their own
+# CARGO_TARGET_DIRs.
+BUILD_ID="$$-$(date +%s)"
+
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
@@ -54,9 +67,13 @@ echo "🧹 Cleaning previous builds..."
 # fails partway. Previously "rm -rf npx-cli/dist" ran up front, so any later
 # failure (web build, cargo, ...) wiped the running deployment and left the
 # service crash-looping on a missing binary.
-DIST_STAGING="npx-cli/.dist-staging"
+DIST_STAGING="npx-cli/.dist-staging-${BUILD_ID}"
 rm -rf "$DIST_STAGING"
 mkdir -p "$DIST_STAGING/$PLATFORM"
+# Always clean up our staging dir on exit, even if the build aborts.
+# Without this, concurrent failed builds would leave .dist-staging-* trees
+# behind and slowly fill the worktree.
+trap 'rm -rf "$DIST_STAGING" 2>/dev/null || true' EXIT
 
 echo "🔨 Building web app..."
 (cd packages/local-web && npm run build)
@@ -166,18 +183,26 @@ echo "🔨 Building npx-cli TypeScript..."
 # Only now that every binary built successfully do we replace the live dist.
 # Any failure above aborts the script (set -e) leaving the previous, working
 # npx-cli/dist untouched, so a running service keeps serving.
+#
+# A small flock around just the rename serializes the publish step across
+# concurrent builders (CI + local rebuild). Each builder has its own
+# .dist-staging-${BUILD_ID} from above, so only this critical section needs
+# coordination. The lock file lives next to npx-cli/dist so it shares the
+# same filesystem (flock needs a real local file).
 echo "Publishing build to npx-cli/dist..."
-rm -rf npx-cli/dist
-mv "$DIST_STAGING" npx-cli/dist
+(
+  flock --exclusive 200
+  rm -rf npx-cli/dist
+  mv "$DIST_STAGING" npx-cli/dist
+) 200>"npx-cli/.publish-lock"
 
 # Make the published artifacts readable/traversable by the non-builder service
 # users (vibe-kanban-dev, vibe-kanban-remote) regardless of the build umask.
-# Scoped to dist, which we just created and therefore own. node_modules is
-# intentionally excluded: it can contain files owned by a different user (from
-# a prior local build), so chmod -R would EPERM and abort the build under
-# set -e; its readability is handled on the deploy host. Never fail the publish
-# over a cosmetic perms tweak.
-chmod -R go+rX npx-cli/dist || true
+# g+rwX so a future builder running as a different user (but same group) can
+# overwrite this tree without EPERM'ing on chmod. Scoped to dist only;
+# node_modules is intentionally excluded because it can contain files owned
+# by another user from a prior build, which would abort under set -e.
+chmod -R g+rwX,o+rX npx-cli/dist || true
 
 echo ""
 echo "🚀 To test locally, run:"
