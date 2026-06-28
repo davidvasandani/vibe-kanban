@@ -41,6 +41,7 @@ import {
   DropdownMenuTriggerButton,
 } from '@vibe/ui/components/Dropdown';
 import { SettingsCard, SettingsField } from './SettingsComponents';
+import { OrganizationEnvVarsCard } from './OrganizationEnvVarsCard';
 
 export function OrganizationsSettingsSection() {
   const { t } = useTranslation('organization');
@@ -471,6 +472,11 @@ export function OrganizationsSettingsSection() {
             </div>
           )}
         </SettingsCard>
+      )}
+
+      {/* Environment variables (admin only, non-personal orgs) */}
+      {selectedOrg && selectedOrgId && isAdmin && !isPersonalOrg && (
+        <OrganizationEnvVarsCard organizationId={selectedOrgId} />
       )}
 
       {/* Billing CTA (admin only, non-personal orgs, when remote URL is configured) */}
