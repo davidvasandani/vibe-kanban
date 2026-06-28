@@ -474,8 +474,8 @@ export function OrganizationsSettingsSection() {
         </SettingsCard>
       )}
 
-      {/* Environment variables (admin only, non-personal orgs) */}
-      {selectedOrg && selectedOrgId && isAdmin && !isPersonalOrg && (
+      {/* Environment variables (admin only; includes personal orgs) */}
+      {selectedOrg && selectedOrgId && isAdmin && (
         <OrganizationEnvVarsCard organizationId={selectedOrgId} />
       )}
 
