@@ -47,7 +47,13 @@ import {
   StatusResponse,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
+  CreateOrganizationEnvVarRequest,
+  CreateOrganizationEnvVarResponse,
+  ListOrganizationEnvVarsResponse,
   ListOrganizationsResponse,
+  OrganizationEnvVar,
+  UpdateOrganizationEnvVarRequest,
+  UpdateOrganizationEnvVarResponse,
   OrganizationMemberWithProfile,
   ListMembersResponse,
   CreateInvitationRequest,
@@ -1479,6 +1485,58 @@ export const organizationsApi = {
     const response = await makeRemoteRequest(`/v1/organizations/${orgId}`, {
       method: 'DELETE',
     });
+    return handleRemoteResponse<void>(response);
+  },
+
+  listEnvVars: async (orgId: string): Promise<OrganizationEnvVar[]> => {
+    const response = await makeRemoteRequest(
+      `/v1/organizations/${orgId}/env-vars`
+    );
+    const result =
+      await handleRemoteResponse<ListOrganizationEnvVarsResponse>(response);
+    return result.env_vars;
+  },
+
+  createEnvVar: async (
+    orgId: string,
+    data: CreateOrganizationEnvVarRequest
+  ): Promise<OrganizationEnvVar> => {
+    const response = await makeRemoteRequest(
+      `/v1/organizations/${orgId}/env-vars`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }
+    );
+    const result =
+      await handleRemoteResponse<CreateOrganizationEnvVarResponse>(response);
+    return result.env_var;
+  },
+
+  updateEnvVar: async (
+    orgId: string,
+    envVarId: string,
+    data: UpdateOrganizationEnvVarRequest
+  ): Promise<OrganizationEnvVar> => {
+    const response = await makeRemoteRequest(
+      `/v1/organizations/${orgId}/env-vars/${envVarId}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }
+    );
+    const result =
+      await handleRemoteResponse<UpdateOrganizationEnvVarResponse>(response);
+    return result.env_var;
+  },
+
+  deleteEnvVar: async (orgId: string, envVarId: string): Promise<void> => {
+    const response = await makeRemoteRequest(
+      `/v1/organizations/${orgId}/env-vars/${envVarId}`,
+      { method: 'DELETE' }
+    );
     return handleRemoteResponse<void>(response);
   },
 };

@@ -262,6 +262,15 @@ impl JwtService {
         self.encrypt_data(json.as_bytes())
     }
 
+    pub fn encrypt_string(&self, plaintext: &str) -> Result<String, JwtError> {
+        self.encrypt_data(plaintext.as_bytes())
+    }
+
+    pub fn decrypt_string(&self, ciphertext: &str) -> Result<String, JwtError> {
+        let bytes = self.decrypt_data(ciphertext)?;
+        String::from_utf8(bytes).map_err(|_| JwtError::EncryptionError)
+    }
+
     fn encrypt_data(&self, data: &[u8]) -> Result<String, JwtError> {
         let key_bytes = self.derive_key()?;
         let key = Key::<Aes256Gcm>::from(key_bytes);

@@ -6,4 +6,5 @@ export const organizationKeys = {
   members: (orgId: string) => ['organizations', orgId, 'members'] as const,
   invitations: (orgId: string) =>
     ['organizations', orgId, 'invitations'] as const,
+  envVars: (orgId: string) => ['organizations', orgId, 'env-vars'] as const,
 };

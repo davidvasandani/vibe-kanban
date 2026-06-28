@@ -258,6 +258,18 @@ export type UpdateMemberRoleRequest = { role: MemberRole, };
 
 export type UpdateMemberRoleResponse = { user_id: string, role: MemberRole, };
 
+export type OrganizationEnvVar = { id: string, organization_id: string, name: string, created_at: string, updated_at: string, };
+
+export type ListOrganizationEnvVarsResponse = { env_vars: Array<OrganizationEnvVar>, };
+
+export type CreateOrganizationEnvVarRequest = { name: string, value: string, };
+
+export type CreateOrganizationEnvVarResponse = { env_var: OrganizationEnvVar, };
+
+export type UpdateOrganizationEnvVarRequest = { value: string, };
+
+export type UpdateOrganizationEnvVarResponse = { env_var: OrganizationEnvVar, };
+
 export type RegisterRepoRequest = { path: string, display_name: string | null, };
 
 export type InitRepoRequest = { parent_path: string, folder_name: string, };

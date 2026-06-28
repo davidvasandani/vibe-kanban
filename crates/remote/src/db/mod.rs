@@ -18,6 +18,7 @@ pub mod issues;
 pub mod notifications;
 pub mod oauth;
 pub mod oauth_accounts;
+pub mod organization_env_vars;
 pub mod organization_members;
 pub mod organizations;
 pub mod pending_uploads;

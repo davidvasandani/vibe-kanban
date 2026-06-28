@@ -41,6 +41,7 @@ pub mod issue_tags;
 pub mod issues;
 pub mod notifications;
 mod oauth;
+mod organization_env_vars;
 pub(crate) mod organization_members;
 mod organizations;
 pub mod project_statuses;
@@ -116,6 +117,7 @@ pub fn router(state: AppState) -> Router {
         .merge(hosts::router())
         .merge(projects::router())
         .merge(organizations::router())
+        .merge(organization_env_vars::router())
         .merge(organization_members::protected_router())
         .merge(oauth::protected_router())
         .merge(electric_proxy::router())
