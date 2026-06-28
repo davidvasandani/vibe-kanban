@@ -4,6 +4,7 @@ import { useDropzone } from 'react-dropzone';
 import { useCreateMode } from '@/features/create-mode/model/useCreateMode';
 import { AgentIcon } from '@/shared/components/AgentIcon';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
+import { useIsRealMobile } from '@/shared/hooks/useIsMobile';
 import WYSIWYGEditor from '@/shared/components/WYSIWYGEditor';
 import { useCreateWorkspace } from '@/shared/hooks/useCreateWorkspace';
 import { useCreateAttachments } from '@/shared/hooks/useCreateAttachments';
@@ -41,6 +42,12 @@ export function CreateChatBoxContainer({
 }: CreateChatBoxContainerProps) {
   const { t } = useTranslation('common');
   const { profiles, config } = useUserSystem();
+  const isMobile = useIsRealMobile();
+  // On mobile keyboards there is no Shift+Enter, so force ModifierEnter mode
+  // (plain Enter inserts a newline; user taps the Send button to send).
+  const effectiveSendShortcut = isMobile
+    ? 'ModifierEnter'
+    : config?.send_message_shortcut;
   const {
     repos,
     targetBranches,
@@ -349,7 +356,7 @@ export function CreateChatBoxContainer({
                       autoFocus
                       onPasteFiles={onPasteFiles}
                       localAttachments={localAttachments}
-                      sendShortcut={config?.send_message_shortcut}
+                      sendShortcut={effectiveSendShortcut}
                     />
                   )}
                   agentIcon={
