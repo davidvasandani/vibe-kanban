@@ -116,6 +116,7 @@ export function RemoteDesktopNavbar() {
   const setSelectedOrgId = useOrganizationStore((s) => s.setSelectedOrgId);
   const organizations = orgsData?.organizations ?? [];
   const orgName = organizations.find((o) => o.id === selectedOrgId)?.name ?? "";
+  const hasMultipleOrgs = organizations.length > 1;
 
   const actionCtx = useActionVisibilityContext();
 
@@ -159,8 +160,10 @@ export function RemoteDesktopNavbar() {
   }, []);
 
   const navbarTitle = isOnProjectPage
-    ? orgName
-    : (selectedWorkspace?.branch ?? orgName);
+    ? hasMultipleOrgs
+      ? undefined
+      : orgName
+    : (selectedWorkspace?.branch ?? (hasMultipleOrgs ? undefined : orgName));
 
   return (
     <Navbar
@@ -170,6 +173,7 @@ export function RemoteDesktopNavbar() {
           organizations={organizations}
           selectedOrgId={selectedOrgId}
           onSelect={setSelectedOrgId}
+          label={orgName}
         />
       }
       leftItems={leftItems}
