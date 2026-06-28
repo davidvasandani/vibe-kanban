@@ -1,0 +1,49 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "baseBranches": ["main"],
+  "labels": ["dependencies"],
+  "timezone": "UTC",
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 10,
+  "prHourlyLimit": 0,
+  "automerge": true,
+  "platformAutomerge": true,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Rust-embedded npm CLI pins (npx -y <pkg>@<version>)",
+      "managerFilePatterns": ["/\\.rs$/"],
+      "matchStrings": [
+        "npx\\s+-y\\s+(?<depName>@?[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)?)@(?<currentValue>\\d[^\\s\"'\\\\]*)"
+      ],
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "npm"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Group each Rust-embedded npm CLI pin into its own PR; require human review.",
+      "matchManagers": ["custom.regex"],
+      "matchDatasources": ["npm"],
+      "groupName": "{{depName}}",
+      "automerge": false,
+      "prBodyNotes": [
+        "This dependency is pinned inside Rust source (see `crates/executors/src/executors/*.rs`) and is managed by a Renovate custom manager — do not hand-edit the version."
+      ]
+    },
+    {
+      "description": "Extra reviewer note for the Claude Code CLI — model aliases can shift between versions.",
+      "matchManagers": ["custom.regex"],
+      "matchDatasources": ["npm"],
+      "matchPackageNames": ["@anthropic-ai/claude-code"],
+      "prBodyNotes": [
+        ":warning: **Model alias check:** Bumping `@anthropic-ai/claude-code` can change which model the `opus`, `sonnet`, and `haiku` aliases resolve to. Glance at the CLI release notes / changelog for model-mapping changes before approving."
+      ]
+    }
+  ]
+}

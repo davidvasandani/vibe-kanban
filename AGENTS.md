@@ -51,6 +51,10 @@ Do not manually edit shared/remote-types.ts, instead edit crates/remote/src/bin/
 - Rust: prefer unit tests alongside code (`#[cfg(test)]`), run `cargo test --workspace`. Add tests for new logic and edge cases.
 - Web app: ensure `pnpm run check` and `pnpm run lint` pass. If adding runtime logic, include lightweight tests (e.g., Vitest) in the same directory.
 
+## Dependencies
+- Cargo, npm, and GitHub Actions versions are updated by Renovate (see `renovate.json`).
+- Several agent CLIs are pinned **inside Rust source** as `npx -y <pkg>@<version>` strings (e.g. `@anthropic-ai/claude-code`, `@musistudio/claude-code-router`, `@openai/codex`, `@google/gemini-cli`, `@github/copilot`, `@qwen-code/qwen-code`, `opencode-ai` in `crates/executors/src/executors/*.rs`). These are picked up by a Renovate custom regex manager — **do not hand-bump them**; let Renovate open the PR. Bumping `@anthropic-ai/claude-code` in particular can silently change which model the `opus` / `sonnet` / `haiku` aliases resolve to, so review the CLI's release notes before merging.
+
 ## Security & Config Tips
 - Use `.env` for local overrides; never commit secrets. Key envs: `FRONTEND_PORT`, `BACKEND_PORT`, `HOST` 
 - Dev ports and assets are managed by `scripts/setup-dev-environment.js`.
