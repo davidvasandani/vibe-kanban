@@ -1,0 +1,34 @@
+# Auto-dispatch davidvasandani/homelab's vibe-kanban-deploy workflow on every
+# merge to main, so vibe-kanban-dev.vasandani.dev redeploys without a manual
+# `gh workflow run`.
+#
+# This is a separate file from the upstream-managed `trigger-fork-deploy.yml`
+# (which points at 2001zhaozhao/vibe-kanban-private-deploy) so fork syncs from
+# BloopAI/vibe-kanban don't clobber our dispatch — the previous one was lost
+# that way (see hosts/think/think2.nix:449-453 in the homelab repo).
+#
+# Requires repo secret HOMELAB_DEPLOY_TOKEN: a fine-grained PAT on
+# davidvasandani/homelab with `Contents: Read and write` (authorizes the
+# repository_dispatch REST call).
+name: Trigger homelab CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch vibe-kanban-deploy to homelab
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMELAB_DEPLOY_TOKEN }}
+          repository: davidvasandani/homelab
+          event-type: vibe-kanban-deploy
+          client-payload: |
+            {
+              "sha": "${{ github.sha }}",
+              "ref": "${{ github.ref_name }}"
+            }
