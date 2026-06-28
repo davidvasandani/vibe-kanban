@@ -414,7 +414,8 @@
     "subIssueIndicator": "↳",
     "viewTabs": {
       "active": "Active",
-      "all": "All"
+      "all": "All",
+      "slim": "Slim"
     },
     "loginRequired": {
       "title": "Sign in required",

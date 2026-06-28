@@ -397,7 +397,8 @@
     "subIssueIndicator": "↳",
     "viewTabs": {
       "active": "Actif",
-      "all": "Tout"
+      "all": "Tout",
+      "slim": "Compact"
     },
     "loginRequired": {
       "title": "Connexion requise",

@@ -1142,6 +1142,7 @@ export function KanbanContainer() {
               selectedIssueIds={selectedIssueIds}
               isMultiSelectActive={isMultiSelectActive}
               onIssueCheckboxChange={handleCheckboxChange}
+              slim={kanbanViewMode === 'slim'}
             />
           </KanbanProvider>
         </div>

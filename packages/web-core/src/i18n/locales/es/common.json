@@ -397,7 +397,8 @@
     "subIssueIndicator": "↳",
     "viewTabs": {
       "active": "Activo",
-      "all": "Todo"
+      "all": "Todo",
+      "slim": "Compacto"
     },
     "loginRequired": {
       "title": "Se requiere iniciar sesión",

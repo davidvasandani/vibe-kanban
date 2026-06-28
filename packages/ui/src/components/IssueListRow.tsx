@@ -71,6 +71,8 @@ export interface IssueListRowProps {
   isMultiSelectActive?: boolean;
   isChecked?: boolean;
   onCheckboxChange?: (checked: boolean) => void;
+  /** Compact rendering: only the issue id and title. */
+  slim?: boolean;
   className?: string;
 }
 
@@ -86,10 +88,47 @@ export function IssueListRow({
   isMultiSelectActive = false,
   isChecked = false,
   onCheckboxChange,
+  slim = false,
   className,
 }: IssueListRowProps) {
   const showCheckbox = isMultiSelectActive || isChecked;
   const visibleTags = tags.slice(0, MAX_VISIBLE_TAGS);
+
+  if (slim) {
+    return (
+      <Draggable draggableId={issue.id} index={index}>
+        {(provided, snapshot) => (
+          <div
+            ref={provided.innerRef}
+            {...provided.draggableProps}
+            {...provided.dragHandleProps}
+            role="button"
+            tabIndex={0}
+            onClick={onClick}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onClick(e as unknown as MouseEvent);
+              }
+            }}
+            className={cn(
+              'flex items-center gap-base px-double py-half',
+              'transition-colors',
+              'hover:bg-secondary',
+              (isSelected || isChecked) && 'bg-secondary',
+              snapshot.isDragging && 'bg-secondary shadow-lg cursor-grabbing',
+              className
+            )}
+          >
+            <span className="font-ibm-plex-mono text-sm text-low shrink-0">
+              {issue.simple_id}
+            </span>
+            <span className="text-sm text-high truncate">{issue.title}</span>
+          </div>
+        )}
+      </Draggable>
+    );
+  }
 
   return (
     <Draggable draggableId={issue.id} index={index}>

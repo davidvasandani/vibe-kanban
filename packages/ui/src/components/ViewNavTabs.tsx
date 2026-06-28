@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { cn } from '../lib/cn';
 import { ButtonGroup, ButtonGroupItem } from './IconButtonGroup';
 
-export type ViewNavMode = 'kanban' | 'list';
+export type ViewNavMode = 'kanban' | 'list' | 'slim';
 
 export type ViewNavStatus = {
   id: string;
@@ -31,6 +31,7 @@ export function ViewNavTabs({
   const { t } = useTranslation('common');
   const isActiveTab = activeView === 'kanban';
   const isAllTab = activeView === 'list' && selectedStatusId === null;
+  const isSlimTab = activeView === 'slim';
 
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-base">
@@ -55,6 +56,17 @@ export function ViewNavTabs({
           }}
         >
           {t('kanban.viewTabs.all')}
+        </ButtonGroupItem>
+
+        {/* Slim (compact list) tab */}
+        <ButtonGroupItem
+          active={isSlimTab}
+          onClick={() => {
+            onViewChange('slim');
+            onStatusSelect(null);
+          }}
+        >
+          {t('kanban.viewTabs.slim')}
         </ButtonGroupItem>
 
         {/* Hidden status tabs */}
