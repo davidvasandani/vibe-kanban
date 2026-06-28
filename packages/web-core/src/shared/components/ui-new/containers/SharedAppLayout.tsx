@@ -432,15 +432,23 @@ export function SharedAppLayout() {
             {/* Header: org name + org switcher + close button */}
             <div className="flex items-center justify-between p-4 border-b border-border gap-2">
               <div className="flex items-center gap-1 min-w-0 flex-1">
-                <span className="text-sm font-medium text-high truncate">
-                  {organizations.find((o) => o.id === selectedOrgId)?.name ??
-                    'Organization'}
-                </span>
-                <OrgSwitcher
-                  organizations={organizations}
-                  selectedOrgId={selectedOrgId}
-                  onSelect={setSelectedOrgId}
-                />
+                {organizations.length > 1 ? (
+                  <OrgSwitcher
+                    organizations={organizations}
+                    selectedOrgId={selectedOrgId}
+                    onSelect={setSelectedOrgId}
+                    label={
+                      organizations.find((o) => o.id === selectedOrgId)?.name ??
+                      'Organization'
+                    }
+                    labelClassName="text-sm font-medium text-high"
+                  />
+                ) : (
+                  <span className="text-sm font-medium text-high truncate">
+                    {organizations.find((o) => o.id === selectedOrgId)?.name ??
+                      'Organization'}
+                  </span>
+                )}
               </div>
               <button
                 type="button"

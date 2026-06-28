@@ -190,10 +190,13 @@ export function NavbarContainer({
     [actionCtx, handleExecuteAction]
   );
 
+  const hasMultipleOrgs = (orgsData?.organizations.length ?? 0) > 1;
   const navbarTitle = isCreateMode
     ? 'Create Workspace'
     : isOnProjectPage
-      ? orgName
+      ? hasMultipleOrgs
+        ? undefined
+        : orgName
       : selectedWorkspace?.branch;
 
   // Breadcrumbs: Project / Issue / Workspace (only on workspace pages with linked project)
@@ -349,6 +352,7 @@ export function NavbarContainer({
             organizations={orgsData.organizations}
             selectedOrgId={selectedOrgId}
             onSelect={onOrgSelect}
+            label={orgName}
           />
         ) : null
       }

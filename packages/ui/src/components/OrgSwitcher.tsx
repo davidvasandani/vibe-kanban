@@ -1,11 +1,11 @@
-import { BuildingsIcon, CaretDownIcon, CheckIcon } from '@phosphor-icons/react';
-import { cn } from '../lib/cn';
+import { BuildingsIcon, CaretDownIcon, CheckIcon } from "@phosphor-icons/react";
+import { cn } from "../lib/cn";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
-} from './Dropdown';
+} from "./Dropdown";
 
 export interface OrgSwitcherOrganization {
   id: string;
@@ -16,12 +16,16 @@ interface OrgSwitcherProps {
   organizations: OrgSwitcherOrganization[];
   selectedOrgId: string | null;
   onSelect: (id: string) => void;
+  label?: string;
+  labelClassName?: string;
 }
 
 export function OrgSwitcher({
   organizations,
   selectedOrgId,
   onSelect,
+  label,
+  labelClassName,
 }: OrgSwitcherProps) {
   if (organizations.length <= 1) {
     return null;
@@ -32,10 +36,13 @@ export function OrgSwitcher({
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          className="p-1 rounded-sm text-low hover:text-normal cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+          className="flex items-center gap-1 min-w-0 p-1 rounded-sm text-low hover:text-normal cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
           aria-label="Switch organization"
         >
-          <CaretDownIcon className="h-3.5 w-3.5" weight="bold" />
+          {label && (
+            <span className={cn("truncate", labelClassName)}>{label}</span>
+          )}
+          <CaretDownIcon className="h-3.5 w-3.5 shrink-0" weight="bold" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
@@ -48,7 +55,7 @@ export function OrgSwitcher({
             key={org.id}
             icon={org.id === selectedOrgId ? CheckIcon : BuildingsIcon}
             onClick={() => onSelect(org.id)}
-            className={cn(org.id === selectedOrgId && 'bg-brand/10')}
+            className={cn(org.id === selectedOrgId && "bg-brand/10")}
           >
             {org.name}
           </DropdownMenuItem>
