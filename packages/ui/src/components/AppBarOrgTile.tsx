@@ -1,12 +1,12 @@
-import { CaretDownIcon, CheckIcon, BuildingsIcon } from "@phosphor-icons/react";
-import { cn } from "../lib/cn";
+import { CaretDownIcon, CheckIcon, BuildingsIcon } from '@phosphor-icons/react';
+import { cn } from '../lib/cn';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
-} from "./Dropdown";
-import { Tooltip } from "./Tooltip";
+} from './Dropdown';
+import { Tooltip } from './Tooltip';
 
 export interface AppBarOrgTileOrganization {
   id: string;
@@ -21,7 +21,7 @@ interface AppBarOrgTileProps {
 
 function getOrgInitials(name: string): string {
   const trimmed = name.trim();
-  if (!trimmed) return "??";
+  if (!trimmed) return '??';
   const words = trimmed.split(/\s+/);
   if (words.length >= 2) {
     return (words[0].charAt(0) + words[1].charAt(0)).toUpperCase();
@@ -30,7 +30,7 @@ function getOrgInitials(name: string): string {
 }
 
 const tileBaseClassName =
-  "group relative flex items-center justify-center w-10 h-10 rounded-lg text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand bg-brand/15 text-brand";
+  'group relative flex items-center justify-center w-10 h-10 rounded-lg text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand bg-brand/15 text-brand';
 
 /**
  * Organization tile rendered at the top of the AppBar rail.
@@ -71,7 +71,7 @@ export function AppBarOrgTile({
             type="button"
             className={cn(
               tileBaseClassName,
-              "cursor-pointer hover:bg-brand/25",
+              'cursor-pointer hover:bg-brand/25'
             )}
             aria-label="Switch organization"
           >
@@ -89,7 +89,7 @@ export function AppBarOrgTile({
             key={org.id}
             icon={org.id === selectedOrg.id ? CheckIcon : BuildingsIcon}
             onClick={() => onSelect(org.id)}
-            className={cn(org.id === selectedOrg.id && "bg-brand/10")}
+            className={cn(org.id === selectedOrg.id && 'bg-brand/10')}
           >
             {org.name}
           </DropdownMenuItem>

@@ -1,11 +1,11 @@
-import { GitBranchIcon } from "@phosphor-icons/react";
-import { cn } from "../lib/cn";
-import { Tooltip } from "./Tooltip";
+import { GitBranchIcon } from '@phosphor-icons/react';
+import { cn } from '../lib/cn';
+import { Tooltip } from './Tooltip';
 import {
   SyncErrorIndicator,
   type SyncErrorIndicatorError,
-} from "./SyncErrorIndicator";
-import type { NavbarSectionItem, NavbarActionItem } from "./Navbar";
+} from './SyncErrorIndicator';
+import type { NavbarSectionItem, NavbarActionItem } from './Navbar';
 
 interface WorkspaceRailProps {
   /** Branch / workspace title shown as a header tile tooltip. */
@@ -17,12 +17,12 @@ interface WorkspaceRailProps {
 }
 
 const railTileBaseClassName =
-  "flex items-center justify-center w-10 h-10 rounded-lg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand";
+  'flex items-center justify-center w-10 h-10 rounded-lg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand';
 
 function isDivider(
-  item: NavbarSectionItem,
-): item is Extract<NavbarSectionItem, { type: "divider" }> {
-  return item.type === "divider";
+  item: NavbarSectionItem
+): item is Extract<NavbarSectionItem, { type: 'divider' }> {
+  return item.type === 'divider';
 }
 
 function RailDivider() {
@@ -32,7 +32,7 @@ function RailDivider() {
 function RailActionTile({ item }: { item: NavbarActionItem }) {
   const Icon = item.icon;
   return (
-    <Tooltip content={item.tooltip ?? ""} shortcut={item.shortcut} side="right">
+    <Tooltip content={item.tooltip ?? ''} shortcut={item.shortcut} side="right">
       <button
         type="button"
         onClick={item.onClick}
@@ -40,16 +40,16 @@ function RailActionTile({ item }: { item: NavbarActionItem }) {
         aria-label={item.tooltip}
         className={cn(
           railTileBaseClassName,
-          "cursor-pointer",
+          'cursor-pointer',
           item.isActive
-            ? "bg-brand/20 text-brand hover:bg-brand/20"
-            : "text-low hover:bg-brand/10 hover:text-normal",
-          item.disabled && "cursor-not-allowed opacity-40 hover:bg-transparent",
+            ? 'bg-brand/20 text-brand hover:bg-brand/20'
+            : 'text-low hover:bg-brand/10 hover:text-normal',
+          item.disabled && 'cursor-not-allowed opacity-40 hover:bg-transparent'
         )}
       >
         <Icon
           className="size-icon-base"
-          weight={item.isActive ? "fill" : "regular"}
+          weight={item.isActive ? 'fill' : 'regular'}
         />
       </button>
     </Tooltip>
@@ -62,7 +62,7 @@ function renderItems(items: NavbarSectionItem[], keyPrefix: string) {
       <RailDivider key={`${keyPrefix}-divider-${index}`} />
     ) : (
       <RailActionTile key={`${keyPrefix}-${item.id}-${index}`} item={item} />
-    ),
+    )
   );
 }
 
@@ -86,15 +86,15 @@ export function WorkspaceRail({
   return (
     <div
       className={cn(
-        "flex flex-col items-center h-full min-h-0 overflow-y-auto p-base gap-1",
-        "bg-primary border-r border-border",
+        'flex flex-col items-center h-full min-h-0 overflow-y-auto p-base gap-1',
+        'bg-primary border-r border-border'
       )}
     >
       {branch && (
         <>
           <Tooltip content={branch} side="right">
             <div
-              className={cn(railTileBaseClassName, "text-low")}
+              className={cn(railTileBaseClassName, 'text-low')}
               aria-label={branch}
             >
               <GitBranchIcon className="size-icon-base" weight="bold" />
@@ -104,9 +104,9 @@ export function WorkspaceRail({
         </>
       )}
 
-      {renderItems(leftItems, "left")}
+      {renderItems(leftItems, 'left')}
       {hasLeft && hasRight && <RailDivider />}
-      {renderItems(rightItems, "right")}
+      {renderItems(rightItems, 'right')}
 
       <div className="mt-auto pt-base">
         <SyncErrorIndicator errors={syncErrors} onRefreshPage={onRefreshPage} />
