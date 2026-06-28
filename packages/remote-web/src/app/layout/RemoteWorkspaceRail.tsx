@@ -3,10 +3,8 @@ import { useLocation } from "@tanstack/react-router";
 import { useWorkspaceContext } from "@/shared/hooks/useWorkspaceContext";
 import { useActions } from "@/shared/hooks/useActions";
 import { useSyncErrorContext } from "@/shared/hooks/useSyncErrorContext";
-import { useUserOrganizations } from "@/shared/hooks/useUserOrganizations";
-import { useOrganizationStore } from "@/shared/stores/useOrganizationStore";
-import { Navbar, type NavbarSectionItem } from "@vibe/ui/components/Navbar";
-import { OrgSwitcher } from "@vibe/ui/components/OrgSwitcher";
+import { WorkspaceRail } from "@vibe/ui/components/WorkspaceRail";
+import type { NavbarSectionItem } from "@vibe/ui/components/Navbar";
 import { NavbarActionGroups } from "@/shared/actions";
 import {
   NavbarDivider,
@@ -21,8 +19,6 @@ import {
   isActionVisible,
 } from "@/shared/types/actions";
 import { useActionVisibilityContext } from "@/shared/hooks/useActionVisibilityContext";
-import { SettingsDialog } from "@/shared/dialogs/settings/SettingsDialog";
-import { CommandBarDialog } from "@/shared/dialogs/command-bar/CommandBarDialog";
 
 /**
  * Check if a NavbarItem is a divider
@@ -94,14 +90,17 @@ function toNavbarSectionItems(
 }
 
 /**
- * Desktop navbar for remote workspace and project pages.
+ * Vertical workspace rail for remote workspace and project pages.
  *
- * Mounted on workspace detail routes (/workspaces/:id) and project routes (/projects/:id)
- * where all required providers (ActionsProvider, WorkspaceProvider, etc.) are available.
+ * Docked to the right edge of the AppBar, it holds the per-workspace controls
+ * (branch, sync indicator, action groups) that previously lived in the
+ * horizontal RemoteDesktopNavbar.
  *
- * Mobile navbar is handled separately by RemoteNavbarContainer.
+ * Mounted on workspace detail routes (/workspaces/:id) and project routes
+ * (/projects/:id) where all required providers (ActionsProvider,
+ * WorkspaceProvider, etc.) are available.
  */
-export function RemoteDesktopNavbar() {
+export function RemoteWorkspaceRail() {
   const { executeAction } = useActions();
   const { workspace: selectedWorkspace } = useWorkspaceContext();
   const syncErrorContext = useSyncErrorContext();
@@ -110,13 +109,6 @@ export function RemoteDesktopNavbar() {
   const isOnProjectPage =
     /^\/projects\/[^/]+/.test(location.pathname) ||
     /^\/hosts\/[^/]+\/projects\/[^/]+/.test(location.pathname);
-
-  const { data: orgsData } = useUserOrganizations();
-  const selectedOrgId = useOrganizationStore((s) => s.selectedOrgId);
-  const setSelectedOrgId = useOrganizationStore((s) => s.setSelectedOrgId);
-  const organizations = orgsData?.organizations ?? [];
-  const orgName = organizations.find((o) => o.id === selectedOrgId)?.name ?? "";
-  const hasMultipleOrgs = organizations.length > 1;
 
   const actionCtx = useActionVisibilityContext();
 
@@ -151,37 +143,16 @@ export function RemoteDesktopNavbar() {
     [actionCtx, handleExecuteAction],
   );
 
-  const handleOpenSettings = useCallback(() => {
-    SettingsDialog.show();
-  }, []);
-
-  const handleOpenCommandBar = useCallback(() => {
-    CommandBarDialog.show();
-  }, []);
-
-  const navbarTitle = isOnProjectPage
-    ? hasMultipleOrgs
-      ? undefined
-      : orgName
-    : (selectedWorkspace?.branch ?? (hasMultipleOrgs ? undefined : orgName));
+  const branch = isOnProjectPage
+    ? undefined
+    : (selectedWorkspace?.branch ?? undefined);
 
   return (
-    <Navbar
-      workspaceTitle={navbarTitle}
-      afterTitleSlot={
-        <OrgSwitcher
-          organizations={organizations}
-          selectedOrgId={selectedOrgId}
-          onSelect={setSelectedOrgId}
-          label={orgName}
-        />
-      }
+    <WorkspaceRail
+      branch={branch}
       leftItems={leftItems}
       rightItems={rightItems}
       syncErrors={syncErrorContext?.errors}
-      isOnProjectPage={isOnProjectPage}
-      onOpenSettings={handleOpenSettings}
-      onOpenCommandBar={handleOpenCommandBar}
     />
   );
 }
