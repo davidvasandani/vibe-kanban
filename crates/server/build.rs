@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fs, path::Path, process::Command};
 
 fn main() {
     // Load .env from the workspace root
@@ -13,6 +13,33 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SENTRY_DSN");
     if env_file.exists() {
         println!("cargo:rerun-if-changed={}", env_file.display());
+    }
+
+    // Capture the short git commit hash at build time so the running app can
+    // display the exact deployed revision. Re-run whenever HEAD moves.
+    let git_dir = workspace_root.join(".git");
+    if git_dir.exists() {
+        println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+        if let Ok(head) = fs::read_to_string(git_dir.join("HEAD")) {
+            if let Some(reference) = head.strip_prefix("ref: ").map(str::trim) {
+                let ref_path = git_dir.join(reference);
+                if ref_path.exists() {
+                    println!("cargo:rerun-if-changed={}", ref_path.display());
+                }
+            }
+        }
+    }
+    let git_sha = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(&workspace_root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(sha) = git_sha {
+        println!("cargo:rustc-env=VK_GIT_SHA={}", sha);
     }
 
     // Ensure build script re-runs when these env vars change
