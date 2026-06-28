@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM organization_env_vars\n            WHERE id = $1 AND organization_id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b4be141cd544281eed58db7b1037ebc3b0f8ff8b1a526706e40ca2973c78807c"
+}
