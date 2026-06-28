@@ -158,19 +158,19 @@ export function RemoteDesktopNavbar() {
     CommandBarDialog.show();
   }, []);
 
-  const navbarTitle = isOnProjectPage ? orgName : selectedWorkspace?.branch;
+  const navbarTitle = isOnProjectPage
+    ? orgName
+    : (selectedWorkspace?.branch ?? orgName);
 
   return (
     <Navbar
       workspaceTitle={navbarTitle}
       afterTitleSlot={
-        isOnProjectPage ? (
-          <OrgSwitcher
-            organizations={organizations}
-            selectedOrgId={selectedOrgId}
-            onSelect={setSelectedOrgId}
-          />
-        ) : null
+        <OrgSwitcher
+          organizations={organizations}
+          selectedOrgId={selectedOrgId}
+          onSelect={setSelectedOrgId}
+        />
       }
       leftItems={leftItems}
       rightItems={rightItems}

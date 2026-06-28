@@ -194,7 +194,7 @@ export function NavbarContainer({
     ? 'Create Workspace'
     : isOnProjectPage
       ? orgName
-      : selectedWorkspace?.branch;
+      : (selectedWorkspace?.branch ?? orgName);
 
   // Breadcrumbs: Project / Issue / Workspace (only on workspace pages with linked project)
   const linkedProjectId = linkedRemoteWorkspace?.project_id ?? null;
@@ -344,7 +344,7 @@ export function NavbarContainer({
       mobileActiveTab={mobileActiveTab as MobileTabId}
       onMobileTabChange={(tab) => setMobileActiveTab(tab)}
       afterTitleSlot={
-        isOnProjectPage && onOrgSelect && orgsData?.organizations ? (
+        onOrgSelect && orgsData?.organizations ? (
           <OrgSwitcher
             organizations={orgsData.organizations}
             selectedOrgId={selectedOrgId}
