@@ -60,10 +60,15 @@ echo "➤ Initializing temporary Postgres cluster..."
 initdb -D "$DATA_DIR" > /dev/null
 
 echo "➤ Starting Postgres on port $PORT..."
-pg_ctl -D "$DATA_DIR" -o "-p $PORT" -w start > /dev/null
+# -k puts the unix socket in the (writable) data dir. Postgres otherwise tries
+# its compiled-in default (/run/postgresql or /tmp), which is not writable on
+# hosts with a read-only root fs and makes pg_ctl fail to start.
+pg_ctl -D "$DATA_DIR" -o "-p $PORT -k $DATA_DIR" -w start > /dev/null
 
 echo "➤ Creating 'remote' database..."
-createdb -p $PORT remote
+# Connect over TCP (matching DATABASE_URL below) so this works regardless of
+# where the unix socket lives.
+createdb -h localhost -p $PORT remote
 
 # Connection string
 export DATABASE_URL="postgres://localhost:$PORT/remote"
