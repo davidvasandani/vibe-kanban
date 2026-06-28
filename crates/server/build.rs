@@ -20,12 +20,12 @@ fn main() {
     let git_dir = workspace_root.join(".git");
     if git_dir.exists() {
         println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
-        if let Ok(head) = fs::read_to_string(git_dir.join("HEAD")) {
-            if let Some(reference) = head.strip_prefix("ref: ").map(str::trim) {
-                let ref_path = git_dir.join(reference);
-                if ref_path.exists() {
-                    println!("cargo:rerun-if-changed={}", ref_path.display());
-                }
+        if let Ok(head) = fs::read_to_string(git_dir.join("HEAD"))
+            && let Some(reference) = head.strip_prefix("ref: ").map(str::trim)
+        {
+            let ref_path = git_dir.join(reference);
+            if ref_path.exists() {
+                println!("cargo:rerun-if-changed={}", ref_path.display());
             }
         }
     }

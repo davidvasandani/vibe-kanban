@@ -160,9 +160,7 @@ async fn get_user_system_info(
     };
 
     let user_system_info = UserSystemInfo {
-        version: option_env!("VK_GIT_SHA")
-            .unwrap_or("dev")
-            .to_string(),
+        version: option_env!("VK_GIT_SHA").unwrap_or("dev").to_string(),
         config,
         machine_id: deployment.user_id().to_string(),
         login_status,
