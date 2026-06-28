@@ -26,6 +26,7 @@ import { useAuth } from '@/shared/hooks/auth/useAuth';
 import { useDiscordOnlineCount } from '@/shared/hooks/useDiscordOnlineCount';
 import { useGitHubStars } from '@/shared/hooks/useGitHubStars';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
+import { useDeployUpdateAvailable } from '@/shared/hooks/useDeployUpdateAvailable';
 import { useAppUpdateStore } from '@/shared/stores/useAppUpdateStore';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useCurrentAppDestination } from '@/shared/hooks/useCurrentAppDestination';
@@ -69,6 +70,7 @@ export function SharedAppLayout() {
   const { appVersion } = useUserSystem();
   const updateVersion = useAppUpdateStore((s) => s.updateVersion);
   const restartForUpdate = useAppUpdateStore((s) => s.restart);
+  const { updateAvailable: deployUpdateAvailable } = useDeployUpdateAvailable();
   const { data: onlineCount } = useDiscordOnlineCount();
   const { data: starCount } = useGitHubStars();
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -369,6 +371,8 @@ export function SharedAppLayout() {
               appVersion={appVersion}
               updateVersion={updateVersion}
               onUpdateClick={restartForUpdate ?? undefined}
+              deployUpdateAvailable={deployUpdateAvailable}
+              onReloadClick={() => window.location.reload()}
               githubIconPath={siGithub.path}
               discordIconPath={siDiscord.path}
             />

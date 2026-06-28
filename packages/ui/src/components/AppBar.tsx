@@ -63,6 +63,8 @@ interface AppBarProps {
   appVersion?: string | null;
   updateVersion?: string | null;
   onUpdateClick?: () => void;
+  deployUpdateAvailable?: boolean;
+  onReloadClick?: () => void;
   githubIconPath: string;
   discordIconPath: string;
 }
@@ -213,6 +215,8 @@ export function AppBar({
   appVersion,
   updateVersion,
   onUpdateClick,
+  deployUpdateAvailable,
+  onReloadClick,
 }: AppBarProps) {
   const { t } = useTranslation('common');
   const sections: AppBarSection[] = [];
@@ -538,6 +542,24 @@ export function AppBar({
               )}
             >
               Update
+            </button>
+          </Tooltip>
+        ) : deployUpdateAvailable ? (
+          <Tooltip
+            content="A new version was deployed — click to refresh"
+            side="right"
+          >
+            <button
+              type="button"
+              onClick={onReloadClick}
+              className={cn(
+                'flex items-center justify-center py-1 rounded-md w-10',
+                'text-[9px] font-ibm-plex-mono font-medium leading-none',
+                'bg-brand text-on-brand hover:bg-brand-hover',
+                'transition-colors cursor-pointer animate-pulse'
+              )}
+            >
+              Refresh
             </button>
           </Tooltip>
         ) : (
