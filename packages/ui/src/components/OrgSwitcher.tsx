@@ -1,11 +1,11 @@
-import { BuildingsIcon, CaretDownIcon, CheckIcon } from "@phosphor-icons/react";
-import { cn } from "../lib/cn";
+import { BuildingsIcon, CaretDownIcon, CheckIcon } from '@phosphor-icons/react';
+import { cn } from '../lib/cn';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
-} from "./Dropdown";
+} from './Dropdown';
 
 export interface OrgSwitcherOrganization {
   id: string;
@@ -40,7 +40,7 @@ export function OrgSwitcher({
           aria-label="Switch organization"
         >
           {label && (
-            <span className={cn("truncate", labelClassName)}>{label}</span>
+            <span className={cn('truncate', labelClassName)}>{label}</span>
           )}
           <CaretDownIcon className="h-3.5 w-3.5 shrink-0" weight="bold" />
         </button>
@@ -55,7 +55,7 @@ export function OrgSwitcher({
             key={org.id}
             icon={org.id === selectedOrgId ? CheckIcon : BuildingsIcon}
             onClick={() => onSelect(org.id)}
-            className={cn(org.id === selectedOrgId && "bg-brand/10")}
+            className={cn(org.id === selectedOrgId && 'bg-brand/10')}
           >
             {org.name}
           </DropdownMenuItem>
