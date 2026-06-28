@@ -178,16 +178,6 @@ export function KanbanContainer() {
     },
     [isIssueComposerOpen, issueComposerKey, appNavigation, projectId]
   );
-  const openIssueWorkspace = useCallback(
-    (issueId: string, workspaceAttemptId: string) => {
-      appNavigation.goToProjectIssueWorkspace(
-        projectId,
-        issueId,
-        workspaceAttemptId
-      );
-    },
-    [appNavigation, projectId]
-  );
   const startCreate = useCallback(
     (options?: ProjectIssueCreateOptions) => {
       openKanbanIssueComposer(issueComposerKey, options);
@@ -1099,15 +1089,6 @@ export function KanbanContainer() {
                                   <IssueWorkspaceCard
                                     key={workspace.id}
                                     workspace={workspace}
-                                    onClick={
-                                      workspace.localWorkspaceId
-                                        ? () =>
-                                            openIssueWorkspace(
-                                              issue.id,
-                                              workspace.localWorkspaceId!
-                                            )
-                                        : undefined
-                                    }
                                     showOwner={false}
                                     showStatusBadge={false}
                                     showNoPrText={false}
