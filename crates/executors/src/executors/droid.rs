@@ -238,6 +238,7 @@ impl StandardCodingAgentExecutor for Droid {
         let options = ExecutorDiscoveredOptions {
             model_selector: ModelSelectorConfig {
                 models: [
+                    ("claude-opus-4-8", "Claude Opus 4.8"),
                     ("claude-opus-4-6", "Claude Opus 4.6"),
                     ("claude-opus-4-6-fast", "Claude Opus 4.6 Fast Mode"),
                     ("gemini-3.1-pro-preview", "Gemini 3.1 Pro"),
