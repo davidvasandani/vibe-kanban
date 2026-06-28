@@ -38,7 +38,9 @@
     "description": "View pending invitations for {{orgName}}",
     "loading": "Loading invitations...",
     "invited": "Invited {{date}}",
-    "pending": "Pending"
+    "pending": "Pending",
+    "copyLink": "링크 복사",
+    "copied": "복사됨"
   },
   "settings": {
     "title": "Organization Settings",

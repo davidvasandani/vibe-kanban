@@ -38,7 +38,9 @@
     "description": "View pending invitations for {{orgName}}",
     "loading": "Loading invitations...",
     "invited": "Invited {{date}}",
-    "pending": "Pending"
+    "pending": "Pending",
+    "copyLink": "Copiar enlace",
+    "copied": "¡Copiado!"
   },
   "settings": {
     "title": "Organization Settings",

@@ -38,7 +38,9 @@
     "description": "查看 {{orgName}} 的待處理邀請",
     "loading": "載入邀請中...",
     "invited": "邀請於 {{date}}",
-    "pending": "待處理"
+    "pending": "待處理",
+    "copyLink": "複製連結",
+    "copied": "已複製"
   },
   "settings": {
     "title": "組織設定",

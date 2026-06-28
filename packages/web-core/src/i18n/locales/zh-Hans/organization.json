@@ -38,7 +38,9 @@
     "description": "查看 {{orgName}} 的待处理邀请",
     "loading": "加载邀请中...",
     "invited": "邀请于 {{date}}",
-    "pending": "待处理"
+    "pending": "待处理",
+    "copyLink": "复制链接",
+    "copied": "已复制"
   },
   "settings": {
     "title": "组织设置",
