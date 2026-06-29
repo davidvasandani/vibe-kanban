@@ -12,7 +12,6 @@ import {
   type NavbarBreadcrumbItem,
   type MobileTabId,
 } from '@vibe/ui/components/Navbar';
-import { OrgSwitcher } from '@vibe/ui/components/OrgSwitcher';
 import { useAllOrganizationProjects } from '@/shared/hooks/useAllOrganizationProjects';
 import { useShape } from '@/shared/integrations/electric/hooks';
 import { PROJECT_ISSUES_SHAPE } from 'shared/remote-types';
@@ -346,16 +345,6 @@ export function NavbarContainer({
       onOpenDrawer={onOpenDrawer}
       mobileActiveTab={mobileActiveTab as MobileTabId}
       onMobileTabChange={(tab) => setMobileActiveTab(tab)}
-      afterTitleSlot={
-        onOrgSelect && orgsData?.organizations ? (
-          <OrgSwitcher
-            organizations={orgsData.organizations}
-            selectedOrgId={selectedOrgId}
-            onSelect={onOrgSelect}
-            label={orgName}
-          />
-        ) : null
-      }
       leftSlot={
         !breadcrumbs &&
         !isWaitingForBreadcrumbData &&
