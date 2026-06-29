@@ -12,6 +12,7 @@
 - `docs/`: Documentation files.
 
 ### Crate-specific guides
+- [`crates/mcp/AGENTS.md`](crates/mcp/AGENTS.md) — MCP server architecture, launch modes, backend resolution (and the intermittent-availability fix), config propagation to launched agents.
 - [`crates/remote/AGENTS.md`](crates/remote/AGENTS.md) — Remote server architecture, ElectricSQL integration, mutation patterns, environment variables.
 - [`docs/AGENTS.md`](docs/AGENTS.md) — Mintlify documentation writing guidelines and component reference.
 - [`packages/local-web/AGENTS.md`](packages/local-web/AGENTS.md) — Web app design system styling guidelines.

@@ -273,3 +273,57 @@ Once configured, you'll see the Vibe Kanban MCP server listed and ready to use i
 <Note>
 Similar configuration steps apply to other MCP clients like Claude Desktop, VS Code with MCP extensions, or any custom MCP client implementations.
 </Note>
+
+## Troubleshooting
+
+<AccordionGroup>
+<Accordion title="A coding agent doesn't see the Vibe Kanban MCP server">
+The **MCP Servers** settings page is per-agent: when you save, Vibe Kanban writes the configuration to the selected agent's own config file, and to that file only.
+
+If your workspaces launch a different agent from the one you had selected when saving, that agent never receives the configuration.
+
+<Steps>
+<Step title="Confirm which agent your workspaces use">
+  Check the executor configured for the workspaces where the server is missing.
+</Step>
+
+<Step title="Save the server for that agent">
+  Open **Settings → MCP Servers**, switch the agent selector to match, click the **Vibe Kanban** card under **Popular servers**, then click **Save Settings**.
+
+  <Check>
+  The `vibe_kanban` entry now appears in that agent's MCP configuration file (for example, `~/.claude.json` for Claude Code).
+  </Check>
+</Step>
+
+<Step title="Restart the agent session">
+  Coding agents read MCP configuration at startup, so start a new session to pick up the change.
+</Step>
+</Steps>
+
+Repeat these steps for each agent you use across your workspaces.
+</Accordion>
+
+<Accordion title="The MCP server is only available intermittently">
+By default the MCP server discovers the Vibe Kanban backend through a temporary port file that the backend writes while it runs. If the backend restarts, that file is briefly rewritten, and the server may fail to connect for sessions that start during the restart.
+
+Pin the backend address to make discovery deterministic. Add a `VIBE_BACKEND_URL` environment variable to the server entry, pointing at the port your Vibe Kanban backend listens on:
+
+```json
+{
+  "mcpServers": {
+    "vibe_kanban": {
+      "command": "npx",
+      "args": ["-y", "vibe-kanban@latest", "--mcp"],
+      "env": { "VIBE_BACKEND_URL": "http://127.0.0.1:3334" }
+    }
+  }
+}
+```
+
+Restart the agent session afterwards so the new environment takes effect.
+
+<Warning>
+This is reliable only when the backend always listens on the same port. Set a fixed `BACKEND_PORT` in your `.env` so the address in `VIBE_BACKEND_URL` stays valid across restarts. Saving from the **MCP Servers** settings page rewrites the entry and removes the `env` block, so re-add it after any save from the UI.
+</Warning>
+</Accordion>
+</AccordionGroup>
