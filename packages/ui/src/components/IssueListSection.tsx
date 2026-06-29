@@ -34,7 +34,6 @@ export interface IssueListSectionProps {
   selectedIssueIds?: Set<string>;
   isMultiSelectActive?: boolean;
   onIssueCheckboxChange?: (issueId: string, checked: boolean) => void;
-  slim?: boolean;
   className?: string;
 }
 
@@ -50,7 +49,6 @@ export function IssueListSection({
   selectedIssueIds,
   isMultiSelectActive,
   onIssueCheckboxChange,
-  slim,
   className,
 }: IssueListSectionProps) {
   const storageKey = `ui.issue-list-section.${status.id}`;
@@ -126,7 +124,6 @@ export function IssueListSection({
                     onCheckboxChange={(checked) =>
                       onIssueCheckboxChange?.(issue.id, checked)
                     }
-                    slim={slim}
                   />
                 );
               })}
