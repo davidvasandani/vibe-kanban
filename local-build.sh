@@ -102,6 +102,13 @@ echo "Building Remote API binary..."
 cargo build --release --manifest-path crates/remote/Cargo.toml \
   --target-dir "$CARGO_TARGET_DIR" --bin remote
 
+echo "Building Relay tunnel server binary..."
+# crates/relay-tunnel is also excluded from the workspace (exclude = [...]), so
+# it builds via its own manifest. This is the Remote Access relay broker that
+# hosts register with and clients tunnel through.
+cargo build --release --manifest-path crates/relay-tunnel/Cargo.toml \
+  --target-dir "$CARGO_TARGET_DIR" --bin relay-server
+
 echo "📦 Creating distribution package..."
 
 # Copy the main binary
@@ -126,6 +133,11 @@ mv vibe-kanban-review.zip "$DIST_STAGING/$PLATFORM/vibe-kanban-review.zip"
 # It is run directly by the remote service, so it ships unzipped + executable.
 cp ${CARGO_TARGET_DIR}/release/remote "$DIST_STAGING/$PLATFORM/remote"
 chmod +x "$DIST_STAGING/$PLATFORM/remote"
+
+# Copy the Relay tunnel server binary (Remote Access broker).
+# Run directly by the relay service, so it ships unzipped + executable.
+cp ${CARGO_TARGET_DIR}/release/relay-server "$DIST_STAGING/$PLATFORM/relay-server"
+chmod +x "$DIST_STAGING/$PLATFORM/relay-server"
 
 echo "✅ CLI build complete!"
 echo "📁 Files created:"
