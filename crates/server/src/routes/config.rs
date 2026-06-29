@@ -436,26 +436,33 @@ fn set_mcp_servers_in_config_path(
         *raw_config = serde_json::json!({});
     }
 
+    // An empty path leaves no attribute to set; treat it as a misconfiguration
+    // rather than panicking on the slice/`last()` operations below.
+    let (final_attr, parents) = path
+        .split_last()
+        .ok_or("MCP servers_path must not be empty")?;
+
     let mut current = raw_config;
     // Navigate/create the nested structure (all parts except the last)
-    for part in &path[..path.len() - 1] {
+    for part in parents {
         if current.get(part).is_none() {
             current
                 .as_object_mut()
-                .unwrap()
+                .ok_or("config node is not a JSON object")?
                 .insert(part.to_string(), serde_json::json!({}));
         }
-        current = current.get_mut(part).unwrap();
+        current = current
+            .get_mut(part)
+            .ok_or("failed to navigate config node")?;
         if !current.is_object() {
             *current = serde_json::json!({});
         }
     }
 
     // Set the final attribute
-    let final_attr = path.last().unwrap();
     current
         .as_object_mut()
-        .unwrap()
+        .ok_or("config node is not a JSON object")?
         .insert(final_attr.to_string(), serde_json::to_value(servers)?);
 
     Ok(())
@@ -682,4 +689,39 @@ async fn handle_executor_discovered_options_ws(
         .send(LogMsg::Finished.to_ws_message_unchecked())
         .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn servers(name: &str) -> HashMap<String, Value> {
+        HashMap::from([(name.to_string(), serde_json::json!({ "command": "x" }))])
+    }
+
+    #[test]
+    fn sets_nested_attribute_creating_missing_objects() {
+        let mut config = serde_json::json!({});
+        let path = vec!["a".to_string(), "b".to_string(), "mcpServers".to_string()];
+        set_mcp_servers_in_config_path(&mut config, &path, &servers("srv")).unwrap();
+        assert_eq!(
+            config["a"]["b"]["mcpServers"]["srv"]["command"],
+            serde_json::json!("x")
+        );
+    }
+
+    #[test]
+    fn overwrites_non_object_nodes_in_path() {
+        let mut config = serde_json::json!({ "a": 5 });
+        let path = vec!["a".to_string(), "mcpServers".to_string()];
+        set_mcp_servers_in_config_path(&mut config, &path, &servers("srv")).unwrap();
+        assert!(config["a"]["mcpServers"]["srv"].is_object());
+    }
+
+    #[test]
+    fn empty_path_is_an_error_not_a_panic() {
+        let mut config = serde_json::json!({});
+        let err = set_mcp_servers_in_config_path(&mut config, &[], &servers("srv"));
+        assert!(err.is_err());
+    }
 }
