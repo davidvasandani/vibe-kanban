@@ -397,7 +397,8 @@
     "subIssueIndicator": "↳",
     "viewTabs": {
       "active": "アクティブ",
-      "all": "すべて"
+      "all": "すべて",
+      "slim": "スリム"
     },
     "loginRequired": {
       "title": "サインインが必要です",

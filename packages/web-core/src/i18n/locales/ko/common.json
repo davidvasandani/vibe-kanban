@@ -397,7 +397,8 @@
     "subIssueIndicator": "↳",
     "viewTabs": {
       "active": "활성",
-      "all": "전체"
+      "all": "전체",
+      "slim": "슬림"
     },
     "loginRequired": {
       "title": "로그인 필요",

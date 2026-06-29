@@ -397,7 +397,8 @@
     "subIssueIndicator": "↳",
     "viewTabs": {
       "active": "活動",
-      "all": "全部"
+      "all": "全部",
+      "slim": "精簡"
     },
     "loginRequired": {
       "title": "需要登入",

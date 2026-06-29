@@ -178,16 +178,6 @@ export function KanbanContainer() {
     },
     [isIssueComposerOpen, issueComposerKey, appNavigation, projectId]
   );
-  const openIssueWorkspace = useCallback(
-    (issueId: string, workspaceAttemptId: string) => {
-      appNavigation.goToProjectIssueWorkspace(
-        projectId,
-        issueId,
-        workspaceAttemptId
-      );
-    },
-    [appNavigation, projectId]
-  );
   const startCreate = useCallback(
     (options?: ProjectIssueCreateOptions) => {
       openKanbanIssueComposer(issueComposerKey, options);
@@ -388,6 +378,10 @@ export function KanbanContainer() {
   const setListViewStatusFilter = useUiPreferencesStore(
     (s) => s.setListViewStatusFilter
   );
+  // 'kanban' and 'slim' both render the column board; 'slim' just renders
+  // compact cards (issue id + title only).
+  const isBoardView = kanbanViewMode === 'kanban' || kanbanViewMode === 'slim';
+  const isSlimView = kanbanViewMode === 'slim';
   // Reset view mode when navigating projects
   const prevProjectIdRef = useRef<string | null>(null);
 
@@ -433,14 +427,14 @@ export function KanbanContainer() {
   );
 
   const defaultCreateStatusId = useMemo(() => {
-    if (kanbanViewMode === 'kanban') {
+    if (isBoardView) {
       return visibleStatuses[0]?.id;
     }
     if (listViewStatusFilter) {
       return listViewStatusFilter;
     }
     return sortedStatuses[0]?.id;
-  }, [kanbanViewMode, visibleStatuses, listViewStatusFilter, sortedStatuses]);
+  }, [isBoardView, visibleStatuses, listViewStatusFilter, sortedStatuses]);
 
   // Update default create status for command bar based on current tab
   useEffect(() => {
@@ -764,10 +758,9 @@ export function KanbanContainer() {
 
   // Compute ordered issue IDs for range selection
   const orderedIssueIds = useMemo(() => {
-    const statusOrder =
-      kanbanViewMode === 'kanban' ? visibleStatuses : listViewStatuses;
+    const statusOrder = isBoardView ? visibleStatuses : listViewStatuses;
     return statusOrder.flatMap((status) => items[status.id] ?? []);
-  }, [kanbanViewMode, visibleStatuses, listViewStatuses, items]);
+  }, [isBoardView, visibleStatuses, listViewStatuses, items]);
 
   // Keep the store's ordered IDs in sync
   useEffect(() => {
@@ -974,7 +967,7 @@ export function KanbanContainer() {
         </div>
       </div>
 
-      {kanbanViewMode === 'kanban' ? (
+      {isBoardView ? (
         visibleStatuses.length === 0 ? (
           <div className="flex-1 flex items-center justify-center">
             <p className="text-low">{t('kanban.noVisibleStatuses')}</p>
@@ -1041,6 +1034,7 @@ export function KanbanContainer() {
                             dragDisabled={isMultiSelectActive}
                           >
                             <KanbanCardContent
+                              slim={isSlimView}
                               displayId={issue.simple_id}
                               title={issue.title}
                               description={issue.description}
@@ -1093,21 +1087,12 @@ export function KanbanContainer() {
                                 ),
                               }}
                             />
-                            {issueWorkspaces.length > 0 && (
+                            {!isSlimView && issueWorkspaces.length > 0 && (
                               <div className="mt-base flex flex-col gap-half">
                                 {issueWorkspaces.map((workspace) => (
                                   <IssueWorkspaceCard
                                     key={workspace.id}
                                     workspace={workspace}
-                                    onClick={
-                                      workspace.localWorkspaceId
-                                        ? () =>
-                                            openIssueWorkspace(
-                                              issue.id,
-                                              workspace.localWorkspaceId!
-                                            )
-                                        : undefined
-                                    }
                                     showOwner={false}
                                     showStatusBadge={false}
                                     showNoPrText={false}

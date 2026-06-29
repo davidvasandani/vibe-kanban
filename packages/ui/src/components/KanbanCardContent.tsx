@@ -132,6 +132,8 @@ export type KanbanCardContentProps<TTag extends KanbanTag = KanbanTag> = {
   relationships?: KanbanRelationship[];
   isSubIssue?: boolean;
   isLoading?: boolean;
+  /** Compact rendering: only the issue id and title. */
+  slim?: boolean;
   className?: string;
   onPriorityClick?: (e: MouseEvent) => void;
   onAssigneeClick?: (e: MouseEvent) => void;
@@ -151,6 +153,7 @@ export function KanbanCardContent<TTag extends KanbanTag = KanbanTag>({
   relationships = [],
   isSubIssue,
   isLoading = false,
+  slim = false,
   className,
   onPriorityClick,
   onAssigneeClick,
@@ -198,6 +201,23 @@ export function KanbanCardContent<TTag extends KanbanTag = KanbanTag>({
       {tagsDisplay}
     </button>
   );
+
+  if (slim) {
+    return (
+      <div className={cn('flex items-center gap-half min-w-0', className)}>
+        {isSubIssue && (
+          <span className="text-sm text-low shrink-0">
+            {t('kanban.subIssueIndicator')}
+          </span>
+        )}
+        <span className="font-ibm-plex-mono text-sm text-low shrink-0">
+          {displayId}
+        </span>
+        <span className="text-base text-normal truncate">{title}</span>
+        {isLoading && <RunningDots />}
+      </div>
+    );
+  }
 
   return (
     <div className={cn('flex flex-col gap-half min-w-0', className)}>
