@@ -102,9 +102,14 @@ pub async fn start_dev_server(
 
     let mut execution_processes = Vec::new();
     for repo in repos_with_dev_script {
+        // Guaranteed `Some` by the `is_some_and(|s| !s.is_empty())` filter above,
+        // but match explicitly so a future filter change can't turn this into a panic.
+        let Some(script) = repo.dev_server_script.clone() else {
+            continue;
+        };
         let executor_action = ExecutorAction::new(
             ExecutorActionType::ScriptRequest(ScriptRequest {
-                script: repo.dev_server_script.clone().unwrap(),
+                script,
                 language: ScriptRequestLanguage::Bash,
                 context: ScriptContext::DevServer,
                 working_dir: Some(repo.name.clone()),
