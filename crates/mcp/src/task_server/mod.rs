@@ -1,7 +1,10 @@
 mod handler;
 mod tools;
 
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{Arc, RwLock},
+};
 
 use anyhow::Context;
 use db::models::{requests::ContainerQuery, workspace::WorkspaceContext};
@@ -49,7 +52,10 @@ pub enum McpMode {
 #[derive(Debug, Clone)]
 pub struct McpServer {
     client: reqwest::Client,
-    base_url: String,
+    // Interior-mutable so a long-lived MCP session can re-resolve the backend
+    // URL after the backend restarts on a new port, instead of staying pinned to
+    // a dead one for the life of the process. Refreshed by `refresh_base_url`.
+    base_url: Arc<RwLock<String>>,
     tool_router: ToolRouter<McpServer>,
     context: Option<McpContext>,
     mode: McpMode,
@@ -59,7 +65,7 @@ impl McpServer {
     pub fn new_global(base_url: &str) -> Self {
         Self {
             client: reqwest::Client::new(),
-            base_url: base_url.to_string(),
+            base_url: Arc::new(RwLock::new(base_url.to_string())),
             tool_router: Self::global_mode_router(),
             context: None,
             mode: McpMode::Global,
@@ -69,19 +75,50 @@ impl McpServer {
     pub fn new_orchestrator(base_url: &str) -> Self {
         Self {
             client: reqwest::Client::new(),
-            base_url: base_url.to_string(),
+            base_url: Arc::new(RwLock::new(base_url.to_string())),
             tool_router: Self::orchestrator_mode_router(),
             context: None,
             mode: McpMode::Orchestrator,
         }
     }
 
+    /// Current backend base URL. Recovers the inner value if the lock was
+    /// poisoned so a panic in one request never wedges every later request.
+    pub(crate) fn current_base_url(&self) -> String {
+        self.base_url
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     fn url(&self, path: &str) -> String {
         format!(
             "{}/{}",
-            self.base_url.trim_end_matches('/'),
+            self.current_base_url().trim_end_matches('/'),
             path.trim_start_matches('/')
         )
+    }
+
+    /// Re-resolves the backend URL (env vars → port file) and, if it changed,
+    /// swaps it in for subsequent requests. Called from the request path after a
+    /// transient connection error so the session reconnects to a restarted
+    /// backend. Returns the freshly resolved URL.
+    pub(crate) async fn refresh_base_url(&self) -> anyhow::Result<String> {
+        let resolved = crate::backend::resolve_base_url("vibe-kanban-mcp").await?;
+        let current = self.current_base_url();
+        if resolved != current {
+            tracing::warn!(
+                "MCP backend URL changed from {} to {}; reconnecting to the restarted backend",
+                current,
+                resolved
+            );
+            let mut guard = self
+                .base_url
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *guard = resolved.clone();
+        }
+        Ok(resolved)
     }
 
     pub async fn init(mut self) -> anyhow::Result<Self> {

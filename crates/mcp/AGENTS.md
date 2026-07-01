@@ -63,31 +63,52 @@ subprocess (one MCP client session).
 ### Failure mode: intermittent availability via the port file
 
 When neither `VIBE_BACKEND_URL` nor the port env vars are set, the MCP depends on
-the port file. That path is best-effort and has three sharp edges:
+the port file. Historically that path had three sharp edges, each now addressed in
+code (see **Resilience** below):
 
-- **Read-once, no retry.** `read_port_file` does `fs::read_to_string(path)?` and
-  fails on the first miss. The error propagates out of `resolve_base_url`, so the
-  binary exits **before** `serve(stdio())` — the MCP server never connects for that
-  session.
-- **Non-atomic write.** The backend writes the port file in place
-  (`fs::write`, no temp+rename). During a backend restart there is a sub-second
-  window where the file is empty or partial; an MCP launched in that window reads
-  garbage and exits.
-- **No staleness check, cached URL.** The reader never verifies the port is
-  listening, and the resolved URL is cached for the whole session. If the backend
-  later restarts on a different port, the long-lived MCP keeps pointing at the dead
-  one — the server stays "connected" but every tool call fails until the client
-  session is restarted.
+- **Read-once, no retry.** `read_port_file` used to do `fs::read_to_string(path)?`
+  and fail on the first miss. The error propagated out of `resolve_base_url`, so the
+  binary exited **before** `serve(stdio())` — the MCP server never connected for that
+  session. → *Now retried with backoff.*
+- **Non-atomic write.** The backend wrote the port file in place
+  (`fs::write`, no temp+rename). During a backend restart there was a sub-second
+  window where the file was empty or partial; an MCP launched in that window read
+  garbage and exited. → *Now written atomically via temp+rename.*
+- **No staleness check, cached URL.** The reader never verified the port was
+  listening, and the resolved URL was cached for the whole session. If the backend
+  later restarted on a different port, the long-lived MCP kept pointing at the dead
+  one — the server stayed "connected" but every tool call failed until the client
+  session was restarted. → *Now re-resolved and retried on connection failure.*
 
-Together these present as **"the MCP is only available intermittently"**, correlated
-with backend restarts rather than anything in the client config.
+Together these presented as **"the MCP is only available intermittently"**, correlated
+with backend restarts rather than anything in the client config. The classic symptom
+of the third edge: the tool **reconnects at the tooling layer, but every backend call
+fails** (e.g. "Unable to connect. Is the computer able to access the url?").
 
-### Fix: pin the backend URL
+### Resilience (implemented)
+
+Backend resolution now self-heals without any config change:
+
+- **Atomic port-file writes** — `write_port_file_with_proxy`
+  (`crates/utils/src/port_file.rs`) writes to a process-unique `*.tmp` file and
+  `rename`s it into place, so readers never observe an empty/partial file.
+- **Retry-with-backoff reads** — `read_port_info` retries the read a bounded number
+  of times (~1s total) to ride out the restart window instead of failing on the
+  first miss.
+- **Reconnect-on-failure** — `McpServer` holds `base_url` behind an
+  `Arc<RwLock<String>>`. When a tool's HTTP call fails with a transient connection
+  error (`send_with_reconnect` in `src/task_server/tools/mod.rs`), the server
+  re-resolves the backend URL (`crate::backend::resolve_base_url`), retargets the
+  request at the new host/port, and retries once. A long-lived session therefore
+  follows the backend across a restart+port-change instead of staying pinned to the
+  dead port. URL changes and retries are logged at `warn`.
+
+### Still preferred: pin the backend URL
 
 Set `VIBE_BACKEND_URL` in the MCP server entry's `env` so resolution is
-deterministic and never touches the port file. This is durable only if the backend
-listens on a fixed port (e.g. `PORT`/`BACKEND_PORT` pinned in `.env` or the service
-definition).
+deterministic and never touches the port file at all. This is durable only if the
+backend listens on a fixed port (e.g. `PORT`/`BACKEND_PORT` pinned in `.env` or the
+service definition).
 
 ```json
 {
@@ -107,10 +128,10 @@ definition).
 > `VIBE_BACKEND_URL` in the environment that launches the agent so it is inherited
 > regardless of the config file.
 
-If fixed ports are not acceptable, the durable code fix is to make resolution
-robust: retry-with-backoff in `read_port_file`, atomic (temp+rename) port-file
-writes, and reconnect-on-failure in the MCP instead of caching the URL. Those live
-in `crates/utils/src/port_file.rs` and this crate.
+Pinning is still the most deterministic option, but it is no longer *required* for
+stability — the resolution path is now robust on its own (retry-with-backoff reads
+and atomic writes in `crates/utils/src/port_file.rs`, reconnect-on-failure in this
+crate). See **Resilience** above.
 
 ## How config reaches Vibe Kanban-launched agents
 
