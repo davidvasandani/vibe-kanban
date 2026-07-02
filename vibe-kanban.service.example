@@ -1,0 +1,52 @@
+# Vibe Kanban — systemd unit (example)
+#
+# Install:
+#   sudo install -m 600 vibe-kanban.env.example /etc/vibe-kanban.env   # then edit
+#   sudo cp vibe-kanban.service.example /etc/systemd/system/vibe-kanban.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vibe-kanban
+#
+# This is the "option 1" durable place to pin the port: BACKEND_PORT (and
+# VIBE_BACKEND_URL for the MCP) live in the EnvironmentFile and are inherited by
+# the server process — and, in turn, by any coding agents the server launches.
+
+[Unit]
+Description=Vibe Kanban
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# The user/group the server runs as. Its $HOME is where Vibe Kanban stores its
+# asset dir / database, so set HOME explicitly if this user has none.
+User=vibe-kanban
+Group=vibe-kanban
+Environment=HOME=/var/lib/vibe-kanban
+WorkingDirectory=/var/lib/vibe-kanban
+
+# Pinned ports + VIBE_BACKEND_URL. This is what makes the port static.
+EnvironmentFile=/etc/vibe-kanban.env
+
+# Launch via the npx CLI, which spawns the server binary with the inherited
+# environment (stdio: inherit, no env override), so the vars above reach it.
+# Pin the version in production instead of @latest for reproducible restarts,
+# e.g. vibe-kanban@0.1.43. Adjust the npx path to match your Node install.
+ExecStart=/usr/bin/npx -y vibe-kanban
+
+# Fail-fast + auto-recover. A static port errors on bind if the port is still
+# held; stop-then-start restart ordering releases it before the retry.
+Restart=always
+RestartSec=2
+
+# --- Optional hardening (uncomment as appropriate for your host) --------------
+# NoNewPrivileges=true
+# ProtectSystem=strict
+# ProtectHome=true
+# ReadWritePaths=/var/lib/vibe-kanban
+# PrivateTmp=true          # NOTE: gives the service its own /tmp, so the MCP
+#                          # port file is isolated too — fine here because
+#                          # VIBE_BACKEND_URL is pinned and the port file is unused.
+
+[Install]
+WantedBy=multi-user.target

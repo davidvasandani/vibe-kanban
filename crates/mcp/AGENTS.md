@@ -110,6 +110,12 @@ deterministic and never touches the port file at all. This is durable only if th
 backend listens on a fixed port (e.g. `PORT`/`BACKEND_PORT` pinned in `.env` or the
 service definition).
 
+For a self-hosted/prod server, the most durable form is to pin both
+`BACKEND_PORT` and `VIBE_BACKEND_URL` in the service manager's environment so the
+server *and* the coding agents it launches inherit them. See the example
+`vibe-kanban.service.example` + `vibe-kanban.env.example` at the repo root
+(front the loopback port with a reverse proxy — see `Caddyfile.example`).
+
 ```json
 {
   "mcpServers": {
