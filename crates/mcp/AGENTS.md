@@ -114,7 +114,28 @@ For a self-hosted/prod server, the most durable form is to pin both
 `BACKEND_PORT` and `VIBE_BACKEND_URL` in the service manager's environment so the
 server *and* the coding agents it launches inherit them. See the example
 `vibe-kanban.service.example` + `vibe-kanban.env.example` at the repo root
-(front the loopback port with a reverse proxy — see `Caddyfile.example`).
+(front the loopback port with a reverse proxy — see `Caddyfile.example`). Those
+examples also run **our** build — the compiled `server` binary directly rather
+than the public `npx vibe-kanban` package — and set `VIBE_KANBAN_MCP_COMMAND`
+(see below) so launched agents spawn our MCP binary too.
+
+### Launching our MCP build in agents (not the public package)
+
+The MCP entry written into launched agents' configs comes from
+`crates/executors/default_mcp.json`, whose default is `npx -y vibe-kanban@latest
+--mcp` — the **public** package. A self-hosted deployment overrides this without
+patching the file via two env vars read by `PRECONFIGURED_MCP_SERVERS`
+(`crates/executors/src/mcp_config.rs`):
+
+- `VIBE_KANBAN_MCP_COMMAND` — the executable (e.g. the co-located
+  `vibe-kanban-mcp` binary from `local-build.sh`). Running the binary directly
+  needs no args (defaults to global mode).
+- `VIBE_KANBAN_MCP_ARGS` — optional whitespace-separated args; e.g. to pin a
+  privately published package: `command=npx`,
+  `args="-y @ourscope/vibe-kanban@X.Y.Z --mcp"`.
+
+Unset ⇒ the public default is used unchanged, so this is opt-in and doesn't
+affect normal/public installs.
 
 ```json
 {

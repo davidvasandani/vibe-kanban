@@ -23,9 +23,57 @@ fn is_jsonc_file(path: &Path) -> bool {
 }
 
 static DEFAULT_MCP_JSON: &str = include_str!("../default_mcp.json");
+
+/// Overrides the executable used to launch the bundled Vibe Kanban MCP server
+/// that gets written into launched agents' config files. Lets a self-hosted /
+/// prod deployment point agents at **its own** build (e.g. the co-located
+/// `vibe-kanban-mcp` binary, or a privately published package) instead of the
+/// public `npx -y vibe-kanban@latest` default. Unset ⇒ the public default in
+/// `default_mcp.json` is used unchanged.
+const MCP_COMMAND_ENV: &str = "VIBE_KANBAN_MCP_COMMAND";
+/// Optional whitespace-separated args for [`MCP_COMMAND_ENV`]. When the command
+/// is overridden but this is unset, the args are cleared — running the
+/// `vibe-kanban-mcp` binary directly needs no extra args (defaults to global
+/// mode), unlike the `npx … --mcp` form where `--mcp` selects the subcommand.
+const MCP_ARGS_ENV: &str = "VIBE_KANBAN_MCP_ARGS";
+
 pub static PRECONFIGURED_MCP_SERVERS: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str::<Value>(DEFAULT_MCP_JSON).expect("Failed to parse default MCP JSON")
+    let mut value =
+        serde_json::from_str::<Value>(DEFAULT_MCP_JSON).expect("Failed to parse default MCP JSON");
+    apply_vibe_kanban_command_override(&mut value);
+    value
 });
+
+/// Applies the [`MCP_COMMAND_ENV`] / [`MCP_ARGS_ENV`] override to the parsed
+/// preconfigured servers, if set. No-op when the env var is absent or blank.
+fn apply_vibe_kanban_command_override(value: &mut Value) {
+    let Ok(command) = std::env::var(MCP_COMMAND_ENV) else {
+        return;
+    };
+    let command = command.trim();
+    if command.is_empty() {
+        return;
+    }
+
+    let args: Vec<String> = std::env::var(MCP_ARGS_ENV)
+        .ok()
+        .map(|raw| raw.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default();
+
+    set_vibe_kanban_command(value, command, args);
+}
+
+/// Rewrites the `vibe_kanban` server entry's `command`/`args` in place, leaving
+/// every other preconfigured server untouched.
+fn set_vibe_kanban_command(value: &mut Value, command: &str, args: Vec<String>) {
+    if let Some(entry) = value.get_mut("vibe_kanban").and_then(Value::as_object_mut) {
+        entry.insert("command".to_string(), Value::String(command.to_string()));
+        entry.insert(
+            "args".to_string(),
+            Value::Array(args.into_iter().map(Value::String).collect()),
+        );
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct McpConfig {
@@ -409,5 +457,65 @@ impl CodingAgent {
 
         let canonical = PRECONFIGURED_MCP_SERVERS.clone();
         apply_adapter(adapter, canonical)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_vibe_kanban_command_is_unchanged_without_override() {
+        // The checked-in default must still point at the public package so
+        // normal installs keep working; the override is opt-in via env.
+        let value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        let vk = &value["vibe_kanban"];
+        assert_eq!(vk["command"], serde_json::json!("npx"));
+        assert_eq!(
+            vk["args"],
+            serde_json::json!(["-y", "vibe-kanban@latest", "--mcp"])
+        );
+    }
+
+    #[test]
+    fn override_points_vibe_kanban_at_our_build_and_leaves_others_untouched() {
+        let mut value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        let playwright_before = value["playwright"].clone();
+
+        set_vibe_kanban_command(
+            &mut value,
+            "/opt/vibe-kanban/bin/vibe-kanban-mcp",
+            Vec::new(),
+        );
+
+        let vk = &value["vibe_kanban"];
+        assert_eq!(
+            vk["command"],
+            serde_json::json!("/opt/vibe-kanban/bin/vibe-kanban-mcp")
+        );
+        assert_eq!(vk["args"], serde_json::json!([]));
+        // Other preconfigured servers (public third-party tools) are untouched.
+        assert_eq!(value["playwright"], playwright_before);
+    }
+
+    #[test]
+    fn override_supports_custom_args_for_a_private_package() {
+        let mut value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        set_vibe_kanban_command(
+            &mut value,
+            "npx",
+            vec![
+                "-y".to_string(),
+                "@ourscope/vibe-kanban@1.2.3".to_string(),
+                "--mcp".to_string(),
+            ],
+        );
+
+        let vk = &value["vibe_kanban"];
+        assert_eq!(vk["command"], serde_json::json!("npx"));
+        assert_eq!(
+            vk["args"],
+            serde_json::json!(["-y", "@ourscope/vibe-kanban@1.2.3", "--mcp"])
+        );
     }
 }

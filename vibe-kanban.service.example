@@ -6,9 +6,10 @@
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now vibe-kanban
 #
-# This is the "option 1" durable place to pin the port: BACKEND_PORT (and
-# VIBE_BACKEND_URL for the MCP) live in the EnvironmentFile and are inherited by
-# the server process — and, in turn, by any coding agents the server launches.
+# This runs OUR build directly — not `npx vibe-kanban`, which downloads the
+# public package. `./local-build.sh` produces the release binaries; install the
+# `server` and `vibe-kanban-mcp` binaries somewhere stable (e.g.
+# /opt/vibe-kanban/bin) and point ExecStart + VIBE_KANBAN_MCP_COMMAND at them.
 
 [Unit]
 Description=Vibe Kanban
@@ -25,14 +26,13 @@ Group=vibe-kanban
 Environment=HOME=/var/lib/vibe-kanban
 WorkingDirectory=/var/lib/vibe-kanban
 
-# Pinned ports + VIBE_BACKEND_URL. This is what makes the port static.
+# Pinned ports, VIBE_BACKEND_URL, and the MCP command override (our binary).
+# This is what makes the port static and keeps everything on our build.
 EnvironmentFile=/etc/vibe-kanban.env
 
-# Launch via the npx CLI, which spawns the server binary with the inherited
-# environment (stdio: inherit, no env override), so the vars above reach it.
-# Pin the version in production instead of @latest for reproducible restarts,
-# e.g. vibe-kanban@0.1.43. Adjust the npx path to match your Node install.
-ExecStart=/usr/bin/npx -y vibe-kanban
+# Run our compiled server binary directly. No npx, no npm, no public download.
+# Path is where you installed the output of ./local-build.sh.
+ExecStart=/opt/vibe-kanban/bin/server
 
 # Fail-fast + auto-recover. A static port errors on bind if the port is still
 # held; stop-then-start restart ordering releases it before the retry.
