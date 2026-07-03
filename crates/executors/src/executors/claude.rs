@@ -280,7 +280,9 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
             models: [
                 ("opus", "Opus"),
                 ("opus[1m]", "Opus (1M context)"),
+                ("sonnet-5", "Sonnet 5"),
                 ("sonnet", "Sonnet"),
+                ("fable", "Fable"),
                 ("haiku", "Haiku"),
             ]
             .into_iter()
