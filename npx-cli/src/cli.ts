@@ -5,17 +5,9 @@ import { cac } from "cac";
 import {
   ensureBinary,
   ensureDesktopBundle,
-  BINARY_TAG,
-  CACHE_DIR,
-  DESKTOP_CACHE_DIR,
-  LOCAL_DEV_MODE,
   LOCAL_DIST_DIR,
 } from "./download";
-import {
-  getTauriPlatform,
-  installAndLaunch,
-  cleanOldDesktopVersions,
-} from "./desktop";
+import { getTauriPlatform, installAndLaunch } from "./desktop";
 
 const CLI_VERSION: string = require("../package.json").version;
 
@@ -86,36 +78,8 @@ function getBinaryName(base: string): string {
 }
 
 const platformDir = getPlatformDir();
-// In local dev mode, extract directly to dist directory; otherwise use global cache
-const versionCacheDir = LOCAL_DEV_MODE
-  ? path.join(LOCAL_DIST_DIR, platformDir)
-  : path.join(CACHE_DIR, BINARY_TAG, platformDir);
-
-// Remove old version directories from the binary cache
-function cleanOldVersions(): void {
-  try {
-    const entries = fs.readdirSync(CACHE_DIR, {
-      withFileTypes: true,
-    });
-    for (const entry of entries) {
-      if (entry.isDirectory() && entry.name !== BINARY_TAG) {
-        const oldDir = path.join(CACHE_DIR, entry.name);
-        fs.rmSync(oldDir, { recursive: true, force: true });
-      }
-    }
-  } catch {
-    // Ignore cleanup errors — not critical
-  }
-}
-
-function showProgress(downloaded: number, total: number): void {
-  const percent = total ? Math.round((downloaded / total) * 100) : 0;
-  const mb = (downloaded / (1024 * 1024)).toFixed(1);
-  const totalMb = total ? (total / (1024 * 1024)).toFixed(1) : "?";
-  process.stderr.write(
-    `\r   Downloading: ${mb}MB / ${totalMb}MB (${percent}%)`,
-  );
-}
+// Binaries live in npx-cli/dist/<platform>/, produced by ./local-build.sh.
+const versionCacheDir = path.join(LOCAL_DIST_DIR, platformDir);
 
 function buildMcpArgs(args: string[]): string[] {
   return args.length > 0 ? args : ["--mode", "global"];
@@ -141,15 +105,13 @@ async function extractAndRun(
     }
   }
 
-  // Download if not cached
+  // Ensure the built binary zip exists (produced by ./local-build.sh).
   if (!fs.existsSync(zipPath)) {
-    console.error(`Downloading ${baseName}...`);
     try {
-      await ensureBinary(platformDir, baseName, showProgress);
-      console.error(""); // newline after progress
+      await ensureBinary(platformDir, baseName);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`\nDownload failed: ${msg}`);
+      console.error(`\n${msg}`);
       process.exit(1);
     }
   }
@@ -176,11 +138,6 @@ async function extractAndRun(
       "This usually indicates a corrupt download. Please try again.",
     );
     process.exit(1);
-  }
-
-  // Clean up old cached versions only after current version is fully ready
-  if (!LOCAL_DEV_MODE) {
-    cleanOldVersions();
   }
 
   // Set permissions (non-Windows)
@@ -222,24 +179,14 @@ async function runReview(args: string[]): Promise<void> {
 }
 
 async function runMain(desktopMode: boolean): Promise<void> {
-  const modeLabel = LOCAL_DEV_MODE ? " (local dev)" : "";
   const tauriPlatform = getTauriPlatform(platformDir);
 
   // Default: browser mode (headless server + opens browser).
   // Use --desktop to launch the desktop app instead.
   if (desktopMode && tauriPlatform) {
     try {
-      console.log(
-        `Starting vibe-kanban desktop v${CLI_VERSION}${modeLabel}...`,
-      );
-      const bundleInfo = await ensureDesktopBundle(tauriPlatform, showProgress);
-      console.error(""); // newline after progress
-
-      // Clean old desktop versions after successful download
-      if (!LOCAL_DEV_MODE) {
-        cleanOldDesktopVersions(DESKTOP_CACHE_DIR, BINARY_TAG);
-      }
-
+      console.log(`Starting vibe-kanban desktop v${CLI_VERSION}...`);
+      const bundleInfo = await ensureDesktopBundle(tauriPlatform);
       const exitCode = await installAndLaunch(bundleInfo, platform);
       process.exit(exitCode);
     } catch (err: unknown) {
@@ -250,7 +197,7 @@ async function runMain(desktopMode: boolean): Promise<void> {
   }
 
   // Browser mode (default — headless server + opens browser)
-  console.log(`Starting vibe-kanban v${CLI_VERSION}${modeLabel}...`);
+  console.log(`Starting vibe-kanban v${CLI_VERSION}...`);
   await extractAndRun("vibe-kanban", (bin) => {
     execSync(`"${bin}"`, { stdio: "inherit" });
   });

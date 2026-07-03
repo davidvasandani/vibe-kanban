@@ -286,26 +286,3 @@ export async function installAndLaunch(
     `Desktop app not supported on platform: ${osPlatform}`
   );
 }
-
-export function cleanOldDesktopVersions(
-  desktopBaseDir: string,
-  currentTag: string
-): void {
-  try {
-    const entries = fs.readdirSync(desktopBaseDir, {
-      withFileTypes: true,
-    });
-    for (const entry of entries) {
-      if (entry.isDirectory() && entry.name !== currentTag) {
-        const oldDir = path.join(desktopBaseDir, entry.name);
-        try {
-          fs.rmSync(oldDir, { recursive: true, force: true });
-        } catch {
-          // Ignore errors (e.g. EBUSY on Windows if app is running)
-        }
-      }
-    }
-  } catch {
-    // Ignore cleanup errors
-  }
-}
