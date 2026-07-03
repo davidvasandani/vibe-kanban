@@ -167,20 +167,25 @@ Vibe Kanban is built for this. Use kanban issues to plan work, either privately 
 
 ![](packages/public/vibe-kanban-screenshot-workspace.png)
 
-One command. Describe the work, review the diff, ship it.
+Build our binaries once, then run them — no public package involved.
 
 ```bash
-npx vibe-kanban
+./local-build.sh          # compiles our build into npx-cli/dist/
+node npx-cli/bin/cli.js    # runs our build (auto-detects the local dist)
 ```
 
 
 ## Installation
 
-Make sure you have authenticated with your favourite coding agent. A full list of supported coding agents can be found in the [docs](https://vibekanban.com/docs/supported-coding-agents). Then in your terminal run:
+Make sure you have authenticated with your favourite coding agent. A full list of supported coding agents can be found in the [docs](https://vibekanban.com/docs/supported-coding-agents). Then build and run our binaries:
 
 ```bash
-npx vibe-kanban
+./local-build.sh
+node npx-cli/bin/cli.js
 ```
+
+For a long-running server, run the compiled `server` binary under a service
+manager instead — see `vibe-kanban.service.example` + `vibe-kanban.env.example`.
 
 ## Documentation
 

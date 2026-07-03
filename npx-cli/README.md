@@ -4,10 +4,11 @@
 
 ## Quick Start
 
-Run vibe kanban instantly without installation:
+Build and run our own binaries (not the public package):
 
 ```bash
-npx vibe-kanban
+./local-build.sh          # compiles our build into npx-cli/dist/
+node npx-cli/bin/cli.js    # runs our build (auto-detects the local dist)
 ```
 
 This will launch the application locally and open it in your browser automatically.
@@ -15,10 +16,10 @@ This will launch the application locally and open it in your browser automatical
 Helpful entrypoints:
 
 ```bash
-npx vibe-kanban --help
-npx vibe-kanban --version
-npx vibe-kanban review --help
-npx vibe-kanban mcp --help
+node npx-cli/bin/cli.js --help
+node npx-cli/bin/cli.js --version
+node npx-cli/bin/cli.js review --help
+node npx-cli/bin/cli.js mcp --help
 ```
 
 ## What is Vibe Kanban?
@@ -176,7 +177,8 @@ Vibe Kanban supports customization through its configuration system:
 **Ready to supercharge your development workflow?**
 
 ```bash
-npx vibe-kanban
+./local-build.sh
+node npx-cli/bin/cli.js
 ```
 
 _Start managing your projects with the power of AI coding agents today!_
