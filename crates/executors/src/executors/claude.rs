@@ -272,7 +272,8 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
     let effort_options =
         ReasoningOption::from_names(["low", "medium", "high", "xhigh", "max"].map(String::from));
 
-    let supports_effort = |id: &str| -> bool { id.contains("opus") || id.contains("sonnet") };
+    let supports_effort =
+        |id: &str| -> bool { id.contains("opus") || id.contains("sonnet") || id.contains("fable") };
 
     ExecutorDiscoveredOptions {
         model_selector: ModelSelectorConfig {
