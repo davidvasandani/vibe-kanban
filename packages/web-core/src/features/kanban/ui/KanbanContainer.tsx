@@ -976,10 +976,13 @@ export function KanbanContainer() {
           <div
             className={cn(
               'flex-1 overflow-x-auto scroll-smooth',
-              isMobile ? 'snap-x snap-mandatory' : 'px-double'
+              isMobile ? 'snap-x snap-mandatory overflow-y-hidden' : 'px-double'
             )}
           >
-            <KanbanProvider onDragEnd={handleDragEnd}>
+            <KanbanProvider
+              onDragEnd={handleDragEnd}
+              className={cn(isMobile && 'h-full')}
+            >
               {visibleStatuses.map((status) => {
                 const issueIds = items[status.id] ?? [];
 
@@ -1004,7 +1007,13 @@ export function KanbanContainer() {
                         </button>
                       </div>
                     </KanbanHeader>
-                    <KanbanCards id={status.id}>
+                    <KanbanCards
+                      id={status.id}
+                      className={cn(
+                        isMobile &&
+                          'overflow-y-auto overscroll-y-contain min-h-0'
+                      )}
+                    >
                       {issueIds.map((issueId, index) => {
                         const issue = issueMap[issueId];
                         if (!issue) return null;
