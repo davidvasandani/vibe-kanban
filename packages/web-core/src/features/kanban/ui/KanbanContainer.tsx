@@ -973,7 +973,12 @@ export function KanbanContainer() {
             <p className="text-low">{t('kanban.noVisibleStatuses')}</p>
           </div>
         ) : (
-          <div className="flex-1 overflow-x-auto px-double">
+          <div
+            className={cn(
+              'flex-1 overflow-x-auto scroll-smooth',
+              isMobile ? 'snap-x snap-mandatory' : 'px-double'
+            )}
+          >
             <KanbanProvider onDragEnd={handleDragEnd}>
               {visibleStatuses.map((status) => {
                 const issueIds = items[status.id] ?? [];

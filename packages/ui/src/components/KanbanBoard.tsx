@@ -55,7 +55,9 @@ export type KanbanBoardProps = {
 
 export const KanbanBoard = ({ children, className }: KanbanBoardProps) => {
   return (
-    <div className={cn('flex flex-col min-h-40', className)}>{children}</div>
+    <div className={cn('flex flex-col min-h-40 snap-start', className)}>
+      {children}
+    </div>
   );
 };
 
@@ -109,7 +111,7 @@ export const KanbanCard = ({
         return (
           <Card
             className={cn(
-              'p-base outline-none flex-col border -mt-[1px] -mx-[1px] bg-primary',
+              'p-base outline-none flex-col border -mt-[1px] -mx-[1px] bg-primary transition-shadow duration-150 ease-out',
               snapshot.isDragging && 'cursor-grabbing shadow-lg',
               isSelected
                 ? 'ring-2 ring-accent ring-inset bg-accent/5'
@@ -270,7 +272,7 @@ export const KanbanProvider = ({
     <DragDropContext onDragEnd={onDragEnd}>
       <div
         className={cn(
-          'inline-grid grid-flow-col auto-cols-[minmax(200px,400px)] divide-x border-x items-stretch min-h-full',
+          'inline-grid grid-flow-col auto-cols-[100vw] md:auto-cols-[minmax(200px,400px)] divide-x md:border-x items-stretch min-h-full',
           className
         )}
       >
