@@ -138,7 +138,11 @@ kanban_project_view_selections: { [key in string]?: JsonValue },
 /**
  * Kanban project view preferences (filters, toggles per project per view)
  */
-kanban_project_view_preferences: { [key in string]?: JsonValue }, };
+kanban_project_view_preferences: { [key in string]?: JsonValue }, 
+/**
+ * Kanban board view mode (kanban | list | slim)
+ */
+kanban_view_mode: string | null, };
 
 export type ProjectRepoDefaultsData = { repos: Array<DraftWorkspaceRepo>, };
 

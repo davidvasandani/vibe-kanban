@@ -21,6 +21,7 @@ import {
   type WorkspaceSortOrder,
   type KanbanProjectViewSelection,
   type KanbanProjectViewPreferences,
+  type KanbanViewMode,
 } from '@/shared/stores/useUiPreferencesStore';
 import type { RepoAction } from '@vibe/ui/components/RepoCard';
 
@@ -53,6 +54,7 @@ function storeToScratchData(state: {
     string,
     Record<string, KanbanProjectViewPreferences>
   >;
+  kanbanViewMode: KanbanViewMode;
 }): UiPreferencesData {
   const workspacePanelStates: { [key: string]: WorkspacePanelStateData } = {};
   for (const [key, value] of Object.entries(state.workspacePanelStates)) {
@@ -90,6 +92,7 @@ function storeToScratchData(state: {
     >,
     kanban_project_view_preferences:
       state.kanbanProjectViewPreferences as Record<string, JsonValue>,
+    kanban_view_mode: state.kanbanViewMode,
   };
 }
 
@@ -117,6 +120,7 @@ function scratchDataToStore(data: UiPreferencesData): {
     string,
     Record<string, KanbanProjectViewPreferences>
   >;
+  kanbanViewMode: KanbanViewMode;
 } {
   const workspacePanelStates: Record<string, WorkspacePanelState> = {};
   if (data.workspace_panel_states) {
@@ -175,6 +179,7 @@ function scratchDataToStore(data: UiPreferencesData): {
       {}) as Record<string, KanbanProjectViewSelection>,
     kanbanProjectViewPreferences: (data.kanban_project_view_preferences ??
       {}) as Record<string, Record<string, KanbanProjectViewPreferences>>,
+    kanbanViewMode: (data.kanban_view_mode as KanbanViewMode) ?? 'kanban',
   };
 }
 
@@ -212,6 +217,7 @@ export function useUiPreferencesScratch() {
     createDraftWorkspaceByDefault: state.createDraftWorkspaceByDefault,
     kanbanProjectViewSelections: state.kanbanProjectViewSelections,
     kanbanProjectViewPreferences: state.kanbanProjectViewPreferences,
+    kanbanViewMode: state.kanbanViewMode,
   }));
 
   // Extract scratch data
@@ -244,6 +250,7 @@ export function useUiPreferencesScratch() {
       createDraftWorkspaceByDefault: currentState.createDraftWorkspaceByDefault,
       kanbanProjectViewSelections: currentState.kanbanProjectViewSelections,
       kanbanProjectViewPreferences: currentState.kanbanProjectViewPreferences,
+      kanbanViewMode: currentState.kanbanViewMode,
     });
 
     try {
@@ -293,6 +300,7 @@ export function useUiPreferencesScratch() {
           serverState.createDraftWorkspaceByDefault,
         kanbanProjectViewSelections: serverState.kanbanProjectViewSelections,
         kanbanProjectViewPreferences: serverState.kanbanProjectViewPreferences,
+        kanbanViewMode: serverState.kanbanViewMode,
       });
 
       // Allow a brief delay for state to settle
