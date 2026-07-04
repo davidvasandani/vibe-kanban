@@ -1083,6 +1083,11 @@ pub trait ContainerService {
             .filter(|dir| !dir.is_empty())
             .cloned();
 
+        // Several projects can share a single repository (e.g. different
+        // services in a homelab monorepo). When this workspace targets a
+        // subdirectory of a shared repo, tell the agent which one it is on.
+        let prompt = scope_initial_prompt_to_working_dir(prompt, &repos);
+
         let coding_action = ExecutorAction::new(
             ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
                 prompt,
@@ -1356,5 +1361,105 @@ pub trait ContainerService {
 
         tracing::debug!("Started next action: {:?}", next_action);
         Ok(())
+    }
+}
+
+/// Prepend project-scoping context to an initial coding-agent prompt.
+///
+/// When a workspace targets a subdirectory of a single repository (for example,
+/// one service inside a shared homelab monorepo), several projects map to the
+/// same repo and the agent is started inside that subdirectory. Nothing in the
+/// prompt otherwise tells the agent which project it is working on, so add a
+/// short note describing the working directory and asking it to keep changes
+/// scoped there. Prompts for multi-repo or whole-repo workspaces are returned
+/// unchanged.
+fn scope_initial_prompt_to_working_dir(prompt: String, repos: &[Repo]) -> String {
+    let [repo] = repos else {
+        return prompt;
+    };
+
+    let Some(subdir) = repo
+        .default_working_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|subdir| !subdir.is_empty())
+    else {
+        return prompt;
+    };
+
+    let repo_name = &repo.display_name;
+    format!(
+        "You are working in the `{subdir}` directory of the `{repo_name}` \
+         repository, which is shared by multiple projects. This directory is \
+         your current working directory and the root of the project for this \
+         task—keep your changes scoped to it unless the task explicitly \
+         requires touching other parts of the repository.\n\n{prompt}"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use chrono::Utc;
+    use db::models::repo::Repo;
+    use uuid::Uuid;
+
+    use super::scope_initial_prompt_to_working_dir;
+
+    fn repo_with_working_dir(display_name: &str, working_dir: Option<&str>) -> Repo {
+        Repo {
+            id: Uuid::new_v4(),
+            path: PathBuf::from("/tmp/repo"),
+            name: display_name.to_string(),
+            display_name: display_name.to_string(),
+            setup_script: None,
+            cleanup_script: None,
+            archive_script: None,
+            copy_files: None,
+            parallel_setup_script: false,
+            dev_server_script: None,
+            default_target_branch: None,
+            default_working_dir: working_dir.map(str::to_string),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn prepends_context_when_single_repo_targets_a_subdirectory() {
+        let repos = vec![repo_with_working_dir("homelab", Some("services/grafana"))];
+        let result = scope_initial_prompt_to_working_dir("Bump the image tag".to_string(), &repos);
+
+        assert!(result.contains("`services/grafana`"));
+        assert!(result.contains("`homelab`"));
+        assert!(result.ends_with("Bump the image tag"));
+    }
+
+    #[test]
+    fn leaves_prompt_unchanged_without_a_working_dir() {
+        let repos = vec![repo_with_working_dir("homelab", None)];
+        let result = scope_initial_prompt_to_working_dir("Do the thing".to_string(), &repos);
+
+        assert_eq!(result, "Do the thing");
+    }
+
+    #[test]
+    fn leaves_prompt_unchanged_for_empty_working_dir() {
+        let repos = vec![repo_with_working_dir("homelab", Some("   "))];
+        let result = scope_initial_prompt_to_working_dir("Do the thing".to_string(), &repos);
+
+        assert_eq!(result, "Do the thing");
+    }
+
+    #[test]
+    fn leaves_prompt_unchanged_for_multi_repo_workspaces() {
+        let repos = vec![
+            repo_with_working_dir("homelab", Some("services/grafana")),
+            repo_with_working_dir("infra", Some("modules/dns")),
+        ];
+        let result = scope_initial_prompt_to_working_dir("Do the thing".to_string(), &repos);
+
+        assert_eq!(result, "Do the thing");
     }
 }
