@@ -179,8 +179,23 @@ export function WorkspacesLayout() {
   );
 
   const isMobile = useIsMobile();
-  const [mobileTab] = useMobileActiveTab();
+  const [mobileTab, setMobileActiveTab] = useMobileActiveTab();
   const mainContainerRef = useRef<WorkspacesMainContainerHandle>(null);
+
+  // On mobile, the workspaces landing (no workspace selected, not creating)
+  // should default to the Active list rather than the empty "select a
+  // workspace to get started" chat view. Only default when newly entering the
+  // landing so a manual tab choice is not overridden. The ref is updated only
+  // while mobile so a desktop→mobile resize on the landing still defaults.
+  const isWorkspacesLanding = !workspaceId && !isCreateMode;
+  const wasWorkspacesLandingRef = useRef(false);
+  useEffect(() => {
+    if (!isMobile) return;
+    if (isWorkspacesLanding && !wasWorkspacesLandingRef.current) {
+      setMobileActiveTab('workspaces');
+    }
+    wasWorkspacesLandingRef.current = isWorkspacesLanding;
+  }, [isMobile, isWorkspacesLanding, setMobileActiveTab]);
 
   const handleScrollToBottom = useCallback(
     (behavior: 'auto' | 'smooth' = 'smooth') => {
