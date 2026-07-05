@@ -17,6 +17,14 @@ git sparse-checkout disable
 
 After disabling sparse-checkout, create a new task and try again.
 
+## Vibe Kanban Restarted While Work Was Running
+
+If Vibe Kanban stops while work is in progress — during an update, or after a crash — it recovers automatically the next time it starts:
+
+- **Coding agent runs** are marked as interrupted. Uncommitted changes are preserved as a work-in-progress commit, and the session chat shows a banner with a one-click **Resume** that continues the agent from where it left off. See [Sessions](/workspaces/sessions#interrupted-runs).
+- **Dev servers** keep running through the restart on macOS and Linux; Vibe Kanban reconnects to them and their logs automatically. On Windows they are restarted at startup.
+- **Leftover processes** from a crashed instance are cleaned up at startup, so they don't keep running in the background or hold on to ports.
+
 ## Enabling Debug Logs
 
 If you need more detailed logs to help debug an issue, you can enable debug-level logging by setting the `RUST_LOG` environment variable.
