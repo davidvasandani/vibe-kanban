@@ -106,6 +106,7 @@ import {
   OpenRemoteWorkspaceInEditorRequest,
   OpenRemoteEditorResponse,
   ProfileResponse,
+  Pipeline,
 } from 'shared/types';
 import type { Project as RemoteProject } from 'shared/remote-types';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
@@ -1059,6 +1060,14 @@ export const tagsApi = {
       method: 'DELETE',
     });
     return handleApiResponse<void>(response);
+  },
+};
+
+// Pipelines APIs (file-based task pipelines; see GET /api/pipelines)
+export const pipelinesApi = {
+  list: async (): Promise<Pipeline[]> => {
+    const response = await makeRequest('/api/pipelines', { cache: 'no-store' });
+    return handleApiResponse<Pipeline[]>(response);
   },
 };
 
