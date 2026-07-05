@@ -37,9 +37,18 @@ const NO_WORKTREE_NOTE: &str = "The workspace worktree is not materialized yet."
 pub fn router() -> Router<DeploymentImpl> {
     Router::new()
         .route("/speckit/workspace/{workspace_id}", get(get_status))
-        .route("/speckit/workspace/{workspace_id}/artifacts", get(get_artifacts))
-        .route("/speckit/workspace/{workspace_id}/artifact", put(put_artifact))
-        .route("/speckit/workspace/{workspace_id}/tasks/toggle", put(toggle_task))
+        .route(
+            "/speckit/workspace/{workspace_id}/artifacts",
+            get(get_artifacts),
+        )
+        .route(
+            "/speckit/workspace/{workspace_id}/artifact",
+            put(put_artifact),
+        )
+        .route(
+            "/speckit/workspace/{workspace_id}/tasks/toggle",
+            put(toggle_task),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -53,10 +62,7 @@ struct SpecKitCtx {
     feature_abs: PathBuf,
 }
 
-async fn load_ctx(
-    deployment: &DeploymentImpl,
-    workspace_id: Uuid,
-) -> Result<SpecKitCtx, ApiError> {
+async fn load_ctx(deployment: &DeploymentImpl, workspace_id: Uuid) -> Result<SpecKitCtx, ApiError> {
     let pool = &deployment.db().pool;
     let workspace = Workspace::find_by_id(pool, workspace_id)
         .await?
