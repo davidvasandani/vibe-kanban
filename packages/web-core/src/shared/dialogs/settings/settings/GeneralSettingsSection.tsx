@@ -523,6 +523,16 @@ export function GeneralSettingsSection() {
             ) : null}
           </div>
         </SettingsField>
+
+        <SettingsCheckbox
+          id="resume-interrupted-on-startup"
+          label={t('settings.general.taskExecution.autoResume.label')}
+          description={t('settings.general.taskExecution.autoResume.helper')}
+          checked={draft?.resume_interrupted_on_startup ?? false}
+          onChange={(checked) =>
+            updateDraft({ resume_interrupted_on_startup: checked })
+          }
+        />
       </SettingsCard>
 
       {/* Git */}

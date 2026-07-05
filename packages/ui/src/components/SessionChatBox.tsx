@@ -130,6 +130,12 @@ interface AskQuestionModeProps {
   error?: string | null;
 }
 
+interface InterruptedNoticeProps {
+  /** Resume the interrupted run as a follow-up */
+  onResume: () => void;
+  isResuming: boolean;
+}
+
 interface ReviewCommentsProps {
   /** Number of review comments */
   count: number;
@@ -168,6 +174,7 @@ interface SessionChatBoxProps<TExecutor extends string = string> {
   approvalMode?: ApprovalModeProps;
   askQuestionMode?: AskQuestionModeProps;
   reviewComments?: ReviewCommentsProps;
+  interruptedNotice?: InterruptedNoticeProps;
   toolbarActions?: ToolbarActionsProps;
   modelSelector?: ReactNode;
   error?: string | null;
@@ -233,6 +240,7 @@ export function SessionChatBox<TExecutor extends string = string>({
   approvalMode,
   askQuestionMode,
   reviewComments,
+  interruptedNotice,
   toolbarActions,
   modelSelector,
   error,
@@ -630,6 +638,33 @@ export function SessionChatBox<TExecutor extends string = string>({
           isTimedOut={askQuestionMode.isTimedOut}
           error={askQuestionMode.error ?? null}
         />
+      );
+    }
+
+    // Interrupted-run banner: the previous run was stopped by a server
+    // restart (e.g. an update) and can be resumed
+    if (interruptedNotice) {
+      banners.push(
+        <div
+          key="interrupted"
+          className="bg-warning/5 border-b px-double py-base flex items-center gap-base"
+        >
+          <WarningIcon className="h-4 w-4 text-warning flex-shrink-0" />
+          <span className="text-sm text-normal flex-1">
+            {t('conversation.interrupted.message')}
+          </span>
+          <PrimaryButton
+            variant="secondary"
+            value={
+              interruptedNotice.isResuming
+                ? t('conversation.interrupted.resuming')
+                : t('conversation.interrupted.resume')
+            }
+            onClick={interruptedNotice.onResume}
+            disabled={interruptedNotice.isResuming}
+            actionIcon={interruptedNotice.isResuming ? 'spinner' : undefined}
+          />
+        </div>
       );
     }
 

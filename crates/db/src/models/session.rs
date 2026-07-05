@@ -172,7 +172,11 @@ impl Session {
         .await?)
     }
 
-    async fn resolve_agent_working_dir(
+    /// The agent's effective working dir relative to the workspace root:
+    /// `Some("<repo.name>[/<default_working_dir>]")` for single-repo
+    /// workspaces, `None` (= workspace root) for multi-repo ones. Public so
+    /// SpecKit provisioning and its viewer anchor on the same base.
+    pub async fn resolve_agent_working_dir(
         pool: &SqlitePool,
         workspace_id: Uuid,
     ) -> Result<Option<String>, sqlx::Error> {

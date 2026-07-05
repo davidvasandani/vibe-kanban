@@ -141,6 +141,17 @@ If an agent is running in the current session:
 Stopping an agent may leave changes in an incomplete state. Review the changes panel to see what was modified.
 </Warning>
 
+### Interrupted Runs
+
+If Vibe Kanban restarts while an agent is running — for example during an update — the run is marked as **interrupted** rather than failed:
+
+- Any uncommitted changes from the run are preserved as a work-in-progress commit on the workspace branch
+- The chat shows a banner offering to **Resume** the run; one click sends a follow-up that continues the agent from where it left off
+
+<Info>
+The agent's session history is preserved across the restart, so resuming continues the same conversation rather than starting over.
+</Info>
+
 ## Multiple Agents in Sessions
 
 Different sessions can use different agents:

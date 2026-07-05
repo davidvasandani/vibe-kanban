@@ -155,11 +155,26 @@ pub async fn initialize_deployment(
     let deployment = DeploymentImpl::new(shutdown).await?;
     migrate_legacy_attachment_directories(&deployment).await?;
     deployment.update_sentry_scope().await?;
-    deployment
+    let interrupted_processes = deployment
         .container()
         .cleanup_orphan_executions()
         .await
         .map_err(DeploymentError::from)?;
+    deployment
+        .container()
+        .restart_interrupted_dev_servers(&interrupted_processes)
+        .await;
+    if deployment
+        .config()
+        .read()
+        .await
+        .resume_interrupted_on_startup
+    {
+        deployment
+            .container()
+            .resume_interrupted_coding_agents(&interrupted_processes)
+            .await;
+    }
     deployment
         .container()
         .backfill_before_head_commits()

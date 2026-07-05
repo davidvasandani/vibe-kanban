@@ -445,6 +445,11 @@
       "count_one": "{{count}} 則審查評論將被包含",
       "count_other": "{{count}} 則審查評論將被包含"
     },
+    "interrupted": {
+      "message": "此次執行因 vibe-kanban 重新啟動而中斷。",
+      "resume": "恢復",
+      "resuming": "恢復中"
+    },
     "workspace": {
       "create": "建立",
       "creating": "建立中..."

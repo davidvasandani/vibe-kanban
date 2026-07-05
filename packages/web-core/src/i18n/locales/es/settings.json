@@ -70,7 +70,11 @@
           "helper": "Define la configuración predeterminada del agente que se usará al iniciar una tarea."
         },
         "variant": "PREDETERMINADO",
-        "defaultLabel": "Predeterminado"
+        "defaultLabel": "Predeterminado",
+        "autoResume": {
+          "label": "Reanudar ejecuciones interrumpidas al iniciar",
+          "helper": "Envía automáticamente un seguimiento a las ejecuciones de agentes interrumpidas por un reinicio. Cada ejecución se reanuda como máximo una vez. Los agentes se inician sin confirmación y pueden consumir tokens."
+        }
       },
       "editor": {
         "title": "Editor",

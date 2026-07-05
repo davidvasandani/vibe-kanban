@@ -78,6 +78,12 @@ pub struct LocalContainerService {
     /// When stopping execution, we await these to ensure logs are fully persisted.
     db_stream_handles: Arc<RwLock<HashMap<Uuid, JoinHandle<()>>>>,
     exit_monitor_handles: Arc<RwLock<HashMap<Uuid, JoinHandle<()>>>>,
+    /// Tailer tasks streaming a detached process's raw log file into its
+    /// MsgStore (dev servers write straight to a file instead of pipes).
+    raw_log_tailers: Arc<RwLock<HashMap<Uuid, JoinHandle<()>>>>,
+    /// Process group ids of dev servers adopted from a previous server
+    /// instance. These have no child handle; they are managed by pgid.
+    adopted_pgids: Arc<RwLock<HashMap<Uuid, i32>>>,
     workspace_touch_times: Arc<RwLock<HashMap<Uuid, Instant>>>,
     config: Arc<RwLock<Config>>,
     git: GitService,
@@ -107,6 +113,8 @@ impl LocalContainerService {
         let cancellation_tokens = Arc::new(RwLock::new(HashMap::new()));
         let db_stream_handles = Arc::new(RwLock::new(HashMap::new()));
         let exit_monitor_handles = Arc::new(RwLock::new(HashMap::new()));
+        let raw_log_tailers = Arc::new(RwLock::new(HashMap::new()));
+        let adopted_pgids = Arc::new(RwLock::new(HashMap::new()));
         let workspace_touch_times = Arc::new(RwLock::new(HashMap::new()));
         let notification_service = NotificationService::new(config.clone());
 
@@ -118,6 +126,8 @@ impl LocalContainerService {
             msg_stores,
             db_stream_handles,
             exit_monitor_handles,
+            raw_log_tailers,
+            adopted_pgids,
             workspace_touch_times,
             config,
             git,
@@ -233,6 +243,124 @@ impl LocalContainerService {
     async fn add_exit_monitor_handle(&self, id: Uuid, handle: JoinHandle<()>) {
         let mut map = self.exit_monitor_handles.write().await;
         map.insert(id, handle);
+    }
+
+    async fn take_adopted_pgid(&self, id: &Uuid) -> Option<i32> {
+        let mut map = self.adopted_pgids.write().await;
+        map.remove(id)
+    }
+
+    /// Give the raw-log tailer a moment to catch up on the file's final
+    /// bytes, then stop it. Call after the process has exited or been killed.
+    async fn finish_raw_log_tailer(&self, id: &Uuid) {
+        let handle = {
+            let mut map = self.raw_log_tailers.write().await;
+            map.remove(id)
+        };
+        if let Some(handle) = handle {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            handle.abort();
+        }
+    }
+
+    /// Leave a detached process running across a server shutdown so the next
+    /// boot can adopt it. Forgets the child handle (defusing kill_on_drop)
+    /// and stops its monitor tasks without touching the DB row, which stays
+    /// Running.
+    #[cfg(unix)]
+    async fn detach_execution_for_handoff(&self, process: &ExecutionProcess) {
+        if let Some(child_arc) = self.child_store.write().await.remove(&process.id) {
+            // Leak one Arc clone so the child struct is never dropped and
+            // kill_on_drop can't fire while the server shuts down.
+            std::mem::forget(child_arc);
+        }
+        if let Some(handle) = self.take_exit_monitor_handle(&process.id).await {
+            handle.abort();
+        }
+        if let Some(handle) = self.raw_log_tailers.write().await.remove(&process.id) {
+            handle.abort();
+        }
+        self.take_adopted_pgid(&process.id).await;
+        tracing::info!(
+            "Leaving dev server process {} running across restart",
+            process.id
+        );
+    }
+
+    /// Watch an adopted process group and finalize its execution record when
+    /// every process in the group has exited.
+    #[cfg(unix)]
+    fn spawn_adopted_exit_watcher(&self, exec_id: Uuid, pgid: i32) -> JoinHandle<()> {
+        let container = self.clone();
+        tokio::spawn(async move {
+            while utils::process::process_group_alive(pgid) {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+
+            // The process ended on its own; the real exit code is unknowable
+            // because the original parent is gone.
+            if !ExecutionProcess::was_stopped(&container.db.pool, exec_id).await
+                && let Err(e) = ExecutionProcess::update_completion(
+                    &container.db.pool,
+                    exec_id,
+                    ExecutionProcessStatus::Failed,
+                    None,
+                )
+                .await
+            {
+                tracing::error!(
+                    "Failed to update completion for adopted execution {}: {}",
+                    exec_id,
+                    e
+                );
+            }
+
+            container.take_adopted_pgid(&exec_id).await;
+            container.finish_raw_log_tailer(&exec_id).await;
+            if let Some(msg) = container.msg_stores.write().await.remove(&exec_id) {
+                msg.push_finished();
+            }
+        })
+    }
+
+    /// Stop a process that was adopted from a previous server instance:
+    /// there is no child handle, so the process group is signalled directly.
+    async fn stop_adopted_execution(
+        &self,
+        execution_process: &ExecutionProcess,
+        status: ExecutionProcessStatus,
+        pgid: i32,
+    ) -> Result<(), ContainerError> {
+        let exit_code = if status == ExecutionProcessStatus::Completed {
+            Some(0)
+        } else {
+            None
+        };
+        ExecutionProcess::update_completion(&self.db.pool, execution_process.id, status, exit_code)
+            .await?;
+
+        #[cfg(unix)]
+        utils::process::kill_process_group_by_pgid(pgid).await;
+        #[cfg(not(unix))]
+        let _ = pgid;
+
+        // The adopted liveness watcher would perform the same cleanup on its
+        // next poll; abort it and clean up deterministically here instead.
+        if let Some(handle) = self.take_exit_monitor_handle(&execution_process.id).await {
+            handle.abort();
+        }
+        self.finish_raw_log_tailer(&execution_process.id).await;
+        if let Some(msg) = self.msg_stores.write().await.remove(&execution_process.id) {
+            msg.push_finished();
+        }
+
+        self.update_after_head_commits(execution_process.id).await;
+
+        tracing::debug!(
+            "Adopted execution process {} stopped successfully",
+            execution_process.id
+        );
+        Ok(())
     }
 
     async fn take_exit_monitor_handle(&self, id: &Uuid) -> Option<JoinHandle<()>> {
@@ -477,6 +605,45 @@ impl LocalContainerService {
         any_committed
     }
 
+    /// Snapshot uncommitted worktree changes left behind by an interrupted
+    /// run so they survive as a commit on the workspace branch, mirroring the
+    /// auto-commit that happens after a successful run.
+    async fn commit_interrupted_wip(&self, process: &ExecutionProcess) {
+        if !matches!(
+            process.run_reason,
+            ExecutionProcessRunReason::CodingAgent | ExecutionProcessRunReason::CleanupScript
+        ) {
+            return;
+        }
+
+        let Ok(ctx) = ExecutionProcess::load_context(&self.db.pool, process.id).await else {
+            return;
+        };
+        let Some(container_ref) = ctx.workspace.container_ref.as_ref() else {
+            return;
+        };
+
+        let workspace_root = PathBuf::from(container_ref);
+        match self.check_repos_for_changes(&workspace_root, &ctx.repos) {
+            Ok(repos_with_changes) if !repos_with_changes.is_empty() => {
+                let message = "WIP: run interrupted by vibe-kanban shutdown";
+                if self.commit_repos(repos_with_changes, message) {
+                    // Re-record HEAD so the snapshot commit is part of this
+                    // process's recorded after-state.
+                    self.update_after_head_commits(process.id).await;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to check for uncommitted changes on interrupted process {}: {}",
+                    process.id,
+                    e
+                );
+            }
+        }
+    }
+
     /// Spawn a background task that polls the child process for completion and
     /// cleans up the execution entry when it exits.
     fn spawn_exit_monitor(
@@ -621,10 +788,12 @@ impl LocalContainerService {
                     let mut started_queued_follow_up = false;
 
                     // Only execute queued messages if the execution succeeded
-                    // If it failed or was killed, just clear the queue and finalize
+                    // If it failed, was killed or interrupted, just clear the queue and finalize
                     let should_execute_queued = !matches!(
                         ctx.execution_process.status,
-                        ExecutionProcessStatus::Failed | ExecutionProcessStatus::Killed
+                        ExecutionProcessStatus::Failed
+                            | ExecutionProcessStatus::Killed
+                            | ExecutionProcessStatus::Interrupted
                     );
 
                     if let Some(queued_msg) =
@@ -794,7 +963,9 @@ impl LocalContainerService {
             // capture the HEAD OID as the definitive "after" state (best-effort).
             container.update_after_head_commits(exec_id).await;
 
-            // Wait for DB persistence to complete before cleaning up MsgStore
+            // Let any raw-log tailer flush the file's final output, then wait
+            // for DB persistence to complete before cleaning up the MsgStore
+            container.finish_raw_log_tailer(&exec_id).await;
             let db_stream_handle = container.take_db_stream_handle(&exec_id).await;
             if let Some(msg_arc) = msg_stores.write().await.remove(&exec_id) {
                 msg_arc.push_finished();
@@ -854,6 +1025,62 @@ impl LocalContainerService {
     fn dir_name_from_workspace(workspace_id: &Uuid, task_title: &str) -> String {
         let task_title_id = git_branch_id(task_title);
         format!("{}-{}", short_uuid(workspace_id), task_title_id)
+    }
+
+    /// Stream a detached process's raw log file into a fresh MsgStore,
+    /// following the file as the process appends to it. Replays from the
+    /// start of the file so the store's history is complete even when the
+    /// process was adopted from a previous server instance.
+    async fn track_raw_file_msgs_in_store(&self, id: Uuid, path: PathBuf) {
+        let store = Arc::new(MsgStore::new());
+        self.msg_stores.write().await.insert(id, store.clone());
+
+        let handle = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+
+            // The file is created at spawn (or verified during adoption), but
+            // retry briefly in case creation races this task.
+            let mut file = {
+                let mut attempts = 0;
+                loop {
+                    match tokio::fs::File::open(&path).await {
+                        Ok(f) => break f,
+                        Err(e) if attempts < 20 => {
+                            attempts += 1;
+                            tracing::debug!(
+                                "Raw log file {} not yet available ({}), retrying",
+                                path.display(),
+                                e
+                            );
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Giving up opening raw log file {} for execution {}: {}",
+                                path.display(),
+                                id,
+                                e
+                            );
+                            return;
+                        }
+                    }
+                }
+            };
+
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                match file.read(&mut buf).await {
+                    // At EOF; wait for the process to append more
+                    Ok(0) => tokio::time::sleep(Duration::from_millis(250)).await,
+                    Ok(n) => store.push_stdout(String::from_utf8_lossy(&buf[..n]).into_owned()),
+                    Err(e) => {
+                        tracing::warn!("Raw log tailer for execution {} failed: {}", id, e);
+                        break;
+                    }
+                }
+            }
+        });
+        self.raw_log_tailers.write().await.insert(id, handle);
     }
 
     async fn track_child_msgs_in_store(&self, id: Uuid, child: &mut AsyncGroupChild) {
@@ -1469,6 +1696,31 @@ impl ContainerService for LocalContainerService {
         env.insert("VK_WORKSPACE_ID", workspace.id.to_string());
         env.insert("VK_WORKSPACE_BRANCH", &workspace.branch);
 
+        // Dev servers write their output straight to a raw log file (instead
+        // of pipes) so they can keep running across a server restart; the
+        // server tails the file. Unix only: adoption after a restart relies
+        // on process-group management.
+        #[cfg(unix)]
+        let dev_server_raw_log =
+            if execution_process.run_reason == ExecutionProcessRunReason::DevServer {
+                let path = utils::execution_logs::process_raw_log_file_path(
+                    execution_process.session_id,
+                    execution_process.id,
+                );
+                if let Some(parent) = path.parent() {
+                    let _ = tokio::fs::create_dir_all(parent).await;
+                }
+                env.insert(
+                    executors::actions::script::RAW_LOG_PATH_ENV,
+                    path.to_string_lossy().into_owned(),
+                );
+                Some(path)
+            } else {
+                None
+            };
+        #[cfg(not(unix))]
+        let dev_server_raw_log: Option<PathBuf> = None;
+
         // Create the child and stream, add to execution tracker with timeout
         let mut spawned = tokio::time::timeout(
             Duration::from_secs(30),
@@ -1481,8 +1733,26 @@ impl ContainerService for LocalContainerService {
             ))
         })??;
 
-        self.track_child_msgs_in_store(execution_process.id, &mut spawned.child)
-            .await;
+        // Record the process group id (== leader pid for grouped spawns) so a
+        // later boot can clean up the group if this server dies uncleanly.
+        if let Some(pid) = spawned.child.id()
+            && let Err(e) =
+                ExecutionProcess::update_pgid(&self.db.pool, execution_process.id, pid as i64).await
+        {
+            tracing::warn!(
+                "Failed to record pgid for execution process {}: {}",
+                execution_process.id,
+                e
+            );
+        }
+
+        if let Some(path) = dev_server_raw_log {
+            self.track_raw_file_msgs_in_store(execution_process.id, path)
+                .await;
+        } else {
+            self.track_child_msgs_in_store(execution_process.id, &mut spawned.child)
+                .await;
+        }
 
         self.add_child_to_store(execution_process.id, spawned.child)
             .await;
@@ -1505,12 +1775,18 @@ impl ContainerService for LocalContainerService {
         execution_process: &ExecutionProcess,
         status: ExecutionProcessStatus,
     ) -> Result<(), ContainerError> {
-        let child = self
-            .get_child_from_store(&execution_process.id)
-            .await
-            .ok_or_else(|| {
-                ContainerError::Other(anyhow!("Child process not found for execution"))
-            })?;
+        let Some(child) = self.get_child_from_store(&execution_process.id).await else {
+            // No in-memory handle: the process may have been adopted from a
+            // previous server instance and is managed by pgid only.
+            if let Some(pgid) = self.take_adopted_pgid(&execution_process.id).await {
+                return self
+                    .stop_adopted_execution(execution_process, status, pgid)
+                    .await;
+            }
+            return Err(ContainerError::Other(anyhow!(
+                "Child process not found for execution"
+            )));
+        };
         let exit_code = if status == ExecutionProcessStatus::Completed {
             Some(0)
         } else {
@@ -1555,6 +1831,7 @@ impl ContainerService for LocalContainerService {
         self.remove_child_from_store(&execution_process.id).await;
 
         // Mark the process finished in the MsgStore and wait for DB persistence
+        self.finish_raw_log_tailer(&execution_process.id).await;
         let db_stream_handle = self.take_db_stream_handle(&execution_process.id).await;
         if let Some(msg) = self.msg_stores.write().await.remove(&execution_process.id) {
             msg.push_finished();
@@ -1698,6 +1975,50 @@ impl ContainerService for LocalContainerService {
         .map_err(|e| ContainerError::Other(anyhow!("Copy files task failed: {e}")))?
     }
 
+    async fn try_adopt_execution(&self, process: &ExecutionProcess) -> bool {
+        #[cfg(not(unix))]
+        {
+            let _ = process;
+            false
+        }
+        #[cfg(unix)]
+        {
+            if process.run_reason != ExecutionProcessRunReason::DevServer {
+                return false;
+            }
+            let Some(pgid) = process.pgid else {
+                return false;
+            };
+            // A raw log file means the process writes its own output and can
+            // be tailed; without one (e.g. spawned by an older version with
+            // piped output) adoption is impossible.
+            let raw_log_path =
+                utils::execution_logs::process_raw_log_file_path(process.session_id, process.id);
+            if !raw_log_path.exists() {
+                return false;
+            }
+            let age_secs = (chrono::Utc::now() - process.started_at).num_seconds();
+            if !utils::process::process_group_leader_matches(pgid as i32, age_secs).await {
+                return false;
+            }
+
+            self.adopted_pgids
+                .write()
+                .await
+                .insert(process.id, pgid as i32);
+            self.track_raw_file_msgs_in_store(process.id, raw_log_path)
+                .await;
+            let watcher = self.spawn_adopted_exit_watcher(process.id, pgid as i32);
+            self.add_exit_monitor_handle(process.id, watcher).await;
+            tracing::info!(
+                "Adopted running dev server process {} (pgid {})",
+                process.id,
+                pgid
+            );
+            true
+        }
+    }
+
     async fn kill_all_running_processes(&self) -> Result<(), ContainerError> {
         tracing::info!("Killing all running processes");
         let running_processes = ExecutionProcess::find_running(&self.db.pool).await?;
@@ -1708,13 +2029,24 @@ impl ContainerService for LocalContainerService {
         );
 
         for process in running_processes {
+            // On unix, dev servers are detached (their output goes to a raw
+            // log file) and are left running across the restart; the next
+            // boot re-adopts them via their process group id.
+            #[cfg(unix)]
+            if process.run_reason == ExecutionProcessRunReason::DevServer {
+                self.detach_execution_for_handoff(&process).await;
+                continue;
+            }
+
             tracing::info!(
                 "Killing process: id={}, run_reason={:?}",
                 process.id,
                 process.run_reason
             );
+            // Mark as interrupted (not killed): the process is stopped by a
+            // server shutdown/restart, so the run can be offered for resume.
             if let Err(error) = self
-                .stop_execution(&process, ExecutionProcessStatus::Killed)
+                .stop_execution(&process, ExecutionProcessStatus::Interrupted)
                 .await
             {
                 tracing::error!(
@@ -1724,6 +2056,7 @@ impl ContainerService for LocalContainerService {
                 );
             } else {
                 tracing::info!("Successfully killed process: id={}", process.id);
+                self.commit_interrupted_wip(&process).await;
             }
         }
 

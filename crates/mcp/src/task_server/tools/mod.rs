@@ -1,6 +1,9 @@
 use std::str::FromStr;
 
-use api_types::{Issue, ListProjectStatusesResponse, ProjectStatus};
+use api_types::{
+    Issue, ListIssuesResponse, ListOrganizationsResponse, ListProjectStatusesResponse,
+    ListProjectsResponse, ProjectStatus, SearchIssuesRequest,
+};
 use db::models::{execution_process::ExecutionProcessStatus, tag::Tag};
 use executors::executors::BaseCodingAgent;
 use regex::Regex;
@@ -34,6 +37,35 @@ impl ToolError {
     fn message(message: impl Into<String>) -> Self {
         Self::new(message, None::<String>)
     }
+}
+
+/// How long to wait after a transient failure before retrying against the
+/// re-resolved backend. Small enough to stay responsive, large enough to let a
+/// backend that is mid-restart finish rebinding its port.
+const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Whether an error is a connection-level failure worth retrying after
+/// re-resolving the backend URL (as opposed to, say, an HTTP error status,
+/// which `send_with_reconnect` never sees). Covers the "backend moved ports"
+/// and "backend mid-restart" cases that present as the MCP being unreachable.
+fn is_transient_error(error: &reqwest::Error) -> bool {
+    error.is_connect() || error.is_timeout()
+}
+
+/// Rewrites `request`'s scheme/host/port to point at `base_url`, preserving the
+/// original path and query. Used to re-target a cloned request at the backend's
+/// new address without rebuilding it from scratch.
+fn retarget_request(request: &mut reqwest::Request, base_url: &str) -> Result<(), ToolError> {
+    let base = reqwest::Url::parse(base_url)
+        .map_err(|error| ToolError::new("Invalid backend URL", Some(error.to_string())))?;
+    let url = request.url_mut();
+    url.set_scheme(base.scheme())
+        .map_err(|_| ToolError::message("Failed to set backend scheme"))?;
+    url.set_host(base.host_str())
+        .map_err(|error| ToolError::new("Invalid backend host", Some(error.to_string())))?;
+    url.set_port(base.port())
+        .map_err(|_| ToolError::message("Failed to set backend port"))?;
+    Ok(())
 }
 
 mod context;
@@ -110,13 +142,73 @@ impl McpServer {
         )])
     }
 
+    /// Sends a request, retrying once against a freshly re-resolved backend URL
+    /// if the first attempt fails with a transient connection error.
+    ///
+    /// This is what makes a long-lived MCP session self-heal after the backend
+    /// restarts on a different port: the cached URL points at a dead port, the
+    /// first attempt fails to connect, we re-resolve (env vars → port file),
+    /// re-target the request at the new host, and retry once.
+    async fn send_with_reconnect(
+        &self,
+        rb: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, ToolError> {
+        let request = rb.build().map_err(|error| {
+            ToolError::new("Failed to build VK API request", Some(error.to_string()))
+        })?;
+        // Keep a clone so we can retry; JSON/empty bodies are always cloneable.
+        let retry_request = request.try_clone();
+
+        let first_error = match self.client.execute(request).await {
+            Ok(resp) => return Ok(resp),
+            Err(error) if is_transient_error(&error) => error,
+            Err(error) => {
+                return Err(ToolError::new(
+                    "Failed to connect to VK API",
+                    Some(error.to_string()),
+                ));
+            }
+        };
+
+        let Some(mut retry_request) = retry_request else {
+            return Err(ToolError::new(
+                "Failed to connect to VK API",
+                Some(first_error.to_string()),
+            ));
+        };
+
+        tracing::warn!(
+            "VK API request to {} failed ({}); re-resolving backend URL and retrying",
+            retry_request.url(),
+            first_error
+        );
+        tokio::time::sleep(RECONNECT_BACKOFF).await;
+
+        match self.refresh_base_url().await {
+            Ok(base_url) => {
+                if let Err(error) = retarget_request(&mut retry_request, &base_url) {
+                    tracing::warn!(
+                        "Failed to retarget VK API request after reconnect: {}",
+                        error.message
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!("Failed to re-resolve backend URL for reconnect: {}", error);
+            }
+        }
+
+        self.client
+            .execute(retry_request)
+            .await
+            .map_err(|error| ToolError::new("Failed to connect to VK API", Some(error.to_string())))
+    }
+
     async fn send_json<T: DeserializeOwned>(
         &self,
         rb: reqwest::RequestBuilder,
     ) -> Result<T, ToolError> {
-        let resp = rb.send().await.map_err(|error| {
-            ToolError::new("Failed to connect to VK API", Some(error.to_string()))
-        })?;
+        let resp = self.send_with_reconnect(rb).await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -144,9 +236,7 @@ impl McpServer {
     }
 
     async fn send_empty_json(&self, rb: reqwest::RequestBuilder) -> Result<(), ToolError> {
-        let resp = rb.send().await.map_err(|error| {
-            ToolError::new("Failed to connect to VK API", Some(error.to_string()))
-        })?;
+        let resp = self.send_with_reconnect(rb).await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -261,6 +351,90 @@ impl McpServer {
         Err(ToolError::message(
             "project_id is required (not available from workspace context)",
         ))
+    }
+
+    /// Resolves an issue identifier that is either the internal UUID or the
+    /// human-facing simple ID shown on the board (e.g. "VAS-64").
+    ///
+    /// Simple IDs are looked up in the workspace's linked project first; when
+    /// there is no linked project or no match there, every project visible to
+    /// the user is searched. A key matching issues in several projects is an
+    /// error rather than a guess.
+    async fn resolve_issue_id(&self, issue_id: &str) -> Result<Uuid, ToolError> {
+        let trimmed = issue_id.trim();
+        if let Ok(id) = Uuid::parse_str(trimmed) {
+            return Ok(id);
+        }
+
+        let context_project_id = self.context.as_ref().and_then(|ctx| ctx.project_id);
+        if let Some(project_id) = context_project_id
+            && let Some(issue) = self.find_issue_by_simple_id(project_id, trimmed).await?
+        {
+            return Ok(issue.id);
+        }
+
+        let mut matches = Vec::new();
+        for project_id in self.list_all_project_ids().await? {
+            if Some(project_id) == context_project_id {
+                continue;
+            }
+            if let Some(issue) = self.find_issue_by_simple_id(project_id, trimmed).await? {
+                matches.push(issue.id);
+            }
+        }
+        Self::select_unique_issue_match(&matches, trimmed)
+    }
+
+    fn select_unique_issue_match(matches: &[Uuid], simple_id: &str) -> Result<Uuid, ToolError> {
+        match matches {
+            [id] => Ok(*id),
+            [] => Err(ToolError::message(format!(
+                "No issue found with ID or simple ID '{simple_id}'. Use `list_issues` to look up issues."
+            ))),
+            _ => Err(ToolError::message(format!(
+                "Simple ID '{simple_id}' matches issues in multiple projects. Pass the issue's UUID instead (see `list_issues`)."
+            ))),
+        }
+    }
+
+    async fn find_issue_by_simple_id(
+        &self,
+        project_id: Uuid,
+        simple_id: &str,
+    ) -> Result<Option<Issue>, ToolError> {
+        let query = SearchIssuesRequest {
+            project_id,
+            status_id: None,
+            status_ids: None,
+            priority: None,
+            parent_issue_id: None,
+            search: None,
+            simple_id: Some(simple_id.to_string()),
+            assignee_user_id: None,
+            tag_id: None,
+            tag_ids: None,
+            sort_field: None,
+            sort_direction: None,
+            limit: Some(1),
+            offset: None,
+        };
+        let url = self.url("/api/remote/issues/search");
+        let response: ListIssuesResponse =
+            self.send_json(self.client.post(&url).json(&query)).await?;
+        Ok(response.issues.into_iter().next())
+    }
+
+    async fn list_all_project_ids(&self) -> Result<Vec<Uuid>, ToolError> {
+        let orgs_url = self.url("/api/organizations");
+        let orgs: ListOrganizationsResponse = self.send_json(self.client.get(&orgs_url)).await?;
+
+        let mut project_ids = Vec::new();
+        for org in orgs.organizations {
+            let url = self.url(&format!("/api/remote/projects?organization_id={}", org.id));
+            let projects: ListProjectsResponse = self.send_json(self.client.get(&url)).await?;
+            project_ids.extend(projects.projects.into_iter().map(|project| project.id));
+        }
+        Ok(project_ids)
     }
 
     // Resolves an organization_id from an explicit parameter or falls back to context.
@@ -379,6 +553,7 @@ impl McpServer {
             ExecutionProcessStatus::Completed => "completed",
             ExecutionProcessStatus::Failed => "failed",
             ExecutionProcessStatus::Killed => "killed",
+            ExecutionProcessStatus::Interrupted => "interrupted",
         }
     }
 }
@@ -443,7 +618,9 @@ mod tests {
         let workspace_id = Uuid::new_v4();
         let server = McpServer {
             client: reqwest::Client::new(),
-            base_url: "http://127.0.0.1:3000".to_string(),
+            base_url: std::sync::Arc::new(std::sync::RwLock::new(
+                "http://127.0.0.1:3000".to_string(),
+            )),
             tool_router: ToolRouter::default(),
             context: Some(McpContext {
                 organization_id: None,
@@ -470,7 +647,9 @@ mod tests {
         install_rustls_provider();
         let server = McpServer {
             client: reqwest::Client::new(),
-            base_url: "http://127.0.0.1:3000".to_string(),
+            base_url: std::sync::Arc::new(std::sync::RwLock::new(
+                "http://127.0.0.1:3000".to_string(),
+            )),
             tool_router: ToolRouter::default(),
             context: None,
             mode: McpMode::Orchestrator,
@@ -479,6 +658,47 @@ mod tests {
         assert_eq!(server.orchestrator_session_id(), None);
         assert!(server.resolve_workspace_id(None).is_err());
         assert!(server.scope_allows_workspace(Uuid::new_v4()).is_ok());
+    }
+
+    #[test]
+    fn select_unique_issue_match_returns_single_match() {
+        let issue_id = Uuid::new_v4();
+        assert_eq!(
+            McpServer::select_unique_issue_match(&[issue_id], "VAS-64").unwrap(),
+            issue_id
+        );
+    }
+
+    #[test]
+    fn select_unique_issue_match_rejects_missing_key() {
+        let error = McpServer::select_unique_issue_match(&[], "VAS-64").unwrap_err();
+        assert!(error.to_string().contains("No issue found"));
+    }
+
+    #[test]
+    fn select_unique_issue_match_rejects_ambiguous_key() {
+        let error =
+            McpServer::select_unique_issue_match(&[Uuid::new_v4(), Uuid::new_v4()], "VAS-64")
+                .unwrap_err();
+        assert!(error.to_string().contains("multiple projects"));
+    }
+
+    #[test]
+    fn retarget_request_swaps_host_and_port_but_keeps_path_and_query() {
+        install_rustls_provider();
+        let client = reqwest::Client::new();
+        let mut request = client
+            .get("http://127.0.0.1:3000/api/organizations?scope=all")
+            .build()
+            .expect("request should build");
+
+        super::retarget_request(&mut request, "http://127.0.0.1:4567")
+            .expect("retarget should succeed");
+
+        assert_eq!(
+            request.url().as_str(),
+            "http://127.0.0.1:4567/api/organizations?scope=all"
+        );
     }
 
     #[test]

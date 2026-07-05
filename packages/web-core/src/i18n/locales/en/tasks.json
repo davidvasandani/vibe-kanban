@@ -170,6 +170,11 @@
       "count_one": "{{count}} review comment will be included",
       "count_other": "{{count}} review comments will be included"
     },
+    "interrupted": {
+      "message": "This run was interrupted by a vibe-kanban restart.",
+      "resume": "Resume",
+      "resuming": "Resuming"
+    },
     "workspace": {
       "create": "Create",
       "creating": "Creating..."

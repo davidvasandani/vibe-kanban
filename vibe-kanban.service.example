@@ -1,0 +1,52 @@
+# Vibe Kanban — systemd unit (example)
+#
+# Install:
+#   sudo install -m 600 vibe-kanban.env.example /etc/vibe-kanban.env   # then edit
+#   sudo cp vibe-kanban.service.example /etc/systemd/system/vibe-kanban.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vibe-kanban
+#
+# This runs OUR build directly — not `npx vibe-kanban`, which downloads the
+# public package. `./local-build.sh` produces the release binaries; install the
+# `server` and `vibe-kanban-mcp` binaries somewhere stable (e.g.
+# /opt/vibe-kanban/bin) and point ExecStart + VIBE_KANBAN_MCP_COMMAND at them.
+
+[Unit]
+Description=Vibe Kanban
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# The user/group the server runs as. Its $HOME is where Vibe Kanban stores its
+# asset dir / database, so set HOME explicitly if this user has none.
+User=vibe-kanban
+Group=vibe-kanban
+Environment=HOME=/var/lib/vibe-kanban
+WorkingDirectory=/var/lib/vibe-kanban
+
+# Pinned ports, VIBE_BACKEND_URL, and the MCP command override (our binary).
+# This is what makes the port static and keeps everything on our build.
+EnvironmentFile=/etc/vibe-kanban.env
+
+# Run our compiled server binary directly. No npx, no npm, no public download.
+# Path is where you installed the output of ./local-build.sh.
+ExecStart=/opt/vibe-kanban/bin/server
+
+# Fail-fast + auto-recover. A static port errors on bind if the port is still
+# held; stop-then-start restart ordering releases it before the retry.
+Restart=always
+RestartSec=2
+
+# --- Optional hardening (uncomment as appropriate for your host) --------------
+# NoNewPrivileges=true
+# ProtectSystem=strict
+# ProtectHome=true
+# ReadWritePaths=/var/lib/vibe-kanban
+# PrivateTmp=true          # NOTE: gives the service its own /tmp, so the MCP
+#                          # port file is isolated too — fine here because
+#                          # VIBE_BACKEND_URL is pinned and the port file is unused.
+
+[Install]
+WantedBy=multi-user.target

@@ -78,7 +78,11 @@
           "helper": "Choose the default agent configuration to use when creating a workspace."
         },
         "variant": "DEFAULT",
-        "defaultLabel": "Default"
+        "defaultLabel": "Default",
+        "autoResume": {
+          "label": "Resume interrupted runs on startup",
+          "helper": "Automatically send a follow-up to coding agent runs that were interrupted by a restart. Each run is resumed at most once. Agents start without confirmation and may spend tokens."
+        }
       },
       "editor": {
         "title": "Editor",

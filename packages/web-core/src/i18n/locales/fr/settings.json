@@ -70,7 +70,11 @@
           "helper": "Choisissez la configuration d'agent par défaut à utiliser lors de la création d'une tentative de tâche."
         },
         "variant": "PAR DÉFAUT",
-        "defaultLabel": "Par défaut"
+        "defaultLabel": "Par défaut",
+        "autoResume": {
+          "label": "Reprendre les exécutions interrompues au démarrage",
+          "helper": "Envoie automatiquement une relance aux exécutions d'agents interrompues par un redémarrage. Chaque exécution n'est reprise qu'une seule fois. Les agents démarrent sans confirmation et peuvent consommer des tokens."
+        }
       },
       "editor": {
         "title": "Éditeur",

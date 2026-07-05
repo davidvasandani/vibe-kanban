@@ -37,9 +37,9 @@ struct StartWorkspaceRequest {
     #[schemars(description = "Repository selection for the workspace")]
     repositories: Vec<McpWorkspaceRepoInput>,
     #[schemars(
-        description = "Optional issue ID to link the workspace to. When provided, the workspace will be associated with this remote issue."
+        description = "Optional issue to link the workspace to. Accepts the issue UUID or its simple ID (e.g. 'VAS-64'). When provided, the workspace will be associated with this remote issue."
     )]
-    issue_id: Option<Uuid>,
+    issue_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -51,8 +51,10 @@ struct StartWorkspaceResponse {
 struct LinkWorkspaceIssueRequest {
     #[schemars(description = "The workspace ID to link")]
     workspace_id: Uuid,
-    #[schemars(description = "The issue ID to link the workspace to")]
-    issue_id: Uuid,
+    #[schemars(
+        description = "The issue to link the workspace to. Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+    )]
+    issue_id: String,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -106,6 +108,14 @@ impl McpServer {
         if repositories.is_empty() {
             return Self::err("At least one repository must be specified.", None::<&str>);
         }
+
+        let issue_id = match issue_id {
+            Some(issue_id) => match self.resolve_issue_id(&issue_id).await {
+                Ok(id) => Some(id),
+                Err(e) => return Ok(Self::tool_error(e)),
+            },
+            None => None,
+        };
 
         let executor_trimmed = executor.trim();
         if executor_trimmed.is_empty() {
@@ -231,6 +241,11 @@ impl McpServer {
             issue_id,
         }): Parameters<LinkWorkspaceIssueRequest>,
     ) -> Result<CallToolResult, ErrorData> {
+        let issue_id = match self.resolve_issue_id(&issue_id).await {
+            Ok(id) => id,
+            Err(e) => return Ok(Self::tool_error(e)),
+        };
+
         if let Err(e) = self.link_workspace_to_issue(workspace_id, issue_id).await {
             return Ok(Self::tool_error(e));
         }

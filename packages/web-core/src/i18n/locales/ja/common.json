@@ -557,5 +557,16 @@
   },
   "attachments": {
     "storageDisabled": "添付ファイルのアップロードは無効になっています。管理者に添付ファイルストレージの有効化を依頼してください。"
+  },
+  "taskPipeline": {
+    "title": "Pipeline",
+    "description": "Pick the stages this task should go through. The selected stages are appended to the task description for the agent to follow.",
+    "pipelinesLabel": "Pipelines",
+    "pipelinesHelper": "Select one or more pipelines; their stages combine into one ordered list.",
+    "noSteps": "The selected pipelines have no stages configured.",
+    "heavyBadge": "heavy",
+    "addonLabel": "Prompt addon (editable)",
+    "addonPlaceholder": "Tick stages above to compose the pipeline block, or type your own.",
+    "resetToGenerated": "Reset to generated"
   }
 }

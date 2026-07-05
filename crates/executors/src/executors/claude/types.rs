@@ -226,3 +226,20 @@ impl std::fmt::Display for PermissionMode {
         write!(f, "{}", self.as_str())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn result_message_retains_fields_for_spurious_detection() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":56,"num_turns":0,"result":"","session_id":"abc"}"#;
+        match serde_json::from_str::<CLIMessage>(line).unwrap() {
+            CLIMessage::Result(v) => {
+                assert_eq!(v.get("num_turns").and_then(|n| n.as_u64()), Some(0));
+                assert_eq!(v.get("is_error").and_then(|b| b.as_bool()), Some(false));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+}

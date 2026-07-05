@@ -12,6 +12,7 @@ import type {
   ResolvedGroupItem,
 } from '@/shared/types/commandBar';
 import type { StatusItem } from '@/shared/types/selectionItems';
+import { isRealMobileDevice } from '@/shared/hooks/useIsMobile';
 import { resolveLabel, type ActionDefinition } from '@/shared/types/actions';
 
 export interface SelectionPage<TResult = unknown> {
@@ -49,8 +50,9 @@ const SelectionDialogImpl = create<SelectionDialogProps>(
     }, [modal.visible, initialPageId]);
 
     // Ensure cmdk search input is focused when dialog opens or page changes.
+    // Skip on mobile: focusing opens the software keyboard over the options.
     useEffect(() => {
-      if (!modal.visible) return;
+      if (!modal.visible || isRealMobileDevice()) return;
       const rafId = requestAnimationFrame(() => {
         const activeDialog = document.querySelector(
           '[role="dialog"][data-state="open"]'

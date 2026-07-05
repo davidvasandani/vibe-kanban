@@ -62,7 +62,7 @@ fn base_command(claude_code_router: bool) -> &'static str {
     if claude_code_router {
         "npx -y @musistudio/claude-code-router@1.0.66 code"
     } else {
-        "npx -y @anthropic-ai/claude-code@2.1.168"
+        "npx -y @anthropic-ai/claude-code@2.1.200"
     }
 }
 
@@ -272,7 +272,8 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
     let effort_options =
         ReasoningOption::from_names(["low", "medium", "high", "xhigh", "max"].map(String::from));
 
-    let supports_effort = |id: &str| -> bool { id.contains("opus") || id.contains("sonnet") };
+    let supports_effort =
+        |id: &str| -> bool { id.contains("opus") || id.contains("sonnet") || id.contains("fable") };
 
     ExecutorDiscoveredOptions {
         model_selector: ModelSelectorConfig {
@@ -280,7 +281,9 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
             models: [
                 ("opus", "Opus"),
                 ("opus[1m]", "Opus (1M context)"),
+                ("claude-sonnet-5", "Sonnet 5"),
                 ("sonnet", "Sonnet"),
+                ("fable", "Fable"),
                 ("haiku", "Haiku"),
             ]
             .into_iter()
@@ -394,6 +397,7 @@ impl StandardCodingAgentExecutor for ClaudeCode {
             current_dir,
             entry_index_provider.clone(),
             HistoryStrategy::Default,
+            self.model.clone(),
         );
 
         // Process stderr logs
@@ -722,6 +726,24 @@ pub enum HistoryStrategy {
 /// Default context window for models (used until we get actual value from result)
 const DEFAULT_CLAUDE_CONTEXT_WINDOW: u32 = 200_000;
 
+/// Context window (in tokens) granted by the 1M-token context beta. Models
+/// opting into it carry a `[1m]` suffix in their name/alias.
+const CLAUDE_1M_CONTEXT_WINDOW: u32 = 1_000_000;
+
+/// Infer a model's max context window from its name or alias.
+///
+/// Different models have different max contexts. Standard Claude models use the
+/// default window; models requesting the 1M-token context beta carry a `[1m]`
+/// suffix (e.g. `opus[1m]`). We rely on the configured/reported model string
+/// because the end-of-turn usage report is only available once a turn finishes.
+fn context_window_for_model(model: &str) -> u32 {
+    if model.contains("[1m]") {
+        CLAUDE_1M_CONTEXT_WINDOW
+    } else {
+        DEFAULT_CLAUDE_CONTEXT_WINDOW
+    }
+}
+
 /// Handles log processing and interpretation for Claude executor
 pub struct ClaudeLogProcessor {
     model_name: Option<String>,
@@ -736,6 +758,15 @@ pub struct ClaudeLogProcessor {
     main_model_name: Option<String>,
     main_model_context_window: u32,
     context_tokens_used: u32,
+    // Last catch-all system message, so uninterrupted repeats (e.g. `thinking_tokens`)
+    // collapse into one ticked entry instead of a new line each time.
+    repeated_system_message: Option<RepeatedSystemMessage>,
+}
+
+struct RepeatedSystemMessage {
+    entry_index: usize,
+    content: String,
+    count: usize,
 }
 
 impl ClaudeLogProcessor {
@@ -755,7 +786,45 @@ impl ClaudeLogProcessor {
             last_assistant_message: None,
             main_model_context_window: DEFAULT_CLAUDE_CONTEXT_WINDOW,
             context_tokens_used: 0,
+            repeated_system_message: None,
         }
+    }
+
+    /// Add a system message entry, collapsing uninterrupted repeats of the same
+    /// content into a single entry that gains one `✓` per repeat.
+    fn push_collapsible_system_message(
+        &mut self,
+        content: String,
+        metadata: Option<serde_json::Value>,
+        entry_index_provider: &EntryIndexProvider,
+    ) -> json_patch::Patch {
+        if let Some(repeated) = self.repeated_system_message.as_mut()
+            && repeated.content == content
+            && entry_index_provider.current() == repeated.entry_index + 1
+        {
+            repeated.count += 1;
+            let entry = NormalizedEntry {
+                timestamp: None,
+                entry_type: NormalizedEntryType::SystemMessage,
+                content: format!("{content} {}", "✓".repeat(repeated.count - 1)),
+                metadata,
+            };
+            return ConversationPatch::replace(repeated.entry_index, entry);
+        }
+
+        let entry = NormalizedEntry {
+            timestamp: None,
+            entry_type: NormalizedEntryType::SystemMessage,
+            content: content.clone(),
+            metadata,
+        };
+        let idx = entry_index_provider.next();
+        self.repeated_system_message = Some(RepeatedSystemMessage {
+            entry_index: idx,
+            content,
+            count: 1,
+        });
+        ConversationPatch::add_normalized_entry(idx, entry)
     }
 
     /// Process raw logs and convert them to normalized entries with patches
@@ -764,6 +833,7 @@ impl ClaudeLogProcessor {
         current_dir: &Path,
         entry_index_provider: EntryIndexProvider,
         strategy: HistoryStrategy,
+        configured_model: Option<String>,
     ) -> tokio::task::JoinHandle<()> {
         let current_dir_clone = current_dir.to_owned();
         tokio::spawn(async move {
@@ -772,6 +842,13 @@ impl ClaudeLogProcessor {
             let worktree_path = current_dir_clone.to_string_lossy().to_string();
             let mut session_id_extracted = false;
             let mut processor = Self::new_with_strategy(strategy);
+            // Seed the context window from the configured model. The model
+            // reported in the stream may drop the `[1m]` suffix, so the
+            // configured alias is the reliable source until the end-of-turn
+            // usage report provides the real value.
+            if let Some(model) = configured_model.as_deref() {
+                processor.main_model_context_window = context_window_for_model(model);
+            }
             // Track pending assistant UUID - only committed when we see a Result message
             let mut pending_assistant_uuid: Option<String> = None;
 
@@ -1261,9 +1338,12 @@ impl ClaudeLogProcessor {
                             // this name matches the model names in the usage report in the result message
                             if let Some(model) = model {
                                 self.main_model_name = Some(model.clone());
-                                if model.contains("[1m]") {
-                                    self.main_model_context_window = 1_000_000;
-                                }
+                                // Only upgrade the window; never downgrade a
+                                // value already seeded from the configured model
+                                // (the reported name may drop the `[1m]` suffix).
+                                self.main_model_context_window = self
+                                    .main_model_context_window
+                                    .max(context_window_for_model(model));
                             }
                         }
                         // Skip system init messages because it doesn't contain the actual model that will be used in assistant messages in case of claude-code-router.
@@ -1365,30 +1445,28 @@ impl ClaudeLogProcessor {
                         }
                     }
                     Some(subtype) => {
-                        let entry = NormalizedEntry {
-                            timestamp: None,
-                            entry_type: NormalizedEntryType::SystemMessage,
-                            content: format!("System: {subtype}"),
-                            metadata: Some(
-                                serde_json::to_value(claude_json)
-                                    .unwrap_or(serde_json::Value::Null),
+                        patches.push(
+                            self.push_collapsible_system_message(
+                                format!("System: {subtype}"),
+                                Some(
+                                    serde_json::to_value(claude_json)
+                                        .unwrap_or(serde_json::Value::Null),
+                                ),
+                                entry_index_provider,
                             ),
-                        };
-                        let idx = entry_index_provider.next();
-                        patches.push(ConversationPatch::add_normalized_entry(idx, entry));
+                        );
                     }
                     None => {
-                        let entry = NormalizedEntry {
-                            timestamp: None,
-                            entry_type: NormalizedEntryType::SystemMessage,
-                            content: "System message".to_string(),
-                            metadata: Some(
-                                serde_json::to_value(claude_json)
-                                    .unwrap_or(serde_json::Value::Null),
+                        patches.push(
+                            self.push_collapsible_system_message(
+                                "System message".to_string(),
+                                Some(
+                                    serde_json::to_value(claude_json)
+                                        .unwrap_or(serde_json::Value::Null),
+                                ),
+                                entry_index_provider,
                             ),
-                        };
-                        let idx = entry_index_provider.next();
-                        patches.push(ConversationPatch::add_normalized_entry(idx, entry));
+                        );
                     }
                 }
             }
@@ -1481,6 +1559,9 @@ impl ClaudeLogProcessor {
                         }
                         entry_index_provider.reset();
                         self.tool_map.clear();
+                        // Indices are reallocated from 0 after the reset, so the
+                        // tracked collapse target no longer points at its entry.
+                        self.repeated_system_message = None;
                     }
 
                     for item in message.content.items() {
@@ -2099,6 +2180,16 @@ fn extract_model_name(
         && let Some(model) = message.model.as_ref()
     {
         processor.model_name = Some(model.clone());
+        // Fall back to the assistant-reported model for context-window tracking
+        // when the system init message carried no model (e.g. claude-code-router).
+        // This name matches the keys in the end-of-turn usage report, so it also
+        // lets that report correct the window later.
+        if processor.main_model_name.is_none() {
+            processor.main_model_name = Some(model.clone());
+            processor.main_model_context_window = processor
+                .main_model_context_window
+                .max(context_window_for_model(model));
+        }
         let entry = NormalizedEntry {
             timestamp: None,
             entry_type: NormalizedEntryType::SystemMessage,
@@ -2849,6 +2940,119 @@ mod tests {
     }
 
     #[test]
+    fn test_repeated_unknown_system_subtype_collapses_with_ticks() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::test_new();
+        let json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"thinking_tokens"}"#).unwrap();
+
+        let patches = processor.normalize_entries(&json, "", &provider);
+        assert_eq!(patches.len(), 1);
+        assert!(matches!(
+            patches[0].0.first(),
+            Some(json_patch::PatchOperation::Add(_))
+        ));
+        let (first_idx, entry) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+        assert_eq!(entry.content, "System: thinking_tokens");
+
+        for repeat in 1..=3 {
+            let patches = processor.normalize_entries(&json, "", &provider);
+            assert_eq!(patches.len(), 1);
+            assert!(matches!(
+                patches[0].0.first(),
+                Some(json_patch::PatchOperation::Replace(_))
+            ));
+            let (idx, entry) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+            assert_eq!(idx, first_idx);
+            assert_eq!(
+                entry.content,
+                format!("System: thinking_tokens {}", "✓".repeat(repeat))
+            );
+        }
+
+        // Repeats reuse the original entry; no extra indices were allocated.
+        assert_eq!(provider.current(), first_idx + 1);
+    }
+
+    #[test]
+    fn test_repeated_system_subtype_interrupted_starts_new_entry() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::test_new();
+        let system_json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"thinking_tokens"}"#).unwrap();
+        let assistant_json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}]}}"#,
+        )
+        .unwrap();
+
+        let patches = processor.normalize_entries(&system_json, "", &provider);
+        let (first_idx, _) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+
+        processor.normalize_entries(&assistant_json, "", &provider);
+
+        let patches = processor.normalize_entries(&system_json, "", &provider);
+        assert_eq!(patches.len(), 1);
+        assert!(matches!(
+            patches[0].0.first(),
+            Some(json_patch::PatchOperation::Add(_))
+        ));
+        let (idx, entry) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+        assert_ne!(idx, first_idx);
+        assert_eq!(entry.content, "System: thinking_tokens");
+    }
+
+    #[test]
+    fn test_amp_resume_reset_clears_repeat_tracker() {
+        let mut processor = ClaudeLogProcessor::new_with_strategy(HistoryStrategy::AmpResume);
+        let provider = EntryIndexProvider::test_new();
+        let system_json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"thinking_tokens"}"#).unwrap();
+        let user_json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"resume"}]},"session_id":null}"#,
+        )
+        .unwrap();
+
+        // Tracked at index 0, then the user message resets the provider and
+        // reallocates index 0 for itself.
+        processor.normalize_entries(&system_json, "", &provider);
+        processor.normalize_entries(&user_json, "", &provider);
+
+        // The stale tracker must not replace the user message at index 0.
+        let patches = processor.normalize_entries(&system_json, "", &provider);
+        assert_eq!(patches.len(), 1);
+        assert!(matches!(
+            patches[0].0.first(),
+            Some(json_patch::PatchOperation::Add(_))
+        ));
+        let (idx, entry) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(entry.content, "System: thinking_tokens");
+    }
+
+    #[test]
+    fn test_different_system_subtypes_do_not_collapse() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::test_new();
+        let first_json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"thinking_tokens"}"#).unwrap();
+        let second_json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"other_event"}"#).unwrap();
+
+        let patches = processor.normalize_entries(&first_json, "", &provider);
+        let (first_idx, _) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+
+        let patches = processor.normalize_entries(&second_json, "", &provider);
+        assert_eq!(patches.len(), 1);
+        assert!(matches!(
+            patches[0].0.first(),
+            Some(json_patch::PatchOperation::Add(_))
+        ));
+        let (idx, entry) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+        assert_ne!(idx, first_idx);
+        assert_eq!(entry.content, "System: other_event");
+    }
+
+    #[test]
     fn test_todo_tool_empty_list() {
         // Test TodoWrite with empty todo list
         let empty_data = ClaudeToolData::TodoWrite { todos: vec![] };
@@ -3280,5 +3484,80 @@ mod tests {
         let control_request_json = r#"{"type":"control_request","request_id":"f559d907-b139-475b-addd-79c05591eb99","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"./gradlew :web:testApi","timeout":300000,"description":"Run API tests"},"permission_suggestions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"./gradlew :web:testApi:"}],"behavior":"allow","destination":"localSettings"}],"tool_use_id":"toolu_014PR3WXsJfiftSCbjcjEbeM"}}"#;
         let parsed: ClaudeJson = serde_json::from_str(control_request_json).unwrap();
         assert!(matches!(parsed, ClaudeJson::ControlRequest { .. }));
+    }
+
+    #[test]
+    fn test_context_window_for_model() {
+        assert_eq!(
+            context_window_for_model("opus"),
+            DEFAULT_CLAUDE_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("sonnet"),
+            DEFAULT_CLAUDE_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-opus-4-8"),
+            DEFAULT_CLAUDE_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("opus[1m]"),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-sonnet-4-20250514[1m]"),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+    }
+
+    #[test]
+    fn test_init_with_1m_model_upgrades_context_window() {
+        let mut processor = ClaudeLogProcessor::new();
+        assert_eq!(
+            processor.main_model_context_window,
+            DEFAULT_CLAUDE_CONTEXT_WINDOW
+        );
+
+        let init: ClaudeJson = serde_json::from_str(
+            r#"{"type":"system","subtype":"init","session_id":"abc","model":"opus[1m]"}"#,
+        )
+        .unwrap();
+        normalize_helper(&mut processor, &init, "/tmp");
+
+        assert_eq!(
+            processor.main_model_context_window,
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+    }
+
+    #[test]
+    fn test_seeded_1m_window_not_downgraded_by_reported_name() {
+        // Simulates a model configured as `opus[1m]` (seeded to 1M) whose
+        // stream reports the resolved name without the `[1m]` suffix.
+        let mut processor = ClaudeLogProcessor::new();
+        processor.main_model_context_window = CLAUDE_1M_CONTEXT_WINDOW;
+
+        // Init carries no model (router-style), assistant reports the stripped name.
+        let init: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"init","session_id":"abc"}"#)
+                .unwrap();
+        normalize_helper(&mut processor, &init, "/tmp");
+
+        let assistant: ClaudeJson = serde_json::from_str(
+            r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}]}}"#,
+        )
+        .unwrap();
+        normalize_helper(&mut processor, &assistant, "/tmp");
+
+        // The window stays at 1M, and the reported name is captured so the
+        // end-of-turn usage report can still correct it.
+        assert_eq!(
+            processor.main_model_context_window,
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            processor.main_model_name.as_deref(),
+            Some("claude-opus-4-8")
+        );
     }
 }

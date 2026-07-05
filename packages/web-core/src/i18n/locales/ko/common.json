@@ -557,5 +557,16 @@
   },
   "attachments": {
     "storageDisabled": "첨부 파일 업로드가 비활성화되어 있습니다. 관리자에게 첨부 파일 저장소를 활성화하도록 요청하세요."
+  },
+  "taskPipeline": {
+    "title": "Pipeline",
+    "description": "Pick the stages this task should go through. The selected stages are appended to the task description for the agent to follow.",
+    "pipelinesLabel": "Pipelines",
+    "pipelinesHelper": "Select one or more pipelines; their stages combine into one ordered list.",
+    "noSteps": "The selected pipelines have no stages configured.",
+    "heavyBadge": "heavy",
+    "addonLabel": "Prompt addon (editable)",
+    "addonPlaceholder": "Tick stages above to compose the pipeline block, or type your own.",
+    "resetToGenerated": "Reset to generated"
   }
 }

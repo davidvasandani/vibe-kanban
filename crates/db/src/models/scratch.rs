@@ -150,6 +150,9 @@ pub struct UiPreferencesData {
     /// Kanban project view preferences (filters, toggles per project per view)
     #[serde(default)]
     pub kanban_project_view_preferences: std::collections::HashMap<String, serde_json::Value>,
+    /// Kanban board view mode (kanban | list | slim)
+    #[serde(default)]
+    pub kanban_view_mode: Option<String>,
 }
 
 /// Linked issue data for draft workspace scratch
@@ -239,7 +242,7 @@ pub enum ScratchPayload {
     DraftIssue(DraftIssueData),
     PreviewSettings(PreviewSettingsData),
     WorkspaceNotes(WorkspaceNotesData),
-    UiPreferences(UiPreferencesData),
+    UiPreferences(Box<UiPreferencesData>),
     ProjectRepoDefaults(ProjectRepoDefaultsData),
 }
 

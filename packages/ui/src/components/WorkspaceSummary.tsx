@@ -40,7 +40,12 @@ export interface WorkspaceSummaryProps {
   hasRunningDevServer?: boolean;
   hasUnseenActivity?: boolean;
   latestProcessCompletedAt?: string;
-  latestProcessStatus?: 'running' | 'completed' | 'failed' | 'killed';
+  latestProcessStatus?:
+    | 'running'
+    | 'completed'
+    | 'failed'
+    | 'killed'
+    | 'interrupted';
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
   onClick?: () => void;
   className?: string;
@@ -74,7 +79,9 @@ export function WorkspaceSummary({
   const { t } = useTranslation('common');
   const hasChanges = filesChanged !== undefined && filesChanged > 0;
   const isFailed =
-    latestProcessStatus === 'failed' || latestProcessStatus === 'killed';
+    latestProcessStatus === 'failed' ||
+    latestProcessStatus === 'killed' ||
+    latestProcessStatus === 'interrupted';
 
   const handleOpenCommandBar = (e: React.MouseEvent) => {
     e.stopPropagation();

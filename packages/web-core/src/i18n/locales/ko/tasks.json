@@ -445,6 +445,11 @@
       "count_one": "{{count}}개의 리뷰 댓글이 포함됩니다",
       "count_other": "{{count}}개의 리뷰 댓글이 포함됩니다"
     },
+    "interrupted": {
+      "message": "이 실행은 vibe-kanban 재시작으로 인해 중단되었습니다.",
+      "resume": "재개",
+      "resuming": "재개 중"
+    },
     "workspace": {
       "create": "만들기",
       "creating": "만드는 중..."
