@@ -21,6 +21,7 @@ import { IssueSubIssuesSectionContainer } from './IssueSubIssuesSectionContainer
 import { IssueRelationshipsSectionContainer } from './IssueRelationshipsSectionContainer';
 import { IssueWorkspacesSectionContainer } from './IssueWorkspacesSectionContainer';
 import { PipelineSection, type PipelineSelection } from './PipelineSection';
+import { SpecKitSection } from '../speckit/SpecKitSection';
 import { appendPipelineToDescription } from '@/shared/lib/pipeline/taskPipeline';
 import {
   KanbanIssuePanel,
@@ -115,6 +116,7 @@ export function KanbanIssuePanelContainer({
     insertTag,
     getTagsForIssue,
     getPullRequestsForIssue,
+    getWorkspacesForIssue,
     isLoading: projectLoading,
   } = useProjectContext();
   const selectedKanbanIssueId = routeState.issueId;
@@ -184,6 +186,28 @@ export function KanbanIssuePanelContainer({
   // Get action methods from actions context
   const { openStatusSelection, openPrioritySelection, openAssigneeSelection } =
     useActions();
+
+  // The SpecKit viewer is workspace-anchored: pick the issue's most recent
+  // workspace that exists locally on this machine (remote-only workspaces
+  // have no worktree to read artifacts from).
+  const speckitWorkspaceId = useMemo(() => {
+    if (kanbanCreateMode || !selectedKanbanIssueId) return null;
+    const candidates = getWorkspacesForIssue(selectedKanbanIssueId)
+      .filter(
+        (w) =>
+          w.local_workspace_id && localWorkspaceIds.has(w.local_workspace_id)
+      )
+      .sort(
+        (a, b) =>
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
+    return candidates[0]?.local_workspace_id ?? null;
+  }, [
+    kanbanCreateMode,
+    selectedKanbanIssueId,
+    getWorkspacesForIssue,
+    localWorkspaceIds,
+  ]);
 
   // Find selected issue if in edit mode
   const selectedIssue = useMemo(() => {
@@ -1158,6 +1182,11 @@ export function KanbanIssuePanelContainer({
       renderWorkspacesSection={(issueId) => (
         <IssueWorkspacesSectionContainer issueId={issueId} />
       )}
+      renderSpecKitSection={() =>
+        speckitWorkspaceId ? (
+          <SpecKitSection workspaceId={speckitWorkspaceId} />
+        ) : null
+      }
       renderRelationshipsSection={(issueId) => (
         <IssueRelationshipsSectionContainer issueId={issueId} />
       )}

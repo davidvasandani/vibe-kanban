@@ -159,6 +159,7 @@ export interface KanbanIssuePanelProps {
 
   // Edit-mode section renderers
   renderWorkspacesSection?: (issueId: string) => ReactNode;
+  renderSpecKitSection?: (issueId: string) => ReactNode;
   renderRelationshipsSection?: (issueId: string) => ReactNode;
   renderSubIssuesSection?: (issueId: string) => ReactNode;
   renderCommentsSection?: (issueId: string) => ReactNode;
@@ -201,6 +202,7 @@ export function KanbanIssuePanel({
   attachmentError,
   onDismissAttachmentError,
   renderWorkspacesSection,
+  renderSpecKitSection,
   renderRelationshipsSection,
   renderSubIssuesSection,
   renderCommentsSection,
@@ -542,6 +544,13 @@ export function KanbanIssuePanel({
         {!isCreateMode && issueId && renderWorkspacesSection && (
           <div className="border-t">{renderWorkspacesSection(issueId)}</div>
         )}
+
+        {/* SpecKit Section (Edit mode only). No wrapper: the section renders
+            nothing at all for non-SpecKit tasks, border included. */}
+        {!isCreateMode &&
+          issueId &&
+          renderSpecKitSection &&
+          renderSpecKitSection(issueId)}
 
         {/* Relationships Section (Edit mode only) */}
         {!isCreateMode && issueId && renderRelationshipsSection && (

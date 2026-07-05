@@ -107,6 +107,12 @@ import {
   OpenRemoteEditorResponse,
   ProfileResponse,
   Pipeline,
+  SpecKitTaskStatus,
+  SpecKitArtifacts,
+  SpecKitArtifact,
+  SpecKitTasks,
+  SpecKitUpdateArtifactRequest,
+  SpecKitToggleTaskRequest,
 } from 'shared/types';
 import type { Project as RemoteProject } from 'shared/remote-types';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
@@ -1068,6 +1074,52 @@ export const pipelinesApi = {
   list: async (): Promise<Pipeline[]> => {
     const response = await makeRequest('/api/pipelines', { cache: 'no-store' });
     return handleApiResponse<Pipeline[]>(response);
+  },
+};
+
+// SpecKit APIs (workspace-anchored spec-driven-development viewer;
+// see crates/server/src/routes/speckit.rs)
+export const speckitApi = {
+  getStatus: async (workspaceId: string): Promise<SpecKitTaskStatus> => {
+    const response = await makeRequest(`/api/speckit/workspace/${workspaceId}`, {
+      cache: 'no-store',
+    });
+    return handleApiResponse<SpecKitTaskStatus>(response);
+  },
+  getArtifacts: async (workspaceId: string): Promise<SpecKitArtifacts> => {
+    const response = await makeRequest(
+      `/api/speckit/workspace/${workspaceId}/artifacts`,
+      { cache: 'no-store' }
+    );
+    return handleApiResponse<SpecKitArtifacts>(response);
+  },
+  updateArtifact: async (
+    workspaceId: string,
+    data: SpecKitUpdateArtifactRequest
+  ): Promise<SpecKitArtifact> => {
+    const response = await makeRequest(
+      `/api/speckit/workspace/${workspaceId}/artifact`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<SpecKitArtifact>(response);
+  },
+  toggleTask: async (
+    workspaceId: string,
+    data: SpecKitToggleTaskRequest
+  ): Promise<SpecKitTasks> => {
+    const response = await makeRequest(
+      `/api/speckit/workspace/${workspaceId}/tasks/toggle`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<SpecKitTasks>(response);
   },
 };
 
