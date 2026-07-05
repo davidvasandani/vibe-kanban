@@ -201,21 +201,29 @@ function ArtifactEditor({
 }) {
   const { t } = useTranslation('common');
   const [selectedPath, setSelectedPath] = useState(artifacts[0].relative_path);
-  const selected =
-    artifacts.find((a) => a.relative_path === selectedPath) ?? artifacts[0];
+  // Derived at render time: if the selected artifact disappears from the
+  // list (agent rewrote the feature dir), the stale draft is treated as
+  // not-dirty IMMEDIATELY — the clamp effect below only runs after paint,
+  // and Save must never write the old file's content into a different
+  // artifact, not even for one render.
+  const selectionValid = artifacts.some(
+    (a) => a.relative_path === selectedPath
+  );
+  const selected = selectionValid
+    ? artifacts.find((a) => a.relative_path === selectedPath)!
+    : artifacts[0];
   const [draft, setDraft] = useState(selected.content ?? '');
-  const [dirty, setDirty] = useState(false);
+  const [rawDirty, setDirty] = useState(false);
+  const dirty = rawDirty && selectionValid;
   const update = useUpdateSpecKitArtifact(workspaceId);
 
-  // If the selected artifact disappears from the list (agent rewrote the
-  // feature dir), clamp the selection and drop the stale draft so Save can
-  // never write the old file's content into a different artifact.
+  // Clamp the state to match the render-time fallback above.
   useEffect(() => {
-    if (!artifacts.some((a) => a.relative_path === selectedPath)) {
+    if (!selectionValid) {
       setSelectedPath(artifacts[0].relative_path);
       setDirty(false);
     }
-  }, [artifacts, selectedPath]);
+  }, [selectionValid, artifacts]);
 
   // Re-seed the editor whenever the operator switches artifact or fresh
   // content arrives while the draft is untouched.
