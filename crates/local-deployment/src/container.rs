@@ -475,6 +475,45 @@ impl LocalContainerService {
         any_committed
     }
 
+    /// Snapshot uncommitted worktree changes left behind by an interrupted
+    /// run so they survive as a commit on the workspace branch, mirroring the
+    /// auto-commit that happens after a successful run.
+    async fn commit_interrupted_wip(&self, process: &ExecutionProcess) {
+        if !matches!(
+            process.run_reason,
+            ExecutionProcessRunReason::CodingAgent | ExecutionProcessRunReason::CleanupScript
+        ) {
+            return;
+        }
+
+        let Ok(ctx) = ExecutionProcess::load_context(&self.db.pool, process.id).await else {
+            return;
+        };
+        let Some(container_ref) = ctx.workspace.container_ref.as_ref() else {
+            return;
+        };
+
+        let workspace_root = PathBuf::from(container_ref);
+        match self.check_repos_for_changes(&workspace_root, &ctx.repos) {
+            Ok(repos_with_changes) if !repos_with_changes.is_empty() => {
+                let message = "WIP: run interrupted by vibe-kanban shutdown";
+                if self.commit_repos(repos_with_changes, message) {
+                    // Re-record HEAD so the snapshot commit is part of this
+                    // process's recorded after-state.
+                    self.update_after_head_commits(process.id).await;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to check for uncommitted changes on interrupted process {}: {}",
+                    process.id,
+                    e
+                );
+            }
+        }
+    }
+
     /// Spawn a background task that polls the child process for completion and
     /// cleans up the execution entry when it exits.
     fn spawn_exit_monitor(
@@ -619,10 +658,12 @@ impl LocalContainerService {
                     let mut started_queued_follow_up = false;
 
                     // Only execute queued messages if the execution succeeded
-                    // If it failed or was killed, just clear the queue and finalize
+                    // If it failed, was killed or interrupted, just clear the queue and finalize
                     let should_execute_queued = !matches!(
                         ctx.execution_process.status,
-                        ExecutionProcessStatus::Failed | ExecutionProcessStatus::Killed
+                        ExecutionProcessStatus::Failed
+                            | ExecutionProcessStatus::Killed
+                            | ExecutionProcessStatus::Interrupted
                     );
 
                     if let Some(queued_msg) =
@@ -1374,6 +1415,19 @@ impl ContainerService for LocalContainerService {
             ))
         })??;
 
+        // Record the process group id (== leader pid for grouped spawns) so a
+        // later boot can clean up the group if this server dies uncleanly.
+        if let Some(pid) = spawned.child.id()
+            && let Err(e) =
+                ExecutionProcess::update_pgid(&self.db.pool, execution_process.id, pid as i64).await
+        {
+            tracing::warn!(
+                "Failed to record pgid for execution process {}: {}",
+                execution_process.id,
+                e
+            );
+        }
+
         self.track_child_msgs_in_store(execution_process.id, &mut spawned.child)
             .await;
 
@@ -1606,8 +1660,10 @@ impl ContainerService for LocalContainerService {
                 process.id,
                 process.run_reason
             );
+            // Mark as interrupted (not killed): the process is stopped by a
+            // server shutdown/restart, so the run can be offered for resume.
             if let Err(error) = self
-                .stop_execution(&process, ExecutionProcessStatus::Killed)
+                .stop_execution(&process, ExecutionProcessStatus::Interrupted)
                 .await
             {
                 tracing::error!(
@@ -1617,6 +1673,7 @@ impl ContainerService for LocalContainerService {
                 );
             } else {
                 tracing::info!("Successfully killed process: id={}", process.id);
+                self.commit_interrupted_wip(&process).await;
             }
         }
 

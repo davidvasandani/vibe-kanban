@@ -222,10 +222,12 @@ pub trait ContainerService {
             return false;
         }
 
-        // Always finalize failed or killed executions, regardless of next action
+        // Always finalize failed, killed or interrupted executions, regardless of next action
         if matches!(
             ctx.execution_process.status,
-            ExecutionProcessStatus::Failed | ExecutionProcessStatus::Killed
+            ExecutionProcessStatus::Failed
+                | ExecutionProcessStatus::Killed
+                | ExecutionProcessStatus::Interrupted
         ) {
             return true;
         }
@@ -237,7 +239,11 @@ pub trait ContainerService {
     /// Finalize workspace execution by sending notifications
     async fn finalize_task(&self, ctx: &ExecutionContext) {
         // Skip notification if process was intentionally killed by user
-        if matches!(ctx.execution_process.status, ExecutionProcessStatus::Killed) {
+        // or interrupted by a server shutdown/restart
+        if matches!(
+            ctx.execution_process.status,
+            ExecutionProcessStatus::Killed | ExecutionProcessStatus::Interrupted
+        ) {
             return;
         }
 
@@ -269,20 +275,36 @@ pub trait ContainerService {
             .await;
     }
 
-    /// Cleanup executions marked as running in the db, call at startup
-    async fn cleanup_orphan_executions(&self) -> Result<(), ContainerError> {
+    /// Cleanup executions marked as running in the db, call at startup.
+    /// Returns the processes that were marked as interrupted.
+    async fn cleanup_orphan_executions(&self) -> Result<Vec<ExecutionProcess>, ContainerError> {
         let running_processes = ExecutionProcess::find_running(&self.db().pool).await?;
+        let mut interrupted = Vec::new();
         for process in running_processes {
             tracing::info!(
                 "Found orphaned execution process {} for session {}",
                 process.id,
                 process.session_id
             );
+            // If the previous server died uncleanly (crash/SIGKILL), the OS
+            // process group may still be alive: kill it before touching state
+            // so a restarted dev server won't fight it for ports.
+            #[cfg(unix)]
+            if let Some(pgid) = process.pgid {
+                let age_secs = (chrono::Utc::now() - process.started_at).num_seconds();
+                if utils::process::kill_orphan_process_group(pgid as i32, age_secs).await {
+                    tracing::info!(
+                        "Killed orphaned OS process group {} for execution process {}",
+                        pgid,
+                        process.id
+                    );
+                }
+            }
             // Update the execution process status first
             if let Err(e) = ExecutionProcess::update_completion(
                 &self.db().pool,
                 process.id,
-                ExecutionProcessStatus::Failed,
+                ExecutionProcessStatus::Interrupted,
                 None, // No exit code for orphaned processes
             )
             .await
@@ -319,10 +341,74 @@ pub trait ContainerService {
                     }
                 }
             }
-            // Process marked as failed
-            tracing::info!("Marked orphaned execution process {} as failed", process.id);
+            tracing::info!(
+                "Marked orphaned execution process {} as interrupted",
+                process.id
+            );
+            interrupted.push(process);
         }
-        Ok(())
+        Ok(interrupted)
+    }
+
+    /// Restart dev servers that were interrupted by a server shutdown or
+    /// crash. Call at startup with the processes returned by
+    /// [`Self::cleanup_orphan_executions`].
+    async fn restart_interrupted_dev_servers(&self, interrupted: &[ExecutionProcess]) {
+        for process in interrupted {
+            if process.run_reason != ExecutionProcessRunReason::DevServer {
+                continue;
+            }
+            let ctx = match ExecutionProcess::load_context(&self.db().pool, process.id).await {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    tracing::warn!(
+                        "Skipping dev server restart for process {}: failed to load context: {}",
+                        process.id,
+                        e
+                    );
+                    continue;
+                }
+            };
+            if ctx.workspace.archived || ctx.workspace.worktree_deleted {
+                continue;
+            }
+            // Only restart into an existing worktree; don't recreate one at boot
+            if !ctx
+                .workspace
+                .container_ref
+                .as_deref()
+                .is_some_and(|p| Path::new(p).exists())
+            {
+                continue;
+            }
+            let Ok(executor_action) = process.executor_action() else {
+                continue;
+            };
+            match self
+                .start_execution(
+                    &ctx.workspace,
+                    &ctx.session,
+                    executor_action,
+                    &ExecutionProcessRunReason::DevServer,
+                )
+                .await
+            {
+                Ok(new_process) => {
+                    tracing::info!(
+                        "Restarted interrupted dev server for workspace {} as process {}",
+                        ctx.workspace.id,
+                        new_process.id
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to restart interrupted dev server for workspace {}: {}",
+                        ctx.workspace.id,
+                        e
+                    );
+                }
+            }
+        }
     }
 
     /// Backfill before_head_commit for legacy execution processes.

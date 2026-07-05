@@ -71,11 +71,15 @@ async fn main() -> Result<(), VibeKanbanError> {
 
     let deployment = DeploymentImpl::new(shutdown_token.clone()).await?;
     deployment.update_sentry_scope().await?;
-    deployment
+    let interrupted_processes = deployment
         .container()
         .cleanup_orphan_executions()
         .await
         .map_err(DeploymentError::from)?;
+    deployment
+        .container()
+        .restart_interrupted_dev_servers(&interrupted_processes)
+        .await;
     deployment
         .container()
         .backfill_before_head_commits()

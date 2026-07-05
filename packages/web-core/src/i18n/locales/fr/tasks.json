@@ -170,6 +170,11 @@
       "count_one": "{{count}} commentaire de révision sera inclus",
       "count_other": "{{count}} commentaires de révision seront inclus"
     },
+    "interrupted": {
+      "message": "Cette exécution a été interrompue par un redémarrage de vibe-kanban.",
+      "resume": "Reprendre",
+      "resuming": "Reprise"
+    },
     "workspace": {
       "create": "Créer",
       "creating": "Création en cours..."

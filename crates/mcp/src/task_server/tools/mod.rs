@@ -553,6 +553,7 @@ impl McpServer {
             ExecutionProcessStatus::Completed => "completed",
             ExecutionProcessStatus::Failed => "failed",
             ExecutionProcessStatus::Killed => "killed",
+            ExecutionProcessStatus::Interrupted => "interrupted",
         }
     }
 }

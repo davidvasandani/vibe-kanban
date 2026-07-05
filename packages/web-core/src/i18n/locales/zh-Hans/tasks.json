@@ -427,6 +427,11 @@
       "count_one": "{{count}} 条审查评论将被包含",
       "count_other": "{{count}} 条审查评论将被包含"
     },
+    "interrupted": {
+      "message": "此次运行因 vibe-kanban 重启而中断。",
+      "resume": "恢复",
+      "resuming": "恢复中"
+    },
     "workspace": {
       "create": "创建",
       "creating": "创建中..."

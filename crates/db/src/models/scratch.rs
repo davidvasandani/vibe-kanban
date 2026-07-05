@@ -242,7 +242,7 @@ pub enum ScratchPayload {
     DraftIssue(DraftIssueData),
     PreviewSettings(PreviewSettingsData),
     WorkspaceNotes(WorkspaceNotesData),
-    UiPreferences(UiPreferencesData),
+    UiPreferences(Box<UiPreferencesData>),
     ProjectRepoDefaults(ProjectRepoDefaultsData),
 }
 
