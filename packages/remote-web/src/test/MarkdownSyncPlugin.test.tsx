@@ -8,6 +8,7 @@ import {
   DecoratorNode,
   $getRoot,
   $createParagraphNode,
+  $createTextNode,
   type LexicalEditor,
   type NodeKey,
   type SerializedLexicalNode,
@@ -138,6 +139,32 @@ describe("MarkdownSyncPlugin – Send gating (prefilled prompt)", () => {
     // with an empty string — otherwise Send would grey out while the prompt is
     // still visible and unsendable.
     expect(emptyOnChangeCalls(onChange)).toEqual([]);
+  });
+
+  it("reports '' when a non-empty prompt is replaced with whitespace only", () => {
+    const onChange = vi.fn();
+    const { getEditor } = renderEditor("hello world", onChange);
+    const editor = getEditor();
+
+    onChange.mockClear();
+
+    // Replace the text with whitespace only. The paragraph still has a text
+    // child, but whitespace serializes to '' and MUST clear the Send state —
+    // otherwise the stale "hello world" prompt could be sent.
+    act(() => {
+      editor.update(
+        () => {
+          const root = $getRoot();
+          root.clear();
+          const paragraph = $createParagraphNode();
+          paragraph.append($createTextNode("   "));
+          root.append(paragraph);
+        },
+        { discrete: true },
+      );
+    });
+
+    expect(emptyOnChangeCalls(onChange).length).toBeGreaterThan(0);
   });
 
   it("still reports '' when the user genuinely clears all content", () => {

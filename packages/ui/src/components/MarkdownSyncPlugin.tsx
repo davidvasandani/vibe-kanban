@@ -5,7 +5,13 @@ import {
   $convertFromMarkdownString,
   type Transformer,
 } from '@lexical/markdown';
-import { $getRoot, $isElementNode, type EditorState } from 'lexical';
+import {
+  $getRoot,
+  $isDecoratorNode,
+  $isElementNode,
+  type EditorState,
+  type LexicalNode,
+} from 'lexical';
 
 type MarkdownSyncPluginProps = {
   value: string;
@@ -16,19 +22,21 @@ type MarkdownSyncPluginProps = {
 };
 
 /**
- * Whether the editor structurally holds any visible content.
+ * Whether the editor holds a decorator node (image, attachment, PR comment,
+ * component info, …), anywhere in the tree.
  *
- * This is intentionally stricter than "serializes to a non-empty markdown
- * string": some content (e.g. decorator nodes) can round-trip asymmetrically
- * and momentarily serialize to an empty string. A single empty paragraph (the
- * default empty state) counts as no content; anything else — text, or a
- * paragraph containing an inline node such as an image/attachment — counts as
- * content.
+ * These render as visible content but can serialize to an empty markdown
+ * string, so their presence must not be mistaken for an empty editor. Plain
+ * text is deliberately excluded: whitespace-only text serializes to '' and
+ * *should* clear the Send state, so it must not be treated as content here.
  */
-function $editorHasContent(): boolean {
-  return $getRoot()
-    .getChildren()
-    .some((child) => !$isElementNode(child) || !child.isEmpty());
+function $editorHasDecoratorContent(): boolean {
+  const hasDecorator = (node: LexicalNode): boolean => {
+    if ($isDecoratorNode(node)) return true;
+    if ($isElementNode(node)) return node.getChildren().some(hasDecorator);
+    return false;
+  };
+  return $getRoot().getChildren().some(hasDecorator);
 }
 
 /**
@@ -93,19 +101,21 @@ export function MarkdownSyncPlugin({
       onEditorStateChange?.(editorState);
       if (!onChange) return;
 
-      const { markdown, hasContent } = editorState.read(() => ({
+      const { markdown, hasDecoratorContent } = editorState.read(() => ({
         markdown: $convertToMarkdownString(transformers),
-        hasContent: $editorHasContent(),
+        hasDecoratorContent: $editorHasDecoratorContent(),
       }));
 
       if (markdown === lastSerializedRef.current) return;
 
-      // Never report empty content while the editor visibly holds content.
-      // Otherwise external state (which gates the Send button) would be wiped
-      // to '', and the controlled-value effect above would early-return on the
-      // next render (value === lastSerializedRef), leaving a prefilled prompt
-      // on screen that can no longer be sent.
-      if (markdown.trim() === '' && hasContent) return;
+      // Never report empty content while the editor still holds a decorator
+      // node that markdown can't serialize. Otherwise external state (which
+      // gates the Send button) would be wiped to '', and the controlled-value
+      // effect above would early-return on the next render (value ===
+      // lastSerializedRef), leaving a prefilled prompt on screen that can no
+      // longer be sent. Whitespace-only text is intentionally NOT guarded: it
+      // serializes to '' and should correctly clear the Send state.
+      if (markdown.trim() === '' && hasDecoratorContent) return;
 
       lastSerializedRef.current = markdown;
       onChange(markdown);
