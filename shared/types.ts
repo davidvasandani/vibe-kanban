@@ -705,12 +705,12 @@ export type SpecKitStageArtifact = { stage: SpecKitStage,
  */
 artifact: string, exists: boolean, };
 
-export type SpecKitTaskStatus = { task_id: string, enabled: boolean, 
+export type SpecKitTaskStatus = { workspace_id: string, enabled: boolean, 
 /**
  * Explains why `enabled` is false, so the frontend can show accurate
  * copy without re-deriving it.
  */
-note?: string, workspace_id?: string, 
+note?: string, 
 /**
  * The SpecKit feature key (the workspace branch, verbatim, captured at
  * first provisioning).
