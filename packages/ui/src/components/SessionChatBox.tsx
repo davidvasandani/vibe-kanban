@@ -38,6 +38,39 @@ import {
   type TurnNavigationItem,
 } from './TurnNavigationPopup';
 
+/**
+ * Prompt sent when the user hits Send with an empty editor in an existing
+ * session. The placeholder advertises exactly this prompt, so the two must
+ * stay in sync.
+ */
+export const DEFAULT_CONTINUE_PROMPT = 'Continue working on this task';
+
+/**
+ * Message to submit from the session chat box: an empty box in an existing
+ * session sends `DEFAULT_CONTINUE_PROMPT` instead. The fallback only
+ * applies when there is nothing else to send (no typed text, no review
+ * comments), the box belongs to an existing session, and any persisted draft
+ * has finished loading (so a not-yet-restored draft can't be bypassed).
+ */
+export function resolveSessionSendMessage(options: {
+  message: string;
+  hasReviewComments: boolean;
+  isNewSessionMode: boolean;
+  isDraftLoaded: boolean;
+}): string {
+  const { message, hasReviewComments, isNewSessionMode, isDraftLoaded } =
+    options;
+  if (
+    message.trim() ||
+    hasReviewComments ||
+    isNewSessionMode ||
+    !isDraftLoaded
+  ) {
+    return message;
+  }
+  return DEFAULT_CONTINUE_PROMPT;
+}
+
 // Status enum - single source of truth for execution state
 export type ExecutionStatus =
   | 'idle'
@@ -163,6 +196,12 @@ export interface SessionChatBoxEditorRenderProps<
 interface SessionChatBoxProps<TExecutor extends string = string> {
   status: ExecutionStatus;
   editor: EditorProps;
+  /**
+   * Whether a persisted draft is still loading into the editor. While true the
+   * empty editor cannot yet be trusted, so the "send the default continue
+   * prompt" affordance stays disabled to avoid a Send button that no-ops.
+   */
+  isDraftLoading?: boolean;
   renderEditor: (
     props: SessionChatBoxEditorRenderProps<TExecutor>
   ) => ReactNode;
@@ -231,6 +270,7 @@ function defaultFormatSessionDate(createdAt: string | Date) {
 export function SessionChatBox<TExecutor extends string = string>({
   status,
   editor,
+  isDraftLoading = false,
   renderEditor,
   actions,
   session,
@@ -299,6 +339,19 @@ export function SessionChatBox<TExecutor extends string = string>({
     editor.value.trim().length > 0 || (reviewComments?.count ?? 0) > 0;
   const canSend =
     hasContent && !['sending', 'stopping', 'queue-loading'].includes(status);
+  // With an empty editor in an existing session, the Send button submits the
+  // default continue prompt advertised by the placeholder. Button only:
+  // keyboard shortcuts still require typed content to avoid accidental sends.
+  // Requires a selected session so the placeholder-mode chat box (no session
+  // yet, no-op actions) keeps its disabled Send button, and a fully-loaded
+  // draft so the button never appears enabled while it would no-op (the
+  // resolver refuses to substitute the prompt until the draft has loaded).
+  const canSendContinue =
+    !hasContent &&
+    status === 'idle' &&
+    !session.isNewSessionMode &&
+    Boolean(session.selectedSessionId) &&
+    !isDraftLoading;
   const isQueued = status === 'queued';
   const isRunning = status === 'running' || status === 'queued';
   const areContentInsertActionsDisabled = isDisabled || isQueued;
@@ -318,7 +371,7 @@ export function SessionChatBox<TExecutor extends string = string>({
           ? 'Type a different answer...'
           : session.isNewSessionMode
             ? 'Start a new conversation...'
-            : 'Continue working on this task...';
+            : `${DEFAULT_CONTINUE_PROMPT}...`;
 
   // Cmd+Enter handler
   const handleCmdEnter = () => {
@@ -528,7 +581,7 @@ export function SessionChatBox<TExecutor extends string = string>({
         return (
           <PrimaryButton
             onClick={actions.onSend}
-            disabled={!canSend}
+            disabled={!canSend && !canSendContinue}
             value={t('conversation.actions.send')}
           />
         );
