@@ -13,6 +13,12 @@ use crate::{
     executors::{ExecutorError, SpawnedChild},
 };
 
+/// When set in the execution environment, the script's stdout/stderr are
+/// appended to this file instead of piped to the server. This detaches the
+/// process from the server's lifetime: it keeps logging even if the server
+/// restarts, and the (new) server tails the file. Used for dev servers.
+pub const RAW_LOG_PATH_ENV: &str = "VK_RAW_LOG_PATH";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub enum ScriptRequestLanguage {
     Bash,
@@ -52,13 +58,28 @@ impl Executable for ScriptRequest {
             None => current_dir.to_path_buf(),
         };
 
+        let (stdout, stderr) = match env.get(RAW_LOG_PATH_ENV) {
+            Some(path) => {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)?;
+                let clone = file.try_clone()?;
+                (
+                    std::process::Stdio::from(clone),
+                    std::process::Stdio::from(file),
+                )
+            }
+            None => (std::process::Stdio::piped(), std::process::Stdio::piped()),
+        };
+
         let (shell_cmd, shell_arg) = get_shell_command();
         let mut command = Command::new(shell_cmd);
         command
             .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stdout(stdout)
+            .stderr(stderr)
             .arg(shell_arg)
             .arg(&self.script)
             .current_dir(&effective_dir);
@@ -69,5 +90,46 @@ impl Executable for ScriptRequest {
         let child = command.group_spawn_no_window()?;
 
         Ok(child.into())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{
+        approvals::NoopExecutorApprovalService,
+        env::{ExecutionEnv, RepoContext},
+    };
+
+    #[tokio::test]
+    async fn redirects_output_to_raw_log_file_when_env_set() {
+        let dir = std::env::temp_dir().join(format!("vk-script-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("out.raw.log");
+
+        let request = ScriptRequest {
+            script: "echo hello-raw-log".to_string(),
+            language: ScriptRequestLanguage::Bash,
+            context: ScriptContext::DevServer,
+            working_dir: None,
+        };
+        let mut env =
+            ExecutionEnv::new(RepoContext::new(dir.clone(), vec![]), false, String::new());
+        env.insert(RAW_LOG_PATH_ENV, log_path.to_string_lossy().into_owned());
+
+        let mut spawned = request
+            .spawn(&dir, Arc::new(NoopExecutorApprovalService), &env)
+            .await
+            .unwrap();
+        // With redirected stdio there are no pipes to consume
+        assert!(spawned.child.inner().stdout.is_none());
+        spawned.child.wait().await.unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("hello-raw-log"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

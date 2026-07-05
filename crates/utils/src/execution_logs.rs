@@ -21,6 +21,15 @@ pub fn process_log_file_path_in_root(root: &Path, session_id: Uuid, process_id: 
         .join(format!("{}.jsonl", process_id))
 }
 
+/// Raw (unstructured) log file that a detached process writes its
+/// stdout/stderr to directly, so its output survives a server restart.
+/// Used for dev servers, which are left running across restarts.
+pub fn process_raw_log_file_path(session_id: Uuid, process_id: Uuid) -> PathBuf {
+    process_logs_session_dir(session_id)
+        .join("processes")
+        .join(format!("{}.raw.log", process_id))
+}
+
 pub struct ExecutionLogWriter {
     path: PathBuf,
     file: tokio::fs::File,

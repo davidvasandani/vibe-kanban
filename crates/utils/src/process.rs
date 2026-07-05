@@ -40,30 +40,39 @@ pub async fn kill_process_group(child: &mut AsyncGroupChild) -> std::io::Result<
 /// happens to reuse the pid.
 #[cfg(unix)]
 pub async fn kill_orphan_process_group(pgid: i32, expected_age_secs: i64) -> bool {
+    if !process_group_leader_matches(pgid, expected_age_secs).await {
+        return false;
+    }
+    kill_process_group_by_pgid(pgid).await
+}
+
+/// Whether any process in the group is still alive.
+#[cfg(unix)]
+pub fn process_group_alive(pgid: i32) -> bool {
+    use nix::{sys::signal::killpg, unistd::Pid};
+    killpg(Pid::from_raw(pgid), None).is_ok()
+}
+
+/// Send SIGTERM then SIGKILL to a process group identified only by its pgid
+/// (e.g. one adopted from a previous server instance, with no child handle).
+/// Returns true if a signal was delivered.
+#[cfg(unix)]
+pub async fn kill_process_group_by_pgid(pgid: i32) -> bool {
     use nix::{
         errno::Errno,
         sys::signal::{Signal, killpg},
         unistd::Pid,
     };
 
-    if !orphan_group_leader_matches(pgid, expected_age_secs).await {
-        return false;
-    }
-
     let pid = Pid::from_raw(pgid);
     let mut signalled = false;
     for sig in [Signal::SIGTERM, Signal::SIGKILL] {
-        tracing::info!("Sending {:?} to orphaned process group {}", sig, pgid);
+        tracing::info!("Sending {:?} to process group {}", sig, pgid);
         match killpg(pid, sig) {
             Ok(()) => signalled = true,
             Err(Errno::ESRCH) => break,
             Err(e) => {
-                tracing::warn!(
-                    "Failed to send {:?} to orphaned process group {}: {}",
-                    sig,
-                    pgid,
-                    e
-                );
+                tracing::warn!("Failed to send {:?} to process group {}: {}", sig, pgid, e);
             }
         }
         if sig != Signal::SIGKILL {
@@ -74,9 +83,10 @@ pub async fn kill_orphan_process_group(pgid: i32, expected_age_secs: i64) -> boo
 }
 
 /// Check that the process with the given pid is still the leader of its own
-/// process group and started around when the execution record was created.
+/// process group and started around when the execution record was created
+/// (guards against acting on a recycled pid).
 #[cfg(unix)]
-async fn orphan_group_leader_matches(pgid: i32, expected_age_secs: i64) -> bool {
+pub async fn process_group_leader_matches(pgid: i32, expected_age_secs: i64) -> bool {
     let output = match tokio::process::Command::new("ps")
         .args(["-o", "pgid=,etime=", "-p", &pgid.to_string()])
         .output()
@@ -140,6 +150,23 @@ fn parse_etime_seconds(etime: &str) -> Option<u64> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::parse_etime_seconds;
+    use crate::command_ext::GroupSpawnNoWindowExt;
+
+    #[tokio::test]
+    async fn detects_and_kills_live_process_group() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .group_spawn_no_window()
+            .expect("spawn sleep");
+        let pgid = child.id().expect("child pid") as i32;
+
+        assert!(super::process_group_alive(pgid));
+        assert!(super::kill_process_group_by_pgid(pgid).await);
+
+        // Reap the child so the group is fully gone, then verify
+        let _ = child.wait().await;
+        assert!(!super::process_group_alive(pgid));
+    }
 
     #[test]
     fn parses_minutes_and_seconds() {
