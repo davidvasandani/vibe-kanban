@@ -124,7 +124,7 @@ fn repo_host_rel(repo: &Repo) -> String {
 /// Pick the spec-host repo out of a workspace's repos:
 /// persisted host (if still present) → the only repo → first by
 /// `display_name` ASC, `id` ASC. `None` only when there are no repos.
-pub fn select_host_repo<'a>(persisted: Option<Uuid>, repos: &'a [Repo]) -> Option<&'a Repo> {
+pub fn select_host_repo(persisted: Option<Uuid>, repos: &[Repo]) -> Option<&Repo> {
     if let Some(id) = persisted
         && let Some(repo) = repos.iter().find(|r| r.id == id)
     {
