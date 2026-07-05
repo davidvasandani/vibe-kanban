@@ -194,6 +194,12 @@ pub trait ContainerService {
 
     async fn kill_all_running_processes(&self) -> Result<(), ContainerError>;
 
+    /// Try to re-attach to a still-running process left behind by a previous
+    /// server instance instead of interrupting it. Returns true when adopted.
+    async fn try_adopt_execution(&self, _process: &ExecutionProcess) -> bool {
+        false
+    }
+
     async fn delete(&self, workspace: &Workspace) -> Result<(), ContainerError>;
 
     /// A context is finalized when
@@ -281,6 +287,11 @@ pub trait ContainerService {
         let running_processes = ExecutionProcess::find_running(&self.db().pool).await?;
         let mut interrupted = Vec::new();
         for process in running_processes {
+            // Detached processes (dev servers) are left running across
+            // restarts; if still alive, re-attach instead of killing.
+            if self.try_adopt_execution(&process).await {
+                continue;
+            }
             tracing::info!(
                 "Found orphaned execution process {} for session {}",
                 process.id,
@@ -1405,12 +1416,19 @@ pub trait ContainerService {
             }
         }
 
-        execution_process::spawn_stream_raw_logs_to_storage(
-            self.msg_stores().clone(),
-            self.db().clone(),
-            execution_process.id,
-            session.id,
-        );
+        // Detached dev servers (unix) write their own raw log file, which is
+        // the persistent record; mirroring the MsgStore into a JSONL file
+        // would duplicate it on every adoption replay.
+        let dev_server_writes_own_log =
+            cfg!(unix) && matches!(run_reason, ExecutionProcessRunReason::DevServer);
+        if !dev_server_writes_own_log {
+            execution_process::spawn_stream_raw_logs_to_storage(
+                self.msg_stores().clone(),
+                self.db().clone(),
+                execution_process.id,
+                session.id,
+            );
+        }
         Ok(execution_process)
     }
 
