@@ -41,7 +41,7 @@ import { buildAgentPrompt } from '@/shared/lib/promptMessage';
 import { formatDateShortWithTime } from '@/shared/lib/date';
 import { toPrettyCase } from '@/shared/lib/string';
 import {
-  DEFAULT_CONTINUE_PROMPT,
+  resolveSessionSendMessage,
   SessionChatBox,
   type ExecutionStatus,
   type SessionChatBoxEditorRenderProps,
@@ -532,10 +532,12 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   const handleSend = useCallback(async () => {
     // Sending with an empty editor in an existing session submits the
     // default continue prompt advertised by the placeholder.
-    const message =
-      !localMessage.trim() && !reviewMarkdown && !isNewSessionMode
-        ? DEFAULT_CONTINUE_PROMPT
-        : localMessage;
+    const message = resolveSessionSendMessage({
+      message: localMessage,
+      hasReviewComments: Boolean(reviewMarkdown),
+      isNewSessionMode,
+      isDraftLoaded: hasInitialValue && !isScratchLoading,
+    });
     const { prompt, isSlashCommand } = buildAgentPrompt(message, [
       reviewMarkdown,
     ]);
@@ -566,6 +568,8 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     setLocalMessage,
     clearUploadedAttachments,
     isNewSessionMode,
+    hasInitialValue,
+    isScratchLoading,
     clearDraft,
     reviewContext,
   ]);

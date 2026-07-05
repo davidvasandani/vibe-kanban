@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import {
   SessionChatBox,
   DEFAULT_CONTINUE_PROMPT,
+  resolveSessionSendMessage,
   type ExecutionStatus,
 } from "@vibe/ui/components/SessionChatBox";
 
@@ -11,8 +12,10 @@ function renderChatBox(overrides: {
   status?: ExecutionStatus;
   value?: string;
   isNewSessionMode?: boolean;
+  selectedSessionId?: string;
 }) {
   const onSend = vi.fn();
+  const hasSession = "selectedSessionId" in overrides;
   render(
     <SessionChatBox
       status={overrides.status ?? "idle"}
@@ -26,7 +29,10 @@ function renderChatBox(overrides: {
         onPasteFiles: vi.fn(),
       }}
       session={{
-        sessions: [],
+        sessions: hasSession
+          ? [{ id: overrides.selectedSessionId!, created_at: "2026-01-01" }]
+          : [],
+        selectedSessionId: overrides.selectedSessionId,
         onSelectSession: vi.fn(),
         isNewSessionMode: overrides.isNewSessionMode ?? false,
       }}
@@ -41,7 +47,7 @@ const sendButton = () => screen.getByRole("button", { name: /(^|\.)send$/i });
 
 describe("SessionChatBox – sending the prefilled (placeholder) prompt", () => {
   it("enables Send with an empty editor when continuing an existing session", async () => {
-    const { onSend } = renderChatBox({ value: "" });
+    const { onSend } = renderChatBox({ value: "", selectedSessionId: "s1" });
 
     const btn = sendButton();
     expect(btn).toBeEnabled();
@@ -55,12 +61,57 @@ describe("SessionChatBox – sending the prefilled (placeholder) prompt", () => 
     expect(sendButton()).toBeDisabled();
   });
 
-  it("keeps Send enabled when the editor has content", () => {
-    renderChatBox({ value: "do the thing" });
-    expect(sendButton()).toBeEnabled();
+  it("keeps Send disabled in placeholder mode (no session selected)", () => {
+    renderChatBox({ value: "" });
+    expect(sendButton()).toBeDisabled();
   });
 
-  it("advertises the default continue prompt in the placeholder", () => {
+  it("keeps Send enabled when the editor has content", () => {
+    renderChatBox({ value: "do the thing", selectedSessionId: "s1" });
+    expect(sendButton()).toBeEnabled();
+  });
+});
+
+describe("resolveSessionSendMessage", () => {
+  const base = {
+    message: "",
+    hasReviewComments: false,
+    isNewSessionMode: false,
+    isDraftLoaded: true,
+  };
+
+  it("substitutes the default continue prompt for an empty message in an existing session", () => {
+    expect(resolveSessionSendMessage(base)).toBe(DEFAULT_CONTINUE_PROMPT);
+    expect(resolveSessionSendMessage({ ...base, message: "   " })).toBe(
+      DEFAULT_CONTINUE_PROMPT,
+    );
+  });
+
+  it("keeps a typed message as-is", () => {
+    expect(resolveSessionSendMessage({ ...base, message: "fix the bug" })).toBe(
+      "fix the bug",
+    );
+  });
+
+  it("does not substitute when review comments carry the content", () => {
+    expect(
+      resolveSessionSendMessage({ ...base, hasReviewComments: true }),
+    ).toBe("");
+  });
+
+  it("does not substitute in new-session mode", () => {
+    expect(resolveSessionSendMessage({ ...base, isNewSessionMode: true })).toBe(
+      "",
+    );
+  });
+
+  it("does not substitute while a persisted draft is still loading", () => {
+    expect(resolveSessionSendMessage({ ...base, isDraftLoaded: false })).toBe(
+      "",
+    );
+  });
+
+  it("advertises the same prompt the placeholder shows", () => {
     // The placeholder must stay in sync with the prompt that gets sent.
     expect(DEFAULT_CONTINUE_PROMPT).toBe("Continue working on this task");
   });

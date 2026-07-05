@@ -45,6 +45,32 @@ import {
  */
 export const DEFAULT_CONTINUE_PROMPT = 'Continue working on this task';
 
+/**
+ * Message to submit from the session chat box: an empty box in an existing
+ * session sends `DEFAULT_CONTINUE_PROMPT` instead. The fallback only
+ * applies when there is nothing else to send (no typed text, no review
+ * comments), the box belongs to an existing session, and any persisted draft
+ * has finished loading (so a not-yet-restored draft can't be bypassed).
+ */
+export function resolveSessionSendMessage(options: {
+  message: string;
+  hasReviewComments: boolean;
+  isNewSessionMode: boolean;
+  isDraftLoaded: boolean;
+}): string {
+  const { message, hasReviewComments, isNewSessionMode, isDraftLoaded } =
+    options;
+  if (
+    message.trim() ||
+    hasReviewComments ||
+    isNewSessionMode ||
+    !isDraftLoaded
+  ) {
+    return message;
+  }
+  return DEFAULT_CONTINUE_PROMPT;
+}
+
 // Status enum - single source of truth for execution state
 export type ExecutionStatus =
   | 'idle'
@@ -301,8 +327,13 @@ export function SessionChatBox<TExecutor extends string = string>({
   // With an empty editor in an existing session, the Send button submits the
   // default continue prompt advertised by the placeholder. Button only:
   // keyboard shortcuts still require typed content to avoid accidental sends.
+  // Requires a selected session so the placeholder-mode chat box (no session
+  // yet, no-op actions) keeps its disabled Send button.
   const canSendContinue =
-    !hasContent && status === 'idle' && !session.isNewSessionMode;
+    !hasContent &&
+    status === 'idle' &&
+    !session.isNewSessionMode &&
+    Boolean(session.selectedSessionId);
   const isQueued = status === 'queued';
   const isRunning = status === 'running' || status === 'queued';
   const areContentInsertActionsDisabled = isDisabled || isQueued;
