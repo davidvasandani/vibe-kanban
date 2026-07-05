@@ -38,6 +38,13 @@ import {
   type TurnNavigationItem,
 } from './TurnNavigationPopup';
 
+/**
+ * Prompt sent when the user hits Send with an empty editor in an existing
+ * session. The placeholder advertises exactly this prompt, so the two must
+ * stay in sync.
+ */
+export const DEFAULT_CONTINUE_PROMPT = 'Continue working on this task';
+
 // Status enum - single source of truth for execution state
 export type ExecutionStatus =
   | 'idle'
@@ -291,6 +298,11 @@ export function SessionChatBox<TExecutor extends string = string>({
     editor.value.trim().length > 0 || (reviewComments?.count ?? 0) > 0;
   const canSend =
     hasContent && !['sending', 'stopping', 'queue-loading'].includes(status);
+  // With an empty editor in an existing session, the Send button submits the
+  // default continue prompt advertised by the placeholder. Button only:
+  // keyboard shortcuts still require typed content to avoid accidental sends.
+  const canSendContinue =
+    !hasContent && status === 'idle' && !session.isNewSessionMode;
   const isQueued = status === 'queued';
   const isRunning = status === 'running' || status === 'queued';
   const areContentInsertActionsDisabled = isDisabled || isQueued;
@@ -310,7 +322,7 @@ export function SessionChatBox<TExecutor extends string = string>({
           ? 'Type a different answer...'
           : session.isNewSessionMode
             ? 'Start a new conversation...'
-            : 'Continue working on this task...';
+            : `${DEFAULT_CONTINUE_PROMPT}...`;
 
   // Cmd+Enter handler
   const handleCmdEnter = () => {
@@ -520,7 +532,7 @@ export function SessionChatBox<TExecutor extends string = string>({
         return (
           <PrimaryButton
             onClick={actions.onSend}
-            disabled={!canSend}
+            disabled={!canSend && !canSendContinue}
             value={t('conversation.actions.send')}
           />
         );
