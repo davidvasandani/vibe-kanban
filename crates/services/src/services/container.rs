@@ -222,10 +222,12 @@ pub trait ContainerService {
             return false;
         }
 
-        // Always finalize failed or killed executions, regardless of next action
+        // Always finalize failed, killed or interrupted executions, regardless of next action
         if matches!(
             ctx.execution_process.status,
-            ExecutionProcessStatus::Failed | ExecutionProcessStatus::Killed
+            ExecutionProcessStatus::Failed
+                | ExecutionProcessStatus::Killed
+                | ExecutionProcessStatus::Interrupted
         ) {
             return true;
         }
@@ -237,7 +239,11 @@ pub trait ContainerService {
     /// Finalize workspace execution by sending notifications
     async fn finalize_task(&self, ctx: &ExecutionContext) {
         // Skip notification if process was intentionally killed by user
-        if matches!(ctx.execution_process.status, ExecutionProcessStatus::Killed) {
+        // or interrupted by a server shutdown/restart
+        if matches!(
+            ctx.execution_process.status,
+            ExecutionProcessStatus::Killed | ExecutionProcessStatus::Interrupted
+        ) {
             return;
         }
 
@@ -282,7 +288,7 @@ pub trait ContainerService {
             if let Err(e) = ExecutionProcess::update_completion(
                 &self.db().pool,
                 process.id,
-                ExecutionProcessStatus::Failed,
+                ExecutionProcessStatus::Interrupted,
                 None, // No exit code for orphaned processes
             )
             .await
@@ -319,8 +325,10 @@ pub trait ContainerService {
                     }
                 }
             }
-            // Process marked as failed
-            tracing::info!("Marked orphaned execution process {} as failed", process.id);
+            tracing::info!(
+                "Marked orphaned execution process {} as interrupted",
+                process.id
+            );
         }
         Ok(())
     }

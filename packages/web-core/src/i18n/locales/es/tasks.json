@@ -445,6 +445,11 @@
       "count_one": "{{count}} comentario de revisión será incluido",
       "count_other": "{{count}} comentarios de revisión serán incluidos"
     },
+    "interrupted": {
+      "message": "Esta ejecución fue interrumpida por un reinicio de vibe-kanban.",
+      "resume": "Reanudar",
+      "resuming": "Reanudando"
+    },
     "workspace": {
       "create": "Crear",
       "creating": "Creando..."

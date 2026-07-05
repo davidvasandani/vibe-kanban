@@ -45,6 +45,9 @@ pub enum ExecutionProcessStatus {
     Completed,
     Failed,
     Killed,
+    /// Stopped by a server shutdown/restart (e.g. a deploy), not by the user
+    /// or a failure. Interrupted coding-agent runs can be resumed.
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Type, Serialize, Deserialize, PartialEq, TS)]
@@ -419,6 +422,7 @@ impl ExecutionProcess {
         if let Ok(exp_process) = Self::find_by_id(pool, id).await
             && exp_process.is_some_and(|ep| {
                 ep.status == ExecutionProcessStatus::Killed
+                    || ep.status == ExecutionProcessStatus::Interrupted
                     || ep.status == ExecutionProcessStatus::Completed
             })
         {

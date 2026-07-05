@@ -121,7 +121,8 @@ export function deriveConversationSemanticTimeline(
           liveExecutionProcess?.status === ExecutionProcessStatus.running,
         failedOrKilled:
           liveExecutionProcess?.status === ExecutionProcessStatus.failed ||
-          liveExecutionProcess?.status === ExecutionProcessStatus.killed,
+          liveExecutionProcess?.status === ExecutionProcessStatus.killed ||
+          liveExecutionProcess?.status === ExecutionProcessStatus.interrupted,
       } satisfies ConversationSemanticProcessItem;
     });
 

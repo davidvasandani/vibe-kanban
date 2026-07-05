@@ -43,7 +43,12 @@ export interface WorkspaceWithStats {
   hasRunningDevServer?: boolean;
   hasUnseenActivity?: boolean;
   latestProcessCompletedAt?: string;
-  latestProcessStatus?: 'running' | 'completed' | 'failed' | 'killed';
+  latestProcessStatus?:
+    | 'running'
+    | 'completed'
+    | 'failed'
+    | 'killed'
+    | 'interrupted';
 }
 
 export interface IssueWorkspaceCardProps {
@@ -145,7 +150,8 @@ export function IssueWorkspaceCard({
   const hasUnseenActivity = workspace.hasUnseenActivity ?? false;
   const isFailed =
     workspace.latestProcessStatus === 'failed' ||
-    workspace.latestProcessStatus === 'killed';
+    workspace.latestProcessStatus === 'killed' ||
+    workspace.latestProcessStatus === 'interrupted';
   const hasLiveStatusIndicator =
     hasRunningDevServer ||
     isFailed ||
