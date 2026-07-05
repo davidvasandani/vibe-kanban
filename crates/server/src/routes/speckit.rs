@@ -1,8 +1,10 @@
-//! SpecKit (Spec-Driven Development) viewer endpoints, anchored on **tasks**.
+//! SpecKit (Spec-Driven Development) viewer endpoints, anchored on
+//! **workspaces**. The frontend resolves a kanban issue to its most recent
+//! locally-present workspace and asks about that workspace by id.
 //!
 //! The viewer is a read/edit layer over the artifacts the SpecKit pipeline's
-//! `/speckit.*` slash commands write into the task's most recent live
-//! workspace, under `<container_ref>/<host_rel>/specs/<feature_key>/`. The
+//! `/speckit.*` slash commands write into the workspace's worktree, under
+//! `<container_ref>/<host_rel>/specs/<feature_key>/`. The
 //! spec-host repo and feature key come from
 //! `services::services::speckit::resolve_speckit_host`, so provisioning, the
 //! agent, and the viewer all agree on one base directory — for single- and

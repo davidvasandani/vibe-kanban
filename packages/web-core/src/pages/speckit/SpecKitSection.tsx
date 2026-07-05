@@ -207,6 +207,16 @@ function ArtifactEditor({
   const [dirty, setDirty] = useState(false);
   const update = useUpdateSpecKitArtifact(workspaceId);
 
+  // If the selected artifact disappears from the list (agent rewrote the
+  // feature dir), clamp the selection and drop the stale draft so Save can
+  // never write the old file's content into a different artifact.
+  useEffect(() => {
+    if (!artifacts.some((a) => a.relative_path === selectedPath)) {
+      setSelectedPath(artifacts[0].relative_path);
+      setDirty(false);
+    }
+  }, [artifacts, selectedPath]);
+
   // Re-seed the editor whenever the operator switches artifact or fresh
   // content arrives while the draft is untouched.
   useEffect(() => {
