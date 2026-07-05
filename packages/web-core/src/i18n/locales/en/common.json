@@ -568,5 +568,23 @@
     "addonLabel": "Prompt addon (editable)",
     "addonPlaceholder": "Tick stages above to compose the pipeline block, or type your own.",
     "resetToGenerated": "Reset to generated"
+  },
+  "speckit": {
+    "title": "SpecKit",
+    "stageProgress": "{{done}}/{{total}} stages",
+    "tasksProgress": "{{done}}/{{total}} tasks done",
+    "parallelMarker": "P",
+    "save": "Save",
+    "saving": "Saving…",
+    "saveFailed": "Failed to save the artifact.",
+    "stages": {
+      "constitution": "Constitution",
+      "specify": "Specify",
+      "clarify": "Clarify",
+      "plan": "Plan",
+      "tasks": "Tasks",
+      "analyze": "Analyze",
+      "implement": "Implement"
+    }
   }
 }

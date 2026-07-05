@@ -131,19 +131,18 @@ pub struct SpecKitStageArtifact {
     pub exists: bool,
 }
 
-/// Whether the task has a live workspace whose SpecKit artifacts the viewer
-/// can show. Returned even when there is nothing to view (`enabled: false`) so
-/// the viewer can render an empty state explaining why (see `note`).
+/// Whether a workspace has SpecKit artifacts the viewer can show. Returned
+/// even when there is nothing to view (`enabled: false`) so the viewer can
+/// render an empty state explaining why (see `note`). The frontend picks the
+/// task's most recent local workspace and asks about it by id.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SpecKitTaskStatus {
-    pub task_id: Uuid,
+    pub workspace_id: Uuid,
     pub enabled: bool,
     /// Explains why `enabled` is false, so the frontend can show accurate
     /// copy without re-deriving it.
     #[ts(optional)]
     pub note: Option<String>,
-    #[ts(optional)]
-    pub workspace_id: Option<Uuid>,
     /// The SpecKit feature key (the workspace branch, verbatim, captured at
     /// first provisioning).
     #[ts(optional)]
