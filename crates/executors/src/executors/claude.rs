@@ -1559,6 +1559,9 @@ impl ClaudeLogProcessor {
                         }
                         entry_index_provider.reset();
                         self.tool_map.clear();
+                        // Indices are reallocated from 0 after the reset, so the
+                        // tracked collapse target no longer points at its entry.
+                        self.repeated_system_message = None;
                     }
 
                     for item in message.content.items() {
@@ -2995,6 +2998,34 @@ mod tests {
         ));
         let (idx, entry) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
         assert_ne!(idx, first_idx);
+        assert_eq!(entry.content, "System: thinking_tokens");
+    }
+
+    #[test]
+    fn test_amp_resume_reset_clears_repeat_tracker() {
+        let mut processor = ClaudeLogProcessor::new_with_strategy(HistoryStrategy::AmpResume);
+        let provider = EntryIndexProvider::test_new();
+        let system_json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"thinking_tokens"}"#).unwrap();
+        let user_json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"resume"}]},"session_id":null}"#,
+        )
+        .unwrap();
+
+        // Tracked at index 0, then the user message resets the provider and
+        // reallocates index 0 for itself.
+        processor.normalize_entries(&system_json, "", &provider);
+        processor.normalize_entries(&user_json, "", &provider);
+
+        // The stale tracker must not replace the user message at index 0.
+        let patches = processor.normalize_entries(&system_json, "", &provider);
+        assert_eq!(patches.len(), 1);
+        assert!(matches!(
+            patches[0].0.first(),
+            Some(json_patch::PatchOperation::Add(_))
+        ));
+        let (idx, entry) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+        assert_eq!(idx, 1);
         assert_eq!(entry.content, "System: thinking_tokens");
     }
 
