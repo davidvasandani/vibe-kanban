@@ -137,6 +137,7 @@ impl StandardCodingAgentExecutor for Amp {
             current_dir,
             entry_index_provider.clone(),
             HistoryStrategy::AmpResume,
+            None,
         );
 
         // Process stderr logs using the standard stderr processor

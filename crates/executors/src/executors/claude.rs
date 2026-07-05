@@ -397,6 +397,7 @@ impl StandardCodingAgentExecutor for ClaudeCode {
             current_dir,
             entry_index_provider.clone(),
             HistoryStrategy::Default,
+            self.model.clone(),
         );
 
         // Process stderr logs
@@ -725,6 +726,24 @@ pub enum HistoryStrategy {
 /// Default context window for models (used until we get actual value from result)
 const DEFAULT_CLAUDE_CONTEXT_WINDOW: u32 = 200_000;
 
+/// Context window (in tokens) granted by the 1M-token context beta. Models
+/// opting into it carry a `[1m]` suffix in their name/alias.
+const CLAUDE_1M_CONTEXT_WINDOW: u32 = 1_000_000;
+
+/// Infer a model's max context window from its name or alias.
+///
+/// Different models have different max contexts. Standard Claude models use the
+/// default window; models requesting the 1M-token context beta carry a `[1m]`
+/// suffix (e.g. `opus[1m]`). We rely on the configured/reported model string
+/// because the end-of-turn usage report is only available once a turn finishes.
+fn context_window_for_model(model: &str) -> u32 {
+    if model.contains("[1m]") {
+        CLAUDE_1M_CONTEXT_WINDOW
+    } else {
+        DEFAULT_CLAUDE_CONTEXT_WINDOW
+    }
+}
+
 /// Handles log processing and interpretation for Claude executor
 pub struct ClaudeLogProcessor {
     model_name: Option<String>,
@@ -767,6 +786,7 @@ impl ClaudeLogProcessor {
         current_dir: &Path,
         entry_index_provider: EntryIndexProvider,
         strategy: HistoryStrategy,
+        configured_model: Option<String>,
     ) -> tokio::task::JoinHandle<()> {
         let current_dir_clone = current_dir.to_owned();
         tokio::spawn(async move {
@@ -775,6 +795,13 @@ impl ClaudeLogProcessor {
             let worktree_path = current_dir_clone.to_string_lossy().to_string();
             let mut session_id_extracted = false;
             let mut processor = Self::new_with_strategy(strategy);
+            // Seed the context window from the configured model. The model
+            // reported in the stream may drop the `[1m]` suffix, so the
+            // configured alias is the reliable source until the end-of-turn
+            // usage report provides the real value.
+            if let Some(model) = configured_model.as_deref() {
+                processor.main_model_context_window = context_window_for_model(model);
+            }
             // Track pending assistant UUID - only committed when we see a Result message
             let mut pending_assistant_uuid: Option<String> = None;
 
@@ -1264,9 +1291,12 @@ impl ClaudeLogProcessor {
                             // this name matches the model names in the usage report in the result message
                             if let Some(model) = model {
                                 self.main_model_name = Some(model.clone());
-                                if model.contains("[1m]") {
-                                    self.main_model_context_window = 1_000_000;
-                                }
+                                // Only upgrade the window; never downgrade a
+                                // value already seeded from the configured model
+                                // (the reported name may drop the `[1m]` suffix).
+                                self.main_model_context_window = self
+                                    .main_model_context_window
+                                    .max(context_window_for_model(model));
                             }
                         }
                         // Skip system init messages because it doesn't contain the actual model that will be used in assistant messages in case of claude-code-router.
@@ -2102,6 +2132,16 @@ fn extract_model_name(
         && let Some(model) = message.model.as_ref()
     {
         processor.model_name = Some(model.clone());
+        // Fall back to the assistant-reported model for context-window tracking
+        // when the system init message carried no model (e.g. claude-code-router).
+        // This name matches the keys in the end-of-turn usage report, so it also
+        // lets that report correct the window later.
+        if processor.main_model_name.is_none() {
+            processor.main_model_name = Some(model.clone());
+            processor.main_model_context_window = processor
+                .main_model_context_window
+                .max(context_window_for_model(model));
+        }
         let entry = NormalizedEntry {
             timestamp: None,
             entry_type: NormalizedEntryType::SystemMessage,
@@ -3283,5 +3323,80 @@ mod tests {
         let control_request_json = r#"{"type":"control_request","request_id":"f559d907-b139-475b-addd-79c05591eb99","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"./gradlew :web:testApi","timeout":300000,"description":"Run API tests"},"permission_suggestions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"./gradlew :web:testApi:"}],"behavior":"allow","destination":"localSettings"}],"tool_use_id":"toolu_014PR3WXsJfiftSCbjcjEbeM"}}"#;
         let parsed: ClaudeJson = serde_json::from_str(control_request_json).unwrap();
         assert!(matches!(parsed, ClaudeJson::ControlRequest { .. }));
+    }
+
+    #[test]
+    fn test_context_window_for_model() {
+        assert_eq!(
+            context_window_for_model("opus"),
+            DEFAULT_CLAUDE_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("sonnet"),
+            DEFAULT_CLAUDE_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-opus-4-8"),
+            DEFAULT_CLAUDE_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("opus[1m]"),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-sonnet-4-20250514[1m]"),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+    }
+
+    #[test]
+    fn test_init_with_1m_model_upgrades_context_window() {
+        let mut processor = ClaudeLogProcessor::new();
+        assert_eq!(
+            processor.main_model_context_window,
+            DEFAULT_CLAUDE_CONTEXT_WINDOW
+        );
+
+        let init: ClaudeJson = serde_json::from_str(
+            r#"{"type":"system","subtype":"init","session_id":"abc","model":"opus[1m]"}"#,
+        )
+        .unwrap();
+        normalize_helper(&mut processor, &init, "/tmp");
+
+        assert_eq!(
+            processor.main_model_context_window,
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+    }
+
+    #[test]
+    fn test_seeded_1m_window_not_downgraded_by_reported_name() {
+        // Simulates a model configured as `opus[1m]` (seeded to 1M) whose
+        // stream reports the resolved name without the `[1m]` suffix.
+        let mut processor = ClaudeLogProcessor::new();
+        processor.main_model_context_window = CLAUDE_1M_CONTEXT_WINDOW;
+
+        // Init carries no model (router-style), assistant reports the stripped name.
+        let init: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"init","session_id":"abc"}"#)
+                .unwrap();
+        normalize_helper(&mut processor, &init, "/tmp");
+
+        let assistant: ClaudeJson = serde_json::from_str(
+            r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}]}}"#,
+        )
+        .unwrap();
+        normalize_helper(&mut processor, &assistant, "/tmp");
+
+        // The window stays at 1M, and the reported name is captured so the
+        // end-of-turn usage report can still correct it.
+        assert_eq!(
+            processor.main_model_context_window,
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            processor.main_model_name.as_deref(),
+            Some("claude-opus-4-8")
+        );
     }
 }
