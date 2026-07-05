@@ -47,6 +47,31 @@ impl<'a> OrganizationEnvVarRepository<'a> {
         Ok(rows)
     }
 
+    /// Fetch all env vars for an organization as `(name, encrypted_value)`
+    /// pairs. Unlike `list`, this includes the encrypted payload so callers can
+    /// decrypt it — used only to resolve env vars for injection into agents.
+    pub async fn list_with_encrypted_values(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<(String, String)>, OrganizationEnvVarError> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT name AS "name!", encrypted_value AS "encrypted_value!"
+            FROM organization_env_vars
+            WHERE organization_id = $1
+            ORDER BY name
+            "#,
+            organization_id
+        )
+        .fetch_all(self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.name, row.encrypted_value))
+            .collect())
+    }
+
     pub async fn create(
         &self,
         organization_id: Uuid,

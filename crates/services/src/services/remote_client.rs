@@ -13,11 +13,11 @@ use api_types::{
     ListIssueRelationshipsResponse, ListIssueTagsResponse, ListIssuesResponse, ListMembersResponse,
     ListOrganizationsResponse, ListProjectStatusesResponse, ListProjectsResponse,
     ListPullRequestsResponse, ListTagsResponse, LocalLoginRequest, LocalLoginResponse,
-    MutationResponse, Organization, ProfileResponse, PullRequest, RevokeInvitationRequest,
-    SearchIssuesRequest, SingleUserLoginResponse, Tag, TokenRefreshRequest, TokenRefreshResponse,
-    UpdateIssueRequest, UpdateMemberRoleRequest, UpdateMemberRoleResponse,
-    UpdateOrganizationRequest, UpdatePullRequestApiRequest, UpdateWorkspaceRequest,
-    UpsertPullRequestRequest, Workspace,
+    MutationResponse, Organization, ProfileResponse, PullRequest,
+    ResolvedOrganizationEnvVarsResponse, RevokeInvitationRequest, SearchIssuesRequest,
+    SingleUserLoginResponse, Tag, TokenRefreshRequest, TokenRefreshResponse, UpdateIssueRequest,
+    UpdateMemberRoleRequest, UpdateMemberRoleResponse, UpdateOrganizationRequest,
+    UpdatePullRequestApiRequest, UpdateWorkspaceRequest, UpsertPullRequestRequest, Workspace,
 };
 use backon::{ExponentialBuilder, Retryable};
 use chrono::Duration as ChronoDuration;
@@ -569,6 +569,17 @@ impl RemoteClient {
     /// Lists organizations for the authenticated user.
     pub async fn list_organizations(&self) -> Result<ListOrganizationsResponse, RemoteClientError> {
         self.get_authed("/v1/organizations").await
+    }
+
+    /// Fetches the owning organization's env vars (decrypted) for a remote
+    /// project the caller can access. Used to inject org-level env vars into
+    /// agents started against that project.
+    pub async fn get_project_env_vars(
+        &self,
+        remote_project_id: Uuid,
+    ) -> Result<ResolvedOrganizationEnvVarsResponse, RemoteClientError> {
+        self.get_authed(&format!("/v1/projects/{remote_project_id}/env-vars"))
+            .await
     }
 
     /// Gets a specific organization by ID.

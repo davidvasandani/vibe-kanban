@@ -75,11 +75,7 @@ fn validate_value(value: &str) -> Result<&str, ErrorResponse> {
     Ok(value)
 }
 
-async fn assert_admin(
-    state: &AppState,
-    org_id: Uuid,
-    user_id: Uuid,
-) -> Result<(), ErrorResponse> {
+async fn assert_admin(state: &AppState, org_id: Uuid, user_id: Uuid) -> Result<(), ErrorResponse> {
     OrganizationRepository::new(&state.pool)
         .assert_admin(org_id, user_id)
         .await
