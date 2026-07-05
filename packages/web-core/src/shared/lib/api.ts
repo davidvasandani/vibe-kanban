@@ -1081,9 +1081,12 @@ export const pipelinesApi = {
 // see crates/server/src/routes/speckit.rs)
 export const speckitApi = {
   getStatus: async (workspaceId: string): Promise<SpecKitTaskStatus> => {
-    const response = await makeRequest(`/api/speckit/workspace/${workspaceId}`, {
-      cache: 'no-store',
-    });
+    const response = await makeRequest(
+      `/api/speckit/workspace/${workspaceId}`,
+      {
+        cache: 'no-store',
+      }
+    );
     return handleApiResponse<SpecKitTaskStatus>(response);
   },
   getArtifacts: async (workspaceId: string): Promise<SpecKitArtifacts> => {
