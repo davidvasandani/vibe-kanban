@@ -496,9 +496,7 @@ pub trait ContainerService {
         process: &ExecutionProcess,
     ) -> Result<Option<ExecutionProcess>, ContainerError> {
         let pool = &self.db().pool;
-        let executor_action = process
-            .executor_action()
-            .map_err(ContainerError::Other)?;
+        let executor_action = process.executor_action().map_err(ContainerError::Other)?;
         let Some(executor_config) = executor_config_for_auto_resume(executor_action) else {
             tracing::info!(
                 "Not auto-resuming process {}: not a coding-agent request, or it was itself a resume of an interrupted run",
