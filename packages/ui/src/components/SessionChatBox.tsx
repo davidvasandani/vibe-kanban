@@ -190,6 +190,12 @@ export interface SessionChatBoxEditorRenderProps<
 interface SessionChatBoxProps<TExecutor extends string = string> {
   status: ExecutionStatus;
   editor: EditorProps;
+  /**
+   * Whether a persisted draft is still loading into the editor. While true the
+   * empty editor cannot yet be trusted, so the "send the default continue
+   * prompt" affordance stays disabled to avoid a Send button that no-ops.
+   */
+  isDraftLoading?: boolean;
   renderEditor: (
     props: SessionChatBoxEditorRenderProps<TExecutor>
   ) => ReactNode;
@@ -257,6 +263,7 @@ function defaultFormatSessionDate(createdAt: string | Date) {
 export function SessionChatBox<TExecutor extends string = string>({
   status,
   editor,
+  isDraftLoading = false,
   renderEditor,
   actions,
   session,
@@ -328,12 +335,15 @@ export function SessionChatBox<TExecutor extends string = string>({
   // default continue prompt advertised by the placeholder. Button only:
   // keyboard shortcuts still require typed content to avoid accidental sends.
   // Requires a selected session so the placeholder-mode chat box (no session
-  // yet, no-op actions) keeps its disabled Send button.
+  // yet, no-op actions) keeps its disabled Send button, and a fully-loaded
+  // draft so the button never appears enabled while it would no-op (the
+  // resolver refuses to substitute the prompt until the draft has loaded).
   const canSendContinue =
     !hasContent &&
     status === 'idle' &&
     !session.isNewSessionMode &&
-    Boolean(session.selectedSessionId);
+    Boolean(session.selectedSessionId) &&
+    !isDraftLoading;
   const isQueued = status === 'queued';
   const isRunning = status === 'running' || status === 'queued';
   const areContentInsertActionsDisabled = isDisabled || isQueued;

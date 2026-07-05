@@ -1096,6 +1096,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
         value: editorValue,
         onChange: handleEditorChange,
       }}
+      isDraftLoading={isScratchLoading || !hasInitialValue}
       actions={{
         onSend: handleSend,
         onQueue: handleQueueMessage,

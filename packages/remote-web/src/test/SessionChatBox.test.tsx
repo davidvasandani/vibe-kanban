@@ -13,6 +13,7 @@ function renderChatBox(overrides: {
   value?: string;
   isNewSessionMode?: boolean;
   selectedSessionId?: string;
+  isDraftLoading?: boolean;
 }) {
   const onSend = vi.fn();
   const hasSession = "selectedSessionId" in overrides;
@@ -20,6 +21,7 @@ function renderChatBox(overrides: {
     <SessionChatBox
       status={overrides.status ?? "idle"}
       editor={{ value: overrides.value ?? "", onChange: vi.fn() }}
+      isDraftLoading={overrides.isDraftLoading ?? false}
       renderEditor={() => <div data-testid="editor" />}
       actions={{
         onSend,
@@ -63,6 +65,13 @@ describe("SessionChatBox – sending the prefilled (placeholder) prompt", () => 
 
   it("keeps Send disabled in placeholder mode (no session selected)", () => {
     renderChatBox({ value: "" });
+    expect(sendButton()).toBeDisabled();
+  });
+
+  it("keeps Send disabled while a persisted draft is still loading", () => {
+    // Enabling it here would render a clickable button that no-ops, because
+    // the resolver refuses to substitute the prompt until the draft loads.
+    renderChatBox({ value: "", selectedSessionId: "s1", isDraftLoading: true });
     expect(sendButton()).toBeDisabled();
   });
 
