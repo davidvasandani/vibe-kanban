@@ -29,13 +29,18 @@ struct McpCreateIssueRequest {
         description = "Optional priority of the issue. Allowed values: 'urgent', 'high', 'medium', 'low'."
     )]
     priority: Option<String>,
-    #[schemars(description = "Optional parent issue ID to create a subissue")]
-    parent_issue_id: Option<Uuid>,
+    #[schemars(
+        description = "Optional parent issue to create a subissue under. Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+    )]
+    parent_issue_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct McpCreateIssueResponse {
+    #[schemars(description = "The unique identifier of the created issue")]
     issue_id: String,
+    #[schemars(description = "The human-readable issue key shown on the board (e.g. 'VAS-64')")]
+    simple_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -54,8 +59,10 @@ struct McpListIssuesRequest {
         description = "Filter by priority. Allowed values: 'urgent', 'high', 'medium', 'low'."
     )]
     priority: Option<String>,
-    #[schemars(description = "Filter by parent issue ID (subissues of this issue)")]
-    parent_issue_id: Option<Uuid>,
+    #[schemars(
+        description = "Filter by parent issue (subissues of this issue). Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+    )]
+    parent_issue_id: Option<String>,
     #[schemars(description = "Case-insensitive substring match against title and description")]
     search: Option<String>,
     #[schemars(description = "Filter by issue simple ID (case-insensitive exact match)")]
@@ -200,8 +207,10 @@ struct McpListIssuesResponse {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct McpUpdateIssueRequest {
-    #[schemars(description = "The ID of the issue to update")]
-    issue_id: Uuid,
+    #[schemars(
+        description = "The issue to update. Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+    )]
+    issue_id: String,
     #[schemars(description = "New title for the issue")]
     title: Option<String>,
     #[schemars(description = "New description for the issue")]
@@ -213,9 +222,9 @@ struct McpUpdateIssueRequest {
     )]
     priority: Option<String>,
     #[schemars(
-        description = "Parent issue ID to set this as a subissue. Pass null to un-nest from parent."
+        description = "Parent issue to set this as a subissue. Accepts the issue UUID or its simple ID (e.g. 'VAS-64'). Pass null to un-nest from parent."
     )]
-    parent_issue_id: Option<Option<Uuid>>,
+    parent_issue_id: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -225,8 +234,10 @@ struct McpUpdateIssueResponse {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct McpDeleteIssueRequest {
-    #[schemars(description = "The ID of the issue to delete")]
-    issue_id: Uuid,
+    #[schemars(
+        description = "The issue to delete. Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+    )]
+    issue_id: String,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -236,8 +247,10 @@ struct McpDeleteIssueResponse {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct McpGetIssueRequest {
-    #[schemars(description = "The ID of the issue to retrieve")]
-    issue_id: Uuid,
+    #[schemars(
+        description = "The issue to retrieve. Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+    )]
+    issue_id: String,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -288,6 +301,14 @@ impl McpServer {
             None => None,
         };
 
+        let parent_issue_id = match parent_issue_id {
+            Some(parent) => match self.resolve_issue_id(&parent).await {
+                Ok(id) => Some(id),
+                Err(e) => return Ok(McpServer::tool_error(e)),
+            },
+            None => None,
+        };
+
         let payload = CreateIssueRequest {
             id: None,
             project_id,
@@ -313,6 +334,7 @@ impl McpServer {
 
         McpServer::success(&McpCreateIssueResponse {
             issue_id: response.data.id.to_string(),
+            simple_id: response.data.simple_id.clone(),
         })
     }
 
@@ -340,6 +362,14 @@ impl McpServer {
         let project_id = match self.resolve_project_id(project_id) {
             Ok(id) => id,
             Err(e) => return Ok(McpServer::tool_error(e)),
+        };
+
+        let parent_issue_id = match parent_issue_id {
+            Some(parent) => match self.resolve_issue_id(&parent).await {
+                Ok(id) => Some(id),
+                Err(e) => return Ok(McpServer::tool_error(e)),
+            },
+            None => None,
         };
 
         let project_statuses = match self.fetch_project_statuses(project_id).await {
@@ -463,12 +493,17 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Get detailed information about a specific issue. You can use `list_issues` to find issue IDs. `issue_id` is required."
+        description = "Get detailed information about a specific issue. You can use `list_issues` to find issue IDs. `issue_id` is required and accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
     )]
     async fn get_issue(
         &self,
         Parameters(McpGetIssueRequest { issue_id }): Parameters<McpGetIssueRequest>,
     ) -> Result<CallToolResult, ErrorData> {
+        let issue_id = match self.resolve_issue_id(&issue_id).await {
+            Ok(id) => id,
+            Err(e) => return Ok(McpServer::tool_error(e)),
+        };
+
         let url = self.url(&format!("/api/remote/issues/{}", issue_id));
         let issue: Issue = match self.send_json(self.client.get(&url)).await {
             Ok(i) => i,
@@ -481,7 +516,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Update an existing issue's title, description, or status. `issue_id` is required. `title`, `description`, and `status` are optional."
+        description = "Update an existing issue's title, description, or status. `issue_id` is required and accepts the issue UUID or its simple ID (e.g. 'VAS-64'). `title`, `description`, and `status` are optional."
     )]
     async fn update_issue(
         &self,
@@ -494,6 +529,20 @@ impl McpServer {
             parent_issue_id,
         }): Parameters<McpUpdateIssueRequest>,
     ) -> Result<CallToolResult, ErrorData> {
+        let issue_id = match self.resolve_issue_id(&issue_id).await {
+            Ok(id) => id,
+            Err(e) => return Ok(McpServer::tool_error(e)),
+        };
+
+        let parent_issue_id = match parent_issue_id {
+            Some(Some(parent)) => match self.resolve_issue_id(&parent).await {
+                Ok(id) => Some(Some(id)),
+                Err(e) => return Ok(McpServer::tool_error(e)),
+            },
+            Some(None) => Some(None),
+            None => None,
+        };
+
         // First get the issue to know its project_id for status resolution
         let get_url = self.url(&format!("/api/remote/issues/{}", issue_id));
         let existing_issue: Issue = match self.send_json(self.client.get(&get_url)).await {
@@ -565,11 +614,18 @@ impl McpServer {
         })
     }
 
-    #[tool(description = "Delete an issue. `issue_id` is required.")]
+    #[tool(
+        description = "Delete an issue. `issue_id` is required and accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+    )]
     async fn delete_issue(
         &self,
         Parameters(McpDeleteIssueRequest { issue_id }): Parameters<McpDeleteIssueRequest>,
     ) -> Result<CallToolResult, ErrorData> {
+        let issue_id = match self.resolve_issue_id(&issue_id).await {
+            Ok(id) => id,
+            Err(e) => return Ok(McpServer::tool_error(e)),
+        };
+
         let url = self.url(&format!("/api/remote/issues/{}", issue_id));
         if let Err(e) = self.send_empty_json(self.client.delete(&url)).await {
             return Ok(McpServer::tool_error(e));

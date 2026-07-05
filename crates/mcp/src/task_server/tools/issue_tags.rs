@@ -39,8 +39,10 @@ struct McpListTagsResponse {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct McpListIssueTagsRequest {
-    #[schemars(description = "Issue ID to list tags for")]
-    issue_id: Uuid,
+    #[schemars(
+        description = "Issue to list tags for. Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+    )]
+    issue_id: String,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -62,8 +64,10 @@ struct McpListIssueTagsResponse {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct McpAddIssueTagRequest {
-    #[schemars(description = "Issue ID to attach the tag to")]
-    issue_id: Uuid,
+    #[schemars(
+        description = "Issue to attach the tag to. Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+    )]
+    issue_id: String,
     #[schemars(description = "Tag ID to attach")]
     tag_id: Uuid,
 }
@@ -128,6 +132,11 @@ impl McpServer {
         &self,
         Parameters(McpListIssueTagsRequest { issue_id }): Parameters<McpListIssueTagsRequest>,
     ) -> Result<CallToolResult, ErrorData> {
+        let issue_id = match self.resolve_issue_id(&issue_id).await {
+            Ok(id) => id,
+            Err(e) => return Ok(Self::tool_error(e)),
+        };
+
         let url = self.url(&format!("/api/remote/issue-tags?issue_id={}", issue_id));
         let response: ListIssueTagsResponse = match self.send_json(self.client.get(&url)).await {
             Ok(r) => r,
@@ -156,6 +165,11 @@ impl McpServer {
         &self,
         Parameters(McpAddIssueTagRequest { issue_id, tag_id }): Parameters<McpAddIssueTagRequest>,
     ) -> Result<CallToolResult, ErrorData> {
+        let issue_id = match self.resolve_issue_id(&issue_id).await {
+            Ok(id) => id,
+            Err(e) => return Ok(Self::tool_error(e)),
+        };
+
         let payload = CreateIssueTagRequest {
             id: None,
             issue_id,

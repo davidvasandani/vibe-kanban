@@ -12,10 +12,14 @@ use super::McpServer;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct McpCreateIssueRelationshipRequest {
-    #[schemars(description = "The source issue ID")]
-    issue_id: Uuid,
-    #[schemars(description = "The related issue ID")]
-    related_issue_id: Uuid,
+    #[schemars(
+        description = "The source issue. Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+    )]
+    issue_id: String,
+    #[schemars(
+        description = "The related issue. Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+    )]
+    related_issue_id: String,
     #[schemars(description = "Relationship type: 'blocking', 'related', or 'has_duplicate'")]
     relationship_type: IssueRelationshipType,
 }
@@ -52,6 +56,15 @@ impl McpServer {
             relationship_type,
         }): Parameters<McpCreateIssueRelationshipRequest>,
     ) -> Result<CallToolResult, ErrorData> {
+        let issue_id = match self.resolve_issue_id(&issue_id).await {
+            Ok(id) => id,
+            Err(e) => return Ok(Self::tool_error(e)),
+        };
+        let related_issue_id = match self.resolve_issue_id(&related_issue_id).await {
+            Ok(id) => id,
+            Err(e) => return Ok(Self::tool_error(e)),
+        };
+
         let payload = CreateIssueRelationshipRequest {
             id: None,
             issue_id,
