@@ -164,6 +164,11 @@ export type Session = { id: string, workspace_id: string, name: string | null, e
 
 export type ExecutionProcess = { id: string, session_id: string, run_reason: ExecutionProcessRunReason, executor_action: ExecutorAction, status: ExecutionProcessStatus, exit_code: bigint | null, 
 /**
+ * OS process group id of the spawned child, used to clean up orphaned
+ * process groups after a server crash. Not meaningful across machines.
+ */
+pgid: bigint | null, 
+/**
  * dropped: true if this process is excluded from the current
  * history view (due to restore/trimming). Hidden from logs/timeline;
  * still listed in the Processes tab.

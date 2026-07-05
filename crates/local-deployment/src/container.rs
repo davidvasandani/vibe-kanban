@@ -1415,6 +1415,19 @@ impl ContainerService for LocalContainerService {
             ))
         })??;
 
+        // Record the process group id (== leader pid for grouped spawns) so a
+        // later boot can clean up the group if this server dies uncleanly.
+        if let Some(pid) = spawned.child.id()
+            && let Err(e) =
+                ExecutionProcess::update_pgid(&self.db.pool, execution_process.id, pid as i64).await
+        {
+            tracing::warn!(
+                "Failed to record pgid for execution process {}: {}",
+                execution_process.id,
+                e
+            );
+        }
+
         self.track_child_msgs_in_store(execution_process.id, &mut spawned.child)
             .await;
 

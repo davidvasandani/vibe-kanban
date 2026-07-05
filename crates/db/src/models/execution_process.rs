@@ -70,6 +70,9 @@ pub struct ExecutionProcess {
     pub executor_action: sqlx::types::Json<ExecutorActionField>,
     pub status: ExecutionProcessStatus,
     pub exit_code: Option<i64>,
+    /// OS process group id of the spawned child, used to clean up orphaned
+    /// process groups after a server crash. Not meaningful across machines.
+    pub pgid: Option<i64>,
     /// dropped: true if this process is excluded from the current
     /// history view (due to restore/trimming). Hidden from logs/timeline;
     /// still listed in the Processes tab.
@@ -135,6 +138,7 @@ impl ExecutionProcess {
                     ep.executor_action as "executor_action!: sqlx::types::Json<ExecutorActionField>",
                     ep.status as "status!: ExecutionProcessStatus",
                     ep.exit_code,
+                    ep.pgid,
                     ep.dropped as "dropped!: bool",
                     ep.started_at as "started_at!: DateTime<Utc>",
                     ep.completed_at as "completed_at?: DateTime<Utc>",
@@ -209,6 +213,7 @@ impl ExecutionProcess {
                     ep.executor_action as "executor_action!: sqlx::types::Json<ExecutorActionField>",
                     ep.status as "status!: ExecutionProcessStatus",
                     ep.exit_code,
+                    ep.pgid,
                     ep.dropped as "dropped!: bool",
                     ep.started_at as "started_at!: DateTime<Utc>",
                     ep.completed_at as "completed_at?: DateTime<Utc>",
@@ -236,6 +241,7 @@ impl ExecutionProcess {
                       ep.executor_action as "executor_action!: sqlx::types::Json<ExecutorActionField>",
                       ep.status          as "status!: ExecutionProcessStatus",
                       ep.exit_code,
+                      ep.pgid,
                       ep.dropped as "dropped!: bool",
                       ep.started_at      as "started_at!: DateTime<Utc>",
                       ep.completed_at    as "completed_at?: DateTime<Utc>",
@@ -263,6 +269,7 @@ impl ExecutionProcess {
                     ep.executor_action as "executor_action!: sqlx::types::Json<ExecutorActionField>",
                     ep.status as "status!: ExecutionProcessStatus",
                     ep.exit_code,
+                    ep.pgid,
                     ep.dropped as "dropped!: bool",
                     ep.started_at as "started_at!: DateTime<Utc>",
                     ep.completed_at as "completed_at?: DateTime<Utc>",
@@ -326,6 +333,7 @@ impl ExecutionProcess {
             ep.executor_action as "executor_action!: sqlx::types::Json<ExecutorActionField>",
             ep.status as "status!: ExecutionProcessStatus",
             ep.exit_code,
+            ep.pgid,
             ep.dropped as "dropped!: bool",
             ep.started_at as "started_at!: DateTime<Utc>",
             ep.completed_at as "completed_at?: DateTime<Utc>",
@@ -360,6 +368,7 @@ impl ExecutionProcess {
                     ep.executor_action as "executor_action!: sqlx::types::Json<ExecutorActionField>",
                     ep.status as "status!: ExecutionProcessStatus",
                     ep.exit_code,
+                    ep.pgid,
                     ep.dropped as "dropped!: bool",
                     ep.started_at as "started_at!: DateTime<Utc>",
                     ep.completed_at as "completed_at?: DateTime<Utc>",
@@ -429,6 +438,18 @@ impl ExecutionProcess {
             return true;
         }
         false
+    }
+
+    /// Record the OS process group id of the spawned child
+    pub async fn update_pgid(pool: &SqlitePool, id: Uuid, pgid: i64) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            r#"UPDATE execution_processes SET pgid = $1 WHERE id = $2"#,
+            pgid,
+            id
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
     }
 
     /// Update execution process status and completion info
@@ -573,6 +594,7 @@ impl ExecutionProcess {
                     ep.executor_action as "executor_action!: sqlx::types::Json<ExecutorActionField>",
                     ep.status as "status!: ExecutionProcessStatus",
                     ep.exit_code,
+                    ep.pgid,
                     ep.dropped as "dropped!: bool",
                     ep.started_at as "started_at!: DateTime<Utc>",
                     ep.completed_at as "completed_at?: DateTime<Utc>",
