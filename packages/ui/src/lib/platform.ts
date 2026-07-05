@@ -14,6 +14,20 @@ export function getModifierKey(): string {
   return isMac() ? '\u2318' : 'Ctrl';
 }
 
+export function isMobileDevice(): boolean {
+  // Modern API (Chrome, Edge, Opera) - not supported in Safari, Firefox.
+  const nav = navigator as Navigator & {
+    userAgentData?: { mobile?: boolean };
+  };
+  if (nav.userAgentData?.mobile !== undefined) {
+    return nav.userAgentData.mobile;
+  }
+  // Fallback for Safari and older browsers.
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Windows Phone|Mobi/i.test(
+    navigator.userAgent
+  );
+}
+
 type TauriInvoke = (
   cmd: string,
   args?: Record<string, unknown>

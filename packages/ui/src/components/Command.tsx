@@ -2,6 +2,7 @@ import * as React from 'react';
 import { Command as CommandPrimitive } from 'cmdk';
 import { MagnifyingGlassIcon } from '@phosphor-icons/react';
 import { cn } from '../lib/cn';
+import { isMobileDevice } from '../lib/platform';
 import { Dialog, DialogContent, DialogTitle } from './Dialog';
 
 const Command = React.forwardRef<
@@ -30,13 +31,23 @@ function CommandDialog({
   onOpenAutoFocus,
   ...props
 }: CommandDialogProps) {
+  // On mobile, focusing the search input opens the software keyboard,
+  // which covers the option list — keep focus off the input instead.
+  const handleOpenAutoFocus = (event: Event) => {
+    if (isMobileDevice()) {
+      event.preventDefault();
+      return;
+    }
+    onOpenAutoFocus?.(event);
+  };
+
   return (
     <Dialog {...props}>
       <DialogContent
         className="overflow-hidden p-0"
         hideCloseButton
         onCloseAutoFocus={onCloseAutoFocus}
-        onOpenAutoFocus={onOpenAutoFocus}
+        onOpenAutoFocus={handleOpenAutoFocus}
         aria-describedby={undefined}
       >
         <DialogTitle className="sr-only">Command Bar</DialogTitle>
