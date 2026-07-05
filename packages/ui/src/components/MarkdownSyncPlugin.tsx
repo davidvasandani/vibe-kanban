@@ -5,13 +5,7 @@ import {
   $convertFromMarkdownString,
   type Transformer,
 } from '@lexical/markdown';
-import {
-  $getRoot,
-  $isDecoratorNode,
-  $isElementNode,
-  type EditorState,
-  type LexicalNode,
-} from 'lexical';
+import { $getRoot, type EditorState } from 'lexical';
 
 type MarkdownSyncPluginProps = {
   value: string;
@@ -20,24 +14,6 @@ type MarkdownSyncPluginProps = {
   editable: boolean;
   transformers: Transformer[];
 };
-
-/**
- * Whether the editor holds a decorator node (image, attachment, PR comment,
- * component info, …), anywhere in the tree.
- *
- * These render as visible content but can serialize to an empty markdown
- * string, so their presence must not be mistaken for an empty editor. Plain
- * text is deliberately excluded: whitespace-only text serializes to '' and
- * *should* clear the Send state, so it must not be treated as content here.
- */
-function $editorHasDecoratorContent(): boolean {
-  const hasDecorator = (node: LexicalNode): boolean => {
-    if ($isDecoratorNode(node)) return true;
-    if ($isElementNode(node)) return node.getChildren().some(hasDecorator);
-    return false;
-  };
-  return $getRoot().getChildren().some(hasDecorator);
-}
 
 /**
  * Handles bidirectional markdown synchronization between Lexical editor and external state.
@@ -101,21 +77,11 @@ export function MarkdownSyncPlugin({
       onEditorStateChange?.(editorState);
       if (!onChange) return;
 
-      const { markdown, hasDecoratorContent } = editorState.read(() => ({
-        markdown: $convertToMarkdownString(transformers),
-        hasDecoratorContent: $editorHasDecoratorContent(),
-      }));
+      const markdown = editorState.read(() =>
+        $convertToMarkdownString(transformers)
+      );
 
       if (markdown === lastSerializedRef.current) return;
-
-      // Never report empty content while the editor still holds a decorator
-      // node that markdown can't serialize. Otherwise external state (which
-      // gates the Send button) would be wiped to '', and the controlled-value
-      // effect above would early-return on the next render (value ===
-      // lastSerializedRef), leaving a prefilled prompt on screen that can no
-      // longer be sent. Whitespace-only text is intentionally NOT guarded: it
-      // serializes to '' and should correctly clear the Send state.
-      if (markdown.trim() === '' && hasDecoratorContent) return;
 
       lastSerializedRef.current = markdown;
       onChange(markdown);
