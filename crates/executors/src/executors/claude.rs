@@ -1445,24 +1445,28 @@ impl ClaudeLogProcessor {
                         }
                     }
                     Some(subtype) => {
-                        patches.push(self.push_collapsible_system_message(
-                            format!("System: {subtype}"),
-                            Some(
-                                serde_json::to_value(claude_json)
-                                    .unwrap_or(serde_json::Value::Null),
+                        patches.push(
+                            self.push_collapsible_system_message(
+                                format!("System: {subtype}"),
+                                Some(
+                                    serde_json::to_value(claude_json)
+                                        .unwrap_or(serde_json::Value::Null),
+                                ),
+                                entry_index_provider,
                             ),
-                            entry_index_provider,
-                        ));
+                        );
                     }
                     None => {
-                        patches.push(self.push_collapsible_system_message(
-                            "System message".to_string(),
-                            Some(
-                                serde_json::to_value(claude_json)
-                                    .unwrap_or(serde_json::Value::Null),
+                        patches.push(
+                            self.push_collapsible_system_message(
+                                "System message".to_string(),
+                                Some(
+                                    serde_json::to_value(claude_json)
+                                        .unwrap_or(serde_json::Value::Null),
+                                ),
+                                entry_index_provider,
                             ),
-                            entry_index_provider,
-                        ));
+                        );
                     }
                 }
             }
