@@ -170,7 +170,7 @@ export type ExecutionProcess = { id: string, session_id: string, run_reason: Exe
  */
 dropped: boolean, started_at: string, completed_at: string | null, created_at: string, updated_at: string, };
 
-export enum ExecutionProcessStatus { running = "running", completed = "completed", failed = "failed", killed = "killed" }
+export enum ExecutionProcessStatus { running = "running", completed = "completed", failed = "failed", killed = "killed", interrupted = "interrupted" }
 
 export type ExecutionProcessRunReason = "setupscript" | "cleanupscript" | "archivescript" | "codingagent" | "devserver";
 
