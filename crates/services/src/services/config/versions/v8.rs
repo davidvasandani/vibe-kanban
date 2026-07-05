@@ -68,6 +68,11 @@ pub struct Config {
     pub relay_enabled: bool,
     #[serde(default)]
     pub host_nickname: Option<String>,
+    /// Opt-in: auto-resume coding-agent runs interrupted by a server
+    /// restart. Off by default because it spawns agents (and spends
+    /// tokens) at boot without a human in the loop.
+    #[serde(default)]
+    pub resume_interrupted_on_startup: bool,
 }
 
 impl Config {
@@ -99,6 +104,7 @@ impl Config {
             send_message_shortcut: SendMessageShortcut::default(),
             relay_enabled: true,
             host_nickname: None,
+            resume_interrupted_on_startup: false,
         }
     }
 
@@ -155,6 +161,7 @@ impl Default for Config {
             send_message_shortcut: SendMessageShortcut::default(),
             relay_enabled: true,
             host_nickname: None,
+            resume_interrupted_on_startup: false,
         }
     }
 }
