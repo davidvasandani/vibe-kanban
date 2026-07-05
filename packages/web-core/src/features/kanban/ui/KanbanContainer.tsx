@@ -1010,8 +1010,13 @@ export function KanbanContainer() {
                     <KanbanCards
                       id={status.id}
                       className={cn(
+                        // overflow-x-hidden keeps the card list scrollable in
+                        // exactly one axis: overflow-y-auto alone promotes
+                        // overflow-x to auto, and the cards' -mx-[1px] borders
+                        // overflow it, so horizontal swipes starting on a card
+                        // panned the cards instead of the snapping board.
                         isMobile &&
-                          'overflow-y-auto overscroll-y-contain min-h-0'
+                          'overflow-y-auto overflow-x-hidden overscroll-y-contain min-h-0'
                       )}
                     >
                       {issueIds.map((issueId, index) => {

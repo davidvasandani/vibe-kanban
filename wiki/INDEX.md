@@ -1,0 +1,24 @@
+# Project Knowledge Base
+
+Distilled, reusable knowledge about this codebase, written by and for task
+agents (and humans). Each page covers one topic and lists the task ids that
+contributed to it.
+
+## Conventions
+
+- One topic per page, kebab-case filename, `# Title` heading.
+- Every page ends with a `## Contributed by` section listing task ids
+  (e.g. `vk/de6e-improve-column-s`) so knowledge can be traced to its task.
+- Update an existing page rather than creating a near-duplicate; add your
+  task id when you do.
+- Keep this index in sync: one line per page.
+- Record only knowledge that is reusable beyond the task that produced it —
+  architecture decisions, non-obvious gotchas, rejected alternatives and why.
+  Plain code structure belongs in `CLAUDE.md`/`AGENTS.md`, not here.
+
+## Pages
+
+- [mobile-kanban-scrolling.md](mobile-kanban-scrolling.md) — Mobile kanban
+  board scroll/snap architecture: nested single-axis scrollers, the
+  `overflow-y` → `overflow-x` promotion gotcha, gesture routing, history of
+  fixes.
