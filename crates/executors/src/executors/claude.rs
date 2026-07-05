@@ -758,6 +758,15 @@ pub struct ClaudeLogProcessor {
     main_model_name: Option<String>,
     main_model_context_window: u32,
     context_tokens_used: u32,
+    // Last catch-all system message, so uninterrupted repeats (e.g. `thinking_tokens`)
+    // collapse into one ticked entry instead of a new line each time.
+    repeated_system_message: Option<RepeatedSystemMessage>,
+}
+
+struct RepeatedSystemMessage {
+    entry_index: usize,
+    content: String,
+    count: usize,
 }
 
 impl ClaudeLogProcessor {
@@ -777,7 +786,45 @@ impl ClaudeLogProcessor {
             last_assistant_message: None,
             main_model_context_window: DEFAULT_CLAUDE_CONTEXT_WINDOW,
             context_tokens_used: 0,
+            repeated_system_message: None,
         }
+    }
+
+    /// Add a system message entry, collapsing uninterrupted repeats of the same
+    /// content into a single entry that gains one `✓` per repeat.
+    fn push_collapsible_system_message(
+        &mut self,
+        content: String,
+        metadata: Option<serde_json::Value>,
+        entry_index_provider: &EntryIndexProvider,
+    ) -> json_patch::Patch {
+        if let Some(repeated) = self.repeated_system_message.as_mut()
+            && repeated.content == content
+            && entry_index_provider.current() == repeated.entry_index + 1
+        {
+            repeated.count += 1;
+            let entry = NormalizedEntry {
+                timestamp: None,
+                entry_type: NormalizedEntryType::SystemMessage,
+                content: format!("{content} {}", "✓".repeat(repeated.count - 1)),
+                metadata,
+            };
+            return ConversationPatch::replace(repeated.entry_index, entry);
+        }
+
+        let entry = NormalizedEntry {
+            timestamp: None,
+            entry_type: NormalizedEntryType::SystemMessage,
+            content: content.clone(),
+            metadata,
+        };
+        let idx = entry_index_provider.next();
+        self.repeated_system_message = Some(RepeatedSystemMessage {
+            entry_index: idx,
+            content,
+            count: 1,
+        });
+        ConversationPatch::add_normalized_entry(idx, entry)
     }
 
     /// Process raw logs and convert them to normalized entries with patches
@@ -1398,30 +1445,28 @@ impl ClaudeLogProcessor {
                         }
                     }
                     Some(subtype) => {
-                        let entry = NormalizedEntry {
-                            timestamp: None,
-                            entry_type: NormalizedEntryType::SystemMessage,
-                            content: format!("System: {subtype}"),
-                            metadata: Some(
-                                serde_json::to_value(claude_json)
-                                    .unwrap_or(serde_json::Value::Null),
+                        patches.push(
+                            self.push_collapsible_system_message(
+                                format!("System: {subtype}"),
+                                Some(
+                                    serde_json::to_value(claude_json)
+                                        .unwrap_or(serde_json::Value::Null),
+                                ),
+                                entry_index_provider,
                             ),
-                        };
-                        let idx = entry_index_provider.next();
-                        patches.push(ConversationPatch::add_normalized_entry(idx, entry));
+                        );
                     }
                     None => {
-                        let entry = NormalizedEntry {
-                            timestamp: None,
-                            entry_type: NormalizedEntryType::SystemMessage,
-                            content: "System message".to_string(),
-                            metadata: Some(
-                                serde_json::to_value(claude_json)
-                                    .unwrap_or(serde_json::Value::Null),
+                        patches.push(
+                            self.push_collapsible_system_message(
+                                "System message".to_string(),
+                                Some(
+                                    serde_json::to_value(claude_json)
+                                        .unwrap_or(serde_json::Value::Null),
+                                ),
+                                entry_index_provider,
                             ),
-                        };
-                        let idx = entry_index_provider.next();
-                        patches.push(ConversationPatch::add_normalized_entry(idx, entry));
+                        );
                     }
                 }
             }
@@ -1514,6 +1559,9 @@ impl ClaudeLogProcessor {
                         }
                         entry_index_provider.reset();
                         self.tool_map.clear();
+                        // Indices are reallocated from 0 after the reset, so the
+                        // tracked collapse target no longer points at its entry.
+                        self.repeated_system_message = None;
                     }
 
                     for item in message.content.items() {
@@ -2889,6 +2937,119 @@ mod tests {
             NormalizedEntryType::Thinking
         ));
         assert_eq!(entries[0].content, "Let me think about this...");
+    }
+
+    #[test]
+    fn test_repeated_unknown_system_subtype_collapses_with_ticks() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::test_new();
+        let json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"thinking_tokens"}"#).unwrap();
+
+        let patches = processor.normalize_entries(&json, "", &provider);
+        assert_eq!(patches.len(), 1);
+        assert!(matches!(
+            patches[0].0.first(),
+            Some(json_patch::PatchOperation::Add(_))
+        ));
+        let (first_idx, entry) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+        assert_eq!(entry.content, "System: thinking_tokens");
+
+        for repeat in 1..=3 {
+            let patches = processor.normalize_entries(&json, "", &provider);
+            assert_eq!(patches.len(), 1);
+            assert!(matches!(
+                patches[0].0.first(),
+                Some(json_patch::PatchOperation::Replace(_))
+            ));
+            let (idx, entry) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+            assert_eq!(idx, first_idx);
+            assert_eq!(
+                entry.content,
+                format!("System: thinking_tokens {}", "✓".repeat(repeat))
+            );
+        }
+
+        // Repeats reuse the original entry; no extra indices were allocated.
+        assert_eq!(provider.current(), first_idx + 1);
+    }
+
+    #[test]
+    fn test_repeated_system_subtype_interrupted_starts_new_entry() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::test_new();
+        let system_json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"thinking_tokens"}"#).unwrap();
+        let assistant_json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}]}}"#,
+        )
+        .unwrap();
+
+        let patches = processor.normalize_entries(&system_json, "", &provider);
+        let (first_idx, _) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+
+        processor.normalize_entries(&assistant_json, "", &provider);
+
+        let patches = processor.normalize_entries(&system_json, "", &provider);
+        assert_eq!(patches.len(), 1);
+        assert!(matches!(
+            patches[0].0.first(),
+            Some(json_patch::PatchOperation::Add(_))
+        ));
+        let (idx, entry) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+        assert_ne!(idx, first_idx);
+        assert_eq!(entry.content, "System: thinking_tokens");
+    }
+
+    #[test]
+    fn test_amp_resume_reset_clears_repeat_tracker() {
+        let mut processor = ClaudeLogProcessor::new_with_strategy(HistoryStrategy::AmpResume);
+        let provider = EntryIndexProvider::test_new();
+        let system_json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"thinking_tokens"}"#).unwrap();
+        let user_json: ClaudeJson = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"resume"}]},"session_id":null}"#,
+        )
+        .unwrap();
+
+        // Tracked at index 0, then the user message resets the provider and
+        // reallocates index 0 for itself.
+        processor.normalize_entries(&system_json, "", &provider);
+        processor.normalize_entries(&user_json, "", &provider);
+
+        // The stale tracker must not replace the user message at index 0.
+        let patches = processor.normalize_entries(&system_json, "", &provider);
+        assert_eq!(patches.len(), 1);
+        assert!(matches!(
+            patches[0].0.first(),
+            Some(json_patch::PatchOperation::Add(_))
+        ));
+        let (idx, entry) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(entry.content, "System: thinking_tokens");
+    }
+
+    #[test]
+    fn test_different_system_subtypes_do_not_collapse() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::test_new();
+        let first_json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"thinking_tokens"}"#).unwrap();
+        let second_json: ClaudeJson =
+            serde_json::from_str(r#"{"type":"system","subtype":"other_event"}"#).unwrap();
+
+        let patches = processor.normalize_entries(&first_json, "", &provider);
+        let (first_idx, _) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+
+        let patches = processor.normalize_entries(&second_json, "", &provider);
+        assert_eq!(patches.len(), 1);
+        assert!(matches!(
+            patches[0].0.first(),
+            Some(json_patch::PatchOperation::Add(_))
+        ));
+        let (idx, entry) = extract_normalized_entry_from_patch(&patches[0]).unwrap();
+        assert_ne!(idx, first_idx);
+        assert_eq!(entry.content, "System: other_event");
     }
 
     #[test]
