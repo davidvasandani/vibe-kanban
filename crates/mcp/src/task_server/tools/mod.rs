@@ -1,6 +1,9 @@
 use std::str::FromStr;
 
-use api_types::{Issue, ListProjectStatusesResponse, ProjectStatus};
+use api_types::{
+    Issue, ListIssuesResponse, ListOrganizationsResponse, ListProjectStatusesResponse,
+    ListProjectsResponse, ProjectStatus, SearchIssuesRequest,
+};
 use db::models::{execution_process::ExecutionProcessStatus, tag::Tag};
 use executors::executors::BaseCodingAgent;
 use regex::Regex;
@@ -350,6 +353,90 @@ impl McpServer {
         ))
     }
 
+    /// Resolves an issue identifier that is either the internal UUID or the
+    /// human-facing simple ID shown on the board (e.g. "VAS-64").
+    ///
+    /// Simple IDs are looked up in the workspace's linked project first; when
+    /// there is no linked project or no match there, every project visible to
+    /// the user is searched. A key matching issues in several projects is an
+    /// error rather than a guess.
+    async fn resolve_issue_id(&self, issue_id: &str) -> Result<Uuid, ToolError> {
+        let trimmed = issue_id.trim();
+        if let Ok(id) = Uuid::parse_str(trimmed) {
+            return Ok(id);
+        }
+
+        let context_project_id = self.context.as_ref().and_then(|ctx| ctx.project_id);
+        if let Some(project_id) = context_project_id
+            && let Some(issue) = self.find_issue_by_simple_id(project_id, trimmed).await?
+        {
+            return Ok(issue.id);
+        }
+
+        let mut matches = Vec::new();
+        for project_id in self.list_all_project_ids().await? {
+            if Some(project_id) == context_project_id {
+                continue;
+            }
+            if let Some(issue) = self.find_issue_by_simple_id(project_id, trimmed).await? {
+                matches.push(issue.id);
+            }
+        }
+        Self::select_unique_issue_match(&matches, trimmed)
+    }
+
+    fn select_unique_issue_match(matches: &[Uuid], simple_id: &str) -> Result<Uuid, ToolError> {
+        match matches {
+            [id] => Ok(*id),
+            [] => Err(ToolError::message(format!(
+                "No issue found with ID or simple ID '{simple_id}'. Use `list_issues` to look up issues."
+            ))),
+            _ => Err(ToolError::message(format!(
+                "Simple ID '{simple_id}' matches issues in multiple projects. Pass the issue's UUID instead (see `list_issues`)."
+            ))),
+        }
+    }
+
+    async fn find_issue_by_simple_id(
+        &self,
+        project_id: Uuid,
+        simple_id: &str,
+    ) -> Result<Option<Issue>, ToolError> {
+        let query = SearchIssuesRequest {
+            project_id,
+            status_id: None,
+            status_ids: None,
+            priority: None,
+            parent_issue_id: None,
+            search: None,
+            simple_id: Some(simple_id.to_string()),
+            assignee_user_id: None,
+            tag_id: None,
+            tag_ids: None,
+            sort_field: None,
+            sort_direction: None,
+            limit: Some(1),
+            offset: None,
+        };
+        let url = self.url("/api/remote/issues/search");
+        let response: ListIssuesResponse =
+            self.send_json(self.client.post(&url).json(&query)).await?;
+        Ok(response.issues.into_iter().next())
+    }
+
+    async fn list_all_project_ids(&self) -> Result<Vec<Uuid>, ToolError> {
+        let orgs_url = self.url("/api/organizations");
+        let orgs: ListOrganizationsResponse = self.send_json(self.client.get(&orgs_url)).await?;
+
+        let mut project_ids = Vec::new();
+        for org in orgs.organizations {
+            let url = self.url(&format!("/api/remote/projects?organization_id={}", org.id));
+            let projects: ListProjectsResponse = self.send_json(self.client.get(&url)).await?;
+            project_ids.extend(projects.projects.into_iter().map(|project| project.id));
+        }
+        Ok(project_ids)
+    }
+
     // Resolves an organization_id from an explicit parameter or falls back to context.
     fn resolve_organization_id(&self, explicit: Option<Uuid>) -> Result<Uuid, ToolError> {
         if let Some(id) = explicit {
@@ -570,6 +657,29 @@ mod tests {
         assert_eq!(server.orchestrator_session_id(), None);
         assert!(server.resolve_workspace_id(None).is_err());
         assert!(server.scope_allows_workspace(Uuid::new_v4()).is_ok());
+    }
+
+    #[test]
+    fn select_unique_issue_match_returns_single_match() {
+        let issue_id = Uuid::new_v4();
+        assert_eq!(
+            McpServer::select_unique_issue_match(&[issue_id], "VAS-64").unwrap(),
+            issue_id
+        );
+    }
+
+    #[test]
+    fn select_unique_issue_match_rejects_missing_key() {
+        let error = McpServer::select_unique_issue_match(&[], "VAS-64").unwrap_err();
+        assert!(error.to_string().contains("No issue found"));
+    }
+
+    #[test]
+    fn select_unique_issue_match_rejects_ambiguous_key() {
+        let error =
+            McpServer::select_unique_issue_match(&[Uuid::new_v4(), Uuid::new_v4()], "VAS-64")
+                .unwrap_err();
+        assert!(error.to_string().contains("multiple projects"));
     }
 
     #[test]

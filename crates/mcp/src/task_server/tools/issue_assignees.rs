@@ -12,8 +12,10 @@ use super::McpServer;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct McpListIssueAssigneesRequest {
-    #[schemars(description = "Issue ID to list assignees for")]
-    issue_id: Uuid,
+    #[schemars(
+        description = "Issue to list assignees for. Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+    )]
+    issue_id: String,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -37,8 +39,10 @@ struct McpListIssueAssigneesResponse {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct McpAssignIssueRequest {
-    #[schemars(description = "Issue ID to assign")]
-    issue_id: Uuid,
+    #[schemars(
+        description = "Issue to assign. Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+    )]
+    issue_id: String,
     #[schemars(description = "User ID to assign to the issue")]
     user_id: Uuid,
 }
@@ -69,6 +73,11 @@ impl McpServer {
             McpListIssueAssigneesRequest,
         >,
     ) -> Result<CallToolResult, ErrorData> {
+        let issue_id = match self.resolve_issue_id(&issue_id).await {
+            Ok(id) => id,
+            Err(e) => return Ok(Self::tool_error(e)),
+        };
+
         let url = self.url(&format!(
             "/api/remote/issue-assignees?issue_id={}",
             issue_id
@@ -102,6 +111,11 @@ impl McpServer {
         &self,
         Parameters(McpAssignIssueRequest { issue_id, user_id }): Parameters<McpAssignIssueRequest>,
     ) -> Result<CallToolResult, ErrorData> {
+        let issue_id = match self.resolve_issue_id(&issue_id).await {
+            Ok(id) => id,
+            Err(e) => return Ok(Self::tool_error(e)),
+        };
+
         let payload = CreateIssueAssigneeRequest {
             id: None,
             issue_id,
