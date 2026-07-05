@@ -17,9 +17,11 @@ use db::{
             ExecutionContext, ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus,
         },
         execution_process_repo_state::ExecutionProcessRepoState,
+        project::Project,
         repo::Repo,
         scratch::{DraftFollowUpData, Scratch, ScratchType},
         session::{Session, SessionError},
+        task::Task,
         workspace::Workspace,
         workspace_repo::WorkspaceRepo,
     },
@@ -1339,6 +1341,99 @@ impl LocalContainerService {
         )
         .await
     }
+
+    /// Resolve organization-level env vars for a workspace by mapping it to its
+    /// remote project (workspace → task → local project → `remote_project_id`)
+    /// and fetching the decrypted values from the remote server. Returns an
+    /// empty map when the workspace isn't linked to a remote project, no remote
+    /// client is configured, or the fetch fails — org env vars are best-effort
+    /// and must never block a workspace from starting.
+    async fn resolve_org_env_vars(&self, workspace: &Workspace) -> HashMap<String, String> {
+        let Some(remote_client) = self.remote_client.as_ref() else {
+            return HashMap::new();
+        };
+        let Some(task_id) = workspace.task_id else {
+            return HashMap::new();
+        };
+
+        let remote_project_id = match Task::find_by_id(&self.db.pool, task_id).await {
+            Ok(Some(task)) => match Project::find_by_id(&self.db.pool, task.project_id).await {
+                Ok(Some(project)) => project.remote_project_id,
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(?e, "Failed to load project while resolving org env vars");
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(?e, "Failed to load task while resolving org env vars");
+                None
+            }
+        };
+
+        let Some(remote_project_id) = remote_project_id else {
+            return HashMap::new();
+        };
+
+        // Cap the wait: this runs on the spawn path for every execution, and the
+        // remote client itself retries with a 30s per-request timeout. A short
+        // outer timeout keeps a degraded remote from stalling workspace starts.
+        let resp = match tokio::time::timeout(
+            ORG_ENV_FETCH_TIMEOUT,
+            remote_client.get_project_env_vars(remote_project_id),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
+                tracing::warn!(?e, %remote_project_id, "Failed to fetch org env vars from remote");
+                return HashMap::new();
+            }
+            Err(_) => {
+                tracing::warn!(%remote_project_id, "Timed out fetching org env vars from remote");
+                return HashMap::new();
+            }
+        };
+
+        resp.env_vars
+            .into_iter()
+            .filter_map(|v| {
+                if is_reserved_env_name(&v.name) {
+                    // Don't let an org config clobber the workspace contract or an
+                    // executor's own runtime/auth wiring.
+                    tracing::warn!(name = %v.name, "Ignoring org env var with reserved name");
+                    None
+                } else {
+                    Some((v.name, v.value))
+                }
+            })
+            .collect()
+    }
+}
+
+/// Timeout for the best-effort org env var fetch on the execution spawn path.
+const ORG_ENV_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Env var names that Vibe Kanban or the coding-agent executors manage
+/// internally. Org-provided values for these are ignored so an organization
+/// config cannot clobber the workspace contract (`VK_*`) or break an executor's
+/// own auth/runtime wiring (e.g. opencode's server password). Names are
+/// case-sensitive to match process env semantics on Unix.
+const RESERVED_ENV_PREFIXES: &[&str] = &["VK_"];
+const RESERVED_ENV_NAMES: &[&str] = &[
+    "PATH",
+    "HOME",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "OPENCODE_SERVER_PASSWORD",
+];
+
+fn is_reserved_env_name(name: &str) -> bool {
+    RESERVED_ENV_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || RESERVED_ENV_NAMES.iter().any(|reserved| name == *reserved)
 }
 
 fn failure_exit_status() -> std::process::ExitStatus {
@@ -1585,7 +1680,19 @@ impl ContainerService for LocalContainerService {
             commit_reminder_prompt,
         );
 
-        // Always inject workspace/session context
+        // Inject organization-level env vars (e.g. GITHUB_TOKEN) for workspaces
+        // linked to a remote org project. Injected here — the single point every
+        // execution (initial, setup, follow-up) flows through — so all agent
+        // processes in the workspace receive them. Applied BEFORE the VK_* context
+        // below so an org var can never clobber the internal workspace contract.
+        // Best-effort: on any failure we log and start without them rather than
+        // block the workspace.
+        let org_env_vars = self.resolve_org_env_vars(workspace).await;
+        if !org_env_vars.is_empty() {
+            env.merge(&org_env_vars);
+        }
+
+        // Always inject workspace/session context (wins over any org var above).
         env.insert("VK_WORKSPACE_ID", workspace.id.to_string());
         env.insert("VK_WORKSPACE_BRANCH", &workspace.branch);
 

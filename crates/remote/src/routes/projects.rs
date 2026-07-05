@@ -1,12 +1,13 @@
 use api_types::{
     BulkUpdateProjectsRequest, BulkUpdateProjectsResponse, CreateProjectRequest, DeleteResponse,
-    ListProjectsQuery, ListProjectsResponse, MutationResponse, Project, UpdateProjectRequest,
+    ListProjectsQuery, ListProjectsResponse, MutationResponse, Project, ResolvedEnvVar,
+    ResolvedOrganizationEnvVarsResponse, UpdateProjectRequest,
 };
 use axum::{
     Json,
     extract::{Extension, Path, Query, State},
     http::StatusCode,
-    routing::post,
+    routing::{get, post},
 };
 use tracing::instrument;
 use uuid::Uuid;
@@ -18,7 +19,10 @@ use super::{
 use crate::{
     AppState,
     auth::RequestContext,
-    db::{get_txid, projects::ProjectRepository, types::is_valid_hsl_color},
+    db::{
+        get_txid, organization_env_vars::OrganizationEnvVarRepository, projects::ProjectRepository,
+        types::is_valid_hsl_color,
+    },
     mutation_definition::MutationBuilder,
 };
 
@@ -36,6 +40,55 @@ pub fn router() -> axum::Router<AppState> {
     mutation()
         .router()
         .route("/projects/bulk", post(bulk_update_projects))
+        .route("/projects/{project_id}/env-vars", get(get_project_env_vars))
+}
+
+/// Returns the owning organization's env vars, decrypted, for a project the
+/// caller can access. Used by agent hosts to inject org-level env vars (e.g.
+/// GITHUB_TOKEN) into workspaces started against this project. Gated on org
+/// membership — the same access required to read the project itself; any member
+/// who can start a workspace here would receive these values in-process anyway.
+#[instrument(
+    name = "projects.get_project_env_vars",
+    skip(state, ctx),
+    fields(project_id = %project_id, user_id = %ctx.user.id)
+)]
+async fn get_project_env_vars(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Path(project_id): Path<Uuid>,
+) -> Result<Json<ResolvedOrganizationEnvVarsResponse>, ErrorResponse> {
+    let project = ProjectRepository::find_by_id(state.pool(), project_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(?error, %project_id, "failed to load project");
+            ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to load project")
+        })?
+        .ok_or_else(|| ErrorResponse::new(StatusCode::NOT_FOUND, "project not found"))?;
+
+    ensure_member_access(state.pool(), project.organization_id, ctx.user.id).await?;
+
+    let pairs = OrganizationEnvVarRepository::new(state.pool())
+        .list_with_encrypted_values(project.organization_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(?error, organization_id = %project.organization_id, "failed to load org env vars");
+            ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to load env vars")
+        })?;
+
+    let mut env_vars = Vec::with_capacity(pairs.len());
+    for (name, encrypted) in pairs {
+        match state.jwt.decrypt_string(&encrypted) {
+            Ok(value) => env_vars.push(ResolvedEnvVar { name, value }),
+            Err(error) => {
+                // Skip individual undecryptable entries rather than failing the
+                // whole workspace start.
+                tracing::warn!(?error, %name, "failed to decrypt org env var; skipping");
+            }
+        }
+    }
+
+    Ok(Json(ResolvedOrganizationEnvVarsResponse { env_vars }))
 }
 
 #[instrument(

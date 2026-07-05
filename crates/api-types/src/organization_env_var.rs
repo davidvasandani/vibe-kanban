@@ -40,3 +40,18 @@ pub struct UpdateOrganizationEnvVarRequest {
 pub struct UpdateOrganizationEnvVarResponse {
     pub env_var: OrganizationEnvVar,
 }
+
+/// A resolved (decrypted) organization env var. Unlike the listing types above,
+/// this carries the plaintext `value` and is only returned to callers with
+/// access to the owning organization's project, for injection into agent
+/// processes started against that project.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ResolvedEnvVar {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ResolvedOrganizationEnvVarsResponse {
+    pub env_vars: Vec<ResolvedEnvVar>,
+}
