@@ -5,7 +5,7 @@ import {
   $convertFromMarkdownString,
   type Transformer,
 } from '@lexical/markdown';
-import { $getRoot, type EditorState } from 'lexical';
+import { $getRoot, $isElementNode, type EditorState } from 'lexical';
 
 type MarkdownSyncPluginProps = {
   value: string;
@@ -14,6 +14,22 @@ type MarkdownSyncPluginProps = {
   editable: boolean;
   transformers: Transformer[];
 };
+
+/**
+ * Whether the editor structurally holds any visible content.
+ *
+ * This is intentionally stricter than "serializes to a non-empty markdown
+ * string": some content (e.g. decorator nodes) can round-trip asymmetrically
+ * and momentarily serialize to an empty string. A single empty paragraph (the
+ * default empty state) counts as no content; anything else — text, or a
+ * paragraph containing an inline node such as an image/attachment — counts as
+ * content.
+ */
+function $editorHasContent(): boolean {
+  return $getRoot()
+    .getChildren()
+    .some((child) => !$isElementNode(child) || !child.isEmpty());
+}
 
 /**
  * Handles bidirectional markdown synchronization between Lexical editor and external state.
@@ -77,11 +93,19 @@ export function MarkdownSyncPlugin({
       onEditorStateChange?.(editorState);
       if (!onChange) return;
 
-      const markdown = editorState.read(() =>
-        $convertToMarkdownString(transformers)
-      );
+      const { markdown, hasContent } = editorState.read(() => ({
+        markdown: $convertToMarkdownString(transformers),
+        hasContent: $editorHasContent(),
+      }));
 
       if (markdown === lastSerializedRef.current) return;
+
+      // Never report empty content while the editor visibly holds content.
+      // Otherwise external state (which gates the Send button) would be wiped
+      // to '', and the controlled-value effect above would early-return on the
+      // next render (value === lastSerializedRef), leaving a prefilled prompt
+      // on screen that can no longer be sent.
+      if (markdown.trim() === '' && hasContent) return;
 
       lastSerializedRef.current = markdown;
       onChange(markdown);
