@@ -152,9 +152,23 @@ export type CreateScratch = { payload: ScratchPayload, };
 
 export type UpdateScratch = { payload: ScratchPayload, };
 
-export type Workspace = { id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, };
+export type Workspace = { id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, 
+/**
+ * Which numbered `## Pipeline` stage the execution agent last reported
+ * itself as starting (1-based), detected from a `VK-PIPELINE-STAGE: N`
+ * marker in the execution's raw log stream. `None` when no coding-agent
+ * execution has reported a stage yet for the current run.
+ */
+current_pipeline_stage: bigint | null, };
 
-export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, };
+export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, 
+/**
+ * Which numbered `## Pipeline` stage the execution agent last reported
+ * itself as starting (1-based), detected from a `VK-PIPELINE-STAGE: N`
+ * marker in the execution's raw log stream. `None` when no coding-agent
+ * execution has reported a stage yet for the current run.
+ */
+current_pipeline_stage: bigint | null, };
 
 export type Session = { id: string, workspace_id: string, name: string | null, executor: string | null, agent_working_dir: string | null, created_at: string, updated_at: string, };
 
@@ -528,6 +542,57 @@ export type UiLanguage = "BROWSER" | "EN" | "FR" | "JA" | "ES" | "KO" | "ZH_HANS
 export type ShowcaseState = { seen_features: Array<string>, };
 
 export type SendMessageShortcut = "ModifierEnter" | "Enter";
+
+export type PipelineStep = { 
+/**
+ * Stable slug, e.g. "spec".
+ */
+id: string, 
+/**
+ * Shown next to the task-create checkbox.
+ */
+label: string, 
+/**
+ * Appended as a bullet when the step is ticked.
+ */
+prompt_fragment: string, 
+/**
+ * Whether the task checkbox starts ticked.
+ */
+default_enabled: boolean, 
+/**
+ * Whether this stage is marked "heavy" (resource-intensive); the UI
+ * renders a badge and it starts unticked by convention.
+ */
+heavy: boolean, };
+
+export type Pipeline = { 
+/**
+ * Stable slug = the file stem, e.g. "basic".
+ */
+id: string, 
+/**
+ * Display name from the file's `name` field.
+ */
+name: string, 
+/**
+ * Optional one-line description.
+ */
+description: string | null, 
+/**
+ * Ordered stages; this order is authoritative for the composed block.
+ */
+stages: Array<PipelineStep>, };
+
+export type PipelineParseError = { message: string, line: number | null, column: number | null, };
+
+export type PipelineValidation = { valid: boolean, error: PipelineParseError | null, };
+
+export type PipelineFileStatus = { id: string, name: string, stage_count: number | null, valid: boolean, error: PipelineParseError | null, };
+
+export type PipelineRawBody = { content: string, };
+
+export type PipelineValidateBody = { id: string | null, content: string, };
 
 export type GitBranch = { name: string, is_current: boolean, is_remote: boolean, last_commit_date: Date, };
 

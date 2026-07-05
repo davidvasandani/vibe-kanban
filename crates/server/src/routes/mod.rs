@@ -19,6 +19,7 @@ pub mod health;
 pub mod host_relay;
 pub mod oauth;
 pub mod organizations;
+pub mod pipelines;
 pub mod preview;
 pub mod relay_auth;
 pub mod releases;
@@ -37,6 +38,7 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
     let relay_signed_routes = Router::new()
         .route("/health", get(health::health_check))
         .merge(config::router())
+        .merge(pipelines::router())
         .merge(containers::router(&deployment))
         .merge(workspaces::router(&deployment))
         .merge(execution_processes::router(&deployment))

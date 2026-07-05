@@ -13,6 +13,8 @@ pub mod filesystem;
 pub mod filesystem_watcher;
 pub mod notification;
 pub mod oauth_credentials;
+pub mod pipeline_stage;
+pub mod pipelines;
 pub mod pr_monitor;
 
 #[cfg(feature = "qa-mode")]

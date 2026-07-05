@@ -1320,6 +1320,34 @@ pub trait ContainerService {
             execution_process.id,
             session.id,
         );
+
+        // Reset the reported pipeline stage only when a *new coding-agent*
+        // execution begins (not for setup/cleanup/archive/dev-server runs,
+        // which would otherwise wrongly wipe a live stage). The tracker
+        // spawned below will repopulate it as the fresh execution reports
+        // markers.
+        if *run_reason == ExecutionProcessRunReason::CodingAgent
+            && let Err(e) =
+                Workspace::set_current_pipeline_stage(&self.db().pool, workspace.id, None).await
+        {
+            tracing::warn!(
+                "Failed to reset current_pipeline_stage for workspace {}: {}",
+                workspace.id,
+                e
+            );
+        }
+
+        if *run_reason == ExecutionProcessRunReason::CodingAgent
+            && let Some(store) = self.get_msg_store_by_id(&execution_process.id).await
+        {
+            crate::services::pipeline_stage::spawn_pipeline_stage_tracker(
+                store,
+                workspace.id,
+                execution_process.id,
+                self.db().clone(),
+            );
+        }
+
         Ok(execution_process)
     }
 
