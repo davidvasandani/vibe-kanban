@@ -1429,6 +1429,63 @@ pub trait ContainerService {
                 session.id,
             );
         }
+
+        // Reset the reported pipeline stage only when a *new coding-agent*
+        // execution begins (not for setup/cleanup/archive/dev-server runs,
+        // which would otherwise wrongly wipe a live stage). The tracker
+        // spawned below will repopulate it as the fresh execution reports
+        // markers.
+        if *run_reason == ExecutionProcessRunReason::CodingAgent
+            && let Err(e) =
+                Workspace::set_current_pipeline_stage(&self.db().pool, workspace.id, None).await
+        {
+            tracing::warn!(
+                "Failed to reset current_pipeline_stage for workspace {}: {}",
+                workspace.id,
+                e
+            );
+        }
+
+        // Provision the SpecKit scaffold for SpecKit workspaces. Durable gate
+        // first (`speckit_feature_key` set — covers follow-ups after the first
+        // provisioning), else the tightened prompt gate (a composed
+        // `## Pipeline` block that names a `/speckit.` command). Provisioning
+        // failure must never block the execution: warn and continue.
+        if *run_reason == ExecutionProcessRunReason::CodingAgent {
+            let prompt = match executor_action.typ() {
+                ExecutorActionType::CodingAgentInitialRequest(request) => {
+                    Some(request.prompt.as_str())
+                }
+                ExecutorActionType::CodingAgentFollowUpRequest(request) => {
+                    Some(request.prompt.as_str())
+                }
+                _ => None,
+            };
+            let speckit_enabled = workspace.speckit_feature_key.is_some()
+                || prompt.is_some_and(crate::services::speckit::is_speckit_pipeline);
+            if speckit_enabled
+                && let Err(e) =
+                    crate::services::speckit::provision_workspace(&self.db().pool, workspace).await
+            {
+                tracing::warn!(
+                    "Failed to provision SpecKit scaffold for workspace {}: {}",
+                    workspace.id,
+                    e
+                );
+            }
+        }
+
+        if *run_reason == ExecutionProcessRunReason::CodingAgent
+            && let Some(store) = self.get_msg_store_by_id(&execution_process.id).await
+        {
+            crate::services::pipeline_stage::spawn_pipeline_stage_tracker(
+                store,
+                workspace.id,
+                execution_process.id,
+                self.db().clone(),
+            );
+        }
+
         Ok(execution_process)
     }
 

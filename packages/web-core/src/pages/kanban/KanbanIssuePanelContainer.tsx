@@ -20,6 +20,8 @@ import { IssueCommentsSectionContainer } from './IssueCommentsSectionContainer';
 import { IssueSubIssuesSectionContainer } from './IssueSubIssuesSectionContainer';
 import { IssueRelationshipsSectionContainer } from './IssueRelationshipsSectionContainer';
 import { IssueWorkspacesSectionContainer } from './IssueWorkspacesSectionContainer';
+import { PipelineSection, type PipelineSelection } from './PipelineSection';
+import { appendPipelineToDescription } from '@/shared/lib/pipeline/taskPipeline';
 import {
   KanbanIssuePanel,
   type IssueFormData,
@@ -339,6 +341,17 @@ export function KanbanIssuePanelContainer({
     displayData.description ?? null
   );
   latestDescriptionRef.current = displayData.description ?? null;
+
+  // Per-task Pipeline selection, stashed until the task is created. Null when
+  // nothing is selected (so no block is appended). Reset when the composer
+  // changes.
+  const pipelineRef = useRef<PipelineSelection | null>(null);
+  // Bumped on delete-draft so the PipelineSection remounts and its internal
+  // selection resets in lockstep with pipelineRef being cleared.
+  const [pipelineResetKey, setPipelineResetKey] = useState(0);
+  useEffect(() => {
+    pipelineRef.current = null;
+  }, [issueComposerKey]);
 
   const isCreateDraftDirty = useMemo(() => {
     return selectIsCreateDraftDirty({
@@ -831,11 +844,21 @@ export function KanbanIssuePanelContainer({
             ? Math.min(...statusIssues.map((i) => i.sort_order))
             : 0;
 
+        // Append the per-task Pipeline block to the description (the only
+        // thing fed into the agent prompt).
+        const pipeline = pipelineRef.current;
+        const finalDescription = pipeline
+          ? appendPipelineToDescription(
+              displayData.description ?? '',
+              pipeline.block
+            )
+          : displayData.description;
+
         const { persisted } = insertIssue({
           project_id: projectId,
           status_id: displayData.statusId,
           title: displayData.title,
-          description: displayData.description,
+          description: finalDescription,
           priority: displayData.priority,
           sort_order: minSortOrder - 1,
           start_date: null,
@@ -848,6 +871,10 @@ export function KanbanIssuePanelContainer({
 
         // Wait for the issue to be confirmed by the backend and get the synced entity
         const syncedIssue = await persisted;
+
+        // Pipeline selection consumed; clear it so a subsequent task doesn't
+        // inherit it.
+        pipelineRef.current = null;
 
         // Commit only attachments still referenced in the description
         const allUploadedIds = getAttachmentIds();
@@ -898,7 +925,7 @@ export function KanbanIssuePanelContainer({
         if (displayData.createDraftWorkspace) {
           const initialPrompt = buildWorkspaceCreatePrompt(
             displayData.title,
-            displayData.description
+            finalDescription
           );
 
           // Get defaults from most recent workspace
@@ -978,7 +1005,16 @@ export function KanbanIssuePanelContainer({
       createFormData: createModeDefaults,
     });
     resetIssueComposerDraft();
+    pipelineRef.current = null;
+    setPipelineResetKey((k) => k + 1);
   }, [createModeDefaults, resetIssueComposerDraft]);
+
+  // Create mode: stash the per-task Pipeline selection until the task is
+  // created (null when nothing is selected, so we don't append an empty
+  // block).
+  const handlePipelineChange = useCallback((selection: PipelineSelection) => {
+    pipelineRef.current = selection.block ? selection : null;
+  }, []);
 
   const handleTitleMultiLinePaste = useCallback(
     (overflow: string) => {
@@ -1108,6 +1144,16 @@ export function KanbanIssuePanelContainer({
       onDismissAttachmentError={clearUploadError}
       renderDescriptionEditor={(props) => (
         <WYSIWYGEditor {...props} localAttachments={localAttachments} />
+      )}
+      renderPipeline={() => (
+        <PipelineSection
+          // PipelineSection seeds its default selection on mount; key it on
+          // the composer (and the delete-draft reset counter) so a fresh
+          // composer or a deleted draft gets a fresh instance.
+          key={`create:${issueComposerKey}:${pipelineResetKey}`}
+          disabled={isSubmitting}
+          onChange={handlePipelineChange}
+        />
       )}
       renderWorkspacesSection={(issueId) => (
         <IssueWorkspacesSectionContainer issueId={issueId} />

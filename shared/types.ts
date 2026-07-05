@@ -156,9 +156,45 @@ export type CreateScratch = { payload: ScratchPayload, };
 
 export type UpdateScratch = { payload: ScratchPayload, };
 
-export type Workspace = { id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, };
+export type Workspace = { id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, 
+/**
+ * Which numbered `## Pipeline` stage the execution agent last reported
+ * itself as starting (1-based), detected from a `VK-PIPELINE-STAGE: N`
+ * marker in the execution's raw log stream. `None` when no coding-agent
+ * execution has reported a stage yet for the current run.
+ */
+current_pipeline_stage: bigint | null, 
+/**
+ * SpecKit feature key: the workspace's branch, captured verbatim at first
+ * SpecKit provisioning. Artifacts live under `specs/<feature_key>/` in the
+ * spec-host repo. Once set it is never re-derived.
+ */
+speckit_feature_key: string | null, 
+/**
+ * Which repo worktree hosts `specs/` + `.specify/` for this workspace's
+ * SpecKit artifacts. Persisted at first provisioning.
+ */
+speckit_host_repo_id: string | null, };
 
-export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, };
+export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, 
+/**
+ * Which numbered `## Pipeline` stage the execution agent last reported
+ * itself as starting (1-based), detected from a `VK-PIPELINE-STAGE: N`
+ * marker in the execution's raw log stream. `None` when no coding-agent
+ * execution has reported a stage yet for the current run.
+ */
+current_pipeline_stage: bigint | null, 
+/**
+ * SpecKit feature key: the workspace's branch, captured verbatim at first
+ * SpecKit provisioning. Artifacts live under `specs/<feature_key>/` in the
+ * spec-host repo. Once set it is never re-derived.
+ */
+speckit_feature_key: string | null, 
+/**
+ * Which repo worktree hosts `specs/` + `.specify/` for this workspace's
+ * SpecKit artifacts. Persisted at first provisioning.
+ */
+speckit_host_repo_id: string | null, };
 
 export type Session = { id: string, workspace_id: string, name: string | null, executor: string | null, agent_working_dir: string | null, created_at: string, updated_at: string, };
 
@@ -537,6 +573,172 @@ export type UiLanguage = "BROWSER" | "EN" | "FR" | "JA" | "ES" | "KO" | "ZH_HANS
 export type ShowcaseState = { seen_features: Array<string>, };
 
 export type SendMessageShortcut = "ModifierEnter" | "Enter";
+
+export type PipelineStep = { 
+/**
+ * Stable slug, e.g. "spec".
+ */
+id: string, 
+/**
+ * Shown next to the task-create checkbox.
+ */
+label: string, 
+/**
+ * Appended as a bullet when the step is ticked.
+ */
+prompt_fragment: string, 
+/**
+ * Whether the task checkbox starts ticked.
+ */
+default_enabled: boolean, 
+/**
+ * Whether this stage is marked "heavy" (resource-intensive); the UI
+ * renders a badge and it starts unticked by convention.
+ */
+heavy: boolean, };
+
+export type Pipeline = { 
+/**
+ * Stable slug = the file stem, e.g. "basic".
+ */
+id: string, 
+/**
+ * Display name from the file's `name` field.
+ */
+name: string, 
+/**
+ * Optional one-line description.
+ */
+description: string | null, 
+/**
+ * Ordered stages; this order is authoritative for the composed block.
+ */
+stages: Array<PipelineStep>, };
+
+export type PipelineParseError = { message: string, line: number | null, column: number | null, };
+
+export type PipelineValidation = { valid: boolean, error: PipelineParseError | null, };
+
+export type PipelineFileStatus = { id: string, name: string, stage_count: number | null, valid: boolean, error: PipelineParseError | null, };
+
+export type PipelineRawBody = { content: string, };
+
+export type PipelineValidateBody = { id: string | null, content: string, };
+
+export type SpecKitStage = "constitution" | "specify" | "clarify" | "plan" | "tasks" | "analyze" | "implement";
+
+export type SpecKitTask = { 
+/**
+ * Task identifier as written in tasks.md (e.g. "T001"). Falls back to the
+ * 1-based ordinal when the source line has no explicit id.
+ */
+id: string, 
+/**
+ * Human-readable task description (the text after the id/marker).
+ */
+description: string, 
+/**
+ * File paths referenced in the task line, when present.
+ */
+file_paths: Array<string>, 
+/**
+ * True when the task is marked `[P]` (safe to run in parallel).
+ */
+parallelizable: boolean, 
+/**
+ * Phase / user-story heading the task is grouped under, if any.
+ */
+phase?: string, 
+/**
+ * Whether the task's checkbox is ticked (`[x]`).
+ */
+done: boolean, };
+
+export type SpecKitTaskLayer = { 
+/**
+ * Task ids that make up this layer.
+ */
+task_ids: Array<string>, 
+/**
+ * True when the layer holds more than one task (i.e. real parallelism).
+ */
+parallel: boolean, };
+
+export type SpecKitTasks = { tasks: Array<SpecKitTask>, 
+/**
+ * Ordered parallel layers derived from `[P]` markers + task order.
+ */
+layers: Array<SpecKitTaskLayer>, total: number, completed: number, };
+
+export type SpecKitArtifact = { 
+/**
+ * Display name / filename (e.g. "spec.md").
+ */
+name: string, 
+/**
+ * Path relative to the feature dir (e.g. "contracts/api-spec.json").
+ */
+relative_path: string, content?: string, exists: boolean, };
+
+export type SpecKitArtifacts = { 
+/**
+ * Feature dir relative to the *workspace root*, e.g.
+ * "backend/specs/vk/webhook-retries" (spec-host repo prefix included).
+ */
+feature_dir: string, spec: SpecKitArtifact, plan: SpecKitArtifact, tasks: SpecKitArtifact, research: SpecKitArtifact, data_model: SpecKitArtifact, quickstart: SpecKitArtifact, 
+/**
+ * Contract files under `contracts/` (json / markdown), if any.
+ */
+contracts: Array<SpecKitArtifact>, };
+
+export type SpecKitUpdateArtifactRequest = { 
+/**
+ * Path relative to the feature dir (e.g. "spec.md", "contracts/api.json").
+ */
+relative_path: string, content: string, };
+
+export type SpecKitToggleTaskRequest = { task_id: string, done: boolean, };
+
+export type SpecKitStageArtifact = { stage: SpecKitStage, 
+/**
+ * The stage's primary artifact, relative to the workspace root.
+ */
+artifact: string, exists: boolean, };
+
+export type SpecKitTaskStatus = { task_id: string, enabled: boolean, 
+/**
+ * Explains why `enabled` is false, so the frontend can show accurate
+ * copy without re-deriving it.
+ */
+note?: string, workspace_id?: string, 
+/**
+ * The SpecKit feature key (the workspace branch, verbatim, captured at
+ * first provisioning).
+ */
+feature_key?: string, 
+/**
+ * Feature dir relative to the workspace root, e.g.
+ * "backend/specs/vk/webhook-retries".
+ */
+feature_dir?: string, 
+/**
+ * The spec-host repo's dir relative to the workspace root,
+ * e.g. "backend" (repo name plus optional default working dir).
+ */
+host_rel?: string, 
+/**
+ * True when the workspace has more than one repo (command files then live
+ * at the workspace root and every path is repo-qualified).
+ */
+multi_repo: boolean, 
+/**
+ * Per-stage artifact presence, in workflow order.
+ */
+stages: Array<SpecKitStageArtifact>, 
+/**
+ * Parsed `tasks.md`, when it exists.
+ */
+tasks?: SpecKitTasks, };
 
 export type GitBranch = { name: string, is_current: boolean, is_remote: boolean, last_commit_date: Date, };
 

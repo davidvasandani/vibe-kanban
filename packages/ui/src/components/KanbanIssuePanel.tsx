@@ -121,6 +121,11 @@ export interface KanbanIssuePanelProps {
     props: KanbanIssueDescriptionEditorProps
   ) => ReactNode;
 
+  // Optional per-task "Pipeline" control, rendered in create mode only
+  // (stage checkboxes + editable prompt addon). Logic lives in the container;
+  // this is just a render slot.
+  renderPipeline?: () => ReactNode;
+
   // Loading states
   isSubmitting?: boolean;
 
@@ -181,6 +186,7 @@ export function KanbanIssuePanel({
   onCreateTag,
   renderAddTagControl,
   renderDescriptionEditor,
+  renderPipeline,
   isSubmitting,
   descriptionSaveStatus,
   titleInputRef,
@@ -489,6 +495,10 @@ export function KanbanIssuePanel({
             )}
           </div>
         </div>
+
+        {/* Per-task Pipeline control (Create mode only). PipelineSection
+            renders its own border-t/padding. */}
+        {isCreateMode && renderPipeline && renderPipeline()}
 
         {/* Create Draft Workspace Toggle (Create mode only) */}
         {isCreateMode && (

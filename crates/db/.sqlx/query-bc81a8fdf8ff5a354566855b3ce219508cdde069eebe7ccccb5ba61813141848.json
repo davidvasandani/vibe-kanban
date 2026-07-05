@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!: Uuid\",\n                          task_id AS \"task_id: Uuid\",\n                          container_ref,\n                          branch,\n                          setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                          created_at AS \"created_at!: DateTime<Utc>\",\n                          updated_at AS \"updated_at!: DateTime<Utc>\",\n                          archived AS \"archived!: bool\",\n                          pinned AS \"pinned!: bool\",\n                          name,\n                          worktree_deleted AS \"worktree_deleted!: bool\"\n                   FROM workspaces\n                   ORDER BY created_at DESC",
+  "query": "INSERT INTO workspaces (id, task_id, container_ref, branch, setup_completed_at, name)\n               VALUES ($1, $2, $3, $4, $5, $6)\n               RETURNING id as \"id!: Uuid\", task_id as \"task_id: Uuid\", container_ref, branch, setup_completed_at as \"setup_completed_at: DateTime<Utc>\", created_at as \"created_at!: DateTime<Utc>\", updated_at as \"updated_at!: DateTime<Utc>\", archived as \"archived!: bool\", pinned as \"pinned!: bool\", name, worktree_deleted as \"worktree_deleted!: bool\", current_pipeline_stage, speckit_feature_key, speckit_host_repo_id as \"speckit_host_repo_id: Uuid\"",
   "describe": {
     "columns": [
       {
@@ -57,10 +57,25 @@
         "name": "worktree_deleted!: bool",
         "ordinal": 10,
         "type_info": "Bool"
+      },
+      {
+        "name": "current_pipeline_stage",
+        "ordinal": 11,
+        "type_info": "Integer"
+      },
+      {
+        "name": "speckit_feature_key",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "speckit_host_repo_id: Uuid",
+        "ordinal": 13,
+        "type_info": "Blob"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 6
     },
     "nullable": [
       true,
@@ -73,8 +88,11 @@
       false,
       false,
       true,
-      false
+      false,
+      true,
+      true,
+      true
     ]
   },
-  "hash": "64f31710ab7ba14047f31cce44ad36c60a53624f9bcb03a5eaff5d61ca8cc9cf"
+  "hash": "bc81a8fdf8ff5a354566855b3ce219508cdde069eebe7ccccb5ba61813141848"
 }
