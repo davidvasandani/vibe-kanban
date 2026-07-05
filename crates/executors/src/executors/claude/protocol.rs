@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{ChildStdin, ChildStdout},
     sync::Mutex,
+    time::{Instant, sleep_until},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -18,6 +19,12 @@ use crate::{
         },
     },
 };
+
+/// How long to keep answering control requests after the final `result`
+/// message. The CLI can fire the Stop hook after emitting the result (e.g.
+/// when interrupted); closing stdin immediately would make that callback fail
+/// with "Stream closed" inside the CLI.
+const POST_RESULT_GRACE: Duration = Duration::from_millis(500);
 
 /// Handles bidirectional control protocol communication
 #[derive(Clone)]
@@ -55,6 +62,11 @@ impl ProtocolPeer {
         let mut reader = BufReader::new(stdout);
         let mut buffer = String::new();
         let mut interrupt_sent = false;
+        // Set once the final `result` arrives; when it expires we break, which
+        // drops stdin and lets the CLI exit. Until then keep answering
+        // trailing control requests (e.g. the Stop hook fired after the
+        // result), which would otherwise fail with "Stream closed" in the CLI.
+        let mut grace_deadline: Option<Instant> = None;
 
         loop {
             buffer.clear();
@@ -67,6 +79,9 @@ impl ProtocolPeer {
                         tracing::warn!("Failed to send interrupt to Claude: {e}");
                     }
                     // Continue the loop to read Claude's response (it should send a result)
+                }
+                _ = sleep_until(grace_deadline.unwrap_or_else(Instant::now)), if grace_deadline.is_some() => {
+                    break;
                 }
                 line_result = reader.read_line(&mut buffer) => {
                     match line_result {
@@ -88,7 +103,8 @@ impl ProtocolPeer {
                                         .await;
                                 }
                                 Ok(CLIMessage::Result(_)) => {
-                                    break;
+                                    grace_deadline
+                                        .get_or_insert_with(|| Instant::now() + POST_RESULT_GRACE);
                                 }
                                 _ => {}
                             }
