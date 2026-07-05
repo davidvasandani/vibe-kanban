@@ -56,6 +56,13 @@ pub struct Workspace {
     /// marker in the execution's raw log stream. `None` when no coding-agent
     /// execution has reported a stage yet for the current run.
     pub current_pipeline_stage: Option<i64>,
+    /// SpecKit feature key: the workspace's branch, captured verbatim at first
+    /// SpecKit provisioning. Artifacts live under `specs/<feature_key>/` in the
+    /// spec-host repo. Once set it is never re-derived.
+    pub speckit_feature_key: Option<String>,
+    /// Which repo worktree hosts `specs/` + `.specify/` for this workspace's
+    /// SpecKit artifacts. Persisted at first provisioning.
+    pub speckit_host_repo_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -108,7 +115,9 @@ impl Workspace {
                           pinned AS "pinned!: bool",
                           name,
                           worktree_deleted AS "worktree_deleted!: bool",
-                          current_pipeline_stage
+                          current_pipeline_stage,
+                          speckit_feature_key,
+                          speckit_host_repo_id AS "speckit_host_repo_id: Uuid"
                    FROM workspaces
                    ORDER BY created_at DESC"#
         )
@@ -211,7 +220,9 @@ impl Workspace {
                        pinned            AS "pinned!: bool",
                        name,
                        worktree_deleted  AS "worktree_deleted!: bool",
-                       current_pipeline_stage
+                       current_pipeline_stage,
+                       speckit_feature_key,
+                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid"
                FROM    workspaces
                WHERE   id = $1"#,
             id
@@ -234,7 +245,9 @@ impl Workspace {
                        pinned            AS "pinned!: bool",
                        name,
                        worktree_deleted  AS "worktree_deleted!: bool",
-                       current_pipeline_stage
+                       current_pipeline_stage,
+                       speckit_feature_key,
+                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid"
                FROM    workspaces
                WHERE   rowid = $1"#,
             rowid
@@ -278,7 +291,9 @@ impl Workspace {
                 w.pinned as "pinned!: bool",
                 w.name,
                 w.worktree_deleted as "worktree_deleted!: bool",
-                w.current_pipeline_stage
+                w.current_pipeline_stage,
+                w.speckit_feature_key,
+                w.speckit_host_repo_id as "speckit_host_repo_id: Uuid"
             FROM workspaces w
             LEFT JOIN sessions s ON w.id = s.workspace_id
             LEFT JOIN execution_processes ep ON s.id = ep.session_id AND ep.completed_at IS NOT NULL
@@ -326,7 +341,7 @@ impl Workspace {
             Workspace,
             r#"INSERT INTO workspaces (id, task_id, container_ref, branch, setup_completed_at, name)
                VALUES ($1, $2, $3, $4, $5, $6)
-               RETURNING id as "id!: Uuid", task_id as "task_id: Uuid", container_ref, branch, setup_completed_at as "setup_completed_at: DateTime<Utc>", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", archived as "archived!: bool", pinned as "pinned!: bool", name, worktree_deleted as "worktree_deleted!: bool", current_pipeline_stage"#,
+               RETURNING id as "id!: Uuid", task_id as "task_id: Uuid", container_ref, branch, setup_completed_at as "setup_completed_at: DateTime<Utc>", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", archived as "archived!: bool", pinned as "pinned!: bool", name, worktree_deleted as "worktree_deleted!: bool", current_pipeline_stage, speckit_feature_key, speckit_host_repo_id as "speckit_host_repo_id: Uuid""#,
             id,
             Option::<Uuid>::None,
             Option::<String>::None,
@@ -461,6 +476,65 @@ impl Workspace {
         Ok(())
     }
 
+    /// The most recent workspace for a task whose worktree has not been
+    /// deleted — the workspace whose on-disk SpecKit artifacts the viewer
+    /// should read.
+    pub async fn find_latest_by_task_id(
+        pool: &SqlitePool,
+        task_id: Uuid,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as!(
+            Workspace,
+            r#"SELECT  id                AS "id!: Uuid",
+                       task_id           AS "task_id: Uuid",
+                       container_ref,
+                       branch,
+                       setup_completed_at AS "setup_completed_at: DateTime<Utc>",
+                       created_at        AS "created_at!: DateTime<Utc>",
+                       updated_at        AS "updated_at!: DateTime<Utc>",
+                       archived          AS "archived!: bool",
+                       pinned            AS "pinned!: bool",
+                       name,
+                       worktree_deleted  AS "worktree_deleted!: bool",
+                       current_pipeline_stage,
+                       speckit_feature_key,
+                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid"
+               FROM    workspaces
+               WHERE   task_id = $1 AND worktree_deleted = FALSE
+               ORDER BY created_at DESC
+               LIMIT 1"#,
+            task_id
+        )
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Persist the SpecKit host repo + feature key, but only at *first*
+    /// provisioning: the guard (`speckit_feature_key IS NULL`) makes this a
+    /// no-op once a feature key has ever been recorded, so the key and host
+    /// stay stable across branch renames and repo additions. Returns whether
+    /// the row was updated.
+    pub async fn set_speckit_provisioning(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        host_repo_id: Uuid,
+        feature_key: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query!(
+            r#"UPDATE workspaces
+               SET speckit_host_repo_id = $1,
+                   speckit_feature_key = $2,
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = $3 AND speckit_feature_key IS NULL"#,
+            host_repo_id,
+            feature_key,
+            workspace_id
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn get_first_user_message(
         pool: &SqlitePool,
         workspace_id: Uuid,
@@ -542,6 +616,8 @@ impl Workspace {
                 w.name,
                 w.worktree_deleted AS "worktree_deleted!: bool",
                 w.current_pipeline_stage,
+                w.speckit_feature_key,
+                w.speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
 
                 CASE WHEN EXISTS (
                     SELECT 1
@@ -585,6 +661,8 @@ impl Workspace {
                     name: rec.name,
                     worktree_deleted: rec.worktree_deleted,
                     current_pipeline_stage: rec.current_pipeline_stage,
+                    speckit_feature_key: rec.speckit_feature_key,
+                    speckit_host_repo_id: rec.speckit_host_repo_id,
                 },
                 is_running: rec.is_running != 0,
                 is_errored: rec.is_errored != 0,
@@ -638,6 +716,8 @@ impl Workspace {
                 w.name,
                 w.worktree_deleted AS "worktree_deleted!: bool",
                 w.current_pipeline_stage,
+                w.speckit_feature_key,
+                w.speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
 
                 CASE WHEN EXISTS (
                     SELECT 1
@@ -684,6 +764,8 @@ impl Workspace {
                 name: rec.name,
                 worktree_deleted: rec.worktree_deleted,
                 current_pipeline_stage: rec.current_pipeline_stage,
+                speckit_feature_key: rec.speckit_feature_key,
+                speckit_host_repo_id: rec.speckit_host_repo_id,
             },
             is_running: rec.is_running != 0,
             is_errored: rec.is_errored != 0,

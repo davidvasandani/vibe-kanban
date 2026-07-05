@@ -38,6 +38,10 @@ const BUNDLED: &[(&str, &str)] = &[
         "wikillm.toml",
         include_str!("../../../../../assets/pipelines/wikillm.toml"),
     ),
+    (
+        "speckit.toml",
+        include_str!("../../../../../assets/pipelines/speckit.toml"),
+    ),
 ];
 
 /// A single per-task pipeline stage. Stages are defined in pipeline files
@@ -576,7 +580,7 @@ mod tests {
         let d = TmpDir::new();
         let pipelines = load_pipelines(d.path());
         let ids: Vec<_> = pipelines.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["basic", "wikillm"]);
+        assert_eq!(ids, vec!["basic", "wikillm", "speckit"]);
     }
 
     #[test]

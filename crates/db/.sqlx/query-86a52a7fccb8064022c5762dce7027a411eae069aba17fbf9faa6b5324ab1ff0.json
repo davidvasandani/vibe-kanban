@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT  id                AS \"id!: Uuid\",\n                       task_id           AS \"task_id: Uuid\",\n                       container_ref,\n                       branch,\n                       setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                       created_at        AS \"created_at!: DateTime<Utc>\",\n                       updated_at        AS \"updated_at!: DateTime<Utc>\",\n                       archived          AS \"archived!: bool\",\n                       pinned            AS \"pinned!: bool\",\n                       name,\n                       worktree_deleted  AS \"worktree_deleted!: bool\",\n                       current_pipeline_stage\n               FROM    workspaces\n               WHERE   id = $1",
+  "query": "SELECT  id                AS \"id!: Uuid\",\n                       task_id           AS \"task_id: Uuid\",\n                       container_ref,\n                       branch,\n                       setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                       created_at        AS \"created_at!: DateTime<Utc>\",\n                       updated_at        AS \"updated_at!: DateTime<Utc>\",\n                       archived          AS \"archived!: bool\",\n                       pinned            AS \"pinned!: bool\",\n                       name,\n                       worktree_deleted  AS \"worktree_deleted!: bool\",\n                       current_pipeline_stage,\n                       speckit_feature_key,\n                       speckit_host_repo_id AS \"speckit_host_repo_id: Uuid\"\n               FROM    workspaces\n               WHERE   id = $1",
   "describe": {
     "columns": [
       {
@@ -62,6 +62,16 @@
         "name": "current_pipeline_stage",
         "ordinal": 11,
         "type_info": "Integer"
+      },
+      {
+        "name": "speckit_feature_key",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "speckit_host_repo_id: Uuid",
+        "ordinal": 13,
+        "type_info": "Blob"
       }
     ],
     "parameters": {
@@ -79,8 +89,10 @@
       false,
       true,
       false,
+      true,
+      true,
       true
     ]
   },
-  "hash": "fec5efd7692eaff1e4c045186de5f946ac6f25c26572367cea3c6e244e40233f"
+  "hash": "86a52a7fccb8064022c5762dce7027a411eae069aba17fbf9faa6b5324ab1ff0"
 }
