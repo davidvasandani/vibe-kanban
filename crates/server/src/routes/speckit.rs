@@ -20,7 +20,7 @@ use axum::{
     response::Json as ResponseJson,
     routing::{get, put},
 };
-use db::models::{session::Session, task::Task, workspace::Workspace};
+use db::models::{session::Session, workspace::Workspace};
 use deployment::Deployment;
 use services::services::speckit::{self, CommandContext, SpecKitHost};
 use utils::response::ApiResponse;
@@ -28,17 +28,16 @@ use uuid::Uuid;
 
 use crate::{DeploymentImpl, error::ApiError};
 
-const NO_WORKSPACE_NOTE: &str =
-    "This task has no live workspace yet — start it (pick the SpecKit pipeline).";
+const NO_WORKSPACE_NOTE: &str = "Workspace not found.";
 const NO_REPOS_NOTE: &str = "The task's workspace has no repositories.";
 const NO_WORKTREE_NOTE: &str = "The workspace worktree is not materialized yet.";
 
 pub fn router() -> Router<DeploymentImpl> {
     Router::new()
-        .route("/speckit/task/{task_id}", get(get_task_status))
-        .route("/speckit/task/{task_id}/artifacts", get(get_artifacts))
-        .route("/speckit/task/{task_id}/artifact", put(put_artifact))
-        .route("/speckit/task/{task_id}/tasks/toggle", put(toggle_task))
+        .route("/speckit/workspace/{workspace_id}", get(get_status))
+        .route("/speckit/workspace/{workspace_id}/artifacts", get(get_artifacts))
+        .route("/speckit/workspace/{workspace_id}/artifact", put(put_artifact))
+        .route("/speckit/workspace/{workspace_id}/tasks/toggle", put(toggle_task))
 }
 
 // ---------------------------------------------------------------------------
@@ -52,13 +51,12 @@ struct SpecKitCtx {
     feature_abs: PathBuf,
 }
 
-async fn load_ctx(deployment: &DeploymentImpl, task_id: Uuid) -> Result<SpecKitCtx, ApiError> {
+async fn load_ctx(
+    deployment: &DeploymentImpl,
+    workspace_id: Uuid,
+) -> Result<SpecKitCtx, ApiError> {
     let pool = &deployment.db().pool;
-    Task::find_by_id(pool, task_id)
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("Task not found.".to_string()))?;
-
-    let workspace = Workspace::find_latest_by_task_id(pool, task_id)
+    let workspace = Workspace::find_by_id(pool, workspace_id)
         .await?
         .ok_or_else(|| ApiError::BadRequest(NO_WORKSPACE_NOTE.to_string()))?;
     let host = speckit::resolve_speckit_host(pool, &workspace)
@@ -79,30 +77,26 @@ async fn load_ctx(deployment: &DeploymentImpl, task_id: Uuid) -> Result<SpecKitC
 // Status
 // ---------------------------------------------------------------------------
 
-async fn get_task_status(
+async fn get_status(
     State(deployment): State<DeploymentImpl>,
-    AxumPath(task_id): AxumPath<Uuid>,
+    AxumPath(workspace_id): AxumPath<Uuid>,
 ) -> Result<ResponseJson<ApiResponse<SpecKitTaskStatus>>, ApiError> {
     let pool = &deployment.db().pool;
-    Task::find_by_id(pool, task_id)
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("Task not found.".to_string()))?;
-
-    let Some(workspace) = Workspace::find_latest_by_task_id(pool, task_id).await? else {
+    let Some(workspace) = Workspace::find_by_id(pool, workspace_id).await? else {
         return Ok(ResponseJson(ApiResponse::success(disabled_status(
-            task_id,
+            workspace_id,
             NO_WORKSPACE_NOTE,
         ))));
     };
     let Some(host) = speckit::resolve_speckit_host(pool, &workspace).await? else {
         return Ok(ResponseJson(ApiResponse::success(disabled_status(
-            task_id,
+            workspace_id,
             NO_REPOS_NOTE,
         ))));
     };
     let Some(container_ref) = workspace.container_ref.clone() else {
         return Ok(ResponseJson(ApiResponse::success(disabled_status(
-            task_id,
+            workspace_id,
             NO_WORKTREE_NOTE,
         ))));
     };
@@ -120,7 +114,7 @@ async fn get_task_status(
         if let Err(e) =
             speckit::ensure_scaffold(&host_abs, &agent_cwd, &CommandContext::from(&host))
         {
-            tracing::warn!(?e, %task_id, "Failed to repair SpecKit scaffold");
+            tracing::warn!(?e, %workspace_id, "Failed to repair SpecKit scaffold");
         }
     }
 
@@ -135,10 +129,9 @@ async fn get_task_status(
         .map(|text| speckit::parse_tasks_md(&text));
 
     Ok(ResponseJson(ApiResponse::success(SpecKitTaskStatus {
-        task_id,
+        workspace_id,
         enabled: true,
         note: None,
-        workspace_id: Some(workspace.id),
         feature_key: Some(host.feature_key.clone()),
         feature_dir: Some(feature_dir_ws),
         host_rel: Some(host.host_rel.clone()),
@@ -148,12 +141,11 @@ async fn get_task_status(
     })))
 }
 
-fn disabled_status(task_id: Uuid, note: &str) -> SpecKitTaskStatus {
+fn disabled_status(workspace_id: Uuid, note: &str) -> SpecKitTaskStatus {
     SpecKitTaskStatus {
-        task_id,
+        workspace_id,
         enabled: false,
         note: Some(note.to_string()),
-        workspace_id: None,
         feature_key: None,
         feature_dir: None,
         host_rel: None,
@@ -208,9 +200,9 @@ fn stage_artifacts(
 
 async fn get_artifacts(
     State(deployment): State<DeploymentImpl>,
-    AxumPath(task_id): AxumPath<Uuid>,
+    AxumPath(workspace_id): AxumPath<Uuid>,
 ) -> Result<ResponseJson<ApiResponse<SpecKitArtifacts>>, ApiError> {
-    let ctx = load_ctx(&deployment, task_id).await?;
+    let ctx = load_ctx(&deployment, workspace_id).await?;
 
     let artifacts = SpecKitArtifacts {
         feature_dir: format!(
@@ -231,10 +223,10 @@ async fn get_artifacts(
 
 async fn put_artifact(
     State(deployment): State<DeploymentImpl>,
-    AxumPath(task_id): AxumPath<Uuid>,
+    AxumPath(workspace_id): AxumPath<Uuid>,
     Json(payload): Json<SpecKitUpdateArtifactRequest>,
 ) -> Result<ResponseJson<ApiResponse<SpecKitArtifact>>, ApiError> {
-    let ctx = load_ctx(&deployment, task_id).await?;
+    let ctx = load_ctx(&deployment, workspace_id).await?;
     let target = safe_join(&ctx.feature_abs, &payload.relative_path)?;
     std::fs::write(&target, &payload.content)?;
 
@@ -252,10 +244,10 @@ async fn put_artifact(
 
 async fn toggle_task(
     State(deployment): State<DeploymentImpl>,
-    AxumPath(task_id): AxumPath<Uuid>,
+    AxumPath(workspace_id): AxumPath<Uuid>,
     Json(payload): Json<SpecKitToggleTaskRequest>,
 ) -> Result<ResponseJson<ApiResponse<SpecKitTasks>>, ApiError> {
-    let ctx = load_ctx(&deployment, task_id).await?;
+    let ctx = load_ctx(&deployment, workspace_id).await?;
     let tasks_path = ctx.feature_abs.join("tasks.md");
     let text = std::fs::read_to_string(&tasks_path)
         .map_err(|_| ApiError::BadRequest("tasks.md does not exist yet.".to_string()))?;
