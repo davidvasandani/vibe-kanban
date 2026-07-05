@@ -161,10 +161,18 @@ impl ProtocolPeer {
                                     });
                                 }
                                 Ok(CLIMessage::Other(value)) => {
-                                    if matches!(
-                                        value.get("type").and_then(|t| t.as_str()),
-                                        Some("assistant" | "stream_event" | "user")
-                                    ) {
+                                    // Replayed/synthetic messages are resume
+                                    // history, not evidence that the real turn
+                                    // started; they must not clear the fallback.
+                                    let replayed = ["isReplay", "isSynthetic"].iter().any(|k| {
+                                        value.get(k).and_then(|v| v.as_bool()).unwrap_or(false)
+                                    });
+                                    if !replayed
+                                        && matches!(
+                                            value.get("type").and_then(|t| t.as_str()),
+                                            Some("assistant" | "stream_event" | "user")
+                                        )
+                                    {
                                         spurious_fallback = None;
                                     }
                                 }
