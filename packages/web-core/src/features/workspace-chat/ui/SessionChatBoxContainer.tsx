@@ -68,7 +68,12 @@ import { sessionsApi } from '@/shared/lib/api';
 import { RenameSessionDialog } from '@vibe/ui/components/RenameSessionDialog';
 import type { TurnNavigationItem } from '@vibe/ui/components/TurnNavigationPopup';
 
-/** Follow-up prompt sent when resuming a run interrupted by a server restart */
+/**
+ * Follow-up prompt sent when resuming a run interrupted by a server restart.
+ * Keep in sync with RESUME_INTERRUPTED_PROMPT in
+ * crates/services/src/services/container.rs — boot-time auto-resume uses the
+ * same prompt and treats runs that already carry it as resumed once.
+ */
 const RESUME_INTERRUPTED_PROMPT =
   'The previous run was interrupted by a vibe-kanban restart before it could finish. Review the current state of the working tree and continue the task from where it left off.';
 

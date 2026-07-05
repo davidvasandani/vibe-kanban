@@ -70,7 +70,11 @@
           "helper": "選擇建立任務嘗試時要使用的預設代理設定檔。"
         },
         "variant": "預設",
-        "defaultLabel": "預設"
+        "defaultLabel": "預設",
+        "autoResume": {
+          "label": "啟動時恢復被中斷的執行",
+          "helper": "自動向因重新啟動而中斷的編碼代理執行傳送後續訊息。每次執行最多恢復一次。代理會在未經確認的情況下啟動，並可能消耗 token。"
+        }
       },
       "editor": {
         "title": "編輯器",

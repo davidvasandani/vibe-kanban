@@ -30,6 +30,7 @@ use executors::profile::ExecutorConfigs;
 use executors::{
     actions::{
         ExecutorAction, ExecutorActionType,
+        coding_agent_follow_up::CodingAgentFollowUpRequest,
         coding_agent_initial::CodingAgentInitialRequest,
         script::{ScriptContext, ScriptRequest, ScriptRequestLanguage},
     },
@@ -59,6 +60,33 @@ use worktree_manager::WorktreeError;
 
 use crate::services::{execution_process, notification::NotificationService};
 pub type ContainerRef = String;
+
+/// Follow-up prompt sent when resuming a coding-agent run that was
+/// interrupted by a server shutdown/restart. Keep in sync with
+/// RESUME_INTERRUPTED_PROMPT in SessionChatBoxContainer.tsx (the Resume
+/// banner) so manual and automatic resumes read the same in the session
+/// history. Auto-resume also uses it to recognize runs it already resumed
+/// once (see [`executor_config_for_auto_resume`]).
+pub const RESUME_INTERRUPTED_PROMPT: &str = "The previous run was interrupted by a vibe-kanban restart before it could finish. Review the current state of the working tree and continue the task from where it left off.";
+
+/// Decide whether an interrupted coding-agent action is eligible for
+/// auto-resume, and with which executor config. Returns `None` when the
+/// action is not a coding-agent request, or when it is itself a resume
+/// follow-up — resuming those again would spawn agents unattended on every
+/// boot of a crash-restart loop, so each run is resumed at most once.
+fn executor_config_for_auto_resume(action: &ExecutorAction) -> Option<ExecutorConfig> {
+    match action.typ() {
+        ExecutorActionType::CodingAgentInitialRequest(request) => {
+            Some(request.executor_config.clone())
+        }
+        ExecutorActionType::CodingAgentFollowUpRequest(request)
+            if request.prompt != RESUME_INTERRUPTED_PROMPT =>
+        {
+            Some(request.executor_config.clone())
+        }
+        _ => None,
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ContainerError {
@@ -420,6 +448,105 @@ pub trait ContainerService {
                 }
             }
         }
+    }
+
+    /// Resume coding-agent runs that were interrupted by a server shutdown
+    /// or crash by sending them the resume follow-up. Call at startup (only
+    /// when opted in via config) with the processes returned by
+    /// [`Self::cleanup_orphan_executions`]. Each run is resumed at most
+    /// once: interrupted resume follow-ups are not resumed again, so a
+    /// crash-restart loop cannot keep respawning agents.
+    async fn resume_interrupted_coding_agents(&self, interrupted: &[ExecutionProcess]) {
+        let mut resumed_sessions = HashSet::new();
+        for process in interrupted {
+            if process.run_reason != ExecutionProcessRunReason::CodingAgent {
+                continue;
+            }
+            // One follow-up per session, even if several of its processes
+            // were somehow marked interrupted.
+            if !resumed_sessions.insert(process.session_id) {
+                continue;
+            }
+            match self.resume_interrupted_coding_agent(process).await {
+                Ok(Some(new_process)) => {
+                    tracing::info!(
+                        "Auto-resumed interrupted coding agent process {} as process {}",
+                        process.id,
+                        new_process.id
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to auto-resume interrupted coding agent process {}: {}",
+                        process.id,
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    /// Send the resume follow-up for a single interrupted coding-agent
+    /// process. Returns `Ok(None)` when the process is intentionally
+    /// skipped (already resumed once, workspace archived/deleted, or no
+    /// agent session to resume).
+    async fn resume_interrupted_coding_agent(
+        &self,
+        process: &ExecutionProcess,
+    ) -> Result<Option<ExecutionProcess>, ContainerError> {
+        let pool = &self.db().pool;
+        let executor_action = process
+            .executor_action()
+            .map_err(ContainerError::Other)?;
+        let Some(executor_config) = executor_config_for_auto_resume(executor_action) else {
+            tracing::info!(
+                "Not auto-resuming process {}: not a coding-agent request, or it was itself a resume of an interrupted run",
+                process.id
+            );
+            return Ok(None);
+        };
+        let ctx = ExecutionProcess::load_context(pool, process.id).await?;
+        if ctx.workspace.archived || ctx.workspace.worktree_deleted {
+            return Ok(None);
+        }
+        let Some(resume_info) =
+            CodingAgentTurn::find_latest_session_info(pool, process.session_id).await?
+        else {
+            tracing::info!(
+                "Not auto-resuming process {}: no agent session to resume",
+                process.id
+            );
+            return Ok(None);
+        };
+        self.ensure_container_exists(&ctx.workspace).await?;
+        let repos = WorkspaceRepo::find_repos_for_workspace(pool, ctx.workspace.id).await?;
+        let cleanup_action = self.cleanup_actions_for_repos(&repos);
+        let working_dir = ctx
+            .session
+            .agent_working_dir
+            .as_ref()
+            .filter(|dir| !dir.is_empty())
+            .cloned();
+        let action = ExecutorAction::new(
+            ExecutorActionType::CodingAgentFollowUpRequest(CodingAgentFollowUpRequest {
+                prompt: RESUME_INTERRUPTED_PROMPT.to_string(),
+                session_id: resume_info.session_id,
+                reset_to_message_id: None,
+                executor_config,
+                working_dir,
+            }),
+            cleanup_action.map(Box::new),
+        );
+        let new_process = self
+            .start_execution(
+                &ctx.workspace,
+                &ctx.session,
+                &action,
+                &ExecutionProcessRunReason::CodingAgent,
+            )
+            .await?;
+        Ok(Some(new_process))
     }
 
     /// Backfill before_head_commit for legacy execution processes.
@@ -1622,5 +1749,84 @@ mod tests {
         let result = scope_initial_prompt_to_working_dir("Do the thing".to_string(), &repos);
 
         assert_eq!(result, "Do the thing");
+    }
+
+    mod auto_resume {
+        use executors::{
+            actions::{
+                ExecutorAction, ExecutorActionType,
+                coding_agent_follow_up::CodingAgentFollowUpRequest,
+                coding_agent_initial::CodingAgentInitialRequest,
+                script::{ScriptContext, ScriptRequest, ScriptRequestLanguage},
+            },
+            executors::BaseCodingAgent,
+            profile::ExecutorConfig,
+        };
+
+        use crate::services::container::{
+            RESUME_INTERRUPTED_PROMPT, executor_config_for_auto_resume,
+        };
+
+        fn executor_config() -> ExecutorConfig {
+            ExecutorConfig::new(BaseCodingAgent::ClaudeCode)
+        }
+
+        fn follow_up_action(prompt: &str) -> ExecutorAction {
+            ExecutorAction::new(
+                ExecutorActionType::CodingAgentFollowUpRequest(CodingAgentFollowUpRequest {
+                    prompt: prompt.to_string(),
+                    session_id: "agent-session".to_string(),
+                    reset_to_message_id: None,
+                    executor_config: executor_config(),
+                    working_dir: None,
+                }),
+                None,
+            )
+        }
+
+        #[test]
+        fn resumes_interrupted_initial_requests() {
+            let action = ExecutorAction::new(
+                ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
+                    prompt: "Build the feature".to_string(),
+                    executor_config: executor_config(),
+                    working_dir: None,
+                }),
+                None,
+            );
+
+            assert!(executor_config_for_auto_resume(&action).is_some());
+        }
+
+        #[test]
+        fn resumes_interrupted_user_follow_ups() {
+            let action = follow_up_action("Please also add tests");
+
+            assert!(executor_config_for_auto_resume(&action).is_some());
+        }
+
+        #[test]
+        fn does_not_resume_a_run_twice() {
+            // A run whose prompt is the resume prompt was already resumed
+            // once; skipping it caps auto-resume in a crash-restart loop.
+            let action = follow_up_action(RESUME_INTERRUPTED_PROMPT);
+
+            assert!(executor_config_for_auto_resume(&action).is_none());
+        }
+
+        #[test]
+        fn does_not_resume_non_coding_agent_actions() {
+            let action = ExecutorAction::new(
+                ExecutorActionType::ScriptRequest(ScriptRequest {
+                    script: "echo hi".to_string(),
+                    language: ScriptRequestLanguage::Bash,
+                    context: ScriptContext::SetupScript,
+                    working_dir: None,
+                }),
+                None,
+            );
+
+            assert!(executor_config_for_auto_resume(&action).is_none());
+        }
     }
 }

@@ -80,6 +80,12 @@ async fn main() -> Result<(), VibeKanbanError> {
         .container()
         .restart_interrupted_dev_servers(&interrupted_processes)
         .await;
+    if deployment.config().read().await.resume_interrupted_on_startup {
+        deployment
+            .container()
+            .resume_interrupted_coding_agents(&interrupted_processes)
+            .await;
+    }
     deployment
         .container()
         .backfill_before_head_commits()

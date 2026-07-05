@@ -70,7 +70,11 @@
           "helper": "选择创建任务尝试时使用的默认代理配置。"
         },
         "variant": "默认",
-        "defaultLabel": "默认"
+        "defaultLabel": "默认",
+        "autoResume": {
+          "label": "启动时恢复被中断的运行",
+          "helper": "自动向因重启而中断的编码代理运行发送后续消息。每次运行最多恢复一次。代理会在未经确认的情况下启动，并可能消耗 token。"
+        }
       },
       "editor": {
         "title": "编辑器",
