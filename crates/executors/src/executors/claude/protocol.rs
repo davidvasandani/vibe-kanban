@@ -102,9 +102,32 @@ impl ProtocolPeer {
                                     self.handle_control_request(&client, request_id, request)
                                         .await;
                                 }
-                                Ok(CLIMessage::Result(_)) => {
-                                    grace_deadline
-                                        .get_or_insert_with(|| Instant::now() + POST_RESULT_GRACE);
+                                Ok(CLIMessage::Result(result)) => {
+                                    // claude-code >= 2.1.200 can emit a spurious
+                                    // zero-turn success result immediately after
+                                    // resuming a session with queued task
+                                    // notifications, before it has processed our
+                                    // prompt. Treating it as terminal closes stdin
+                                    // and silently swallows the request, so keep
+                                    // reading; the real turn produces its own
+                                    // result. After an interrupt a zero-turn
+                                    // result is legitimate (nothing ran).
+                                    let spurious = !interrupt_sent
+                                        && result.get("num_turns").and_then(|v| v.as_u64())
+                                            == Some(0)
+                                        && !result
+                                            .get("is_error")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false);
+                                    if spurious {
+                                        tracing::warn!(
+                                            "Ignoring zero-turn success result (resume artifact); continuing to read"
+                                        );
+                                    } else {
+                                        grace_deadline.get_or_insert_with(|| {
+                                            Instant::now() + POST_RESULT_GRACE
+                                        });
+                                    }
                                 }
                                 _ => {}
                             }
