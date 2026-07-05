@@ -68,6 +68,10 @@ import { sessionsApi } from '@/shared/lib/api';
 import { RenameSessionDialog } from '@vibe/ui/components/RenameSessionDialog';
 import type { TurnNavigationItem } from '@vibe/ui/components/TurnNavigationPopup';
 
+/** Follow-up prompt sent when resuming a run interrupted by a server restart */
+const RESUME_INTERRUPTED_PROMPT =
+  'The previous run was interrupted by a vibe-kanban restart before it could finish. Review the current state of the working tree and continue the task from where it left off.';
+
 /** Compute execution status from boolean flags */
 function computeExecutionStatus(params: {
   isInFeedbackMode: boolean;
@@ -562,6 +566,22 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     clearDraft,
     reviewContext,
   ]);
+
+  // Interrupted-run resume affordance: the latest coding-agent process in
+  // this session was stopped by a server restart and can be resumed.
+  const hasInterruptedLatestProcess = useMemo(() => {
+    if (!sessionId || isNewSessionMode) return false;
+    const sessionAgentProcesses = processes.filter(
+      (p) => p.session_id === sessionId && p.run_reason === 'codingagent'
+    );
+    const latest = sessionAgentProcesses[sessionAgentProcesses.length - 1];
+    return latest?.status === ExecutionProcessStatus.interrupted;
+  }, [processes, sessionId, isNewSessionMode]);
+
+  const handleResumeInterrupted = useCallback(async () => {
+    onScrollToBottom('auto');
+    await send(RESUME_INTERRUPTED_PROMPT);
+  }, [send, onScrollToBottom]);
 
   // Track previous process count for queue refresh
   const prevProcessCountRef = useRef(processes.length);
@@ -1114,6 +1134,14 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
         conflictedFilesCount,
         onResolveConflicts: handleResolveConflicts,
       }}
+      interruptedNotice={
+        hasInterruptedLatestProcess && !isAttemptRunning
+          ? {
+              onResume: handleResumeInterrupted,
+              isResuming: isSending,
+            }
+          : undefined
+      }
       error={sendError}
       agent={effectiveExecutor}
       todos={todos}

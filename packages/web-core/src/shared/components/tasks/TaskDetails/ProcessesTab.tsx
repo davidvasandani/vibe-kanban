@@ -74,6 +74,8 @@ function ProcessesTab({ sessionId }: ProcessesTabProps) {
         return <AlertCircle className="h-4 w-4 text-destructive" />;
       case 'killed':
         return <Square className="h-4 w-4 text-gray-500" />;
+      case 'interrupted':
+        return <AlertCircle className="h-4 w-4 text-amber-500" />;
       default:
         return <Clock className="h-4 w-4 text-gray-400" />;
     }
@@ -89,6 +91,8 @@ function ProcessesTab({ sessionId }: ProcessesTabProps) {
         return 'bg-red-50 border-red-200 text-red-800';
       case 'killed':
         return 'bg-gray-50 border-gray-200 text-gray-800';
+      case 'interrupted':
+        return 'bg-amber-50 border-amber-200 text-amber-800';
       default:
         return 'bg-gray-50 border-gray-200 text-gray-800';
     }

@@ -973,8 +973,16 @@ export function KanbanContainer() {
             <p className="text-low">{t('kanban.noVisibleStatuses')}</p>
           </div>
         ) : (
-          <div className="flex-1 overflow-x-auto px-double">
-            <KanbanProvider onDragEnd={handleDragEnd}>
+          <div
+            className={cn(
+              'flex-1 overflow-x-auto scroll-smooth',
+              isMobile ? 'snap-x snap-mandatory overflow-y-hidden' : 'px-double'
+            )}
+          >
+            <KanbanProvider
+              onDragEnd={handleDragEnd}
+              className={cn(isMobile && 'h-full')}
+            >
               {visibleStatuses.map((status) => {
                 const issueIds = items[status.id] ?? [];
 
@@ -999,7 +1007,13 @@ export function KanbanContainer() {
                         </button>
                       </div>
                     </KanbanHeader>
-                    <KanbanCards id={status.id}>
+                    <KanbanCards
+                      id={status.id}
+                      className={cn(
+                        isMobile &&
+                          'overflow-y-auto overscroll-y-contain min-h-0'
+                      )}
+                    >
                       {issueIds.map((issueId, index) => {
                         const issue = issueMap[issueId];
                         if (!issue) return null;

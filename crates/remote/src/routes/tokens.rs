@@ -181,8 +181,8 @@ async fn refresh_token(
     }
 
     // Skip OAuth validation for local auth providers and single-user mode
-    if !is_local_provider(&token_details.provider)
-        && !(state.single_user_mode() && token_details.provider == "local")
+    if !(is_local_provider(&token_details.provider)
+        || (state.single_user_mode() && token_details.provider == "local"))
     {
         state
             .oauth_token_validator()

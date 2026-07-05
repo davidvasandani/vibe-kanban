@@ -194,6 +194,12 @@ pub trait ContainerService {
 
     async fn kill_all_running_processes(&self) -> Result<(), ContainerError>;
 
+    /// Try to re-attach to a still-running process left behind by a previous
+    /// server instance instead of interrupting it. Returns true when adopted.
+    async fn try_adopt_execution(&self, _process: &ExecutionProcess) -> bool {
+        false
+    }
+
     async fn delete(&self, workspace: &Workspace) -> Result<(), ContainerError>;
 
     /// A context is finalized when
@@ -222,10 +228,12 @@ pub trait ContainerService {
             return false;
         }
 
-        // Always finalize failed or killed executions, regardless of next action
+        // Always finalize failed, killed or interrupted executions, regardless of next action
         if matches!(
             ctx.execution_process.status,
-            ExecutionProcessStatus::Failed | ExecutionProcessStatus::Killed
+            ExecutionProcessStatus::Failed
+                | ExecutionProcessStatus::Killed
+                | ExecutionProcessStatus::Interrupted
         ) {
             return true;
         }
@@ -237,7 +245,11 @@ pub trait ContainerService {
     /// Finalize workspace execution by sending notifications
     async fn finalize_task(&self, ctx: &ExecutionContext) {
         // Skip notification if process was intentionally killed by user
-        if matches!(ctx.execution_process.status, ExecutionProcessStatus::Killed) {
+        // or interrupted by a server shutdown/restart
+        if matches!(
+            ctx.execution_process.status,
+            ExecutionProcessStatus::Killed | ExecutionProcessStatus::Interrupted
+        ) {
             return;
         }
 
@@ -269,20 +281,41 @@ pub trait ContainerService {
             .await;
     }
 
-    /// Cleanup executions marked as running in the db, call at startup
-    async fn cleanup_orphan_executions(&self) -> Result<(), ContainerError> {
+    /// Cleanup executions marked as running in the db, call at startup.
+    /// Returns the processes that were marked as interrupted.
+    async fn cleanup_orphan_executions(&self) -> Result<Vec<ExecutionProcess>, ContainerError> {
         let running_processes = ExecutionProcess::find_running(&self.db().pool).await?;
+        let mut interrupted = Vec::new();
         for process in running_processes {
+            // Detached processes (dev servers) are left running across
+            // restarts; if still alive, re-attach instead of killing.
+            if self.try_adopt_execution(&process).await {
+                continue;
+            }
             tracing::info!(
                 "Found orphaned execution process {} for session {}",
                 process.id,
                 process.session_id
             );
+            // If the previous server died uncleanly (crash/SIGKILL), the OS
+            // process group may still be alive: kill it before touching state
+            // so a restarted dev server won't fight it for ports.
+            #[cfg(unix)]
+            if let Some(pgid) = process.pgid {
+                let age_secs = (chrono::Utc::now() - process.started_at).num_seconds();
+                if utils::process::kill_orphan_process_group(pgid as i32, age_secs).await {
+                    tracing::info!(
+                        "Killed orphaned OS process group {} for execution process {}",
+                        pgid,
+                        process.id
+                    );
+                }
+            }
             // Update the execution process status first
             if let Err(e) = ExecutionProcess::update_completion(
                 &self.db().pool,
                 process.id,
-                ExecutionProcessStatus::Failed,
+                ExecutionProcessStatus::Interrupted,
                 None, // No exit code for orphaned processes
             )
             .await
@@ -319,10 +352,74 @@ pub trait ContainerService {
                     }
                 }
             }
-            // Process marked as failed
-            tracing::info!("Marked orphaned execution process {} as failed", process.id);
+            tracing::info!(
+                "Marked orphaned execution process {} as interrupted",
+                process.id
+            );
+            interrupted.push(process);
         }
-        Ok(())
+        Ok(interrupted)
+    }
+
+    /// Restart dev servers that were interrupted by a server shutdown or
+    /// crash. Call at startup with the processes returned by
+    /// [`Self::cleanup_orphan_executions`].
+    async fn restart_interrupted_dev_servers(&self, interrupted: &[ExecutionProcess]) {
+        for process in interrupted {
+            if process.run_reason != ExecutionProcessRunReason::DevServer {
+                continue;
+            }
+            let ctx = match ExecutionProcess::load_context(&self.db().pool, process.id).await {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    tracing::warn!(
+                        "Skipping dev server restart for process {}: failed to load context: {}",
+                        process.id,
+                        e
+                    );
+                    continue;
+                }
+            };
+            if ctx.workspace.archived || ctx.workspace.worktree_deleted {
+                continue;
+            }
+            // Only restart into an existing worktree; don't recreate one at boot
+            if !ctx
+                .workspace
+                .container_ref
+                .as_deref()
+                .is_some_and(|p| Path::new(p).exists())
+            {
+                continue;
+            }
+            let Ok(executor_action) = process.executor_action() else {
+                continue;
+            };
+            match self
+                .start_execution(
+                    &ctx.workspace,
+                    &ctx.session,
+                    executor_action,
+                    &ExecutionProcessRunReason::DevServer,
+                )
+                .await
+            {
+                Ok(new_process) => {
+                    tracing::info!(
+                        "Restarted interrupted dev server for workspace {} as process {}",
+                        ctx.workspace.id,
+                        new_process.id
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to restart interrupted dev server for workspace {}: {}",
+                        ctx.workspace.id,
+                        e
+                    );
+                }
+            }
+        }
     }
 
     /// Backfill before_head_commit for legacy execution processes.
@@ -1083,6 +1180,11 @@ pub trait ContainerService {
             .filter(|dir| !dir.is_empty())
             .cloned();
 
+        // Several projects can share a single repository (e.g. different
+        // services in a homelab monorepo). When this workspace targets a
+        // subdirectory of a shared repo, tell the agent which one it is on.
+        let prompt = scope_initial_prompt_to_working_dir(prompt, &repos);
+
         let coding_action = ExecutorAction::new(
             ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
                 prompt,
@@ -1314,12 +1416,19 @@ pub trait ContainerService {
             }
         }
 
-        execution_process::spawn_stream_raw_logs_to_storage(
-            self.msg_stores().clone(),
-            self.db().clone(),
-            execution_process.id,
-            session.id,
-        );
+        // Detached dev servers (unix) write their own raw log file, which is
+        // the persistent record; mirroring the MsgStore into a JSONL file
+        // would duplicate it on every adoption replay.
+        let dev_server_writes_own_log =
+            cfg!(unix) && matches!(run_reason, ExecutionProcessRunReason::DevServer);
+        if !dev_server_writes_own_log {
+            execution_process::spawn_stream_raw_logs_to_storage(
+                self.msg_stores().clone(),
+                self.db().clone(),
+                execution_process.id,
+                session.id,
+            );
+        }
 
         // Reset the reported pipeline stage only when a *new coding-agent*
         // execution begins (not for setup/cleanup/archive/dev-server runs,
@@ -1413,5 +1522,105 @@ pub trait ContainerService {
 
         tracing::debug!("Started next action: {:?}", next_action);
         Ok(())
+    }
+}
+
+/// Prepend project-scoping context to an initial coding-agent prompt.
+///
+/// When a workspace targets a subdirectory of a single repository (for example,
+/// one service inside a shared homelab monorepo), several projects map to the
+/// same repo and the agent is started inside that subdirectory. Nothing in the
+/// prompt otherwise tells the agent which project it is working on, so add a
+/// short note describing the working directory and asking it to keep changes
+/// scoped there. Prompts for multi-repo or whole-repo workspaces are returned
+/// unchanged.
+fn scope_initial_prompt_to_working_dir(prompt: String, repos: &[Repo]) -> String {
+    let [repo] = repos else {
+        return prompt;
+    };
+
+    let Some(subdir) = repo
+        .default_working_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|subdir| !subdir.is_empty())
+    else {
+        return prompt;
+    };
+
+    let repo_name = &repo.display_name;
+    format!(
+        "You are working in the `{subdir}` directory of the `{repo_name}` \
+         repository, which is shared by multiple projects. This directory is \
+         your current working directory and the root of the project for this \
+         task—keep your changes scoped to it unless the task explicitly \
+         requires touching other parts of the repository.\n\n{prompt}"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use chrono::Utc;
+    use db::models::repo::Repo;
+    use uuid::Uuid;
+
+    use super::scope_initial_prompt_to_working_dir;
+
+    fn repo_with_working_dir(display_name: &str, working_dir: Option<&str>) -> Repo {
+        Repo {
+            id: Uuid::new_v4(),
+            path: PathBuf::from("/tmp/repo"),
+            name: display_name.to_string(),
+            display_name: display_name.to_string(),
+            setup_script: None,
+            cleanup_script: None,
+            archive_script: None,
+            copy_files: None,
+            parallel_setup_script: false,
+            dev_server_script: None,
+            default_target_branch: None,
+            default_working_dir: working_dir.map(str::to_string),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn prepends_context_when_single_repo_targets_a_subdirectory() {
+        let repos = vec![repo_with_working_dir("homelab", Some("services/grafana"))];
+        let result = scope_initial_prompt_to_working_dir("Bump the image tag".to_string(), &repos);
+
+        assert!(result.contains("`services/grafana`"));
+        assert!(result.contains("`homelab`"));
+        assert!(result.ends_with("Bump the image tag"));
+    }
+
+    #[test]
+    fn leaves_prompt_unchanged_without_a_working_dir() {
+        let repos = vec![repo_with_working_dir("homelab", None)];
+        let result = scope_initial_prompt_to_working_dir("Do the thing".to_string(), &repos);
+
+        assert_eq!(result, "Do the thing");
+    }
+
+    #[test]
+    fn leaves_prompt_unchanged_for_empty_working_dir() {
+        let repos = vec![repo_with_working_dir("homelab", Some("   "))];
+        let result = scope_initial_prompt_to_working_dir("Do the thing".to_string(), &repos);
+
+        assert_eq!(result, "Do the thing");
+    }
+
+    #[test]
+    fn leaves_prompt_unchanged_for_multi_repo_workspaces() {
+        let repos = vec![
+            repo_with_working_dir("homelab", Some("services/grafana")),
+            repo_with_working_dir("infra", Some("modules/dns")),
+        ];
+        let result = scope_initial_prompt_to_working_dir("Do the thing".to_string(), &repos);
+
+        assert_eq!(result, "Do the thing");
     }
 }
