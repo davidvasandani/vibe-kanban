@@ -328,6 +328,11 @@ impl ClaudeAgentClient {
     ) -> Result<serde_json::Value, ExecutorError> {
         // Stop hook git check - uses `decision` (approve/block) and `reason` fields
         if callback_id == STOP_GIT_CHECK_CALLBACK_ID {
+            // The execution was interrupted; don't block the stop to ask
+            // Claude to keep working.
+            if self.cancel.is_cancelled() {
+                return Ok(serde_json::json!({"decision": "approve"}));
+            }
             if input
                 .get("stop_hook_active")
                 .and_then(|v| v.as_bool())
