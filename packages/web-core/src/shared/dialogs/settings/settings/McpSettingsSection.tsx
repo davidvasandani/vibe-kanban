@@ -1,12 +1,24 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { PlusIcon } from '@phosphor-icons/react';
-import type { BaseCodingAgent, ExecutorProfile } from 'shared/types';
+import {
+  CheckIcon,
+  CodeIcon,
+  PencilSimpleIcon,
+  PlusIcon,
+  TrashIcon,
+} from '@phosphor-icons/react';
+import type { BaseCodingAgent, ExecutorProfile, JsonValue } from 'shared/types';
 import { McpConfig } from 'shared/types';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { McpConfigStrategyGeneral } from '@/shared/lib/mcpStrategies';
+import {
+  codecForAgent,
+  transportOf,
+  type McpServerCodec,
+} from '@/shared/lib/mcpServerCodec';
 import { cn } from '@/shared/lib/utils';
 import { toPrettyCase } from '@/shared/lib/string';
+import { Button } from '@vibe/ui/components/Button';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -20,16 +32,35 @@ import {
   SettingsSaveBar,
   SettingsTextarea,
 } from './SettingsComponents';
+import { McpServerDialog } from './McpServerDialog';
 import { useSettingsDirty } from './SettingsDirtyContext';
 import { useSettingsMachineClient } from './SettingsHostContext';
+
+type ServerMap = Record<string, JsonValue>;
+
+const isObject = (v: JsonValue | undefined): v is ServerMap =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/** Badge text for a server entry's transport. */
+function transportBadge(
+  codec: McpServerCodec,
+  entry: JsonValue,
+  customLabel: string
+): string {
+  const transport = transportOf(codec, entry);
+  if (transport === null) return customLabel;
+  if (transport === 'stdio') return 'stdio';
+  return transport.toUpperCase();
+}
 
 export function McpSettingsSection() {
   const { t } = useTranslation('settings');
   const { setDirty: setContextDirty } = useSettingsDirty();
   const machineClient = useSettingsMachineClient();
   const { config, profiles } = useUserSystem();
-  const [mcpServers, setMcpServers] = useState('{}');
-  const [originalMcpServers, setOriginalMcpServers] = useState('{}');
+
+  const [servers, setServers] = useState<ServerMap>({});
+  const [originalSnapshot, setOriginalSnapshot] = useState('{}');
   const [mcpConfig, setMcpConfig] = useState<McpConfig | null>(null);
   const [mcpError, setMcpError] = useState<string | null>(null);
   const [mcpLoading, setMcpLoading] = useState(true);
@@ -39,15 +70,39 @@ export function McpSettingsSection() {
   const [mcpConfigPath, setMcpConfigPath] = useState<string>('');
   const [success, setSuccess] = useState(false);
 
-  const isDirty = mcpServers !== originalMcpServers;
+  // Raw-JSON escape hatch.
+  const [mode, setMode] = useState<'form' | 'json'>('form');
+  const [jsonText, setJsonText] = useState('{}');
+  const [jsonError, setJsonError] = useState<string | null>(null);
 
-  // Sync dirty state to context for unsaved changes confirmation
+  const snapshot = useMemo(() => JSON.stringify(servers), [servers]);
+  const isDirty = snapshot !== originalSnapshot;
+
+  const selectedProfileKey = useMemo(
+    () =>
+      selectedProfile
+        ? Object.keys(profiles || {}).find(
+            (key) => profiles![key] === selectedProfile
+          ) || ''
+        : '',
+    [selectedProfile, profiles]
+  );
+
+  const codec = useMemo(
+    () =>
+      selectedProfileKey
+        ? codecForAgent(selectedProfileKey as BaseCodingAgent)
+        : null,
+    [selectedProfileKey]
+  );
+
+  // Sync dirty state to context for unsaved changes confirmation.
   useEffect(() => {
     setContextDirty('mcp', isDirty);
     return () => setContextDirty('mcp', false);
   }, [isDirty, setContextDirty]);
 
-  // Initialize selected profile when config loads
+  // Initialize selected profile when config loads.
   useEffect(() => {
     if (config?.executor_profile && profiles && !selectedProfile) {
       const currentProfile = profiles[config.executor_profile.executor];
@@ -59,35 +114,29 @@ export function McpSettingsSection() {
     }
   }, [config?.executor_profile, profiles, selectedProfile]);
 
-  // Load MCP configuration when selected profile changes
+  // Load MCP configuration when selected profile changes.
   useEffect(() => {
     const loadMcpServersForProfile = async (profile: ExecutorProfile) => {
       setMcpLoading(true);
       setMcpError(null);
       setMcpConfigPath('');
+      setMode('form');
+      setJsonError(null);
 
       try {
         const profileKey = profiles
           ? Object.keys(profiles).find((key) => profiles[key] === profile)
           : null;
-        if (!profileKey) {
-          throw new Error('Profile key not found');
-        }
-
-        if (!machineClient) {
-          throw new Error('Machine client is required');
-        }
+        if (!profileKey) throw new Error('Profile key not found');
+        if (!machineClient) throw new Error('Machine client is required');
 
         const result = await machineClient.loadMcpServers({
           executor: profileKey as BaseCodingAgent,
         });
         setMcpConfig(result.mcp_config);
-        const fullConfig = McpConfigStrategyGeneral.createFullConfig(
-          result.mcp_config
-        );
-        const configJson = JSON.stringify(fullConfig, null, 2);
-        setMcpServers(configJson);
-        setOriginalMcpServers(configJson);
+        const loaded = (result.mcp_config.servers ?? {}) as ServerMap;
+        setServers(loaded);
+        setOriginalSnapshot(JSON.stringify(loaded));
         setMcpConfigPath(result.config_path);
       } catch (err: unknown) {
         if (
@@ -108,112 +157,136 @@ export function McpSettingsSection() {
     }
   }, [machineClient, profiles, selectedProfile]);
 
-  const handleMcpServersChange = (value: string) => {
-    setMcpServers(value);
-    setMcpError(null);
-
-    if (value.trim() && mcpConfig) {
-      try {
-        const parsedConfig = JSON.parse(value);
-        McpConfigStrategyGeneral.validateFullConfig(mcpConfig, parsedConfig);
-      } catch (err) {
-        if (err instanceof SyntaxError) {
-          setMcpError(t('settings.mcp.errors.invalidJson'));
-        } else {
-          setMcpError(
-            err instanceof Error
-              ? err.message
-              : t('settings.mcp.errors.validationError')
-          );
-        }
-      }
-    }
-  };
-
-  const handleApplyMcpServers = async () => {
-    if (!selectedProfile || !mcpConfig) return;
+  const handleApply = useCallback(async () => {
+    if (!selectedProfile || !mcpConfig || !selectedProfileKey) return;
 
     setMcpApplying(true);
     setMcpError(null);
 
     try {
-      if (mcpServers.trim()) {
-        try {
-          const fullConfig = JSON.parse(mcpServers);
-          McpConfigStrategyGeneral.validateFullConfig(mcpConfig, fullConfig);
-          const mcpServersConfig =
-            McpConfigStrategyGeneral.extractServersForApi(
-              mcpConfig,
-              fullConfig
-            );
-
-          const selectedProfileKey = profiles
-            ? Object.keys(profiles).find(
-                (key) => profiles[key] === selectedProfile
-              )
-            : null;
-          if (!selectedProfileKey) {
-            throw new Error('Selected profile key not found');
-          }
-
-          if (!machineClient) {
-            throw new Error('Machine client is required');
-          }
-
-          await machineClient.saveMcpServers(
-            {
-              executor: selectedProfileKey as BaseCodingAgent,
-            },
-            { servers: mcpServersConfig }
-          );
-
-          setOriginalMcpServers(mcpServers);
-          setSuccess(true);
-          setTimeout(() => setSuccess(false), 3000);
-        } catch (mcpErr) {
-          if (mcpErr instanceof SyntaxError) {
-            setMcpError(t('settings.mcp.errors.invalidJson'));
-          } else {
-            setMcpError(
-              mcpErr instanceof Error
-                ? mcpErr.message
-                : t('settings.mcp.errors.saveFailed')
-            );
-          }
-        }
-      }
+      if (!machineClient) throw new Error('Machine client is required');
+      await machineClient.saveMcpServers(
+        { executor: selectedProfileKey as BaseCodingAgent },
+        { servers }
+      );
+      setOriginalSnapshot(JSON.stringify(servers));
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 3000);
     } catch (err) {
-      setMcpError(t('settings.mcp.errors.applyFailed'));
+      setMcpError(
+        err instanceof Error ? err.message : t('settings.mcp.errors.saveFailed')
+      );
       console.error('Error applying MCP servers:', err);
     } finally {
       setMcpApplying(false);
     }
-  };
+  }, [
+    machineClient,
+    mcpConfig,
+    selectedProfile,
+    selectedProfileKey,
+    servers,
+    t,
+  ]);
 
-  const handleDiscard = () => {
-    setMcpServers(originalMcpServers);
+  const handleDiscard = useCallback(() => {
+    setServers(JSON.parse(originalSnapshot) as ServerMap);
     setMcpError(null);
-  };
+    setJsonError(null);
+    setMode('form');
+  }, [originalSnapshot]);
 
-  const addServer = (key: string) => {
-    try {
-      const existing = mcpServers.trim() ? JSON.parse(mcpServers) : {};
-      const updated = McpConfigStrategyGeneral.addPreconfiguredToConfig(
-        mcpConfig!,
-        existing,
-        key
-      );
-      setMcpServers(JSON.stringify(updated, null, 2));
-      setMcpError(null);
-    } catch (err) {
-      console.error(err);
-      setMcpError(
-        err instanceof Error
-          ? err.message
-          : t('settings.mcp.errors.addServerFailed')
-      );
-    }
-  };
+  const openDialog = useCallback(
+    async (initial?: { name: string; entry: JsonValue }) => {
+      if (!codec) return;
+      const result = await McpServerDialog.show({
+        codec,
+        existingNames: Object.keys(servers),
+        initial,
+      });
+      if (!result) return;
+      setServers((prev) => {
+        const next = { ...prev };
+        // Renamed: drop the old key.
+        if (initial && initial.name !== result.name) delete next[initial.name];
+        next[result.name] = result.entry;
+        return next;
+      });
+    },
+    [codec, servers]
+  );
+
+  const removeServer = useCallback((name: string) => {
+    setServers((prev) => {
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
+  }, []);
+
+  const addPreconfigured = useCallback(
+    (key: string) => {
+      if (!mcpConfig) return;
+      const preconf = mcpConfig.preconfigured;
+      if (!isObject(preconf) || !(key in preconf)) return;
+      const entry = preconf[key];
+      if (entry === undefined) return;
+      setServers((prev) => ({ ...prev, [key]: entry }));
+    },
+    [mcpConfig]
+  );
+
+  // --- JSON escape hatch ----------------------------------------------------
+
+  const enterJsonMode = useCallback(() => {
+    if (!mcpConfig) return;
+    const scratch = { ...mcpConfig, servers } as McpConfig;
+    const fullConfig = McpConfigStrategyGeneral.createFullConfig(scratch);
+    setJsonText(JSON.stringify(fullConfig, null, 2));
+    setJsonError(null);
+    setMode('json');
+  }, [mcpConfig, servers]);
+
+  const applyJsonToServers = useCallback(
+    (value: string): boolean => {
+      if (!mcpConfig) return false;
+      try {
+        const parsed = JSON.parse(value);
+        McpConfigStrategyGeneral.validateFullConfig(mcpConfig, parsed);
+        const extracted = McpConfigStrategyGeneral.extractServersForApi(
+          mcpConfig,
+          parsed
+        );
+        setServers(extracted as ServerMap);
+        setJsonError(null);
+        return true;
+      } catch (err) {
+        setJsonError(
+          err instanceof SyntaxError
+            ? t('settings.mcp.errors.invalidJson')
+            : err instanceof Error
+              ? err.message
+              : t('settings.mcp.errors.validationError')
+        );
+        return false;
+      }
+    },
+    [mcpConfig, t]
+  );
+
+  const exitJsonMode = useCallback(() => {
+    if (applyJsonToServers(jsonText)) setMode('form');
+  }, [applyJsonToServers, jsonText]);
+
+  const handleJsonChange = useCallback(
+    (value: string) => {
+      setJsonText(value);
+      applyJsonToServers(value);
+    },
+    [applyJsonToServers]
+  );
+
+  // --- preconfigured metadata -----------------------------------------------
 
   const preconfiguredObj = (mcpConfig?.preconfigured ?? {}) as Record<
     string,
@@ -226,7 +299,7 @@ export function McpSettingsSection() {
           { name?: string; description?: string; url?: string; icon?: string }
         >)
       : {};
-  const servers = Object.fromEntries(
+  const preconfiguredServers = Object.fromEntries(
     Object.entries(preconfiguredObj).filter(([k]) => k !== 'meta')
   ) as Record<string, unknown>;
   const getMetaFor = (key: string) => meta[key] || {};
@@ -237,11 +310,8 @@ export function McpSettingsSection() {
         .map((key) => ({ value: key, label: toPrettyCase(key) }))
     : [];
 
-  const selectedProfileKey = selectedProfile
-    ? Object.keys(profiles || {}).find(
-        (key) => profiles![key] === selectedProfile
-      ) || ''
-    : '';
+  const notSupported = mcpError?.includes('does not support MCP');
+  const serverNames = Object.keys(servers).sort();
 
   if (!config) {
     return (
@@ -256,7 +326,7 @@ export function McpSettingsSection() {
   return (
     <>
       {/* Status messages */}
-      {mcpError && !mcpError.includes('does not support MCP') && (
+      {mcpError && !notSupported && (
         <div className="bg-error/10 border border-error/50 rounded-sm p-4 text-error">
           {t('settings.mcp.errors.mcpError', { error: mcpError })}
         </div>
@@ -268,7 +338,6 @@ export function McpSettingsSection() {
         </div>
       )}
 
-      {/* MCP Configuration */}
       <SettingsCard
         title={t('settings.mcp.title')}
         description={t('settings.mcp.description')}
@@ -304,7 +373,7 @@ export function McpSettingsSection() {
           </DropdownMenu>
         </SettingsField>
 
-        {mcpError && mcpError.includes('does not support MCP') ? (
+        {notSupported ? (
           <div className="rounded-sm border border-warning/50 bg-warning/10 p-4">
             <h3 className="text-sm font-medium text-warning">
               {t('settings.mcp.errors.notSupported')}
@@ -316,50 +385,154 @@ export function McpSettingsSection() {
           </div>
         ) : (
           <>
-            <SettingsField
-              label={t('settings.mcp.labels.serverConfig')}
-              description={
-                mcpLoading ? (
-                  t('settings.mcp.loadingStates.configuration')
+            {/* Header: title, save location, and mode toggle */}
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <label className="text-sm font-medium text-normal">
+                  {t('settings.mcp.labels.servers')}
+                </label>
+                <p className="text-sm text-low">
+                  {mcpLoading ? (
+                    t('settings.mcp.loadingStates.configuration')
+                  ) : (
+                    <>
+                      {t('settings.mcp.labels.saveLocation')}
+                      {mcpConfigPath && (
+                        <span className="ml-2 font-mono text-xs">
+                          {mcpConfigPath}
+                        </span>
+                      )}
+                    </>
+                  )}
+                </p>
+              </div>
+              {!mcpLoading && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  type="button"
+                  className="shrink-0 text-low"
+                  onClick={mode === 'json' ? exitJsonMode : enterJsonMode}
+                >
+                  <CodeIcon className="size-icon-xs mr-1" weight="bold" />
+                  {mode === 'json'
+                    ? t('settings.mcp.json.editAsForm')
+                    : t('settings.mcp.json.editAsJson')}
+                </Button>
+              )}
+            </div>
+
+            {mcpLoading ? (
+              <div className="text-sm text-low py-4">
+                {t('settings.mcp.loadingStates.jsonEditor')}
+              </div>
+            ) : mode === 'json' ? (
+              <SettingsField label="" error={jsonError}>
+                <SettingsTextarea
+                  value={jsonText}
+                  onChange={handleJsonChange}
+                  rows={16}
+                  monospace
+                />
+              </SettingsField>
+            ) : (
+              <div className="space-y-2">
+                {serverNames.length === 0 ? (
+                  <div className="rounded-sm border border-dashed border-border p-6 text-center">
+                    <p className="text-sm text-low">
+                      {t('settings.mcp.list.empty')}
+                    </p>
+                  </div>
                 ) : (
-                  <>
-                    {t('settings.mcp.labels.saveLocation')}
-                    {mcpConfigPath && (
-                      <span className="ml-2 font-mono text-xs">
-                        {mcpConfigPath}
-                      </span>
-                    )}
-                  </>
-                )
-              }
-            >
-              <SettingsTextarea
-                value={
-                  mcpLoading
-                    ? t('settings.mcp.loadingStates.jsonEditor')
-                    : mcpServers
-                }
-                onChange={handleMcpServersChange}
-                disabled={mcpLoading}
-                rows={14}
-                placeholder='{\n  "server-name": {\n    "type": "stdio",\n    "command": "your-command",\n    "args": ["arg1", "arg2"]\n  }\n}'
-              />
-            </SettingsField>
+                  <div className="space-y-2">
+                    {serverNames.map((name) => {
+                      const entry = servers[name];
+                      const summary = codec ? codec.summarize(entry) : '';
+                      const badge = codec
+                        ? transportBadge(
+                            codec,
+                            entry,
+                            t('settings.mcp.list.customBadge')
+                          )
+                        : '';
+                      return (
+                        <div
+                          key={name}
+                          className="flex items-center gap-3 rounded-sm border border-border bg-secondary/30 p-3"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-sm text-high truncate">
+                                {name}
+                              </span>
+                              {badge && (
+                                <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-xs font-medium text-low">
+                                  {badge}
+                                </span>
+                              )}
+                            </div>
+                            {summary && (
+                              <div className="mt-1 truncate font-mono text-xs text-low">
+                                {summary}
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => openDialog({ name, entry })}
+                              aria-label={`Edit ${name}`}
+                              className="flex items-center justify-center rounded-sm p-2 text-low hover:bg-secondary hover:text-normal"
+                            >
+                              <PencilSimpleIcon
+                                className="size-icon-xs"
+                                weight="bold"
+                              />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => removeServer(name)}
+                              aria-label={`Remove ${name}`}
+                              className="flex items-center justify-center rounded-sm p-2 text-error hover:bg-error/10"
+                            >
+                              <TrashIcon
+                                className="size-icon-xs"
+                                weight="bold"
+                              />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <Button
+                  variant="outline"
+                  size="sm"
+                  type="button"
+                  onClick={() => openDialog()}
+                >
+                  <PlusIcon className="size-icon-xs mr-1" weight="bold" />
+                  {t('settings.mcp.list.addServer')}
+                </Button>
+              </div>
+            )}
 
             {/* Preconfigured servers */}
-            {mcpConfig?.preconfigured &&
-              typeof mcpConfig.preconfigured === 'object' &&
-              Object.keys(servers).length > 0 && (
+            {mode === 'form' &&
+              !mcpLoading &&
+              Object.keys(preconfiguredServers).length > 0 && (
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-normal">
                     {t('settings.mcp.labels.popularServers')}
                   </label>
                   <p className="text-sm text-low">
-                    {t('settings.mcp.labels.serverHelper')}
+                    {t('settings.mcp.labels.serverHelperForm')}
                   </p>
 
                   <div className="grid grid-cols-2 gap-2">
-                    {Object.entries(servers).map(([key]) => {
+                    {Object.keys(preconfiguredServers).map((key) => {
                       const metaObj = getMetaFor(key) as {
                         name?: string;
                         description?: string;
@@ -369,15 +542,19 @@ export function McpSettingsSection() {
                       const description =
                         metaObj.description || 'No description';
                       const icon = metaObj.icon ? `/${metaObj.icon}` : null;
+                      const added = key in servers;
 
                       return (
                         <button
                           key={key}
                           type="button"
-                          onClick={() => addServer(key)}
+                          onClick={() => addPreconfigured(key)}
+                          disabled={added}
                           className={cn(
-                            'flex items-start gap-3 p-3 rounded-sm border border-border/50 bg-secondary/30',
-                            'hover:bg-secondary hover:border-border transition-colors text-left'
+                            'flex items-start gap-3 p-3 rounded-sm border border-border/50 bg-secondary/30 text-left transition-colors',
+                            added
+                              ? 'opacity-60 cursor-default'
+                              : 'hover:bg-secondary hover:border-border'
                           )}
                         >
                           <div className="w-6 h-6 rounded-sm border border-border bg-secondary flex items-center justify-center overflow-hidden shrink-0">
@@ -401,10 +578,17 @@ export function McpSettingsSection() {
                               {description}
                             </div>
                           </div>
-                          <PlusIcon
-                            className="size-icon-xs text-low shrink-0"
-                            weight="bold"
-                          />
+                          {added ? (
+                            <CheckIcon
+                              className="size-icon-xs text-success shrink-0"
+                              weight="bold"
+                            />
+                          ) : (
+                            <PlusIcon
+                              className="size-icon-xs text-low shrink-0"
+                              weight="bold"
+                            />
+                          )}
                         </button>
                       );
                     })}
@@ -416,10 +600,10 @@ export function McpSettingsSection() {
       </SettingsCard>
 
       <SettingsSaveBar
-        show={isDirty && !mcpError?.includes('does not support MCP')}
+        show={isDirty && !notSupported}
         saving={mcpApplying}
-        saveDisabled={!!mcpError}
-        onSave={handleApplyMcpServers}
+        saveDisabled={!!jsonError}
+        onSave={handleApply}
         onDiscard={handleDiscard}
       />
     </>
