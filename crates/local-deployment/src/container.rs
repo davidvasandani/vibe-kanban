@@ -1433,7 +1433,7 @@ fn is_reserved_env_name(name: &str) -> bool {
     RESERVED_ENV_PREFIXES
         .iter()
         .any(|prefix| name.starts_with(prefix))
-        || RESERVED_ENV_NAMES.iter().any(|reserved| name == *reserved)
+        || RESERVED_ENV_NAMES.contains(&name)
 }
 
 fn failure_exit_status() -> std::process::ExitStatus {
