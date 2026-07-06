@@ -105,6 +105,7 @@ export function useShape<
   const clearErrorFn = syncErrorContext?.clearError;
 
   const handleError = useCallback((err: SyncError) => setError(err), []);
+  const handleRecovered = useCallback(() => setError(null), []);
 
   const retry = useCallback(() => {
     setError(null);
@@ -136,10 +137,18 @@ export function useShape<
 
   const collection = useMemo(() => {
     if (!enabled) return null;
-    const config = { onError: handleError };
+    const config = { onError: handleError, onRecovered: handleRecovered };
     void retryKey;
     return createShapeCollection(shape, stableParams, config, mutation);
-  }, [enabled, shape, mutation, handleError, retryKey, stableParams]);
+  }, [
+    enabled,
+    shape,
+    mutation,
+    handleError,
+    handleRecovered,
+    retryKey,
+    stableParams,
+  ]);
 
   const { data, isLoading: queryLoading } = useLiveQuery(
     (query) => (collection ? query.from({ item: collection }) : undefined),

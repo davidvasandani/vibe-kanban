@@ -18,6 +18,11 @@ contributed to it.
 
 ## Pages
 
+- [electric-sync-fallback.md](electric-sync-fallback.md) — Client Electric
+  hybrid sync + REST fallback: Electric-first-then-fallback architecture, the
+  error/recovery callback chain to the navbar banner, why the readiness timeout
+  must fall back silently ("falling back is recovery, not an error"), and the
+  stable-callback / caching / testing gotchas.
 - [kanban-items-state-and-activity-grouping.md](kanban-items-state-and-activity-grouping.md)
   — The `items` array ↔ drag-and-drop index/sort_order contract, the
   `isSyncingRef` rebuild-swallowing gotcha, the In progress Active/Waiting
