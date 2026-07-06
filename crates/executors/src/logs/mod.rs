@@ -4,6 +4,7 @@ use workspace_utils::approvals::{ApprovalStatus, QuestionStatus};
 
 use crate::logs::utils::shell_command_parsing::CommandCategory;
 
+pub mod image_extraction;
 pub mod plain_text_processor;
 pub mod stderr_processor;
 pub mod utils;

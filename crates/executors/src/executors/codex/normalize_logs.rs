@@ -1909,7 +1909,20 @@ pub fn normalize_logs(
                                 } else {
                                     ToolStatus::Success
                                 };
-                                if value.content.iter().all(|block| {
+                                if let Some(markdown) =
+                                    crate::logs::image_extraction::rewrite_blocks_with_images(
+                                        std::path::Path::new(&worktree_path_str),
+                                        &value.content,
+                                    )
+                                {
+                                    // MCP result carried image blocks (e.g. a
+                                    // browser screenshot): persisted to the
+                                    // worktree and rendered as inline Markdown.
+                                    mcp_tool_state.result = Some(ToolResult {
+                                        r#type: ToolResultValueType::Markdown,
+                                        value: Value::String(markdown),
+                                    });
+                                } else if value.content.iter().all(|block| {
                                     block.get("type").and_then(|t| t.as_str()) == Some("text")
                                 }) {
                                     mcp_tool_state.result = Some(ToolResult {

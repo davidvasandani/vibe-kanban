@@ -1719,8 +1719,21 @@ impl ClaudeLogProcessor {
                                 | ClaudeToolData::CodebaseSearchAgent { .. }
                                 | ClaudeToolData::NotebookEdit { .. }
                         ) {
+                            // MCP tools can return image content blocks (e.g. a
+                            // browser screenshot). Persist those into the worktree
+                            // and render them as inline Markdown image references;
+                            // otherwise fall back to text/JSON normalization.
                             let (res_type, res_value) =
-                                Self::normalize_claude_tool_result_value(content);
+                                match crate::logs::image_extraction::rewrite_content_with_images(
+                                    std::path::Path::new(worktree_path),
+                                    content,
+                                ) {
+                                    Some(markdown) => (
+                                        crate::logs::ToolResultValueType::Markdown,
+                                        serde_json::Value::String(markdown),
+                                    ),
+                                    None => Self::normalize_claude_tool_result_value(content),
+                                };
 
                             let args_to_show = serde_json::to_value(&info.tool_data)
                                 .ok()
