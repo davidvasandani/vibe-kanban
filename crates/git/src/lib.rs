@@ -1026,15 +1026,21 @@ impl GitService {
         worktree_path: &Path,
     ) -> Result<(), GitServiceError> {
         let git = GitCli::new();
-        // Repair from the main repo, naming the worktree: fixes the repo-side
-        // `gitdir` pointer and the worktree's `.git` file where resolvable.
-        git.worktree_repair(repo_path, &[worktree_path])
-            .map_err(|e| GitServiceError::InvalidRepository(e.to_string()))?;
-        // Best-effort: also repair from within the worktree to recreate the
-        // repo-side admin files when only the worktree's `.git` file survived.
-        // Non-fatal if it fails (e.g. the worktree's `.git` is unreadable).
-        let _ = git.worktree_repair(worktree_path, &[]);
-        Ok(())
+        // Attempt both repair directions independently — one can succeed when
+        // the other can't, so neither should short-circuit the other:
+        // - from the main repo, naming the worktree: fixes the repo-side
+        //   `gitdir` pointer (and the worktree's `.git` file) when the repo can
+        //   resolve the worktree.
+        // - from within the worktree: fixes the worktree's `.git` file (and the
+        //   repo-side admin files) when only the worktree side is resolvable.
+        let from_repo = git.worktree_repair(repo_path, &[worktree_path]);
+        let from_worktree = git.worktree_repair(worktree_path, &[]);
+        match (from_repo, from_worktree) {
+            // At least one direction repaired successfully.
+            (Ok(()), _) | (_, Ok(())) => Ok(()),
+            // Both failed — surface the repo-side error (the primary attempt).
+            (Err(e), Err(_)) => Err(GitServiceError::InvalidRepository(e.to_string())),
+        }
     }
 
     pub fn delete_branch(
