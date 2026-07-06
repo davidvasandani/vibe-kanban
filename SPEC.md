@@ -1,197 +1,105 @@
-# Spec: Split the "In progress" kanban column by activity
-
-Task: `vk/d4db-in-progress-acti` — "the 'in progress' status can be both
-actively working or waiting for feedback. Split issues in this category into
-their active group."
+# Spec: iPad Windowed Layout — Top Nav Cut Off
 
 ## Problem
 
-On the project kanban board, an issue sits in the **In progress** column both
-while a coding agent is actively working on one of its workspaces *and* after
-the agent has stopped and is waiting on the user (review the output, answer a
-question, approve a tool call, send a follow-up prompt). These are very
-different states for the user — one needs no attention, the other is blocked
-on them — but the column renders them as one undifferentiated list. Users must
-open each card (or squint at the tiny per-workspace status icons) to find out
-which issues are actually waiting on them.
+When the Vibe Kanban web app is viewed on an iPad in a **windowed / Stage
+Manager layout** (or any environment that exposes a non-zero top safe-area
+inset), the top navigation bar is clipped by the device status bar. Its
+content (title, tabs, action icons) renders underneath the status bar and is
+partially or fully cut off.
+
+## Root cause
+
+`packages/local-web/index.html` declares:
+
+```html
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+```
+
+`viewport-fit=cover` instructs the browser to lay the page out edge-to-edge,
+extending **under** the device safe areas (status bar, home indicator, rounded
+corners). To keep content clear of those areas an app must add padding using
+the CSS `env(safe-area-inset-*)` values.
+
+The app currently only compensates for the **bottom** inset:
+
+- `packages/web-core/src/shared/components/ui-new/containers/SharedAppLayout.tsx`
+  → mobile container uses `pb-[env(safe-area-inset-bottom)]`.
+- `packages/remote-web/src/app/layout/RemoteAppShell.tsx` → same.
+- `packages/ui/src/components/MobileDrawer.tsx` → same.
+
+Nothing accounts for `env(safe-area-inset-top)`. On devices/layouts where that
+inset is `0` (typical desktop, non-windowed) there is no visible problem, which
+is why it went unnoticed. On iPad windowed mode the inset is non-zero and the
+top nav is cut off.
 
 ## Goal
 
-Inside the **In progress** column of the board view, partition the issues into
-two visually separated groups, each with a small section header:
+The top navigation bar must always render fully below the top safe-area inset,
+regardless of platform, while remaining visually unchanged on displays where
+the inset is `0`.
 
-1. **Active** — at least one linked workspace has an agent actively running
-   (and not blocked on a tool-approval prompt).
-2. **Waiting for feedback** — everything else: the latest agent run finished
-   (completed/failed/killed), a run is paused on a pending tool approval, or
-   the issue has no live workspace signal at all.
+## Approach
 
-Cards move between groups automatically as live workspace state changes (agent
-starts → Active; agent finishes or asks for approval → Waiting for feedback).
+Apply top safe-area padding to the shared `Navbar` component
+(`packages/ui/src/components/Navbar.tsx`) — the element that is flush with the
+top of the viewport in every layout that renders it (local desktop, local
+mobile; the remote shell renders the same component through
+`RemoteNavbarContainer`).
 
-## Non-goals
+Padding the navbar itself (rather than the outer app container) is preferred
+because:
 
-- **No backend / schema / API changes.** The activity signal already reaches
-  the frontend (workspace WS stream + workspace summaries); this is a pure
-  presentation change in `web-core`.
-- **No change to the issue's `status_id`** — grouping is derived, ephemeral UI
-  state. Nothing is persisted.
-- **No new columns.** "In review" already exists as a separate status for the
-  human-review stage of the workflow; this feature is about live agent
-  activity *within* "In progress", not about adding workflow stages.
-- **List view (`IssueListView`) unchanged.** The feature targets the board
-  ("kanban" and "slim") views where the In progress column is rendered.
-- No user setting to toggle the grouping (it only appears when it has
-  something to say — see Behavior).
+- The navbar background (`bg-secondary`) then fills the status-bar area,
+  matching the standard iOS convention where the status bar blends with the
+  navigation bar. Padding the outer `bg-primary` container instead would leave
+  a mismatched primary-colored strip above the navbar.
+- It is the smallest, most localized change and touches the single element that
+  is actually being clipped.
+- In the local desktop grid the navbar shares its row with a `bg-secondary`
+  corner spacer that stretches to the row height, so the whole top strip renders
+  `bg-secondary` seamlessly.
 
-## Background: where the signals live
+### Why an inline `style` (not a Tailwind arbitrary class)
 
-- The board renders dynamic per-project `ProjectStatus` columns
-  (`packages/web-core/src/features/kanban/ui/KanbanContainer.tsx`). "In
-  progress" is a seeded status row (`crates/remote/src/db/project_statuses.rs`
-  `DEFAULT_STATUSES`), not an enum variant. The backend itself identifies it
-  by name (`ProjectStatusRepository::find_by_name(pool, project_id,
-  "In progress")` in `crates/remote/src/db/issues.rs::
-  sync_issue_from_workspace_created`), so name matching is the established
-  pattern.
-- Live per-workspace agent state arrives via `useWorkspaceContext().
-  activeWorkspaces` (`SidebarWorkspace` from
-  `packages/web-core/src/shared/hooks/useWorkspaces.ts`): `isRunning` (WS
-  stream), `hasPendingApproval`, `hasUnseenActivity`, `latestProcessStatus`
-  (summaries API).
-- `KanbanContainer` already joins issues to their live workspaces in the
-  `workspacesByIssueId` memo, but that memo is gated behind the
-  `showWorkspaces` display preference; the grouping signal must not be.
+The existing bottom-inset padding uses Tailwind arbitrary values
+(`pb-[env(safe-area-inset-bottom)]`), but those live in the **app shells**,
+which each app's Tailwind config scans. The `Navbar` lives in
+`packages/ui/src`, which the `remote-web` Tailwind config does **not** scan (and
+it does not define the `spacing.half` token). A new arbitrary utility added in
+`ui/src` would therefore not be generated for the remote build and, if it
+referenced `theme(spacing.half)`, could error. A plain inline `style` with a
+`calc(...)` value is evaluated natively by the browser, needs no class
+generation, resolves identically in both apps, and matches inline-style usage
+already present in the codebase (e.g. `style={{ minWidth: 56 }}` in
+`SharedAppLayout`).
 
-## Functional requirements
+### Behavior contract
 
-### FR1 — Which columns are grouped
+- **Desktop navbar** (`px-base py-half`): top padding becomes
+  `calc(0.25rem + env(safe-area-inset-top))` where `0.25rem` is the existing
+  `py-half` value. The bottom padding stays `py-half`. When the inset is `0`
+  the top padding equals `0.25rem` — identical to today.
+- **Mobile navbar** (no vertical padding on the `<nav>` itself; inner rows own
+  their spacing): top padding becomes `env(safe-area-inset-top)`. When the inset
+  is `0` this is `0` — identical to today.
 
-A status column gets the activity grouping when its name matches the seeded
-in-progress status: `status.name.trim().toLowerCase() === 'in progress'`.
-Case-insensitive to be tolerant of cosmetic renames, consistent in spirit with
-the backend's name-based lookup. Renamed/custom statuses keep today's
-behavior.
+In both cases the navbar's `bg-secondary` extends up into the status-bar area.
 
-### FR2 — Group assignment
+## Out of scope
 
-For each issue in a grouped column:
-
-- **Active** ⇔ at least one linked, non-archived workspace that resolves to a
-  live local workspace has `isRunning === true` **and**
-  `hasPendingApproval !== true`.
-- **Waiting for feedback** ⇔ every other issue in the column, including:
-  - runs paused on a pending tool approval (`isRunning && hasPendingApproval`
-    — the agent is literally waiting for the user),
-  - latest process completed / failed / killed / interrupted,
-  - issues with no linked workspace or no live local workspace signal
-    (e.g. workspaces owned by another machine): nothing is running for the
-    user, so they are "waiting" by default.
-
-This mirrors the per-workspace status-icon semantics in
-`packages/ui/src/components/IssueWorkspaceCard.tsx` (spinner = running,
-hand = pending approval, dot = unseen activity).
-
-The group signal is computed from `activeWorkspaces` + issue→workspace links
-independently of the `showWorkspaces` preference.
-
-### FR3 — Ordering & sorting
-
-- Within the grouped column, **Active** issues render first, then **Waiting
-  for feedback**. (The column reads top-down as "what is happening right now",
-  and the groups make the waiting set explicit immediately below.)
-- The partition is **stable**: within each group the existing sort
-  (`sortField`/`sortDirection`, including manual `sort_order`) is preserved
-  unchanged.
-- The partition is applied where column membership is computed (the `items`
-  rebuild effect in `KanbanContainer`), so the rendered order and the
-  `items[statusId]` array stay identical — this is what drag-and-drop indexes
-  and `calculateSortOrder` are based on.
-
-### FR4 — Group headers
-
-- A small, non-draggable section header row is rendered above each group:
-  "Active" and "Waiting for feedback", each with the group's card count.
-- Headers are only rendered when the column contains **both** groups. A column
-  that is all-active or all-waiting renders exactly as today (no header
-  noise).
-- Header labels are i18n'd (new keys under `kanban.` in
-  `packages/web-core/src/i18n/locales/*/common.json` for all locales: en, es,
-  fr, ja, ko, zh-Hans, zh-Hant).
-- Headers render in both `kanban` and `slim` board modes, desktop and mobile.
-- Headers are inert for drag-and-drop: they are plain elements between
-  `Draggable` cards; card `index` props remain the flat position in
-  `items[statusId]` so `@hello-pangea/dnd` indexes stay correct.
-
-### FR5 — Drag-and-drop interaction
-
-- Cross-column and within-column DnD keep today's semantics untouched
-  (`handleDragEnd` unchanged).
-- Dropping a card into the "wrong" group is allowed; since group membership is
-  derived from live state, the next `items` rebuild snaps it back into its
-  correct group (keeping its manual order within that group). No attempt is
-  made to block drops per group.
-
-### FR6 — Liveness
-
-Group membership re-derives whenever workspace state changes (the memoized
-activity map is an input to the `items` rebuild effect), so a card jumps from
-Active to Waiting for feedback the moment its agent stops, without a refresh.
-
-## UI
-
-Header row (per group), inside `KanbanCards` above the group's first card:
-
-```
-ACTIVE · 2                 ← text-xs uppercase, muted (text-low), py-half px-base
-─ cards… ─
-WAITING FOR FEEDBACK · 3
-─ cards… ─
-```
-
-Minimal chrome — no icons, no background; it must read as a subdivision of the
-column, not a new column header. Exact classes follow the design system
-(`packages/local-web/AGENTS.md`).
-
-## Implementation sketch
-
-All in `packages/web-core` (+ i18n files):
-
-1. New pure helper module `packages/web-core/src/features/kanban/model/
-   activityGrouping.ts`:
-   - `isInProgressStatus(name: string): boolean`
-   - `isWorkspaceActive(ws): boolean` (`isRunning && !hasPendingApproval`)
-   - `partitionByActivity(issueIds, activeIssueIds): string[]` — stable
-     active-first ordering.
-   - `buildActivityGroups(issueIds, activeIssueIds)` — render-side segments
-     (`active` / `waiting` id arrays) so the component can place headers.
-2. `KanbanContainer.tsx`:
-   - Compute `activeIssueIds: Set<string>` from `issues` ×
-     `getWorkspacesForIssue` × `localWorkspacesById` (not gated by
-     `showWorkspaces`).
-   - In the `items` rebuild effect: after sorting a status's issues, if
-     `isInProgressStatus(status.name)`, stable-partition active-first. Add the
-     activity signal to the effect deps.
-   - In the board render loop: for grouped columns compute the two segments
-     from `items[status.id]` + `activeIssueIds`; render header rows (only if
-     both segments non-empty) and keep the flat card `index`.
-3. i18n: add `kanban.activityGroups.active` / `.waitingForFeedback` to all
-   seven locale `common.json` files.
-4. Vitest unit tests for the helper module (partition stability, header
-   eligibility, active predicate incl. pending-approval case), colocated as
-   `activityGrouping.test.ts`.
+- Left/right safe-area insets (iPads have no side notch; Stage Manager windows
+  are inset from screen edges by the OS).
+- The `CloudShutdownExportBanner` (disabled by default in this fork) — the
+  navbar is the topmost element in the default configuration.
+- Any change to `viewport-fit` or the existing bottom-inset handling.
 
 ## Acceptance criteria
 
-- In progress column with 2 running-agent issues and 3 idle issues shows
-  "Active · 2" above the running ones and "Waiting for feedback · 3" above the
-  rest; other columns unchanged.
-- A workspace whose agent is paused on tool approval appears under Waiting for
-  feedback.
-- All-active or all-waiting In progress column shows no headers.
-- Grouping appears even when the "show workspaces" display preference is off.
-- Manual sort order is preserved within each group; DnD between columns still
-  works; within-column reorder still only in manual-sort mode.
-- A card moves between groups live when its agent starts/stops.
-- `pnpm run check`, `pnpm run lint`, and web-core vitest pass; no Rust or
-  generated-type changes.
+1. On a layout with a non-zero top safe-area inset (iPad windowed), the full top
+   nav is visible below the status bar; the status-bar area shows the navbar's
+   `bg-secondary` color.
+2. On displays where the top inset is `0`, the navbar is pixel-identical to
+   before (top padding unchanged).
+3. Applies to both the desktop and mobile navbar variants.
+4. `pnpm run check` and `pnpm run lint` pass.
