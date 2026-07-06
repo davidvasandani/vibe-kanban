@@ -1,15 +1,15 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use sqlx::PgPool;
 use tokio::task::JoinHandle;
 use tracing::{info, instrument, warn};
 
 use crate::{
-    azure_blob::AzureBlobService,
     db::{
         attachments::AttachmentRepository, blobs::BlobRepository,
         pending_uploads::PendingUploadRepository,
     },
+    storage::BlobStorage,
 };
 
 const EXPIRED_BATCH_SIZE: i64 = 100;
@@ -17,7 +17,7 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Spawns a background task that periodically cleans up orphan attachments and
 /// expired pending uploads. Call once during server startup.
-pub(crate) fn spawn_cleanup_task(pool: PgPool, azure: AzureBlobService) -> JoinHandle<()> {
+pub(crate) fn spawn_cleanup_task(pool: PgPool, storage: Arc<dyn BlobStorage>) -> JoinHandle<()> {
     let interval = std::env::var("ATTACHMENT_CLEANUP_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -36,18 +36,18 @@ pub(crate) fn spawn_cleanup_task(pool: PgPool, azure: AzureBlobService) -> JoinH
 
         loop {
             ticker.tick().await;
-            run_sweep(&pool, &azure).await;
+            run_sweep(&pool, storage.as_ref()).await;
         }
     })
 }
 
 #[instrument(name = "attachment_cleanup.sweep", skip_all)]
-async fn run_sweep(pool: &PgPool, azure: &AzureBlobService) {
+async fn run_sweep(pool: &PgPool, storage: &dyn BlobStorage) {
     info!("Starting attachment cleanup sweep");
 
     let (expired, pending) = tokio::join!(
-        cleanup_expired_attachments(pool, azure),
-        cleanup_expired_pending_uploads(pool, azure),
+        cleanup_expired_attachments(pool, storage),
+        cleanup_expired_pending_uploads(pool, storage),
     );
 
     match expired {
@@ -63,7 +63,7 @@ async fn run_sweep(pool: &PgPool, azure: &AzureBlobService) {
 
 async fn cleanup_expired_attachments(
     pool: &PgPool,
-    azure: &AzureBlobService,
+    storage: &dyn BlobStorage,
 ) -> anyhow::Result<u32> {
     let expired = AttachmentRepository::find_expired(pool, EXPIRED_BATCH_SIZE).await?;
     let mut deleted_count: u32 = 0;
@@ -80,13 +80,13 @@ async fn cleanup_expired_attachments(
         match AttachmentRepository::count_by_blob_id(pool, blob_id).await {
             Ok(0) => {
                 if let Ok(Some(blob)) = BlobRepository::delete(pool, blob_id).await {
-                    if let Err(e) = azure.delete_blob(&blob.blob_path).await {
-                        warn!(blob_path = %blob.blob_path, error = %e, "Failed to delete Azure blob");
+                    if let Err(e) = storage.delete_blob(&blob.blob_path).await {
+                        warn!(blob_path = %blob.blob_path, error = %e, "Failed to delete blob");
                     }
                     if let Some(thumb_path) = &blob.thumbnail_blob_path
-                        && let Err(e) = azure.delete_blob(thumb_path).await
+                        && let Err(e) = storage.delete_blob(thumb_path).await
                     {
-                        warn!(blob_path = %thumb_path, error = %e, "Failed to delete Azure thumbnail");
+                        warn!(blob_path = %thumb_path, error = %e, "Failed to delete thumbnail");
                     }
                 }
             }
@@ -104,14 +104,14 @@ async fn cleanup_expired_attachments(
 
 async fn cleanup_expired_pending_uploads(
     pool: &PgPool,
-    azure: &AzureBlobService,
+    storage: &dyn BlobStorage,
 ) -> anyhow::Result<u32> {
     let expired = PendingUploadRepository::delete_expired(pool).await?;
     let mut deleted_count: u32 = 0;
 
     for pending in expired {
-        if let Err(e) = azure.delete_blob(&pending.blob_path).await {
-            warn!(blob_path = %pending.blob_path, error = %e, "Failed to delete Azure blob for expired pending upload");
+        if let Err(e) = storage.delete_blob(&pending.blob_path).await {
+            warn!(blob_path = %pending.blob_path, error = %e, "Failed to delete blob for expired pending upload");
         }
         deleted_count += 1;
     }

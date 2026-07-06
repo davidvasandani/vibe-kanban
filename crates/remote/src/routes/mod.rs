@@ -26,6 +26,7 @@ mod billing {
     }
 }
 pub mod attachments;
+mod blobs;
 pub(crate) mod electric_proxy;
 pub(crate) mod error;
 mod export;
@@ -104,6 +105,7 @@ pub fn router(state: AppState) -> Router {
 
     let v1_public = Router::<AppState>::new()
         .route("/health", get(health))
+        .merge(blobs::public_router())
         .merge(oauth::public_router())
         .merge(organization_members::public_router())
         .merge(tokens::public_router())
@@ -187,7 +189,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         single_user_mode: state.single_user_mode(),
-        attachments_enabled: state.azure_blob().is_some(),
+        attachments_enabled: state.blob_storage().is_some(),
     })
 }
 

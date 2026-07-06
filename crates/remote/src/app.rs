@@ -12,7 +12,6 @@ use crate::{
         GitHubOAuthProvider, GoogleOAuthProvider, JwtService, OAuthHandoffService,
         OAuthTokenValidator, ProviderRegistry,
     },
-    azure_blob::AzureBlobService,
     billing::BillingService,
     config::RemoteServerConfig,
     db, digest,
@@ -20,6 +19,7 @@ use crate::{
     mail::{LoopsMailer, Mailer, NoopMailer},
     r2::R2Service,
     routes,
+    storage::{BlobStorage, LocalDiskStorage, derive_signing_key},
 };
 
 pub struct Server;
@@ -133,14 +133,30 @@ impl Server {
             );
         }
 
-        let azure_blob = config.azure_blob.as_ref().map(AzureBlobService::new);
-        if azure_blob.is_some() {
-            tracing::info!("Azure Blob storage service initialized");
-        } else {
-            tracing::info!(
-                "Azure Blob storage not configured. Set AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY to enable issue attachments."
-            );
-        }
+        let blob_storage: Option<Arc<dyn BlobStorage>> = match &config.local_disk {
+            Some(local) => {
+                // Domain-separated key derived from the JWT secret; no new env var.
+                let signing_key =
+                    derive_signing_key(config.auth.jwt_secret().expose_secret().as_bytes());
+                let store = LocalDiskStorage::new(
+                    local.data_dir.clone(),
+                    server_public_base_url.clone(),
+                    signing_key,
+                    local.presign_expiry_secs,
+                );
+                tracing::info!(
+                    data_dir = %local.data_dir.display(),
+                    "Local-disk attachment storage initialized"
+                );
+                Some(Arc::new(store))
+            }
+            None => {
+                tracing::info!(
+                    "Attachment storage not configured. Set ATTACHMENTS_DATA_DIR to enable issue attachments."
+                );
+                None
+            }
+        };
 
         let http_client = reqwest::Client::builder()
             .user_agent("VibeKanbanRemote/1.0")
@@ -192,8 +208,8 @@ impl Server {
             }
         };
 
-        if let Some(ref azure_blob_service) = azure_blob {
-            spawn_cleanup_task(pool.clone(), azure_blob_service.clone());
+        if let Some(ref storage) = blob_storage {
+            spawn_cleanup_task(pool.clone(), storage.clone());
         }
 
         let digest_enabled = std::env::var("DIGEST_ENABLED")
@@ -222,7 +238,7 @@ impl Server {
             server_public_base_url,
             http_client,
             r2,
-            azure_blob,
+            blob_storage,
             github_app,
             billing,
             analytics,

@@ -81,19 +81,11 @@ cd crates/remote
 docker compose --env-file .env.remote --profile relay up --build
 ```
 
-Enable local attachment storage with Azurite:
-
-```bash
-cd crates/remote
-docker compose --env-file .env.remote --profile attachments up --build
-```
-
-Enable both:
-
-```bash
-cd crates/remote
-docker compose --env-file .env.remote --profile relay --profile attachments up --build
-```
+Attachment storage is filesystem-backed and enabled by default: the
+`remote-server` service mounts the `attachments-data` volume at `/srv/attachments`
+and sets `ATTACHMENTS_DATA_DIR`. Blob URLs are HMAC-signed and served by the
+server's own `/v1/blobs/*` routes, so no external object store is required.
+Remove `ATTACHMENTS_DATA_DIR` from the compose file to disable uploads.
 
 Additional endpoint with the `relay` profile:
 

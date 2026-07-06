@@ -5,12 +5,12 @@ use sqlx::PgPool;
 use crate::{
     analytics::AnalyticsService,
     auth::{JwtService, OAuthHandoffService, OAuthTokenValidator, ProviderRegistry},
-    azure_blob::AzureBlobService,
     billing::BillingService,
     config::RemoteServerConfig,
     github_app::GitHubAppService,
     mail::Mailer,
     r2::R2Service,
+    storage::BlobStorage,
 };
 
 #[derive(Clone)]
@@ -24,7 +24,7 @@ pub struct AppState {
     handoff: Arc<OAuthHandoffService>,
     oauth_token_validator: Arc<OAuthTokenValidator>,
     r2: Option<R2Service>,
-    azure_blob: Option<AzureBlobService>,
+    blob_storage: Option<Arc<dyn BlobStorage>>,
     github_app: Option<Arc<GitHubAppService>>,
     billing: BillingService,
     analytics: Option<AnalyticsService>,
@@ -43,7 +43,7 @@ impl AppState {
         server_public_base_url: String,
         http_client: reqwest::Client,
         r2: Option<R2Service>,
-        azure_blob: Option<AzureBlobService>,
+        blob_storage: Option<Arc<dyn BlobStorage>>,
         github_app: Option<Arc<GitHubAppService>>,
         billing: BillingService,
         analytics: Option<AnalyticsService>,
@@ -59,7 +59,7 @@ impl AppState {
             handoff,
             oauth_token_validator,
             r2,
-            azure_blob,
+            blob_storage,
             github_app,
             billing,
             analytics,
@@ -95,8 +95,8 @@ impl AppState {
         self.r2.as_ref()
     }
 
-    pub fn azure_blob(&self) -> Option<&AzureBlobService> {
-        self.azure_blob.as_ref()
+    pub fn blob_storage(&self) -> Option<&Arc<dyn BlobStorage>> {
+        self.blob_storage.as_ref()
     }
 
     pub fn github_app(&self) -> Option<&GitHubAppService> {
