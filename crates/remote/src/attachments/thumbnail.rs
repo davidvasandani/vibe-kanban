@@ -120,9 +120,9 @@ mod tests {
     #[test]
     fn test_calculate_dimensions_portrait() {
         let (w, h) = calculate_thumbnail_dimensions(600, 800);
-        // 600x800 aspect ratio = 3:4
-        // Max height 150, width would be 112
-        assert_eq!((w, h), (112, 150));
+        // 600x800 aspect ratio = 3:4, scaled by 150/800 = 0.1875.
+        // Height clamps to 150; width = 600 * 0.1875 = 112.5, which rounds to 113.
+        assert_eq!((w, h), (113, 150));
     }
 
     #[test]
