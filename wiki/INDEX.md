@@ -22,3 +22,7 @@ contributed to it.
   board scroll/snap architecture: nested single-axis scrollers, the
   `overflow-y` → `overflow-x` promotion gotcha, gesture routing, history of
   fixes.
+- [self-hosted-deployment.md](self-hosted-deployment.md) — Versioned-release
+  deploy contract (`VK_RELEASES_DIR`), why services must not run from the
+  source checkout, deploy-loop invariants (reconciler over edge triggers,
+  health-gated rollback, paging), health endpoints, rejected alternatives.
