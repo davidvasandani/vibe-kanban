@@ -61,6 +61,7 @@ jobs:
               - 'crates/executors/**'
               - 'crates/git/**'
               - 'crates/local-deployment/**'
+              - 'crates/remote/**'
               - 'crates/review/**'
               - 'crates/server/**'
               - 'crates/services/**'
@@ -136,6 +137,14 @@ jobs:
       - name: Sqlx checks
         run: npm run prepare-db:check
 
+      # crates/remote is a separate workspace; check its generated types and
+      # offline SQLx cache too. Both run offline without a database.
+      - name: Check generated types (remote)
+        run: npm run remote:generate-types:check
+
+      - name: Sqlx checks (remote)
+        run: npm run remote:prepare-db:check
+
   backend-clippy:
     needs: changes
     if: always() && (needs.changes.outputs.backend == 'true' || needs.changes.result == 'skipped')
@@ -158,6 +167,18 @@ jobs:
           set -x
           cargo fmt --all -- --check & pid_fmt=$!
           cargo clippy --workspace --exclude vibe-kanban-tauri --all-targets -- -D warnings
+          wait $pid_fmt
+
+      # crates/remote is a separate workspace (excluded from the root workspace),
+      # so the checks above do not cover it. Run its clippy/fmt explicitly. The
+      # committed .sqlx cache lets this run offline without a database.
+      - name: Run Clippy and fmt checks (remote)
+        env:
+          SQLX_OFFLINE: "true"
+        run: |
+          set -x
+          cargo fmt --manifest-path crates/remote/Cargo.toml --all -- --check & pid_fmt=$!
+          cargo clippy --manifest-path crates/remote/Cargo.toml --all-targets -- -D warnings
           wait $pid_fmt
 
   backend-test:
