@@ -570,6 +570,13 @@ impl IssueRepository {
         )
         .await?;
 
+        // When merged work moves the issue to "Done", archive its active
+        // workspaces so completed issues don't leave workspaces lingering.
+        // All linked PRs are merged in this path, so no warning is needed.
+        if signal == IssueWorkflowSignal::WorkMerged {
+            WorkspaceRepository::archive_active_by_issue_id(&mut *conn, issue_id).await?;
+        }
+
         Ok(())
     }
 
