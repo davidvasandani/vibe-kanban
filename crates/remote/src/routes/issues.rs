@@ -1,7 +1,7 @@
 use api_types::{
     CreateIssueRequest, DeleteResponse, Issue, ListIssuesQuery, ListIssuesResponse,
-    MutationResponse, NotificationPayload, NotificationType, SearchIssuesRequest,
-    UpdateIssueRequest,
+    MutationResponse, NotificationPayload, NotificationType, PullRequestStatus,
+    SearchIssuesRequest, UpdateIssueRequest,
 };
 use axum::{
     Json,
@@ -22,7 +22,8 @@ use crate::{
     auth::RequestContext,
     db::{
         get_txid, issue_followers::IssueFollowerRepository, issues::IssueRepository,
-        project_statuses::ProjectStatusRepository,
+        project_statuses::ProjectStatusRepository, pull_requests::PullRequestRepository,
+        workspaces::WorkspaceRepository,
     },
     mutation_definition::MutationBuilder,
     notifications::{
@@ -170,6 +171,77 @@ async fn notify_issue_update_changes(
         )
         .await;
     }
+}
+
+/// When an issue moves into the "Done" status, archive its still-active
+/// workspaces. Emits a warning when the issue's pull requests are not all
+/// merged, since archiving hides work that was never merged.
+///
+/// Runs on the caller's transaction connection so the archive is committed
+/// atomically with the issue status update and is covered by the same txid
+/// the client waits on.
+async fn archive_workspaces_for_done_issue(
+    conn: &mut sqlx::PgConnection,
+    old_issue: &Issue,
+    new_issue: &Issue,
+) -> Result<(), ErrorResponse> {
+    // Only react when the status actually changes into "Done".
+    if old_issue.status_id == new_issue.status_id {
+        return Ok(());
+    }
+
+    let moved_to_done = ProjectStatusRepository::find_by_id(&mut *conn, new_issue.status_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(?error, issue_id = %new_issue.id, "failed to load status while archiving done issue");
+            ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+        })?
+        .is_some_and(|status| status.name.eq_ignore_ascii_case("Done"));
+    if !moved_to_done {
+        return Ok(());
+    }
+
+    let workspaces = WorkspaceRepository::list_active_by_issue_id(&mut *conn, new_issue.id)
+        .await
+        .map_err(|error| {
+            tracing::error!(?error, issue_id = %new_issue.id, "failed to list workspaces while archiving done issue");
+            ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+        })?;
+    if workspaces.is_empty() {
+        return Ok(());
+    }
+
+    // Warn once if the issue's work was never fully merged. Pull requests are
+    // linked to issues, not reliably to individual workspaces (the
+    // pull_requests.workspace_id column is not populated on creation), so this
+    // is evaluated at the issue level. A lookup failure downgrades to "no
+    // warning" rather than failing the request.
+    let pull_requests = PullRequestRepository::list_by_issue(&mut *conn, new_issue.id)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(?error, issue_id = %new_issue.id, "failed to load pull requests while archiving done issue");
+            Vec::new()
+        });
+    let work_merged = !pull_requests.is_empty()
+        && pull_requests
+            .iter()
+            .all(|pr| pr.status == PullRequestStatus::Merged);
+    if !work_merged {
+        tracing::warn!(
+            issue_id = %new_issue.id,
+            workspace_count = workspaces.len(),
+            "archiving workspaces for issue marked Done, but its pull requests are not all merged"
+        );
+    }
+
+    WorkspaceRepository::archive_active_by_issue_id(&mut *conn, new_issue.id)
+        .await
+        .map_err(|error| {
+            tracing::error!(?error, issue_id = %new_issue.id, "failed to archive workspaces for done issue");
+            ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+        })?;
+
+    Ok(())
 }
 
 #[instrument(
@@ -383,6 +455,10 @@ async fn update_issue(
         ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
     })?;
 
+    // Archive workspaces within the same transaction so the change is covered
+    // by the returned txid the client waits on.
+    archive_workspaces_for_done_issue(&mut tx, &issue, &data).await?;
+
     let txid = get_txid(&mut *tx).await.map_err(|error| {
         tracing::error!(?error, "failed to get txid");
         ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
@@ -558,6 +634,10 @@ async fn bulk_update_issues(
             tracing::error!(?error, issue_id = %item.id, "failed to update issue");
             ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to update issue")
         })?;
+
+        // Archive workspaces in the same transaction as the status change so
+        // they are covered by the returned txid.
+        archive_workspaces_for_done_issue(&mut tx, &issue, &updated).await?;
 
         notification_pairs.push((issue, updated.clone()));
         results.push(updated);
