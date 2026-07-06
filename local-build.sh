@@ -260,6 +260,82 @@ if [ -n "${VK_REMOTE_STATIC_RELEASES:-}" ]; then
   echo "✅ Remote web published: $REMOTE_RELEASE"
 fi
 
+# --- Publish versioned binary release ---------------------------------------
+# When VK_RELEASES_DIR is set (deploy hosts only — CI and local dev leave it
+# unset and are unaffected), publish the freshly-built binaries as an
+# immutable, versioned release that services exec directly:
+#
+#   $VK_RELEASES_DIR/
+#     build-<id>/bin/{vibe-kanban,vibe-kanban-mcp,vibe-kanban-review,
+#                     remote,relay-server}
+#     build-<id>/release.json      {"sha", "build_id", "built_at"}
+#     current  -> build-<id>       (atomic rename flip)
+#     previous -> old current      (single-step rollback target)
+#
+# This extends the VK_REMOTE_STATIC_RELEASES pattern above to the binaries.
+# Deployed services stop running out of npx-cli/dist inside the source
+# checkout — where a repo reset/chmod/wipe can take the running deployment
+# down — and instead exec extracted binaries behind a `current` symlink. A
+# build that fails anywhere above never reaches this block, so `current`
+# always resolves to the last release whose every binary built.
+if [ -n "${VK_RELEASES_DIR:-}" ]; then
+  echo "📦 Publishing binary release to ${VK_RELEASES_DIR}..."
+  RELEASE="${VK_RELEASES_DIR}/build-${BUILD_ID}"
+  rm -rf "$RELEASE"
+  mkdir -p "$RELEASE/bin"
+  # Deploy names: `server` ships as `vibe-kanban` and `review` as
+  # `vibe-kanban-review`, matching the names the npm CLI extracts.
+  cp "${CARGO_TARGET_DIR}/release/server" "$RELEASE/bin/vibe-kanban"
+  cp "${CARGO_TARGET_DIR}/release/vibe-kanban-mcp" "$RELEASE/bin/vibe-kanban-mcp"
+  cp "${CARGO_TARGET_DIR}/release/review" "$RELEASE/bin/vibe-kanban-review"
+  cp "${CARGO_TARGET_DIR}/release/remote" "$RELEASE/bin/remote"
+  cp "${CARGO_TARGET_DIR}/release/relay-server" "$RELEASE/bin/relay-server"
+  chmod 755 "$RELEASE/bin/"*
+
+  # Self-describing release: a deploy reconciler compares `sha` against its
+  # desired-revision stamp to detect stalled deploys mechanically.
+  cat > "$RELEASE/release.json" <<EOF
+{
+  "sha": "$(git rev-parse HEAD)",
+  "build_id": "${BUILD_ID}",
+  "built_at": "$(date -u +%FT%TZ)"
+}
+EOF
+
+  # Group-writable for whichever builder runs next; world-readable/executable
+  # for the (non-builder) service users, regardless of the build umask.
+  chmod -R g+rwX,o+rX "$RELEASE" || true
+
+  # Keep the outgoing release reachable as `previous` (one-step rollback)
+  # before flipping `current`. A crash between the two flips leaves
+  # previous == current — harmless.
+  OLD_CURRENT="$(readlink -f "${VK_RELEASES_DIR}/current" 2>/dev/null || true)"
+  if [ -n "$OLD_CURRENT" ] && [ -e "$OLD_CURRENT" ]; then
+    ln -sfn "$OLD_CURRENT" "${VK_RELEASES_DIR}/.previous-${BUILD_ID}"
+    mv -Tf "${VK_RELEASES_DIR}/.previous-${BUILD_ID}" \
+      "${VK_RELEASES_DIR}/previous"
+  fi
+
+  # Atomic repoint, same protocol as the remote-web publish above: readers
+  # always resolve either the old or the new complete release.
+  ln -sfn "$RELEASE" "${VK_RELEASES_DIR}/.current-${BUILD_ID}"
+  mv -Tf "${VK_RELEASES_DIR}/.current-${BUILD_ID}" "${VK_RELEASES_DIR}/current"
+
+  # Retain the 3 newest releases, but never prune what current/previous still
+  # point at — a rollback target must stay on disk.
+  KEEP_CURRENT="$(readlink -f "${VK_RELEASES_DIR}/current" 2>/dev/null || true)"
+  KEEP_PREVIOUS="$(readlink -f "${VK_RELEASES_DIR}/previous" 2>/dev/null || true)"
+  ls -1dt "${VK_RELEASES_DIR}"/build-* 2>/dev/null \
+    | tail -n +4 \
+    | while IFS= read -r old; do
+        old_abs="$(readlink -f "$old" 2>/dev/null || true)"
+        if [ "$old_abs" != "$KEEP_CURRENT" ] && [ "$old_abs" != "$KEEP_PREVIOUS" ]; then
+          rm -rf "$old"
+        fi
+      done
+  echo "✅ Binary release published: $RELEASE"
+fi
+
 echo ""
 echo "🚀 To test locally, run:"
 echo "   cd npx-cli && node bin/cli.js                # browser mode (default)"

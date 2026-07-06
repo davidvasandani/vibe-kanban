@@ -10,6 +10,13 @@
 # public package. `./local-build.sh` produces the release binaries; install the
 # `server` and `vibe-kanban-mcp` binaries somewhere stable (e.g.
 # /opt/vibe-kanban/bin) and point ExecStart + VIBE_KANBAN_MCP_COMMAND at them.
+#
+# RECOMMENDED: run ./local-build.sh with VK_RELEASES_DIR set (e.g.
+# /srv/vk-releases). Each build then publishes an immutable
+# build-<id>/bin/ tree with a release.json and atomically flips a `current`
+# symlink (keeping `previous` for one-step rollback). Point ExecStart and
+# VIBE_KANBAN_MCP_COMMAND at $VK_RELEASES_DIR/current/bin/* and a failed
+# build can never leave this service without a working binary.
 
 [Unit]
 Description=Vibe Kanban
