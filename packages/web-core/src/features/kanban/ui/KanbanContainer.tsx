@@ -518,6 +518,10 @@ export function KanbanContainer() {
 
   // Track items as arrays of IDs grouped by status
   const [items, setItems] = useState<Record<string, string[]>>({});
+  // Bumped when a drag-drop sync window closes, because dep-driven rebuilds
+  // that arrive during the window are skipped; the extra rebuild re-derives
+  // the "In progress" activity grouping after cross-group drops.
+  const [itemsRebuildTick, setItemsRebuildTick] = useState(0);
   const [isFiltersDialogOpen, setIsFiltersDialogOpen] = useState(false);
 
   // Sync items from filtered issues when they change
@@ -569,15 +573,24 @@ export function KanbanContainer() {
 
       // Split the "In progress" column by live agent activity: actively
       // running issues first, then those waiting on user feedback. Stable
-      // within each group, so the user's sort is preserved.
-      if (isInProgressStatus(status.name)) {
+      // within each group, so the user's sort is preserved. Board views
+      // only — list view renders items without group headers, so it keeps
+      // the plain sort.
+      if (isBoardView && isInProgressStatus(status.name)) {
         statusIssueIds = partitionByActivity(statusIssueIds, activeIssueIds);
       }
 
       grouped[status.id] = statusIssueIds;
     }
     setItems(grouped);
-  }, [filteredIssues, statuses, kanbanFilters, activeIssueIds]);
+  }, [
+    filteredIssues,
+    statuses,
+    kanbanFilters,
+    isBoardView,
+    activeIssueIds,
+    itemsRebuildTick,
+  ]);
 
   // Create a lookup map for issue data
   const issueMap = useMemo(() => {
@@ -782,6 +795,7 @@ export function KanbanContainer() {
           // Delay clearing flag to let Electric sync complete
           setTimeout(() => {
             isSyncingRef.current = false;
+            setItemsRebuildTick((tick) => tick + 1);
           }, 500);
         });
     },
