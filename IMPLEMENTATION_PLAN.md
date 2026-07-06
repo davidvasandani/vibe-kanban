@@ -1,96 +1,118 @@
-# Implementation Plan: Production-Grade Deployment Strategy
+# Implementation Plan: Split the "In progress" column by activity
 
-See `SPEC.md` for the full design and observed failure evidence. Changes span
-both workspace repos: `vibe-kanban/` (build script + deploy docs) and
-`homelab/` (NixOS modules for think2).
+See `SPEC.md` for the full design and `../PRIOR_KNOWLEDGE.md` for mobile
+card-list constraints. All changes are frontend (`packages/web-core`); no
+backend, schema, or generated-type changes.
 
-## Step 1 — `local-build.sh`: versioned binary releases (vibe-kanban repo)
+## Step 1 — Pure grouping helpers + unit tests
 
-Gated on new env `VK_RELEASES_DIR` (absent → byte-identical behavior for CI
-and local dev), mirroring the existing `VK_REMOTE_STATIC_RELEASES` block:
+**New file:** `packages/web-core/src/features/kanban/model/activityGrouping.ts`
 
-- After the atomic `npx-cli/dist` publish, when `VK_RELEASES_DIR` is set:
-  - Create `$VK_RELEASES_DIR/build-${BUILD_ID}/bin/` and copy the five
-    binaries **extracted** from `$CARGO_TARGET_DIR/release/`:
-    `server → vibe-kanban`, `vibe-kanban-mcp`, `review → vibe-kanban-review`,
-    `remote`, `relay-server`; `chmod 755` them.
-  - Write `build-${BUILD_ID}/release.json` with `sha` (`git rev-parse HEAD`),
-    `build_id`, `built_at` (ISO-8601 UTC).
-  - Repoint `previous` at the old `current` target (if any), then atomically
-    flip `current` (stage `.current-${BUILD_ID}` symlink, `mv -Tf`).
-  - Prune to the 3 newest `build-*` dirs, always keeping the resolved
-    targets of `current` and `previous`.
-  - `chmod -R g+rwX,o+rX` the release so non-builder service users can exec.
-- Validate with `bash -n local-build.sh` and a scratch-dir dry run of the
-  publish function (no full rebuild required for the publish logic itself).
+- `isInProgressStatus(name: string): boolean` — `trim().toLowerCase() === 'in progress'`.
+- `isWorkspaceActive(ws: { isRunning?: boolean; hasPendingApproval?: boolean }): boolean`
+  — `isRunning === true && hasPendingApproval !== true` (a run paused on tool
+  approval is *waiting*, matching `IssueWorkspaceCard`'s hand-icon semantics).
+- `partitionByActivity(issueIds: string[], activeIssueIds: ReadonlySet<string>): string[]`
+  — stable partition, active ids first, original order preserved within each
+  group. Returns the input array unchanged (same reference not required) when
+  no reordering is needed.
+- `buildActivityGroups(issueIds: string[], activeIssueIds: ReadonlySet<string>)`
+  → `{ active: string[]; waiting: string[]; showHeaders: boolean }` where
+  `showHeaders = active.length > 0 && waiting.length > 0`.
 
-## Step 2 — `vibe-kanban-rebuild.nix`: publish → releases, health-gate, alert (homelab)
+**New file:** `activityGrouping.test.ts` (Vitest, colocated) covering:
+- name matching (case/whitespace variants, non-matches like "In review");
+- active predicate (running, running+pendingApproval, not running, undefined
+  flags);
+- partition stability and no-op cases (all active / all waiting / empty);
+- `showHeaders` only when both groups non-empty.
 
-1. New options: `releasesDir` (default `/srv/vk-releases`), `healthChecks`
-   (list of `{unit, url}` with think2 defaults), `ntfyTopicUrl`
-   (nullable; when set, failures page).
-2. tmpfiles rule for `releasesDir` (`2775 developer developers`, like
-   `staticReleasesDir`).
-3. Script changes:
-   - Export `VK_RELEASES_DIR=${releasesDir}`.
-   - **Remove** the publish-back of `npx-cli/dist` + `cli.js` into the
-     checkout (and its flock section).
-   - **Remove** `git worktree prune`; clean only our own build tree
-     (`worktree remove --force` + targeted `rm -rf` of the tree and its
-     `.git/worktrees/build-tree` admin dir).
-   - After `local-build.sh` succeeds: `systemctl restart` the units (moved
-     from `ExecStartPost` into the script), then poll each health URL with
-     curl, ~60s budget. On any probe failing: flip `current` back to
-     `previous`, restart units again, log loudly, `exit 1`.
-4. `OnFailure=vibe-kanban-deploy-alert.service` on the rebuild unit; new
-   oneshot alert unit posts unit name + `journalctl -u vibe-kanban-rebuild
-   -n 30` tail to the ntfy topic (skip silently when topic unset).
-5. Guard → reconciler:
-   - Missing-artifact check now targets `${releasesDir}/current/bin/*`
-     (update `expectedArtifacts` default) + keep the remote-web serve check.
-   - New freshness check: `stamp SHA != release.json sha` (jq) while
-     `vibe-kanban-rebuild.service` is inactive → `systemctl start --no-block`
-     it.
-   - Consecutive-failure counter in `${releasesDir}/.reconcile-failures`;
-     at ≥2, also fire the alert unit ("deploy stalled at <sha>").
-6. Polkit rule already covers `restartUnits`; the rollback path restarts the
-   same units, so no polkit change.
+## Step 2 — Activity signal in `KanbanContainer`
 
-## Step 3 — services exec from the release (homelab)
+**Edit:** `packages/web-core/src/features/kanban/ui/KanbanContainer.tsx`
 
-- `vibe-kanban.nix` (`services.vibe-kanban-dev`): new nullable option
-  `releasesDir`. When set: `ExecStart=${releasesDir}/current/bin/vibe-kanban`
-  (drop node/cli.js + `VIBE_KANBAN_LOCAL`), add unit env
-  `VIBE_KANBAN_MCP_COMMAND=${releasesDir}/current/bin/vibe-kanban-mcp`.
-  Both the token-script and plain-ExecStart branches must honor it.
-- `vibe-kanban-remote.nix` / `vibe-kanban-relay.nix`: `binaryPath` defaults
-  change to `/srv/vk-releases/current/bin/{remote,relay-server}` (think2
-  stays on defaults); drop `ExecStartPre chmod +x`.
-- `vibe-kanban-mcp.nix`: exec `…/current/bin/vibe-kanban-mcp` instead of
-  `cli.js --mcp`.
-- `hosts/think/think2.nix`: set `releasesDir`/topic options; update comments
-  contradicted by the change (e.g. cli.js extraction rationale for the
-  service user's `developers` membership).
+- New memo `activeIssueIds: Set<string>` computed from `issues`,
+  `getWorkspacesForIssue`, `localWorkspacesById` (the existing
+  `SidebarWorkspace` map): an issue id is in the set when any linked,
+  non-archived workspace resolves to a local workspace with
+  `isWorkspaceActive(localWorkspace)`. **Not** gated by `showWorkspaces`
+  (unlike `workspacesByIssueId`) — grouping must work with workspace cards
+  hidden. Reuses the same link-resolution shape as `workspacesByIssueId`
+  (`!ws.archived && ws.local_workspace_id && localWorkspacesById.has(...)`).
+- In the `items` rebuild effect (currently lines ~478–525): after the
+  per-status sort, apply
+  `if (isInProgressStatus(status.name)) statusIssueIds = partitionByActivity(...)`.
+  Add `activeIssueIds` to the effect dependency array so group membership
+  re-derives live when agents start/stop. The `isSyncingRef` drag-sync skip
+  stays as is.
 
-## Step 4 — migration + docs
+## Step 3 — Group header rendering
 
-- Runbook: first-deploy ordering, manual rollback one-liner, alert topic —
-  in module header comments + a short `homelab/docs/` note if warranted.
-- vibe-kanban repo: mention `VK_RELEASES_DIR` in `vibe-kanban.env.example` /
-  `vibe-kanban.service.example` where they describe installing binaries.
+**Edit:** same file, board render loop (currently lines ~986–1128):
 
-## Step 5 — verify
+- For each column, compute `const groups = isInProgressStatus(status.name)
+  ? buildActivityGroups(issueIds, activeIssueIds) : null` (in-render, cheap).
+- When `groups?.showHeaders`, render a header row before the first card of
+  each group inside `<KanbanCards>`; determine boundaries while mapping the
+  flat `issueIds` (header before index 0, and before the first id whose group
+  differs from the previous id's group). Cards keep their **flat** `index`
+  prop so `@hello-pangea/dnd` draggable indexes keep matching
+  `items[status.id]` and `handleDragEnd`/`calculateSortOrder` stay untouched.
+- Header row markup (per PRIOR_KNOWLEDGE constraints: plain block element, no
+  negative margins, no scroll container):
+  `<div className="flex items-center gap-half px-base pt-base pb-half text-xs uppercase tracking-wide text-low">`
+  with label + count. Use `t('kanban.activityGroups.active')` /
+  `t('kanban.activityGroups.waitingForFeedback')`.
+- Applies to both `kanban` and `slim` modes automatically (same loop). List
+  view untouched.
 
-1. `bash -n vibe-kanban/local-build.sh`; scratch-dir dry-run of the release
-   publish with a fake `CARGO_TARGET_DIR`.
-2. `nix flake check` (or targeted `nix eval` of the think2 config) in
-   `homelab/`.
-3. Quoting / `set -euo pipefail` review of embedded module scripts.
-4. `pnpm run format` in vibe-kanban if any TS/Rust touched (expected: none).
+## Step 4 — i18n
 
-## Step 6 — review, docs, knowledge, PRs
+**Edit:** `packages/web-core/src/i18n/locales/{en,es,fr,ja,ko,zh-Hans,zh-Hant}/common.json`
 
-- Codex review of both diffs; fix confirmed findings.
-- Docs stage: wiki page for the deployment architecture + INDEX update.
-- PRs: one against `davidvasandani/vibe-kanban` main, one against
-  `davidvasandani/homelab` main.
+Add under the existing `"kanban"` object:
+
+- en: `activityGroups.active` = "Active", `activityGroups.waitingForFeedback`
+  = "Waiting for feedback"
+- es: "Activo" / "Esperando comentarios"
+- fr: "En cours d'exécution" → keep short: "Actif" / "En attente de retour"
+- ja: "実行中" / "フィードバック待ち"
+- ko: "실행 중" / "피드백 대기 중"
+- zh-Hans: "进行中" / "等待反馈"
+- zh-Hant: "進行中" / "等待回饋"
+
+(Mirror the nesting style already used in each file's `kanban` section.)
+
+## Step 5 — Verification
+
+1. `pnpm -F @vibe/web-core exec vitest run src/features/kanban/model/activityGrouping.test.ts`
+   (or the package's test script) — new unit tests green.
+2. `pnpm run check` — TS across web + Rust workspaces.
+3. `pnpm run lint` — ESLint + clippy.
+4. `pnpm run format` before finishing (repo requirement).
+5. Manual sanity if feasible (`pnpm run dev`): seed a project, start an agent
+   on one In progress issue, confirm headers/split appear, approval-pending
+   run lands in Waiting, other columns unaffected, no headers when
+   single-group. Mobile touch checks are manual-only per
+   `mobile-testing.md` — note in PR.
+
+## Risks / edge cases to watch
+
+- **Effect deps:** `activeIssueIds` must be memoized with stable identity
+  (rebuild only when inputs change) to avoid rebuilding `items` every render;
+  derive from `issues` + `getWorkspacesForIssue` + `localWorkspacesById`.
+- **DnD index integrity:** headers must not be `Draggable`s; card `index`
+  stays the flat array position (dnd requires indexes to match render order
+  of draggables within a droppable — inert elements between them are fine).
+- **Snap-back UX:** dropping a card across group headers reorders the flat
+  array; the next rebuild snaps it to its derived group. Accepted per spec
+  FR5.
+- **Renamed statuses** don't group (FR1) — intentional, matches backend
+  name-based "In progress" behavior.
+
+## Pipeline stages remaining after implementation
+
+- Codex review of the diff (iterate until clean).
+- Wiki: add a page on kanban activity grouping / issue-workspace activity
+  signals; update `wiki/INDEX.md`; tag with `vk/d4db-in-progress-acti`.
+- Open PR against the base branch.
