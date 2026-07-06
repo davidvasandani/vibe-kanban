@@ -202,3 +202,51 @@ jobs:
 
       - name: Run Cargo tests
         run: cargo nextest run --workspace --exclude vibe-kanban-tauri
+
+  # crates/remote is a separate workspace (excluded from the root workspace), so
+  # the root `backend-test` job above never compiles or runs it. Its migrations
+  # create roles/publications and its SQLx queries are checked at compile time,
+  # so this job needs a real Postgres rather than the offline .sqlx cache.
+  remote-test:
+    needs: changes
+    if: always() && (needs.changes.outputs.backend == 'true' || needs.changes.result == 'skipped')
+    runs-on: *runner_label
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
+      # Matches crates/remote/docker-compose.yml (db/user/password all "remote").
+      # The migrations GRANT on DATABASE remote, so the db must be named "remote".
+      DATABASE_URL: postgres://remote:remote@localhost:5432/remote
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: remote
+          POSTGRES_USER: remote
+          POSTGRES_PASSWORD: remote
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/cargo-checks-common-setup
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cache-key: remote-test-${{ runner.os }}-${{ runner.arch }}-${{ env.RUNNER_LABEL }}
+          setup-sqlx-cli: 'true'
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run migrations
+        working-directory: crates/remote
+        run: sqlx migrate run
+
+      - name: Run remote Cargo tests
+        run: cargo nextest run --manifest-path crates/remote/Cargo.toml
