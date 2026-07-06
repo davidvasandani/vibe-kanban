@@ -182,6 +182,10 @@ export interface NavbarProps {
   mobileTabs?: { id: MobileTabId; icon: Icon; label: string }[];
   showMobileTabs?: boolean;
   mobileShowBack?: boolean;
+  // Reserve leading space in the mobile top row for OS window controls (the
+  // iPadOS Stage Manager grabber / traffic lights) so they don't cover the
+  // drawer button.
+  reserveWindowControls?: boolean;
 }
 
 export function Navbar({
@@ -208,7 +212,15 @@ export function Navbar({
   mobileTabs,
   showMobileTabs,
   mobileShowBack,
+  reserveWindowControls = false,
 }: NavbarProps) {
+  // Width reserved at the leading edge for OS window controls (matches the
+  // desktop traffic-light spacer in SharedAppLayout). Never smaller than the
+  // horizontal safe-area inset.
+  const windowControlsPadding = reserveWindowControls
+    ? 'max(env(safe-area-inset-left), 56px)'
+    : undefined;
+
   const renderItem = (item: NavbarSectionItem, key: string) => {
     // Render divider
     if (isDivider(item)) {
@@ -246,7 +258,16 @@ export function Navbar({
         style={{ paddingTop: 'env(safe-area-inset-top)' }}
       >
         {/* Row 1: Tab bar (workspace pages) or minimal header (project pages) */}
-        <div className="flex items-center justify-between px-base py-half">
+        <div
+          className="flex items-center justify-between px-base py-half"
+          // Push the leading content (drawer button) clear of the OS window
+          // controls when present; overrides px-base's left padding only.
+          style={
+            windowControlsPadding
+              ? { paddingLeft: windowControlsPadding }
+              : undefined
+          }
+        >
           {isOnProjectPage ? (
             <div className="flex items-center gap-base">
               {isOnProjectSubRoute

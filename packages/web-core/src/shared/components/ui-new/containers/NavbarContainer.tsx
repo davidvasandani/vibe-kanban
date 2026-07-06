@@ -39,6 +39,7 @@ import { getProjectDestination } from '@/shared/lib/routes/appNavigation';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useCurrentAppDestination } from '@/shared/hooks/useCurrentAppDestination';
 import { getRemoteAuthDegradedMessage } from '@/shared/lib/auth/remoteAuthDegraded';
+import { isIPad, isStandaloneWebApp } from '@/shared/lib/platform';
 
 /**
  * Check if a NavbarItem is a divider
@@ -139,6 +140,14 @@ export function NavbarContainer({
   const isOnProjectSubRoute =
     projectDestination !== null && projectDestination.kind !== 'project';
   const [mobileActiveTab, setMobileActiveTab] = useMobileActiveTab();
+
+  // On iPad the mobile navbar only renders in a narrow (Stage Manager / Split
+  // View) window, where iPadOS overlays window controls on the top-leading
+  // corner. Reserve space for them so they don't cover the drawer button.
+  const reserveWindowControls = useMemo(
+    () => mobileMode && isStandaloneWebApp() && isIPad(),
+    [mobileMode]
+  );
 
   // Find remote workspace linked to current local workspace
   const linkedRemoteWorkspace = useMemo(() => {
@@ -335,6 +344,7 @@ export function NavbarContainer({
       rightItems={rightItems}
       syncErrors={syncErrors}
       mobileMode={mobileMode}
+      reserveWindowControls={reserveWindowControls}
       mobileUserSlot={userPopoverSlot}
       isOnProjectPage={isOnProjectPage}
       isOnProjectSubRoute={isOnProjectSubRoute}
