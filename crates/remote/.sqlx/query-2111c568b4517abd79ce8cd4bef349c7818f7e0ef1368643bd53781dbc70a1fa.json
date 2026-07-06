@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE workspaces\n            SET archived = TRUE, updated_at = NOW()\n            WHERE issue_id = $1 AND archived = FALSE\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2111c568b4517abd79ce8cd4bef349c7818f7e0ef1368643bd53781dbc70a1fa"
+}

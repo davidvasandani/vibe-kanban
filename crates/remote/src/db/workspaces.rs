@@ -1,6 +1,6 @@
 use api_types::Workspace;
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Postgres};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -235,6 +235,64 @@ impl WorkspaceRepository {
         .fetch_one(pool)
         .await?;
         Ok(count)
+    }
+
+    /// Lists the non-archived workspaces linked to an issue. Generic over the
+    /// executor so it can run inside an existing transaction.
+    pub async fn list_active_by_issue_id<'e, E>(
+        executor: E,
+        issue_id: Uuid,
+    ) -> Result<Vec<Workspace>, WorkspaceError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        let records = sqlx::query_as!(
+            Workspace,
+            r#"
+            SELECT
+                id                  AS "id!: Uuid",
+                project_id          AS "project_id!: Uuid",
+                owner_user_id       AS "owner_user_id!: Uuid",
+                issue_id            AS "issue_id: Uuid",
+                local_workspace_id  AS "local_workspace_id: Uuid",
+                name                AS "name: String",
+                archived            AS "archived!: bool",
+                files_changed       AS "files_changed: i32",
+                lines_added         AS "lines_added: i32",
+                lines_removed       AS "lines_removed: i32",
+                created_at          AS "created_at!: DateTime<Utc>",
+                updated_at          AS "updated_at!: DateTime<Utc>"
+            FROM workspaces
+            WHERE issue_id = $1 AND archived = FALSE
+            "#,
+            issue_id
+        )
+        .fetch_all(executor)
+        .await?;
+        Ok(records)
+    }
+
+    /// Archives all non-archived workspaces linked to an issue, returning the
+    /// number of workspaces archived. Generic over the executor so it can run
+    /// inside an existing transaction.
+    pub async fn archive_active_by_issue_id<'e, E>(
+        executor: E,
+        issue_id: Uuid,
+    ) -> Result<u64, WorkspaceError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        let result = sqlx::query!(
+            r#"
+            UPDATE workspaces
+            SET archived = TRUE, updated_at = NOW()
+            WHERE issue_id = $1 AND archived = FALSE
+            "#,
+            issue_id
+        )
+        .execute(executor)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     pub async fn update(
