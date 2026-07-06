@@ -434,6 +434,11 @@
         "successMessage": "✓ MCP 設定儲存成功！",
         "loading": "載入目前 MCP 伺服器設定...",
         "unsavedChanges": "• 您有未儲存的變更"
+      },
+      "test": {
+        "button": "測試連線",
+        "dirtyHint": "測試前請先儲存變更。",
+        "failed": "測試 MCP 伺服器失敗"
       }
     },
     "projects": {

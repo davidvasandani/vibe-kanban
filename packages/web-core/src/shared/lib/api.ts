@@ -24,6 +24,8 @@ import {
   UpdateTag,
   UserSystemInfo,
   McpServerQuery,
+  McpServerTestResult,
+  TestMcpServersBody,
   UpdateMcpServersBody,
   GetMcpServerResponse,
   AttachmentResponse,
@@ -1168,6 +1170,22 @@ export const mcpServersApi = {
         response
       );
     }
+  },
+  test: async (
+    query: McpServerQuery,
+    body?: TestMcpServersBody,
+    hostId?: string | null
+  ): Promise<McpServerTestResult[]> => {
+    const params = new URLSearchParams(query);
+    const response = await makeHostAwareRequest(
+      `/api/mcp-config/test?${params.toString()}`,
+      hostId,
+      {
+        method: 'POST',
+        body: JSON.stringify(body ?? {}),
+      }
+    );
+    return handleApiResponse<McpServerTestResult[]>(response);
   },
 };
 

@@ -434,6 +434,11 @@
         "successMessage": "✓ ¡Configuración MCP guardada exitosamente!",
         "loading": "Cargando configuración actual del servidor MCP...",
         "unsavedChanges": "• Tienes cambios sin guardar"
+      },
+      "test": {
+        "button": "Probar conexión",
+        "dirtyHint": "Guarda tus cambios antes de probar.",
+        "failed": "Error al probar los servidores MCP"
       }
     },
     "projects": {

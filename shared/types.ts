@@ -349,6 +349,21 @@ export type UpdateMcpServersBody = { servers: { [key in string]?: JsonValue }, }
 
 export type GetMcpServerResponse = { mcp_config: McpConfig, config_path: string, };
 
+export type TestMcpServersBody = { 
+/**
+ * When present and non-empty, only these servers are tested; otherwise all
+ * of the agent's configured servers are tested.
+ */
+servers: Array<string> | null, };
+
+export type McpServerTestResult = { name: string, 
+/**
+ * `"stdio" | "http" | "sse" | "unknown"`.
+ */
+transport: string, status: McpServerTestStatus, latency_ms: bigint | null, tool_count: number | null, server_name: string | null, server_version: string | null, error: string | null, };
+
+export type McpServerTestStatus = "ok" | "failed" | "unsupported";
+
 export type CheckEditorAvailabilityQuery = { editor_type: EditorType, };
 
 export type CheckEditorAvailabilityResponse = { available: boolean, };
