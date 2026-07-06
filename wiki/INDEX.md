@@ -23,6 +23,11 @@ contributed to it.
   error/recovery callback chain to the navbar banner, why the readiness timeout
   must fall back silently ("falling back is recovery, not an error"), and the
   stable-callback / caching / testing gotchas.
+- [kanban-items-state-and-activity-grouping.md](kanban-items-state-and-activity-grouping.md)
+  — The `items` array ↔ drag-and-drop index/sort_order contract, the
+  `isSyncingRef` rebuild-swallowing gotcha, the In progress Active/Waiting
+  split, preference-gated vs semantic workspace signals, name-based
+  "In progress" identification.
 - [mobile-kanban-scrolling.md](mobile-kanban-scrolling.md) — Mobile kanban
   board scroll/snap architecture: nested single-axis scrollers, the
   `overflow-y` → `overflow-x` promotion gotcha, gesture routing, history of

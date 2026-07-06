@@ -1,119 +1,118 @@
-# Implementation Plan — `vk/a96d-electric-sync-er`
+# Implementation Plan: Split the "In progress" column by activity
 
-See `SPEC.md` for the full design. All changes are in `packages/web-core`.
+See `SPEC.md` for the full design and `../PRIOR_KNOWLEDGE.md` for mobile
+card-list constraints. All changes are frontend (`packages/web-core`); no
+backend, schema, or generated-type changes.
 
-## Step 1 — Type: add `onRecovered` to `CollectionConfig`
+## Step 1 — Pure grouping helpers + unit tests
 
-File: `packages/web-core/src/shared/lib/electric/types.ts`
+**New file:** `packages/web-core/src/features/kanban/model/activityGrouping.ts`
 
-Add an optional callback to `CollectionConfig`:
+- `isInProgressStatus(name: string): boolean` — `trim().toLowerCase() === 'in progress'`.
+- `isWorkspaceActive(ws: { isRunning?: boolean; hasPendingApproval?: boolean }): boolean`
+  — `isRunning === true && hasPendingApproval !== true` (a run paused on tool
+  approval is *waiting*, matching `IssueWorkspaceCard`'s hand-icon semantics).
+- `partitionByActivity(issueIds: string[], activeIssueIds: ReadonlySet<string>): string[]`
+  — stable partition, active ids first, original order preserved within each
+  group. Returns the input array unchanged (same reference not required) when
+  no reordering is needed.
+- `buildActivityGroups(issueIds: string[], activeIssueIds: ReadonlySet<string>)`
+  → `{ active: string[]; waiting: string[]; showHeaders: boolean }` where
+  `showHeaders = active.length > 0 && waiting.length > 0`.
 
-```ts
-export interface CollectionConfig {
-  /** Callback for sync errors */
-  onError?: (error: SyncError) => void;
-  /** Called when a source recovers (e.g. a fallback snapshot loads),
-   *  so previously-reported errors can be cleared. */
-  onRecovered?: () => void;
-}
-```
+**New file:** `activityGrouping.test.ts` (Vitest, colocated) covering:
+- name matching (case/whitespace variants, non-matches like "In review");
+- active predicate (running, running+pendingApproval, not running, undefined
+  flags);
+- partition stability and no-op cases (all active / all waiting / empty);
+- `showHeaders` only when both groups non-empty.
 
-## Step 2 — `collections.ts`: silent timeout + recovery reporting
+## Step 2 — Activity signal in `KanbanContainer`
 
-File: `packages/web-core/src/shared/lib/electric/collections.ts`
+**Edit:** `packages/web-core/src/features/kanban/ui/KanbanContainer.tsx`
 
-1. **Recovery reporter.** In `createShapeCollection`, alongside
-   `const reportError = createErrorReporter(config);` add:
-   ```ts
-   const reportRecovered = () => config?.onRecovered?.();
-   ```
-   Pass `reportRecovered` into `createHybridSync({ ... })`.
+- New memo `activeIssueIds: Set<string>` computed from `issues`,
+  `getWorkspacesForIssue`, `localWorkspacesById` (the existing
+  `SidebarWorkspace` map): an issue id is in the set when any linked,
+  non-archived workspace resolves to a local workspace with
+  `isWorkspaceActive(localWorkspace)`. **Not** gated by `showWorkspaces`
+  (unlike `workspacesByIssueId`) — grouping must work with workspace cards
+  hidden. Reuses the same link-resolution shape as `workspacesByIssueId`
+  (`!ws.archived && ws.local_workspace_id && localWorkspacesById.has(...)`).
+- In the `items` rebuild effect (currently lines ~478–525): after the
+  per-status sort, apply
+  `if (isInProgressStatus(status.name)) statusIssueIds = partitionByActivity(...)`.
+  Add `activeIssueIds` to the effect dependency array so group membership
+  re-derives live when agents start/stop. The `isSyncingRef` drag-sync skip
+  stays as is.
 
-2. **Thread through `createHybridSync`.** Add `reportRecovered: () => void` to
-   its args type and forward it into the `createFallbackSync({ ... })` call it
-   constructs.
+## Step 3 — Group header rendering
 
-3. **`createFallbackSync`.** Add `reportRecovered: () => void` to its args.
-   In `refreshNow`, after a successful fetch + `applySnapshot(syncParams, rows)`
-   (inside the `if (!isCleanedUp)` block), call `args.reportRecovered()`.
+**Edit:** same file, board render loop (currently lines ~986–1128):
 
-4. **Silent timeout.** In `createHybridSync`'s `scheduleReadyTimeout`, replace:
-   ```ts
-   args.reportError({
-     message: `Electric sync timed out after ${ELECTRIC_READY_TIMEOUT_MS}ms, switching to fallback`,
-   });
-   lockSourceToFallback(args.sourceKey);
-   ```
-   with:
-   ```ts
-   console.warn(
-     `Electric sync timed out after ${ELECTRIC_READY_TIMEOUT_MS}ms, switching to fallback`
-   );
-   lockSourceToFallback(args.sourceKey);
-   ```
-   (Page visibility is already guaranteed earlier in the handler.)
+- For each column, compute `const groups = isInProgressStatus(status.name)
+  ? buildActivityGroups(issueIds, activeIssueIds) : null` (in-render, cheap).
+- When `groups?.showHeaders`, render a header row before the first card of
+  each group inside `<KanbanCards>`; determine boundaries while mapping the
+  flat `issueIds` (header before index 0, and before the first id whose group
+  differs from the previous id's group). Cards keep their **flat** `index`
+  prop so `@hello-pangea/dnd` draggable indexes keep matching
+  `items[status.id]` and `handleDragEnd`/`calculateSortOrder` stay untouched.
+- Header row markup (per PRIOR_KNOWLEDGE constraints: plain block element, no
+  negative margins, no scroll container):
+  `<div className="flex items-center gap-half px-base pt-base pb-half text-xs uppercase tracking-wide text-low">`
+  with label + count. Use `t('kanban.activityGroups.active')` /
+  `t('kanban.activityGroups.waitingForFeedback')`.
+- Applies to both `kanban` and `slim` modes automatically (same loop). List
+  view untouched.
 
-## Step 3 — `useShape`: clear error on recovery
+## Step 4 — i18n
 
-File: `packages/web-core/src/shared/integrations/electric/hooks.ts`
+**Edit:** `packages/web-core/src/i18n/locales/{en,es,fr,ja,ko,zh-Hans,zh-Hant}/common.json`
 
-Add a stable recovery handler and pass it in the collection config:
+Add under the existing `"kanban"` object:
 
-```ts
-const handleRecovered = useCallback(() => setError(null), []);
-// ...
-const config = { onError: handleError, onRecovered: handleRecovered };
-```
+- en: `activityGroups.active` = "Active", `activityGroups.waitingForFeedback`
+  = "Waiting for feedback"
+- es: "Activo" / "Esperando comentarios"
+- fr: "En cours d'exécution" → keep short: "Actif" / "En attente de retour"
+- ja: "実行中" / "フィードバック待ち"
+- ko: "실행 중" / "피드백 대기 중"
+- zh-Hans: "进行中" / "等待反馈"
+- zh-Hant: "進行中" / "等待回饋"
 
-Add `handleRecovered` to the `useMemo` dependency list that builds the
-collection. Setting `error` to `null` also clears the `SyncErrorContext` entry
-via the existing effect keyed on `error`.
+(Mirror the nesting style already used in each file's `kanban` section.)
 
-## Step 4 — Test
+## Step 5 — Verification
 
-File: `packages/web-core/src/shared/lib/electric/collections.test.ts`
+1. `pnpm -F @vibe/web-core exec vitest run src/features/kanban/model/activityGrouping.test.ts`
+   (or the package's test script) — new unit tests green.
+2. `pnpm run check` — TS across web + Rust workspaces.
+3. `pnpm run lint` — ESLint + clippy.
+4. `pnpm run format` before finishing (repo requirement).
+5. Manual sanity if feasible (`pnpm run dev`): seed a project, start an agent
+   on one In progress issue, confirm headers/split appear, approval-pending
+   run lands in Waiting, other columns unaffected, no headers when
+   single-group. Mobile touch checks are manual-only per
+   `mobile-testing.md` — note in PR.
 
-Vitest unit test. Mocks:
-- `@tanstack/electric-db-collection` → `electricCollectionOptions` returns
-  `{ id, sync: { sync: <electric sync that never markReady> } }` merged with
-  input options.
-- `@tanstack/react-db` → `createCollection` captures the passed options and
-  synchronously invokes `options.sync.sync(fakeSyncParams)`, returning a stub.
-- `@/shared/lib/auth/runtime` → `getAuthRuntime` stub.
-- `@/shared/lib/remoteApi` → `getRemoteApiUrl`, `getRemoteApiBasicAuth`,
-  `makeRequest` (records calls; returns `{ ok, json }` with fallback rows).
+## Risks / edge cases to watch
 
-Harness: stub `globalThis.document = { visibilityState: 'visible' }` and use
-`vi.useFakeTimers()`. `fakeSyncParams` implements
-`collection.isReady/onFirstReady`, `begin/write/commit/markReady/truncate`.
+- **Effect deps:** `activeIssueIds` must be memoized with stable identity
+  (rebuild only when inputs change) to avoid rebuilding `items` every render;
+  derive from `issues` + `getWorkspacesForIssue` + `localWorkspacesById`.
+- **DnD index integrity:** headers must not be `Draggable`s; card `index`
+  stays the flat array position (dnd requires indexes to match render order
+  of draggables within a droppable — inert elements between them are fine).
+- **Snap-back UX:** dropping a card across group headers reorders the flat
+  array; the next rebuild snaps it to its derived group. Accepted per spec
+  FR5.
+- **Renamed statuses** don't group (FR1) — intentional, matches backend
+  name-based "In progress" behavior.
 
-Assertions:
-1. Create a collection (unique table name), advance timers past 3000ms, flush
-   promises. Expect: `onError` **not** called; `makeRequest` called with the
-   fallback path; rows written + `markReady` called; `onRecovered` called.
-2. (Optional secondary case) confirm the fallback poll uses the shape's
-   `fallbackUrl`.
+## Pipeline stages remaining after implementation
 
-Use a unique `table`/`params` per test so the module-level `collectionCache`,
-`sourceRuntimes`, and `fallbackSnapshotCache` don't leak between cases.
-
-## Step 5 — Verify
-
-- `pnpm --filter @vibe/web-core test` (or `pnpm run test` in the package).
-- `pnpm run check` (frontend typecheck + Rust) and `pnpm run lint`.
-- `pnpm run format`.
-
-## Step 6 — Review & knowledge (pipeline stages 4–5)
-
-- Codex review of the diff; address findings; re-verify.
-- Add a `wiki/` page on the client Electric hybrid-sync + fallback design and
-  the "fallback is recovery, not a user error" principle; tag
-  `vk/a96d-electric-sync-er`; refresh `wiki/INDEX.md`; commit.
-
-## Files touched
-
-- `packages/web-core/src/shared/lib/electric/types.ts`
-- `packages/web-core/src/shared/lib/electric/collections.ts`
-- `packages/web-core/src/shared/integrations/electric/hooks.ts`
-- `packages/web-core/src/shared/lib/electric/collections.test.ts` (new)
-- `wiki/*` (stage 5)
+- Codex review of the diff (iterate until clean).
+- Wiki: add a page on kanban activity grouping / issue-workspace activity
+  signals; update `wiki/INDEX.md`; tag with `vk/d4db-in-progress-acti`.
+- Open PR against the base branch.

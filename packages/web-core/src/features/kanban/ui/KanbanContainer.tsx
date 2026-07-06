@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useMemo,
   useCallback,
   useState,
@@ -28,6 +29,13 @@ import {
   useKanbanFilters,
   PRIORITY_ORDER,
 } from '../model/hooks/useKanbanFilters';
+import {
+  buildActivityGroups,
+  isInProgressStatus,
+  isWorkspaceActive,
+  partitionByActivity,
+  type ActivityGroup,
+} from '../model/activityGrouping';
 import {
   bulkUpdateIssues,
   type BulkUpdateIssueItem,
@@ -470,8 +478,50 @@ export function KanbanContainer() {
     return sortedStatuses;
   }, [sortedStatuses, listViewStatusFilter]);
 
+  const localWorkspacesById = useMemo(() => {
+    const map = new Map<string, (typeof activeWorkspaces)[number]>();
+
+    for (const workspace of activeWorkspaces) {
+      map.set(workspace.id, workspace);
+    }
+
+    return map;
+  }, [activeWorkspaces]);
+
+  // Issues with at least one linked workspace whose agent is actively
+  // running (not paused on a tool approval). Drives the "In progress"
+  // column's activity grouping, so unlike workspacesByIssueId it is not
+  // gated by the showWorkspaces display preference.
+  const activeIssueIds = useMemo(() => {
+    const ids = new Set<string>();
+
+    for (const issue of issues) {
+      const hasActiveWorkspace = getWorkspacesForIssue(issue.id).some(
+        (workspace) => {
+          if (workspace.archived || !workspace.local_workspace_id) {
+            return false;
+          }
+          const localWorkspace = localWorkspacesById.get(
+            workspace.local_workspace_id
+          );
+          return !!localWorkspace && isWorkspaceActive(localWorkspace);
+        }
+      );
+
+      if (hasActiveWorkspace) {
+        ids.add(issue.id);
+      }
+    }
+
+    return ids;
+  }, [issues, getWorkspacesForIssue, localWorkspacesById]);
+
   // Track items as arrays of IDs grouped by status
   const [items, setItems] = useState<Record<string, string[]>>({});
+  // Bumped when a drag-drop sync window closes, because dep-driven rebuilds
+  // that arrive during the window are skipped; the extra rebuild re-derives
+  // the "In progress" activity grouping after cross-group drops.
+  const [itemsRebuildTick, setItemsRebuildTick] = useState(0);
   const [isFiltersDialogOpen, setIsFiltersDialogOpen] = useState(false);
 
   // Sync items from filtered issues when they change
@@ -519,10 +569,28 @@ export function KanbanContainer() {
         return sortDirection === 'desc' ? -comparison : comparison;
       });
 
-      grouped[status.id] = statusIssues.map((i) => i.id);
+      let statusIssueIds = statusIssues.map((i) => i.id);
+
+      // Split the "In progress" column by live agent activity: actively
+      // running issues first, then those waiting on user feedback. Stable
+      // within each group, so the user's sort is preserved. Board views
+      // only — list view renders items without group headers, so it keeps
+      // the plain sort.
+      if (isBoardView && isInProgressStatus(status.name)) {
+        statusIssueIds = partitionByActivity(statusIssueIds, activeIssueIds);
+      }
+
+      grouped[status.id] = statusIssueIds;
     }
     setItems(grouped);
-  }, [filteredIssues, statuses, kanbanFilters]);
+  }, [
+    filteredIssues,
+    statuses,
+    kanbanFilters,
+    isBoardView,
+    activeIssueIds,
+    itemsRebuildTick,
+  ]);
 
   // Create a lookup map for issue data
   const issueMap = useMemo(() => {
@@ -552,16 +620,6 @@ export function KanbanContainer() {
     () => [...membersWithProfilesById.values()],
     [membersWithProfilesById]
   );
-
-  const localWorkspacesById = useMemo(() => {
-    const map = new Map<string, (typeof activeWorkspaces)[number]>();
-
-    for (const workspace of activeWorkspaces) {
-      map.set(workspace.id, workspace);
-    }
-
-    return map;
-  }, [activeWorkspaces]);
 
   const prsByWorkspaceId = useMemo(() => {
     const map = new Map<string, WorkspacePr[]>();
@@ -737,6 +795,7 @@ export function KanbanContainer() {
           // Delay clearing flag to let Electric sync complete
           setTimeout(() => {
             isSyncingRef.current = false;
+            setItemsRebuildTick((tick) => tick + 1);
           }, 500);
         });
     },
@@ -985,6 +1044,9 @@ export function KanbanContainer() {
             >
               {visibleStatuses.map((status) => {
                 const issueIds = items[status.id] ?? [];
+                const activityGroups = isInProgressStatus(status.name)
+                  ? buildActivityGroups(issueIds, activeIssueIds)
+                  : null;
 
                 return (
                   <KanbanBoard key={status.id}>
@@ -1022,6 +1084,43 @@ export function KanbanContainer() {
                       {issueIds.map((issueId, index) => {
                         const issue = issueMap[issueId];
                         if (!issue) return null;
+
+                        // Section header above the first card of each
+                        // activity group ("Active" / "Waiting for feedback").
+                        // Plain inert row between draggables; card indexes
+                        // stay flat so dnd keeps matching items[status.id].
+                        const issueGroup: ActivityGroup = activeIssueIds.has(
+                          issueId
+                        )
+                          ? 'active'
+                          : 'waiting';
+                        let groupHeader: {
+                          label: string;
+                          count: number;
+                        } | null = null;
+                        if (activityGroups?.showHeaders) {
+                          const previousGroup: ActivityGroup | null =
+                            index === 0
+                              ? null
+                              : activeIssueIds.has(issueIds[index - 1])
+                                ? 'active'
+                                : 'waiting';
+                          if (previousGroup !== issueGroup) {
+                            groupHeader =
+                              issueGroup === 'active'
+                                ? {
+                                    label: t('kanban.activityGroups.active'),
+                                    count: activityGroups.active.length,
+                                  }
+                                : {
+                                    label: t(
+                                      'kanban.activityGroups.waitingForFeedback'
+                                    ),
+                                    count: activityGroups.waiting.length,
+                                  };
+                          }
+                        }
+
                         const issueWorkspaces =
                           workspacesByIssueId.get(issue.id) ?? [];
                         const workspaceIdsShownOnCard = new Set(
@@ -1040,86 +1139,93 @@ export function KanbanContainer() {
                         });
 
                         return (
-                          <KanbanCard
-                            key={issue.id}
-                            id={issue.id}
-                            name={issue.title}
-                            index={index}
-                            className="group"
-                            onClick={(e) => handleCardClick(issue.id, e)}
-                            isOpen={selectedKanbanIssueId === issue.id}
-                            isMobile={isMobile}
-                            isSelected={selectedIssueIds.has(issue.id)}
-                            dragDisabled={isMultiSelectActive}
-                          >
-                            <KanbanCardContent
-                              slim={isSlimView}
-                              displayId={issue.simple_id}
-                              title={issue.title}
-                              description={issue.description}
-                              priority={issue.priority}
-                              tags={getTagObjectsForIssue(issue.id)}
-                              assignees={issueAssigneesMap[issue.id] ?? []}
-                              pullRequests={issueCardPullRequests}
-                              relationships={resolveRelationshipsForIssue(
-                                issue.id,
-                                getRelationshipsForIssue(issue.id),
-                                issuesById
-                              )}
-                              isSubIssue={!!issue.parent_issue_id}
-                              isMobile={isMobile}
-                              onPriorityClick={(e) => {
-                                e.stopPropagation();
-                                handleCardPriorityClick(issue.id);
-                              }}
-                              onAssigneeClick={(e) => {
-                                e.stopPropagation();
-                                handleCardAssigneeClick(issue.id);
-                              }}
-                              onMoreActionsClick={() =>
-                                handleCardMoreActionsClick(issue.id)
-                              }
-                              tagEditProps={{
-                                allTags: tags,
-                                selectedTagIds: getTagsForIssue(issue.id).map(
-                                  (it) => it.tag_id
-                                ),
-                                onTagToggle: (tagId) =>
-                                  handleCardTagToggle(issue.id, tagId),
-                                onCreateTag: handleCreateTag,
-                                renderTagEditor: ({
-                                  allTags,
-                                  selectedTagIds,
-                                  onTagToggle,
-                                  onCreateTag,
-                                  trigger,
-                                }) => (
-                                  <SearchableTagDropdownContainer
-                                    tags={allTags}
-                                    selectedTagIds={selectedTagIds}
-                                    onTagToggle={onTagToggle}
-                                    onCreateTag={onCreateTag}
-                                    disabled={false}
-                                    contentClassName=""
-                                    trigger={trigger}
-                                  />
-                                ),
-                              }}
-                            />
-                            {!isSlimView && issueWorkspaces.length > 0 && (
-                              <div className="mt-base flex flex-col gap-half">
-                                {issueWorkspaces.map((workspace) => (
-                                  <IssueWorkspaceCard
-                                    key={workspace.id}
-                                    workspace={workspace}
-                                    showOwner={false}
-                                    showStatusBadge={false}
-                                    showNoPrText={false}
-                                  />
-                                ))}
+                          <Fragment key={issue.id}>
+                            {groupHeader && (
+                              <div className="flex items-baseline gap-half px-base pt-base pb-half text-xs font-medium uppercase tracking-wide text-low">
+                                <span>{groupHeader.label}</span>
+                                <span>{groupHeader.count}</span>
                               </div>
                             )}
-                          </KanbanCard>
+                            <KanbanCard
+                              id={issue.id}
+                              name={issue.title}
+                              index={index}
+                              className="group"
+                              onClick={(e) => handleCardClick(issue.id, e)}
+                              isOpen={selectedKanbanIssueId === issue.id}
+                              isMobile={isMobile}
+                              isSelected={selectedIssueIds.has(issue.id)}
+                              dragDisabled={isMultiSelectActive}
+                            >
+                              <KanbanCardContent
+                                slim={isSlimView}
+                                displayId={issue.simple_id}
+                                title={issue.title}
+                                description={issue.description}
+                                priority={issue.priority}
+                                tags={getTagObjectsForIssue(issue.id)}
+                                assignees={issueAssigneesMap[issue.id] ?? []}
+                                pullRequests={issueCardPullRequests}
+                                relationships={resolveRelationshipsForIssue(
+                                  issue.id,
+                                  getRelationshipsForIssue(issue.id),
+                                  issuesById
+                                )}
+                                isSubIssue={!!issue.parent_issue_id}
+                                isMobile={isMobile}
+                                onPriorityClick={(e) => {
+                                  e.stopPropagation();
+                                  handleCardPriorityClick(issue.id);
+                                }}
+                                onAssigneeClick={(e) => {
+                                  e.stopPropagation();
+                                  handleCardAssigneeClick(issue.id);
+                                }}
+                                onMoreActionsClick={() =>
+                                  handleCardMoreActionsClick(issue.id)
+                                }
+                                tagEditProps={{
+                                  allTags: tags,
+                                  selectedTagIds: getTagsForIssue(issue.id).map(
+                                    (it) => it.tag_id
+                                  ),
+                                  onTagToggle: (tagId) =>
+                                    handleCardTagToggle(issue.id, tagId),
+                                  onCreateTag: handleCreateTag,
+                                  renderTagEditor: ({
+                                    allTags,
+                                    selectedTagIds,
+                                    onTagToggle,
+                                    onCreateTag,
+                                    trigger,
+                                  }) => (
+                                    <SearchableTagDropdownContainer
+                                      tags={allTags}
+                                      selectedTagIds={selectedTagIds}
+                                      onTagToggle={onTagToggle}
+                                      onCreateTag={onCreateTag}
+                                      disabled={false}
+                                      contentClassName=""
+                                      trigger={trigger}
+                                    />
+                                  ),
+                                }}
+                              />
+                              {!isSlimView && issueWorkspaces.length > 0 && (
+                                <div className="mt-base flex flex-col gap-half">
+                                  {issueWorkspaces.map((workspace) => (
+                                    <IssueWorkspaceCard
+                                      key={workspace.id}
+                                      workspace={workspace}
+                                      showOwner={false}
+                                      showStatusBadge={false}
+                                      showNoPrText={false}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                            </KanbanCard>
+                          </Fragment>
                         );
                       })}
                     </KanbanCards>
