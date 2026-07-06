@@ -371,7 +371,51 @@
         "serverConfig": "Configuración de Servidor (JSON)",
         "popularServers": "Servidores populares",
         "serverHelper": "Haz clic en una tarjeta para insertar ese Servidor MCP en el JSON de arriba.",
-        "saveLocation": "Los cambios se guardarán en:"
+        "saveLocation": "Los cambios se guardarán en:",
+        "servers": "Servidores",
+        "serverHelperForm": "Haz clic en una tarjeta para agregar ese servidor MCP a la lista."
+      },
+      "list": {
+        "empty": "Aún no hay servidores MCP configurados. Agrega uno abajo.",
+        "addServer": "Agregar servidor",
+        "customBadge": "personalizado"
+      },
+      "dialog": {
+        "addTitle": "Agregar servidor MCP",
+        "editTitle": "Editar servidor MCP",
+        "description": "Configura cómo se inicia este servidor MCP.",
+        "name": "Nombre",
+        "namePlaceholder": "p. ej. mi_servidor",
+        "transport": "Transporte",
+        "command": "Comando",
+        "args": "Argumentos",
+        "argsHelper": "Un argumento por línea.",
+        "env": "Variables de entorno",
+        "addEnv": "Agregar variable",
+        "url": "URL",
+        "headers": "Encabezados",
+        "addHeader": "Agregar encabezado",
+        "customJson": "JSON del servidor",
+        "customJsonHelper": "Este servidor usa un formato que el formulario no puede mostrar; edita su JSON directamente.",
+        "cancel": "Cancelar",
+        "add": "Agregar servidor",
+        "saveEdit": "Guardar cambios"
+      },
+      "validation": {
+        "nameRequired": "El nombre es obligatorio.",
+        "nameWhitespace": "El nombre no puede empezar ni terminar con espacios.",
+        "nameTaken": "Ya existe un servidor con este nombre.",
+        "commandRequired": "El comando es obligatorio.",
+        "urlRequired": "La URL es obligatoria.",
+        "urlInvalid": "Introduce una URL válida.",
+        "urlScheme": "La URL debe empezar con http:// o https://.",
+        "duplicateKey": "No se permiten claves duplicadas.",
+        "invalidJson": "Formato JSON inválido.",
+        "customNotObject": "El JSON del servidor debe ser un objeto."
+      },
+      "json": {
+        "editAsJson": "Editar como JSON",
+        "editAsForm": "Editar como formulario"
       },
       "errors": {
         "loadFailed": "Error al cargar la configuración.",
