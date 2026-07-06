@@ -1,129 +1,213 @@
-# Spec: First-Class MCP Server Configuration UX
+# Spec: Production-Grade Deployment Strategy for Vibe Kanban
 
 ## Problem
 
-The MCP Servers settings section (`packages/web-core/src/shared/dialogs/settings/settings/McpSettingsSection.tsx`) exposes a raw JSON textarea containing the *entire* agent config wrapper (e.g. `{"mcpServers": {...}}`). Users must hand-write JSON to add, edit, or remove an MCP server, know each agent's native config dialect (Claude-style `mcpServers`, Gemini's `httpUrl`, Opencode's `type: local/remote` + command array, Codex's TOML-backed `mcp_servers`), and get only a coarse "Invalid JSON format" error when they make a mistake. On mobile/tablet (see attached screenshot) editing JSON in a textarea is especially painful.
+Vibe Kanban self-hosts on think2 via a chain of homelab NixOS units:
+`git-projects-update` (poll/CI-trigger) hard-resets `/srv/src/vibe-kanban` and
+writes a SHA stamp → `vibe-kanban-rebuild.path` fires → `vibe-kanban-rebuild.service`
+builds via `local-build.sh` in an isolated worktree → publishes `npx-cli/dist`
+**back into the live checkout** → restarts `vibe-kanban-dev`, `vibe-kanban-remote`,
+`vibe-kanban-relay`.
+
+Two classes of production problems, both observed live in the think2 journal:
+
+### 1. Multiple services mutate the source checkout
+
+`/srv/src/vibe-kanban` is simultaneously:
+
+- the **deploy artifact store** — every service ExecStarts from inside it
+  (`node …/npx-cli/bin/cli.js`, `…/npx-cli/dist/linux-x64/remote`,
+  `…/dist/linux-x64/relay-server`); the CLI launcher *unlinks and re-extracts*
+  binaries into `npx-cli/dist/<platform>/` on every service start, so service
+  users need write access to the repo;
+- the **build input** — the rebuild service publishes fresh `dist/` into it
+  under flock;
+- a **git workspace shared with the app** — vibe-kanban manages this repo as a
+  project, so task worktrees (owned by `vibe-kanban-dev`) register under
+  `/srv/src/vibe-kanban/.git/worktrees/`;
+- a **poll target** — `git-projects-update` hard-resets it every 15 minutes.
+
+Observed failure (Jul 05 23:42): the rebuild's `git worktree prune` (running as
+`developer`) hit `failed to delete '.git/worktrees/vibe-kanban1': Permission
+denied` on the app's foreign-owned worktree registrations. Any actor that
+wipes/resets `npx-cli/dist` takes the running services' binaries with it.
+
+### 2. Build failures back up silently
+
+- Jul 05 23:35: rebuild exited `status=127` one second in; **no retry, no
+  alert** — deploy stalled until the next upstream commit happened to re-fire
+  the stamp.
+- Jul 05 22:39: rebuild killed mid-run (`status=15/TERM`, result `signal`) —
+  same silence.
+- The trigger is **edge-triggered** (PathChanged on the stamp): once a build
+  for SHA *N* fails, later polls reset to the same SHA without rewriting the
+  stamp, so nothing re-fires.
+- The self-heal guard checks only artifact **existence**, not **freshness**:
+  binaries from commit *N−1* are "present", so a stalled deploy of commit *N*
+  is invisible to it.
+- No notification path exists for any of this; failures are discovered only
+  when someone notices the running version is stale.
 
 ## Goal
 
-Replace JSON-first editing with a structured, form-based UX:
+A deployment pipeline where:
 
-- A **server list** showing each configured server as a card with its name, transport badge, and a one-line summary (command line or URL), plus edit/remove actions.
-- An **add/edit dialog** with proper fields — name, transport type, command/args/env for stdio servers, URL/headers for remote servers — with inline validation (no hand-written JSON for the common paths).
-- **Popular servers** cards add directly to the list with one click (same behavior as today, but no JSON round-trip visible to the user).
-- A **raw JSON escape hatch** ("Edit as JSON" toggle) that preserves today's full-fidelity editing for power users and for config shapes the form can't represent.
+1. **Services never run from, or write to, the source checkout.** Builds
+   publish immutable, versioned releases outside the repo; services ExecStart
+   from a `current` symlink that is flipped atomically.
+2. **Deploys are level-triggered (reconciled), not just edge-triggered.** The
+   system converges on "deployed SHA == stamped SHA" even after crashes,
+   SIGTERM kills, or exit-127s, without waiting for the next upstream commit.
+3. **Failures are loud.** Any rebuild failure, health-check failure, or
+   persistent deploy drift publishes an ntfy alert with journal context.
+4. **Restarts are health-gated with rollback.** After flipping `current` and
+   restarting, the deployer probes each service's existing `/health` endpoint;
+   on failure it flips back to the previous release, restarts, and alerts.
 
 ## Non-goals
 
-- No backend / API changes. The existing `GET/POST /mcp-config?executor=...` endpoints already exchange the servers map in agent-native form; the frontend keeps using them via `machineClient.loadMcpServers` / `saveMcpServers`.
-- No change to generated types (`shared/types.ts`) — `McpConfig` already carries `servers`, `servers_path`, `template`, `preconfigured`.
-- No change to how launched agents receive MCP config (`crates/executors/src/mcp_config.rs` adapters).
-- No secret management — env var / header values remain plain text, same as the JSON editor today.
-
-## Background: per-agent server entry formats
-
-The API returns/accepts server entries in the *agent's native* format (the canonical→native conversion in `crates/executors/src/mcp_config.rs` applies only to preconfigured servers). The form layer therefore needs per-agent codecs:
-
-| Agent(s) | stdio shape | remote shape |
-|---|---|---|
-| Claude Code, Amp, Droid | `{command, args?, env?}` | `{type: "http"\|"sse", url, headers?}` |
-| Copilot | `{command, args?, env?, tools?}` | `{type: "http"\|"sse", url, headers?, tools?}` |
-| Cursor | `{command, args?, env?}` | `{url, headers?}` (no `type`) |
-| Gemini, Qwen Code | `{command, args?, env?}` | `{httpUrl, headers?}` |
-| Codex (TOML) | `{command, args?, env?}` | *not supported* — stdio only |
-| Opencode | `{type: "local", command: [cmd, ...args], enabled, environment?}` | `{type: "remote", url, headers?, enabled}` |
+- No change to the public npm/npx distribution path (`ensureBinary` download
+  flow, `npm-cdn.vibekanban.com`); this is about the self-hosted local-build
+  deployment only.
+- No Docker/Kubernetes migration — the strategy stays NixOS units + systemd,
+  matching the rest of the homelab.
+- No change to how the app itself creates task worktrees (`.git/worktrees/`
+  stays multi-writer by design); the deploy machinery must simply tolerate it.
+- No blue/green for the SQLite-backed local instance (single writer); rollback
+  is symlink-flip + restart, not parallel instances.
 
 ## Design
 
-### 1. Normalized form model + per-agent codecs
+Changes span both repos in this workspace.
 
-New module `packages/web-core/src/shared/lib/mcpServerCodec.ts`:
+### A. vibe-kanban repo: versioned release publishing in `local-build.sh`
 
-```ts
-export type McpTransport = 'stdio' | 'http' | 'sse';
+Extend the existing `VK_REMOTE_STATIC_RELEASES` pattern (versioned
+`build-<id>/` trees + atomic `current` symlink + prune) to the **binaries**:
 
-export interface McpServerFormValues {
-  transport: McpTransport;
-  command: string;
-  args: string[];
-  env: Array<{ key: string; value: string }>;
-  url: string;
-  headers: Array<{ key: string; value: string }>;
-}
+- New env `VK_RELEASES_DIR` (set by the deploy host, absent for CI/dev — same
+  gating style as `VK_REMOTE_STATIC_RELEASES`). When set, after all binaries
+  build, `local-build.sh` publishes:
 
-export interface McpServerCodec {
-  transports: McpTransport[];
-  parse(entry: JsonValue): McpServerFormValues | null; // null → custom
-  serialize(values: McpServerFormValues, original?: JsonValue): JsonValue;
-  summarize(entry: JsonValue): string;
-}
+  ```
+  $VK_RELEASES_DIR/
+    build-<BUILD_ID>/
+      release.json          # {"sha": "<git sha>", "build_id": "...", "built_at": "..."}
+      bin/
+        vibe-kanban         # extracted server binary
+        vibe-kanban-mcp
+        vibe-kanban-review
+        remote
+        relay-server
+    current  -> build-<BUILD_ID>     # atomic rename flip
+    previous -> build-<old>          # previous current, for rollback
+  ```
 
-export function codecForAgent(agent: BaseCodingAgent): McpServerCodec;
-```
+- Binaries are published **extracted** (no zips) so services exec them
+  directly — no launcher, no runtime extraction, no writes at service start.
+- `sha` comes from the build tree's `git rev-parse HEAD` (the rebuild service
+  builds a pinned worktree, so this equals the stamp SHA).
+- Flip protocol: stage `.current-<BUILD_ID>` symlink, `mv -Tf` over `current`
+  (atomic rename, same as remote-web); repoint `previous` to the old target
+  first. Prune to the 3 newest `build-*` dirs, never deleting the targets of
+  `current`/`previous`.
+- The existing `npx-cli/dist` staging/publish continues unchanged (CI and
+  local dev still use it); on the deploy host it simply stops being what
+  services run from.
 
-Codec rules:
+### B. homelab repo: `modules/vibe-kanban-rebuild.nix` becomes a deployer
 
-- **Parse is conservative.** An entry parses only if its recognized keys have the expected types. Anything else returns `null` and is treated as a **custom** entry (edited as raw JSON).
-- **Unknown keys are preserved.** Extra keys the form doesn't model (Copilot's `tools`, Opencode's `enabled`, `timeout`, etc.) never block parsing; on save they merge back from the original entry unchanged. `parse` → `serialize(values, original)` on an untouched form is a no-op for every representable entry.
-- **Per-agent specifics:**
-  - Claude/Amp/Droid/Copilot: `type` absent + `command` present ⇒ stdio; `type: "http"|"sse"` + `url` ⇒ remote. Both `http` and `sse` offered.
-  - Cursor: remote entries have `url` and no `type`; serialize omits `type`. Single URL transport option (rendered as `http`).
-  - Gemini/Qwen: remote uses `httpUrl`. Single URL transport option.
-  - Codex: `transports = ['stdio']` only.
-  - Opencode: `type: "local"` ⇒ stdio with `command[0]` as command, rest as args, `environment` as env; `type: "remote"` ⇒ url/headers. New entries serialize with `enabled: true`; existing `enabled` value is preserved.
+1. **Publish to releases, not the checkout.** Set `VK_RELEASES_DIR` (new
+   option `releasesDir`, default `/srv/vk-releases`; tmpfiles-managed like
+   `staticReleasesDir`). Drop the step that publishes `npx-cli/dist` +
+   `cli.js` back into `/srv/src/vibe-kanban` — the checkout becomes build
+   input only.
+2. **Health-gated restart with rollback.** Replace the blind
+   `ExecStartPost systemctl restart …` with a deploy step in the script:
+   restart units, then poll each service's `/health`
+   (dev `127.0.0.1:3334/api/health`, remote `127.0.0.1:8082/health`, relay
+   `127.0.0.1:8083/health`) with a bounded retry window (~60s). On failure:
+   flip `current` back to `previous`, restart again, and exit non-zero so the
+   failure alert fires.
+3. **Failure alerting.** `OnFailure=vibe-kanban-deploy-alert.service` on the
+   rebuild unit — a oneshot that posts the failing unit + last ~30 journal
+   lines to ntfy (`https://ntfy.vasandani.dev/<topic>`, topic a module option;
+   same capability-URL pattern as the comin watchdog).
+4. **Reconciler guard (freshness, not just existence).** Extend
+   `vibe-kanban-rebuild-guard` to also compare the stamp SHA against
+   `releases/current/release.json`'s `sha`. If they differ and no rebuild is
+   active/queued, start one. Persist a consecutive-failure counter in a state
+   file; at ≥2 consecutive reconcile attempts without convergence, fire the
+   alert unit (deploy stalled — the "silent backlog" now pages). Keep the
+   existing remote-web serve-path check; existence checks now target
+   `releases/current/bin/*`.
+5. **Fix the worktree collision.** Remove the global `git worktree prune`
+   (it trips over the app's foreign-owned registrations). Clean up only our
+   own build tree: `git worktree remove --force` it, and remove its specific
+   admin dir `.git/worktrees/build-tree` if left behind; both are created by
+   the build user, so no permission conflicts.
 
-### 2. Section state: object-based, not string-based
+### C. homelab repo: services exec from the release
 
-`McpSettingsSection` keeps the servers map (`Record<string, JsonValue>`) as source of truth. Dirty tracking compares `JSON.stringify(servers)` against a snapshot taken at load/save. Save posts `{servers}` via `machineClient.saveMcpServers`. Save-bar behavior unchanged.
+- `vibe-kanban.nix` (dev instance): new option `releasesDir`; when set,
+  `ExecStart` runs `${releasesDir}/current/bin/vibe-kanban` directly (no
+  node/cli.js, no `VIBE_KANBAN_LOCAL`), and the unit environment sets
+  `VIBE_KANBAN_MCP_COMMAND=${releasesDir}/current/bin/vibe-kanban-mcp` so
+  launched agents get the co-built MCP binary (per
+  `vibe-kanban.env.example`'s documented override). The `developers`
+  group-write requirement for the *service user* (needed only for the cli.js
+  extract step) is retained for now because agents still build in worktrees,
+  but the service itself no longer writes to the repo.
+- `vibe-kanban-remote.nix` / `vibe-kanban-relay.nix`: default `binaryPath` to
+  `${releasesDir}/current/bin/{remote,relay-server}`; drop the
+  `ExecStartPre chmod +x` (release binaries are published executable).
+- `vibe-kanban-mcp.nix`: point the gateway at
+  `${releasesDir}/current/bin/vibe-kanban-mcp` instead of `cli.js`.
+- `hosts/think/think2.nix`: enable the new options.
+- Services keep running the **old** release until the deployer flips
+  `current`; a failed build can no longer leave them binary-less (today's
+  crash-loop-on-wiped-dist mode disappears structurally).
 
-### 3. Server list UI
+### D. Migration / compatibility
 
-One card per entry: server name (mono), transport badge (`stdio` / `HTTP` / `SSE` / `custom`), summary line (`codec.summarize`), Edit and Remove buttons. Empty state + "Add server" button. Remove deletes the key locally, applied on Save (discardable).
-
-### 4. Add/edit dialog
-
-`McpServerDialog` (NiceModal), receives the codec, existing names, and (for edit) name + original entry:
-
-- **Name**: required, unique, no leading/trailing whitespace. Rename allowed (delete old key, insert new).
-- **Transport**: select from `codec.transports`; hidden when only one option.
-- **stdio**: Command (required); Arguments (textarea, one per line); Environment key/value rows.
-- **http/sse**: URL (required, http(s) URL); Headers key/value rows.
-- **Custom entries** (`parse` → `null`): single JSON textarea for that entry, validated as a JSON object.
-
-### 5. Popular servers
-
-`addPreconfigured(key)` writes `preconfigured[key]` (already agent-native) into `servers`. Cards for already-added servers show a check state and are disabled.
-
-### 6. Raw JSON escape hatch
-
-"Edit as JSON" toggle. JSON mode seeds the textarea with `createFullConfig`-shaped JSON built from current `servers`; edits re-validate/extract live. Switching back to form mode is blocked on invalid JSON. For Codex the textarea stays JSON (backend converts to TOML).
-
-### 7. i18n
-
-New keys under `settings.mcp.*` in `en/settings.json` (list, dialog, validation, json-toggle). i18next falls back to English for other locales.
-
-## Validation rules (summary)
-
-| Field | Rule |
-|---|---|
-| Name | non-empty; unique; no leading/trailing whitespace |
-| Command | non-empty (stdio) |
-| Args | lines used verbatim; empty lines dropped |
-| URL | non-empty; parses via `new URL()` with http/https scheme |
-| Env/Header keys | non-empty; unique within the entry |
-| Custom JSON | parses as a JSON object |
-
-## Testing
-
-- Vitest unit tests `mcpServerCodec.test.ts`: parse/serialize round-trips per agent (unknown-key preservation, Opencode command split/join, Gemini `httpUrl`, Cursor typeless URL, Codex stdio-only), unparseable fallbacks, summarize output.
-- `pnpm run check` and `pnpm run lint` pass.
-- Manual: load per agent, add popular server, add stdio + http via form, edit, remove, JSON toggle round-trip, save & confirm file on disk.
+- First deploy after the switch: guard sees no `releases/current` →
+  triggers a rebuild → release published → units (now pointing at
+  `current`) restart healthy. Until that first successful build, units may
+  fail to start; ordering the nixos switch after a manual
+  `systemctl start vibe-kanban-rebuild` avoids a gap, and the guard
+  self-heals regardless.
+- `expectedArtifacts` option semantics change (release paths); think2.nix
+  doesn't override it, so no host churn.
+- Rollback runbook: `ln -sfn <build-dir> /srv/vk-releases/.roll && mv -Tf
+  /srv/vk-releases/.roll /srv/vk-releases/current && systemctl restart
+  vibe-kanban-dev vibe-kanban-remote vibe-kanban-relay`.
 
 ## Acceptance criteria
 
-1. Add / edit / remove MCP servers for every MCP-capable agent without seeing or typing JSON.
-2. Existing configs — including entries with keys the form doesn't model — survive load → edit-something-else → save without data loss.
-3. Popular-server cards add in one click.
-4. Raw JSON editing remains available and behaves as before.
-5. Per-agent constraints enforced (Codex: stdio only; Gemini/Qwen/Cursor: single URL transport).
-6. No backend or generated-type changes; web `check`/`lint`/`test` green.
+1. No systemd unit ExecStarts from, or writes at startup into,
+   `/srv/src/vibe-kanban`.
+2. `local-build.sh` with `VK_RELEASES_DIR` set publishes an extracted,
+   `release.json`-stamped, atomically-flipped release; without it, behavior
+   is byte-identical to today (CI unaffected).
+3. A rebuild that fails (any exit path: compile error, 127, SIGTERM) leaves
+   `current` untouched, services running, and posts an ntfy alert.
+4. A deploy that stalls (stamp SHA ≠ deployed SHA across two guard runs)
+   posts an ntfy alert and keeps retrying the build.
+5. A release whose services fail their `/health` probes is rolled back to
+   `previous` automatically, with an alert.
+6. The rebuild never runs `git worktree prune` against the shared checkout;
+   app-owned worktree registrations cannot fail the build.
+7. `nix flake check` passes for the homelab repo; `bash -n local-build.sh`
+   and a dry local build pass for vibe-kanban.
+
+## Risks
+
+- **Hardcoded health ports** in the deployer must match think2's service
+  config; expose them as module options with think2's values as defaults.
+- **`previous` pointing at a pruned dir** — prune must exclude both symlink
+  targets (spec'd above).
+- **First-boot ordering** (no release yet) — covered by guard self-heal;
+  documented in the runbook.
+- **ntfy topic in a public-ish repo** — follows existing repo practice
+  (comin watchdog commits its topic); topic is unguessable, not a secret
+  credential.
