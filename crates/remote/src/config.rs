@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, path::PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use secrecy::SecretString;
@@ -16,7 +16,7 @@ pub struct RemoteServerConfig {
     pub electric_role_password: Option<SecretString>,
     pub electric_publication_names: Vec<String>,
     pub r2: Option<R2Config>,
-    pub azure_blob: Option<AzureBlobConfig>,
+    pub local_disk: Option<LocalDiskConfig>,
     pub review_worker_base_url: Option<String>,
     pub review_disabled: bool,
     pub github_app: Option<GitHubAppConfig>,
@@ -94,87 +94,35 @@ impl R2Config {
     }
 }
 
+/// Filesystem-backed attachment storage. Enabled by setting
+/// `ATTACHMENTS_DATA_DIR`; blob URLs are signed and served from this server's
+/// own `/v1/blobs/*` routes (no cloud object store required).
 #[derive(Debug, Clone)]
-pub enum AzureAuthMode {
-    /// Entra ID via user-assigned managed identity (production).
-    EntraId { client_id: String },
-    /// Shared Key via custom HMAC policy (local Azurite).
-    SharedKey,
-}
-
-#[derive(Debug, Clone)]
-pub struct AzureBlobConfig {
-    pub account_name: String,
-    /// Account key is always required for SAS token generation.
-    pub account_key: SecretString,
-    pub container_name: String,
-    pub endpoint_url: Option<String>,
-    pub public_endpoint_url: Option<String>,
+pub struct LocalDiskConfig {
+    pub data_dir: PathBuf,
     pub presign_expiry_secs: u64,
-    pub auth_mode: AzureAuthMode,
 }
 
-impl AzureBlobConfig {
-    pub fn from_env() -> Result<Option<Self>, ConfigError> {
-        let account_name = match env::var("AZURE_STORAGE_ACCOUNT_NAME") {
-            Ok(v) if !v.trim().is_empty() => v,
-            Ok(_) => {
-                tracing::info!("AZURE_STORAGE_ACCOUNT_NAME is empty, Azure Blob storage disabled");
-                return Ok(None);
-            }
-            Err(_) => {
-                tracing::info!("AZURE_STORAGE_ACCOUNT_NAME not set, Azure Blob storage disabled");
-                return Ok(None);
-            }
-        };
-
-        tracing::info!("AZURE_STORAGE_ACCOUNT_NAME is set, checking other Azure Blob env vars");
-
-        let account_key = match env::var("AZURE_STORAGE_ACCOUNT_KEY") {
-            Ok(v) if !v.trim().is_empty() => v,
-            Ok(_) | Err(_) => return Err(ConfigError::MissingVar("AZURE_STORAGE_ACCOUNT_KEY")),
-        };
-
-        let container_name = env::var("AZURE_STORAGE_CONTAINER_NAME")
+impl LocalDiskConfig {
+    pub fn from_env() -> Option<Self> {
+        let data_dir = env::var("ATTACHMENTS_DATA_DIR")
             .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "issue-attachments".to_string());
+            .filter(|value| !value.trim().is_empty())?;
 
-        let endpoint_url = env::var("AZURE_STORAGE_ENDPOINT_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        let public_endpoint_url = env::var("AZURE_STORAGE_PUBLIC_ENDPOINT_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-
-        let auth_mode = match env::var("AZURE_MANAGED_IDENTITY_CLIENT_ID") {
-            Ok(client_id) if !client_id.trim().is_empty() => AzureAuthMode::EntraId { client_id },
-            Err(_) => AzureAuthMode::SharedKey,
-            Ok(_) => AzureAuthMode::SharedKey,
-        };
-
-        let presign_expiry_secs = env::var("AZURE_BLOB_PRESIGN_EXPIRY_SECS")
+        let presign_expiry_secs = env::var("ATTACHMENTS_PRESIGN_EXPIRY_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3600);
 
         tracing::info!(
-            account_name = %account_name,
-            container_name = %container_name,
-            endpoint_url = ?endpoint_url,
-            auth_mode = ?auth_mode,
-            "Azure Blob config loaded successfully"
+            data_dir = %data_dir,
+            "Local-disk attachment storage config loaded"
         );
 
-        Ok(Some(Self {
-            account_name,
-            account_key: SecretString::new(account_key.into()),
-            container_name,
-            endpoint_url,
-            public_endpoint_url,
+        Some(Self {
+            data_dir: PathBuf::from(data_dir),
             presign_expiry_secs,
-            auth_mode,
-        }))
+        })
     }
 }
 
@@ -276,7 +224,7 @@ impl RemoteServerConfig {
         };
 
         let r2 = R2Config::from_env()?;
-        let azure_blob = AzureBlobConfig::from_env()?;
+        let local_disk = LocalDiskConfig::from_env();
 
         let review_worker_base_url = env::var("REVIEW_WORKER_BASE_URL").ok();
 
@@ -299,7 +247,7 @@ impl RemoteServerConfig {
             electric_role_password,
             electric_publication_names,
             r2,
-            azure_blob,
+            local_disk,
             review_worker_base_url,
             review_disabled,
             github_app,
