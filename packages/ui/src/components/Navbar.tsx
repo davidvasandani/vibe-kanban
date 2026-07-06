@@ -240,6 +240,10 @@ export function Navbar({
           'flex flex-col bg-secondary border-b shrink-0',
           className
         )}
+        // Keep the nav clear of the top safe area (iPad windowed / notched
+        // fullscreen); the nav's bg-secondary fills the status-bar strip.
+        // Resolves to 0 where there is no top inset.
+        style={{ paddingTop: 'env(safe-area-inset-top)' }}
       >
         {/* Row 1: Tab bar (workspace pages) or minimal header (project pages) */}
         <div className="flex items-center justify-between px-base py-half">
@@ -428,6 +432,10 @@ export function Navbar({
         'flex items-center justify-between px-base py-half bg-secondary border-b shrink-0',
         className
       )}
+      // 0.25rem mirrors py-half (kept for the bottom); the added top safe-area
+      // inset keeps the nav clear of the status bar in iPad windowed / notched
+      // layouts. Resolves to py-half where there is no top inset.
+      style={{ paddingTop: 'calc(0.25rem + env(safe-area-inset-top))' }}
     >
       {/* Left - Archive & Old UI Link + optional slot */}
       <div data-tauri-drag-region className="flex-1 flex items-center gap-base">
