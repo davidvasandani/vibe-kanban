@@ -15,6 +15,12 @@ export interface SyncError {
 export interface CollectionConfig {
   /** Callback for sync errors */
   onError?: (error: SyncError) => void;
+  /**
+   * Callback invoked when a source recovers — e.g. a REST fallback snapshot
+   * loads successfully after Electric was unavailable — so any previously
+   * reported error for this collection can be cleared.
+   */
+  onRecovered?: () => void;
 }
 
 /**

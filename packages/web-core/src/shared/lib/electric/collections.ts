@@ -111,6 +111,17 @@ class ErrorHandler {
 
     return true;
   }
+
+  /**
+   * Forget the last-reported error and reset the debounce window. Called when a
+   * source recovers, so a later failure — even with the same message — is
+   * reported again instead of being debounced away against the stale state.
+   */
+  reset(): void {
+    this.lastErrorTime = 0;
+    this.lastErrorMessage = '';
+    this.consecutiveErrors = 0;
+  }
 }
 
 function buildUrl(baseUrl: string, params: Record<string, string>): string {
@@ -282,12 +293,13 @@ function isTransientElectricShapeError(error: {
   return isCancelledErrorMessage(error.message);
 }
 
-function createErrorReporter(
-  config?: CollectionConfig
-): (error: SyncError) => void {
+function createErrorReporter(config?: CollectionConfig): {
+  reportError: (error: SyncError) => void;
+  reportRecovered: () => void;
+} {
   const handler = new ErrorHandler();
 
-  return (error: SyncError) => {
+  const reportError = (error: SyncError) => {
     if (!handler.shouldReport(error.message)) return;
 
     if (isPageVisible()) {
@@ -295,6 +307,15 @@ function createErrorReporter(
     }
     config?.onError?.(error);
   };
+
+  const reportRecovered = () => {
+    // Clear the error banner and the debounce state together, so they can't
+    // drift out of sync (a cleared banner but a still-suppressing handler).
+    handler.reset();
+    config?.onRecovered?.();
+  };
+
+  return { reportError, reportRecovered };
 }
 
 function createErrorHandlingFetch(args: {
@@ -455,6 +476,7 @@ function createFallbackSync(args: {
   shape: ShapeDefinition<unknown>;
   params: Record<string, string>;
   reportError: (error: SyncError) => void;
+  reportRecovered: () => void;
 }) {
   return (syncParams: SyncParams): SyncResult => {
     const runtime = getOrCreateSourceRuntime(args.sourceKey);
@@ -490,6 +512,9 @@ function createFallbackSync(args: {
 
           if (!isCleanedUp) {
             applySnapshot(syncParams, rows);
+            // The fallback is now serving data: the source has recovered, so
+            // clear any error that an earlier Electric failure surfaced.
+            args.reportRecovered();
           }
         } catch (error) {
           if (isAbortError(error)) return;
@@ -541,6 +566,7 @@ function createHybridSync(args: {
   shape: ShapeDefinition<unknown>;
   params: Record<string, string>;
   reportError: (error: SyncError) => void;
+  reportRecovered: () => void;
   electricSync: SyncConfigLike['sync'];
 }) {
   const fallbackSync = createFallbackSync({
@@ -548,6 +574,7 @@ function createHybridSync(args: {
     shape: args.shape,
     params: args.params,
     reportError: args.reportError,
+    reportRecovered: args.reportRecovered,
   });
 
   return (syncParams: SyncParams): SyncResult => {
@@ -588,9 +615,12 @@ function createHybridSync(args: {
           return;
         }
 
-        args.reportError({
-          message: `Electric sync timed out after ${ELECTRIC_READY_TIMEOUT_MS}ms, switching to fallback`,
-        });
+        // Falling back to REST polling is expected graceful degradation, not a
+        // failure the user needs to see. Log for diagnostics and switch
+        // silently; a genuine error only surfaces if the fallback also fails.
+        console.warn(
+          `Electric sync timed out after ${ELECTRIC_READY_TIMEOUT_MS}ms, switching to fallback`
+        );
         lockSourceToFallback(args.sourceKey);
       }, ELECTRIC_READY_TIMEOUT_MS);
     };
@@ -790,7 +820,7 @@ export function createShapeCollection<TRow extends ElectricRow>(
     return cached as typeof cached & { __rowType?: TRow };
   }
 
-  const reportError = createErrorReporter(config);
+  const { reportError, reportRecovered } = createErrorReporter(config);
   const onElectricUnavailable = () => lockSourceToFallback(sourceKey);
 
   const shapeOptions = createElectricShapeOptions({
@@ -823,6 +853,7 @@ export function createShapeCollection<TRow extends ElectricRow>(
         shape,
         params,
         reportError,
+        reportRecovered,
         electricSync: electricSyncConfig.sync,
       }),
     },

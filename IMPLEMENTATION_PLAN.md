@@ -1,96 +1,119 @@
-# Implementation Plan: Production-Grade Deployment Strategy
+# Implementation Plan — `vk/a96d-electric-sync-er`
 
-See `SPEC.md` for the full design and observed failure evidence. Changes span
-both workspace repos: `vibe-kanban/` (build script + deploy docs) and
-`homelab/` (NixOS modules for think2).
+See `SPEC.md` for the full design. All changes are in `packages/web-core`.
 
-## Step 1 — `local-build.sh`: versioned binary releases (vibe-kanban repo)
+## Step 1 — Type: add `onRecovered` to `CollectionConfig`
 
-Gated on new env `VK_RELEASES_DIR` (absent → byte-identical behavior for CI
-and local dev), mirroring the existing `VK_REMOTE_STATIC_RELEASES` block:
+File: `packages/web-core/src/shared/lib/electric/types.ts`
 
-- After the atomic `npx-cli/dist` publish, when `VK_RELEASES_DIR` is set:
-  - Create `$VK_RELEASES_DIR/build-${BUILD_ID}/bin/` and copy the five
-    binaries **extracted** from `$CARGO_TARGET_DIR/release/`:
-    `server → vibe-kanban`, `vibe-kanban-mcp`, `review → vibe-kanban-review`,
-    `remote`, `relay-server`; `chmod 755` them.
-  - Write `build-${BUILD_ID}/release.json` with `sha` (`git rev-parse HEAD`),
-    `build_id`, `built_at` (ISO-8601 UTC).
-  - Repoint `previous` at the old `current` target (if any), then atomically
-    flip `current` (stage `.current-${BUILD_ID}` symlink, `mv -Tf`).
-  - Prune to the 3 newest `build-*` dirs, always keeping the resolved
-    targets of `current` and `previous`.
-  - `chmod -R g+rwX,o+rX` the release so non-builder service users can exec.
-- Validate with `bash -n local-build.sh` and a scratch-dir dry run of the
-  publish function (no full rebuild required for the publish logic itself).
+Add an optional callback to `CollectionConfig`:
 
-## Step 2 — `vibe-kanban-rebuild.nix`: publish → releases, health-gate, alert (homelab)
+```ts
+export interface CollectionConfig {
+  /** Callback for sync errors */
+  onError?: (error: SyncError) => void;
+  /** Called when a source recovers (e.g. a fallback snapshot loads),
+   *  so previously-reported errors can be cleared. */
+  onRecovered?: () => void;
+}
+```
 
-1. New options: `releasesDir` (default `/srv/vk-releases`), `healthChecks`
-   (list of `{unit, url}` with think2 defaults), `ntfyTopicUrl`
-   (nullable; when set, failures page).
-2. tmpfiles rule for `releasesDir` (`2775 developer developers`, like
-   `staticReleasesDir`).
-3. Script changes:
-   - Export `VK_RELEASES_DIR=${releasesDir}`.
-   - **Remove** the publish-back of `npx-cli/dist` + `cli.js` into the
-     checkout (and its flock section).
-   - **Remove** `git worktree prune`; clean only our own build tree
-     (`worktree remove --force` + targeted `rm -rf` of the tree and its
-     `.git/worktrees/build-tree` admin dir).
-   - After `local-build.sh` succeeds: `systemctl restart` the units (moved
-     from `ExecStartPost` into the script), then poll each health URL with
-     curl, ~60s budget. On any probe failing: flip `current` back to
-     `previous`, restart units again, log loudly, `exit 1`.
-4. `OnFailure=vibe-kanban-deploy-alert.service` on the rebuild unit; new
-   oneshot alert unit posts unit name + `journalctl -u vibe-kanban-rebuild
-   -n 30` tail to the ntfy topic (skip silently when topic unset).
-5. Guard → reconciler:
-   - Missing-artifact check now targets `${releasesDir}/current/bin/*`
-     (update `expectedArtifacts` default) + keep the remote-web serve check.
-   - New freshness check: `stamp SHA != release.json sha` (jq) while
-     `vibe-kanban-rebuild.service` is inactive → `systemctl start --no-block`
-     it.
-   - Consecutive-failure counter in `${releasesDir}/.reconcile-failures`;
-     at ≥2, also fire the alert unit ("deploy stalled at <sha>").
-6. Polkit rule already covers `restartUnits`; the rollback path restarts the
-   same units, so no polkit change.
+## Step 2 — `collections.ts`: silent timeout + recovery reporting
 
-## Step 3 — services exec from the release (homelab)
+File: `packages/web-core/src/shared/lib/electric/collections.ts`
 
-- `vibe-kanban.nix` (`services.vibe-kanban-dev`): new nullable option
-  `releasesDir`. When set: `ExecStart=${releasesDir}/current/bin/vibe-kanban`
-  (drop node/cli.js + `VIBE_KANBAN_LOCAL`), add unit env
-  `VIBE_KANBAN_MCP_COMMAND=${releasesDir}/current/bin/vibe-kanban-mcp`.
-  Both the token-script and plain-ExecStart branches must honor it.
-- `vibe-kanban-remote.nix` / `vibe-kanban-relay.nix`: `binaryPath` defaults
-  change to `/srv/vk-releases/current/bin/{remote,relay-server}` (think2
-  stays on defaults); drop `ExecStartPre chmod +x`.
-- `vibe-kanban-mcp.nix`: exec `…/current/bin/vibe-kanban-mcp` instead of
-  `cli.js --mcp`.
-- `hosts/think/think2.nix`: set `releasesDir`/topic options; update comments
-  contradicted by the change (e.g. cli.js extraction rationale for the
-  service user's `developers` membership).
+1. **Recovery reporter.** In `createShapeCollection`, alongside
+   `const reportError = createErrorReporter(config);` add:
+   ```ts
+   const reportRecovered = () => config?.onRecovered?.();
+   ```
+   Pass `reportRecovered` into `createHybridSync({ ... })`.
 
-## Step 4 — migration + docs
+2. **Thread through `createHybridSync`.** Add `reportRecovered: () => void` to
+   its args type and forward it into the `createFallbackSync({ ... })` call it
+   constructs.
 
-- Runbook: first-deploy ordering, manual rollback one-liner, alert topic —
-  in module header comments + a short `homelab/docs/` note if warranted.
-- vibe-kanban repo: mention `VK_RELEASES_DIR` in `vibe-kanban.env.example` /
-  `vibe-kanban.service.example` where they describe installing binaries.
+3. **`createFallbackSync`.** Add `reportRecovered: () => void` to its args.
+   In `refreshNow`, after a successful fetch + `applySnapshot(syncParams, rows)`
+   (inside the `if (!isCleanedUp)` block), call `args.reportRecovered()`.
 
-## Step 5 — verify
+4. **Silent timeout.** In `createHybridSync`'s `scheduleReadyTimeout`, replace:
+   ```ts
+   args.reportError({
+     message: `Electric sync timed out after ${ELECTRIC_READY_TIMEOUT_MS}ms, switching to fallback`,
+   });
+   lockSourceToFallback(args.sourceKey);
+   ```
+   with:
+   ```ts
+   console.warn(
+     `Electric sync timed out after ${ELECTRIC_READY_TIMEOUT_MS}ms, switching to fallback`
+   );
+   lockSourceToFallback(args.sourceKey);
+   ```
+   (Page visibility is already guaranteed earlier in the handler.)
 
-1. `bash -n vibe-kanban/local-build.sh`; scratch-dir dry-run of the release
-   publish with a fake `CARGO_TARGET_DIR`.
-2. `nix flake check` (or targeted `nix eval` of the think2 config) in
-   `homelab/`.
-3. Quoting / `set -euo pipefail` review of embedded module scripts.
-4. `pnpm run format` in vibe-kanban if any TS/Rust touched (expected: none).
+## Step 3 — `useShape`: clear error on recovery
 
-## Step 6 — review, docs, knowledge, PRs
+File: `packages/web-core/src/shared/integrations/electric/hooks.ts`
 
-- Codex review of both diffs; fix confirmed findings.
-- Docs stage: wiki page for the deployment architecture + INDEX update.
-- PRs: one against `davidvasandani/vibe-kanban` main, one against
-  `davidvasandani/homelab` main.
+Add a stable recovery handler and pass it in the collection config:
+
+```ts
+const handleRecovered = useCallback(() => setError(null), []);
+// ...
+const config = { onError: handleError, onRecovered: handleRecovered };
+```
+
+Add `handleRecovered` to the `useMemo` dependency list that builds the
+collection. Setting `error` to `null` also clears the `SyncErrorContext` entry
+via the existing effect keyed on `error`.
+
+## Step 4 — Test
+
+File: `packages/web-core/src/shared/lib/electric/collections.test.ts`
+
+Vitest unit test. Mocks:
+- `@tanstack/electric-db-collection` → `electricCollectionOptions` returns
+  `{ id, sync: { sync: <electric sync that never markReady> } }` merged with
+  input options.
+- `@tanstack/react-db` → `createCollection` captures the passed options and
+  synchronously invokes `options.sync.sync(fakeSyncParams)`, returning a stub.
+- `@/shared/lib/auth/runtime` → `getAuthRuntime` stub.
+- `@/shared/lib/remoteApi` → `getRemoteApiUrl`, `getRemoteApiBasicAuth`,
+  `makeRequest` (records calls; returns `{ ok, json }` with fallback rows).
+
+Harness: stub `globalThis.document = { visibilityState: 'visible' }` and use
+`vi.useFakeTimers()`. `fakeSyncParams` implements
+`collection.isReady/onFirstReady`, `begin/write/commit/markReady/truncate`.
+
+Assertions:
+1. Create a collection (unique table name), advance timers past 3000ms, flush
+   promises. Expect: `onError` **not** called; `makeRequest` called with the
+   fallback path; rows written + `markReady` called; `onRecovered` called.
+2. (Optional secondary case) confirm the fallback poll uses the shape's
+   `fallbackUrl`.
+
+Use a unique `table`/`params` per test so the module-level `collectionCache`,
+`sourceRuntimes`, and `fallbackSnapshotCache` don't leak between cases.
+
+## Step 5 — Verify
+
+- `pnpm --filter @vibe/web-core test` (or `pnpm run test` in the package).
+- `pnpm run check` (frontend typecheck + Rust) and `pnpm run lint`.
+- `pnpm run format`.
+
+## Step 6 — Review & knowledge (pipeline stages 4–5)
+
+- Codex review of the diff; address findings; re-verify.
+- Add a `wiki/` page on the client Electric hybrid-sync + fallback design and
+  the "fallback is recovery, not a user error" principle; tag
+  `vk/a96d-electric-sync-er`; refresh `wiki/INDEX.md`; commit.
+
+## Files touched
+
+- `packages/web-core/src/shared/lib/electric/types.ts`
+- `packages/web-core/src/shared/lib/electric/collections.ts`
+- `packages/web-core/src/shared/integrations/electric/hooks.ts`
+- `packages/web-core/src/shared/lib/electric/collections.test.ts` (new)
+- `wiki/*` (stage 5)
