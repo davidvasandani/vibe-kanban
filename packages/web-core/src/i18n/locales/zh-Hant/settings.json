@@ -367,7 +367,51 @@
         "serverConfig": "伺服器設定（JSON）",
         "popularServers": "熱門伺服器",
         "serverHelper": "點擊卡片將該 MCP 伺服器插入到上方 JSON 中。",
-        "saveLocation": "變更將儲存到："
+        "saveLocation": "變更將儲存到：",
+        "servers": "伺服器",
+        "serverHelperForm": "點擊卡片即可將該 MCP 伺服器新增至清單。"
+      },
+      "list": {
+        "empty": "尚未設定 MCP 伺服器。請在下方新增一個。",
+        "addServer": "新增伺服器",
+        "customBadge": "自訂"
+      },
+      "dialog": {
+        "addTitle": "新增 MCP 伺服器",
+        "editTitle": "編輯 MCP 伺服器",
+        "description": "設定此 MCP 伺服器的啟動方式。",
+        "name": "名稱",
+        "namePlaceholder": "例如 my_server",
+        "transport": "傳輸方式",
+        "command": "指令",
+        "args": "引數",
+        "argsHelper": "每行一個引數。",
+        "env": "環境變數",
+        "addEnv": "新增變數",
+        "url": "URL",
+        "headers": "標頭",
+        "addHeader": "新增標頭",
+        "customJson": "伺服器 JSON",
+        "customJsonHelper": "此伺服器使用表單無法顯示的格式；請直接編輯其 JSON。",
+        "cancel": "取消",
+        "add": "新增伺服器",
+        "saveEdit": "儲存變更"
+      },
+      "validation": {
+        "nameRequired": "名稱為必填項。",
+        "nameWhitespace": "名稱開頭或結尾不能有空白。",
+        "nameTaken": "已存在同名伺服器。",
+        "commandRequired": "指令為必填項。",
+        "urlRequired": "URL 為必填項。",
+        "urlInvalid": "請輸入有效的 URL。",
+        "urlScheme": "URL 必須以 http:// 或 https:// 開頭。",
+        "duplicateKey": "不允許重複的鍵。",
+        "invalidJson": "JSON 格式無效。",
+        "customNotObject": "伺服器 JSON 必須是一個物件。"
+      },
+      "json": {
+        "editAsJson": "以 JSON 編輯",
+        "editAsForm": "以表單編輯"
       },
       "loadingStates": {
         "jsonEditor": "載入中...",

@@ -373,9 +373,53 @@
         "agentPlaceholder": "Select executor",
         "agentHelper": "Choose which agent to configure MCP servers for.",
         "serverConfig": "Server Configuration (JSON)",
+        "servers": "Servers",
         "popularServers": "Popular servers",
         "serverHelper": "Click a card to insert that MCP Server into the JSON above.",
+        "serverHelperForm": "Click a card to add that MCP server to the list.",
         "saveLocation": "Changes will be saved to:"
+      },
+      "list": {
+        "empty": "No MCP servers configured yet. Add one below.",
+        "addServer": "Add server",
+        "customBadge": "custom"
+      },
+      "dialog": {
+        "addTitle": "Add MCP server",
+        "editTitle": "Edit MCP server",
+        "description": "Configure how this MCP server is launched.",
+        "name": "Name",
+        "namePlaceholder": "e.g. my_server",
+        "transport": "Transport",
+        "command": "Command",
+        "args": "Arguments",
+        "argsHelper": "One argument per line.",
+        "env": "Environment variables",
+        "addEnv": "Add variable",
+        "url": "URL",
+        "headers": "Headers",
+        "addHeader": "Add header",
+        "customJson": "Server JSON",
+        "customJsonHelper": "This server uses a format the form can't display; edit its JSON directly.",
+        "cancel": "Cancel",
+        "add": "Add server",
+        "saveEdit": "Save changes"
+      },
+      "validation": {
+        "nameRequired": "Name is required.",
+        "nameWhitespace": "Name cannot start or end with whitespace.",
+        "nameTaken": "A server with this name already exists.",
+        "commandRequired": "Command is required.",
+        "urlRequired": "URL is required.",
+        "urlInvalid": "Enter a valid URL.",
+        "urlScheme": "URL must start with http:// or https://.",
+        "duplicateKey": "Duplicate keys are not allowed.",
+        "invalidJson": "Invalid JSON format.",
+        "customNotObject": "Server JSON must be an object."
+      },
+      "json": {
+        "editAsJson": "Edit as JSON",
+        "editAsForm": "Edit as form"
       },
       "loadingStates": {
         "jsonEditor": "Loading...",

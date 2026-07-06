@@ -367,7 +367,51 @@
         "serverConfig": "サーバー設定（JSON）",
         "popularServers": "人気サーバー",
         "serverHelper": "カードをクリックして、そのMCPサーバーを上記のJSONに挿入します。",
-        "saveLocation": "変更は次の場所に保存されます："
+        "saveLocation": "変更は次の場所に保存されます：",
+        "servers": "サーバー",
+        "serverHelperForm": "カードをクリックすると、その MCP サーバーがリストに追加されます。"
+      },
+      "list": {
+        "empty": "MCP サーバーはまだ設定されていません。下から追加してください。",
+        "addServer": "サーバーを追加",
+        "customBadge": "カスタム"
+      },
+      "dialog": {
+        "addTitle": "MCP サーバーを追加",
+        "editTitle": "MCP サーバーを編集",
+        "description": "この MCP サーバーの起動方法を設定します。",
+        "name": "名前",
+        "namePlaceholder": "例: my_server",
+        "transport": "トランスポート",
+        "command": "コマンド",
+        "args": "引数",
+        "argsHelper": "1 行につき 1 つの引数。",
+        "env": "環境変数",
+        "addEnv": "変数を追加",
+        "url": "URL",
+        "headers": "ヘッダー",
+        "addHeader": "ヘッダーを追加",
+        "customJson": "サーバー JSON",
+        "customJsonHelper": "このサーバーはフォームで表示できない形式を使用しています。JSON を直接編集してください。",
+        "cancel": "キャンセル",
+        "add": "サーバーを追加",
+        "saveEdit": "変更を保存"
+      },
+      "validation": {
+        "nameRequired": "名前は必須です。",
+        "nameWhitespace": "名前の先頭または末尾に空白を含めることはできません。",
+        "nameTaken": "この名前のサーバーは既に存在します。",
+        "commandRequired": "コマンドは必須です。",
+        "urlRequired": "URL は必須です。",
+        "urlInvalid": "有効な URL を入力してください。",
+        "urlScheme": "URL は http:// または https:// で始まる必要があります。",
+        "duplicateKey": "重複したキーは使用できません。",
+        "invalidJson": "JSON の形式が無効です。",
+        "customNotObject": "サーバー JSON はオブジェクトである必要があります。"
+      },
+      "json": {
+        "editAsJson": "JSON で編集",
+        "editAsForm": "フォームで編集"
       },
       "loadingStates": {
         "jsonEditor": "読み込み中...",

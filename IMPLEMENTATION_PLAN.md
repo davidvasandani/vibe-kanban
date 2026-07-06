@@ -1,94 +1,47 @@
-# Implementation Plan: Collapse repeated `thinking_tokens` system log lines
+# Implementation Plan: First-Class MCP Server Configuration UX
 
-Task: `4095-thinking-tokens` · Spec: `SPEC.md` · Prior knowledge: `../PRIOR_KNOWLEDGE.md`
+See `SPEC.md` for the full design. All changes are in `packages/web-core` (frontend only).
 
-All changes are in `crates/executors/src/executors/claude.rs`. No frontend, DB, or
-shared-type changes.
+## Step 1 — Server-entry codec module ✅
 
-## Step 1 — Add repeat-tracking state to `ClaudeLogProcessor`
+**New file:** `packages/web-core/src/shared/lib/mcpServerCodec.ts`
+- `McpTransport`, `McpServerFormValues`, `McpServerCodec` types.
+- Shared helpers: `pairsToRecord`, `argsFromLines`, strict type guards.
+- Codecs: claude-style (Claude/Amp/Droid/Copilot), cursor, gemini (Gemini/Qwen), codex (stdio-only), opencode (local/remote).
+- `codecForAgent(agent)` registry; `transportOf(codec, entry)` helper.
+- `serialize(values, original)` preserves unrecognized keys and drops stale keys on transport switch.
 
-- Define a private struct near `StreamingMessageState`:
-  ```rust
-  struct RepeatedSystemMessage {
-      entry_index: usize,
-      content: String,
-      count: usize,
-  }
-  ```
-- Add field `repeated_system_message: Option<RepeatedSystemMessage>` to
-  `ClaudeLogProcessor` (around line 748) and initialize it to `None` in
-  `new_with_strategy`.
+**New file:** `mcpServerCodec.test.ts` — round-trips per codec, unknown-key preservation, parse rejections, Opencode command split/join, Gemini `httpUrl`, Cursor typeless URL, transport-switch key dropping.
 
-## Step 2 — Add a collapse helper
+## Step 2 — Add/edit dialog ✅
 
-Add a method on `ClaudeLogProcessor`:
+**New file:** `packages/web-core/src/shared/dialogs/settings/settings/McpServerDialog.tsx`
+- NiceModal component; props `{codec, existingNames, initial?}`; resolves `{name, entry} | undefined`.
+- Fields: name, transport select, command, args textarea (one per line), env rows, url, header rows.
+- Custom-entry JSON mode when `parse` returns `null`.
+- Inline validation; reusable `KeyValueRows` sub-component.
 
-```rust
-fn push_collapsible_system_message(
-    &mut self,
-    content: String,
-    metadata: Option<serde_json::Value>,
-    entry_index_provider: &EntryIndexProvider,
-) -> json_patch::Patch
-```
+## Step 3 — Rework `McpSettingsSection` ✅
 
-Behavior:
-- If `self.repeated_system_message` matches `content` **and**
-  `entry_index_provider.current() == entry_index + 1` (nothing else allocated since):
-  increment `count`, build a `NormalizedEntry` with content
-  `format!("{content} {}", "✓".repeat(count - 1))`, latest `metadata`, and return
-  `ConversationPatch::replace(entry_index, entry)`.
-- Otherwise: `let idx = entry_index_provider.next()`, store
-  `Some(RepeatedSystemMessage { entry_index: idx, content: content.clone(), count: 1 })`,
-  and return `ConversationPatch::add_normalized_entry(idx, entry)` with the plain content.
+**Edit:** `McpSettingsSection.tsx`
+- Object-based `servers` state + `originalSnapshot`; dirty = stringified inequality.
+- Server list cards with transport badge + summary + edit/remove; empty state; "Add server".
+- Popular servers grid inserts `preconfigured[key]`; check state when already added.
+- JSON escape hatch (`mode: 'form' | 'json'`) reusing `McpConfigStrategyGeneral`.
+- Save posts `{servers}` directly.
 
-## Step 3 — Use the helper in the catch-all branches
+## Step 4 — i18n ✅
 
-In `normalize_entries`, `ClaudeJson::System` match (~line 1400):
-- `Some(subtype)` arm: replace the inline entry construction with
-  `patches.push(self.push_collapsible_system_message(format!("System: {subtype}"), Some(raw_json), entry_index_provider))`.
-- `None` arm: same, with content `"System message"`.
-
-No other branch changes; interruption detection is entirely via the
-`current() == entry_index + 1` guard (the provider is shared by all patch producers,
-including stderr normalization).
-
-## Step 4 — Unit tests
-
-In the existing `#[cfg(test)]` module of `claude.rs`:
-
-1. `test_repeated_unknown_system_subtype_collapses_with_ticks` — feed four
-   `{"type":"system","subtype":"thinking_tokens"}` lines through the processor; assert:
-   one add patch at index i, then replace patches at index i; final content
-   `System: thinking_tokens ✓✓✓`.
-2. `test_repeated_system_subtype_interrupted_starts_new_entry` — thinking_tokens,
-   assistant text message, thinking_tokens → two separate entries, both without ticks.
-3. `test_different_system_subtypes_do_not_collapse` — `thinking_tokens` then
-   `some_other_subtype` → two separate add patches.
-
-Reuse the test-harness style already present (e.g. how `test_thinking_content` and the
-init-message tests drive `normalize_entries` / `process_logs`).
+**Edit:** `en/settings.json` — add `settings.mcp.list.*`, `settings.mcp.dialog.*`, `settings.mcp.validation.*`, `settings.mcp.json.*`, `labels.servers`, `labels.serverHelperForm`. Other locales fall back to English.
 
 ## Step 5 — Verify
 
-- `cargo test -p executors` (or the claude module filter) — new + existing tests pass.
-- `cargo clippy -p executors` clean.
-- `pnpm run format` (repo requirement before completing).
-- `pnpm run backend:check` if time allows (full workspace check).
+1. `vitest run` — codec tests green.
+2. `pnpm run check`, `pnpm run lint` (and unused-i18n-key check).
+3. Manual pass with `pnpm run dev` (optional): per-agent load, add/edit/remove, popular add, JSON toggle round-trip, save & inspect written config file.
+4. `pnpm run format`.
 
-## Step 6 — Pipeline follow-ups
+## Step 6 — Review & PR (pipeline stages 3–4)
 
-- Codex review of the diff; address confirmed findings (stage 4).
-- Seed `docs/knowledge-base/` with topic pages + index, tagged `4095-thinking-tokens`,
-  and commit it (stage 5).
-- Commit and open PR against `main` (stage 6).
-
-## Risks / notes
-
-- **Streaming replaces don't advance the provider**: an in-flight assistant delta that
-  replaces an *earlier* index won't break a tick run. Accepted (see spec) — the collapsed
-  entry is still the last visible line.
-- **Unbounded tick string**: a very long run produces a long single line; still strictly
-  better than N lines. No cap for now.
-- Existing single-occurrence behavior stays byte-identical, so no existing test should
-  need modification (only additions).
+1. Codex review of the diff; address confirmed findings, re-run checks.
+2. Commit, push branch `vk/616b-first-class-mcp`, open PR against the base branch.

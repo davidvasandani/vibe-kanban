@@ -367,7 +367,51 @@
         "serverConfig": "Configuration du serveur (JSON)",
         "popularServers": "Serveurs populaires",
         "serverHelper": "Cliquez sur une carte pour insérer ce serveur MCP dans le JSON ci-dessus.",
-        "saveLocation": "Les modifications seront enregistrées dans :"
+        "saveLocation": "Les modifications seront enregistrées dans :",
+        "servers": "Serveurs",
+        "serverHelperForm": "Cliquez sur une carte pour ajouter ce serveur MCP à la liste."
+      },
+      "list": {
+        "empty": "Aucun serveur MCP configuré pour l'instant. Ajoutez-en un ci-dessous.",
+        "addServer": "Ajouter un serveur",
+        "customBadge": "personnalisé"
+      },
+      "dialog": {
+        "addTitle": "Ajouter un serveur MCP",
+        "editTitle": "Modifier le serveur MCP",
+        "description": "Configurez la façon dont ce serveur MCP est lancé.",
+        "name": "Nom",
+        "namePlaceholder": "p. ex. mon_serveur",
+        "transport": "Transport",
+        "command": "Commande",
+        "args": "Arguments",
+        "argsHelper": "Un argument par ligne.",
+        "env": "Variables d'environnement",
+        "addEnv": "Ajouter une variable",
+        "url": "URL",
+        "headers": "En-têtes",
+        "addHeader": "Ajouter un en-tête",
+        "customJson": "JSON du serveur",
+        "customJsonHelper": "Ce serveur utilise un format que le formulaire ne peut pas afficher ; modifiez son JSON directement.",
+        "cancel": "Annuler",
+        "add": "Ajouter un serveur",
+        "saveEdit": "Enregistrer les modifications"
+      },
+      "validation": {
+        "nameRequired": "Le nom est requis.",
+        "nameWhitespace": "Le nom ne peut pas commencer ni se terminer par un espace.",
+        "nameTaken": "Un serveur portant ce nom existe déjà.",
+        "commandRequired": "La commande est requise.",
+        "urlRequired": "L'URL est requise.",
+        "urlInvalid": "Saisissez une URL valide.",
+        "urlScheme": "L'URL doit commencer par http:// ou https://.",
+        "duplicateKey": "Les clés en double ne sont pas autorisées.",
+        "invalidJson": "Format JSON invalide.",
+        "customNotObject": "Le JSON du serveur doit être un objet."
+      },
+      "json": {
+        "editAsJson": "Modifier en JSON",
+        "editAsForm": "Modifier via le formulaire"
       },
       "loadingStates": {
         "jsonEditor": "Chargement...",
