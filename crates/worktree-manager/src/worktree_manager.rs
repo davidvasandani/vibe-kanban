@@ -7,7 +7,7 @@ use std::{
 
 static WORKSPACE_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
-use git::{GitService, GitServiceError};
+use git::{GitCli, GitService, GitServiceError};
 use thiserror::Error;
 use tracing::{debug, info, trace};
 use utils::{path::normalize_macos_private_alias, shell::resolve_executable_path};
@@ -146,6 +146,21 @@ impl WorktreeManager {
             return Ok(());
         }
 
+        // Repair couldn't reconnect the worktree, so it must be recreated. Before
+        // the destructive cleanup, move any directory that still holds data worth
+        // keeping (uncommitted/untracked changes or an installed `node_modules`)
+        // aside to a sibling `<name>.recovered-<epoch>` rather than deleting it,
+        // so a forced recreation never silently destroys user work.
+        if let Some(recovered) =
+            Self::preserve_worktree_dir_if_valuable(&worktree_path_owned).await?
+        {
+            info!(
+                "Preserved existing worktree data at {} before recreating {}",
+                recovered.display(),
+                path_str
+            );
+        }
+
         // Step 1: Comprehensive cleanup of existing worktree and metadata (non-blocking)
         Self::comprehensive_worktree_cleanup_async(repo_path, &worktree_path_owned).await?;
 
@@ -261,6 +276,65 @@ impl WorktreeManager {
         .map_err(|e| WorktreeError::TaskJoin(format!("{e}")))?;
 
         Ok(branch_matches)
+    }
+
+    /// If the worktree directory holds data worth keeping — git-visible
+    /// uncommitted/untracked changes, or an installed `node_modules` whose
+    /// reinstall is costly — move it aside to a sibling `<name>.recovered-<epoch>`
+    /// directory instead of letting the forced recreation delete it. Returns the
+    /// recovery path when a move happened, `None` when there was nothing worth
+    /// preserving (so the caller proceeds with normal cleanup).
+    async fn preserve_worktree_dir_if_valuable(
+        worktree_path: &Path,
+    ) -> Result<Option<PathBuf>, WorktreeError> {
+        let worktree_path_owned = worktree_path.to_path_buf();
+        tokio::task::spawn_blocking(move || -> Result<Option<PathBuf>, WorktreeError> {
+            if !worktree_path_owned.exists()
+                || !Self::worktree_has_recoverable_data(&worktree_path_owned)
+            {
+                return Ok(None);
+            }
+
+            let epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let file_name = worktree_path_owned
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "worktree".to_string());
+
+            // Never clobber an existing recovery dir (e.g. two recreations in the
+            // same second, or a prior preserved copy).
+            let mut recovered =
+                worktree_path_owned.with_file_name(format!("{file_name}.recovered-{epoch}"));
+            let mut suffix = 1;
+            while recovered.exists() {
+                recovered = worktree_path_owned
+                    .with_file_name(format!("{file_name}.recovered-{epoch}-{suffix}"));
+                suffix += 1;
+            }
+
+            fs::rename(&worktree_path_owned, &recovered).map_err(WorktreeError::Io)?;
+            tracing::warn!(
+                "Preserved worktree data before recreation: moved {} -> {}",
+                worktree_path_owned.display(),
+                recovered.display()
+            );
+            Ok(Some(recovered))
+        })
+        .await
+        .map_err(|e| WorktreeError::TaskJoin(format!("{e}")))?
+    }
+
+    /// Whether a worktree directory contains data a delete would irrecoverably or
+    /// expensively destroy: git-visible uncommitted/untracked changes, or a
+    /// populated `node_modules`.
+    fn worktree_has_recoverable_data(worktree_path: &Path) -> bool {
+        if GitCli::new().has_changes(worktree_path).unwrap_or(false) {
+            return true;
+        }
+        worktree_path.join("node_modules").exists()
     }
 
     fn find_worktree_git_internal_name(
@@ -791,5 +865,73 @@ async fn ensure_worktree_recreates_when_branch_mismatches() {
         git_service.get_current_branch(&wt_path).unwrap(),
         "wanted",
         "worktree should be recreated onto the expected branch"
+    );
+}
+
+/// When a forced recreation cannot preserve the worktree in place (repair fails
+/// or the branch mismatches), a directory holding recoverable data (uncommitted
+/// changes or `node_modules`) must be moved aside, not deleted.
+#[tokio::test]
+async fn forced_recreation_moves_recoverable_data_aside() {
+    use std::fs;
+
+    use tempfile::TempDir;
+    let td = TempDir::new().unwrap();
+
+    let repo_path = td.path().join("repo");
+    let git_service = GitService::new();
+    git_service
+        .initialize_repo_with_main_branch(&repo_path)
+        .unwrap();
+    git_service
+        .create_branch(&repo_path, "wanted", "main")
+        .unwrap();
+
+    let wt_path = td.path().join("wt");
+    WorktreeManager::create_worktree(&repo_path, "other", &wt_path, "main", true)
+        .await
+        .unwrap();
+
+    // An installed node_modules plus an untracked file — data a delete would
+    // destroy.
+    let node_modules = wt_path.join("node_modules");
+    fs::create_dir_all(&node_modules).unwrap();
+    fs::write(node_modules.join("marker.txt"), b"installed").unwrap();
+
+    // Break the admin linkage so recreation is forced; the branch mismatch
+    // ("other" vs "wanted") stops the in-place repair from keeping it.
+    let admin_dir = git_service
+        .get_common_dir(&repo_path)
+        .unwrap()
+        .join("worktrees");
+    let admin_dir = fs::read_dir(&admin_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .expect("worktree admin dir should exist");
+    fs::write(admin_dir.join("gitdir"), b"/nonexistent/broken/.git\n").unwrap();
+
+    WorktreeManager::ensure_worktree_exists(&repo_path, "wanted", &wt_path)
+        .await
+        .unwrap();
+
+    // Fresh worktree exists on the expected branch.
+    assert_eq!(git_service.get_current_branch(&wt_path).unwrap(), "wanted");
+
+    // The old data was moved aside to a sibling `.recovered-*` dir, not deleted.
+    let recovered = fs::read_dir(td.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().starts_with("wt.recovered-"))
+                .unwrap_or(false)
+        })
+        .expect("a wt.recovered-* directory should exist");
+    assert!(
+        recovered.join("node_modules").join("marker.txt").exists(),
+        "recovered directory should contain the preserved node_modules"
     );
 }
