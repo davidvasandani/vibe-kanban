@@ -345,7 +345,9 @@ type State = {
 
   // Kanban view mode state
   kanbanViewMode: KanbanViewMode;
-  listViewStatusFilter: string | null;
+  // Selected hidden-status tab, stored by name (not id) since status ids are
+  // per-project and this preference is meant to be global
+  listViewStatusFilterName: string | null;
 
   // Mobile tab state
   mobileActiveTab: MobileTab;
@@ -433,7 +435,7 @@ type State = {
 
   // Kanban view mode actions
   setKanbanViewMode: (mode: KanbanViewMode) => void;
-  setListViewStatusFilter: (statusId: string | null) => void;
+  setListViewStatusFilterName: (name: string | null) => void;
 
   // Mobile tab actions
   setMobileActiveTab: (tab: MobileTab) => void;
@@ -477,7 +479,7 @@ export const useUiPreferencesStore = create<State>()((set, get) => ({
 
   // Kanban view mode state
   kanbanViewMode: 'kanban' as KanbanViewMode,
-  listViewStatusFilter: null,
+  listViewStatusFilterName: null,
 
   // Mobile tab state
   mobileActiveTab: 'chat' as MobileTab,
@@ -819,8 +821,8 @@ export const useUiPreferencesStore = create<State>()((set, get) => ({
   // Kanban view mode actions
   setKanbanViewMode: (mode) => set({ kanbanViewMode: mode }),
 
-  setListViewStatusFilter: (statusId) =>
-    set({ listViewStatusFilter: statusId }),
+  setListViewStatusFilterName: (name) =>
+    set({ listViewStatusFilterName: name }),
 
   // Mobile tab actions
   setMobileActiveTab: (tab) => set({ mobileActiveTab: tab }),
