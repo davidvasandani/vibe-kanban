@@ -606,14 +606,26 @@ export function AppBar({
             </button>
           </Tooltip>
         ) : (
-          appVersion && (
+          appVersion &&
+          (appVersion === 'dev' ? (
             <p
               className="text-[9px] font-ibm-plex-mono text-low leading-none truncate max-w-10 text-center"
               title={appVersion}
             >
               {appVersion}
             </p>
-          )
+          ) : (
+            <Tooltip content={`View commit ${appVersion}`} side="right">
+              <a
+                href={`https://github.com/BloopAI/vibe-kanban/commit/${appVersion}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[9px] font-ibm-plex-mono text-low hover:text-normal leading-none truncate max-w-10 text-center transition-colors cursor-pointer"
+              >
+                {appVersion}
+              </a>
+            </Tooltip>
+          ))
         )}
       </div>
     </div>
