@@ -70,6 +70,14 @@ reporting success while the map was broken):
    iac level via `keys_unsorted[] | select(IN(<allow-list>)|not)`. Required-key
    typos usually surface as type failures, but optional ones don't.
 4. **Enforce documented cardinality** (e.g. "at most one repo `primary: true`").
+5. **A swallowed `jq` exit code passes CI.** `x="$(jq … "$f")"` makes the
+   *assignment* the command, so jq's non-zero exit (e.g. "cannot index string
+   with …" when a node is the wrong type) is masked — `set -e`/`pipefail` don't
+   help, and the mis-typed JSON passes. Gate with one up-front `jq -e` shape
+   assertion whose exit code you actually check, using short-circuiting `and`
+   (`(type=="object") and (.field|…)`) so it never triggers the index error it's
+   guarding against. `all(cond)` over an empty array is `true`, so empty
+   `services: []` / `iac: []` pass the gate correctly.
 
 Verify by actually breaking entries: for each guard, mutate the file with `jq`,
 run the check, confirm non-zero exit + a clear message, then restore.
