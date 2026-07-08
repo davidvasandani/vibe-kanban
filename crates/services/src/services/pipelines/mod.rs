@@ -42,6 +42,10 @@ const BUNDLED: &[(&str, &str)] = &[
         "speckit.toml",
         include_str!("../../../../../assets/pipelines/speckit.toml"),
     ),
+    (
+        "parallel-subagents.toml",
+        include_str!("../../../../../assets/pipelines/parallel-subagents.toml"),
+    ),
 ];
 
 /// A single per-task pipeline stage. Stages are defined in pipeline files
@@ -580,7 +584,10 @@ mod tests {
         let d = TmpDir::new();
         let pipelines = load_pipelines(d.path());
         let ids: Vec<_> = pipelines.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["basic", "wikillm", "speckit"]);
+        assert_eq!(
+            ids,
+            vec!["basic", "wikillm", "speckit", "parallel-subagents"]
+        );
     }
 
     #[test]
@@ -683,6 +690,31 @@ mod tests {
         let broken = statuses.iter().find(|s| s.id == "broken").unwrap();
         assert!(!broken.valid);
         assert!(broken.error.is_some());
+    }
+
+    #[test]
+    fn bundled_parallel_subagents_is_valid() {
+        let d = TmpDir::new();
+        let pipelines = load_pipelines(d.path());
+        let p = pipelines
+            .iter()
+            .find(|p| p.id == "parallel-subagents")
+            .expect("parallel-subagents pipeline seeded");
+        let ids: Vec<_> = p.stages.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["fanout", "analyze", "iterate", "code-review"]);
+
+        let fanout = p.stages.iter().find(|s| s.id == "fanout").unwrap();
+        assert!(fanout.default_enabled);
+        assert!(fanout.heavy);
+        let prompt = fanout.prompt_fragment.to_lowercase();
+        assert!(prompt.contains("parallel"));
+        assert!(prompt.contains("claude"));
+        assert!(prompt.contains("codex"));
+        assert!(prompt.contains("grok"));
+
+        // The loop stage caps iterations at N so it cannot run unbounded.
+        let iterate = p.stages.iter().find(|s| s.id == "iterate").unwrap();
+        assert!(iterate.prompt_fragment.contains('N'));
     }
 
     #[test]
