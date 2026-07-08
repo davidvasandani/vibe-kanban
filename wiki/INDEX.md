@@ -36,3 +36,9 @@ contributed to it.
   deploy contract (`VK_RELEASES_DIR`), why services must not run from the
   source checkout, deploy-loop invariants (reconciler over edge triggers,
   health-gated rollback, paging), health endpoints, rejected alternatives.
+- [project-context-map.md](project-context-map.md) — Giving a spawned issue its
+  scope in a monorepo: a machine-readable `project-context.json` mapping service
+  → source path → governing IaC (JSON+jq not YAML, empty-list = no IaC, single
+  source of truth via a docs pointer), and the CI path-existence check plus the
+  false-pass gotchas reviewers exploit (empty-path skip, pipe-subshell exit
+  code, additionalProperties parity at every level).
