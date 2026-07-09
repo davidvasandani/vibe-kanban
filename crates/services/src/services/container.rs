@@ -355,6 +355,12 @@ pub trait ContainerService {
                 );
                 continue;
             }
+            // Snapshot any uncommitted work left behind by the unclean exit so
+            // it survives the restart, mirroring the clean-shutdown path. Must
+            // run before capturing after_head_commit below so the recorded
+            // after-state reflects the snapshot commit rather than the
+            // pre-change base.
+            self.commit_interrupted_wip(&process).await;
             // Capture after-head commit OID per repository
             if let Ok(ctx) = ExecutionProcess::load_context(&self.db().pool, process.id).await
                 && let Some(ref container_ref) = ctx.workspace.container_ref
@@ -982,6 +988,12 @@ pub trait ContainerService {
     ) -> Result<(), ContainerError>;
 
     async fn try_commit_changes(&self, ctx: &ExecutionContext) -> Result<bool, ContainerError>;
+
+    /// Snapshot uncommitted worktree changes left behind by an interrupted run
+    /// into a commit on the workspace branch, so they survive a restart. This
+    /// mirrors the auto-commit that happens after a successful run and is a
+    /// no-op for run reasons that don't produce worktree changes.
+    async fn commit_interrupted_wip(&self, process: &ExecutionProcess);
 
     async fn copy_project_files(
         &self,

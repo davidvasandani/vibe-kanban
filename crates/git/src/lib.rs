@@ -913,14 +913,26 @@ impl GitService {
                     if log_skip_when_dirty {
                         tracing::warn!("Worktree dirty; skipping reset as not forced");
                     }
-                } else if let Err(e) = self.reset_worktree_to_commit(
-                    worktree_path,
-                    target_commit_oid,
-                    force_when_dirty,
-                ) {
-                    tracing::error!("Failed to reset worktree: {}", e);
                 } else {
-                    outcome.applied = true;
+                    if is_dirty {
+                        // force_when_dirty is set: reset --hard + clean -fd will
+                        // discard uncommitted work. Surface it so the loss is not
+                        // silent (full UI surfacing tracked in VAS-104).
+                        tracing::warn!(
+                            "Force-resetting dirty worktree {} to {}; uncommitted changes will be discarded",
+                            worktree_path.display(),
+                            target_commit_oid
+                        );
+                    }
+                    if let Err(e) = self.reset_worktree_to_commit(
+                        worktree_path,
+                        target_commit_oid,
+                        force_when_dirty,
+                    ) {
+                        tracing::error!("Failed to reset worktree: {}", e);
+                    } else {
+                        outcome.applied = true;
+                    }
                 }
             }
         }
