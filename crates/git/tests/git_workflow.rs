@@ -429,3 +429,66 @@ fn squash_merge_libgit2_sets_author_without_user() {
         assert_eq!(email.as_deref(), Some("noreply@vibekanban.com"));
     }
 }
+
+#[test]
+fn reconcile_skips_reset_when_dirty_and_not_forced() {
+    let td = TempDir::new().unwrap();
+    let repo_path = init_repo_main(&td);
+    let s = GitService::new();
+
+    write_file(&repo_path, "a.txt", "a\n");
+    let _ = s.commit(&repo_path, "seed").unwrap();
+    let base_oid = s.get_head_info(&repo_path).unwrap().oid;
+
+    write_file(&repo_path, "a.txt", "b\n");
+    let _ = s.commit(&repo_path, "second").unwrap();
+    let head_oid = s.get_head_info(&repo_path).unwrap().oid;
+
+    // Uncommitted change on top of HEAD.
+    write_file(&repo_path, "a.txt", "c\n");
+    assert!(!s.is_worktree_clean(&repo_path).unwrap());
+
+    // Not forced: reset is needed but must be skipped to protect dirty work.
+    let outcome = s.reconcile_worktree_to_commit(
+        &repo_path,
+        &base_oid,
+        git::WorktreeResetOptions::new(true, false, true, true),
+    );
+    assert!(outcome.needed);
+    assert!(!outcome.applied);
+    // HEAD unchanged and the uncommitted change is preserved.
+    assert_eq!(s.get_head_info(&repo_path).unwrap().oid, head_oid);
+    assert_eq!(fs::read_to_string(repo_path.join("a.txt")).unwrap(), "c\n");
+}
+
+#[test]
+fn reconcile_force_discards_dirty_and_resets_to_target() {
+    let td = TempDir::new().unwrap();
+    let repo_path = init_repo_main(&td);
+    let s = GitService::new();
+
+    write_file(&repo_path, "a.txt", "a\n");
+    let _ = s.commit(&repo_path, "seed").unwrap();
+    let base_oid = s.get_head_info(&repo_path).unwrap().oid;
+
+    write_file(&repo_path, "a.txt", "b\n");
+    let _ = s.commit(&repo_path, "second").unwrap();
+
+    // Uncommitted change plus an untracked file.
+    write_file(&repo_path, "a.txt", "c\n");
+    write_file(&repo_path, "untracked.txt", "x\n");
+    assert!(!s.is_worktree_clean(&repo_path).unwrap());
+
+    // Forced: rewinds to base, discarding both the tracked edit and untracked file.
+    let outcome = s.reconcile_worktree_to_commit(
+        &repo_path,
+        &base_oid,
+        git::WorktreeResetOptions::new(true, true, true, true),
+    );
+    assert!(outcome.needed);
+    assert!(outcome.applied);
+    assert_eq!(s.get_head_info(&repo_path).unwrap().oid, base_oid);
+    assert_eq!(fs::read_to_string(repo_path.join("a.txt")).unwrap(), "a\n");
+    assert!(!repo_path.join("untracked.txt").exists());
+    assert!(s.is_worktree_clean(&repo_path).unwrap());
+}
