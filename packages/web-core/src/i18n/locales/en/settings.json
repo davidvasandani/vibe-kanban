@@ -442,6 +442,11 @@
         "successMessage": "✓ MCP configuration saved successfully!",
         "loading": "Loading current MCP server configuration...",
         "unsavedChanges": "• You have unsaved changes"
+      },
+      "test": {
+        "button": "Test connection",
+        "dirtyHint": "Save your changes before testing.",
+        "failed": "Failed to test MCP servers"
       }
     },
     "projects": {

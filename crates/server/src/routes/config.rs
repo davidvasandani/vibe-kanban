@@ -7,7 +7,7 @@ use axum::{
     extract::{Path, Query, State, ws::Message},
     http,
     response::{IntoResponse, Json as ResponseJson, Response},
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use deployment::{Deployment, DeploymentError};
 use executors::{
@@ -15,6 +15,7 @@ use executors::{
         AvailabilityInfo, BaseAgentCapability, BaseCodingAgent, StandardCodingAgentExecutor,
     },
     mcp_config::{McpConfig, read_agent_config, write_agent_config},
+    mcp_test::{McpServerTestResult, test_mcp_servers},
     profile::{ExecutorConfigs, ExecutorProfileId},
 };
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,7 @@ pub fn router() -> Router<DeploymentImpl> {
         .route("/config", put(update_config))
         .route("/sounds/{sound}", get(get_sound))
         .route("/mcp-config", get(get_mcp_servers).post(update_mcp_servers))
+        .route("/mcp-config/test", post(test_mcp_servers_route))
         .route("/profiles", get(get_profiles).put(update_profiles))
         .route(
             "/editors/check-availability",
@@ -297,6 +299,17 @@ pub struct UpdateMcpServersBody {
     servers: HashMap<String, Value>,
 }
 
+#[derive(TS, Debug, Default, Deserialize)]
+pub struct TestMcpServersBody {
+    /// When present and non-empty, only these servers are tested; otherwise all
+    /// of the agent's configured servers are tested.
+    #[serde(default)]
+    servers: Option<Vec<String>>,
+}
+
+/// Per-server connectivity timeout for the MCP test endpoint.
+const MCP_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 async fn get_mcp_servers(
     State(_deployment): State<DeploymentImpl>,
     Query(query): Query<McpServerQuery>,
@@ -369,6 +382,68 @@ async fn update_mcp_servers(
             e
         )))),
     }
+}
+
+/// Probe the MCP servers configured on disk for the given agent and report,
+/// per server, whether Vibe Kanban can connect and list tools. Read-only: never
+/// modifies the config file.
+///
+/// Note on stdio probes: testing an stdio server spawns its configured command
+/// (the exact command the agent itself would run). This route lives in the
+/// `relay_signed_routes` group — the same auth boundary as the `/mcp-config`
+/// write endpoint and the agent-execution endpoints — so any caller able to
+/// reach it can already both write that command and start an agent that runs it.
+/// Commands are read only from the on-disk config (never from the request body),
+/// so this does not widen the existing trust boundary. Each probe is bounded by
+/// `MCP_TEST_TIMEOUT`.
+async fn test_mcp_servers_route(
+    State(_deployment): State<DeploymentImpl>,
+    Query(query): Query<McpServerQuery>,
+    body: axum::body::Bytes,
+) -> Result<ResponseJson<ApiResponse<Vec<McpServerTestResult>>>, ApiError> {
+    // The body is optional: an empty body means "test all of the agent's
+    // servers". Use `Bytes` rather than `Json<…>` so a body-less request isn't
+    // rejected by the extractor before we can apply that default.
+    let body: TestMcpServersBody = if body.is_empty() {
+        TestMcpServersBody::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ConfigError::ValidationError(format!("invalid request body: {e}")))?
+    };
+    let coding_agent = ExecutorConfigs::get_cached()
+        .get_coding_agent(&ExecutorProfileId::new(query.executor))
+        .ok_or(ConfigError::ValidationError(
+            "Executor not found".to_string(),
+        ))?;
+
+    if !coding_agent.supports_mcp() {
+        return Ok(ResponseJson(ApiResponse::error(
+            "MCP not supported by this executor",
+        )));
+    }
+
+    let config_path = match coding_agent.default_mcp_config_path() {
+        Some(path) => path,
+        None => {
+            return Ok(ResponseJson(ApiResponse::error(
+                "Could not determine config file path",
+            )));
+        }
+    };
+
+    let mcpc = coding_agent.get_mcp_config();
+    let raw_config = read_agent_config(&config_path, &mcpc).await?;
+    let mut servers = get_mcp_servers_from_config_path(&raw_config, &mcpc.servers_path);
+
+    // Optionally restrict to a named subset of servers.
+    if let Some(names) = &body.servers
+        && !names.is_empty()
+    {
+        servers.retain(|name, _| names.contains(name));
+    }
+
+    let results = test_mcp_servers(servers, MCP_TEST_TIMEOUT).await;
+    Ok(ResponseJson(ApiResponse::success(results)))
 }
 
 async fn update_mcp_servers_in_config(

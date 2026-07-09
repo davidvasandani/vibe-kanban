@@ -434,6 +434,11 @@
         "successMessage": "✓ Configuration MCP enregistrée avec succès !",
         "loading": "Chargement de la configuration actuelle des serveurs MCP...",
         "unsavedChanges": "• Vous avez des modifications non enregistrées"
+      },
+      "test": {
+        "button": "Tester la connexion",
+        "dirtyHint": "Enregistrez vos modifications avant de tester.",
+        "failed": "Échec du test des serveurs MCP"
       }
     },
     "projects": {
