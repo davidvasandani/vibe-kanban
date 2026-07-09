@@ -1,11 +1,5 @@
-import { CaretDownIcon, CheckIcon, BuildingsIcon } from '@phosphor-icons/react';
+import { CaretDownIcon, CaretUpIcon } from '@phosphor-icons/react';
 import { cn } from '../lib/cn';
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-} from './Dropdown';
 import { Tooltip } from './Tooltip';
 
 export interface AppBarOrgTileOrganization {
@@ -17,6 +11,13 @@ interface AppBarOrgTileProps {
   organizations: AppBarOrgTileOrganization[];
   selectedOrgId: string | null;
   onSelect: (id: string) => void;
+  /**
+   * Whether the org section is expanded to show every organization as a tile.
+   * When omitted the section stays collapsed (single active tile + toggle).
+   */
+  expanded?: boolean;
+  /** Toggles the expanded/collapsed state (owned by the caller). */
+  onToggleExpanded?: () => void;
 }
 
 function getOrgInitials(name: string): string {
@@ -29,20 +30,115 @@ function getOrgInitials(name: string): string {
   return trimmed.slice(0, 2).toUpperCase();
 }
 
-const tileBaseClassName =
-  'group relative flex items-center justify-center w-10 h-10 rounded-lg text-sm font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand bg-brand/15 text-brand';
+/**
+ * Derive a stable HSL-triple string (e.g. `"210 65% 55%"`) from an org id.
+ * Organizations have no stored color (unlike projects), so we hash the id to a
+ * hue while keeping saturation/lightness fixed and tuned for the dark rail.
+ * Returned in the same format that project tiles feed into `hsl(...)`.
+ */
+function getOrgColor(id: string): string {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash * 31 + id.charCodeAt(i)) | 0;
+  }
+  const hue = Math.abs(hash) % 360;
+  return `${hue} 65% 55%`;
+}
+
+// Matches the project-tile recipe in AppBar.tsx so org tiles read identically.
+const orgTileBaseClassName =
+  'flex items-center justify-center w-10 h-10 rounded-lg text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand';
+
+function OrgTileButton({
+  org,
+  isActive,
+  onClick,
+}: {
+  org: AppBarOrgTileOrganization;
+  isActive: boolean;
+  onClick: () => void;
+}) {
+  const color = getOrgColor(org.id);
+  return (
+    <Tooltip content={org.name} side="right">
+      <button
+        type="button"
+        onClick={onClick}
+        className={cn(
+          orgTileBaseClassName,
+          'cursor-pointer',
+          isActive ? '' : 'bg-primary text-normal hover:opacity-80'
+        )}
+        style={
+          isActive
+            ? {
+                color: `hsl(${color})`,
+                backgroundColor: `hsl(${color} / 0.2)`,
+              }
+            : undefined
+        }
+        aria-label={org.name}
+        aria-current={isActive ? 'true' : undefined}
+      >
+        {getOrgInitials(org.name)}
+      </button>
+    </Tooltip>
+  );
+}
+
+function OrgSectionLabel() {
+  return (
+    <p className="w-10 text-center text-[9px] font-medium leading-none tracking-wide text-low">
+      Orgs
+    </p>
+  );
+}
+
+function ExpandToggle({
+  expanded,
+  onClick,
+}: {
+  expanded: boolean;
+  onClick: () => void;
+}) {
+  const Icon = expanded ? CaretUpIcon : CaretDownIcon;
+  return (
+    <Tooltip
+      content={expanded ? 'Hide organizations' : 'Show organizations'}
+      side="right"
+    >
+      <button
+        type="button"
+        onClick={onClick}
+        className={cn(
+          'flex items-center justify-center w-10 h-5 rounded-md',
+          'text-low hover:text-normal hover:bg-tertiary transition-colors cursor-pointer',
+          'focus:outline-none focus-visible:ring-2 focus-visible:ring-brand'
+        )}
+        aria-label={expanded ? 'Hide organizations' : 'Show organizations'}
+        aria-expanded={expanded}
+      >
+        <Icon className="h-3.5 w-3.5" weight="bold" />
+      </button>
+    </Tooltip>
+  );
+}
 
 /**
- * Organization tile rendered at the top of the AppBar rail.
+ * Organization section at the top of the AppBar rail.
  *
- * With multiple organizations it acts as a dropdown switcher; with a single
- * organization it renders a static tile. Returns null when there is no
- * organization to display.
+ * - No organizations: renders nothing.
+ * - One organization: a single static tile.
+ * - Multiple organizations: collapsed shows the active org tile plus an expand
+ *   toggle; expanded shows every organization as a project-styled tile for
+ *   one-click switching (no dropdown), with a collapse toggle.
  */
 export function AppBarOrgTile({
   organizations,
   selectedOrgId,
   onSelect,
+  expanded = false,
+  onToggleExpanded,
 }: AppBarOrgTileProps) {
   const selectedOrg =
     organizations.find((org) => org.id === selectedOrgId) ?? organizations[0];
@@ -51,50 +147,34 @@ export function AppBarOrgTile({
     return null;
   }
 
-  const initials = getOrgInitials(selectedOrg.name);
-
+  // Single org: nothing to switch between — a static tile.
   if (organizations.length <= 1) {
+    return <OrgTileButton org={selectedOrg} isActive onClick={() => {}} />;
+  }
+
+  const toggle = () => onToggleExpanded?.();
+
+  if (expanded) {
     return (
-      <Tooltip content={selectedOrg.name} side="right">
-        <div className={tileBaseClassName} aria-label={selectedOrg.name}>
-          {initials}
-        </div>
-      </Tooltip>
+      <div className="flex flex-col items-center gap-base">
+        <OrgSectionLabel />
+        {organizations.map((org) => (
+          <OrgTileButton
+            key={org.id}
+            org={org}
+            isActive={org.id === selectedOrg.id}
+            onClick={() => onSelect(org.id)}
+          />
+        ))}
+        <ExpandToggle expanded onClick={toggle} />
+      </div>
     );
   }
 
   return (
-    <DropdownMenu>
-      <Tooltip content={selectedOrg.name} side="right">
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            className={cn(
-              tileBaseClassName,
-              'cursor-pointer hover:bg-brand/25'
-            )}
-            aria-label="Switch organization"
-          >
-            {initials}
-            <CaretDownIcon
-              className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-secondary p-px text-low opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
-              weight="bold"
-            />
-          </button>
-        </DropdownMenuTrigger>
-      </Tooltip>
-      <DropdownMenuContent side="right" align="start" className="min-w-[200px]">
-        {organizations.map((org) => (
-          <DropdownMenuItem
-            key={org.id}
-            icon={org.id === selectedOrg.id ? CheckIcon : BuildingsIcon}
-            onClick={() => onSelect(org.id)}
-            className={cn(org.id === selectedOrg.id && 'bg-brand/10')}
-          >
-            {org.name}
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <div className="flex flex-col items-center gap-1">
+      <OrgTileButton org={selectedOrg} isActive onClick={toggle} />
+      <ExpandToggle expanded={false} onClick={toggle} />
+    </div>
   );
 }
