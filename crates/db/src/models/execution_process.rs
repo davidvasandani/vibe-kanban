@@ -59,6 +59,19 @@ pub enum ExecutionProcessRunReason {
     ArchiveScript,
     CodingAgent,
     DevServer,
+    /// Agent-requested long-lived helper (watcher, tunnel, log follower).
+    /// Spawned by the server in its own process group so it survives the
+    /// turn-end process-group reap while staying tracked and stoppable.
+    BackgroundHelper,
+}
+
+impl ExecutionProcessRunReason {
+    /// Whether the process outlives the turn/attempt that started it: it is
+    /// detached across server restarts (raw-log output, boot re-adoption by
+    /// pgid) and never finalizes the execution context.
+    pub fn is_persistent(&self) -> bool {
+        matches!(self, Self::DevServer | Self::BackgroundHelper)
+    }
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize, TS)]
@@ -299,8 +312,9 @@ impl ExecutionProcess {
         Ok(count > 0)
     }
 
-    /// Check if there are running processes (excluding dev servers) for a workspace (across all sessions)
-    pub async fn has_running_non_dev_server_processes_for_workspace(
+    /// Check if there are running processes (excluding persistent ones: dev
+    /// servers and background helpers) for a workspace (across all sessions)
+    pub async fn has_running_non_persistent_processes_for_workspace(
         pool: &SqlitePool,
         workspace_id: Uuid,
     ) -> Result<bool, sqlx::Error> {
@@ -310,7 +324,7 @@ impl ExecutionProcess {
                JOIN sessions s ON ep.session_id = s.id
                WHERE s.workspace_id = $1
                  AND ep.status = 'running'
-                 AND ep.run_reason != 'devserver'"#,
+                 AND ep.run_reason NOT IN ('devserver', 'backgroundhelper')"#,
             workspace_id
         )
         .fetch_one(pool)
@@ -318,10 +332,12 @@ impl ExecutionProcess {
         Ok(count > 0)
     }
 
-    /// Find running dev servers for a specific workspace (across all sessions)
-    pub async fn find_running_dev_servers_by_workspace(
+    /// Find running processes with the given run reason for a specific
+    /// workspace (across all sessions)
+    pub async fn find_running_by_workspace_and_run_reason(
         pool: &SqlitePool,
         workspace_id: Uuid,
+        run_reason: &ExecutionProcessRunReason,
     ) -> Result<Vec<Self>, sqlx::Error> {
         sqlx::query_as!(
             ExecutionProcess,
@@ -343,12 +359,26 @@ impl ExecutionProcess {
         JOIN sessions s ON ep.session_id = s.id
         WHERE s.workspace_id = ?
           AND ep.status = 'running'
-          AND ep.run_reason = 'devserver'
+          AND ep.run_reason = ?
         ORDER BY ep.created_at DESC
         "#,
-            workspace_id
+            workspace_id,
+            run_reason
         )
         .fetch_all(pool)
+        .await
+    }
+
+    /// Find running dev servers for a specific workspace (across all sessions)
+    pub async fn find_running_dev_servers_by_workspace(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        Self::find_running_by_workspace_and_run_reason(
+            pool,
+            workspace_id,
+            &ExecutionProcessRunReason::DevServer,
+        )
         .await
     }
 

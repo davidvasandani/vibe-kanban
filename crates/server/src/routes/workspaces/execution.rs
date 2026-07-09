@@ -166,7 +166,7 @@ pub async fn run_cleanup_script(
 ) -> Result<ResponseJson<ApiResponse<ExecutionProcess, RunScriptError>>, ApiError> {
     let pool = &deployment.db().pool;
 
-    if ExecutionProcess::has_running_non_dev_server_processes_for_workspace(pool, workspace.id)
+    if ExecutionProcess::has_running_non_persistent_processes_for_workspace(pool, workspace.id)
         .await?
     {
         return Ok(ResponseJson(ApiResponse::error_with_data(
@@ -232,7 +232,7 @@ pub async fn run_archive_script(
     State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<ExecutionProcess, RunScriptError>>, ApiError> {
     let pool = &deployment.db().pool;
-    if ExecutionProcess::has_running_non_dev_server_processes_for_workspace(pool, workspace.id)
+    if ExecutionProcess::has_running_non_persistent_processes_for_workspace(pool, workspace.id)
         .await?
     {
         return Ok(ResponseJson(ApiResponse::error_with_data(

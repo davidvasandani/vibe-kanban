@@ -53,7 +53,7 @@ pub async fn start_review(
             "Workspace not found".to_string(),
         )))?;
 
-    if ExecutionProcess::has_running_non_dev_server_processes_for_workspace(pool, workspace.id)
+    if ExecutionProcess::has_running_non_persistent_processes_for_workspace(pool, workspace.id)
         .await?
     {
         return Ok(ResponseJson(ApiResponse::error_with_data(

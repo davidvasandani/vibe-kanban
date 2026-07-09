@@ -282,7 +282,8 @@ impl LocalContainerService {
         }
         self.take_adopted_pgid(&process.id).await;
         tracing::info!(
-            "Leaving dev server process {} running across restart",
+            "Leaving {:?} process {} running across restart",
+            process.run_reason,
             process.id
         );
     }
@@ -1657,13 +1658,14 @@ impl ContainerService for LocalContainerService {
         env.insert("VK_WORKSPACE_ID", workspace.id.to_string());
         env.insert("VK_WORKSPACE_BRANCH", &workspace.branch);
 
-        // Dev servers write their output straight to a raw log file (instead
-        // of pipes) so they can keep running across a server restart; the
-        // server tails the file. Unix only: adoption after a restart relies
-        // on process-group management.
+        // Persistent processes (dev servers, background helpers) write their
+        // output straight to a raw log file (instead of pipes) so they can
+        // keep running across a server restart; the server tails the file.
+        // Unix only: adoption after a restart relies on process-group
+        // management.
         #[cfg(unix)]
         let dev_server_raw_log =
-            if execution_process.run_reason == ExecutionProcessRunReason::DevServer {
+            if execution_process.run_reason.is_persistent() {
                 let path = utils::execution_logs::process_raw_log_file_path(
                     execution_process.session_id,
                     execution_process.id,
@@ -1980,7 +1982,7 @@ impl ContainerService for LocalContainerService {
         }
         #[cfg(unix)]
         {
-            if process.run_reason != ExecutionProcessRunReason::DevServer {
+            if !process.run_reason.is_persistent() {
                 return false;
             }
             let Some(pgid) = process.pgid else {
@@ -2008,7 +2010,8 @@ impl ContainerService for LocalContainerService {
             let watcher = self.spawn_adopted_exit_watcher(process.id, pgid as i32);
             self.add_exit_monitor_handle(process.id, watcher).await;
             tracing::info!(
-                "Adopted running dev server process {} (pgid {})",
+                "Adopted running {:?} process {} (pgid {})",
+                process.run_reason,
                 process.id,
                 pgid
             );
@@ -2026,11 +2029,12 @@ impl ContainerService for LocalContainerService {
         );
 
         for process in running_processes {
-            // On unix, dev servers are detached (their output goes to a raw
-            // log file) and are left running across the restart; the next
-            // boot re-adopts them via their process group id.
+            // On unix, persistent processes (dev servers, background helpers)
+            // are detached (their output goes to a raw log file) and are left
+            // running across the restart; the next boot re-adopts them via
+            // their process group id.
             #[cfg(unix)]
-            if process.run_reason == ExecutionProcessRunReason::DevServer {
+            if process.run_reason.is_persistent() {
                 self.detach_execution_for_handoff(&process).await;
                 continue;
             }

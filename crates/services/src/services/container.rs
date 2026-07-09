@@ -232,15 +232,12 @@ pub trait ContainerService {
 
     /// A context is finalized when
     /// - Always when the execution process has failed or been killed
-    /// - Never when the run reason is DevServer
+    /// - Never when the run reason is persistent (DevServer, BackgroundHelper)
     /// - Never when a setup script has no next_action (parallel mode)
     /// - The next action is None (no follow-up actions)
     fn should_finalize(&self, ctx: &ExecutionContext) -> bool {
-        // Never finalize DevServer processes
-        if matches!(
-            ctx.execution_process.run_reason,
-            ExecutionProcessRunReason::DevServer
-        ) {
+        // Never finalize persistent processes
+        if ctx.execution_process.run_reason.is_persistent() {
             return false;
         }
 
@@ -712,7 +709,7 @@ pub trait ContainerService {
         let workspace = Workspace::find_by_id(pool, workspace_id)
             .await?
             .ok_or(ContainerError::Other(anyhow!("Workspace not found")))?;
-        if ExecutionProcess::has_running_non_dev_server_processes_for_workspace(pool, workspace.id)
+        if ExecutionProcess::has_running_non_persistent_processes_for_workspace(pool, workspace.id)
             .await
             .unwrap_or(true)
         {
@@ -751,24 +748,36 @@ pub trait ContainerService {
         Ok(())
     }
 
-    /// Archive a workspace: set archived flag, stop running dev servers, and run archive script.
+    /// Archive a workspace: set archived flag, stop running persistent
+    /// processes (dev servers, background helpers), and run archive script.
     async fn archive_workspace(&self, workspace_id: Uuid) -> Result<(), ContainerError> {
         let pool = &self.db().pool;
 
         Workspace::set_archived(pool, workspace_id, true).await?;
 
-        // Stop running dev servers
-        if let Ok(dev_servers) =
-            ExecutionProcess::find_running_dev_servers_by_workspace(pool, workspace_id).await
-        {
-            for dev_server in dev_servers {
+        // Stop running dev servers and background helpers
+        for run_reason in [
+            ExecutionProcessRunReason::DevServer,
+            ExecutionProcessRunReason::BackgroundHelper,
+        ] {
+            let Ok(processes) = ExecutionProcess::find_running_by_workspace_and_run_reason(
+                pool,
+                workspace_id,
+                &run_reason,
+            )
+            .await
+            else {
+                continue;
+            };
+            for process in processes {
                 if let Err(e) = self
-                    .stop_execution(&dev_server, ExecutionProcessStatus::Killed)
+                    .stop_execution(&process, ExecutionProcessStatus::Killed)
                     .await
                 {
                     tracing::error!(
-                        "Failed to stop dev server {} for workspace {}: {}",
-                        dev_server.id,
+                        "Failed to stop {:?} {} for workspace {}: {}",
+                        run_reason,
+                        process.id,
                         workspace_id,
                         e
                     );
@@ -944,10 +953,9 @@ pub trait ContainerService {
                 ExecutionProcess::find_by_session_id(&self.db().pool, session.id, false).await
             {
                 for process in processes {
-                    // Skip dev server processes unless explicitly included
-                    if !include_dev_server
-                        && process.run_reason == ExecutionProcessRunReason::DevServer
-                    {
+                    // Skip persistent processes (dev servers, background
+                    // helpers) unless explicitly included
+                    if !include_dev_server && process.run_reason.is_persistent() {
                         continue;
                     }
                     if process.status == ExecutionProcessStatus::Running {
@@ -1553,12 +1561,11 @@ pub trait ContainerService {
             }
         }
 
-        // Detached dev servers (unix) write their own raw log file, which is
-        // the persistent record; mirroring the MsgStore into a JSONL file
-        // would duplicate it on every adoption replay.
-        let dev_server_writes_own_log =
-            cfg!(unix) && matches!(run_reason, ExecutionProcessRunReason::DevServer);
-        if !dev_server_writes_own_log {
+        // Detached persistent processes (unix) write their own raw log file,
+        // which is the persistent record; mirroring the MsgStore into a JSONL
+        // file would duplicate it on every adoption replay.
+        let writes_own_raw_log = cfg!(unix) && run_reason.is_persistent();
+        if !writes_own_raw_log {
             execution_process::spawn_stream_raw_logs_to_storage(
                 self.msg_stores().clone(),
                 self.db().clone(),

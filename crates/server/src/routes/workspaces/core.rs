@@ -105,7 +105,7 @@ pub async fn delete_workspace(
     let workspace_manager = deployment.workspace_manager();
     let workspace_id = workspace.id;
 
-    if ExecutionProcess::has_running_non_dev_server_processes_for_workspace(pool, workspace_id)
+    if ExecutionProcess::has_running_non_persistent_processes_for_workspace(pool, workspace_id)
         .await?
     {
         return Err(ApiError::Conflict(
