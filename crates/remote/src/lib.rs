@@ -8,6 +8,7 @@ pub mod config;
 pub mod db;
 pub mod digest;
 pub mod github_app;
+pub mod jira;
 pub mod mail;
 mod middleware;
 pub mod mutation_definition;

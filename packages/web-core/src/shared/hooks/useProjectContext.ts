@@ -13,6 +13,7 @@ import type {
   PullRequest,
   PullRequestIssue,
   Workspace,
+  JiraIssueLink,
   CreateIssueRequest,
   UpdateIssueRequest,
   CreateProjectStatusRequest,
@@ -55,6 +56,7 @@ export interface ProjectContextValue {
   pullRequests: PullRequest[];
   pullRequestIssues: PullRequestIssue[];
   workspaces: Workspace[];
+  jiraLinks: JiraIssueLink[];
 
   // Loading/error state
   isLoading: boolean;
@@ -124,6 +126,7 @@ export interface ProjectContextValue {
   getTag: (tagId: string) => Tag | undefined;
   getPullRequestsForIssue: (issueId: string) => PullRequest[];
   getWorkspacesForIssue: (issueId: string) => Workspace[];
+  getJiraLinkForIssue: (issueId: string) => JiraIssueLink | undefined;
 
   // Computed aggregations (Maps for O(1) lookup)
   issuesById: Map<string, Issue>;

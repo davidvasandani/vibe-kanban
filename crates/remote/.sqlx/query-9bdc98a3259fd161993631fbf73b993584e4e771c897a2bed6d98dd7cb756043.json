@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE project_jira_configs\n            SET sync_requested_at = NOW()\n            WHERE project_id = $1\n            RETURNING sync_requested_at AS \"sync_requested_at!: DateTime<Utc>\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sync_requested_at!: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "9bdc98a3259fd161993631fbf73b993584e4e771c897a2bed6d98dd7cb756043"
+}

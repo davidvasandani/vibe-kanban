@@ -22,7 +22,8 @@ use crate::{
         issue_comment_reactions::IssueCommentReactionRepository,
         issue_comments::IssueCommentRepository, issue_followers::IssueFollowerRepository,
         issue_relationships::IssueRelationshipRepository, issue_tags::IssueTagRepository,
-        issues::IssueRepository, notifications::NotificationRepository, organization_members,
+        issues::IssueRepository, jira_sync::JiraSyncRepository,
+        notifications::NotificationRepository, organization_members,
         project_statuses::ProjectStatusRepository, projects::ProjectRepository,
         pull_request_issues::PullRequestIssueRepository, pull_requests::PullRequestRepository,
         tags::TagRepository, workspaces::WorkspaceRepository,
@@ -60,6 +61,11 @@ struct ListUsersResponse {
 #[derive(Debug, Serialize)]
 struct ListWorkspacesResponse {
     workspaces: Vec<Workspace>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListJiraIssueLinksResponse {
+    jira_issue_links: Vec<crate::jira::types::JiraIssueLink>,
 }
 
 // =============================================================================
@@ -114,6 +120,12 @@ pub fn all_shape_routes() -> Vec<ShapeRoute> {
             ShapeScope::Project,
             "/fallback/issues",
             fallback_list_issues,
+        ),
+        ShapeRoute::new(
+            &shapes::PROJECT_JIRA_LINKS_SHAPE,
+            ShapeScope::Project,
+            "/fallback/jira_links",
+            fallback_list_jira_links,
         ),
         ShapeRoute::new(
             &shapes::USER_WORKSPACES_SHAPE,
@@ -290,6 +302,27 @@ async fn fallback_list_tags(
         })?;
 
     Ok(Json(ListTagsResponse { tags }))
+}
+
+async fn fallback_list_jira_links(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Query(query): Query<ProjectFallbackQuery>,
+) -> Result<Json<ListJiraIssueLinksResponse>, ErrorResponse> {
+    ensure_project_access(state.pool(), ctx.user.id, query.project_id).await?;
+
+    let jira_issue_links =
+        JiraSyncRepository::list_links_by_project(state.pool(), query.project_id)
+            .await
+            .map_err(|error| {
+                tracing::error!(?error, project_id = %query.project_id, "failed to list jira links (fallback)");
+                ErrorResponse::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to list jira links",
+                )
+            })?;
+
+    Ok(Json(ListJiraIssueLinksResponse { jira_issue_links }))
 }
 
 async fn fallback_list_project_statuses(

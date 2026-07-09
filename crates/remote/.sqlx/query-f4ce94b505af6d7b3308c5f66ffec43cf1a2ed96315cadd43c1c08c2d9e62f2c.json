@@ -1,0 +1,127 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO project_jira_configs (\n                project_id, jira_base_url, auth_mode, jira_email,\n                encrypted_credential, jql, enabled, sync_interval_seconds,\n                status_mapping, created_by_user_id\n            )\n            VALUES ($1, $2, $3, $4, COALESCE($5, ''), $6, $7, $8, $9, $10)\n            ON CONFLICT (project_id) DO UPDATE SET\n                jira_base_url = EXCLUDED.jira_base_url,\n                auth_mode = EXCLUDED.auth_mode,\n                jira_email = EXCLUDED.jira_email,\n                encrypted_credential = COALESCE($5, project_jira_configs.encrypted_credential),\n                jql = EXCLUDED.jql,\n                enabled = EXCLUDED.enabled,\n                sync_interval_seconds = EXCLUDED.sync_interval_seconds,\n                status_mapping = EXCLUDED.status_mapping\n            RETURNING\n                id                      AS \"id!: Uuid\",\n                project_id              AS \"project_id!: Uuid\",\n                jira_base_url           AS \"jira_base_url!\",\n                auth_mode               AS \"auth_mode!\",\n                jira_email              AS \"jira_email?\",\n                encrypted_credential    AS \"encrypted_credential!\",\n                jql                     AS \"jql!\",\n                enabled                 AS \"enabled!\",\n                created_by_user_id      AS \"created_by_user_id?: Uuid\",\n                sync_interval_seconds   AS \"sync_interval_seconds!\",\n                status_mapping          AS \"status_mapping!: serde_json::Value\",\n                sync_requested_at       AS \"sync_requested_at?: DateTime<Utc>\",\n                last_sync_started_at    AS \"last_sync_started_at?: DateTime<Utc>\",\n                last_sync_completed_at  AS \"last_sync_completed_at?: DateTime<Utc>\",\n                last_sync_error         AS \"last_sync_error?\",\n                created_at              AS \"created_at!: DateTime<Utc>\",\n                updated_at              AS \"updated_at!: DateTime<Utc>\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "jira_base_url!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "auth_mode!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "jira_email?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "encrypted_credential!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "jql!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "enabled!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_by_user_id?: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 9,
+        "name": "sync_interval_seconds!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "status_mapping!: serde_json::Value",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 11,
+        "name": "sync_requested_at?: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "last_sync_started_at?: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "last_sync_completed_at?: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "last_sync_error?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "created_at!: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "updated_at!: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Int4",
+        "Jsonb",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "f4ce94b505af6d7b3308c5f66ffec43cf1a2ed96315cadd43c1c08c2d9e62f2c"
+}

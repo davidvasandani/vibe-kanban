@@ -114,7 +114,14 @@ import {
   SpecKitUpdateArtifactRequest,
   SpecKitToggleTaskRequest,
 } from 'shared/types';
-import type { Project as RemoteProject } from 'shared/remote-types';
+import type {
+  Project as RemoteProject,
+  JiraSyncConfigResponse,
+  JiraSyncNowResponse,
+  JiraTestConnectionRequest,
+  JiraTestConnectionResponse,
+  UpsertJiraSyncConfigRequest,
+} from 'shared/remote-types';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
 import { createWorkspaceWithSession } from '@/shared/types/attempt';
 import { resolveHostRequestScope } from '@/shared/lib/hostRequestScope';
@@ -1602,6 +1609,64 @@ export const organizationsApi = {
       { method: 'DELETE' }
     );
     return handleRemoteResponse<void>(response);
+  },
+};
+
+export const jiraSyncApi = {
+  getConfig: async (
+    projectId: string
+  ): Promise<JiraSyncConfigResponse | null> => {
+    const response = await makeRemoteRequest(
+      `/v1/projects/${projectId}/jira-sync`
+    );
+    if (response.status === 404) return null;
+    return handleRemoteResponse<JiraSyncConfigResponse>(response);
+  },
+
+  saveConfig: async (
+    projectId: string,
+    data: UpsertJiraSyncConfigRequest
+  ): Promise<JiraSyncConfigResponse> => {
+    const response = await makeRemoteRequest(
+      `/v1/projects/${projectId}/jira-sync`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }
+    );
+    return handleRemoteResponse<JiraSyncConfigResponse>(response);
+  },
+
+  deleteConfig: async (projectId: string): Promise<void> => {
+    const response = await makeRemoteRequest(
+      `/v1/projects/${projectId}/jira-sync`,
+      { method: 'DELETE' }
+    );
+    return handleRemoteResponse<void>(response);
+  },
+
+  testConnection: async (
+    projectId: string,
+    data: JiraTestConnectionRequest
+  ): Promise<JiraTestConnectionResponse> => {
+    const response = await makeRemoteRequest(
+      `/v1/projects/${projectId}/jira-sync/test`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }
+    );
+    return handleRemoteResponse<JiraTestConnectionResponse>(response);
+  },
+
+  syncNow: async (projectId: string): Promise<JiraSyncNowResponse> => {
+    const response = await makeRemoteRequest(
+      `/v1/projects/${projectId}/jira-sync/sync-now`,
+      { method: 'POST' }
+    );
+    return handleRemoteResponse<JiraSyncNowResponse>(response);
   },
 };
 

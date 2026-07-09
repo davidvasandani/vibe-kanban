@@ -14,6 +14,7 @@ import { KanbanBadge } from './KanbanBadge';
 import { KanbanAssignee, type KanbanAssigneeUser } from './KanbanAssignee';
 import { RunningDots } from './RunningDots';
 import { PrBadge, type PrBadgeStatus } from './PrBadge';
+import { JiraBadge } from './JiraBadge';
 import {
   RelationshipBadge,
   type RelationshipDisplayType,
@@ -130,6 +131,8 @@ export type KanbanCardContentProps<TTag extends KanbanTag = KanbanTag> = {
   assignees: KanbanAssigneeUser[];
   pullRequests?: KanbanPullRequest[];
   relationships?: KanbanRelationship[];
+  /** Linked Jira issue, rendered as a badge that opens the issue in Jira. */
+  jiraLink?: { issueKey: string; url: string; active: boolean } | null;
   isSubIssue?: boolean;
   isLoading?: boolean;
   /** Compact rendering: only the issue id and title. */
@@ -151,6 +154,7 @@ export function KanbanCardContent<TTag extends KanbanTag = KanbanTag>({
   assignees,
   pullRequests = [],
   relationships = [],
+  jiraLink,
   isSubIssue,
   isLoading = false,
   slim = false,
@@ -310,11 +314,12 @@ export function KanbanCardContent<TTag extends KanbanTag = KanbanTag>({
         )}
       </div>
 
-      {/* Row 5: Tags, PRs, Relationships (own row to prevent overflow) */}
+      {/* Row 5: Tags, PRs, Relationships, Jira (own row to prevent overflow) */}
       {(tags.length > 0 ||
         tagEditProps ||
         pullRequests.length > 0 ||
-        relationships.length > 0) && (
+        relationships.length > 0 ||
+        jiraLink) && (
         <div className="flex items-center gap-half flex-wrap min-w-0">
           {tagEditProps ? (
             (tagEditProps.renderTagEditor?.({
@@ -357,6 +362,13 @@ export function KanbanCardContent<TTag extends KanbanTag = KanbanTag>({
             <span className="text-sm text-low">
               +{relationships.length - 2}
             </span>
+          )}
+          {jiraLink && (
+            <JiraBadge
+              issueKey={jiraLink.issueKey}
+              url={jiraLink.url}
+              active={jiraLink.active}
+            />
           )}
         </div>
       )}

@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                COUNT(*) FILTER (WHERE link_state = 'active')         AS \"active!\",\n                COUNT(*) FILTER (WHERE link_state = 'dormant')        AS \"dormant!\",\n                COUNT(*) FILTER (WHERE link_state = 'deleted_remote') AS \"deleted_remote!\",\n                COUNT(*) FILTER (WHERE last_error IS NOT NULL)        AS \"errored!\"\n            FROM jira_issue_links\n            WHERE project_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "active!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "dormant!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "deleted_remote!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "errored!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "58138fe8478ade1a86c7862b894a744ef141ceb8aa2ec00caa6d36e65a9d6899"
+}

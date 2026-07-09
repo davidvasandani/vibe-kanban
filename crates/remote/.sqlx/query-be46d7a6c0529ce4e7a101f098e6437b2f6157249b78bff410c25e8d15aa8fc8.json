@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE project_jira_configs\n            SET last_sync_completed_at = NOW(), last_sync_error = $2\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "be46d7a6c0529ce4e7a101f098e6437b2f6157249b78bff410c25e8d15aa8fc8"
+}

@@ -16,6 +16,11 @@ use api_types::{
 };
 use relay_types::{CreateRemoteSessionResponse, ListRelayHostsResponse, RelayHost};
 use remote::{
+    jira::types::{
+        JiraAuthMode, JiraIssueLink, JiraLinkCounts, JiraStatusMapping, JiraSyncConfigResponse,
+        JiraSyncNowResponse, JiraTestConnectionRequest, JiraTestConnectionResponse,
+        UpsertJiraSyncConfigRequest,
+    },
     routes::{
         all_mutation_definitions,
         attachments::{
@@ -136,6 +141,16 @@ fn export_shapes() -> String {
         AttachmentUrlResponse::decl(),
         // Export API types
         ExportRequest::decl(),
+        // Jira sync types
+        JiraAuthMode::decl(),
+        JiraStatusMapping::decl(),
+        JiraIssueLink::decl(),
+        JiraLinkCounts::decl(),
+        JiraSyncConfigResponse::decl(),
+        UpsertJiraSyncConfigRequest::decl(),
+        JiraTestConnectionRequest::decl(),
+        JiraTestConnectionResponse::decl(),
+        JiraSyncNowResponse::decl(),
     ];
 
     for decl in type_decls {
