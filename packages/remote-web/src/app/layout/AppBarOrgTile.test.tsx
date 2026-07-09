@@ -100,4 +100,32 @@ describe("AppBarOrgTile", () => {
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(onSelect).toHaveBeenCalledWith("org-2");
   });
+
+  it("stays functional when uncontrolled (no onToggleExpanded): expands and selects", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(
+      <AppBarOrgTile
+        organizations={orgs}
+        selectedOrgId="org-1"
+        onSelect={onSelect}
+      />,
+    );
+
+    // Collapsed: only the active tile + expand toggle; others hidden.
+    expect(
+      screen.queryByRole("button", { name: "Globex" }),
+    ).not.toBeInTheDocument();
+
+    // Clicking the toggle expands via internal state.
+    await user.click(
+      screen.getByRole("button", { name: /show organizations/i }),
+    );
+    expect(screen.getByRole("button", { name: "Acme" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Globex" })).toBeInTheDocument();
+
+    // Switching still works without a controlled handler.
+    await user.click(screen.getByRole("button", { name: "Globex" }));
+    expect(onSelect).toHaveBeenCalledWith("org-2");
+  });
 });

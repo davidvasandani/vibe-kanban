@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { CaretDownIcon, CaretUpIcon } from '@phosphor-icons/react';
 import { cn } from '../lib/cn';
 import { Tooltip } from './Tooltip';
@@ -13,10 +14,14 @@ interface AppBarOrgTileProps {
   onSelect: (id: string) => void;
   /**
    * Whether the org section is expanded to show every organization as a tile.
-   * When omitted the section stays collapsed (single active tile + toggle).
+   * Only used in the controlled mode (see `onToggleExpanded`).
    */
   expanded?: boolean;
-  /** Toggles the expanded/collapsed state (owned by the caller). */
+  /**
+   * Toggles the expanded/collapsed state. When provided, the component is
+   * controlled and this owns the state; when omitted, the component manages
+   * its own expand state internally so switching still works.
+   */
   onToggleExpanded?: () => void;
 }
 
@@ -140,6 +145,10 @@ export function AppBarOrgTile({
   expanded = false,
   onToggleExpanded,
 }: AppBarOrgTileProps) {
+  // Uncontrolled fallback: when the caller does not own the expand state, the
+  // component manages it so multi-org switching still works.
+  const [internalExpanded, setInternalExpanded] = useState(false);
+
   const selectedOrg =
     organizations.find((org) => org.id === selectedOrgId) ?? organizations[0];
 
@@ -152,9 +161,17 @@ export function AppBarOrgTile({
     return <OrgTileButton org={selectedOrg} isActive onClick={() => {}} />;
   }
 
-  const toggle = () => onToggleExpanded?.();
+  const isControlled = onToggleExpanded !== undefined;
+  const isExpanded = isControlled ? expanded : internalExpanded;
+  const toggle = () => {
+    if (isControlled) {
+      onToggleExpanded();
+    } else {
+      setInternalExpanded((prev) => !prev);
+    }
+  };
 
-  if (expanded) {
+  if (isExpanded) {
     return (
       <div className="flex flex-col items-center gap-base">
         <OrgSectionLabel />
