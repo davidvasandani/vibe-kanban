@@ -55,6 +55,7 @@ function storeToScratchData(state: {
     Record<string, KanbanProjectViewPreferences>
   >;
   kanbanViewMode: KanbanViewMode;
+  listViewStatusFilterName: string | null;
 }): UiPreferencesData {
   const workspacePanelStates: { [key: string]: WorkspacePanelStateData } = {};
   for (const [key, value] of Object.entries(state.workspacePanelStates)) {
@@ -93,6 +94,7 @@ function storeToScratchData(state: {
     kanban_project_view_preferences:
       state.kanbanProjectViewPreferences as Record<string, JsonValue>,
     kanban_view_mode: state.kanbanViewMode,
+    list_view_status_filter_name: state.listViewStatusFilterName,
   };
 }
 
@@ -121,6 +123,7 @@ function scratchDataToStore(data: UiPreferencesData): {
     Record<string, KanbanProjectViewPreferences>
   >;
   kanbanViewMode: KanbanViewMode;
+  listViewStatusFilterName: string | null;
 } {
   const workspacePanelStates: Record<string, WorkspacePanelState> = {};
   if (data.workspace_panel_states) {
@@ -180,6 +183,7 @@ function scratchDataToStore(data: UiPreferencesData): {
     kanbanProjectViewPreferences: (data.kanban_project_view_preferences ??
       {}) as Record<string, Record<string, KanbanProjectViewPreferences>>,
     kanbanViewMode: (data.kanban_view_mode as KanbanViewMode) ?? 'kanban',
+    listViewStatusFilterName: data.list_view_status_filter_name ?? null,
   };
 }
 
@@ -218,6 +222,7 @@ export function useUiPreferencesScratch() {
     kanbanProjectViewSelections: state.kanbanProjectViewSelections,
     kanbanProjectViewPreferences: state.kanbanProjectViewPreferences,
     kanbanViewMode: state.kanbanViewMode,
+    listViewStatusFilterName: state.listViewStatusFilterName,
   }));
 
   // Extract scratch data
@@ -251,6 +256,7 @@ export function useUiPreferencesScratch() {
       kanbanProjectViewSelections: currentState.kanbanProjectViewSelections,
       kanbanProjectViewPreferences: currentState.kanbanProjectViewPreferences,
       kanbanViewMode: currentState.kanbanViewMode,
+      listViewStatusFilterName: currentState.listViewStatusFilterName,
     });
 
     try {
@@ -301,6 +307,7 @@ export function useUiPreferencesScratch() {
         kanbanProjectViewSelections: serverState.kanbanProjectViewSelections,
         kanbanProjectViewPreferences: serverState.kanbanProjectViewPreferences,
         kanbanViewMode: serverState.kanbanViewMode,
+        listViewStatusFilterName: serverState.listViewStatusFilterName,
       });
 
       // Allow a brief delay for state to settle

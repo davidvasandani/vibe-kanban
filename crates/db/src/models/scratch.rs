@@ -153,6 +153,10 @@ pub struct UiPreferencesData {
     /// Kanban board view mode (kanban | list | slim)
     #[serde(default)]
     pub kanban_view_mode: Option<String>,
+    /// Selected hidden-status tab, stored by status name (not id, since status
+    /// ids are per-project and this preference is global)
+    #[serde(default)]
+    pub list_view_status_filter_name: Option<String>,
 }
 
 /// Linked issue data for draft workspace scratch

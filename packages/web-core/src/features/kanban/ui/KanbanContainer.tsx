@@ -379,34 +379,20 @@ export function KanbanContainer() {
     [projectId, setKanbanProjectView]
   );
   const kanbanViewMode = useUiPreferencesStore((s) => s.kanbanViewMode);
-  const listViewStatusFilter = useUiPreferencesStore(
-    (s) => s.listViewStatusFilter
+  const listViewStatusFilterName = useUiPreferencesStore(
+    (s) => s.listViewStatusFilterName
   );
   const setKanbanViewMode = useUiPreferencesStore((s) => s.setKanbanViewMode);
-  const setListViewStatusFilter = useUiPreferencesStore(
-    (s) => s.setListViewStatusFilter
+  const setListViewStatusFilterName = useUiPreferencesStore(
+    (s) => s.setListViewStatusFilterName
   );
   // 'kanban' and 'slim' both render the column board; 'slim' just renders
   // compact cards (issue id + title only).
   const isBoardView = kanbanViewMode === 'kanban' || kanbanViewMode === 'slim';
   const isSlimView = kanbanViewMode === 'slim';
-  // Reset view mode when navigating projects
-  const prevProjectIdRef = useRef<string | null>(null);
 
   // Track when drag-drop sync is in progress to prevent flicker
   const isSyncingRef = useRef(false);
-
-  useEffect(() => {
-    if (
-      prevProjectIdRef.current !== null &&
-      prevProjectIdRef.current !== projectId
-    ) {
-      setKanbanViewMode('kanban');
-      setListViewStatusFilter(null);
-    }
-
-    prevProjectIdRef.current = projectId;
-  }, [projectId, setKanbanViewMode, setListViewStatusFilter]);
 
   // Sort all statuses for display settings
   const sortedStatuses = useMemo(
@@ -432,6 +418,35 @@ export function KanbanContainer() {
   const hiddenStatuses = useMemo(
     () => sortedStatuses.filter((s) => s.hidden),
     [sortedStatuses]
+  );
+
+  // Resolve the persisted (global) status-filter name to this project's
+  // matching hidden status id. Status ids are per-project, so the preference
+  // is stored by name and re-resolved on every project; if no hidden status
+  // in the current project matches, the filter falls back to unset ("All").
+  const listViewStatusFilter = useMemo(() => {
+    if (!listViewStatusFilterName) {
+      return null;
+    }
+    const match = hiddenStatuses.find(
+      (s) =>
+        s.name.trim().toLowerCase() ===
+        listViewStatusFilterName.trim().toLowerCase()
+    );
+    return match?.id ?? null;
+  }, [hiddenStatuses, listViewStatusFilterName]);
+
+  const handleStatusSelect = useCallback(
+    (statusId: string | null) => {
+      if (statusId === null) {
+        setListViewStatusFilterName(null);
+        return;
+      }
+      // ViewNavTabs only ever calls this with an id from `hiddenStatuses`.
+      const status = hiddenStatuses.find((s) => s.id === statusId);
+      setListViewStatusFilterName(status?.name ?? null);
+    },
+    [hiddenStatuses, setListViewStatusFilterName]
   );
 
   const defaultCreateStatusId = useMemo(() => {
@@ -992,7 +1007,7 @@ export function KanbanContainer() {
             onViewChange={setKanbanViewMode}
             hiddenStatuses={hiddenStatuses}
             selectedStatusId={listViewStatusFilter}
-            onStatusSelect={setListViewStatusFilter}
+            onStatusSelect={handleStatusSelect}
           />
           <KanbanFilterBar
             isFiltersDialogOpen={isFiltersDialogOpen}

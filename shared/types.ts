@@ -142,7 +142,12 @@ kanban_project_view_preferences: { [key in string]?: JsonValue },
 /**
  * Kanban board view mode (kanban | list | slim)
  */
-kanban_view_mode: string | null, };
+kanban_view_mode: string | null, 
+/**
+ * Selected hidden-status tab, stored by status name (not id, since status
+ * ids are per-project and this preference is global)
+ */
+list_view_status_filter_name: string | null, };
 
 export type ProjectRepoDefaultsData = { repos: Array<DraftWorkspaceRepo>, };
 
