@@ -21,7 +21,7 @@ describe("AppBarOrgTile", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("renders a single static tile with no expand toggle for one org", () => {
+  it("renders a single non-interactive tile with no toggle for one org", () => {
     render(
       <AppBarOrgTile
         organizations={[orgs[0]]}
@@ -29,7 +29,11 @@ describe("AppBarOrgTile", () => {
         onSelect={() => {}}
       />,
     );
-    expect(screen.getByRole("button", { name: "Acme" })).toBeInTheDocument();
+    // The single-org tile is present but non-interactive (not a button).
+    expect(screen.getByLabelText("Acme")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Acme" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /show organizations/i }),
     ).not.toBeInTheDocument();

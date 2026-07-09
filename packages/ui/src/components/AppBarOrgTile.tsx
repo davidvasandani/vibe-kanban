@@ -54,39 +54,53 @@ function getOrgColor(id: string): string {
 const orgTileBaseClassName =
   'flex items-center justify-center w-10 h-10 rounded-lg text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand';
 
-function OrgTileButton({
+function OrgTile({
   org,
   isActive,
   onClick,
 }: {
   org: AppBarOrgTileOrganization;
   isActive: boolean;
-  onClick: () => void;
+  /** When omitted the tile is non-interactive (e.g. the single-org case). */
+  onClick?: () => void;
 }) {
   const color = getOrgColor(org.id);
+  const className = cn(
+    orgTileBaseClassName,
+    onClick && 'cursor-pointer',
+    isActive ? '' : 'bg-primary text-normal hover:opacity-80'
+  );
+  const style = isActive
+    ? {
+        color: `hsl(${color})`,
+        backgroundColor: `hsl(${color} / 0.2)`,
+      }
+    : undefined;
+  const initials = getOrgInitials(org.name);
+
   return (
     <Tooltip content={org.name} side="right">
-      <button
-        type="button"
-        onClick={onClick}
-        className={cn(
-          orgTileBaseClassName,
-          'cursor-pointer',
-          isActive ? '' : 'bg-primary text-normal hover:opacity-80'
-        )}
-        style={
-          isActive
-            ? {
-                color: `hsl(${color})`,
-                backgroundColor: `hsl(${color} / 0.2)`,
-              }
-            : undefined
-        }
-        aria-label={org.name}
-        aria-current={isActive ? 'true' : undefined}
-      >
-        {getOrgInitials(org.name)}
-      </button>
+      {onClick ? (
+        <button
+          type="button"
+          onClick={onClick}
+          className={className}
+          style={style}
+          aria-label={org.name}
+          aria-current={isActive ? 'true' : undefined}
+        >
+          {initials}
+        </button>
+      ) : (
+        <div
+          className={className}
+          style={style}
+          aria-label={org.name}
+          aria-current={isActive ? 'true' : undefined}
+        >
+          {initials}
+        </div>
+      )}
     </Tooltip>
   );
 }
@@ -156,9 +170,9 @@ export function AppBarOrgTile({
     return null;
   }
 
-  // Single org: nothing to switch between — a static tile.
+  // Single org: nothing to switch between — a non-interactive static tile.
   if (organizations.length <= 1) {
-    return <OrgTileButton org={selectedOrg} isActive onClick={() => {}} />;
+    return <OrgTile org={selectedOrg} isActive />;
   }
 
   const isControlled = onToggleExpanded !== undefined;
@@ -176,7 +190,7 @@ export function AppBarOrgTile({
       <div className="flex flex-col items-center gap-base">
         <OrgSectionLabel />
         {organizations.map((org) => (
-          <OrgTileButton
+          <OrgTile
             key={org.id}
             org={org}
             isActive={org.id === selectedOrg.id}
@@ -190,7 +204,7 @@ export function AppBarOrgTile({
 
   return (
     <div className="flex flex-col items-center gap-1">
-      <OrgTileButton org={selectedOrg} isActive onClick={toggle} />
+      <OrgTile org={selectedOrg} isActive onClick={toggle} />
       <ExpandToggle expanded={false} onClick={toggle} />
     </div>
   );
