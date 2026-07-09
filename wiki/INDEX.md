@@ -42,3 +42,10 @@ contributed to it.
   source of truth via a docs pointer), and the CI path-existence check plus the
   false-pass gotchas reviewers exploit (empty-path skip, pipe-subshell exit
   code, additionalProperties parity at every level).
+- [appbar-rail-and-org-tiles.md](appbar-rail-and-org-tiles.md) — The left
+  AppBar rail: its slots/sections, the reusable icon-tile recipe (40×40,
+  initials, inline-`hsl` active state, right tooltip), and the in-rail org
+  switcher (`AppBarOrgTile`) — client-derived org color (no `color` field),
+  persisted expand state (`useOrgRailStore`), and two component gotchas
+  (optional-controlled state needs an internal fallback; don't render a
+  no-op `<button>` — use a non-interactive tile).
