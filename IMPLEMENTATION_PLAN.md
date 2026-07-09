@@ -1,71 +1,59 @@
-# Implementation Plan: iPad Windowed Layout — Top Nav Cut Off
+# Implementation Plan — Org icons in the left drawer (AppBar rail)
 
-Single-file change plus verification. See `SPEC.md` for rationale.
+Frontend-only change to the cloud app. See `SPEC.md` for rationale and full
+SpecKit artifacts under `homelab/specs/vk/3796-vk-extended-left/`.
 
-## Step 1 — Add top safe-area padding to the shared Navbar
+## Step 1 — Persisted expander store (new file)
+`packages/web-core/src/shared/stores/useOrgRailStore.ts`
+- zustand + `persist`, mirroring `useOrganizationStore`.
+- State: `expanded: boolean` (default `false`), `toggleExpanded()`,
+  `setExpanded(v)`. `persist` name `org-rail-expanded`,
+  `partialize` → `{ expanded }`.
 
-File: `packages/ui/src/components/Navbar.tsx`
+## Step 2 — `getOrgColor(id)` helper
+In `packages/ui/src/components/AppBarOrgTile.tsx` (co-located):
+- Deterministic string hash of the org id → hue `0..359`; fixed S/L tuned for
+  the dark rail (e.g. `65% 55%`). Return `"<h> <s>% <l>%"` (HSL-triple, same
+  format Project tiles feed into `hsl(...)`).
 
-### 1a. Mobile navbar variant
+## Step 3 — Extend `AppBarOrgTile`
+`packages/ui/src/components/AppBarOrgTile.tsx`
+- Add optional props `expanded?: boolean`, `onToggleExpanded?: () => void`.
+- Paths:
+  - 0 orgs → `null` (unchanged).
+  - 1 org → single static tile, no toggle (unchanged).
+  - >1 org + collapsed → active org tile + a small caret-down toggle button
+    (`aria-expanded={false}`, `onClick={onToggleExpanded}`). Replaces the old
+    dropdown as the default.
+  - >1 org + expanded → an `Orgs` section label (matching `AppBar`'s
+    `AppBarSectionLabel` look) + a vertical list of all org tiles rendered in
+    the **project-tile recipe**: `getOrgInitials`, `w-10 h-10 rounded-lg`,
+    right-side `Tooltip` with the org name, `onClick={() => onSelect(id)}`;
+    selected tile gets inline `style={{ color: 'hsl(<c>)', backgroundColor:
+    'hsl(<c> / 0.2)' }}` with `c = getOrgColor(id)`, non-selected get
+    `bg-primary text-normal hover:opacity-80`. Caret-up collapse toggle at end.
+- Keep exports/`AppBarOrgTileOrganization` type stable.
 
-The mobile `<nav>` (`mobileMode` branch) currently has no vertical padding on
-the element itself (its rows carry `px-base py-half`). Add an inline style that
-pads the top by the safe-area inset so the navbar's `bg-secondary` fills the
-status-bar area:
+## Step 4 — Wire up in the cloud shell
+`packages/remote-web/src/app/layout/RemoteAppShell.tsx`
+- Import `useOrgRailStore`; read `expanded` + `toggleExpanded`.
+- Pass `expanded={expanded}` and `onToggleExpanded={toggleExpanded}` into the
+  `<AppBarOrgTile>` rendered as `orgSlot`. Nothing else changes — selecting an
+  org already re-scopes projects via `activeOrganizationId` → `projectsQuery`.
 
-```tsx
-<nav
-  className={cn('flex flex-col bg-secondary border-b shrink-0', className)}
-  style={{ paddingTop: 'env(safe-area-inset-top)' }}
->
-```
+## Step 5 — Tests
+- Add/extend a Vitest for `AppBarOrgTile`: (a) 1 org → no toggle button;
+  (b) >1 org collapsed → toggle present, list hidden; (c) expanded → one tile
+  per org rendered and clicking a tile calls `onSelect(id)`.
 
-When the inset is `0`, `padding-top: 0` — no visual change.
+## Step 6 — Verify
+- `pnpm run check`, `pnpm run lint`, `pnpm run format`.
+- Manual/verify: expand → tiles appear above projects; click switches org and
+  the project list updates; state persists across reload.
 
-### 1b. Desktop navbar variant
+## Step 7 — Codex review
+- Run the `codex-review` skill / Codex CLI on the diff; iterate ≤3 times;
+  address confirmed findings and re-verify.
 
-The desktop `<nav>` uses `px-base py-half`. Keep `py-half` (so the bottom
-padding is unchanged) and override the top padding via inline style to add the
-inset on top of the existing `0.25rem` (`py-half`) value:
-
-```tsx
-<nav
-  data-tauri-drag-region
-  className={cn(
-    'flex items-center justify-between px-base py-half bg-secondary border-b shrink-0',
-    className
-  )}
-  style={{ paddingTop: 'calc(0.25rem + env(safe-area-inset-top))' }}
->
-```
-
-Inline styles win over the Tailwind class, so only `padding-top` is overridden;
-`padding-bottom` stays `py-half`. When the inset is `0`, top padding resolves to
-`0.25rem` — identical to `py-half` today.
-
-A short comment on each `style` explains that `0.25rem` mirrors `py-half` and
-that the inset keeps the nav clear of the status bar in windowed/notched
-layouts.
-
-## Step 2 — Verify
-
-1. `pnpm run check` — frontend typecheck (and backend, unaffected).
-2. `pnpm run lint` — ESLint (no inline-style rule violations expected;
-   inline styles are already used in the codebase).
-3. `pnpm run format` — Prettier for web packages.
-4. Manual/visual reasoning: with the inset `0` the navbar is unchanged; with a
-   non-zero inset the navbar content shifts down by the inset and the
-   `bg-secondary` fills the gap. In the desktop grid the sibling corner spacer
-   (also `bg-secondary`, stretched to row height) covers the left portion of the
-   strip so there is no color seam.
-
-## Step 3 — Independent Codex review
-
-Run the `codex-review` skill / Codex CLI against the diff, iterate on any
-confirmed findings, and re-verify before marking the task ready.
-
-## Risk / rollback
-
-- Single, additive change confined to one component's two root `<nav>` elements.
-- Zero behavioral change on displays without a top inset (the common case).
-- Rollback = remove the two `style` props.
+## Rollback
+Revert the three files + delete the new store file. No data/schema/API impact.
