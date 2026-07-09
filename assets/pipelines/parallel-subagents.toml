@@ -1,0 +1,27 @@
+name = "Parallel Sub-Agents"
+description = "Fan a single prompt out to Claude, Codex, and Grok in parallel, analyze their responses, and iterate up to N rounds."
+
+[[stage]]
+id = "fanout"
+label = "Fan out in parallel"
+default_enabled = true
+heavy = true
+prompt = "Fan this task's prompt out to three sub-agents running in parallel — one using Claude, one using Codex, and one using Grok — giving each the exact same prompt, and collect all three complete responses. Launch them concurrently rather than one after another. If a backend is unavailable, note which one and continue with the sub-agents you can run."
+
+[[stage]]
+id = "analyze"
+label = "Analyze & synthesize"
+default_enabled = true
+prompt = "Analyze the three sub-agent responses side by side: call out where they agree, where they disagree, and the strongest idea from each. Synthesize a single consolidated answer, and list any remaining open questions or contradictions the round did not resolve."
+
+[[stage]]
+id = "iterate"
+label = "Loop N rounds"
+default_enabled = true
+prompt = "Treat the fan-out and analysis you just completed as round 1, then repeat the parallel fan-out and analysis for the remaining rounds up to a total of N rounds (default N = 3; the operator may change N in this task's description). Feed the previous round's synthesis back to the three sub-agents as context each round. Stop early once the responses converge; otherwise stop after the Nth round. Then emit the final consolidated result."
+
+[[stage]]
+id = "code-review"
+label = "Review via Codex"
+default_enabled = false
+prompt = "After implementing, run an independent Codex review of the task's diff (the `codex-review` skill / Codex CLI), iterating until it reports no significant findings. Address confirmed findings and re-verify before marking the task ready."
