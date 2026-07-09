@@ -95,6 +95,9 @@ function SecretInput({
   );
 }
 
+/** ts-rs generates mapping objects with optional values. */
+type MappingEntries = { [key in string]?: string };
+
 /** Editable name -> name mapping rows (used for both mapping directions). */
 function MappingEditor({
   entries,
@@ -104,14 +107,16 @@ function MappingEditor({
   disabled,
   onChange,
 }: {
-  entries: Record<string, string>;
+  entries: MappingEntries;
   keyPlaceholder: string;
   valuePlaceholder: string;
   addLabel: string;
   disabled?: boolean;
-  onChange: (entries: Record<string, string>) => void;
+  onChange: (entries: MappingEntries) => void;
 }) {
-  const rows = Object.entries(entries);
+  const rows = Object.entries(entries).map(
+    ([key, value]) => [key, value ?? ''] as [string, string]
+  );
   return (
     <div className="space-y-half">
       {rows.map(([key, value], index) => (
@@ -271,10 +276,14 @@ export function JiraSyncSettingsSection({
 
   const buildRequestMapping = (mapping: JiraStatusMapping) => ({
     jira_to_vk: Object.fromEntries(
-      Object.entries(mapping.jira_to_vk).filter(([k, v]) => k.trim() && v.trim())
+      Object.entries(mapping.jira_to_vk).filter(
+        ([k, v]) => k.trim() && v?.trim()
+      )
     ),
     vk_to_jira: Object.fromEntries(
-      Object.entries(mapping.vk_to_jira).filter(([k, v]) => k.trim() && v.trim())
+      Object.entries(mapping.vk_to_jira).filter(
+        ([k, v]) => k.trim() && v?.trim()
+      )
     ),
   });
 

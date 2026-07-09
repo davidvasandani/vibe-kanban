@@ -183,6 +183,46 @@ export type ExportRequest = { organization_id: string,
  */
 project_ids: Array<string>, include_attachments: boolean, };
 
+export type JiraAuthMode = "cloud_basic" | "server_pat";
+
+export type JiraStatusMapping = { jira_to_vk: { [key in string]?: string }, vk_to_jira: { [key in string]?: string }, };
+
+export type JiraIssueLink = { id: string, project_id: string, issue_id: string, jira_issue_id: string, jira_issue_key: string, jira_browse_url: string, 
+/**
+ * `active` | `dormant` (left the JQL scope) | `deleted_remote`.
+ */
+link_state: string, last_synced_title: string | null, last_synced_description: string | null, last_synced_status_id: string | null, last_synced_jira_status: string | null, last_synced_jira_updated_at: string | null, last_synced_vk_updated_at: string | null, last_error: string | null, created_at: string, updated_at: string, };
+
+export type JiraLinkCounts = { active: bigint, dormant: bigint, deleted_remote: bigint, errored: bigint, };
+
+export type JiraSyncConfigResponse = { project_id: string, jira_base_url: string, auth_mode: JiraAuthMode, jira_email: string | null, has_credential: boolean, jql: string, enabled: boolean, sync_interval_seconds: number, status_mapping: JiraStatusMapping, sync_requested_at: string | null, last_sync_started_at: string | null, last_sync_completed_at: string | null, last_sync_error: string | null, link_counts: JiraLinkCounts, };
+
+export type UpsertJiraSyncConfigRequest = { jira_base_url: string, auth_mode: JiraAuthMode, jira_email: string | null, 
+/**
+ * Write-only. `None` on update keeps the stored credential; required on
+ * first create.
+ */
+credential: string | null, jql: string, enabled: boolean, sync_interval_seconds: number, status_mapping: JiraStatusMapping, };
+
+export type JiraTestConnectionRequest = { jira_base_url: string, auth_mode: JiraAuthMode, jira_email: string | null, 
+/**
+ * Falls back to the stored credential when `None`.
+ */
+credential: string | null, jql: string, };
+
+export type JiraTestConnectionResponse = { ok: boolean, 
+/**
+ * `None` when the deployment can't provide a count (e.g. Cloud without
+ * the approximate-count endpoint).
+ */
+match_count: bigint | null, 
+/**
+ * Distinct Jira status names seen on the first page; seeds the mapping UI.
+ */
+jira_statuses: Array<string>, error: string | null, };
+
+export type JiraSyncNowResponse = { requested_at: string, };
+
 // Shape definition interface
 export interface ShapeDefinition<T> {
   readonly table: string;
@@ -250,6 +290,13 @@ export const PROJECT_ISSUES_SHAPE = defineShape<Issue>(
   ['project_id'] as const,
   '/v1/shape/project/{project_id}/issues',
   '/v1/fallback/issues'
+);
+
+export const PROJECT_JIRA_LINKS_SHAPE = defineShape<JiraIssueLink>(
+  'jira_issue_links',
+  ['project_id'] as const,
+  '/v1/shape/project/{project_id}/jira_links',
+  '/v1/fallback/jira_links'
 );
 
 export const USER_WORKSPACES_SHAPE = defineShape<Workspace>(
