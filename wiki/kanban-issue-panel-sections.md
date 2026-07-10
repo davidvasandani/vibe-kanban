@@ -13,10 +13,14 @@ edit reorders both frontends.
 ## Layout (top to bottom, inside the scrollable content)
 
 Property row → tags row → Workspaces box (edit mode) → title →
-description → create-mode blocks (pipeline, draft-workspace toggle, create
-button) → SpecKit → Relationships → Sub-issues → Comments. Edit-mode
-sections are gated `!isCreateMode && issueId && renderXxxSection` — keep the
-whole guard when moving a block.
+description → Pipeline card (both modes) → create-mode blocks
+(draft-workspace toggle, create button) → SpecKit → Relationships →
+Sub-issues → Comments. Edit-mode sections are gated
+`!isCreateMode && issueId && renderXxxSection` — keep the whole guard when
+moving a block. Exception: `renderPipeline` renders ungated in both modes;
+the *container* branches per mode (create: stash-until-submit; edit: seeded
+card + "Update Issue" apply button — see
+[task-pipeline-block.md](task-pipeline-block.md)) and may return null.
 
 ## Border convention (one separator per boundary)
 
@@ -54,3 +58,4 @@ whole guard when moving a block.
 
 ## Contributed by
 - vk/b37f-move-issue-works
+- vk/77eb-vk-pipeline
