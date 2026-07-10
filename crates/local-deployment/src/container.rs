@@ -978,6 +978,13 @@ impl LocalContainerService {
         let child_store = self.child_store.clone();
         tokio::spawn(async move {
             loop {
+                // The exit monitor dropping its receiver means no one is
+                // listening anymore — e.g. after a clean warm turn the child
+                // is deliberately left alive. Stop polling instead of spinning
+                // against a long-lived warm process.
+                if tx.is_closed() {
+                    break;
+                }
                 let child_lock = {
                     let map = child_store.read().await;
                     map.get(&exec_id).cloned()
