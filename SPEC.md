@@ -1,105 +1,99 @@
-# Spec: iPad Windowed Layout — Top Nav Cut Off
+# Technical Spec: Bidirectional Jira ↔ VK Project Sync
+
+> Task d2aa. Full SpecKit artifacts live in
+> `homelab/specs/vk/d2aa-sync-vk-and-jira/` (`spec.md`, `plan.md`,
+> `research.md`, `data-model.md`, `contracts/`, `tasks.md`). This file is the
+> repo-root technical summary.
 
 ## Problem
 
-When the Vibe Kanban web app is viewed on an iPad in a **windowed / Stage
-Manager layout** (or any environment that exposes a non-zero top safe-area
-inset), the top navigation bar is clipped by the device status bar. Its
-content (title, tabs, action icons) renders underneath the status bar and is
-partially or fully cut off.
+Work is planned in Jira but executed on VK project boards; moving items
+between the two is manual copy-paste in both directions, and the two views
+silently drift.
 
-## Root cause
+## Solution
 
-`packages/local-web/index.html` declares:
+Connect one VK project to one Jira instance via a JQL query, configured in
+the VK Project Settings dialog. Jira issues matching the query appear as
+board issues; changes to the synced fields (title, description, status) flow
+both ways through a periodic server-side reconciler with visible status and
+per-issue error reporting. Sync never deletes VK issues; disconnecting keeps
+the board intact.
 
-```html
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-```
+## Where it lives
 
-`viewport-fit=cover` instructs the browser to lay the page out edge-to-edge,
-extending **under** the device safe areas (status bar, home indicator, rounded
-corners). To keep content clear of those areas an app must add padding using
-the CSS `env(safe-area-inset-*)` values.
+The board in this fork is the **remote** stack (`crates/remote`: Axum +
+Postgres + ElectricSQL), so the whole feature is implemented there plus the
+shared frontend (`packages/web-core`, `packages/ui`).
 
-The app currently only compensates for the **bottom** inset:
+### Backend (`crates/remote`)
 
-- `packages/web-core/src/shared/components/ui-new/containers/SharedAppLayout.tsx`
-  → mobile container uses `pb-[env(safe-area-inset-bottom)]`.
-- `packages/remote-web/src/app/layout/RemoteAppShell.tsx` → same.
-- `packages/ui/src/components/MobileDrawer.tsx` → same.
+- **Schema** — `migrations/20260709000000_jira_sync.sql`:
+  `project_jira_configs` (one per project; AES-256-GCM-encrypted credential
+  via the existing `JwtService`; JQL; enabled flag; interval; JSONB status
+  mapping; sync-state stamps; `created_by_user_id` for attributing created
+  issues) and `jira_issue_links` (one per synced Jira issue, keyed by Jira's
+  immutable internal id — `UNIQUE(project_id, jira_issue_id)` makes import
+  idempotent; `link_state` active/dormant/deleted_remote; last-synced
+  snapshot columns; per-link `last_error`). Links are electrified for live
+  board badges.
+- **Jira client** — `src/jira/client.rs`: API v2 string semantics (no ADF).
+  Cloud (`cloud_basic`, email+token Basic auth) searches via
+  `/rest/api/2/search/jql` (`nextPageToken`); Server/DC (`server_pat`,
+  Bearer) via classic `/rest/api/2/search`. Field updates via issue PUT,
+  status changes via the transitions API, existence checks via issue GET
+  (404 ⇒ deleted). Error strings never contain the credential.
+- **Status mapping** — `src/jira/mapping.rs`: Jira→VK resolves per-status
+  overrides first, then Jira status-*category* defaults (new→"To do",
+  indeterminate→"In progress", done→"Done"); VK→Jira is an explicit table,
+  auto-seeded from observed statuses, never guessed.
+- **3-way merge** — `src/jira/merge.rs`: each synced field is compared per
+  side against the link's last-synced snapshot. Only-Jira-moved ⇒ write VK;
+  only-VK-moved ⇒ write Jira; both ⇒ last-write-wins with Jira winning
+  ties. Snapshots update in the same transaction as the VK write, so the
+  reconciler's own writes never echo. After writing to Jira the issue is
+  re-read so the snapshot records Jira's normalized representation.
+- **Reconciler** — `src/jira/sync.rs`, spawned in `app.rs`: a 30 s global
+  ticker (env `JIRA_SYNC_TICK_SECS`) runs a pass for every *due* config
+  (interval elapsed, never synced, or level-triggered "sync now" flag).
+  Per-issue failures are recorded on the link and aggregated into
+  `last_sync_error` without aborting the pass. Scope-out handling: issues
+  that leave the JQL become `dormant` (resume on the same VK issue if they
+  return); Jira-deleted issues become `deleted_remote`. Sync-created issues
+  carry their Jira identity in `extension_metadata`, closing the
+  crash-between-create-and-link duplication window.
+- **API** — `src/routes/jira_sync.rs` under `/v1` (session +
+  project-membership gated): GET/PUT/DELETE
+  `/projects/{id}/jira-sync`, POST `…/test`, POST `…/sync-now`. The
+  credential is write-only: `has_credential` in responses, `credential:
+  null` on update keeps the stored one.
 
-Nothing accounts for `env(safe-area-inset-top)`. On devices/layouts where that
-inset is `0` (typical desktop, non-windowed) there is no visible problem, which
-is why it went unnoticed. On iPad windowed mode the inset is non-zero and the
-top nav is cut off.
+### Frontend (`packages/web-core`, `packages/ui`)
 
-## Goal
+- `JiraSyncSettingsSection` registered as a `jira-sync` section in the
+  settings dialog: connection form (URL, auth mode, masked credential, JQL,
+  interval, enable toggle), test-connection with match count, editable
+  status-mapping tables, sync status (last run / running / error / link
+  counts), sync-now and disconnect actions.
+- `jiraSyncApi` + `useJiraSync` React Query hook.
+- Board cards show a Jira key badge (`JiraBadge`) linking to the issue,
+  dimmed when the link is dormant/deleted, fed by the
+  `PROJECT_JIRA_LINKS_SHAPE` Electric shape through `ProjectProvider`.
 
-The top navigation bar must always render fully below the top safe-area inset,
-regardless of platform, while remaining visually unchanged on displays where
-the inset is `0`.
+## Verification
 
-## Approach
+Unit tests cover the mapping/merge decision tables and client parsing. A
+live E2E run (remote server + temp Postgres + mock Jira, single-user mode,
+1 s tick) verified: import with mapped statuses, idempotent re-sync,
+VK→Jira single-field PUT, echo-free follow-up passes, Jira→VK edits,
+dormant/deleted_remote transitions, dormant reactivation without
+duplicates, credential redaction, delete-config-keeps-issues, and
+test-connection success/failure paths.
 
-Apply top safe-area padding to the shared `Navbar` component
-(`packages/ui/src/components/Navbar.tsx`) — the element that is flush with the
-top of the viewport in every layout that renders it (local desktop, local
-mobile; the remote shell renders the same component through
-`RemoteNavbarContainer`).
+## Known v1 limits (by design)
 
-Padding the navbar itself (rather than the outer app container) is preferred
-because:
-
-- The navbar background (`bg-secondary`) then fills the status-bar area,
-  matching the standard iOS convention where the status bar blends with the
-  navigation bar. Padding the outer `bg-primary` container instead would leave
-  a mismatched primary-colored strip above the navbar.
-- It is the smallest, most localized change and touches the single element that
-  is actually being clipped.
-- In the local desktop grid the navbar shares its row with a `bg-secondary`
-  corner spacer that stretches to the row height, so the whole top strip renders
-  `bg-secondary` seamlessly.
-
-### Why an inline `style` (not a Tailwind arbitrary class)
-
-The existing bottom-inset padding uses Tailwind arbitrary values
-(`pb-[env(safe-area-inset-bottom)]`), but those live in the **app shells**,
-which each app's Tailwind config scans. The `Navbar` lives in
-`packages/ui/src`, which the `remote-web` Tailwind config does **not** scan (and
-it does not define the `spacing.half` token). A new arbitrary utility added in
-`ui/src` would therefore not be generated for the remote build and, if it
-referenced `theme(spacing.half)`, could error. A plain inline `style` with a
-`calc(...)` value is evaluated natively by the browser, needs no class
-generation, resolves identically in both apps, and matches inline-style usage
-already present in the codebase (e.g. `style={{ minWidth: 56 }}` in
-`SharedAppLayout`).
-
-### Behavior contract
-
-- **Desktop navbar** (`px-base py-half`): top padding becomes
-  `calc(0.25rem + env(safe-area-inset-top))` where `0.25rem` is the existing
-  `py-half` value. The bottom padding stays `py-half`. When the inset is `0`
-  the top padding equals `0.25rem` — identical to today.
-- **Mobile navbar** (no vertical padding on the `<nav>` itself; inner rows own
-  their spacing): top padding becomes `env(safe-area-inset-top)`. When the inset
-  is `0` this is `0` — identical to today.
-
-In both cases the navbar's `bg-secondary` extends up into the status-bar area.
-
-## Out of scope
-
-- Left/right safe-area insets (iPads have no side notch; Stage Manager windows
-  are inset from screen edges by the OS).
-- The `CloudShutdownExportBanner` (disabled by default in this fork) — the
-  navbar is the topmost element in the default configuration.
-- Any change to `viewport-fit` or the existing bottom-inset handling.
-
-## Acceptance criteria
-
-1. On a layout with a non-zero top safe-area inset (iPad windowed), the full top
-   nav is visible below the status bar; the status-bar area shows the navbar's
-   `bg-secondary` color.
-2. On displays where the top inset is `0`, the navbar is pixel-identical to
-   before (top padding unchanged).
-3. Applies to both the desktop and mobile navbar variants.
-4. `pnpm run check` and `pnpm run lint` pass.
+- Synced fields are exactly title/description/status; VK-born issues are
+  not pushed to Jira; one Jira connection per project.
+- Conflict LWW uses issue-level `updated_at` on the VK side.
+- Formatting fidelity between Jira wiki markup and VK markdown is
+  best-effort (string pass-through).

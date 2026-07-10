@@ -1,71 +1,80 @@
-# Implementation Plan: iPad Windowed Layout — Top Nav Cut Off
+# Implementation Plan: Bidirectional Jira ↔ VK Sync (task vk/d2aa-sync-vk-and-jira)
 
-Single-file change plus verification. See `SPEC.md` for rationale.
+Step-by-step build order. The authoritative dependency-ordered task list is
+`homelab/specs/vk/d2aa-sync-vk-and-jira/tasks.md` (T001–T017); this is the
+executable narrative. Rationale in `SPEC.md`; prior-art recall in
+`PRIOR_KNOWLEDGE.md`.
 
-## Step 1 — Add top safe-area padding to the shared Navbar
+## Step 1 — Schema (T001)
 
-File: `packages/ui/src/components/Navbar.tsx`
+`crates/remote/migrations/20260709000000_jira_sync.sql`: create
+`project_jira_configs` (unique per project, encrypted credential, JQL,
+interval, JSONB status mapping, sync stamps, `created_by_user_id`) and
+`jira_issue_links` (unique per `(project_id, jira_issue_id)` and per
+`issue_id`; link_state; last-synced snapshot columns; `last_error`);
+`set_updated_at` triggers; electrify `jira_issue_links`.
 
-### 1a. Mobile navbar variant
+## Step 2 — Jira domain module (T002, T004–T006)
 
-The mobile `<nav>` (`mobileMode` branch) currently has no vertical padding on
-the element itself (its rows carry `px-base py-half`). Add an inline style that
-pads the top by the safe-area inset so the navbar's `bg-secondary` fills the
-status-bar area:
+- `crates/remote/src/jira/types.rs` — auth-mode/config/link/request/response
+  types (`ts_rs::TS` derives).
+- `crates/remote/src/jira/client.rs` — reqwest client over the shared
+  `AppState.http_client`; Cloud `/rest/api/2/search/jql` vs Server
+  `/rest/api/2/search` pagination; issue GET/PUT; transitions; myself;
+  approximate-count; credential-free error mapping. Unit tests for datetime
+  and error-body parsing.
+- `crates/remote/src/jira/mapping.rs` — override → category-default
+  resolution, explicit reverse table, seeding. Unit-tested.
+- `crates/remote/src/jira/merge.rs` — per-field 3-way decision
+  (`NoOp`/`WriteVk`/`WriteJira`, LWW conflict, Jira wins ties). Unit-tested.
 
-```tsx
-<nav
-  className={cn('flex flex-col bg-secondary border-b shrink-0', className)}
-  style={{ paddingTop: 'env(safe-area-inset-top)' }}
->
-```
+## Step 3 — DB repository (T003)
 
-When the inset is `0`, `padding-top: 0` — no visual change.
+`crates/remote/src/db/jira_sync.rs` — config CRUD (upsert keeps stored
+credential via `COALESCE`), due-config scan (level-triggered: interval
+elapsed OR `sync_requested_at` newer than last start), pass stamps, link
+CRUD + snapshot update + counts, orphan-issue lookup by
+`extension_metadata #>> '{jira,issue_id}'`, `next_sort_order`.
 
-### 1b. Desktop navbar variant
+## Step 4 — Reconciler (T007–T008)
 
-The desktop `<nav>` uses `px-base py-half`. Keep `py-half` (so the bottom
-padding is unchanged) and override the top padding via inline style to add the
-inset on top of the existing `0.25rem` (`py-half`) value:
+`crates/remote/src/jira/sync.rs` — 30 s ticker (`JIRA_SYNC_TICK_SECS`); per
+config: search → seed mapping → per-issue import/3-way sync (VK writes +
+snapshot in one transaction; Jira re-read after outbound writes) →
+scope-out detection (dormant/deleted_remote) → aggregate stamps/errors.
+Spawned from `crates/remote/src/app.rs` beside `spawn_cleanup_task`.
 
-```tsx
-<nav
-  data-tauri-drag-region
-  className={cn(
-    'flex items-center justify-between px-base py-half bg-secondary border-b shrink-0',
-    className
-  )}
-  style={{ paddingTop: 'calc(0.25rem + env(safe-area-inset-top))' }}
->
-```
+## Step 5 — API + shape (T009–T011)
 
-Inline styles win over the Tailwind class, so only `padding-top` is overridden;
-`padding-bottom` stays `py-half`. When the inset is `0`, top padding resolves to
-`0.25rem` — identical to `py-half` today.
+- `crates/remote/src/routes/jira_sync.rs`: GET/PUT/DELETE
+  `/v1/projects/{id}/jira-sync`, POST `…/test`, POST `…/sync-now`; all
+  `ensure_project_access`-gated; credential write-only. Merged in
+  `routes/mod.rs` `v1_protected`.
+- `PROJECT_JIRA_LINKS_SHAPE` in `shapes.rs` + fallback route/handler in
+  `shape_routes.rs` (required by the hybrid-sync contract — see
+  PRIOR_KNOWLEDGE.md).
+- Register types in `src/bin/generate_types.rs`; run
+  `pnpm run remote:generate-types` and `pnpm run remote:prepare-db`
+  (note: environment lacks a standalone `sqlx` binary — shim it to
+  `cargo sqlx` for `scripts/prepare-db.sh`).
 
-A short comment on each `style` explains that `0.25rem` mirrors `py-half` and
-that the inset keeps the nav clear of the status bar in windowed/notched
-layouts.
+## Step 6 — Frontend (T012–T014)
 
-## Step 2 — Verify
+- `jiraSyncApi` in `packages/web-core/src/shared/lib/api.ts`
+  (`makeRemoteRequest`), hook `useJiraSync.ts`.
+- `JiraSyncSettingsSection.tsx` + `jira-sync` registration in
+  `settingsRegistry.tsx` (org/project picker, connection form with masked
+  credential, test-connection, mapping editors, status block,
+  sync-now/disconnect).
+- Badge: subscribe the shape in `ProjectProvider.tsx`
+  (+ `getJiraLinkForIssue` in `useProjectContext.ts`), new
+  `packages/ui/src/components/JiraBadge.tsx`, `jiraLink` prop on
+  `KanbanCardContent.tsx`, wired in `KanbanContainer.tsx`.
 
-1. `pnpm run check` — frontend typecheck (and backend, unaffected).
-2. `pnpm run lint` — ESLint (no inline-style rule violations expected;
-   inline styles are already used in the codebase).
-3. `pnpm run format` — Prettier for web packages.
-4. Manual/visual reasoning: with the inset `0` the navbar is unchanged; with a
-   non-zero inset the navbar content shifts down by the inset and the
-   `bg-secondary` fills the gap. In the desktop grid the sibling corner spacer
-   (also `bg-secondary`, stretched to row height) covers the left portion of the
-   strip so there is no color seam.
+## Step 7 — Gates + verification (T015–T017)
 
-## Step 3 — Independent Codex review
-
-Run the `codex-review` skill / Codex CLI against the diff, iterate on any
-confirmed findings, and re-verify before marking the task ready.
-
-## Risk / rollback
-
-- Single, additive change confined to one component's two root `<nav>` elements.
-- Zero behavioral change on displays without a top inset (the common case).
-- Rollback = remove the two `style` props.
+All typechecks/lints/tests/format + generated-artifact checks, then a live
+E2E: temp Postgres (initdb) + mock Jira (python) + `remote` binary in
+single-user mode with 1 s tick, driving the acceptance criteria end-to-end
+(import, idempotency, both sync directions, echo-freedom, dormancy,
+deletion semantics, credential redaction, auth gating).
