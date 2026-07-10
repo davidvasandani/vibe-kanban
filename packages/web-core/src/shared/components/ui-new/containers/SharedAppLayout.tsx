@@ -17,11 +17,13 @@ import { isTauriMac } from '@/shared/lib/platform';
 
 import { NavbarContainer } from './NavbarContainer';
 import { AppBar, type AppBarHostStatus } from '@vibe/ui/components/AppBar';
+import { AppBarOrgTile } from '@vibe/ui/components/AppBarOrgTile';
 import { MobileDrawer } from '@vibe/ui/components/MobileDrawer';
 import { OrgSwitcher } from '@vibe/ui/components/OrgSwitcher';
 import { AppBarUserPopoverContainer } from './AppBarUserPopoverContainer';
 import { useUserOrganizations } from '@/shared/hooks/useUserOrganizations';
 import { useOrganizationStore } from '@/shared/stores/useOrganizationStore';
+import { useOrgRailStore } from '@/shared/stores/useOrgRailStore';
 import { useAuth } from '@/shared/hooks/auth/useAuth';
 import { useDiscordOnlineCount } from '@/shared/hooks/useDiscordOnlineCount';
 import { useGitHubStars } from '@/shared/hooks/useGitHubStars';
@@ -107,6 +109,8 @@ export function SharedAppLayout() {
 
   const selectedOrgId = useOrganizationStore((s) => s.selectedOrgId);
   const setSelectedOrgId = useOrganizationStore((s) => s.setSelectedOrgId);
+  const isOrgRailExpanded = useOrgRailStore((s) => s.expanded);
+  const toggleOrgRailExpanded = useOrgRailStore((s) => s.toggleExpanded);
   const prevOrgIdRef = useRef<string | null>(null);
 
   // Auto-select first org if none selected or selection is invalid
@@ -356,6 +360,17 @@ export function SharedAppLayout() {
               onSignIn={handleSignIn}
               onHoverStart={() => setIsAppBarHovered(true)}
               onHoverEnd={() => setIsAppBarHovered(false)}
+              orgSlot={
+                isSignedIn ? (
+                  <AppBarOrgTile
+                    organizations={organizations}
+                    selectedOrgId={selectedOrgId}
+                    onSelect={setSelectedOrgId}
+                    expanded={isOrgRailExpanded}
+                    onToggleExpanded={toggleOrgRailExpanded}
+                  />
+                ) : undefined
+              }
               notificationBell={
                 isSignedIn ? <AppBarNotificationBellContainer /> : undefined
               }
