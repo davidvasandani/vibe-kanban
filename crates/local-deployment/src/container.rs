@@ -612,6 +612,7 @@ impl LocalContainerService {
         &self,
         exec_id: &Uuid,
         exit_signal: Option<ExecutorExitSignal>,
+        keep_warm: bool,
     ) -> JoinHandle<()> {
         let exec_id = *exec_id;
         let child_store = self.child_store.clone();
@@ -629,6 +630,10 @@ impl LocalContainerService {
                 .unwrap_or_else(|| std::future::pending().boxed()); // no signal, stall forever
 
             let status_result: std::io::Result<std::process::ExitStatus>;
+            // True when a persistent app-server finished a turn cleanly and is
+            // being left alive for reuse; also guards the tail cleanup below so
+            // the warm child is not killed or dropped after finalization.
+            let mut kept_warm = false;
 
             // Wait for process to exit, or exit signal from executor
             tokio::select! {
@@ -636,8 +641,21 @@ impl LocalContainerService {
                 // Some coding agent processes do not automatically exit after processing the user request; instead the executor
                 // signals when processing has finished to gracefully kill the process.
                 exit_result = &mut exit_signal_future => {
-                    // Executor signaled completion: kill group and use the provided result
-                    if let Some(child_lock) = child_store.read().await.get(&exec_id).cloned() {
+                    // Executor signaled turn completion. Persistent app-servers
+                    // (keep_warm) that finish a turn *cleanly* are left running so
+                    // the next turn reuses the warm process — a turn is a protocol
+                    // event, not a process lifetime. Any non-success result, or a
+                    // turn that was explicitly stopped, falls through to the normal
+                    // process-group kill so nothing lingers.
+                    let is_success = matches!(exit_result, Ok(ExecutorExitResult::Success));
+                    let was_stopped = ExecutionProcess::was_stopped(&db.pool, exec_id).await;
+                    kept_warm = should_keep_warm(keep_warm, is_success, was_stopped);
+                    if kept_warm {
+                        tracing::info!(
+                            "Keeping app-server warm across turn for execution {}",
+                            exec_id
+                        );
+                    } else if let Some(child_lock) = child_store.read().await.get(&exec_id).cloned() {
                         let mut child = child_lock.write().await ;
                         if let Err(err) = command::kill_process_group(&mut child).await {
                             tracing::error!("Failed to kill process group after exit signal: {} {}", exec_id, err);
@@ -939,11 +957,16 @@ impl LocalContainerService {
             // SIGKILL any orphaned children (e.g. MCP servers) still in the
             // process group. The executor itself is already done — either it
             // exited naturally or was killed in the exit-signal branch above.
-            if let Some(child_lock) = child_store.read().await.get(&exec_id).cloned() {
-                let mut child = child_lock.write().await;
-                let _ = child.start_kill();
+            // A warm app-server is exempt: it stays alive (and in the child
+            // store, so it remains reachable by the stop/teardown paths) for
+            // reuse by the next turn.
+            if !kept_warm {
+                if let Some(child_lock) = child_store.read().await.get(&exec_id).cloned() {
+                    let mut child = child_lock.write().await;
+                    let _ = child.start_kill();
+                }
+                child_store.write().await.remove(&exec_id);
             }
-            child_store.write().await.remove(&exec_id);
         })
     }
 
@@ -1398,6 +1421,16 @@ fn is_reserved_env_name(name: &str) -> bool {
         || RESERVED_ENV_NAMES.contains(&name)
 }
 
+/// Decide whether a persistent app-server should be left running ("warm") when
+/// its executor signals turn completion, instead of having its process group
+/// killed. A turn is a protocol event, not a process lifetime — but only a
+/// *clean* turn end keeps the process: any failure result, a non-warm executor,
+/// or a turn that was explicitly stopped is reaped as usual. Kept pure so the
+/// decision matrix is unit-testable without a container or database.
+fn should_keep_warm(keep_warm: bool, is_success: bool, was_stopped: bool) -> bool {
+    keep_warm && is_success && !was_stopped
+}
+
 fn failure_exit_status() -> std::process::ExitStatus {
     #[cfg(unix)]
     {
@@ -1695,6 +1728,11 @@ impl ContainerService for LocalContainerService {
             ))
         })??;
 
+        // Persistent app-servers ask to be kept warm across turns: on a clean
+        // turn-completion signal the exit monitor ends the turn without killing
+        // the process group. Captured before `spawned` is consumed below.
+        let keep_warm = spawned.keep_warm;
+
         // Record the process group id (== leader pid for grouped spawns) so a
         // later boot can clean up the group if this server dies uncleanly.
         if let Some(pid) = spawned.child.id()
@@ -1726,7 +1764,7 @@ impl ContainerService for LocalContainerService {
         }
 
         // Spawn unified exit monitor: watches OS exit and optional executor signal
-        let hn = self.spawn_exit_monitor(&execution_process.id, spawned.exit_signal);
+        let hn = self.spawn_exit_monitor(&execution_process.id, spawned.exit_signal, keep_warm);
         self.add_exit_monitor_handle(execution_process.id, hn).await;
 
         Ok(())
@@ -2073,5 +2111,39 @@ fn success_exit_status() -> std::process::ExitStatus {
     {
         use std::os::windows::process::ExitStatusExt;
         ExitStatusExt::from_raw(0)
+    }
+}
+
+#[cfg(test)]
+mod warm_tests {
+    use super::should_keep_warm;
+
+    // The exit-monitor keeps a persistent app-server warm only on a clean turn
+    // end: warm executor + success + not explicitly stopped. Every other cell of
+    // the matrix must fall through to the process-group kill (returns false).
+    #[test]
+    fn warm_success_not_stopped_is_kept_warm() {
+        assert!(should_keep_warm(true, true, false));
+    }
+
+    #[test]
+    fn warm_failure_is_reaped() {
+        assert!(!should_keep_warm(true, false, false));
+    }
+
+    #[test]
+    fn warm_success_but_stopped_is_reaped() {
+        // An explicit user stop must terminate the process (FR-5), even on a
+        // success-coded signal.
+        assert!(!should_keep_warm(true, true, true));
+    }
+
+    #[test]
+    fn non_warm_executor_is_always_reaped() {
+        // One-shot CLI executors (keep_warm = false) are unaffected (FR-3):
+        // never kept warm regardless of success/stopped.
+        assert!(!should_keep_warm(false, true, false));
+        assert!(!should_keep_warm(false, false, false));
+        assert!(!should_keep_warm(false, true, true));
     }
 }
