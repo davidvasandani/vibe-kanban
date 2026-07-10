@@ -228,6 +228,11 @@ async fn upsert_config(
     .map_err(|error| {
         tracing::error!(?error, "failed to save jira sync config");
         internal("failed to save Jira sync config")
+    })?
+    // The upsert itself skips the write when credential: null races a
+    // concurrent destination change (see JiraSyncRepository::upsert_config).
+    .ok_or_else(|| {
+        bad_request("re-enter the credential when changing the Jira URL or auth mode")
     })?;
 
     Ok(Json(build_response(&state, config).await?))

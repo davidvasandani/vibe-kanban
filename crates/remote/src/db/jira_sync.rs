@@ -76,10 +76,17 @@ impl JiraSyncRepository {
         Ok(record)
     }
 
+    /// Create or update the config. Keeping the stored credential
+    /// (`encrypted_credential: None`) is only permitted when the destination
+    /// (base URL + auth mode) is unchanged — enforced here, in the same
+    /// statement as the write, because a route-level pre-check alone races
+    /// with concurrent saves (check on row X, write after another request
+    /// stored a new secret). A skipped conflict-update returns `None`;
+    /// callers surface that as "re-enter the credential".
     pub async fn upsert_config(
         pool: &PgPool,
         args: UpsertJiraSyncConfigArgs,
-    ) -> Result<JiraSyncConfig, JiraSyncDbError> {
+    ) -> Result<Option<JiraSyncConfig>, JiraSyncDbError> {
         let record = sqlx::query_as!(
             JiraSyncConfig,
             r#"
@@ -98,6 +105,11 @@ impl JiraSyncRepository {
                 enabled = EXCLUDED.enabled,
                 sync_interval_seconds = EXCLUDED.sync_interval_seconds,
                 status_mapping = EXCLUDED.status_mapping
+            WHERE $5 IS NOT NULL
+               OR (
+                    LOWER(project_jira_configs.jira_base_url) = LOWER(EXCLUDED.jira_base_url)
+                    AND project_jira_configs.auth_mode = EXCLUDED.auth_mode
+                  )
             RETURNING
                 id                      AS "id!: Uuid",
                 project_id              AS "project_id!: Uuid",
@@ -128,7 +140,7 @@ impl JiraSyncRepository {
             args.status_mapping,
             args.created_by_user_id
         )
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await?;
         Ok(record)
     }
