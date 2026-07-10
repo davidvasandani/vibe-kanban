@@ -280,12 +280,14 @@ export function composePipelineBlock(
 }
 
 /**
- * Matches a `## Pipeline` heading at a line start, for the legacy fallback:
- * blocks composed before the delimiters existed (or hand-edited past them)
- * are treated as running from the heading through end-of-text, exactly as
- * `parsePipelineStages` already assumes.
+ * Matches exactly the heading forms the composer emits (`## Pipeline` or
+ * `## Pipeline: <names>`) at a line start, for the legacy fallback: blocks
+ * composed before the delimiters existed (or hand-edited past them) are
+ * treated as running from the heading through end-of-text. Deliberately
+ * strict — a prose heading like `## Pipeline risks` must NOT match, since
+ * `stripPipelineBlock` deletes from the match onward.
  */
-const HEADING_LINE_RE = /^## Pipeline\b/m;
+const HEADING_LINE_RE = /^## Pipeline(?::.*)?$/m;
 
 /**
  * Strip any previously-appended pipeline block from a description, returning the
@@ -362,19 +364,17 @@ const NAMED_HEADING_RE = /^## Pipeline:\s*(.+)$/;
  */
 function segmentHeadingNames(
   joined: string,
-  idByName: ReadonlyMap<string, string>
+  knownNames: readonly string[]
 ): string[] {
-  const namesLongestFirst = [...idByName.keys()].sort(
-    (a, b) => b.length - a.length
-  );
-  const ids: string[] = [];
+  const namesLongestFirst = [...knownNames].sort((a, b) => b.length - a.length);
+  const found: string[] = [];
   let rest = joined.trim();
   while (rest.length > 0) {
     const matched = namesLongestFirst.find(
       (n) => rest === n || rest.startsWith(`${n} + `)
     );
     if (matched) {
-      ids.push(idByName.get(matched)!);
+      found.push(matched);
       rest = rest === matched ? '' : rest.slice(matched.length + 3);
       continue;
     }
@@ -382,7 +382,7 @@ function segmentHeadingNames(
     if (sep === -1) break;
     rest = rest.slice(sep + 3);
   }
-  return ids;
+  return found;
 }
 
 /**
@@ -407,10 +407,15 @@ export function parsePipelineSelection(
   const inner = extractPipelineBlockText(block ?? '');
   if (!inner) return { pipelineIds, enabledIds };
 
-  const idByName = new Map<string, string>();
+  // Display names aren't unique across pipeline files, so keep every id per
+  // name (in catalog order): repeated occurrences of a duplicated name in
+  // the heading then map to successive same-named pipelines.
+  const idsByName = new Map<string, string[]>();
   const stageIdByFragment = new Map<string, string>();
   for (const p of pipelines) {
-    if (!idByName.has(p.name)) idByName.set(p.name, p.id);
+    const ids = idsByName.get(p.name);
+    if (ids) ids.push(p.id);
+    else idsByName.set(p.name, [p.id]);
     for (const s of p.stages) {
       if (!stageIdByFragment.has(s.prompt_fragment)) {
         stageIdByFragment.set(s.prompt_fragment, s.id);
@@ -422,8 +427,15 @@ export function parsePipelineSelection(
     const line = rawLine.replace(/\s+$/, '');
     const heading = line.match(NAMED_HEADING_RE);
     if (heading) {
-      for (const id of segmentHeadingNames(heading[1], idByName)) {
-        if (!pipelineIds.includes(id)) pipelineIds.push(id);
+      const occurrences = new Map<string, number>();
+      for (const name of segmentHeadingNames(heading[1], [
+        ...idsByName.keys(),
+      ])) {
+        const seen = occurrences.get(name) ?? 0;
+        occurrences.set(name, seen + 1);
+        const ids = idsByName.get(name) ?? [];
+        const id = ids[Math.min(seen, ids.length - 1)];
+        if (id && !pipelineIds.includes(id)) pipelineIds.push(id);
       }
       continue;
     }

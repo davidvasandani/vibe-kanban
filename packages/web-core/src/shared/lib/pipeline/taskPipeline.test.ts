@@ -554,8 +554,22 @@ describe('extractPipelineBlock', () => {
     expect(extractPipelineBlock(legacy)).toBe(
       '## Pipeline\n\n1. Write a spec.'
     );
+    const legacyNamed = 'Task prose.\n\n## Pipeline: Basic\n\n1. Write a spec.';
+    expect(extractPipelineBlock(legacyNamed)).toBe(
+      '## Pipeline: Basic\n\n1. Write a spec.'
+    );
     // Not fooled by "## Pipeline" mentioned mid-line.
     expect(extractPipelineBlock('See the ## Pipeline heading.')).toBe('');
+  });
+
+  it('does not treat a prose heading like "## Pipeline risks" as a legacy block', () => {
+    const prose = 'Summary\n\n## Pipeline risks\nDo not delete this section.';
+    expect(extractPipelineBlock(prose)).toBe('');
+    // The strip path (via append) must not delete the prose section either.
+    const block = composePipelineBlock(pipeline, ['spec'], '', null);
+    const appended = appendPipelineToDescription(prose, block);
+    expect(appended).toContain('## Pipeline risks');
+    expect(appended).toContain('Do not delete this section.');
   });
 
   it('appendPipelineToDescription replaces a legacy undelimited block instead of stacking', () => {
@@ -737,6 +751,43 @@ describe('parsePipelineSelection', () => {
         withPlus
       ).pipelineIds
     ).toEqual(['basic', 'spec-review']);
+  });
+
+  it('maps repeated occurrences of a duplicated name to successive pipelines', () => {
+    const releaseA: Pipeline = {
+      id: 'release-a',
+      name: 'Release',
+      description: '',
+      stages: [
+        {
+          id: 'spec',
+          label: 'Create spec',
+          prompt_fragment: 'Write a spec.',
+          default_enabled: true,
+          heavy: false,
+        },
+      ],
+    };
+    const releaseB: Pipeline = {
+      id: 'release-b',
+      name: 'Release',
+      description: '',
+      stages: [
+        {
+          id: 'ship',
+          label: 'Ship it',
+          prompt_fragment: 'Ship it.',
+          default_enabled: true,
+          heavy: false,
+        },
+      ],
+    };
+    const parsed = parsePipelineSelection(
+      `${PIPELINE_START}\n## Pipeline: Release + Release\n\n1. Write a spec.\n2. Ship it.\n${PIPELINE_END}`,
+      [releaseA, releaseB]
+    );
+    expect(parsed.pipelineIds).toEqual(['release-a', 'release-b']);
+    expect(parsed.enabledIds).toEqual(['spec', 'ship']);
   });
 
   it('parses a legacy undelimited block', () => {
