@@ -1,45 +1,40 @@
-# Prior Knowledge — recalled for `vk/d2aa-sync-vk-and-jira`
+# Prior Knowledge — recalled for `vk/b37f-move-issue-works`
 
-Searched both project knowledge bases — `wiki/` (primary, 5 pages) and
-`docs/knowledge-base/` (2 pages) — for pages relevant to this task
-(bidirectional Jira sync: remote-server background service, new Electric
-shape, project-settings UI, external REST client, credential storage).
+Searched the project knowledge base — `wiki/` (7 topic pages + INDEX) — for
+pages relevant to this task (reordering sections inside the kanban issue
+detail panel, `packages/ui` + `packages/web-core`). No page covers the
+`KanbanIssuePanel` section layout directly; two are adjacent enough to
+inform the work.
 
 ## Relevant findings
 
-**[wiki/electric-sync-fallback.md] — directly relevant.** Any new Electric
-shape must participate in the client's hybrid sync: Electric-first with a
-readiness timeout, then a locked REST fallback polling the shape's
-`fallbackUrl` (30 s snapshots). Practical consequence for this task: the new
-`PROJECT_JIRA_LINKS_SHAPE` is not complete without a registered REST fallback
-route + handler in `shape_routes.rs` — otherwise boards running in fallback
-mode (Electric down/unreachable) would silently never show Jira badges.
-Applied: `/v1/fallback/jira_links` handler registered alongside the shape.
+**[wiki/appbar-rail-and-org-tiles.md] — adjacent pattern.** Establishes the
+fork's frontend convention this task follows: presentational components in
+`packages/ui` own layout and receive behavior via render props/slots from
+`packages/web-core` containers; layout changes belong in the `packages/ui`
+component, not the container. Also the source of the "don't render a no-op
+interactive element" gotcha — reinforces keeping the edit-mode
+`!isCreateMode && issueId && renderWorkspacesSection` guard intact when
+moving the block.
 
-**[wiki/self-hosted-deployment.md] — context for rollout.** The remote server
-binary (`remote`) ships via the versioned-release contract
-(`VK_RELEASES_DIR`, atomic `current` flip, one-step rollback). SQLx
-migrations run at server startup (`app.rs` → `db::migrate`), so the
-`jira_sync` migration applies on first boot of the new release; rollback to
-`previous` leaves the two new tables in place unused, which is harmless —
-consistent with "sync never deletes VK issues".
+**[wiki/kanban-items-state-and-activity-grouping.md] — scope boundary.**
+Documents the board-side state machinery (items array ↔ sort_order
+contract, workspace activity signals). Confirms the issue *panel* layout is
+independent of board state — a pure JSX reorder in `KanbanIssuePanel.tsx`
+cannot disturb drag-and-drop or activity grouping, so the change surface
+stays one file.
 
-**[wiki/kanban-items-state-and-activity-grouping.md] — convention echo.**
-Board semantics identify the "In progress" column by *name*, not id. The
-Jira status mapping follows the same convention (name-keyed mapping tables,
-case-insensitive resolution against `project_statuses.name`), so renamed
-columns degrade the same way in both features rather than inventing a second
-identity scheme.
+## Not relevant
 
-**Not relevant:** `wiki/mobile-kanban-scrolling.md` (touch gestures),
-`wiki/project-context-map.md` (issue scoping in monorepos),
-`docs/knowledge-base/claude-log-normalization.md` and
-`collapsing-repeated-log-entries.md` (executor log processing).
+`external-connector-sync.md`, `electric-sync-fallback.md`,
+`self-hosted-deployment.md`, `project-context-map.md`,
+`mobile-kanban-scrolling.md` — backend sync, deployment, scoping, and
+mobile board scrolling; none touch the issue panel's internal section
+order.
 
-## Gaps the knowledge base did not cover
+## Consequence for spec/plan
 
-No prior page covered: remote-server background reconcilers, external
-connector credential storage (found via code precedent:
-`organization_env_vars` + `JwtService::encrypt_string`), or external REST
-client patterns (`github_app/service.rs`). These are candidates for new
-pages when this task distills its knowledge.
+Nothing in the knowledge base constrains or contradicts the planned
+approach (move the render-prop block inside
+`packages/ui/src/components/KanbanIssuePanel.tsx`, adjust the wrapper
+border). Proceed as planned.
