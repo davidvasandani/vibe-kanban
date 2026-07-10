@@ -1,99 +1,56 @@
-# Technical Spec: Bidirectional Jira ↔ VK Project Sync
+# Technical Spec: Move Issue Workspace Box above Title and Description
 
-> Task d2aa. Full SpecKit artifacts live in
-> `homelab/specs/vk/d2aa-sync-vk-and-jira/` (`spec.md`, `plan.md`,
-> `research.md`, `data-model.md`, `contracts/`, `tasks.md`). This file is the
-> repo-root technical summary.
+> Task b37f. Full SpecKit artifacts live in
+> `homelab/specs/vk/b37f-move-issue-works/` (`spec.md`, `plan.md`,
+> `tasks.md`). This file is the repo-root technical summary.
 
 ## Problem
 
-Work is planned in Jira but executed on VK project boards; moving items
-between the two is manual copy-paste in both directions, and the two views
-silently drift.
+In the kanban issue detail panel, the Workspaces box (linked
+workspaces/attempts plus the create/link actions) renders below the issue
+title, description, and the create-mode blocks. Users work workspace-first:
+opening an in-progress issue means scrolling past an often-long description
+to reach the section they act on most.
 
 ## Solution
 
-Connect one VK project to one Jira instance via a JQL query, configured in
-the VK Project Settings dialog. Jira issues matching the query appear as
-board issues; changes to the synced fields (title, description, status) flow
-both ways through a periodic server-side reconciler with visible status and
-per-issue error reporting. Sync never deletes VK issues; disconnecting keeps
-the board intact.
+Move the edit-mode Workspaces section above the title/description block, so
+the panel reads: property row → tags row → **Workspaces box** → title →
+description → SpecKit → Relationships → Sub-issues → Comments. Positional
+change only — same component, same data, same actions.
 
 ## Where it lives
 
-The board in this fork is the **remote** stack (`crates/remote`: Axum +
-Postgres + ElectricSQL), so the whole feature is implemented there plus the
-shared frontend (`packages/web-core`, `packages/ui`).
+Single presentational component shared by local-web and remote-web:
 
-### Backend (`crates/remote`)
+- `packages/ui/src/components/KanbanIssuePanel.tsx` — the edit-mode block
+  `{!isCreateMode && issueId && renderWorkspacesSection && (...)}` moves
+  from after the create-button block to immediately before the
+  "Title and Description" container. The moved wrapper's class changes
+  `border-t` → `border-b`: the tags row above already draws `border-b`, so
+  keeping `border-t` would double the separator; below, the next remaining
+  section (SpecKit/Relationships) still draws its own top border against the
+  description, so no separator is lost.
 
-- **Schema** — `migrations/20260709000000_jira_sync.sql`:
-  `project_jira_configs` (one per project; AES-256-GCM-encrypted credential
-  via the existing `JwtService`; JQL; enabled flag; interval; JSONB status
-  mapping; sync-state stamps; `created_by_user_id` for attributing created
-  issues) and `jira_issue_links` (one per synced Jira issue, keyed by Jira's
-  immutable internal id — `UNIQUE(project_id, jira_issue_id)` makes import
-  idempotent; `link_state` active/dormant/deleted_remote; last-synced
-  snapshot columns; per-link `last_error`). Links are electrified for live
-  board badges.
-- **Jira client** — `src/jira/client.rs`: API v2 string semantics (no ADF).
-  Cloud (`cloud_basic`, email+token Basic auth) searches via
-  `/rest/api/2/search/jql` (`nextPageToken`); Server/DC (`server_pat`,
-  Bearer) via classic `/rest/api/2/search`. Field updates via issue PUT,
-  status changes via the transitions API, existence checks via issue GET
-  (404 ⇒ deleted). Error strings never contain the credential.
-- **Status mapping** — `src/jira/mapping.rs`: Jira→VK resolves per-status
-  overrides first, then Jira status-*category* defaults (new→"To do",
-  indeterminate→"In progress", done→"Done"); VK→Jira is an explicit table,
-  auto-seeded from observed statuses, never guessed.
-- **3-way merge** — `src/jira/merge.rs`: each synced field is compared per
-  side against the link's last-synced snapshot. Only-Jira-moved ⇒ write VK;
-  only-VK-moved ⇒ write Jira; both ⇒ last-write-wins with Jira winning
-  ties. Snapshots update in the same transaction as the VK write, so the
-  reconciler's own writes never echo. After writing to Jira the issue is
-  re-read so the snapshot records Jira's normalized representation.
-- **Reconciler** — `src/jira/sync.rs`, spawned in `app.rs`: a 30 s global
-  ticker (env `JIRA_SYNC_TICK_SECS`) runs a pass for every *due* config
-  (interval elapsed, never synced, or level-triggered "sync now" flag).
-  Per-issue failures are recorded on the link and aggregated into
-  `last_sync_error` without aborting the pass. Scope-out handling: issues
-  that leave the JQL become `dormant` (resume on the same VK issue if they
-  return); Jira-deleted issues become `deleted_remote`. Sync-created issues
-  carry their Jira identity in `extension_metadata`, closing the
-  crash-between-create-and-link duplication window.
-- **API** — `src/routes/jira_sync.rs` under `/v1` (session +
-  project-membership gated): GET/PUT/DELETE
-  `/projects/{id}/jira-sync`, POST `…/test`, POST `…/sync-now`. The
-  credential is write-only: `has_credential` in responses, `credential:
-  null` on update keeps the stored one.
+The container (`packages/web-core/src/pages/kanban/KanbanIssuePanelContainer.tsx`)
+and the section itself (`IssueWorkspacesSectionContainer.tsx`,
+`packages/ui/src/components/IssueWorkspacesSection.tsx`) are untouched —
+the `renderWorkspacesSection` render-prop wiring is unchanged.
 
-### Frontend (`packages/web-core`, `packages/ui`)
+## Behavior invariants
 
-- `JiraSyncSettingsSection` registered as a `jira-sync` section in the
-  settings dialog: connection form (URL, auth mode, masked credential, JQL,
-  interval, enable toggle), test-connection with match count, editable
-  status-mapping tables, sync status (last run / running / error / link
-  counts), sync-now and disconnect actions.
-- `jiraSyncApi` + `useJiraSync` React Query hook.
-- Board cards show a Jira key badge (`JiraBadge`) linking to the issue,
-  dimmed when the link is dormant/deleted, fed by the
-  `PROJECT_JIRA_LINKS_SHAPE` Electric shape through `ProjectProvider`.
+- Create mode is unchanged (the Workspaces box never renders there; the
+  `!isCreateMode` guard is preserved).
+- Workspaces box content/actions unchanged (create, link, open, unlink,
+  archive, delete).
+- All other sections keep their relative order.
 
-## Verification
+## Validation
 
-Unit tests cover the mapping/merge decision tables and client parsing. A
-live E2E run (remote server + temp Postgres + mock Jira, single-user mode,
-1 s tick) verified: import with mapped statuses, idempotent re-sync,
-VK→Jira single-field PUT, echo-free follow-up passes, Jira→VK edits,
-dormant/deleted_remote transitions, dormant reactivation without
-duplicates, credential redaction, delete-config-keeps-issues, and
-test-connection success/failure paths.
-
-## Known v1 limits (by design)
-
-- Synced fields are exactly title/description/status; VK-born issues are
-  not pushed to Jira; one Jira connection per project.
-- Conflict LWW uses issue-level `updated_at` on the VK side.
-- Formatting fidelity between Jira wiki markup and VK markdown is
-  best-effort (string pass-through).
+- `packages/remote-web/src/test/KanbanIssuePanel.test.tsx` — rendered-DOM
+  test asserting the Workspaces section precedes title and description in
+  edit mode (and trailing sections still follow the description), and that
+  the section is absent in create mode. Confirmed to fail against the
+  pre-change layout.
+- Gates: `pnpm run check`, `pnpm run lint`, `cargo test --workspace`,
+  `pnpm run format` — all green.

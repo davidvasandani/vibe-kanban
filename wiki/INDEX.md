@@ -30,6 +30,13 @@ contributed to it.
   error/recovery callback chain to the navbar banner, why the readiness timeout
   must fall back silently ("falling back is recovery, not an error"), and the
   stable-callback / caching / testing gotchas.
+- [kanban-issue-panel-sections.md](kanban-issue-panel-sections.md) — The
+  issue detail/create panel (`KanbanIssuePanel.tsx`): section order is owned
+  by the `packages/ui` component (containers only supply render props), the
+  edit-mode section guard, the one-separator border convention (flip
+  `border-t`/`border-b` when moving a section across the title/description
+  block), and the rendered-DOM order-test recipe incl. the
+  `NODE_ENV=production` act() gotcha.
 - [kanban-items-state-and-activity-grouping.md](kanban-items-state-and-activity-grouping.md)
   — The `items` array ↔ drag-and-drop index/sort_order contract, the
   `isSyncingRef` rebuild-swallowing gotcha, the In progress Active/Waiting

@@ -344,6 +344,11 @@ export function KanbanIssuePanel({
           />
         </div>
 
+        {/* Workspaces Section (Edit mode only) */}
+        {!isCreateMode && issueId && renderWorkspacesSection && (
+          <div className="border-b">{renderWorkspacesSection(issueId)}</div>
+        )}
+
         {/* Title and Description */}
         <div className="rounded-sm">
           {/* Title Input */}
@@ -538,11 +543,6 @@ export function KanbanIssuePanel({
               />
             )}
           </div>
-        )}
-
-        {/* Workspaces Section (Edit mode only) */}
-        {!isCreateMode && issueId && renderWorkspacesSection && (
-          <div className="border-t">{renderWorkspacesSection(issueId)}</div>
         )}
 
         {/* SpecKit Section (Edit mode only). No wrapper: the section renders
