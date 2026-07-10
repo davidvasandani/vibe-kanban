@@ -790,6 +790,47 @@ describe('parsePipelineSelection', () => {
     expect(parsed.enabledIds).toEqual(['spec', 'ship']);
   });
 
+  it('disambiguates a single duplicated name by the stages present in the block', () => {
+    const releaseA: Pipeline = {
+      id: 'release-a',
+      name: 'Release',
+      description: '',
+      stages: [
+        {
+          id: 'spec',
+          label: 'Create spec',
+          prompt_fragment: 'Write a spec.',
+          default_enabled: true,
+          heavy: false,
+        },
+      ],
+    };
+    const releaseB: Pipeline = {
+      id: 'release-b',
+      name: 'Release',
+      description: '',
+      stages: [
+        {
+          id: 'ship',
+          label: 'Ship it',
+          prompt_fragment: 'Ship it.',
+          default_enabled: true,
+          heavy: false,
+        },
+      ],
+    };
+    // The issue was created with release-b (its block lists "Ship it."), so
+    // seeding must pick release-b, not the first catalog entry — otherwise
+    // recompose would drop the recognized-but-unselected stage line and an
+    // apply would destroy the stored pipeline.
+    const parsed = parsePipelineSelection(
+      `${PIPELINE_START}\n## Pipeline: Release\n\n1. Ship it.\n${PIPELINE_END}`,
+      [releaseA, releaseB]
+    );
+    expect(parsed.pipelineIds).toEqual(['release-b']);
+    expect(parsed.enabledIds).toEqual(['ship']);
+  });
+
   it('parses a legacy undelimited block', () => {
     const legacy = 'Prose.\n\n## Pipeline: Basic\n\n1. Write a spec.';
     const parsed = parsePipelineSelection(legacy, catalog);

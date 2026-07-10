@@ -408,8 +408,8 @@ export function parsePipelineSelection(
   if (!inner) return { pipelineIds, enabledIds };
 
   // Display names aren't unique across pipeline files, so keep every id per
-  // name (in catalog order): repeated occurrences of a duplicated name in
-  // the heading then map to successive same-named pipelines.
+  // name (in catalog order); pass 2 below picks among same-named candidates
+  // by which pipeline's stages actually appear in the block.
   const idsByName = new Map<string, string[]>();
   const stageIdByFragment = new Map<string, string>();
   for (const p of pipelines) {
@@ -423,26 +423,48 @@ export function parsePipelineSelection(
     }
   }
 
-  for (const rawLine of inner.split('\n')) {
-    const line = rawLine.replace(/\s+$/, '');
-    const heading = line.match(NAMED_HEADING_RE);
-    if (heading) {
-      const occurrences = new Map<string, number>();
-      for (const name of segmentHeadingNames(heading[1], [
-        ...idsByName.keys(),
-      ])) {
-        const seen = occurrences.get(name) ?? 0;
-        occurrences.set(name, seen + 1);
-        const ids = idsByName.get(name) ?? [];
-        const id = ids[Math.min(seen, ids.length - 1)];
-        if (id && !pipelineIds.includes(id)) pipelineIds.push(id);
-      }
-      continue;
-    }
+  const lines = inner.split('\n').map((l) => l.replace(/\s+$/, ''));
+
+  // Pass 1: the block's numbered stage lines — both the enabled stage ids
+  // and the raw fragment set used to disambiguate duplicate names below.
+  const blockFragments = new Set<string>();
+  for (const line of lines) {
     const numbered = line.match(NUMBERED_LINE_RE);
     if (numbered) {
+      blockFragments.add(numbered[1]);
       const stageId = stageIdByFragment.get(numbered[1]);
       if (stageId && !enabledIds.includes(stageId)) enabledIds.push(stageId);
+    }
+  }
+
+  // Pass 2: the heading's pipeline names. When several catalog pipelines
+  // share a display name, prefer the candidate whose stages actually appear
+  // among the block's numbered lines (ties fall back to catalog order), and
+  // never assign the same pipeline to two occurrences of the name.
+  const usedIds = new Set<string>();
+  for (const line of lines) {
+    const heading = line.match(NAMED_HEADING_RE);
+    if (!heading) continue;
+    for (const name of segmentHeadingNames(heading[1], [...idsByName.keys()])) {
+      const candidates = (idsByName.get(name) ?? []).filter(
+        (id) => !usedIds.has(id)
+      );
+      let best: string | undefined;
+      let bestScore = -1;
+      for (const id of candidates) {
+        const candidate = pipelines.find((p) => p.id === id);
+        const score =
+          candidate?.stages.filter((s) => blockFragments.has(s.prompt_fragment))
+            .length ?? 0;
+        if (score > bestScore) {
+          best = id;
+          bestScore = score;
+        }
+      }
+      if (best) {
+        usedIds.add(best);
+        if (!pipelineIds.includes(best)) pipelineIds.push(best);
+      }
     }
   }
 
