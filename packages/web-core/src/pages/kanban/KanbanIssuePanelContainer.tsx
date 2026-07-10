@@ -1076,6 +1076,10 @@ export function KanbanIssuePanelContainer({
   // save first so a stale debounce can't resurrect the old block.
   const handleUpdateIssuePipeline = useCallback(() => {
     if (!selectedKanbanIssueId || !editPipelineSelection) return;
+    // Same guard as the debounced description save: while attachment
+    // uploads are pending the description holds temporary local sources
+    // that must not be persisted.
+    if (hasPendingAttachmentsRef.current) return;
     cancelDebouncedDescription();
     const nextDescription =
       appendPipelineToDescription(
@@ -1247,7 +1251,7 @@ export function KanbanIssuePanelContainer({
               <PrimaryButton
                 value={t('taskPipeline.updateIssue')}
                 onClick={handleUpdateIssuePipeline}
-                disabled={!editPipelineDirty}
+                disabled={!editPipelineDirty || hasPendingAttachments}
                 variant="default"
               />
             }
