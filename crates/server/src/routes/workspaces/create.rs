@@ -209,6 +209,18 @@ fn rewrite_imported_issue_attachments_markdown(
     rewritten
 }
 
+/// Prepend a project's freeform context briefing to the workspace prompt.
+/// Empty/whitespace-only context returns the prompt unchanged (no header, no
+/// blank block) so behavior is identical to when no context is set.
+fn compose_prompt_with_project_context(context: &str, prompt: &str) -> String {
+    let trimmed = context.trim();
+    if trimmed.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("# Project context\n\n{trimmed}\n\n---\n\n{prompt}")
+    }
+}
+
 pub async fn create_and_start_workspace(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<CreateAndStartWorkspaceRequest>,
@@ -290,6 +302,36 @@ pub async fn create_and_start_workspace(
                 );
             }
         }
+
+        // Prepend the project's freeform "context" briefing (set in the Remote
+        // Projects settings) to the initial prompt. Best-effort and *bounded*:
+        // RemoteClient's own timeout is 30s with a retry (~60s worst case), which
+        // is far too long to make an optional briefing block the spawn — so cap
+        // it with a short timeout and skip the briefing on failure/timeout.
+        let context_fetch = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.get_remote_project(linked_issue.remote_project_id),
+        )
+        .await;
+        match context_fetch {
+            Ok(Ok(project)) => {
+                workspace_prompt =
+                    compose_prompt_with_project_context(&project.context, &workspace_prompt);
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "Failed to fetch project context for {}: {}",
+                    linked_issue.remote_project_id,
+                    e
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Timed out fetching project context for {}",
+                    linked_issue.remote_project_id
+                );
+            }
+        }
     }
 
     let workspace = managed_workspace.workspace.clone();
@@ -325,7 +367,28 @@ mod tests {
     use db::models::file::File;
     use uuid::Uuid;
 
-    use super::{ImportedIssueAttachment, rewrite_imported_issue_attachments_markdown};
+    use super::{
+        ImportedIssueAttachment, compose_prompt_with_project_context,
+        rewrite_imported_issue_attachments_markdown,
+    };
+
+    #[test]
+    fn project_context_empty_leaves_prompt_unchanged() {
+        assert_eq!(compose_prompt_with_project_context("", "do the thing"), "do the thing");
+        assert_eq!(
+            compose_prompt_with_project_context("   \n\t ", "do the thing"),
+            "do the thing"
+        );
+    }
+
+    #[test]
+    fn project_context_nonempty_is_prepended_and_labelled() {
+        let out = compose_prompt_with_project_context("  homelab monorepo  ", "fix the bug");
+        assert_eq!(out, "# Project context\n\nhomelab monorepo\n\n---\n\nfix the bug");
+        // The task prompt is preserved verbatim after the briefing.
+        assert!(out.ends_with("fix the bug"));
+        assert!(out.starts_with("# Project context"));
+    }
 
     fn imported_file(
         attachment_id: Uuid,

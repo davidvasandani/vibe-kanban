@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                p.id               AS \"id!: Uuid\",\n                p.organization_id  AS \"organization_id!: Uuid\",\n                p.name             AS \"name!\",\n                p.color            AS \"color!\",\n                p.context          AS \"context!\",\n                p.sort_order       AS \"sort_order!\",\n                p.created_at       AS \"created_at!: DateTime<Utc>\",\n                p.updated_at       AS \"updated_at!: DateTime<Utc>\"\n            FROM projects p\n            INNER JOIN organization_member_metadata omm\n                ON omm.organization_id = p.organization_id\n               AND omm.user_id = $2\n            WHERE p.organization_id = $1\n            ORDER BY p.sort_order ASC, p.created_at DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "color!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "context!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "sort_order!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at!: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "updated_at!: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "cf7bf377281cc3941c8d0e80d4de97a486c28b7f8ffa7d6324de9075a523649a"
+}

@@ -217,6 +217,7 @@ async fn update_project(
         project_id,
         payload.name,
         payload.color,
+        payload.context,
         payload.sort_order,
     )
     .await
@@ -293,6 +294,7 @@ async fn bulk_update_projects(
             item.id,
             item.changes.name,
             item.changes.color,
+            item.changes.context,
             item.changes.sort_order,
         )
         .await
