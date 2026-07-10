@@ -434,6 +434,11 @@
         "successMessage": "✓ MCP設定が正常に保存されました！",
         "loading": "現在のMCPサーバー設定を読み込み中...",
         "unsavedChanges": "• 未保存の変更があります"
+      },
+      "test": {
+        "button": "接続をテスト",
+        "dirtyHint": "テストする前に変更を保存してください。",
+        "failed": "MCP サーバーのテストに失敗しました"
       }
     },
     "projects": {

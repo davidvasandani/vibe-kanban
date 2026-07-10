@@ -19,6 +19,7 @@ import { cn } from "@/shared/lib/utils";
 import { useUserOrganizations } from "@/shared/hooks/useUserOrganizations";
 import { useAuth } from "@/shared/hooks/auth/useAuth";
 import { useOrganizationStore } from "@/shared/stores/useOrganizationStore";
+import { useOrgRailStore } from "@/shared/stores/useOrgRailStore";
 import { useDiscordOnlineCount } from "@/shared/hooks/useDiscordOnlineCount";
 import { useGitHubStars } from "@/shared/hooks/useGitHubStars";
 import { AppBarNotificationBellContainer } from "@/pages/workspaces/AppBarNotificationBellContainer";
@@ -78,6 +79,8 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
   const organizations = organizationsData?.organizations ?? [];
   const selectedOrgId = useOrganizationStore((s) => s.selectedOrgId);
   const setSelectedOrgId = useOrganizationStore((s) => s.setSelectedOrgId);
+  const isOrgRailExpanded = useOrgRailStore((s) => s.expanded);
+  const toggleOrgRailExpanded = useOrgRailStore((s) => s.toggleExpanded);
 
   useEffect(() => {
     if (organizations.length === 0) {
@@ -294,6 +297,8 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
                   organizations={organizations}
                   selectedOrgId={selectedOrgId}
                   onSelect={setSelectedOrgId}
+                  expanded={isOrgRailExpanded}
+                  onToggleExpanded={toggleOrgRailExpanded}
                 />
               ) : undefined
             }

@@ -1,13 +1,22 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  CheckCircleIcon,
   CheckIcon,
+  CircleNotchIcon,
   CodeIcon,
+  MinusCircleIcon,
   PencilSimpleIcon,
   PlusIcon,
   TrashIcon,
+  XCircleIcon,
 } from '@phosphor-icons/react';
-import type { BaseCodingAgent, ExecutorProfile, JsonValue } from 'shared/types';
+import type {
+  BaseCodingAgent,
+  ExecutorProfile,
+  JsonValue,
+  McpServerTestResult,
+} from 'shared/types';
 import { McpConfig } from 'shared/types';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { McpConfigStrategyGeneral } from '@/shared/lib/mcpStrategies';
@@ -53,6 +62,47 @@ function transportBadge(
   return transport.toUpperCase();
 }
 
+/** Per-server connectivity status icon with a hover summary. */
+function McpTestStatusIcon({
+  result,
+}: {
+  result: McpServerTestResult | undefined;
+}) {
+  if (!result) return null;
+  const { status } = result;
+  const Icon =
+    status === 'ok'
+      ? CheckCircleIcon
+      : status === 'unsupported'
+        ? MinusCircleIcon
+        : XCircleIcon;
+  const color =
+    status === 'ok'
+      ? 'text-success'
+      : status === 'unsupported'
+        ? 'text-low'
+        : 'text-error';
+  const title =
+    status === 'ok'
+      ? [
+          `${result.tool_count ?? 0} tools`,
+          result.latency_ms != null ? `${result.latency_ms}ms` : null,
+          result.server_name
+            ? `${result.server_name}${
+                result.server_version ? ` v${result.server_version}` : ''
+              }`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      : (result.error ?? status);
+  return (
+    <span title={title} className="flex items-center px-1">
+      <Icon className={cn('size-icon-sm', color)} weight="fill" />
+    </span>
+  );
+}
+
 export function McpSettingsSection() {
   const { t } = useTranslation('settings');
   const { setDirty: setContextDirty } = useSettingsDirty();
@@ -74,6 +124,20 @@ export function McpSettingsSection() {
   const [mode, setMode] = useState<'form' | 'json'>('form');
   const [jsonText, setJsonText] = useState('{}');
   const [jsonError, setJsonError] = useState<string | null>(null);
+
+  // Connectivity test: per-server probe results keyed by server name.
+  const [testResults, setTestResults] = useState<Record<
+    string,
+    McpServerTestResult
+  > | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [testError, setTestError] = useState<string | null>(null);
+  // Tracks the current profile so an in-flight test can be discarded if the
+  // user switches agents before it resolves.
+  const activeProfileRef = useRef<ExecutorProfile | null>(selectedProfile);
+  useEffect(() => {
+    activeProfileRef.current = selectedProfile;
+  }, [selectedProfile]);
 
   const snapshot = useMemo(() => JSON.stringify(servers), [servers]);
   const isDirty = snapshot !== originalSnapshot;
@@ -122,6 +186,9 @@ export function McpSettingsSection() {
       setMcpConfigPath('');
       setMode('form');
       setJsonError(null);
+      setTestResults(null);
+      setTestError(null);
+      setTesting(false);
 
       try {
         const profileKey = profiles
@@ -170,6 +237,9 @@ export function McpSettingsSection() {
         { servers }
       );
       setOriginalSnapshot(JSON.stringify(servers));
+      // Saved config changed the server set; drop stale statuses.
+      setTestResults(null);
+      setTestError(null);
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
     } catch (err) {
@@ -195,6 +265,36 @@ export function McpSettingsSection() {
     setJsonError(null);
     setMode('form');
   }, [originalSnapshot]);
+
+  // Probe the servers saved on disk for the selected agent and index the
+  // results by server name so each row can show its own status.
+  const handleTest = useCallback(async () => {
+    if (!machineClient || !selectedProfileKey) return;
+
+    const requestedProfile = selectedProfile;
+    const isStale = () => activeProfileRef.current !== requestedProfile;
+
+    setTesting(true);
+    setTestError(null);
+    setTestResults(null);
+
+    try {
+      const results = await machineClient.testMcpServers({
+        executor: selectedProfileKey as BaseCodingAgent,
+      });
+      if (isStale()) return;
+      const byName: Record<string, McpServerTestResult> = {};
+      for (const result of results) byName[result.name] = result;
+      setTestResults(byName);
+    } catch (err) {
+      if (isStale()) return;
+      setTestError(
+        err instanceof Error ? err.message : t('settings.mcp.test.failed')
+      );
+    } finally {
+      if (!isStale()) setTesting(false);
+    }
+  }, [machineClient, selectedProfile, selectedProfileKey, t]);
 
   const openDialog = useCallback(
     async (initial?: { name: string; entry: JsonValue }) => {
@@ -407,18 +507,46 @@ export function McpSettingsSection() {
                 </p>
               </div>
               {!mcpLoading && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  type="button"
-                  className="shrink-0 text-low"
-                  onClick={mode === 'json' ? exitJsonMode : enterJsonMode}
-                >
-                  <CodeIcon className="size-icon-xs mr-1" weight="bold" />
-                  {mode === 'json'
-                    ? t('settings.mcp.json.editAsForm')
-                    : t('settings.mcp.json.editAsJson')}
-                </Button>
+                <div className="flex shrink-0 items-center gap-1">
+                  {mode === 'form' && serverNames.length > 0 && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      type="button"
+                      className="text-low"
+                      onClick={handleTest}
+                      disabled={testing || isDirty}
+                      title={
+                        isDirty ? t('settings.mcp.test.dirtyHint') : undefined
+                      }
+                    >
+                      {testing ? (
+                        <CircleNotchIcon
+                          className="size-icon-xs mr-1 animate-spin"
+                          weight="bold"
+                        />
+                      ) : (
+                        <CheckCircleIcon
+                          className="size-icon-xs mr-1"
+                          weight="bold"
+                        />
+                      )}
+                      {t('settings.mcp.test.button')}
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    type="button"
+                    className="text-low"
+                    onClick={mode === 'json' ? exitJsonMode : enterJsonMode}
+                  >
+                    <CodeIcon className="size-icon-xs mr-1" weight="bold" />
+                    {mode === 'json'
+                      ? t('settings.mcp.json.editAsForm')
+                      : t('settings.mcp.json.editAsJson')}
+                  </Button>
+                </div>
               )}
             </div>
 
@@ -478,6 +606,7 @@ export function McpSettingsSection() {
                             )}
                           </div>
                           <div className="flex shrink-0 items-center gap-1">
+                            <McpTestStatusIcon result={testResults?.[name]} />
                             <button
                               type="button"
                               onClick={() => openDialog({ name, entry })}
@@ -504,6 +633,12 @@ export function McpSettingsSection() {
                         </div>
                       );
                     })}
+                  </div>
+                )}
+
+                {testError && (
+                  <div className="rounded-sm border border-error/50 bg-error/10 p-2 text-xs text-error">
+                    {testError}
                   </div>
                 )}
 

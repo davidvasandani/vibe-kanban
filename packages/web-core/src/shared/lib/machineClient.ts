@@ -3,7 +3,9 @@ import type {
   GetMcpServerResponse,
   GitBranch,
   McpServerQuery,
+  McpServerTestResult,
   Repo,
+  TestMcpServersBody,
   UpdateMcpServersBody,
   UpdateRepo,
   UserSystemInfo,
@@ -49,6 +51,10 @@ export interface MachineClient {
     query: McpServerQuery,
     data: UpdateMcpServersBody
   ) => Promise<void>;
+  testMcpServers: (
+    query: McpServerQuery,
+    body?: TestMcpServersBody
+  ) => Promise<McpServerTestResult[]>;
 }
 
 function getMachineRequestOptions(
@@ -180,6 +186,20 @@ export function createMachineClient(
           {
             method: 'POST',
             body: JSON.stringify(data),
+          }
+        )
+      );
+    },
+    testMcpServers: async (query, body) => {
+      const params = new URLSearchParams(query);
+      return handleApiResponse<McpServerTestResult[]>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/mcp-config/test?${params.toString()}`,
+          {
+            method: 'POST',
+            body: JSON.stringify(body ?? {}),
           }
         )
       );
