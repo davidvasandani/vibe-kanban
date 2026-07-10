@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT s.id AS \"id!: Uuid\",\n                      s.workspace_id AS \"workspace_id!: Uuid\",\n                      s.name,\n                      s.executor,\n                      s.agent_working_dir,\n                      s.created_at AS \"created_at!: DateTime<Utc>\",\n                      s.updated_at AS \"updated_at!: DateTime<Utc>\"\n               FROM sessions s\n               LEFT JOIN (\n                   SELECT ep.session_id, MAX(ep.created_at) as last_used\n                   FROM execution_processes ep\n                   WHERE ep.run_reason != 'devserver' AND ep.dropped = FALSE\n                   GROUP BY ep.session_id\n               ) latest_ep ON s.id = latest_ep.session_id\n               WHERE s.workspace_id = $1\n               ORDER BY COALESCE(latest_ep.last_used, s.created_at) DESC\n               LIMIT 1",
+  "query": "SELECT s.id AS \"id!: Uuid\",\n                      s.workspace_id AS \"workspace_id!: Uuid\",\n                      s.name,\n                      s.executor,\n                      s.agent_working_dir,\n                      s.created_at AS \"created_at!: DateTime<Utc>\",\n                      s.updated_at AS \"updated_at!: DateTime<Utc>\"\n               FROM sessions s\n               LEFT JOIN (\n                   SELECT ep.session_id, MAX(ep.created_at) as last_used\n                   FROM execution_processes ep\n                   WHERE ep.run_reason NOT IN ('devserver', 'backgroundhelper') AND ep.dropped = FALSE\n                   GROUP BY ep.session_id\n               ) latest_ep ON s.id = latest_ep.session_id\n               WHERE s.workspace_id = $1\n               ORDER BY COALESCE(latest_ep.last_used, s.created_at) DESC",
   "describe": {
     "columns": [
       {
@@ -52,5 +52,5 @@
       false
     ]
   },
-  "hash": "93efe07b91d232fc0c371be8ee618ba6ccfd6930454fc11845d5dfc2ba0bad62"
+  "hash": "d889ac3fcd6662de5fcf15eb99932b3e0dec6bc5d97a3c1aaee0f9892ac98855"
 }

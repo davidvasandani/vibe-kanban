@@ -7,6 +7,7 @@ export const PROCESS_RUN_REASONS = {
   ARCHIVE_SCRIPT: 'archivescript' as ExecutionProcessRunReason,
   CODING_AGENT: 'codingagent' as ExecutionProcessRunReason,
   DEV_SERVER: 'devserver' as ExecutionProcessRunReason,
+  BACKGROUND_HELPER: 'backgroundhelper' as ExecutionProcessRunReason,
 } as const;
 
 export const isCodingAgent = (
@@ -18,5 +19,8 @@ export const isCodingAgent = (
 export const shouldShowInLogs = (
   runReason: ExecutionProcessRunReason
 ): boolean => {
-  return runReason !== PROCESS_RUN_REASONS.DEV_SERVER;
+  return (
+    runReason !== PROCESS_RUN_REASONS.DEV_SERVER &&
+    runReason !== PROCESS_RUN_REASONS.BACKGROUND_HELPER
+  );
 };

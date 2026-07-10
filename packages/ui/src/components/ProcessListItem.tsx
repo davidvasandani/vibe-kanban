@@ -3,6 +3,7 @@ import {
   GearIcon,
   CodeIcon,
   GlobeIcon,
+  PulseIcon,
 } from '@phosphor-icons/react';
 import { cn } from '../lib/cn';
 import { RunningDots } from './RunningDots';
@@ -28,6 +29,8 @@ function getRunReasonLabel(runReason: string): string {
       return 'Archive Script';
     case 'devserver':
       return 'Dev Server';
+    case 'backgroundhelper':
+      return 'Background Helper';
     default:
       return runReason;
   }
@@ -43,6 +46,8 @@ function getRunReasonIcon(runReason: string): typeof TerminalIcon {
       return GearIcon;
     case 'devserver':
       return GlobeIcon;
+    case 'backgroundhelper':
+      return PulseIcon;
     default:
       return TerminalIcon;
   }

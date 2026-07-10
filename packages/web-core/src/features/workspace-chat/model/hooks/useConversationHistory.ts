@@ -160,7 +160,8 @@ export const useConversationHistory = ({
       executionProcesses?.current.filter(
         (p) =>
           p.status === ExecutionProcessStatus.running &&
-          p.run_reason !== 'devserver'
+          p.run_reason !== 'devserver' &&
+          p.run_reason !== 'backgroundhelper'
       ) ?? []
     );
   };

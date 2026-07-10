@@ -8,8 +8,7 @@ use anyhow::{Context, Result};
 use db::{
     DBService,
     models::{
-        coding_agent_turn::CodingAgentTurn,
-        execution_process::{ExecutionProcess, ExecutionProcessRunReason},
+        coding_agent_turn::CodingAgentTurn, execution_process::ExecutionProcess,
         execution_process_logs::ExecutionProcessLogs,
     },
 };
@@ -194,10 +193,10 @@ pub async fn remove_session_process_logs(session_id: Uuid) -> Result<()> {
 }
 
 pub async fn load_raw_log_messages(pool: &SqlitePool, execution_id: Uuid) -> Option<Vec<LogMsg>> {
-    // Detached processes (dev servers) write their raw output to a file
-    // directly; that file is the persistent log record.
+    // Detached processes (dev servers, background helpers) write their raw
+    // output to a file directly; that file is the persistent log record.
     if let Ok(Some(process)) = ExecutionProcess::find_by_id(pool, execution_id).await
-        && process.run_reason == ExecutionProcessRunReason::DevServer
+        && process.run_reason.is_persistent()
     {
         let path =
             utils::execution_logs::process_raw_log_file_path(process.session_id, execution_id);

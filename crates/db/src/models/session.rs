@@ -56,7 +56,7 @@ impl Session {
     }
 
     /// Find all sessions for a workspace, ordered by most recently used.
-    /// "Most recently used" is defined as the most recent non-dev server execution process.
+    /// "Most recently used" is defined as the most recent non-persistent (not dev server / background helper) execution process.
     /// Sessions with no executions fall back to created_at for ordering.
     pub async fn find_by_workspace_id(
         pool: &SqlitePool,
@@ -75,7 +75,7 @@ impl Session {
                LEFT JOIN (
                    SELECT ep.session_id, MAX(ep.created_at) as last_used
                    FROM execution_processes ep
-                   WHERE ep.run_reason != 'devserver' AND ep.dropped = FALSE
+                   WHERE ep.run_reason NOT IN ('devserver', 'backgroundhelper') AND ep.dropped = FALSE
                    GROUP BY ep.session_id
                ) latest_ep ON s.id = latest_ep.session_id
                WHERE s.workspace_id = $1
@@ -87,7 +87,7 @@ impl Session {
     }
 
     /// Find the most recently used session for a workspace.
-    /// "Most recently used" is defined as the most recent non-dev server execution process.
+    /// "Most recently used" is defined as the most recent non-persistent (not dev server / background helper) execution process.
     /// Sessions with no executions fall back to created_at for ordering.
     pub async fn find_latest_by_workspace_id(
         pool: &SqlitePool,
@@ -106,7 +106,7 @@ impl Session {
                LEFT JOIN (
                    SELECT ep.session_id, MAX(ep.created_at) as last_used
                    FROM execution_processes ep
-                   WHERE ep.run_reason != 'devserver' AND ep.dropped = FALSE
+                   WHERE ep.run_reason NOT IN ('devserver', 'backgroundhelper') AND ep.dropped = FALSE
                    GROUP BY ep.session_id
                ) latest_ep ON s.id = latest_ep.session_id
                WHERE s.workspace_id = $1

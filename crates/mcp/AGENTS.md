@@ -46,6 +46,17 @@ the workspace (`fetch_context_at_startup`, `mod.rs:105-120`). In `global` mode a
 missing/failed context fetch is non-fatal — `init()` simply drops the
 `get_context` tool.
 
+Both modes include the background-helper tools (`spawn_background_helper`,
+`list_background_helpers`, `stop_background_helper`,
+`src/task_server/tools/background_helpers.rs`). These are the sanctioned way for
+an agent to keep a long-lived subprocess (watcher, tunnel, log follower) running
+past the end of its turn: the backend spawns the helper as a tracked
+`BackgroundHelper` execution process in its own process group, so the turn-end
+process-group reap cannot hit it, while it stays visible in the Processes tab,
+survives server restarts like a dev server, and is stopped on workspace archive.
+Agents should use these instead of `setsid`/`nohup` tricks, which leak untracked
+orphans.
+
 ## Backend resolution (important)
 
 `resolve_base_url` (`src/bin/vibe_kanban_mcp.rs:100-134`) decides which backend the
