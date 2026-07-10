@@ -174,16 +174,34 @@ export function PipelineSection({
     onChange,
   ]);
 
+  // Adjust ticks incrementally on pipeline toggle instead of reseeding the
+  // whole default-enabled union, so an operator's customized ticks (or the
+  // ticks seeded from an issue's stored block) survive adding/removing a
+  // pipeline. Adding enables the added pipeline's own default stages;
+  // removing drops only stages no longer declared by any selected pipeline.
   const togglePipeline = useCallback(
     (id: string) => {
-      const next = selectedIds.includes(id)
-        ? selectedIds.filter((p) => p !== id)
-        : [...selectedIds, id];
+      const adding = !selectedIds.includes(id);
+      const next = adding
+        ? [...selectedIds, id]
+        : selectedIds.filter((p) => p !== id);
       setSelectedIds(next);
-      // Reseed the ticks to the default-enabled union of the new selection.
-      setEnabledIds(
-        defaultEnabledUnion(pipelines.filter((p) => next.includes(p.id)))
-      );
+      setEnabledIds((prev) => {
+        if (adding) {
+          const added = pipelines.find((p) => p.id === id);
+          const merged = new Set(prev);
+          for (const stageId of defaultEnabledUnion(added ? [added] : [])) {
+            merged.add(stageId);
+          }
+          return merged;
+        }
+        const remaining = new Set(
+          canonicalStageOrder(pipelines.filter((p) => next.includes(p.id))).map(
+            (s) => s.id
+          )
+        );
+        return new Set([...prev].filter((stageId) => remaining.has(stageId)));
+      });
     },
     [selectedIds, pipelines]
   );
