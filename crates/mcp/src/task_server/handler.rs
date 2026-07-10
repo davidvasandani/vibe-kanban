@@ -6,7 +6,9 @@ use rmcp::{
 
 use super::{McpMode, McpServer};
 
-#[tool_handler]
+// rmcp 1.8 defaults the router expression to `Self::tool_router()`; ours is a
+// per-instance field selected by mode (global vs orchestrator).
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         let mut tool_names = self
