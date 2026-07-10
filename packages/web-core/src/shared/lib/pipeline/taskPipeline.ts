@@ -322,6 +322,70 @@ export function appendPipelineToDescription(
   return base.length > 0 ? `${base}\n\n${block}` : block;
 }
 
+/** A `PipelineSection` selection re-derived from a stored pipeline block. */
+export interface ParsedPipelineSelection {
+  /** Ids of the pipelines named in the block heading, in heading order. */
+  pipelineIds: string[];
+  /** Ids of the stages whose generated lines appear in the block, in block order. */
+  enabledIds: string[];
+}
+
+/** Matches the named heading, capturing the ` + `-joined pipeline names. */
+const NAMED_HEADING_RE = /^## Pipeline:\s*(.+)$/;
+
+/**
+ * Best-effort inverse of `composePipelineBlock`: re-derive which pipelines
+ * and stages a stored block represents, so the edit-mode `PipelineSection`
+ * can seed its selection from an issue's existing description.
+ *
+ * Pipeline ids come from the `## Pipeline: A + B` heading (names matched
+ * against `pipelines[].name`; unknown names are dropped; a bare
+ * `## Pipeline` heading yields none). Stage ids come from numbered lines
+ * whose remainder exactly equals a stage's `prompt_fragment` in any of the
+ * given pipelines. Everything else (manual lines, renamed/removed stages)
+ * is ignored here — the non-destructive recompose preserves those lines as
+ * manual text when the block is used as `previousBlock`.
+ */
+export function parsePipelineSelection(
+  block: string,
+  pipelines: readonly Pipeline[]
+): ParsedPipelineSelection {
+  const pipelineIds: string[] = [];
+  const enabledIds: string[] = [];
+  const inner = extractPipelineBlockText(block ?? '');
+  if (!inner) return { pipelineIds, enabledIds };
+
+  const idByName = new Map<string, string>();
+  const stageIdByFragment = new Map<string, string>();
+  for (const p of pipelines) {
+    if (!idByName.has(p.name)) idByName.set(p.name, p.id);
+    for (const s of p.stages) {
+      if (!stageIdByFragment.has(s.prompt_fragment)) {
+        stageIdByFragment.set(s.prompt_fragment, s.id);
+      }
+    }
+  }
+
+  for (const rawLine of inner.split('\n')) {
+    const line = rawLine.replace(/\s+$/, '');
+    const heading = line.match(NAMED_HEADING_RE);
+    if (heading) {
+      for (const name of heading[1].split(' + ')) {
+        const id = idByName.get(name.trim());
+        if (id && !pipelineIds.includes(id)) pipelineIds.push(id);
+      }
+      continue;
+    }
+    const numbered = line.match(NUMBERED_LINE_RE);
+    if (numbered) {
+      const stageId = stageIdByFragment.get(numbered[1]);
+      if (stageId && !enabledIds.includes(stageId)) enabledIds.push(stageId);
+    }
+  }
+
+  return { pipelineIds, enabledIds };
+}
+
 /** One numbered stage as parsed from a task's `## Pipeline` block. */
 export interface PipelineStage {
   /** 1-based position in the parsed list (re-sequenced; not the source task's stage id). */

@@ -8,6 +8,7 @@ import {
   composePipelineBlock,
   extractPipelineBlock,
   orderedEnabledStages,
+  parsePipelineSelection,
   parsePipelineStages,
 } from './taskPipeline';
 
@@ -610,5 +611,98 @@ describe('parsePipelineStages', () => {
       { index: 1, label: 'First stage' },
       { index: 2, label: 'Second stage' },
     ]);
+  });
+});
+
+describe('parsePipelineSelection', () => {
+  const catalog = [basicPipeline, wikillmPipeline];
+
+  it('round-trips a composed block back to the same selection', () => {
+    const block = composePipelineBlock(
+      catalog,
+      basicWikillmEnabledUnion,
+      '',
+      null
+    );
+    const parsed = parsePipelineSelection(block, catalog);
+    expect(parsed.pipelineIds).toEqual(['basic', 'wikillm']);
+    // Same set of stage ids, in the composed block's (canonical) order.
+    expect(parsed.enabledIds).toEqual(
+      orderedEnabledStages(catalog, basicWikillmEnabledUnion).map((s) => s.id)
+    );
+  });
+
+  it('parses from a full description containing prose plus the delimited block', () => {
+    const block = composePipelineBlock(
+      [basicPipeline],
+      ['spec', 'plan'],
+      '',
+      null
+    );
+    const description = appendPipelineToDescription(
+      'Some prose.\n1. A prose list.',
+      block
+    );
+    const parsed = parsePipelineSelection(description, catalog);
+    expect(parsed.pipelineIds).toEqual(['basic']);
+    expect(parsed.enabledIds).toEqual(['spec', 'plan']);
+  });
+
+  it('drops pipeline names that no longer exist in the catalog', () => {
+    const block = [
+      PIPELINE_START,
+      '## Pipeline: Basic + Retired Flow',
+      '',
+      '1. Write a spec.',
+      PIPELINE_END,
+    ].join('\n');
+    const parsed = parsePipelineSelection(block, catalog);
+    expect(parsed.pipelineIds).toEqual(['basic']);
+    expect(parsed.enabledIds).toEqual(['spec']);
+  });
+
+  it('ignores manual and hand-edited numbered lines (they stay manual text)', () => {
+    const block = [
+      PIPELINE_START,
+      '## Pipeline: Basic',
+      '',
+      '1. Write a spec.',
+      '2. Write a plan, focusing on the migration risk.',
+      'Also ping the on-call before merging.',
+      PIPELINE_END,
+    ].join('\n');
+    const parsed = parsePipelineSelection(block, catalog);
+    expect(parsed.pipelineIds).toEqual(['basic']);
+    expect(parsed.enabledIds).toEqual(['spec']);
+  });
+
+  it('dedupes a stage line that appears twice', () => {
+    const block = [
+      PIPELINE_START,
+      '## Pipeline: Basic',
+      '',
+      '1. Write a spec.',
+      '2. Write a spec.',
+      PIPELINE_END,
+    ].join('\n');
+    expect(parsePipelineSelection(block, catalog).enabledIds).toEqual(['spec']);
+  });
+
+  it('a bare "## Pipeline" heading selects no pipelines', () => {
+    const block = composePipelineBlock(null, [], 'Custom line only.', null);
+    const parsed = parsePipelineSelection(block, catalog);
+    expect(parsed.pipelineIds).toEqual([]);
+    expect(parsed.enabledIds).toEqual([]);
+  });
+
+  it('returns an empty selection for empty or block-less input', () => {
+    expect(parsePipelineSelection('', catalog)).toEqual({
+      pipelineIds: [],
+      enabledIds: [],
+    });
+    expect(parsePipelineSelection('Just prose.', catalog)).toEqual({
+      pipelineIds: [],
+      enabledIds: [],
+    });
   });
 });

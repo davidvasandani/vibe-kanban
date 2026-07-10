@@ -571,7 +571,9 @@
     "heavyBadge": "heavy",
     "addonLabel": "Prompt addon (editable)",
     "addonPlaceholder": "Tick stages above to compose the pipeline block, or type your own.",
-    "resetToGenerated": "Reset to generated"
+    "resetToGenerated": "Reset to generated",
+    "updateIssue": "Update Issue",
+    "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue."
   },
   "speckit": {
     "title": "SpecKit",
