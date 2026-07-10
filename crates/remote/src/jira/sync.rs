@@ -47,7 +47,10 @@ pub fn spawn_jira_sync_task(
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_TICK);
 
-    info!(tick_secs = tick.as_secs(), "Starting Jira sync background task");
+    info!(
+        tick_secs = tick.as_secs(),
+        "Starting Jira sync background task"
+    );
 
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(tick);
@@ -129,8 +132,7 @@ async fn run_pass(
         }
     };
 
-    if let Err(error) = JiraSyncRepository::mark_sync_completed(pool, config.id, error_text).await
-    {
+    if let Err(error) = JiraSyncRepository::mark_sync_completed(pool, config.id, error_text).await {
         warn!(?error, "jira sync: failed to mark pass completed");
     }
     Ok(())
@@ -192,8 +194,7 @@ async fn do_pass(
 
     let (jira_issues, _total) = client.search_all(&config.jql).await?;
 
-    let statuses =
-        ProjectStatusRepository::list_by_project(pool, config.project_id).await?;
+    let statuses = ProjectStatusRepository::list_by_project(pool, config.project_id).await?;
     let mut sorted = statuses.clone();
     sorted.sort_by_key(|s| s.sort_order);
     let status_index = StatusIndex {
@@ -232,13 +233,11 @@ async fn do_pass(
 
     for jira_issue in &jira_issues {
         let result = match links_by_jira_id.get(jira_issue.id.as_str()) {
-            None => {
-                import_new_issue(pool, config, &status_index, &mapping, &client, jira_issue)
-                    .await
-                    .map(|()| {
-                        stats.created += 1;
-                    })
-            }
+            None => import_new_issue(pool, config, &status_index, &mapping, &client, jira_issue)
+                .await
+                .map(|()| {
+                    stats.created += 1;
+                }),
             Some(link) if link.link_state == LINK_STATE_DELETED_REMOTE => continue,
             Some(link) => {
                 sync_linked_issue(
@@ -257,9 +256,8 @@ async fn do_pass(
             let message = format!("{}: {error}", jira_issue.key);
             warn!(%message, "jira sync: issue failed");
             if let Some(link) = links_by_jira_id.get(jira_issue.id.as_str()) {
-                let _ =
-                    JiraSyncRepository::set_link_error(pool, link.id, Some(error.to_string()))
-                        .await;
+                let _ = JiraSyncRepository::set_link_error(pool, link.id, Some(error.to_string()))
+                    .await;
             }
             stats.errors.push(message);
         }
@@ -270,10 +268,9 @@ async fn do_pass(
     // Jira (permanently unlinked). VK issues are never deleted.
     let returned: std::collections::HashSet<&str> =
         jira_issues.iter().map(|i| i.id.as_str()).collect();
-    for link in links
-        .iter()
-        .filter(|l| l.link_state == LINK_STATE_ACTIVE && !returned.contains(l.jira_issue_id.as_str()))
-    {
+    for link in links.iter().filter(|l| {
+        l.link_state == LINK_STATE_ACTIVE && !returned.contains(l.jira_issue_id.as_str())
+    }) {
         match client.get_issue(&link.jira_issue_id).await {
             Ok(Some(_)) => {
                 JiraSyncRepository::set_link_state(pool, link.id, LINK_STATE_DORMANT).await?;
@@ -283,9 +280,10 @@ async fn do_pass(
                     .await?;
             }
             Err(error) => {
-                stats
-                    .errors
-                    .push(format!("{}: scope check failed: {error}", link.jira_issue_key));
+                stats.errors.push(format!(
+                    "{}: scope check failed: {error}",
+                    link.jira_issue_key
+                ));
             }
         }
     }
@@ -333,8 +331,7 @@ async fn import_new_issue(
                     "sync config has no owning user to attribute created issues to".to_string(),
                 )
             })?;
-            let sort_order =
-                JiraSyncRepository::next_sort_order(pool, config.project_id).await?;
+            let sort_order = JiraSyncRepository::next_sort_order(pool, config.project_id).await?;
             let created = IssueRepository::create(
                 pool,
                 None,
@@ -469,8 +466,7 @@ async fn sync_linked_issue(
     // --- Outbound (VK -> Jira) writes first. ---
     let mut wrote_jira = false;
     let out_summary = (title_action == FieldAction::WriteJira).then_some(vk_title.as_str());
-    let out_description =
-        (desc_action == FieldAction::WriteJira).then_some(vk_desc.as_deref());
+    let out_description = (desc_action == FieldAction::WriteJira).then_some(vk_desc.as_deref());
     if out_summary.is_some() || out_description.is_some() {
         client
             .update_issue_fields(&link.jira_issue_id, out_summary, out_description)

@@ -40,9 +40,7 @@ pub fn resolve_jira_to_vk(
     {
         return Some(vk);
     }
-    jira_category
-        .and_then(category_default)
-        .map(str::to_string)
+    jira_category.and_then(category_default).map(str::to_string)
 }
 
 /// Resolve the Jira status name a VK status change should transition to.
@@ -65,8 +63,7 @@ pub fn seed_vk_to_jira(
 ) -> bool {
     let mut changed = false;
     for (jira_status, category) in observed {
-        let Some(vk_status) = resolve_jira_to_vk(mapping, jira_status, category.as_deref())
-        else {
+        let Some(vk_status) = resolve_jira_to_vk(mapping, jira_status, category.as_deref()) else {
             continue;
         };
         let exists = mapping
@@ -74,9 +71,7 @@ pub fn seed_vk_to_jira(
             .keys()
             .any(|name| name.eq_ignore_ascii_case(&vk_status));
         if !exists {
-            mapping
-                .vk_to_jira
-                .insert(vk_status, jira_status.clone());
+            mapping.vk_to_jira.insert(vk_status, jira_status.clone());
             changed = true;
         }
     }
@@ -87,10 +82,7 @@ pub fn seed_vk_to_jira(
 mod tests {
     use super::*;
 
-    fn mapping(
-        jira_to_vk: &[(&str, &str)],
-        vk_to_jira: &[(&str, &str)],
-    ) -> JiraStatusMapping {
+    fn mapping(jira_to_vk: &[(&str, &str)], vk_to_jira: &[(&str, &str)]) -> JiraStatusMapping {
         JiraStatusMapping {
             jira_to_vk: jira_to_vk
                 .iter()
@@ -148,10 +140,7 @@ mod tests {
     #[test]
     fn vk_to_jira_is_explicit_only() {
         let m = mapping(&[], &[("Done", "Closed")]);
-        assert_eq!(
-            resolve_vk_to_jira(&m, "Done"),
-            Some("Closed".to_string())
-        );
+        assert_eq!(resolve_vk_to_jira(&m, "Done"), Some("Closed".to_string()));
         assert_eq!(resolve_vk_to_jira(&m, "done"), Some("Closed".to_string()));
         assert_eq!(resolve_vk_to_jira(&m, "In progress"), None);
     }

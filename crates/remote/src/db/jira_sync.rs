@@ -457,10 +457,7 @@ impl JiraSyncRepository {
     }
 
     /// Sort order that appends a new issue at the end of the project board.
-    pub async fn next_sort_order(
-        pool: &PgPool,
-        project_id: Uuid,
-    ) -> Result<f64, JiraSyncDbError> {
+    pub async fn next_sort_order(pool: &PgPool, project_id: Uuid) -> Result<f64, JiraSyncDbError> {
         let max = sqlx::query_scalar!(
             r#"SELECT MAX(sort_order) AS "max?: f64" FROM issues WHERE project_id = $1"#,
             project_id

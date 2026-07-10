@@ -31,18 +31,13 @@ pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route(
             "/projects/{project_id}/jira-sync",
-            get(get_config)
-                .put(upsert_config)
-                .delete(delete_config),
+            get(get_config).put(upsert_config).delete(delete_config),
         )
         .route(
             "/projects/{project_id}/jira-sync/test",
             post(test_connection),
         )
-        .route(
-            "/projects/{project_id}/jira-sync/sync-now",
-            post(sync_now),
-        )
+        .route("/projects/{project_id}/jira-sync/sync-now", post(sync_now))
 }
 
 fn internal(message: &str) -> ErrorResponse {
@@ -164,7 +159,11 @@ async fn upsert_config(
         &state.pool,
         UpsertJiraSyncConfigArgs {
             project_id,
-            jira_base_url: payload.jira_base_url.trim().trim_end_matches('/').to_string(),
+            jira_base_url: payload
+                .jira_base_url
+                .trim()
+                .trim_end_matches('/')
+                .to_string(),
             auth_mode: payload.auth_mode.as_str().to_string(),
             jira_email: payload.jira_email.clone(),
             encrypted_credential,
@@ -235,12 +234,7 @@ async fn test_connection(
         }
     };
 
-    let response = run_test(
-        &state,
-        &payload,
-        credential,
-    )
-    .await;
+    let response = run_test(&state, &payload, credential).await;
     Ok(Json(response))
 }
 

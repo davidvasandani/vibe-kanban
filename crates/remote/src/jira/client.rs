@@ -175,7 +175,9 @@ impl JiraClient {
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let req = self.http.request(method, format!("{}{}", self.base_url, path));
+        let req = self
+            .http
+            .request(method, format!("{}{}", self.base_url, path));
         match self.auth_mode {
             JiraAuthMode::CloudBasic => req.basic_auth(
                 self.email.clone().unwrap_or_default(),
@@ -229,7 +231,9 @@ impl JiraClient {
         let mut start_at: i64 = 0;
 
         for _ in 0..MAX_SEARCH_PAGES {
-            let page = self.search_page(jql, next_page_token.as_deref(), start_at).await?;
+            let page = self
+                .search_page(jql, next_page_token.as_deref(), start_at)
+                .await?;
             let page_len = page.issues.len() as i64;
             issues.extend(page.issues.into_iter().map(JiraIssueData::from));
             if page.total.is_some() {
@@ -307,11 +311,7 @@ impl JiraClient {
         if !response.status().is_success() {
             return None;
         }
-        response
-            .json::<CountResponse>()
-            .await
-            .ok()
-            .map(|c| c.count)
+        response.json::<CountResponse>().await.ok().map(|c| c.count)
     }
 
     /// Fetch one issue by immutable id or key. `Ok(None)` means deleted.
@@ -386,9 +386,7 @@ impl JiraClient {
             .find(|t| t.to.name.eq_ignore_ascii_case(target_status))
             .ok_or_else(|| JiraClientError::Api {
                 status: 400,
-                message: format!(
-                    "no available workflow transition to status \"{target_status}\""
-                ),
+                message: format!("no available workflow transition to status \"{target_status}\""),
             })?;
 
         let response = self

@@ -69,7 +69,10 @@ mod tests {
     #[test]
     fn full_decision_table() {
         // (jira_matches, vk_matches) -> action
-        assert_eq!(decide_field(true, true, Some(t(10)), t(20)), FieldAction::NoOp);
+        assert_eq!(
+            decide_field(true, true, Some(t(10)), t(20)),
+            FieldAction::NoOp
+        );
         assert_eq!(
             decide_field(false, true, Some(t(10)), t(20)),
             FieldAction::WriteVk

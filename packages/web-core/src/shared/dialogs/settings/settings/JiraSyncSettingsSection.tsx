@@ -191,8 +191,7 @@ export function JiraSyncSettingsSection({
   const [testResult, setTestResult] =
     useState<JiraTestConnectionResponse | null>(null);
 
-  const { data: orgsResponse, isLoading: orgsLoading } =
-    useUserOrganizations();
+  const { data: orgsResponse, isLoading: orgsLoading } = useUserOrganizations();
   const organizations = useMemo(
     () => orgsResponse?.organizations ?? [],
     [orgsResponse?.organizations]
@@ -428,7 +427,10 @@ export function JiraSyncSettingsSection({
       >
         <TwoColumnPicker>
           <TwoColumnPickerColumn
-            label={t('settings.jiraSync.columns.organizations', 'Organizations')}
+            label={t(
+              'settings.jiraSync.columns.organizations',
+              'Organizations'
+            )}
             isFirst
           >
             {organizations.map((org) => (
@@ -580,9 +582,7 @@ export function JiraSyncSettingsSection({
                 <SecretInput
                   value={form.credential}
                   onChange={(credential) => updateForm({ credential })}
-                  placeholder={
-                    config?.has_credential ? '••••••••' : undefined
-                  }
+                  placeholder={config?.has_credential ? '••••••••' : undefined}
                   disabled={saving}
                 />
               </SettingsField>
@@ -627,13 +627,8 @@ export function JiraSyncSettingsSection({
               <div className="flex items-center gap-base">
                 <PrimaryButton
                   variant="tertiary"
-                  value={t(
-                    'settings.jiraSync.actions.test',
-                    'Test connection'
-                  )}
-                  actionIcon={
-                    testConnection.isPending ? 'spinner' : undefined
-                  }
+                  value={t('settings.jiraSync.actions.test', 'Test connection')}
+                  actionIcon={testConnection.isPending ? 'spinner' : undefined}
                   onClick={() => void handleTest()}
                   disabled={
                     testConnection.isPending ||
@@ -660,10 +655,7 @@ export function JiraSyncSettingsSection({
             <div className="bg-secondary/50 border border-border rounded-sm p-4 space-y-4">
               <div>
                 <p className="text-sm font-medium text-normal">
-                  {t(
-                    'settings.jiraSync.form.mapping.label',
-                    'Status mapping'
-                  )}
+                  {t('settings.jiraSync.form.mapping.label', 'Status mapping')}
                 </p>
                 <p className="text-sm text-low mt-1">
                   {t(
@@ -749,9 +741,7 @@ export function JiraSyncSettingsSection({
                           : ArrowsClockwiseIcon
                       }
                       onClick={() => void syncNow.mutateAsync().catch(() => {})}
-                      disabled={
-                        syncNow.isPending || !config.enabled || dirty
-                      }
+                      disabled={syncNow.isPending || !config.enabled || dirty}
                     />
                     <PrimaryButton
                       variant="tertiary"
@@ -779,10 +769,7 @@ export function JiraSyncSettingsSection({
                               config.last_sync_completed_at
                             ).toLocaleString(),
                           })
-                        : t(
-                            'settings.jiraSync.status.never',
-                            'Not synced yet'
-                          )}
+                        : t('settings.jiraSync.status.never', 'Not synced yet')}
                   </p>
                   <p>
                     {t('settings.jiraSync.status.links', {
