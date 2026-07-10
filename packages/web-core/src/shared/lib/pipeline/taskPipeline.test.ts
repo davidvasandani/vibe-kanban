@@ -548,6 +548,27 @@ describe('extractPipelineBlock', () => {
     expect(extractPipelineBlock(null)).toBe('');
     expect(extractPipelineBlock(undefined)).toBe('');
   });
+
+  it('falls back to the bare heading for a legacy block without delimiters', () => {
+    const legacy = 'Task prose.\n\n## Pipeline\n\n1. Write a spec.';
+    expect(extractPipelineBlock(legacy)).toBe(
+      '## Pipeline\n\n1. Write a spec.'
+    );
+    // Not fooled by "## Pipeline" mentioned mid-line.
+    expect(extractPipelineBlock('See the ## Pipeline heading.')).toBe('');
+  });
+
+  it('appendPipelineToDescription replaces a legacy undelimited block instead of stacking', () => {
+    const legacy = 'Task prose.\n\n## Pipeline\n\n1. Write a spec.';
+    const block = composePipelineBlock(pipeline, ['plan'], '', null);
+    const replaced = appendPipelineToDescription(legacy, block);
+    expect(replaced).toContain('Task prose.');
+    expect(replaced).toContain('1. Write a plan.');
+    expect(replaced).not.toContain('Write a spec.');
+    expect(replaced.match(/## Pipeline/g)?.length).toBe(1);
+    // An empty block strips the legacy block entirely.
+    expect(appendPipelineToDescription(legacy, '')).toBe('Task prose.');
+  });
 });
 
 describe('parsePipelineStages', () => {
@@ -686,6 +707,43 @@ describe('parsePipelineSelection', () => {
       PIPELINE_END,
     ].join('\n');
     expect(parsePipelineSelection(block, catalog).enabledIds).toEqual(['spec']);
+  });
+
+  it('handles pipeline names that themselves contain " + "', () => {
+    const plusPipeline: Pipeline = {
+      id: 'spec-review',
+      name: 'Spec + Review',
+      description: '',
+      stages: [
+        {
+          id: 'spec',
+          label: 'Create spec',
+          prompt_fragment: 'Write a spec.',
+          default_enabled: true,
+          heavy: false,
+        },
+      ],
+    };
+    const withPlus = [basicPipeline, plusPipeline];
+    expect(
+      parsePipelineSelection(
+        `${PIPELINE_START}\n## Pipeline: Spec + Review\n\n1. Write a spec.\n${PIPELINE_END}`,
+        withPlus
+      ).pipelineIds
+    ).toEqual(['spec-review']);
+    expect(
+      parsePipelineSelection(
+        `${PIPELINE_START}\n## Pipeline: Basic + Spec + Review\n\n1. Write a spec.\n${PIPELINE_END}`,
+        withPlus
+      ).pipelineIds
+    ).toEqual(['basic', 'spec-review']);
+  });
+
+  it('parses a legacy undelimited block', () => {
+    const legacy = 'Prose.\n\n## Pipeline: Basic\n\n1. Write a spec.';
+    const parsed = parsePipelineSelection(legacy, catalog);
+    expect(parsed.pipelineIds).toEqual(['basic']);
+    expect(parsed.enabledIds).toEqual(['spec']);
   });
 
   it('a bare "## Pipeline" heading selects no pipelines', () => {

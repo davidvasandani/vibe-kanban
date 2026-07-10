@@ -280,12 +280,26 @@ export function composePipelineBlock(
 }
 
 /**
+ * Matches a `## Pipeline` heading at a line start, for the legacy fallback:
+ * blocks composed before the delimiters existed (or hand-edited past them)
+ * are treated as running from the heading through end-of-text, exactly as
+ * `parsePipelineStages` already assumes.
+ */
+const HEADING_LINE_RE = /^## Pipeline\b/m;
+
+/**
  * Strip any previously-appended pipeline block from a description, returning the
- * remaining prose with trailing whitespace trimmed.
+ * remaining prose with trailing whitespace trimmed. Falls back to stripping
+ * from a bare `## Pipeline` heading through end-of-text when the delimiters
+ * are absent, so replacing a legacy block never stacks a duplicate.
  */
 function stripPipelineBlock(description: string): string {
   const start = description.indexOf(PIPELINE_START);
-  if (start === -1) return description;
+  if (start === -1) {
+    const heading = HEADING_LINE_RE.exec(description);
+    if (!heading) return description;
+    return description.slice(0, heading.index).replace(/\s+$/, '');
+  }
   const endIdx = description.indexOf(PIPELINE_END, start);
   const after =
     endIdx === -1 ? '' : description.slice(endIdx + PIPELINE_END.length);
@@ -293,16 +307,21 @@ function stripPipelineBlock(description: string): string {
 }
 
 /**
- * Extract the delimited `## Pipeline` block (including delimiters) from a
- * task description, for seeding the edit-mode `PipelineSection`. Returns an
- * empty string when the description has no pipeline block.
+ * Extract the `## Pipeline` block (including delimiters, when present) from
+ * a task description, for seeding the edit-mode `PipelineSection`. Falls
+ * back to the bare heading through end-of-text for legacy blocks without
+ * delimiters. Returns an empty string when the description has no pipeline
+ * block.
  */
 export function extractPipelineBlock(
   description: string | null | undefined
 ): string {
   if (!description) return '';
   const start = description.indexOf(PIPELINE_START);
-  if (start === -1) return '';
+  if (start === -1) {
+    const heading = HEADING_LINE_RE.exec(description);
+    return heading ? description.slice(heading.index) : '';
+  }
   const endIdx = description.indexOf(PIPELINE_END, start);
   if (endIdx === -1) return description.slice(start);
   return description.slice(start, endIdx + PIPELINE_END.length);
@@ -332,6 +351,39 @@ export interface ParsedPipelineSelection {
 
 /** Matches the named heading, capturing the ` + `-joined pipeline names. */
 const NAMED_HEADING_RE = /^## Pipeline:\s*(.+)$/;
+
+/**
+ * Segment a heading's ` + `-joined name list against the catalog of known
+ * pipeline names. Names are user-authored and may themselves contain
+ * `" + "`, so a naive split is wrong; instead greedily match the longest
+ * known name at each position (consuming its trailing `" + "` separator),
+ * and skip to the next separator when nothing matches (an unknown/renamed
+ * pipeline).
+ */
+function segmentHeadingNames(
+  joined: string,
+  idByName: ReadonlyMap<string, string>
+): string[] {
+  const namesLongestFirst = [...idByName.keys()].sort(
+    (a, b) => b.length - a.length
+  );
+  const ids: string[] = [];
+  let rest = joined.trim();
+  while (rest.length > 0) {
+    const matched = namesLongestFirst.find(
+      (n) => rest === n || rest.startsWith(`${n} + `)
+    );
+    if (matched) {
+      ids.push(idByName.get(matched)!);
+      rest = rest === matched ? '' : rest.slice(matched.length + 3);
+      continue;
+    }
+    const sep = rest.indexOf(' + ');
+    if (sep === -1) break;
+    rest = rest.slice(sep + 3);
+  }
+  return ids;
+}
 
 /**
  * Best-effort inverse of `composePipelineBlock`: re-derive which pipelines
@@ -370,9 +422,8 @@ export function parsePipelineSelection(
     const line = rawLine.replace(/\s+$/, '');
     const heading = line.match(NAMED_HEADING_RE);
     if (heading) {
-      for (const name of heading[1].split(' + ')) {
-        const id = idByName.get(name.trim());
-        if (id && !pipelineIds.includes(id)) pipelineIds.push(id);
+      for (const id of segmentHeadingNames(heading[1], idByName)) {
+        if (!pipelineIds.includes(id)) pipelineIds.push(id);
       }
       continue;
     }
