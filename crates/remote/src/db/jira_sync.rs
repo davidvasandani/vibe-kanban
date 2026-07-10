@@ -182,15 +182,79 @@ impl JiraSyncRepository {
         Ok(record)
     }
 
-    /// Configs due for a pass: enabled AND (never synced, interval elapsed,
-    /// or an unserviced sync-now request). A pass that crashed before
-    /// completing keeps `last_sync_completed_at` stale, so it is retried on
-    /// the next tick (level-triggered, constitution VI).
-    pub async fn list_due_configs(pool: &PgPool) -> Result<Vec<JiraSyncConfig>, JiraSyncDbError> {
-        let records = sqlx::query_as!(
+    /// Ids of configs that look due (enabled AND never synced / interval
+    /// elapsed / unserviced sync-now, with no held pass lease). This is only
+    /// a cheap pre-filter: the authoritative check is the atomic
+    /// [`Self::claim_due_config`], which re-evaluates everything and returns
+    /// the row the pass must use.
+    pub async fn list_due_config_ids(pool: &PgPool) -> Result<Vec<Uuid>, JiraSyncDbError> {
+        let records = sqlx::query_scalar!(
+            r#"
+            SELECT id AS "id!: Uuid"
+            FROM project_jira_configs
+            WHERE enabled
+              AND (
+                last_sync_completed_at IS NULL
+                OR last_sync_completed_at
+                   <= NOW() - make_interval(secs => sync_interval_seconds::double precision)
+                OR sync_requested_at > COALESCE(last_sync_started_at, '-infinity'::timestamptz)
+              )
+              -- Exclude configs whose pass lease is held (see claim_due_config).
+              AND (
+                last_sync_started_at IS NULL
+                OR last_sync_started_at <= COALESCE(last_sync_completed_at, '-infinity'::timestamptz)
+                OR last_sync_started_at < NOW() - INTERVAL '60 minutes'
+              )
+            ORDER BY last_sync_completed_at ASC NULLS FIRST
+            "#
+        )
+        .fetch_all(pool)
+        .await?;
+        Ok(records)
+    }
+
+    /// Atomically claim a config for a pass and return the *current* row —
+    /// the pass must run from this row, not from any earlier snapshot, so a
+    /// disable or credential/URL edit between listing and claiming takes
+    /// effect immediately.
+    ///
+    /// `last_sync_started_at` newer than `last_sync_completed_at` is a held
+    /// lease: while a pass is running the claim is refused, so concurrent
+    /// server instances cannot double-run one config. A crashed pass never
+    /// completes and would hold its lease forever, so a lease older than
+    /// 60 minutes is treated as stale and taken over (level-triggered
+    /// recovery). A healthy pass longer than that could in principle be
+    /// double-claimed, but completion is lease-token-guarded (see
+    /// [`Self::mark_sync_completed`]) and all writes are idempotent
+    /// upserts/snapshot-guarded updates, so the takeover bound is a
+    /// backstop, not a correctness edge.
+    ///
+    /// Returns `None` when the config is gone, disabled, no longer due, or
+    /// claimed by someone else. The returned row's `last_sync_started_at`
+    /// is the lease token for this pass.
+    pub async fn claim_due_config(
+        pool: &PgPool,
+        config_id: Uuid,
+    ) -> Result<Option<JiraSyncConfig>, JiraSyncDbError> {
+        let record = sqlx::query_as!(
             JiraSyncConfig,
             r#"
-            SELECT
+            UPDATE project_jira_configs
+            SET last_sync_started_at = NOW()
+            WHERE id = $1
+              AND enabled
+              AND (
+                last_sync_completed_at IS NULL
+                OR last_sync_completed_at
+                   <= NOW() - make_interval(secs => sync_interval_seconds::double precision)
+                OR sync_requested_at > COALESCE(last_sync_started_at, '-infinity'::timestamptz)
+              )
+              AND (
+                last_sync_started_at IS NULL
+                OR last_sync_started_at <= COALESCE(last_sync_completed_at, '-infinity'::timestamptz)
+                OR last_sync_started_at < NOW() - INTERVAL '60 minutes'
+              )
+            RETURNING
                 id                      AS "id!: Uuid",
                 project_id              AS "project_id!: Uuid",
                 jira_base_url           AS "jira_base_url!",
@@ -208,69 +272,32 @@ impl JiraSyncRepository {
                 last_sync_error         AS "last_sync_error?",
                 created_at              AS "created_at!: DateTime<Utc>",
                 updated_at              AS "updated_at!: DateTime<Utc>"
-            FROM project_jira_configs
-            WHERE enabled
-              AND (
-                last_sync_completed_at IS NULL
-                OR last_sync_completed_at
-                   <= NOW() - make_interval(secs => sync_interval_seconds::double precision)
-                OR sync_requested_at > COALESCE(last_sync_started_at, '-infinity'::timestamptz)
-              )
-              -- Exclude configs whose pass lease is held (see claim_sync_started).
-              AND (
-                last_sync_started_at IS NULL
-                OR last_sync_started_at <= COALESCE(last_sync_completed_at, '-infinity'::timestamptz)
-                OR last_sync_started_at < NOW() - INTERVAL '10 minutes'
-              )
-            ORDER BY last_sync_completed_at ASC NULLS FIRST
-            "#
-        )
-        .fetch_all(pool)
-        .await?;
-        Ok(records)
-    }
-
-    /// Claim a due config for this pass. `last_sync_started_at` newer than
-    /// `last_sync_completed_at` is a held lease: the claim is refused while
-    /// a pass is running, however long it takes, so concurrent server
-    /// instances cannot double-run one config. A crashed pass never
-    /// completes and would hold its lease forever, so a lease older than
-    /// 10 minutes (far beyond any healthy pass) is treated as stale and
-    /// taken over — level-triggered recovery rather than a wedge.
-    pub async fn claim_sync_started(
-        pool: &PgPool,
-        config_id: Uuid,
-    ) -> Result<bool, JiraSyncDbError> {
-        let updated = sqlx::query!(
-            r#"
-            UPDATE project_jira_configs
-            SET last_sync_started_at = NOW()
-            WHERE id = $1
-              AND (
-                last_sync_started_at IS NULL
-                OR last_sync_started_at <= COALESCE(last_sync_completed_at, '-infinity'::timestamptz)
-                OR last_sync_started_at < NOW() - INTERVAL '10 minutes'
-              )
             "#,
             config_id
         )
-        .execute(pool)
+        .fetch_optional(pool)
         .await?;
-        Ok(updated.rows_affected() > 0)
+        Ok(record)
     }
 
+    /// Complete a pass, guarded by its lease token (the
+    /// `last_sync_started_at` the claim stamped). A pass whose lease was
+    /// taken over cannot mark completion — otherwise a finishing zombie
+    /// would free the lease out from under the current holder.
     pub async fn mark_sync_completed(
         pool: &PgPool,
         config_id: Uuid,
+        lease: DateTime<Utc>,
         error: Option<String>,
     ) -> Result<(), JiraSyncDbError> {
         sqlx::query!(
             r#"
             UPDATE project_jira_configs
-            SET last_sync_completed_at = NOW(), last_sync_error = $2
-            WHERE id = $1
+            SET last_sync_completed_at = NOW(), last_sync_error = $3
+            WHERE id = $1 AND last_sync_started_at = $2
             "#,
             config_id,
+            lease,
             error
         )
         .execute(pool)

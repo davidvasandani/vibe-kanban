@@ -64,7 +64,7 @@ pub fn spawn_jira_sync_task(
 }
 
 async fn run_tick(pool: &PgPool, http: &reqwest::Client, jwt: &JwtService) {
-    let due = match JiraSyncRepository::list_due_configs(pool).await {
+    let due = match JiraSyncRepository::list_due_config_ids(pool).await {
         Ok(due) => due,
         Err(error) => {
             warn!(?error, "jira sync: failed to list due configs");
@@ -72,11 +72,19 @@ async fn run_tick(pool: &PgPool, http: &reqwest::Client, jwt: &JwtService) {
         }
     };
 
-    for config in due {
-        let project_id = config.project_id;
-        if let Err(error) = run_pass(pool, http, jwt, config).await {
-            warn!(?error, %project_id, "jira sync: pass failed");
-        }
+    for config_id in due {
+        // The claim is the authoritative check: it atomically re-evaluates
+        // enabled/dueness/lease and returns the row the pass must use, so a
+        // disable or edit racing this tick takes effect immediately.
+        let config = match JiraSyncRepository::claim_due_config(pool, config_id).await {
+            Ok(Some(config)) => config,
+            Ok(None) => continue,
+            Err(error) => {
+                warn!(?error, %config_id, "jira sync: failed to claim config");
+                continue;
+            }
+        };
+        run_pass(pool, http, jwt, config).await;
     }
 }
 
@@ -101,22 +109,15 @@ impl PassStats {
     }
 }
 
+/// Run one claimed pass. `config` must come from
+/// [`JiraSyncRepository::claim_due_config`]; its `last_sync_started_at` is
+/// the lease token guarding completion.
 #[instrument(name = "jira_sync.pass", skip_all, fields(project_id = %config.project_id))]
-async fn run_pass(
-    pool: &PgPool,
-    http: &reqwest::Client,
-    jwt: &JwtService,
-    config: JiraSyncConfig,
-) -> Result<(), sqlx::Error> {
-    match JiraSyncRepository::claim_sync_started(pool, config.id).await {
-        Ok(true) => {}
-        // Another instance claimed this config within the guard window.
-        Ok(false) => return Ok(()),
-        Err(error) => {
-            warn!(?error, "jira sync: failed to claim pass");
-            return Ok(());
-        }
-    }
+async fn run_pass(pool: &PgPool, http: &reqwest::Client, jwt: &JwtService, config: JiraSyncConfig) {
+    let Some(lease) = config.last_sync_started_at else {
+        warn!("jira sync: claimed config has no lease timestamp");
+        return;
+    };
 
     let outcome = do_pass(pool, http, jwt, &config).await;
 
@@ -137,10 +138,11 @@ async fn run_pass(
         }
     };
 
-    if let Err(error) = JiraSyncRepository::mark_sync_completed(pool, config.id, error_text).await {
+    if let Err(error) =
+        JiraSyncRepository::mark_sync_completed(pool, config.id, lease, error_text).await
+    {
         warn!(?error, "jira sync: failed to mark pass completed");
     }
-    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
