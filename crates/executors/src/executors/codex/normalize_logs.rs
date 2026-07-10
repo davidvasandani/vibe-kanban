@@ -1126,9 +1126,7 @@ fn handle_direct_item_completed(
                             r#type: ToolResultValueType::Json,
                             value: match result.structured_content {
                                 Some(value) => value,
-                                None => {
-                                    serde_json::to_value(result.content).unwrap_or_default()
-                                }
+                                None => serde_json::to_value(result.content).unwrap_or_default(),
                             },
                         });
                     }
