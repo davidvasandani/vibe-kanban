@@ -216,6 +216,12 @@ impl JiraSyncRepository {
                    <= NOW() - make_interval(secs => sync_interval_seconds::double precision)
                 OR sync_requested_at > COALESCE(last_sync_started_at, '-infinity'::timestamptz)
               )
+              -- Exclude configs whose pass lease is held (see claim_sync_started).
+              AND (
+                last_sync_started_at IS NULL
+                OR last_sync_started_at <= COALESCE(last_sync_completed_at, '-infinity'::timestamptz)
+                OR last_sync_started_at < NOW() - INTERVAL '10 minutes'
+              )
             ORDER BY last_sync_completed_at ASC NULLS FIRST
             "#
         )
@@ -224,12 +230,13 @@ impl JiraSyncRepository {
         Ok(records)
     }
 
-    /// Claim a due config for this pass. The claim is conditional so two
-    /// server instances ticking concurrently cannot both run the same
-    /// config: whoever stamps `last_sync_started_at` first wins, the loser
-    /// sees zero rows. The 15 s guard window is shorter than the ticker, so
-    /// a crashed pass (which never completes) is re-claimable on the next
-    /// tick rather than wedged.
+    /// Claim a due config for this pass. `last_sync_started_at` newer than
+    /// `last_sync_completed_at` is a held lease: the claim is refused while
+    /// a pass is running, however long it takes, so concurrent server
+    /// instances cannot double-run one config. A crashed pass never
+    /// completes and would hold its lease forever, so a lease older than
+    /// 10 minutes (far beyond any healthy pass) is treated as stale and
+    /// taken over — level-triggered recovery rather than a wedge.
     pub async fn claim_sync_started(
         pool: &PgPool,
         config_id: Uuid,
@@ -241,7 +248,8 @@ impl JiraSyncRepository {
             WHERE id = $1
               AND (
                 last_sync_started_at IS NULL
-                OR last_sync_started_at < NOW() - INTERVAL '15 seconds'
+                OR last_sync_started_at <= COALESCE(last_sync_completed_at, '-infinity'::timestamptz)
+                OR last_sync_started_at < NOW() - INTERVAL '10 minutes'
               )
             "#,
             config_id
