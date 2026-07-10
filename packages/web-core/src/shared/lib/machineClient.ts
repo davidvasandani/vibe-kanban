@@ -1,4 +1,6 @@
 import type {
+  CliToolId,
+  CliToolStatus,
   Config,
   GetMcpServerResponse,
   GitBranch,
@@ -69,6 +71,10 @@ export interface MachineClient {
     flowId: string,
     code: string
   ) => Promise<McpAuthStatusResponse>;
+  listCliTools: () => Promise<CliToolStatus[]>;
+  installCliTool: (id: CliToolId) => Promise<CliToolStatus>;
+  updateCliTool: (id: CliToolId) => Promise<CliToolStatus>;
+  removeCliTool: (id: CliToolId) => Promise<CliToolStatus>;
 }
 
 function getMachineRequestOptions(
@@ -260,5 +266,36 @@ export function createMachineClient(
         )
       );
     },
+    listCliTools: async () =>
+      handleApiResponse<CliToolStatus[]>(
+        await makeMachineRequest(runtime, target, '/api/cli-tools')
+      ),
+    installCliTool: async (id) =>
+      handleApiResponse<CliToolStatus>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/cli-tools/${encodeURIComponent(id)}/install`,
+          { method: 'POST' }
+        )
+      ),
+    updateCliTool: async (id) =>
+      handleApiResponse<CliToolStatus>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/cli-tools/${encodeURIComponent(id)}/update`,
+          { method: 'POST' }
+        )
+      ),
+    removeCliTool: async (id) =>
+      handleApiResponse<CliToolStatus>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/cli-tools/${encodeURIComponent(id)}`,
+          { method: 'DELETE' }
+        )
+      ),
   };
 }

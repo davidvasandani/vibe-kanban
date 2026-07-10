@@ -409,6 +409,14 @@ export type McpAuthFlowState = "pending" | "completed" | "failed";
 
 export type McpAuthStatusResponse = { status: McpAuthFlowState, error: string | null, };
 
+export type CliToolId = "aws" | "az" | "op" | "gam" | "mgc-beta";
+
+export type HostCopy = { path: string, version: string | null, };
+
+export type AppCopy = { version: string, outdated: boolean, installed_at: string, };
+
+export type CliToolStatus = { id: CliToolId, binary_name: string, display_name: string, description: string, catalog_version: string, supported: boolean, unsupported_reason: string | null, host: HostCopy | null, app: AppCopy | null, docs_url: string, };
+
 export type CheckEditorAvailabilityQuery = { editor_type: EditorType, };
 
 export type CheckEditorAvailabilityResponse = { available: boolean, };
