@@ -150,6 +150,7 @@ export function KanbanContainer() {
     getPullRequestsForIssue,
     getWorkspacesForIssue,
     getRelationshipsForIssue,
+    getJiraLinkForIssue,
     issuesById,
     insertIssueTag,
     removeIssueTag,
@@ -1186,6 +1187,16 @@ export function KanbanContainer() {
                                   getRelationshipsForIssue(issue.id),
                                   issuesById
                                 )}
+                                jiraLink={(() => {
+                                  const link = getJiraLinkForIssue(issue.id);
+                                  return link
+                                    ? {
+                                        issueKey: link.jira_issue_key,
+                                        url: link.jira_browse_url,
+                                        active: link.link_state === 'active',
+                                      }
+                                    : null;
+                                })()}
                                 isSubIssue={!!issue.parent_issue_id}
                                 isMobile={isMobile}
                                 onPriorityClick={(e) => {

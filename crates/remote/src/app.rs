@@ -16,6 +16,7 @@ use crate::{
     config::RemoteServerConfig,
     db, digest,
     github_app::GitHubAppService,
+    jira::sync::spawn_jira_sync_task,
     mail::{LoopsMailer, Mailer, NoopMailer},
     r2::R2Service,
     routes,
@@ -211,6 +212,8 @@ impl Server {
         if let Some(ref storage) = blob_storage {
             spawn_cleanup_task(pool.clone(), storage.clone());
         }
+
+        spawn_jira_sync_task(pool.clone(), http_client.clone(), jwt.clone());
 
         let digest_enabled = std::env::var("DIGEST_ENABLED")
             .map(|v| matches!(v.as_str(), "true" | "1"))

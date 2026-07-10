@@ -18,6 +18,13 @@ contributed to it.
 
 ## Pages
 
+- [external-connector-sync.md](external-connector-sync.md) — Connecting the
+  remote server to an outside system (shipped for Jira): why connectors live
+  in `crates/remote` (not the local SQLite model), the stored-credential
+  destination-pinning rule (atomic with the write, or TOCTOU reopens it),
+  lease-token pass claiming, echo-free per-field 3-way merge with
+  same-transaction snapshots + post-write re-read, config-cascade link
+  deletion, and Jira API / prepare-db / single-user-E2E gotchas.
 - [electric-sync-fallback.md](electric-sync-fallback.md) — Client Electric
   hybrid sync + REST fallback: Electric-first-then-fallback architecture, the
   error/recovery callback chain to the navbar banner, why the readiness timeout

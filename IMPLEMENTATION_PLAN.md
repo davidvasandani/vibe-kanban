@@ -1,59 +1,80 @@
-# Implementation Plan — Org icons in the left drawer (AppBar rail)
+# Implementation Plan: Bidirectional Jira ↔ VK Sync (task vk/d2aa-sync-vk-and-jira)
 
-Frontend-only change to the cloud app. See `SPEC.md` for rationale and full
-SpecKit artifacts under `homelab/specs/vk/3796-vk-extended-left/`.
+Step-by-step build order. The authoritative dependency-ordered task list is
+`homelab/specs/vk/d2aa-sync-vk-and-jira/tasks.md` (T001–T017); this is the
+executable narrative. Rationale in `SPEC.md`; prior-art recall in
+`PRIOR_KNOWLEDGE.md`.
 
-## Step 1 — Persisted expander store (new file)
-`packages/web-core/src/shared/stores/useOrgRailStore.ts`
-- zustand + `persist`, mirroring `useOrganizationStore`.
-- State: `expanded: boolean` (default `false`), `toggleExpanded()`,
-  `setExpanded(v)`. `persist` name `org-rail-expanded`,
-  `partialize` → `{ expanded }`.
+## Step 1 — Schema (T001)
 
-## Step 2 — `getOrgColor(id)` helper
-In `packages/ui/src/components/AppBarOrgTile.tsx` (co-located):
-- Deterministic string hash of the org id → hue `0..359`; fixed S/L tuned for
-  the dark rail (e.g. `65% 55%`). Return `"<h> <s>% <l>%"` (HSL-triple, same
-  format Project tiles feed into `hsl(...)`).
+`crates/remote/migrations/20260709000000_jira_sync.sql`: create
+`project_jira_configs` (unique per project, encrypted credential, JQL,
+interval, JSONB status mapping, sync stamps, `created_by_user_id`) and
+`jira_issue_links` (unique per `(project_id, jira_issue_id)` and per
+`issue_id`; link_state; last-synced snapshot columns; `last_error`);
+`set_updated_at` triggers; electrify `jira_issue_links`.
 
-## Step 3 — Extend `AppBarOrgTile`
-`packages/ui/src/components/AppBarOrgTile.tsx`
-- Add optional props `expanded?: boolean`, `onToggleExpanded?: () => void`.
-- Paths:
-  - 0 orgs → `null` (unchanged).
-  - 1 org → single static tile, no toggle (unchanged).
-  - >1 org + collapsed → active org tile + a small caret-down toggle button
-    (`aria-expanded={false}`, `onClick={onToggleExpanded}`). Replaces the old
-    dropdown as the default.
-  - >1 org + expanded → an `Orgs` section label (matching `AppBar`'s
-    `AppBarSectionLabel` look) + a vertical list of all org tiles rendered in
-    the **project-tile recipe**: `getOrgInitials`, `w-10 h-10 rounded-lg`,
-    right-side `Tooltip` with the org name, `onClick={() => onSelect(id)}`;
-    selected tile gets inline `style={{ color: 'hsl(<c>)', backgroundColor:
-    'hsl(<c> / 0.2)' }}` with `c = getOrgColor(id)`, non-selected get
-    `bg-primary text-normal hover:opacity-80`. Caret-up collapse toggle at end.
-- Keep exports/`AppBarOrgTileOrganization` type stable.
+## Step 2 — Jira domain module (T002, T004–T006)
 
-## Step 4 — Wire up in the cloud shell
-`packages/remote-web/src/app/layout/RemoteAppShell.tsx`
-- Import `useOrgRailStore`; read `expanded` + `toggleExpanded`.
-- Pass `expanded={expanded}` and `onToggleExpanded={toggleExpanded}` into the
-  `<AppBarOrgTile>` rendered as `orgSlot`. Nothing else changes — selecting an
-  org already re-scopes projects via `activeOrganizationId` → `projectsQuery`.
+- `crates/remote/src/jira/types.rs` — auth-mode/config/link/request/response
+  types (`ts_rs::TS` derives).
+- `crates/remote/src/jira/client.rs` — reqwest client over the shared
+  `AppState.http_client`; Cloud `/rest/api/2/search/jql` vs Server
+  `/rest/api/2/search` pagination; issue GET/PUT; transitions; myself;
+  approximate-count; credential-free error mapping. Unit tests for datetime
+  and error-body parsing.
+- `crates/remote/src/jira/mapping.rs` — override → category-default
+  resolution, explicit reverse table, seeding. Unit-tested.
+- `crates/remote/src/jira/merge.rs` — per-field 3-way decision
+  (`NoOp`/`WriteVk`/`WriteJira`, LWW conflict, Jira wins ties). Unit-tested.
 
-## Step 5 — Tests
-- Add/extend a Vitest for `AppBarOrgTile`: (a) 1 org → no toggle button;
-  (b) >1 org collapsed → toggle present, list hidden; (c) expanded → one tile
-  per org rendered and clicking a tile calls `onSelect(id)`.
+## Step 3 — DB repository (T003)
 
-## Step 6 — Verify
-- `pnpm run check`, `pnpm run lint`, `pnpm run format`.
-- Manual/verify: expand → tiles appear above projects; click switches org and
-  the project list updates; state persists across reload.
+`crates/remote/src/db/jira_sync.rs` — config CRUD (upsert keeps stored
+credential via `COALESCE`), due-config scan (level-triggered: interval
+elapsed OR `sync_requested_at` newer than last start), pass stamps, link
+CRUD + snapshot update + counts, orphan-issue lookup by
+`extension_metadata #>> '{jira,issue_id}'`, `next_sort_order`.
 
-## Step 7 — Codex review
-- Run the `codex-review` skill / Codex CLI on the diff; iterate ≤3 times;
-  address confirmed findings and re-verify.
+## Step 4 — Reconciler (T007–T008)
 
-## Rollback
-Revert the three files + delete the new store file. No data/schema/API impact.
+`crates/remote/src/jira/sync.rs` — 30 s ticker (`JIRA_SYNC_TICK_SECS`); per
+config: search → seed mapping → per-issue import/3-way sync (VK writes +
+snapshot in one transaction; Jira re-read after outbound writes) →
+scope-out detection (dormant/deleted_remote) → aggregate stamps/errors.
+Spawned from `crates/remote/src/app.rs` beside `spawn_cleanup_task`.
+
+## Step 5 — API + shape (T009–T011)
+
+- `crates/remote/src/routes/jira_sync.rs`: GET/PUT/DELETE
+  `/v1/projects/{id}/jira-sync`, POST `…/test`, POST `…/sync-now`; all
+  `ensure_project_access`-gated; credential write-only. Merged in
+  `routes/mod.rs` `v1_protected`.
+- `PROJECT_JIRA_LINKS_SHAPE` in `shapes.rs` + fallback route/handler in
+  `shape_routes.rs` (required by the hybrid-sync contract — see
+  PRIOR_KNOWLEDGE.md).
+- Register types in `src/bin/generate_types.rs`; run
+  `pnpm run remote:generate-types` and `pnpm run remote:prepare-db`
+  (note: environment lacks a standalone `sqlx` binary — shim it to
+  `cargo sqlx` for `scripts/prepare-db.sh`).
+
+## Step 6 — Frontend (T012–T014)
+
+- `jiraSyncApi` in `packages/web-core/src/shared/lib/api.ts`
+  (`makeRemoteRequest`), hook `useJiraSync.ts`.
+- `JiraSyncSettingsSection.tsx` + `jira-sync` registration in
+  `settingsRegistry.tsx` (org/project picker, connection form with masked
+  credential, test-connection, mapping editors, status block,
+  sync-now/disconnect).
+- Badge: subscribe the shape in `ProjectProvider.tsx`
+  (+ `getJiraLinkForIssue` in `useProjectContext.ts`), new
+  `packages/ui/src/components/JiraBadge.tsx`, `jiraLink` prop on
+  `KanbanCardContent.tsx`, wired in `KanbanContainer.tsx`.
+
+## Step 7 — Gates + verification (T015–T017)
+
+All typechecks/lints/tests/format + generated-artifact checks, then a live
+E2E: temp Postgres (initdb) + mock Jira (python) + `remote` binary in
+single-user mode with 1 s tick, driving the acceptance criteria end-to-end
+(import, idempotency, both sync directions, echo-freedom, dormancy,
+deletion semantics, credential redaction, auth gating).

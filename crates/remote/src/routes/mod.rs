@@ -40,6 +40,7 @@ pub mod issue_followers;
 pub mod issue_relationships;
 pub mod issue_tags;
 pub mod issues;
+mod jira_sync;
 pub mod notifications;
 mod oauth;
 mod organization_env_vars;
@@ -129,6 +130,7 @@ pub fn router(state: AppState) -> Router {
         .merge(issue_comments::router())
         .merge(issue_comment_reactions::router())
         .merge(issues::router())
+        .merge(jira_sync::router())
         .merge(issue_assignees::router())
         .merge(attachments::router())
         .merge(issue_followers::router())

@@ -11,6 +11,7 @@ import {
   PROJECT_PULL_REQUESTS_SHAPE,
   PROJECT_PULL_REQUEST_ISSUES_SHAPE,
   PROJECT_WORKSPACES_SHAPE,
+  PROJECT_JIRA_LINKS_SHAPE,
   ISSUE_MUTATION,
   PROJECT_STATUS_MUTATION,
   TAG_MUTATION,
@@ -76,6 +77,9 @@ export function ProjectProvider({ projectId, children }: ProjectProviderProps) {
     { enabled, mutation: PULL_REQUEST_ISSUE_MUTATION }
   );
   const workspacesResult = useShape(PROJECT_WORKSPACES_SHAPE, params, {
+    enabled,
+  });
+  const jiraLinksResult = useShape(PROJECT_JIRA_LINKS_SHAPE, params, {
     enabled,
   });
 
@@ -224,6 +228,12 @@ export function ProjectProvider({ projectId, children }: ProjectProviderProps) {
     [workspacesResult.data]
   );
 
+  const getJiraLinkForIssue = useCallback(
+    (issueId: string) =>
+      jiraLinksResult.data.find((l) => l.issue_id === issueId),
+    [jiraLinksResult.data]
+  );
+
   const value = useMemo<ProjectContextValue>(
     () => ({
       projectId,
@@ -239,6 +249,7 @@ export function ProjectProvider({ projectId, children }: ProjectProviderProps) {
       pullRequests: pullRequestsResult.data,
       pullRequestIssues: pullRequestIssuesResult.data,
       workspaces: workspacesResult.data,
+      jiraLinks: jiraLinksResult.data,
 
       // Loading/error
       isLoading,
@@ -292,6 +303,7 @@ export function ProjectProvider({ projectId, children }: ProjectProviderProps) {
       getTag,
       getPullRequestsForIssue,
       getWorkspacesForIssue,
+      getJiraLinkForIssue,
 
       // Computed aggregations
       issuesById,
@@ -324,6 +336,8 @@ export function ProjectProvider({ projectId, children }: ProjectProviderProps) {
       getTag,
       getPullRequestsForIssue,
       getWorkspacesForIssue,
+      getJiraLinkForIssue,
+      jiraLinksResult.data,
       issuesById,
       statusesById,
       tagsById,

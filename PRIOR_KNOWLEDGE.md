@@ -1,38 +1,45 @@
-# Prior Knowledge — recalled for `vk/3796-vk-extended-left`
+# Prior Knowledge — recalled for `vk/d2aa-sync-vk-and-jira`
 
-Searched the project knowledge base (`wiki/`) for pages relevant to this task
-(left drawer / `AppBar` rail, org navigation, project/org icon tiles, sidebar).
+Searched both project knowledge bases — `wiki/` (primary, 5 pages) and
+`docs/knowledge-base/` (2 pages) — for pages relevant to this task
+(bidirectional Jira sync: remote-server background service, new Electric
+shape, project-settings UI, external REST client, credential storage).
 
 ## Relevant findings
 
-**None directly relevant.** The knowledge base has five pages
-(`wiki/INDEX.md`); none covers the `AppBar` rail, the org switcher, or the
-project/org icon-tile UI this task touches:
+**[wiki/electric-sync-fallback.md] — directly relevant.** Any new Electric
+shape must participate in the client's hybrid sync: Electric-first with a
+readiness timeout, then a locked REST fallback polling the shape's
+`fallbackUrl` (30 s snapshots). Practical consequence for this task: the new
+`PROJECT_JIRA_LINKS_SHAPE` is not complete without a registered REST fallback
+route + handler in `shape_routes.rs` — otherwise boards running in fallback
+mode (Electric down/unreachable) would silently never show Jira badges.
+Applied: `/v1/fallback/jira_links` handler registered alongside the shape.
 
-- `wiki/electric-sync-fallback.md` — client Electric sync + REST fallback and a
-  navbar *banner*. Only tangential (mentions the navbar), nothing about the
-  left rail or org tiles.
-- `wiki/kanban-items-state-and-activity-grouping.md` — kanban items ↔ DnD
-  index/sort_order. Unrelated (though the project list in the rail uses
-  `@hello-pangea/dnd`, this task adds no DnD).
-- `wiki/mobile-kanban-scrolling.md` — mobile board scroll/snap. Unrelated.
-- `wiki/self-hosted-deployment.md` — deploy pipeline. Unrelated.
-- `wiki/project-context-map.md` — monorepo scope mapping. Unrelated.
+**[wiki/self-hosted-deployment.md] — context for rollout.** The remote server
+binary (`remote`) ships via the versioned-release contract
+(`VK_RELEASES_DIR`, atomic `current` flip, one-step rollback). SQLx
+migrations run at server startup (`app.rs` → `db::migrate`), so the
+`jira_sync` migration applies on first boot of the new release; rollback to
+`previous` leaves the two new tables in place unused, which is harmless —
+consistent with "sync never deletes VK issues".
 
-So on the topic of **the left-drawer AppBar rail and org navigation tiles**,
-this is effectively a first task — no prior page to build on.
+**[wiki/kanban-items-state-and-activity-grouping.md] — convention echo.**
+Board semantics identify the "In progress" column by *name*, not id. The
+Jira status mapping follows the same convention (name-keyed mapping tables,
+case-insensitive resolution against `project_statuses.name`), so renamed
+columns degrade the same way in both features rather than inventing a second
+identity scheme.
 
-## Carry-forward facts established during this task's investigation
-(useful to the spec/plan stages; candidates for the knowledge base afterwards)
+**Not relevant:** `wiki/mobile-kanban-scrolling.md` (touch gestures),
+`wiki/project-context-map.md` (issue scoping in monorepos),
+`docs/knowledge-base/claude-log-normalization.md` and
+`collapsing-repeated-log-entries.md` (executor log processing).
 
-- The left drawer is the vertical **`AppBar` rail**:
-  `packages/ui/src/components/AppBar.tsx`. It renders an `{orgSlot}` ReactNode at
-  the very top, then labeled sections; the `project-list` case is the styling
-  template for icon tiles (colored initials, 40×40 `rounded-lg`, right-side
-  `Tooltip`, active state via inline `hsl(color)`).
-- Orgs are a **cloud** concept surfaced only in `remote-web`
-  (`RemoteAppShell.tsx`), which today passes a single-tile/dropdown
-  `AppBarOrgTile` as the `orgSlot`. Org data:
-  `useUserOrganizations()` + `useOrganizationStore` (both `web-core`).
-- `OrganizationWithRole` has **no `color`** field (unlike `Project.color`), so
-  org-tile coloring must be client-derived.
+## Gaps the knowledge base did not cover
+
+No prior page covered: remote-server background reconcilers, external
+connector credential storage (found via code precedent:
+`organization_env_vars` + `JwtService::encrypt_string`), or external REST
+client patterns (`github_app/service.rs`). These are candidates for new
+pages when this task distills its knowledge.

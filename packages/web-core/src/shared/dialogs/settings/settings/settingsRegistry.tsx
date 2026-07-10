@@ -7,6 +7,7 @@ import {
   PlugIcon,
   BroadcastIcon,
   PaperclipIcon,
+  KanbanIcon,
 } from '@phosphor-icons/react';
 import type { Icon } from '@phosphor-icons/react';
 import { GeneralSettingsSection } from './GeneralSettingsSection';
@@ -17,6 +18,7 @@ import { AgentsSettingsSection } from './AgentsSettingsSection';
 import { McpSettingsSection } from './McpSettingsSection';
 import { RelaySettingsSectionContent } from './RelaySettingsSection';
 import { AttachmentsSettingsSection } from './AttachmentsSettingsSection';
+import { JiraSyncSettingsSection } from './JiraSyncSettingsSection';
 
 export type SettingsSectionType =
   | 'general'
@@ -26,7 +28,8 @@ export type SettingsSectionType =
   | 'agents'
   | 'mcp'
   | 'relay'
-  | 'attachments';
+  | 'attachments'
+  | 'jira-sync';
 
 export type SettingsSectionGroup = 'host' | 'universal';
 
@@ -41,6 +44,7 @@ export type SettingsSectionInitialState = {
   mcp: undefined;
   relay: { hostId?: string } | undefined;
   attachments: undefined;
+  'jira-sync': { organizationId?: string; projectId?: string } | undefined;
 };
 
 export interface SettingsSectionDefinition {
@@ -58,6 +62,7 @@ export const SETTINGS_SECTION_DEFINITIONS: SettingsSectionDefinition[] = [
   { id: 'remote-projects', icon: CloudIcon, group: 'universal' },
   { id: 'relay', icon: BroadcastIcon, group: 'universal' },
   { id: 'attachments', icon: PaperclipIcon, group: 'universal' },
+  { id: 'jira-sync', icon: KanbanIcon, group: 'universal' },
 ];
 
 export function isHostSpecificSettingsSection(
@@ -106,6 +111,14 @@ export function renderSettingsSection(
       );
     case 'attachments':
       return <AttachmentsSettingsSection />;
+    case 'jira-sync':
+      return (
+        <JiraSyncSettingsSection
+          initialState={
+            initialState as SettingsSectionInitialState['jira-sync']
+          }
+        />
+      );
     default:
       return <GeneralSettingsSection />;
   }

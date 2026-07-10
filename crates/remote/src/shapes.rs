@@ -6,7 +6,7 @@ use api_types::{
     PullRequestIssue, Tag, User, Workspace,
 };
 
-use crate::shape_definition::ShapeDefinition;
+use crate::{jira::types::JiraIssueLink, shape_definition::ShapeDefinition};
 
 // =============================================================================
 // Organization-scoped shapes
@@ -137,6 +137,16 @@ pub const PROJECT_PULL_REQUEST_ISSUES_SHAPE: ShapeDefinition<PullRequestIssue> =
     table: "pull_request_issues",
     where_clause: r#""issue_id" IN (SELECT id FROM issues WHERE "project_id" = $1)"#,
     url: "/shape/project/{project_id}/pull_request_issues",
+    params: ["project_id"],
+);
+
+/// Jira links for the project's issues, so boards can render Jira keys live
+/// (fork addition; rows carry no secrets).
+pub const PROJECT_JIRA_LINKS_SHAPE: ShapeDefinition<JiraIssueLink> = crate::define_shape!(
+    name: "PROJECT_JIRA_LINKS_SHAPE",
+    table: "jira_issue_links",
+    where_clause: r#""project_id" = $1"#,
+    url: "/shape/project/{project_id}/jira_links",
     params: ["project_id"],
 );
 

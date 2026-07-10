@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE jira_issue_links\n            SET jira_issue_key = $2,\n                jira_browse_url = $3,\n                link_state = 'active',\n                last_synced_title = $4,\n                last_synced_description = $5,\n                last_synced_status_id = $6,\n                last_synced_jira_status = $7,\n                last_synced_jira_updated_at = $8,\n                last_synced_vk_updated_at = $9,\n                last_error = NULL\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Uuid",
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "16274ab5df6ad99146952d81c0c58c242479b751cbececd2fbb831a12ff55fa2"
+}

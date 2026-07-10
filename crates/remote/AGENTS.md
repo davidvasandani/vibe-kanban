@@ -56,6 +56,7 @@ The billing crate (`vk-billing` feature) is a private dependency stripped at bui
 | `routes/mod.rs` | Router tree, SPA fallback from `/srv/static` |
 | `db/mod.rs` | Pool creation, migrations, `ensure_electric_role_password()` |
 | `auth/` | JWT, OAuth providers (GitHub/Google), session middleware |
+| `jira/` | Bidirectional Jira sync (fork addition): REST client, status mapping, per-field 3-way merge, background reconciler; per-project config via `routes/jira_sync.rs`, links streamed via `PROJECT_JIRA_LINKS_SHAPE` |
 
 ## ElectricSQL Integration
 

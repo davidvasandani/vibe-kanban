@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id AS \"id!: Uuid\"\n            FROM issues\n            WHERE project_id = $1\n              AND extension_metadata #>> '{jira,issue_id}' = $2\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: Uuid",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "13d8e8715bc8784125a210d18c9d4b78964b4cefcb4893de5e5970964a60db67"
+}

@@ -15,6 +15,7 @@ pub mod issue_followers;
 pub mod issue_relationships;
 pub mod issue_tags;
 pub mod issues;
+pub mod jira_sync;
 pub mod notifications;
 pub mod oauth;
 pub mod oauth_accounts;
