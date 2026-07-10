@@ -187,7 +187,7 @@ export type JiraAuthMode = "cloud_basic" | "server_pat";
 
 export type JiraStatusMapping = { jira_to_vk: { [key in string]?: string }, vk_to_jira: { [key in string]?: string }, };
 
-export type JiraIssueLink = { id: string, project_id: string, issue_id: string, jira_issue_id: string, jira_issue_key: string, jira_browse_url: string, 
+export type JiraIssueLink = { id: string, config_id: string, project_id: string, issue_id: string, jira_issue_id: string, jira_issue_key: string, jira_browse_url: string, 
 /**
  * `active` | `dormant` (left the JQL scope) | `deleted_remote`.
  */

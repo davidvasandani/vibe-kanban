@@ -149,23 +149,16 @@ impl JiraSyncRepository {
         Ok(())
     }
 
-    /// Delete the config and all links. VK issues are untouched (FR-4).
-    /// Returns whether a config existed.
+    /// Delete the config; links go with it via the `config_id` cascade
+    /// (which also blocks an in-flight pass from resurrecting them). VK
+    /// issues are untouched (FR-4). Returns whether a config existed.
     pub async fn delete_config(pool: &PgPool, project_id: Uuid) -> Result<bool, JiraSyncDbError> {
-        let mut tx = pool.begin().await?;
-        sqlx::query!(
-            "DELETE FROM jira_issue_links WHERE project_id = $1",
-            project_id
-        )
-        .execute(&mut *tx)
-        .await?;
         let deleted = sqlx::query!(
             "DELETE FROM project_jira_configs WHERE project_id = $1",
             project_id
         )
-        .execute(&mut *tx)
+        .execute(pool)
         .await?;
-        tx.commit().await?;
         Ok(deleted.rows_affected() > 0)
     }
 
@@ -231,14 +224,31 @@ impl JiraSyncRepository {
         Ok(records)
     }
 
-    pub async fn mark_sync_started(pool: &PgPool, config_id: Uuid) -> Result<(), JiraSyncDbError> {
-        sqlx::query!(
-            "UPDATE project_jira_configs SET last_sync_started_at = NOW() WHERE id = $1",
+    /// Claim a due config for this pass. The claim is conditional so two
+    /// server instances ticking concurrently cannot both run the same
+    /// config: whoever stamps `last_sync_started_at` first wins, the loser
+    /// sees zero rows. The 15 s guard window is shorter than the ticker, so
+    /// a crashed pass (which never completes) is re-claimable on the next
+    /// tick rather than wedged.
+    pub async fn claim_sync_started(
+        pool: &PgPool,
+        config_id: Uuid,
+    ) -> Result<bool, JiraSyncDbError> {
+        let updated = sqlx::query!(
+            r#"
+            UPDATE project_jira_configs
+            SET last_sync_started_at = NOW()
+            WHERE id = $1
+              AND (
+                last_sync_started_at IS NULL
+                OR last_sync_started_at < NOW() - INTERVAL '15 seconds'
+              )
+            "#,
             config_id
         )
         .execute(pool)
         .await?;
-        Ok(())
+        Ok(updated.rows_affected() > 0)
     }
 
     pub async fn mark_sync_completed(
@@ -273,6 +283,7 @@ impl JiraSyncRepository {
             r#"
             SELECT
                 id                          AS "id!: Uuid",
+                config_id                   AS "config_id!: Uuid",
                 project_id                  AS "project_id!: Uuid",
                 issue_id                    AS "issue_id!: Uuid",
                 jira_issue_id               AS "jira_issue_id!",
@@ -303,6 +314,7 @@ impl JiraSyncRepository {
     #[allow(clippy::too_many_arguments)]
     pub async fn create_link<'e, E>(
         executor: E,
+        config_id: Uuid,
         project_id: Uuid,
         issue_id: Uuid,
         jira_issue_id: &str,
@@ -317,15 +329,16 @@ impl JiraSyncRepository {
             JiraIssueLink,
             r#"
             INSERT INTO jira_issue_links (
-                project_id, issue_id, jira_issue_id, jira_issue_key,
+                config_id, project_id, issue_id, jira_issue_id, jira_issue_key,
                 jira_browse_url, link_state,
                 last_synced_title, last_synced_description,
                 last_synced_status_id, last_synced_jira_status,
                 last_synced_jira_updated_at, last_synced_vk_updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9, $10, $11, $12)
             RETURNING
                 id                          AS "id!: Uuid",
+                config_id                   AS "config_id!: Uuid",
                 project_id                  AS "project_id!: Uuid",
                 issue_id                    AS "issue_id!: Uuid",
                 jira_issue_id               AS "jira_issue_id!",
@@ -342,6 +355,7 @@ impl JiraSyncRepository {
                 created_at                  AS "created_at!: DateTime<Utc>",
                 updated_at                  AS "updated_at!: DateTime<Utc>"
             "#,
+            config_id,
             project_id,
             issue_id,
             jira_issue_id,

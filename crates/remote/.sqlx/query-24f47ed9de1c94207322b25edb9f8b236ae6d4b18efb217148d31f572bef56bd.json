@@ -1,0 +1,118 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                id                          AS \"id!: Uuid\",\n                config_id                   AS \"config_id!: Uuid\",\n                project_id                  AS \"project_id!: Uuid\",\n                issue_id                    AS \"issue_id!: Uuid\",\n                jira_issue_id               AS \"jira_issue_id!\",\n                jira_issue_key              AS \"jira_issue_key!\",\n                jira_browse_url             AS \"jira_browse_url!\",\n                link_state                  AS \"link_state!\",\n                last_synced_title           AS \"last_synced_title?\",\n                last_synced_description     AS \"last_synced_description?\",\n                last_synced_status_id       AS \"last_synced_status_id?: Uuid\",\n                last_synced_jira_status     AS \"last_synced_jira_status?\",\n                last_synced_jira_updated_at AS \"last_synced_jira_updated_at?: DateTime<Utc>\",\n                last_synced_vk_updated_at   AS \"last_synced_vk_updated_at?: DateTime<Utc>\",\n                last_error                  AS \"last_error?\",\n                created_at                  AS \"created_at!: DateTime<Utc>\",\n                updated_at                  AS \"updated_at!: DateTime<Utc>\"\n            FROM jira_issue_links\n            WHERE project_id = $1\n            ORDER BY created_at ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "config_id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "project_id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "issue_id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "jira_issue_id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "jira_issue_key!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "jira_browse_url!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "link_state!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "last_synced_title?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "last_synced_description?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "last_synced_status_id?: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 11,
+        "name": "last_synced_jira_status?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "last_synced_jira_updated_at?: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "last_synced_vk_updated_at?: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "last_error?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "created_at!: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "updated_at!: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "24f47ed9de1c94207322b25edb9f8b236ae6d4b18efb217148d31f572bef56bd"
+}

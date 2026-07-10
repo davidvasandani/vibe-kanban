@@ -108,9 +108,14 @@ async fn run_pass(
     jwt: &JwtService,
     config: JiraSyncConfig,
 ) -> Result<(), sqlx::Error> {
-    if let Err(error) = JiraSyncRepository::mark_sync_started(pool, config.id).await {
-        warn!(?error, "jira sync: failed to mark pass started");
-        return Ok(());
+    match JiraSyncRepository::claim_sync_started(pool, config.id).await {
+        Ok(true) => {}
+        // Another instance claimed this config within the guard window.
+        Ok(false) => return Ok(()),
+        Err(error) => {
+            warn!(?error, "jira sync: failed to claim pass");
+            return Ok(());
+        }
     }
 
     let outcome = do_pass(pool, http, jwt, &config).await;
@@ -192,7 +197,8 @@ async fn do_pass(
         credential,
     )?;
 
-    let (jira_issues, _total) = client.search_all(&config.jql).await?;
+    let search = client.search_all(&config.jql).await?;
+    let jira_issues = search.issues;
 
     let statuses = ProjectStatusRepository::list_by_project(pool, config.project_id).await?;
     let mut sorted = statuses.clone();
@@ -265,25 +271,35 @@ async fn do_pass(
 
     // Scope-out detection (FR-9): active links whose issue was not returned
     // by the query either left the JQL scope (dormant) or were deleted in
-    // Jira (permanently unlinked). VK issues are never deleted.
-    let returned: std::collections::HashSet<&str> =
-        jira_issues.iter().map(|i| i.id.as_str()).collect();
-    for link in links.iter().filter(|l| {
-        l.link_state == LINK_STATE_ACTIVE && !returned.contains(l.jira_issue_id.as_str())
-    }) {
-        match client.get_issue(&link.jira_issue_id).await {
-            Ok(Some(_)) => {
-                JiraSyncRepository::set_link_state(pool, link.id, LINK_STATE_DORMANT).await?;
-            }
-            Ok(None) => {
-                JiraSyncRepository::set_link_state(pool, link.id, LINK_STATE_DELETED_REMOTE)
-                    .await?;
-            }
-            Err(error) => {
-                stats.errors.push(format!(
-                    "{}: scope check failed: {error}",
-                    link.jira_issue_key
-                ));
+    // Jira (permanently unlinked). VK issues are never deleted. Skipped
+    // entirely when the search was truncated by the page cap — a partial
+    // result set must not be mistaken for the full JQL scope.
+    if search.truncated {
+        stats.errors.push(format!(
+            "JQL matched more issues than the sync cap; synced the first {}, \
+             skipped out-of-scope detection — narrow the query",
+            jira_issues.len()
+        ));
+    } else {
+        let returned: std::collections::HashSet<&str> =
+            jira_issues.iter().map(|i| i.id.as_str()).collect();
+        for link in links.iter().filter(|l| {
+            l.link_state == LINK_STATE_ACTIVE && !returned.contains(l.jira_issue_id.as_str())
+        }) {
+            match client.get_issue(&link.jira_issue_id).await {
+                Ok(Some(_)) => {
+                    JiraSyncRepository::set_link_state(pool, link.id, LINK_STATE_DORMANT).await?;
+                }
+                Ok(None) => {
+                    JiraSyncRepository::set_link_state(pool, link.id, LINK_STATE_DELETED_REMOTE)
+                        .await?;
+                }
+                Err(error) => {
+                    stats.errors.push(format!(
+                        "{}: scope check failed: {error}",
+                        link.jira_issue_key
+                    ));
+                }
             }
         }
     }
@@ -372,6 +388,7 @@ async fn import_new_issue(
     };
     JiraSyncRepository::create_link(
         pool,
+        config.id,
         config.project_id,
         issue_id,
         &jira_issue.id,

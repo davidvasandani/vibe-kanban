@@ -80,6 +80,7 @@ impl JiraSyncConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, sqlx::FromRow)]
 pub struct JiraIssueLink {
     pub id: Uuid,
+    pub config_id: Uuid,
     pub project_id: Uuid,
     pub issue_id: Uuid,
     pub jira_issue_id: String,

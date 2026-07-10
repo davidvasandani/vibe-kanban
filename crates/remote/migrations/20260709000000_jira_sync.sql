@@ -32,6 +32,11 @@ CREATE TRIGGER trg_project_jira_configs_updated_at
 
 CREATE TABLE jira_issue_links (
     id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- Cascade from the config, not just the project: deleting the sync
+    -- config removes all links even if a reconciler pass is mid-flight
+    -- (a stale pass inserting after the delete hits an FK violation
+    -- instead of resurrecting links).
+    config_id                   UUID NOT NULL REFERENCES project_jira_configs(id) ON DELETE CASCADE,
     project_id                  UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     issue_id                    UUID NOT NULL UNIQUE REFERENCES issues(id) ON DELETE CASCADE,
     -- Jira's immutable internal issue id; keys can be renamed, ids cannot.

@@ -46,6 +46,15 @@ impl From<reqwest::Error> for JiraClientError {
     }
 }
 
+#[derive(Debug)]
+pub struct JiraSearchResult {
+    pub issues: Vec<JiraIssueData>,
+    /// Server/DC classic search reports a total; Cloud does not.
+    pub total: Option<i64>,
+    /// True when the page cap cut the result short.
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct JiraIssueData {
     pub id: String,
@@ -220,15 +229,16 @@ impl JiraClient {
     }
 
     /// Fetch every issue matching `jql` (paginated; capped at
-    /// `MAX_SEARCH_PAGES`). Returns the issues and, on Server/DC, the total.
-    pub async fn search_all(
-        &self,
-        jql: &str,
-    ) -> Result<(Vec<JiraIssueData>, Option<i64>), JiraClientError> {
+    /// `MAX_SEARCH_PAGES`). Returns the issues, the total where the
+    /// deployment reports one (Server/DC), and whether the result was
+    /// truncated by the page cap — callers must not treat a truncated
+    /// result as the complete JQL scope.
+    pub async fn search_all(&self, jql: &str) -> Result<JiraSearchResult, JiraClientError> {
         let mut issues = Vec::new();
         let mut total = None;
         let mut next_page_token: Option<String> = None;
         let mut start_at: i64 = 0;
+        let mut truncated = true;
 
         for _ in 0..MAX_SEARCH_PAGES {
             let page = self
@@ -243,18 +253,26 @@ impl JiraClient {
             match self.auth_mode {
                 JiraAuthMode::CloudBasic => match page.next_page_token {
                     Some(token) => next_page_token = Some(token),
-                    None => break,
+                    None => {
+                        truncated = false;
+                        break;
+                    }
                 },
                 JiraAuthMode::ServerPat => {
                     start_at += page_len;
                     if page_len == 0 || total.is_some_and(|t| start_at >= t) {
+                        truncated = false;
                         break;
                     }
                 }
             }
         }
 
-        Ok((issues, total))
+        Ok(JiraSearchResult {
+            issues,
+            total,
+            truncated,
+        })
     }
 
     async fn search_page(

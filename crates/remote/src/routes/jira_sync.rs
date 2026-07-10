@@ -2,7 +2,13 @@
 //!
 //! The credential is write-only: accepted in PUT/test payloads, stored
 //! encrypted, and never included in any response (`has_credential` stands in
-//! for it).
+//! for it). Reading config/status and "sync now" are open to project
+//! members; anything that stores, deletes, or *uses* a credential with
+//! caller-supplied connection parameters (PUT, DELETE, test) requires org
+//! admin, matching the `organization_env_vars` precedent. Note the server
+//! does make outbound requests to the admin-supplied `jira_base_url`; that
+//! is inherent to the feature (self-hosted Jira lives on private networks),
+//! so the mitigation is restricting *who* can set it, not *where* it points.
 
 use axum::{
     Json, Router,
@@ -17,7 +23,11 @@ use super::{error::ErrorResponse, organization_members::ensure_project_access};
 use crate::{
     AppState,
     auth::RequestContext,
-    db::jira_sync::{JiraSyncRepository, UpsertJiraSyncConfigArgs},
+    db::{
+        identity_errors::IdentityError,
+        jira_sync::{JiraSyncRepository, UpsertJiraSyncConfigArgs},
+        organizations::OrganizationRepository,
+    },
     jira::{
         client::{JiraClient, JiraClientError},
         types::{
@@ -26,6 +36,28 @@ use crate::{
         },
     },
 };
+
+/// Project access plus org-admin, for the credential-bearing operations.
+async fn ensure_project_admin(
+    state: &AppState,
+    user_id: Uuid,
+    project_id: Uuid,
+) -> Result<(), ErrorResponse> {
+    let organization_id = ensure_project_access(state.pool(), user_id, project_id).await?;
+    OrganizationRepository::new(&state.pool)
+        .assert_admin(organization_id, user_id)
+        .await
+        .map_err(|e| match e {
+            IdentityError::PermissionDenied => ErrorResponse::new(
+                StatusCode::FORBIDDEN,
+                "Admin access required to manage Jira sync",
+            ),
+            IdentityError::NotFound => {
+                ErrorResponse::new(StatusCode::NOT_FOUND, "Organization not found")
+            }
+            _ => ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
+        })
+}
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -128,7 +160,7 @@ async fn upsert_config(
     Path(project_id): Path<Uuid>,
     Json(payload): Json<UpsertJiraSyncConfigRequest>,
 ) -> Result<impl IntoResponse, ErrorResponse> {
-    ensure_project_access(state.pool(), ctx.user.id, project_id).await?;
+    ensure_project_admin(&state, ctx.user.id, project_id).await?;
     validate_upsert(&payload)?;
 
     let existing = JiraSyncRepository::find_config_by_project(&state.pool, project_id)
@@ -188,7 +220,7 @@ async fn delete_config(
     Extension(ctx): Extension<RequestContext>,
     Path(project_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ErrorResponse> {
-    ensure_project_access(state.pool(), ctx.user.id, project_id).await?;
+    ensure_project_admin(&state, ctx.user.id, project_id).await?;
 
     JiraSyncRepository::delete_config(&state.pool, project_id)
         .await
@@ -207,10 +239,12 @@ async fn test_connection(
     Path(project_id): Path<Uuid>,
     Json(payload): Json<JiraTestConnectionRequest>,
 ) -> Result<impl IntoResponse, ErrorResponse> {
-    ensure_project_access(state.pool(), ctx.user.id, project_id).await?;
+    ensure_project_admin(&state, ctx.user.id, project_id).await?;
 
-    // Supplied credential wins; otherwise fall back to the stored one so the
-    // user can re-test without re-typing the secret.
+    // Supplied credential wins; otherwise fall back to the stored one — but
+    // the stored credential is only ever presented to the *stored*
+    // destination. Without this, a caller could point the test at a URL
+    // they control and capture the decrypted secret from the auth header.
     let credential = match payload
         .credential
         .as_deref()
@@ -227,6 +261,14 @@ async fn test_connection(
                 })?
                 .filter(|c| !c.encrypted_credential.is_empty())
                 .ok_or_else(|| bad_request("no credential supplied or stored"))?;
+            let same_destination = normalize_base_url(&payload.jira_base_url)
+                == normalize_base_url(&stored.jira_base_url)
+                && payload.auth_mode.as_str() == stored.auth_mode;
+            if !same_destination {
+                return Err(bad_request(
+                    "re-enter the credential when changing the Jira URL or auth mode",
+                ));
+            }
             state
                 .jwt
                 .decrypt_string(&stored.encrypted_credential)
@@ -236,6 +278,10 @@ async fn test_connection(
 
     let response = run_test(&state, &payload, credential).await;
     Ok(Json(response))
+}
+
+fn normalize_base_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_ascii_lowercase()
 }
 
 async fn run_test(
@@ -266,22 +312,24 @@ async fn run_test(
     }
 
     match client.search_all(&payload.jql).await {
-        Ok((issues, total)) => {
-            let mut statuses: Vec<String> = issues
+        Ok(search) => {
+            let mut statuses: Vec<String> = search
+                .issues
                 .iter()
                 .map(|i| i.status_name.clone())
                 .filter(|s| !s.is_empty())
                 .collect();
             statuses.sort();
             statuses.dedup();
-            let match_count = match total {
+            let match_count = match search.total {
                 Some(total) => Some(total),
+                None if search.truncated => None,
                 None => match payload.auth_mode {
                     JiraAuthMode::CloudBasic => client
                         .approximate_count(&payload.jql)
                         .await
-                        .or(Some(issues.len() as i64)),
-                    JiraAuthMode::ServerPat => Some(issues.len() as i64),
+                        .or(Some(search.issues.len() as i64)),
+                    JiraAuthMode::ServerPat => Some(search.issues.len() as i64),
                 },
             };
             JiraTestConnectionResponse {
