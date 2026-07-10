@@ -63,3 +63,13 @@ contributed to it.
   persisted expand state (`useOrgRailStore`), and two component gotchas
   (optional-controlled state needs an internal fallback; don't render a
   no-op `<button>` — use a non-interactive tile).
+- [family-os-sandbox-stack.md](family-os-sandbox-stack.md) — Live Family OS
+  backend in VK sandboxes (`homelab/apps/family-os/scripts/sandbox.sh`):
+  sandbox environment facts (no cgo, Postgres binaries on PATH,
+  `NODE_ENV=production` skipping devDeps, `core.fileMode=false`), why dev
+  seed rows go into the already-applied `0099_seed` (version-tracked, no
+  checksums), the Google-API local-stub pattern (`WithEndpoint` +
+  `WithoutAuthentication`, marshal real drive/v3 structs, test through the
+  real client), `familyctl` token parsing + fixed seed UUIDs, and
+  provisioning-script invariants (restart app procs every `up`, comm-check
+  pidfiles, probe data not process liveness).
