@@ -959,7 +959,10 @@ impl LocalContainerService {
             // exited naturally or was killed in the exit-signal branch above.
             // A warm app-server is exempt: it stays alive (and in the child
             // store, so it remains reachable by the stop/teardown paths) for
-            // reuse by the next turn.
+            // reuse by the next turn. NOTE for enabling keep_warm (Phase 2):
+            // its execution row is Completed here, and workspace teardown
+            // (try_stop) only stops Running executions — the warm registry
+            // must own reaping at attempt/workspace end or the process leaks.
             if !kept_warm {
                 if let Some(child_lock) = child_store.read().await.get(&exec_id).cloned() {
                     let mut child = child_lock.write().await;
