@@ -1664,23 +1664,22 @@ impl ContainerService for LocalContainerService {
         // Unix only: adoption after a restart relies on process-group
         // management.
         #[cfg(unix)]
-        let dev_server_raw_log =
-            if execution_process.run_reason.is_persistent() {
-                let path = utils::execution_logs::process_raw_log_file_path(
-                    execution_process.session_id,
-                    execution_process.id,
-                );
-                if let Some(parent) = path.parent() {
-                    let _ = tokio::fs::create_dir_all(parent).await;
-                }
-                env.insert(
-                    executors::actions::script::RAW_LOG_PATH_ENV,
-                    path.to_string_lossy().into_owned(),
-                );
-                Some(path)
-            } else {
-                None
-            };
+        let dev_server_raw_log = if execution_process.run_reason.is_persistent() {
+            let path = utils::execution_logs::process_raw_log_file_path(
+                execution_process.session_id,
+                execution_process.id,
+            );
+            if let Some(parent) = path.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            env.insert(
+                executors::actions::script::RAW_LOG_PATH_ENV,
+                path.to_string_lossy().into_owned(),
+            );
+            Some(path)
+        } else {
+            None
+        };
         #[cfg(not(unix))]
         let dev_server_raw_log: Option<PathBuf> = None;
 

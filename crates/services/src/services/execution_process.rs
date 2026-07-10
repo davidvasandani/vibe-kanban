@@ -8,8 +8,7 @@ use anyhow::{Context, Result};
 use db::{
     DBService,
     models::{
-        coding_agent_turn::CodingAgentTurn,
-        execution_process::{ExecutionProcess, ExecutionProcessRunReason},
+        coding_agent_turn::CodingAgentTurn, execution_process::ExecutionProcess,
         execution_process_logs::ExecutionProcessLogs,
     },
 };

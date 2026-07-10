@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE workspaces\n               SET speckit_host_repo_id = $1,\n                   speckit_feature_key = $2,\n                   updated_at = datetime('now', 'subsec')\n               WHERE id = $3 AND speckit_feature_key IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "1b90b43c8fc137c6cfec976d7c80a03735553a3bfe5de902498ba3b22cc9bb80"
+}

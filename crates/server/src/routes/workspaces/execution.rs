@@ -1,4 +1,9 @@
-use axum::{Extension, Router, extract::State, response::Json as ResponseJson, routing::post};
+use axum::{
+    Extension, Json, Router,
+    extract::State,
+    response::Json as ResponseJson,
+    routing::{get, post},
+};
 use db::models::{
     execution_process::{ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus},
     session::{CreateSession, Session},
@@ -26,9 +31,33 @@ pub enum RunScriptError {
     ProcessAlreadyRunning,
 }
 
+/// Cap on concurrently running background helpers per workspace, so a
+/// misbehaving agent cannot accumulate an unbounded process fleet.
+const MAX_BACKGROUND_HELPERS_PER_WORKSPACE: usize = 5;
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(tag = "type", rename_all = "snake_case")]
+pub enum StartBackgroundHelperError {
+    EmptyScript,
+    InvalidWorkingDir,
+    TooManyHelpers,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct StartBackgroundHelperRequest {
+    /// Bash script to run as the helper (e.g. a watcher or tunnel).
+    pub script: String,
+    /// Optional path to run the script in, relative to the workspace root.
+    #[serde(default)]
+    pub working_dir: Option<String>,
+}
+
 pub fn router() -> Router<DeploymentImpl> {
     Router::new()
         .route("/dev-server/start", post(start_dev_server))
+        .route("/background-helpers", get(list_background_helpers))
+        .route("/background-helpers/start", post(start_background_helper))
         .route("/cleanup", post(run_cleanup_script))
         .route("/archive", post(run_archive_script))
         .route("/stop", post(stop_workspace_execution))
@@ -157,6 +186,114 @@ pub async fn stop_workspace_execution(
         .await;
 
     Ok(ResponseJson(ApiResponse::success(())))
+}
+
+/// List running background helpers for the workspace.
+#[axum::debug_handler]
+pub async fn list_background_helpers(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<Vec<ExecutionProcess>>>, ApiError> {
+    let helpers = ExecutionProcess::find_running_by_workspace_and_run_reason(
+        &deployment.db().pool,
+        workspace.id,
+        &ExecutionProcessRunReason::BackgroundHelper,
+    )
+    .await?;
+    Ok(ResponseJson(ApiResponse::success(helpers)))
+}
+
+/// Spawn an agent-requested background helper (watcher, tunnel, log
+/// follower). The helper runs in its own process group, so it survives the
+/// turn-end process-group reap, and is tracked as an execution process:
+/// visible in the Processes tab and stoppable via
+/// `POST /api/execution-processes/{id}/stop`.
+#[axum::debug_handler]
+pub async fn start_background_helper(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    Json(request): Json<StartBackgroundHelperRequest>,
+) -> Result<ResponseJson<ApiResponse<ExecutionProcess, StartBackgroundHelperError>>, ApiError> {
+    let pool = &deployment.db().pool;
+
+    if request.script.trim().is_empty() {
+        return Ok(ResponseJson(ApiResponse::error_with_data(
+            StartBackgroundHelperError::EmptyScript,
+        )));
+    }
+
+    // The working dir must stay inside the workspace: relative, no `..`.
+    if let Some(dir) = request.working_dir.as_deref()
+        && !is_valid_helper_working_dir(dir)
+    {
+        return Ok(ResponseJson(ApiResponse::error_with_data(
+            StartBackgroundHelperError::InvalidWorkingDir,
+        )));
+    }
+
+    let running = ExecutionProcess::find_running_by_workspace_and_run_reason(
+        pool,
+        workspace.id,
+        &ExecutionProcessRunReason::BackgroundHelper,
+    )
+    .await?;
+    if running.len() >= MAX_BACKGROUND_HELPERS_PER_WORKSPACE {
+        return Ok(ResponseJson(ApiResponse::error_with_data(
+            StartBackgroundHelperError::TooManyHelpers,
+        )));
+    }
+
+    deployment
+        .container()
+        .ensure_container_exists(&workspace)
+        .await?;
+
+    let session = match Session::find_latest_by_workspace_id(pool, workspace.id).await? {
+        Some(s) => s,
+        None => {
+            Session::create(
+                pool,
+                &CreateSession {
+                    executor: None,
+                    name: None,
+                },
+                Uuid::new_v4(),
+                workspace.id,
+            )
+            .await?
+        }
+    };
+
+    let executor_action = ExecutorAction::new(
+        ExecutorActionType::ScriptRequest(ScriptRequest {
+            script: request.script,
+            language: ScriptRequestLanguage::Bash,
+            context: ScriptContext::BackgroundHelper,
+            working_dir: request.working_dir,
+        }),
+        None,
+    );
+
+    let execution_process = deployment
+        .container()
+        .start_execution(
+            &workspace,
+            &session,
+            &executor_action,
+            &ExecutionProcessRunReason::BackgroundHelper,
+        )
+        .await?;
+
+    deployment
+        .track_if_analytics_allowed(
+            "background_helper_started",
+            serde_json::json!({
+                "workspace_id": workspace.id.to_string(),
+            }),
+        )
+        .await;
+
+    Ok(ResponseJson(ApiResponse::success(execution_process)))
 }
 
 #[axum::debug_handler]
@@ -290,4 +427,32 @@ pub async fn run_archive_script(
         .await;
 
     Ok(ResponseJson(ApiResponse::success(execution_process)))
+}
+
+/// A helper's working dir must stay inside the workspace: relative, no `..`.
+fn is_valid_helper_working_dir(dir: &str) -> bool {
+    let path = std::path::Path::new(dir);
+    !path.is_absolute()
+        && !path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_valid_helper_working_dir;
+
+    #[test]
+    fn accepts_relative_working_dirs() {
+        assert!(is_valid_helper_working_dir("frontend"));
+        assert!(is_valid_helper_working_dir("packages/web-core"));
+        assert!(is_valid_helper_working_dir("./frontend"));
+    }
+
+    #[test]
+    fn rejects_escaping_working_dirs() {
+        assert!(!is_valid_helper_working_dir("/etc"));
+        assert!(!is_valid_helper_working_dir("../other-workspace"));
+        assert!(!is_valid_helper_working_dir("frontend/../../escape"));
+    }
 }

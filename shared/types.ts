@@ -218,7 +218,7 @@ dropped: boolean, started_at: string, completed_at: string | null, created_at: s
 
 export enum ExecutionProcessStatus { running = "running", completed = "completed", failed = "failed", killed = "killed", interrupted = "interrupted" }
 
-export type ExecutionProcessRunReason = "setupscript" | "cleanupscript" | "archivescript" | "codingagent" | "devserver";
+export type ExecutionProcessRunReason = "setupscript" | "cleanupscript" | "archivescript" | "codingagent" | "devserver" | "backgroundhelper";
 
 export type ExecutionProcessRepoState = { id: string, execution_process_id: string, repo_id: string, before_head_commit: string | null, after_head_commit: string | null, merge_commit: string | null, created_at: Date, updated_at: Date, };
 
@@ -450,6 +450,18 @@ export type PushError = { "type": "force_push_required" };
 export type PrError = { "type": "cli_not_installed", provider: ProviderKind, } | { "type": "cli_not_logged_in", provider: ProviderKind, } | { "type": "git_cli_not_logged_in" } | { "type": "git_cli_not_installed" } | { "type": "target_branch_not_found", branch: string, } | { "type": "unsupported_provider" };
 
 export type RunScriptError = { "type": "no_script_configured" } | { "type": "process_already_running" };
+
+export type StartBackgroundHelperError = { "type": "empty_script" } | { "type": "invalid_working_dir" } | { "type": "too_many_helpers" };
+
+export type StartBackgroundHelperRequest = { 
+/**
+ * Bash script to run as the helper (e.g. a watcher or tunnel).
+ */
+script: string, 
+/**
+ * Optional path to run the script in, relative to the workspace root.
+ */
+working_dir: string | null, };
 
 export type AssociateWorkspaceAttachmentsRequest = { attachment_ids: Array<string>, };
 
@@ -803,7 +815,7 @@ reasoning_id?: string | null,
  */
 permission_policy?: PermissionPolicy | null, };
 
-export type ScriptContext = "SetupScript" | "CleanupScript" | "ArchiveScript" | "DevServer" | "ToolInstallScript";
+export type ScriptContext = "SetupScript" | "CleanupScript" | "ArchiveScript" | "DevServer" | "ToolInstallScript" | "BackgroundHelper";
 
 export type ScriptRequest = { script: string, language: ScriptRequestLanguage, context: ScriptContext, 
 /**

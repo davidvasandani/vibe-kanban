@@ -31,6 +31,7 @@ pub enum ScriptContext {
     ArchiveScript,
     DevServer,
     ToolInstallScript,
+    BackgroundHelper,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]

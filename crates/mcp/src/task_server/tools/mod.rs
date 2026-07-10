@@ -68,6 +68,7 @@ fn retarget_request(request: &mut reqwest::Request, base_url: &str) -> Result<()
     Ok(())
 }
 
+mod background_helpers;
 mod context;
 mod issue_assignees;
 mod issue_relationships;
@@ -84,6 +85,7 @@ impl McpServer {
     pub fn global_mode_router() -> rmcp::handler::server::tool::ToolRouter<Self> {
         Self::context_tools_router()
             + Self::workspaces_tools_router()
+            + Self::background_helpers_tools_router()
             + Self::organizations_tools_router()
             + Self::repos_tools_router()
             + Self::remote_projects_tools_router()
@@ -98,6 +100,7 @@ impl McpServer {
     pub fn orchestrator_mode_router() -> rmcp::handler::server::tool::ToolRouter<Self> {
         let mut router = Self::context_tools_router()
             + Self::workspaces_tools_router()
+            + Self::background_helpers_tools_router()
             + Self::session_tools_router();
         router.remove_route("list_workspaces");
         router.remove_route("delete_workspace");
@@ -593,8 +596,11 @@ mod tests {
             "create_session".to_string(),
             "get_context".to_string(),
             "get_execution".to_string(),
+            "list_background_helpers".to_string(),
             "list_sessions".to_string(),
             "run_session_prompt".to_string(),
+            "spawn_background_helper".to_string(),
+            "stop_background_helper".to_string(),
             "update_session".to_string(),
             "update_workspace".to_string(),
         ]);

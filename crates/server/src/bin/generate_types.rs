@@ -155,6 +155,8 @@ fn generate_types_content() -> String {
         server::routes::workspaces::git::PushError::decl(),
         server::routes::workspaces::pr::PrError::decl(),
         server::routes::workspaces::execution::RunScriptError::decl(),
+        server::routes::workspaces::execution::StartBackgroundHelperError::decl(),
+        server::routes::workspaces::execution::StartBackgroundHelperRequest::decl(),
         server::routes::workspaces::attachments::AssociateWorkspaceAttachmentsRequest::decl(),
         server::routes::workspaces::attachments::ImportIssueAttachmentsRequest::decl(),
         server::routes::workspaces::attachments::ImportIssueAttachmentsResponse::decl(),

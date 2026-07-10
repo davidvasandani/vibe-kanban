@@ -736,3 +736,19 @@ impl ExecutionProcess {
         Ok(rows.into_iter().collect())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ExecutionProcessRunReason;
+
+    #[test]
+    fn only_dev_servers_and_background_helpers_are_persistent() {
+        assert!(ExecutionProcessRunReason::DevServer.is_persistent());
+        assert!(ExecutionProcessRunReason::BackgroundHelper.is_persistent());
+
+        assert!(!ExecutionProcessRunReason::SetupScript.is_persistent());
+        assert!(!ExecutionProcessRunReason::CleanupScript.is_persistent());
+        assert!(!ExecutionProcessRunReason::ArchiveScript.is_persistent());
+        assert!(!ExecutionProcessRunReason::CodingAgent.is_persistent());
+    }
+}
