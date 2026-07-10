@@ -11,7 +11,8 @@ use async_trait::async_trait;
 use codex_app_server_protocol::{
     ClientInfo, ClientNotification, ClientRequest, CommandExecutionApprovalDecision,
     CommandExecutionRequestApprovalResponse, ConfigBatchWriteParams, ConfigEdit, ConfigReadParams,
-    ConfigReadResponse, ConfigWriteResponse, DynamicToolCallOutputContentItem,
+    ConfigReadResponse, ConfigWriteResponse, CurrentTimeReadResponse,
+    DynamicToolCallOutputContentItem,
     DynamicToolCallResponse, FileChangeApprovalDecision, FileChangeRequestApprovalResponse,
     GetAccountParams, GetAccountRateLimitsResponse, GetAccountResponse, InitializeCapabilities,
     InitializeParams, InitializeResponse, ItemCompletedNotification, JSONRPCError,
@@ -230,6 +231,7 @@ impl AppServerClient {
                 cursor,
                 limit: None,
                 detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),
+                thread_id: None,
             },
         };
         self.send_request(request, "mcpServerStatus/list").await
@@ -429,8 +431,18 @@ impl AppServerClient {
                 send_server_response(peer, request_id, response).await?;
                 Ok(())
             }
+            ServerRequest::CurrentTimeRead { request_id, .. } => {
+                let current_time_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or_default();
+                let response = CurrentTimeReadResponse { current_time_at };
+                send_server_response(peer, request_id, response).await?;
+                Ok(())
+            }
             ServerRequest::ChatgptAuthTokensRefresh { .. }
             | ServerRequest::McpServerElicitationRequest { .. }
+            | ServerRequest::AttestationGenerate { .. }
             | ServerRequest::PermissionsRequestApproval { .. } => {
                 tracing::warn!("received unhandled v2 server request: {:?}", request);
                 let response = JSONRPCResponse {
