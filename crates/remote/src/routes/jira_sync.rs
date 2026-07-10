@@ -175,8 +175,26 @@ async fn upsert_config(
         .as_deref()
         .map(str::trim)
         .filter(|c| !c.is_empty());
-    if existing.is_none() && credential.is_none() {
-        return Err(bad_request("a credential is required to create the sync"));
+    match (&existing, credential) {
+        (None, None) => {
+            return Err(bad_request("a credential is required to create the sync"));
+        }
+        // Keeping the stored credential is only allowed when the
+        // destination it will be sent to is unchanged — otherwise a save
+        // with credential: null re-points the stored secret at a new URL
+        // and the next sync pass leaks it there (same rule as the test
+        // endpoint).
+        (Some(existing), None) => {
+            let same_destination = normalize_base_url(&payload.jira_base_url)
+                == normalize_base_url(&existing.jira_base_url)
+                && payload.auth_mode.as_str() == existing.auth_mode;
+            if !same_destination {
+                return Err(bad_request(
+                    "re-enter the credential when changing the Jira URL or auth mode",
+                ));
+            }
+        }
+        (_, Some(_)) => {}
     }
 
     let encrypted_credential = credential
