@@ -17,6 +17,7 @@ pub mod execution_processes;
 pub mod frontend;
 pub mod health;
 pub mod host_relay;
+pub mod mcp_auth;
 pub mod oauth;
 pub mod organizations;
 pub mod pipelines;
@@ -39,6 +40,7 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
     let relay_signed_routes = Router::new()
         .route("/health", get(health::health_check))
         .merge(config::router())
+        .merge(mcp_auth::router())
         .merge(pipelines::router())
         .merge(speckit::router())
         .merge(containers::router(&deployment))
