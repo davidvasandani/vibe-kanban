@@ -438,7 +438,13 @@
       "test": {
         "button": "Probar conexión",
         "dirtyHint": "Guarda tus cambios antes de probar.",
-        "failed": "Error al probar los servidores MCP"
+        "failed": "Error al probar los servidores MCP",
+        "authRequired": "Autenticación requerida",
+        "connect": "Conectar",
+        "connecting": "Conectando…",
+        "connectFailed": "Falló la autorización",
+        "popupClosed": "La ventana de autorización se cerró antes de completar.",
+        "popupBlocked": "Ventana emergente bloqueada: permite las ventanas emergentes para este sitio y vuelve a intentarlo."
       }
     },
     "projects": {

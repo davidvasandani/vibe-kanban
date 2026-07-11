@@ -438,7 +438,13 @@
       "test": {
         "button": "接続をテスト",
         "dirtyHint": "テストする前に変更を保存してください。",
-        "failed": "MCP サーバーのテストに失敗しました"
+        "failed": "MCP サーバーのテストに失敗しました",
+        "authRequired": "認証が必要です",
+        "connect": "接続",
+        "connecting": "接続中…",
+        "connectFailed": "認可に失敗しました",
+        "popupClosed": "認可ウィンドウが完了前に閉じられました。",
+        "popupBlocked": "ポップアップがブロックされました。このサイトのポップアップを許可して再試行してください。"
       }
     },
     "projects": {

@@ -5,6 +5,7 @@ import {
   CheckIcon,
   CircleNotchIcon,
   CodeIcon,
+  LockKeyIcon,
   MinusCircleIcon,
   PencilSimpleIcon,
   PlusIcon,
@@ -15,6 +16,7 @@ import type {
   BaseCodingAgent,
   ExecutorProfile,
   JsonValue,
+  McpAuthStatusResponse,
   McpServerTestResult,
 } from 'shared/types';
 import { McpConfig } from 'shared/types';
@@ -73,15 +75,19 @@ function McpTestStatusIcon({
   const Icon =
     status === 'ok'
       ? CheckCircleIcon
-      : status === 'unsupported'
-        ? MinusCircleIcon
-        : XCircleIcon;
+      : status === 'auth_required'
+        ? LockKeyIcon
+        : status === 'unsupported'
+          ? MinusCircleIcon
+          : XCircleIcon;
   const color =
     status === 'ok'
       ? 'text-success'
-      : status === 'unsupported'
-        ? 'text-low'
-        : 'text-error';
+      : status === 'auth_required'
+        ? 'text-warning'
+        : status === 'unsupported'
+          ? 'text-low'
+          : 'text-error';
   const title =
     status === 'ok'
       ? [
@@ -100,6 +106,86 @@ function McpTestStatusIcon({
     <span title={title} className="flex items-center px-1">
       <Icon className={cn('size-icon-sm', color)} weight="fill" />
     </span>
+  );
+}
+
+/**
+ * Inline detail line for a non-ok test result: the error text is readable
+ * without hovering (FR-2), clamped and click-expandable when long, with a
+ * distinct auth-required treatment and Connect action (FR-3/FR-4).
+ */
+function McpTestResultDetails({
+  result,
+  connecting,
+  onConnect,
+  connectDisabled,
+}: {
+  result: McpServerTestResult | undefined;
+  connecting: boolean;
+  onConnect: () => void;
+  connectDisabled: boolean;
+}) {
+  const { t } = useTranslation('settings');
+  const [expanded, setExpanded] = useState(false);
+  if (!result || result.status === 'ok') return null;
+
+  const authRequired = result.status === 'auth_required';
+  const palette = authRequired
+    ? 'border-warning/50 bg-warning/10 text-warning'
+    : result.status === 'unsupported'
+      ? 'border-border bg-secondary/50 text-low'
+      : 'border-error/50 bg-error/10 text-error';
+
+  return (
+    <div
+      className={cn(
+        'flex items-start gap-2 rounded-sm border p-2 text-xs',
+        palette
+      )}
+    >
+      <div className="min-w-0 flex-1">
+        {authRequired && (
+          <div className="font-medium">
+            {t('settings.mcp.test.authRequired')}
+          </div>
+        )}
+        {result.error && (
+          <button
+            type="button"
+            onClick={() => setExpanded((prev) => !prev)}
+            className={cn(
+              'w-full text-left font-mono break-words',
+              !expanded && 'line-clamp-2'
+            )}
+            title={result.error}
+          >
+            {result.error}
+          </button>
+        )}
+      </div>
+      {authRequired && (
+        <Button
+          variant="outline"
+          size="sm"
+          type="button"
+          className="shrink-0"
+          onClick={onConnect}
+          disabled={connecting || connectDisabled}
+        >
+          {connecting ? (
+            <CircleNotchIcon
+              className="size-icon-xs mr-1 animate-spin"
+              weight="bold"
+            />
+          ) : (
+            <LockKeyIcon className="size-icon-xs mr-1" weight="bold" />
+          )}
+          {connecting
+            ? t('settings.mcp.test.connecting')
+            : t('settings.mcp.test.connect')}
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -295,6 +381,124 @@ export function McpSettingsSection() {
       if (!isStale()) setTesting(false);
     }
   }, [machineClient, selectedProfile, selectedProfileKey, t]);
+
+  // OAuth Connect flow for an auth-required server: start the flow, open the
+  // consent popup, poll until it resolves, then refresh state from disk (the
+  // callback wrote the token behind the UI's back — a later Save must not
+  // wipe it) and re-test just that server.
+  const [connectingServer, setConnectingServer] = useState<string | null>(null);
+
+  const waitForAuthFlow = useCallback(
+    async (
+      flowId: string,
+      popup: Window | null
+    ): Promise<McpAuthStatusResponse> => {
+      if (!machineClient) return { status: 'failed', error: null };
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        let status: McpAuthStatusResponse | null = null;
+        try {
+          status = await machineClient.getMcpAuthStatus(flowId);
+        } catch {
+          // Transient polling error; keep going until the flow TTL kicks in.
+        }
+        if (status && status.status !== 'pending') return status;
+        if (popup?.closed) {
+          // The success page closes itself, so check once more before
+          // treating a closed popup as an abandoned flow.
+          try {
+            const final = await machineClient.getMcpAuthStatus(flowId);
+            if (final.status !== 'pending') return final;
+          } catch {
+            // fall through to the abandoned-flow result
+          }
+          return {
+            status: 'failed',
+            error: t('settings.mcp.test.popupClosed'),
+          };
+        }
+      }
+    },
+    [machineClient, t]
+  );
+
+  const handleConnect = useCallback(
+    async (serverName: string) => {
+      if (!machineClient || !selectedProfileKey) return;
+
+      const requestedProfile = selectedProfile;
+      const isStale = () => activeProfileRef.current !== requestedProfile;
+      const executorQuery = {
+        executor: selectedProfileKey as BaseCodingAgent,
+      };
+
+      setConnectingServer(serverName);
+      setTestError(null);
+
+      try {
+        const started = await machineClient.startMcpAuth(
+          executorQuery,
+          serverName
+        );
+        const popup = window.open(
+          started.authorize_url,
+          'vk-mcp-oauth',
+          'width=600,height=700,popup=yes'
+        );
+        if (!popup) {
+          if (!isStale())
+            setTestError(t('settings.mcp.test.popupBlocked'));
+          return;
+        }
+
+        const outcome = await waitForAuthFlow(started.flow_id, popup);
+        if (isStale()) return;
+        if (outcome.status !== 'completed') {
+          setTestError(
+            outcome.error ?? t('settings.mcp.test.connectFailed')
+          );
+          return;
+        }
+
+        // Merge the connected server's on-disk entry (now holding the token
+        // header) into both the working state and the pristine snapshot so
+        // other unsaved edits survive and Save can't drop the token.
+        const fresh = await machineClient.loadMcpServers(executorQuery);
+        if (isStale()) return;
+        const freshEntry = ((fresh.mcp_config.servers ?? {}) as ServerMap)[
+          serverName
+        ];
+        if (freshEntry !== undefined) {
+          setServers((prev) => ({ ...prev, [serverName]: freshEntry }));
+          setOriginalSnapshot((prev) => {
+            const base = JSON.parse(prev) as ServerMap;
+            base[serverName] = freshEntry;
+            return JSON.stringify(base);
+          });
+        }
+
+        const results = await machineClient.testMcpServers(executorQuery, {
+          servers: [serverName],
+        });
+        if (isStale()) return;
+        setTestResults((prev) => {
+          const next = { ...(prev ?? {}) };
+          for (const result of results) next[result.name] = result;
+          return next;
+        });
+      } catch (err) {
+        if (isStale()) return;
+        setTestError(
+          err instanceof Error
+            ? err.message
+            : t('settings.mcp.test.connectFailed')
+        );
+      } finally {
+        if (!isStale()) setConnectingServer(null);
+      }
+    },
+    [machineClient, selectedProfile, selectedProfileKey, t, waitForAuthFlow]
+  );
 
   const openDialog = useCallback(
     async (initial?: { name: string; entry: JsonValue }) => {
@@ -586,50 +790,62 @@ export function McpSettingsSection() {
                       return (
                         <div
                           key={name}
-                          className="flex items-center gap-3 rounded-sm border border-border bg-secondary/30 p-3"
+                          className="space-y-2 rounded-sm border border-border bg-secondary/30 p-3"
                         >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-sm text-high truncate">
-                                {name}
-                              </span>
-                              {badge && (
-                                <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-xs font-medium text-low">
-                                  {badge}
+                          <div className="flex items-center gap-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-sm text-high truncate">
+                                  {name}
                                 </span>
+                                {badge && (
+                                  <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-xs font-medium text-low">
+                                    {badge}
+                                  </span>
+                                )}
+                              </div>
+                              {summary && (
+                                <div className="mt-1 truncate font-mono text-xs text-low">
+                                  {summary}
+                                </div>
                               )}
                             </div>
-                            {summary && (
-                              <div className="mt-1 truncate font-mono text-xs text-low">
-                                {summary}
-                              </div>
-                            )}
-                          </div>
-                          <div className="flex shrink-0 items-center gap-1">
-                            <McpTestStatusIcon result={testResults?.[name]} />
-                            <button
-                              type="button"
-                              onClick={() => openDialog({ name, entry })}
-                              aria-label={`Edit ${name}`}
-                              className="flex items-center justify-center rounded-sm p-2 text-low hover:bg-secondary hover:text-normal"
-                            >
-                              <PencilSimpleIcon
-                                className="size-icon-xs"
-                                weight="bold"
+                            <div className="flex shrink-0 items-center gap-1">
+                              <McpTestStatusIcon
+                                result={testResults?.[name]}
                               />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => removeServer(name)}
-                              aria-label={`Remove ${name}`}
-                              className="flex items-center justify-center rounded-sm p-2 text-error hover:bg-error/10"
-                            >
-                              <TrashIcon
-                                className="size-icon-xs"
-                                weight="bold"
-                              />
-                            </button>
+                              <button
+                                type="button"
+                                onClick={() => openDialog({ name, entry })}
+                                aria-label={`Edit ${name}`}
+                                className="flex items-center justify-center rounded-sm p-2 text-low hover:bg-secondary hover:text-normal"
+                              >
+                                <PencilSimpleIcon
+                                  className="size-icon-xs"
+                                  weight="bold"
+                                />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => removeServer(name)}
+                                aria-label={`Remove ${name}`}
+                                className="flex items-center justify-center rounded-sm p-2 text-error hover:bg-error/10"
+                              >
+                                <TrashIcon
+                                  className="size-icon-xs"
+                                  weight="bold"
+                                />
+                              </button>
+                            </div>
                           </div>
+                          <McpTestResultDetails
+                            result={testResults?.[name]}
+                            connecting={connectingServer === name}
+                            onConnect={() => handleConnect(name)}
+                            connectDisabled={
+                              connectingServer !== null || isDirty
+                            }
+                          />
                         </div>
                       );
                     })}

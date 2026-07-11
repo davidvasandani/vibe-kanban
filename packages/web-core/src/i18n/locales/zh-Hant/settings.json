@@ -438,7 +438,13 @@
       "test": {
         "button": "測試連線",
         "dirtyHint": "測試前請先儲存變更。",
-        "failed": "測試 MCP 伺服器失敗"
+        "failed": "測試 MCP 伺服器失敗",
+        "authRequired": "需要驗證",
+        "connect": "連線",
+        "connecting": "連線中…",
+        "connectFailed": "授權失敗",
+        "popupClosed": "授權視窗在完成前已關閉。",
+        "popupBlocked": "彈出視窗被封鎖 — 請允許此網站的彈出視窗後重試。"
       }
     },
     "projects": {
