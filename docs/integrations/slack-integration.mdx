@@ -1,0 +1,37 @@
+---
+title: "Slack Integration"
+description: "Create Vibe Kanban issues from Slack messages with the Create issue from message shortcut"
+---
+
+Connect a Slack workspace to a Vibe Kanban organization and anyone in that workspace can turn a Slack message into a Vibe Kanban issue: open a message's **More actions** menu, choose **Create issue from message**, pick a project in the modal, adjust the prefilled title and description, and submit. The issue lands in the project's first board column with a link back to the originating Slack message, and Slack confirms with a link to the new issue (visible only to you).
+
+## Requirements
+
+- A Vibe Kanban deployment whose server is reachable from the public internet — Slack must be able to POST interaction payloads to `SERVER_PUBLIC_BASE_URL`. Self-hosted deployments behind NAT need a tunnel or reverse proxy in front of the remote server.
+- Organization admin rights in Vibe Kanban, and permission to create apps in your Slack workspace.
+
+## Setup
+
+1. In Vibe Kanban, open **Settings → Slack** and select your organization. Copy the **Slack app manifest** shown there (it embeds your deployment's interactivity request URL).
+2. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From a manifest**, pick your workspace, and paste the manifest.
+3. Install the app to your workspace, then collect two values:
+   - **Bot token** (`xoxb-…`) from **OAuth & Permissions**.
+   - **Signing secret** from **Basic Information**.
+4. Back in Vibe Kanban's Slack settings, paste both values and save. Saving validates the token against Slack and records which workspace it belongs to.
+5. Use **Test connection** at any time to re-verify the stored credentials.
+
+One Slack workspace connects to one Vibe Kanban organization (and vice versa). Credentials are stored encrypted, are never returned by the API after saving, and every inbound request from Slack is signature-verified before any work happens.
+
+## Using the shortcut
+
+On any Slack message: **More actions (⋯) → Create issue from message**. The modal prefills:
+
+- **Title** — the message's first line (truncated to 120 characters).
+- **Description** — the message text plus a permalink back to the Slack message.
+- **Project** — a selector listing the organization's projects (Slack caps the list at 100).
+
+Issues created this way are attributed to the admin who configured the connection; the invoking Slack user is recorded in the issue's metadata. If the confirmation can't be posted in the channel (for example, the bot isn't a member), it arrives as a DM from the app instead.
+
+## Disconnecting
+
+**Settings → Slack → Disconnect** removes the stored configuration. Issues already created from Slack stay on the board unchanged; the shortcut reports that the integration is not configured until reconnected. The **Shortcut enabled** toggle pauses the integration without deleting credentials.

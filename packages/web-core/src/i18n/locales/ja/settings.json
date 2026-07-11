@@ -34,7 +34,9 @@
         "pairOtherMachines": "Pair other machines",
         "selectHost": "Select host",
         "attachments": "添付ファイル",
-        "attachmentsDesc": "添付ファイルストレージのステータス"
+        "attachmentsDesc": "添付ファイルストレージのステータス",
+        "slack": "Slack",
+        "slackDesc": "Slack ワークスペース連携"
       }
     },
     "general": {

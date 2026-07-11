@@ -19,6 +19,7 @@ pub mod shape_definition;
 pub mod shape_route;
 pub mod shape_routes;
 pub mod shapes;
+pub mod slack;
 mod state;
 pub mod storage;
 
