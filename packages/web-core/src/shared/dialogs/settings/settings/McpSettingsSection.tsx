@@ -436,9 +436,12 @@ export function McpSettingsSection() {
       setTestError(null);
 
       try {
+        // Hand the probe's captured challenge to discovery — some servers
+        // only send WWW-Authenticate on the JSON-RPC POST the probe makes.
         const started = await machineClient.startMcpAuth(
           executorQuery,
-          serverName
+          serverName,
+          testResults?.[serverName]?.www_authenticate
         );
         const popup = window.open(
           started.authorize_url,
@@ -494,7 +497,14 @@ export function McpSettingsSection() {
         if (!isStale()) setConnectingServer(null);
       }
     },
-    [machineClient, selectedProfile, selectedProfileKey, t, waitForAuthFlow]
+    [
+      machineClient,
+      selectedProfile,
+      selectedProfileKey,
+      t,
+      testResults,
+      waitForAuthFlow,
+    ]
   );
 
   const openDialog = useCallback(

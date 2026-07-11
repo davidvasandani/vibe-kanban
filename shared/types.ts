@@ -370,7 +370,15 @@ www_authenticate: string | null, };
 
 export type McpServerTestStatus = "ok" | "failed" | "auth_required" | "unsupported";
 
-export type McpAuthStartRequest = { server_name: string, };
+export type McpAuthStartRequest = { server_name: string, 
+/**
+ * The `WWW-Authenticate` header a probe captured for this server, if
+ * any. Some servers only issue their challenge (and its
+ * `resource_metadata` pointer) on the JSON-RPC POST the probe makes —
+ * passing it here lets discovery start from it instead of hoping a
+ * plain GET re-elicits one.
+ */
+www_authenticate: string | null, };
 
 export type McpAuthStartResponse = { flow_id: string, authorize_url: string, };
 

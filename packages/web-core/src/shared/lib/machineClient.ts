@@ -59,7 +59,8 @@ export interface MachineClient {
   ) => Promise<McpServerTestResult[]>;
   startMcpAuth: (
     query: McpServerQuery,
-    serverName: string
+    serverName: string,
+    wwwAuthenticate?: string | null
   ) => Promise<McpAuthStartResponse>;
   getMcpAuthStatus: (flowId: string) => Promise<McpAuthStatusResponse>;
 }
@@ -211,7 +212,7 @@ export function createMachineClient(
         )
       );
     },
-    startMcpAuth: async (query, serverName) => {
+    startMcpAuth: async (query, serverName, wwwAuthenticate) => {
       const params = new URLSearchParams(query);
       return handleApiResponse<McpAuthStartResponse>(
         await makeMachineRequest(
@@ -220,7 +221,10 @@ export function createMachineClient(
           `/api/mcp-auth/start?${params.toString()}`,
           {
             method: 'POST',
-            body: JSON.stringify({ server_name: serverName }),
+            body: JSON.stringify({
+              server_name: serverName,
+              www_authenticate: wwwAuthenticate ?? null,
+            }),
           }
         )
       );

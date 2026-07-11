@@ -62,6 +62,13 @@ pub struct McpAuthQuery {
 #[derive(TS, Debug, Deserialize)]
 pub struct McpAuthStartRequest {
     pub server_name: String,
+    /// The `WWW-Authenticate` header a probe captured for this server, if
+    /// any. Some servers only issue their challenge (and its
+    /// `resource_metadata` pointer) on the JSON-RPC POST the probe makes —
+    /// passing it here lets discovery start from it instead of hoping a
+    /// plain GET re-elicits one.
+    #[serde(default)]
+    pub www_authenticate: Option<String>,
 }
 
 #[derive(TS, Debug, Serialize)]
@@ -192,7 +199,7 @@ async fn start(
     let redirect_uri = format!("http://{host}/api/mcp-auth/callback");
 
     let client = reqwest::Client::new();
-    let meta = match mcp_oauth::discover(&client, url, None).await {
+    let meta = match mcp_oauth::discover(&client, url, payload.www_authenticate.as_deref()).await {
         Ok(meta) => meta,
         Err(e) => return Ok(ResponseJson(ApiResponse::error(&e))),
     };
