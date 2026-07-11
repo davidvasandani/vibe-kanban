@@ -1,62 +1,130 @@
-# Implementation Plan: Coding-Agent Process Survival (task vk/1a64-coding-agent-pro)
+# Implementation Plan: Edit-mode Pipeline editing with "Update Issue" button (task vk/77eb-vk-pipeline)
 
-Step-by-step build order for Phase 1 (warm-app-server substrate, default-off).
-The authoritative dependency-ordered task list is
-`homelab/specs/vk/1a64-coding-agent-pro/tasks.md` (T001/T003/T007/T008/T009 in
-this phase); this is the executable narrative. Rationale in `SPEC.md`;
-prior-art recall in `PRIOR_KNOWLEDGE.md` at the workspace root.
+Step-by-step build order. Rationale and edge-case matrix in `SPEC.md`;
+prior-art recall in `PRIOR_KNOWLEDGE.md`. SpecKit artifacts (spec/plan/tasks)
+live under `homelab/specs/vk/77eb-vk-pipeline/` once generated.
 
-## Step 1 — Carrier (T001)
+## Step 1 — `parsePipelineSelection` helper + unit tests
 
-In `crates/executors/src/executors/mod.rs`, add `keep_warm: bool` to
-`SpawnedChild` with a doc comment stating the contract (persistent app-server;
-clean turn end keeps the process). Default `false` in
-`From<AsyncGroupChild>`. Set it explicitly at all six construction sites —
-`stdout_dup.rs`, `claude.rs`, `codex.rs`, `opencode.rs`, `acp/harness.rs`
-(×2) — `false` everywhere in Phase 1, with a "Phase 2/3 enables this" comment
-on the three persistent executors.
+File: `packages/web-core/src/shared/lib/pipeline/taskPipeline.ts` (+
+`taskPipeline.test.ts` alongside).
 
-## Step 2 — Exit-monitor decision (T003)
+1. Export `parsePipelineSelection(block, pipelines) → { pipelineIds, enabledIds }`:
+   - Slice the inner block text (reuse the `PIPELINE_START`/`PIPELINE_END` +
+     heading fallback logic already in `extractPipelineBlockText`).
+   - Heading `## Pipeline: A + B` → split remainder on `" + "`, match each
+     name against `pipelines[].name` (first match), keep matches in heading
+     order, dedupe. Bare `## Pipeline`/no heading → `[]`.
+   - Numbered lines `N. <rest>`: build a `prompt_fragment → stage id` map
+     across all `pipelines[].stages`; collect matching ids in order, dedupe.
+     Non-matching numbered lines are ignored (they're manual text).
+2. Tests: round-trip (`composePipelineBlock` → `parsePipelineSelection`
+   returns the same selection), multi-pipeline heading, unknown pipeline
+   name dropped, manual/unknown numbered lines ignored, stage shared by two
+   pipelines returned once, empty/no-block input → empty selection.
 
-In `crates/local-deployment/src/container.rs`:
+No dependencies; pure function. Verify: `pnpm --filter web-core test` (or the
+repo's vitest invocation for `taskPipeline.test.ts`).
 
-1. Capture `spawned.keep_warm` in the spawn path and pass it to
-   `spawn_exit_monitor(&exec_id, exit_signal, keep_warm)`.
-2. Add the pure helper `should_keep_warm(keep_warm, is_success, was_stopped)`
-   near the other free helpers.
-3. In the monitor, hoist `let mut kept_warm = false;` above the
-   `tokio::select!`. In the exit-signal arm compute
-   `kept_warm = should_keep_warm(keep_warm, is_success,
-   ExecutionProcess::was_stopped(...))`; skip `kill_process_group` when it
-   holds (log it), otherwise keep today's kill.
-4. **Also guard the monitor tail** — the post-finalization
-   `start_kill()` + `child_store.remove()` block must be skipped when
-   `kept_warm`, or the warm child is silently reaped anyway (second kill
-   point; `kill_on_drop` on removal). The warm child stays in `child_store`
-   so the existing stop/teardown owner can still reach it.
-5. Leave the entire finalize path (update_completion, commit, next-action,
-   session summary, raw-log flush, msg-store cleanup) untouched.
+## Step 2 — `PipelineSection` seeding + footer props
 
-## Step 3 — Tests (T007)
+File: `packages/web-core/src/pages/kanban/PipelineSection.tsx`.
 
-`#[cfg(test)] mod warm_tests` in `container.rs`: the four decision-matrix
-cases (warm+success+!stopped → kept; warm+failure, warm+success+stopped, and
-all !warm cells → reaped). Run `cargo test -p local-deployment warm`.
+1. Add props `initialBlock?: string`, `seedDefaultPipeline?: boolean`
+   (default `true`), `footer?: ReactNode`.
+2. In the once-only seed effect (currently defaults to `basic`):
+   - If `initialBlock` is non-empty: `parsePipelineSelection(initialBlock,
+     pipelines)` → `setSelectedIds`, `setEnabledIds`, `setText(initialBlock)`;
+     set a `seededFromBlockRef` so the "reseed ticks when selection changes"
+     effect skips exactly one run (otherwise it clobbers parsed ticks with
+     the `default_enabled` union).
+   - Else if `seedDefaultPipeline`: today's behavior (`basic` or first).
+   - Else: leave everything empty.
+3. Render `{footer}` at the bottom of the expanded content.
+4. The section is remount-keyed by callers, so no reseed-on-prop-change
+   logic is needed.
 
-## Step 4 — Docs + no-churn check (T008)
+Depends on Step 1. Verify: `pnpm run check` (types), create-mode behavior
+unchanged by default props.
 
-Confirm nothing here is `#[derive(TS)]`-exported or persisted (no
-`generate-types`, no migration). Comments explain *why* (two kill points,
-protocol-event principle), not *what*.
+## Step 3 — Open the panel slot in edit mode
 
-## Step 5 — Gates (T009)
+File: `packages/ui/src/components/KanbanIssuePanel.tsx`.
 
-`cargo fmt --all` (no diff expected), `cargo clippy -p executors
--p local-deployment --all-targets`, `cargo test -p executors
--p local-deployment`, `pnpm i && pnpm run check && pnpm run lint`.
+- `{isCreateMode && renderPipeline && renderPipeline()}` →
+  `{renderPipeline && renderPipeline()}`; update the slot comment (container
+  decides per-mode content; renders `null` when inapplicable). Same slot
+  position ⇒ no border flip needed (card draws its own `border-t`).
 
-## Deferred (recorded in tasks.md Phases 2-4)
+Independent of Steps 1–2 (safe because the current container only returns
+content in create mode until Step 4 lands, and this PR lands them together).
 
-Warm registry keyed by attempt + reap/idle/liveness (T100), OpenCode reuse via
-stored `base_url` + `keep_warm = true` (T101-T102), Codex/ACP transport
-keep-alive (T201-T202), Tier-3 restart survival (T301).
+## Step 4 — Container: edit-mode wiring + Update Issue button
+
+File: `packages/web-core/src/pages/kanban/KanbanIssuePanelContainer.tsx`.
+
+1. Edit-mode selection state:
+   `const [editPipelineSelection, setEditPipelineSelection] = useState<PipelineSelection | null>(null)`;
+   handler `handleEditPipelineChange` stores every emission (including empty
+   block, which means "cleared").
+2. Seed block: `const issuePipelineBlock = extractPipelineBlock(selectedIssue?.description)`
+   computed for edit mode.
+3. Dirty check (memo): normalize both sides with `.trim()`;
+   `dirty = editPipelineSelection != null && editPipelineSelection.block.trim() !== extractPipelineBlock(latest description).trim()`.
+   Use the *live* description (local edit state / `displayData.description`)
+   so a prose edit that deletes the block is compared against correctly.
+4. Apply handler:
+   ```ts
+   const next = appendPipelineToDescription(
+     latestDescriptionRef.current, editPipelineSelection.block) || null;
+   updateIssue(selectedKanbanIssueId, { description: next });
+   dispatchFormState({ type: 'setEditDescription', description: next });
+   latestDescriptionRef.current = next;
+   ```
+   Cancel the pending debounced description save first
+   (`cancelDebouncedDescription()`) so a stale debounce doesn't overwrite the
+   applied description.
+5. `renderPipeline` branches on mode; edit mode renders
+   `<PipelineSection key={'edit:' + selectedKanbanIssueId} initialBlock={issuePipelineBlock} seedDefaultPipeline={false} disabled={false} footer={<update button/>} onChange={handleEditPipelineChange}/>`.
+   The footer button: `PrimaryButton`-style, label
+   `t('taskPipeline.updateIssue')`, `disabled={!dirty}`.
+6. Reset `editPipelineSelection` to `null` when `selectedKanbanIssueId`
+   changes (effect), matching the keyed remount.
+
+Depends on Steps 1–3.
+
+## Step 5 — i18n
+
+Add to `taskPipeline` in all 7 locales
+(`packages/web-core/src/i18n/locales/{en,es,fr,ja,ko,zh-Hans,zh-Hant}/common.json`):
+
+- `updateIssue`: "Update Issue" (translated per locale).
+- `editModeDescription`: helper copy for edit mode ("Stages are stored in
+  the issue description; click Update Issue to apply changes.") — used in
+  place of the create-mode `description` string when `initialBlock`/edit
+  mode is active (pass a `description` override or a `mode` hint via the
+  existing `description` copy; simplest: new optional `helperText` prop —
+  decide at implementation, keep create-mode copy untouched).
+
+## Step 6 — Verification
+
+1. `pnpm run check` — web + Rust type checks.
+2. `pnpm run lint`.
+3. Vitest for `taskPipeline.test.ts`.
+4. `pnpm run format` before finishing (repo rule).
+5. Manual/E2E-ish sanity via `/verify`-style run if feasible: open an
+   existing issue → Pipeline card shows current stages → tick/untick →
+   Update Issue → description block updates; issue without pipeline starts
+   empty; deselect-all strips the block.
+
+## Risks / watchpoints
+
+- The reseed-ticks effect in `PipelineSection` is keyed on `selectedIds`
+  only (deliberate eslint-disable); the skip-once ref must be set *before*
+  the seeding `setSelectedIds` call takes effect.
+- `pipelines.length === 0` renders `null` — the seed effect must still be
+  safe when pipelines load after mount (it already waits for
+  `pipelines.length > 0`).
+- Don't regress create mode: default prop values must reproduce today's
+  behavior byte-for-byte (default `basic` selection, same emissions).
+- The debounced-save interplay (step 4.4): always cancel before applying.

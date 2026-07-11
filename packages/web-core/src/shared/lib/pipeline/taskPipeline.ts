@@ -280,12 +280,28 @@ export function composePipelineBlock(
 }
 
 /**
+ * Matches exactly the heading forms the composer emits (`## Pipeline` or
+ * `## Pipeline: <names>`) at a line start, for the legacy fallback: blocks
+ * composed before the delimiters existed (or hand-edited past them) are
+ * treated as running from the heading through end-of-text. Deliberately
+ * strict — a prose heading like `## Pipeline risks` must NOT match, since
+ * `stripPipelineBlock` deletes from the match onward.
+ */
+const HEADING_LINE_RE = /^## Pipeline(?::.*)?$/m;
+
+/**
  * Strip any previously-appended pipeline block from a description, returning the
- * remaining prose with trailing whitespace trimmed.
+ * remaining prose with trailing whitespace trimmed. Falls back to stripping
+ * from a bare `## Pipeline` heading through end-of-text when the delimiters
+ * are absent, so replacing a legacy block never stacks a duplicate.
  */
 function stripPipelineBlock(description: string): string {
   const start = description.indexOf(PIPELINE_START);
-  if (start === -1) return description;
+  if (start === -1) {
+    const heading = HEADING_LINE_RE.exec(description);
+    if (!heading) return description;
+    return description.slice(0, heading.index).replace(/\s+$/, '');
+  }
   const endIdx = description.indexOf(PIPELINE_END, start);
   const after =
     endIdx === -1 ? '' : description.slice(endIdx + PIPELINE_END.length);
@@ -293,16 +309,21 @@ function stripPipelineBlock(description: string): string {
 }
 
 /**
- * Extract the delimited `## Pipeline` block (including delimiters) from a
- * task description, for seeding the edit-mode `PipelineSection`. Returns an
- * empty string when the description has no pipeline block.
+ * Extract the `## Pipeline` block (including delimiters, when present) from
+ * a task description, for seeding the edit-mode `PipelineSection`. Falls
+ * back to the bare heading through end-of-text for legacy blocks without
+ * delimiters. Returns an empty string when the description has no pipeline
+ * block.
  */
 export function extractPipelineBlock(
   description: string | null | undefined
 ): string {
   if (!description) return '';
   const start = description.indexOf(PIPELINE_START);
-  if (start === -1) return '';
+  if (start === -1) {
+    const heading = HEADING_LINE_RE.exec(description);
+    return heading ? description.slice(heading.index) : '';
+  }
   const endIdx = description.indexOf(PIPELINE_END, start);
   if (endIdx === -1) return description.slice(start);
   return description.slice(start, endIdx + PIPELINE_END.length);
@@ -320,6 +341,134 @@ export function appendPipelineToDescription(
   const base = stripPipelineBlock(description ?? '');
   if (!block) return base;
   return base.length > 0 ? `${base}\n\n${block}` : block;
+}
+
+/** A `PipelineSection` selection re-derived from a stored pipeline block. */
+export interface ParsedPipelineSelection {
+  /** Ids of the pipelines named in the block heading, in heading order. */
+  pipelineIds: string[];
+  /** Ids of the stages whose generated lines appear in the block, in block order. */
+  enabledIds: string[];
+}
+
+/** Matches the named heading, capturing the ` + `-joined pipeline names. */
+const NAMED_HEADING_RE = /^## Pipeline:\s*(.+)$/;
+
+/**
+ * Segment a heading's ` + `-joined name list against the catalog of known
+ * pipeline names. Names are user-authored and may themselves contain
+ * `" + "`, so a naive split is wrong; instead greedily match the longest
+ * known name at each position (consuming its trailing `" + "` separator),
+ * and skip to the next separator when nothing matches (an unknown/renamed
+ * pipeline).
+ */
+function segmentHeadingNames(
+  joined: string,
+  knownNames: readonly string[]
+): string[] {
+  const namesLongestFirst = [...knownNames].sort((a, b) => b.length - a.length);
+  const found: string[] = [];
+  let rest = joined.trim();
+  while (rest.length > 0) {
+    const matched = namesLongestFirst.find(
+      (n) => rest === n || rest.startsWith(`${n} + `)
+    );
+    if (matched) {
+      found.push(matched);
+      rest = rest === matched ? '' : rest.slice(matched.length + 3);
+      continue;
+    }
+    const sep = rest.indexOf(' + ');
+    if (sep === -1) break;
+    rest = rest.slice(sep + 3);
+  }
+  return found;
+}
+
+/**
+ * Best-effort inverse of `composePipelineBlock`: re-derive which pipelines
+ * and stages a stored block represents, so the edit-mode `PipelineSection`
+ * can seed its selection from an issue's existing description.
+ *
+ * Pipeline ids come from the `## Pipeline: A + B` heading (names matched
+ * against `pipelines[].name`; unknown names are dropped; a bare
+ * `## Pipeline` heading yields none). Stage ids come from numbered lines
+ * whose remainder exactly equals a stage's `prompt_fragment` in any of the
+ * given pipelines. Everything else (manual lines, renamed/removed stages)
+ * is ignored here — the non-destructive recompose preserves those lines as
+ * manual text when the block is used as `previousBlock`.
+ */
+export function parsePipelineSelection(
+  block: string,
+  pipelines: readonly Pipeline[]
+): ParsedPipelineSelection {
+  const pipelineIds: string[] = [];
+  const enabledIds: string[] = [];
+  const inner = extractPipelineBlockText(block ?? '');
+  if (!inner) return { pipelineIds, enabledIds };
+
+  // Display names aren't unique across pipeline files, so keep every id per
+  // name (in catalog order); pass 2 below picks among same-named candidates
+  // by which pipeline's stages actually appear in the block.
+  const idsByName = new Map<string, string[]>();
+  const stageIdByFragment = new Map<string, string>();
+  for (const p of pipelines) {
+    const ids = idsByName.get(p.name);
+    if (ids) ids.push(p.id);
+    else idsByName.set(p.name, [p.id]);
+    for (const s of p.stages) {
+      if (!stageIdByFragment.has(s.prompt_fragment)) {
+        stageIdByFragment.set(s.prompt_fragment, s.id);
+      }
+    }
+  }
+
+  const lines = inner.split('\n').map((l) => l.replace(/\s+$/, ''));
+
+  // Pass 1: the block's numbered stage lines — both the enabled stage ids
+  // and the raw fragment set used to disambiguate duplicate names below.
+  const blockFragments = new Set<string>();
+  for (const line of lines) {
+    const numbered = line.match(NUMBERED_LINE_RE);
+    if (numbered) {
+      blockFragments.add(numbered[1]);
+      const stageId = stageIdByFragment.get(numbered[1]);
+      if (stageId && !enabledIds.includes(stageId)) enabledIds.push(stageId);
+    }
+  }
+
+  // Pass 2: the heading's pipeline names. When several catalog pipelines
+  // share a display name, prefer the candidate whose stages actually appear
+  // among the block's numbered lines (ties fall back to catalog order), and
+  // never assign the same pipeline to two occurrences of the name.
+  const usedIds = new Set<string>();
+  for (const line of lines) {
+    const heading = line.match(NAMED_HEADING_RE);
+    if (!heading) continue;
+    for (const name of segmentHeadingNames(heading[1], [...idsByName.keys()])) {
+      const candidates = (idsByName.get(name) ?? []).filter(
+        (id) => !usedIds.has(id)
+      );
+      let best: string | undefined;
+      let bestScore = -1;
+      for (const id of candidates) {
+        const candidate = pipelines.find((p) => p.id === id);
+        const score =
+          candidate?.stages.filter((s) => blockFragments.has(s.prompt_fragment))
+            .length ?? 0;
+        if (score > bestScore) {
+          best = id;
+          bestScore = score;
+        }
+      }
+      if (best) {
+        usedIds.add(best);
+        if (!pipelineIds.includes(best)) pipelineIds.push(best);
+      }
+    }
+  }
+
+  return { pipelineIds, enabledIds };
 }
 
 /** One numbered stage as parsed from a task's `## Pipeline` block. */

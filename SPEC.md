@@ -1,79 +1,151 @@
-# Technical Spec: Coding-Agent Process Survival (warm app-servers)
+# Spec: Edit-mode Pipeline editing with "Update Issue" button
 
-> Task vk/1a64-coding-agent-pro. Full SpecKit artifacts live in
-> `homelab/specs/vk/1a64-coding-agent-pro/` (`spec.md`, `plan.md`,
-> `research.md`, `data-model.md`, `tasks.md`). This file is the repo-root
-> technical summary.
+Task: `vk/77eb-vk-pipeline` — "Pipelines are available when creating an issue but
+they should also be available to add after the issue is created with an
+'Update Issue' button."
 
-## Problem
+## Background
 
-Persistent app-server executors (Codex, OpenCode, ACP) run a long-lived
-process and signal turn completion **over the wire** instead of exiting. VK
-ends every turn by killing the agent's whole process group and respawns a
-fresh process next turn, discarding warm state and paying a cold start
-(VAS-107 fix #2):
+The per-task **Pipeline** control (`PipelineSection`) lets an operator pick one
+or more file-based pipelines, tick stages, and edit the composed
+`## Pipeline` markdown block. The block is appended to the issue description
+(delimited by `<!-- vk:pipeline:start/end -->`) when the issue is **created**
+(`KanbanIssuePanelContainer.handleSubmit`, create branch). The render slot in
+`KanbanIssuePanel` is gated `isCreateMode && renderPipeline`.
 
-- `spawn_exit_monitor`'s exit-signal branch reaps the group unconditionally
-  (`crates/local-deployment/src/container.rs`, via `kill_process_group` →
-  `killpg` in `crates/utils/src/process.rs`).
-- The monitor tail *also* `start_kill()`s the child and drops it from
-  `child_store` — a second, less obvious kill point (plus `kill_on_drop`).
-- The persistent/one-shot distinction exists only implicitly as
-  `SpawnedChild.exit_signal: Some` vs `None`;
-  `ExecutionProcessRunReason::CodingAgent` is deliberately non-persistent.
+Today there is **no way to add or change a pipeline after creation** short of
+hand-editing the raw description markdown. Groundwork already exists:
+`extractPipelineBlock()` in `packages/web-core/src/shared/lib/pipeline/taskPipeline.ts`
+was written "for seeding the edit-mode `PipelineSection`" but is currently
+unused.
 
 ## Goal
 
-Make a completed turn a **protocol event, not process death** (constitution
-v0.5.1, Vibe Kanban fork section): finalize the turn's records while keeping
-the app-server process warm for the next turn — while failure, explicit stop,
-attempt end, and shutdown still reap it exactly as today, and one-shot CLI
-executors (Claude, Gemini, Amp, Cursor, Qwen, Copilot, Droid) are completely
-unaffected.
+In the issue detail panel (edit mode), show the same Pipeline control, seeded
+from the issue's existing pipeline block (if any), with an **"Update Issue"**
+button that persists the recomposed block into the issue description.
 
-Full server-restart survival (exec-in-place upgrade / supervisor split) stays
-**deferred Tier-3 scope** — recorded in the SpecKit research notes, not
-built; `--resume` + persisted `agent_session_id` already recover the work
-across restarts, so only the tail of one in-flight turn is at stake.
+## Non-goals
 
-## What ships in this task (Phase 1 — substrate, default-off)
+- No backend/Rust changes: the pipeline block continues to live inside
+  `issues.description`; persistence goes through the existing `updateIssue`
+  mutation (ElectricSQL optimistic write).
+- No change to how executions consume the block (`parsePipelineStages`,
+  VK-PIPELINE-STAGE progress markers) — the block format is unchanged.
+- No auto-save of pipeline edits in edit mode; changes apply only on the
+  explicit "Update Issue" click (that is the requested UX).
 
-1. **Carrier**: `SpawnedChild.keep_warm: bool`
-   (`crates/executors/src/executors/mod.rs`), default `false`, explicit at
-   all six construction sites. One-shot executors never set it.
-2. **Decision**: `spawn_exit_monitor` takes `keep_warm`; a pure helper
-   `should_keep_warm(keep_warm, is_success, was_stopped)` gates BOTH kill
-   points (the exit-signal branch's `kill_process_group` AND the monitor
-   tail's `start_kill` + `child_store.remove`). On a clean warm turn the
-   child stays alive and in `child_store`, so the existing stop/teardown
-   owner can still reach it. Every per-turn side effect is preserved: the
-   `ExecutionProcess` reaches a terminal status, the session id persists,
-   raw logs flush, queued follow-ups start.
-3. **Tests**: `warm_tests` in `container.rs` cover the full decision matrix
-   (warm+success kept; warm+failure, warm+stopped, and every non-warm cell
-   reaped).
+## Design
 
-No executor sets `keep_warm = true` yet, so **runtime behavior is
-unchanged**. This is deliberate: enabling reuse requires the Phase 2
-re-attach work below, which must be verified against a live agent.
+### 1. Parse an existing block back into a selection (`taskPipeline.ts`)
 
-## What lands next (recorded, out of scope here)
+New exported helper:
 
-- **Phase 2**: `warm_app_servers` registry keyed by task attempt (child,
-  pgid, executor reuse handle, `last_active`); reap on attempt end + idle
-  timeout (default 30 min) + out-of-band-death detection; OpenCode first
-  (its warm asset is an HTTP `base_url` — least surgery), with
-  `spawn_follow_up` attaching instead of spawning. At most one warm process
-  per attempt; turns strictly sequential.
-- **Phase 3**: Codex (don't break the JSON-RPC reader loop on
-  `turn/completed`) and ACP (keep the connection after the turn-end
-  `cancel`).
-- **Phase 4 (Tier 3)**: exec-in-place or supervisor split, built on the same
-  pgid-tracked, re-adoptable warm-process substrate.
+```ts
+export function parsePipelineSelection(
+  block: string,
+  pipelines: readonly Pipeline[]
+): { pipelineIds: string[]; enabledIds: string[] }
+```
 
-## Acceptance (Phase 1)
+Best-effort inverse of `composePipelineBlock`:
 
-- Decision-matrix unit tests pass (`cargo test -p local-deployment warm`).
-- fmt/clippy/check gates pass; no generated-file edits; no migration.
-- Default-path behavior unchanged (no executor opts in yet).
-- Diff stays minimal and additive in hot upstream files (fork mergeability).
+- **pipelineIds**: from the `## Pipeline: <Name> + <Name>` heading — split the
+  remainder on `" + "` and match each part against `pipelines[].name`
+  (first match wins); unmatched names are dropped. Bare `## Pipeline` (or a
+  missing heading) → `[]`.
+- **enabledIds**: each numbered line `N. <rest>` whose `<rest>` exactly equals
+  some stage's `prompt_fragment` (across ALL provided pipelines) maps to that
+  stage id, deduped, in block order.
+- Manual lines are NOT returned — they are preserved by the existing
+  non-destructive recompose (`extractManualLines` via
+  `composePipelineBlock({previousBlock})`) when the seeded block is used as
+  the section's initial text.
+
+### 2. `PipelineSection` gains seeding + edit-mode props
+
+New optional props:
+
+- `initialBlock?: string` — when non-empty, the once-only seed effect (which
+  today defaults the picker to `basic`) instead calls
+  `parsePipelineSelection(initialBlock, pipelines)` and seeds
+  `selectedIds`, `enabledIds`, and the composed `text` from the block. A ref
+  flag suppresses the immediately following "reseed ticks on selection
+  change" effect once, so the parsed tick state isn't clobbered by the
+  `default_enabled` union.
+- `seedDefaultPipeline?: boolean` (default `true`) — edit mode passes `false`
+  when the issue has no block, so an issue without a pipeline starts with
+  nothing selected (and therefore no spurious dirty state) instead of
+  defaulting to `basic`.
+- `footer?: ReactNode` — rendered at the bottom of the expanded section; the
+  container uses it for the "Update Issue" button so the button sits inside
+  the Pipeline card.
+
+Create mode passes none of these and behaves exactly as today.
+
+### 3. Render slot opens in edit mode (`KanbanIssuePanel.tsx`)
+
+Change `{isCreateMode && renderPipeline && renderPipeline()}` to
+`{renderPipeline && renderPipeline()}` and update the slot comment: the
+container decides per-mode content (and can return `null`). Placement is
+unchanged (after the description editor); in edit mode this puts the Pipeline
+card between the description and the SpecKit/Relationships sections.
+
+### 4. Container wires edit mode (`KanbanIssuePanelContainer.tsx`)
+
+- `renderPipeline` now branches on mode:
+  - **create**: exactly today's `<PipelineSection …/>` (keyed on composer +
+    reset counter).
+  - **edit**: `<PipelineSection key={'edit:' + issueId} initialBlock={extractPipelineBlock(selectedIssue.description)} seedDefaultPipeline={false} footer={<UpdateIssueButton/>} onChange={setEditPipelineSelection}/>`.
+    Keyed on the issue id so switching issues reseeds.
+- Edit-mode pipeline selection lives in `useState<PipelineSelection | null>`
+  (create mode keeps its existing ref).
+- **Dirty check**: `editPipelineSelection.block` (trimmed) differs from
+  `extractPipelineBlock(latest description)` (trimmed). The "Update Issue"
+  button renders enabled only when dirty (disabled otherwise), so idle issues
+  show an inert button rather than a phantom pending change.
+- **Apply (`handleUpdateIssuePipeline`)**:
+  `updateIssue(issueId, { description: appendPipelineToDescription(latestDescriptionRef.current, block) || null })`,
+  plus `dispatchFormState({type:'setEditDescription', …})` and
+  `latestDescriptionRef.current = next` so the on-screen editor reflects the
+  new description immediately. Deselecting everything yields an empty block,
+  which `appendPipelineToDescription` treats as "strip the block" —
+  removing a pipeline is therefore also supported.
+- Uses `latestDescriptionRef` (not `selectedIssue.description`) as the base so
+  in-flight debounced prose edits aren't reverted.
+
+### 5. i18n
+
+New keys under `taskPipeline` in all 7
+`packages/web-core/src/i18n/locales/*/common.json`:
+
+- `updateIssue` = "Update Issue" — the apply button label.
+- `editModeDescription` — edit-mode helper copy explaining stages are stored
+  in the issue description and applied on Update Issue.
+
+## Edge cases
+
+| Case | Behavior |
+|---|---|
+| Issue has no pipeline block | Section starts empty (no `basic` default), button disabled until something is selected |
+| Block contains manual/custom lines | Preserved verbatim through recompose (existing `extractManualLines` path) |
+| Block references stages/pipelines that no longer exist in the TOML files | Unmatched heading names dropped from selection; unmatched numbered lines survive as manual lines (existing behavior of `extractManualLines`) |
+| Concurrent prose edits in the description editor | Apply merges onto `latestDescriptionRef`, so prose typed while the pipeline card is dirty is kept |
+| Deselect all stages/pipelines then Update | Block stripped from the description entirely |
+| Switching issues with the panel open | `key` remount reseeds from the newly selected issue |
+| Pipelines list still loading | Section renders `null` (existing `pipelines.length === 0` guard); no seeding happens until loaded |
+
+## Testing
+
+- `taskPipeline.test.ts`: unit tests for `parsePipelineSelection`
+  (round-trip with `composePipelineBlock`, bare heading, unknown names,
+  manual lines ignored, shared stages deduped).
+- `pnpm run check` and `pnpm run lint` must pass; run existing Vitest suite.
+
+## Files touched
+
+- `packages/web-core/src/shared/lib/pipeline/taskPipeline.ts` (+ tests)
+- `packages/web-core/src/pages/kanban/PipelineSection.tsx`
+- `packages/web-core/src/pages/kanban/KanbanIssuePanelContainer.tsx`
+- `packages/ui/src/components/KanbanIssuePanel.tsx`
+- `packages/web-core/src/i18n/locales/*/common.json` (7 locales)

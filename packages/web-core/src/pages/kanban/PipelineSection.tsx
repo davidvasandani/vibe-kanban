@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { CaretDownIcon, CaretRightIcon } from '@phosphor-icons/react';
 import type { Pipeline } from 'shared/types';
@@ -8,6 +15,7 @@ import {
   composePipelineBlock,
   extractManualLines,
   orderedEnabledStages,
+  parsePipelineSelection,
 } from '@/shared/lib/pipeline/taskPipeline';
 
 export interface PipelineSelection {
@@ -21,22 +29,57 @@ export interface PipelineSelection {
   block: string;
 }
 
+/** The default-enabled stage ids across the given pipelines, deduped. */
+function defaultEnabledUnion(pipelines: readonly Pipeline[]): Set<string> {
+  return new Set(
+    pipelines.flatMap((p) =>
+      p.stages.filter((s) => s.default_enabled).map((s) => s.id)
+    )
+  );
+}
+
 interface PipelineSectionProps {
   /** Disabled while the task is being submitted. */
   disabled?: boolean;
   /** Emits the current selection whenever it changes. */
   onChange: (selection: PipelineSelection) => void;
+  /**
+   * Seed the selection from an existing `## Pipeline` block (edit mode):
+   * the block's pipelines/stages are pre-selected and its text (incl.
+   * manual lines) becomes the initial composed block. Seeding happens once,
+   * after the pipelines list loads — remount (via `key`) to reseed.
+   */
+  initialBlock?: string;
+  /**
+   * Whether to default the picker to the `basic` pipeline when there is no
+   * `initialBlock` (create-mode behavior). Edit mode passes `false` so an
+   * issue without a pipeline starts with nothing selected.
+   */
+  seedDefaultPipeline?: boolean;
+  /** Overrides the create-mode helper copy under the section title. */
+  helperText?: string;
+  /** Rendered at the bottom of the expanded card (e.g. an apply button). */
+  footer?: ReactNode;
 }
 
 /**
- * Per-task "Pipeline" control for the task-create flow. Fetches the
- * file-based pipelines, lets the operator additively pick one or more and
- * tick which of their (deduped, canonically-ordered) stages apply, and edit
- * the composed prompt block. Recompose is non-destructive: any manual lines
- * the operator typed into the block survive further tick/selection changes.
- * Emits the result so the container can append it to the task description.
+ * Per-task "Pipeline" control for the task-create and issue-edit flows.
+ * Fetches the file-based pipelines, lets the operator additively pick one or
+ * more and tick which of their (deduped, canonically-ordered) stages apply,
+ * and edit the composed prompt block. Recompose is non-destructive: any
+ * manual lines the operator typed into the block survive further
+ * tick/selection changes. Emits the result so the container can append it to
+ * the task description (create) or apply it via Update Issue (edit, seeded
+ * from the issue's existing block via `initialBlock`).
  */
-export function PipelineSection({ disabled, onChange }: PipelineSectionProps) {
+export function PipelineSection({
+  disabled,
+  onChange,
+  initialBlock,
+  seedDefaultPipeline = true,
+  helperText,
+  footer,
+}: PipelineSectionProps) {
   const { t } = useTranslation('common');
 
   const { data: pipelines = [] } = usePipelines();
@@ -47,15 +90,30 @@ export function PipelineSection({ disabled, onChange }: PipelineSectionProps) {
   // whenever the selection/ticks change.
   const [text, setText] = useState('');
 
-  // Default the picker to `basic` (else the first pipeline) once the list
-  // loads, exactly once.
+  // Seed the selection once the pipelines list loads, exactly once: from
+  // `initialBlock` when given (edit mode), else the `basic`/first default
+  // (create mode), else nothing. Ticks are set here and on pipeline toggle
+  // (`togglePipeline`), never by a selection-watching effect — an effect
+  // can't tell a user toggle from this seeding and would clobber the parsed
+  // ticks with the `default_enabled` union.
   const appliedDefaultRef = useRef(false);
   useEffect(() => {
     if (appliedDefaultRef.current || pipelines.length === 0) return;
     appliedDefaultRef.current = true;
+    if (initialBlock) {
+      const parsed = parsePipelineSelection(initialBlock, pipelines);
+      setSelectedIds(parsed.pipelineIds);
+      setEnabledIds(new Set(parsed.enabledIds));
+      // The block itself is the initial text, so its manual lines survive
+      // the non-destructive recompose.
+      setText(initialBlock);
+      return;
+    }
+    if (!seedDefaultPipeline) return;
     const def = pipelines.find((p) => p.id === 'basic') ?? pipelines[0] ?? null;
     setSelectedIds(def ? [def.id] : []);
-  }, [pipelines]);
+    setEnabledIds(defaultEnabledUnion(def ? [def] : []));
+  }, [pipelines, initialBlock, seedDefaultPipeline]);
 
   const selectedPipelines = useMemo(
     () =>
@@ -78,22 +136,6 @@ export function PipelineSection({ disabled, onChange }: PipelineSectionProps) {
       new Set(pipelines.flatMap((p) => p.stages.map((s) => s.prompt_fragment))),
     [pipelines]
   );
-
-  // Reseed the ticks to the default-enabled union of the selected pipelines
-  // whenever the pipeline *selection* changes (not whenever `pipelines`
-  // refetches).
-  useEffect(() => {
-    setEnabledIds(
-      new Set(
-        selectedPipelines.flatMap((p) =>
-          p.stages.filter((s) => s.default_enabled).map((s) => s.id)
-        )
-      )
-    );
-    // Deliberately keyed on `selectedIds` only: this reseeds ticks whenever
-    // the pipeline *selection* changes, not whenever `pipelines` reloads.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedIds]);
 
   // Non-destructive recompose: read the previous text via the functional
   // updater (no `text` dep, so this can't loop) and preserve any manual
@@ -132,11 +174,37 @@ export function PipelineSection({ disabled, onChange }: PipelineSectionProps) {
     onChange,
   ]);
 
-  const togglePipeline = useCallback((id: string) => {
-    setSelectedIds((prev) =>
-      prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id]
-    );
-  }, []);
+  // Adjust ticks incrementally on pipeline toggle instead of reseeding the
+  // whole default-enabled union, so an operator's customized ticks (or the
+  // ticks seeded from an issue's stored block) survive adding/removing a
+  // pipeline. Adding enables the added pipeline's own default stages;
+  // removing drops only stages no longer declared by any selected pipeline.
+  const togglePipeline = useCallback(
+    (id: string) => {
+      const adding = !selectedIds.includes(id);
+      const next = adding
+        ? [...selectedIds, id]
+        : selectedIds.filter((p) => p !== id);
+      setSelectedIds(next);
+      setEnabledIds((prev) => {
+        if (adding) {
+          const added = pipelines.find((p) => p.id === id);
+          const merged = new Set(prev);
+          for (const stageId of defaultEnabledUnion(added ? [added] : [])) {
+            merged.add(stageId);
+          }
+          return merged;
+        }
+        const remaining = new Set(
+          canonicalStageOrder(pipelines.filter((p) => next.includes(p.id))).map(
+            (s) => s.id
+          )
+        );
+        return new Set([...prev].filter((stageId) => remaining.has(stageId)));
+      });
+    },
+    [selectedIds, pipelines]
+  );
 
   const toggleStep = useCallback((id: string) => {
     setEnabledIds((prev) => {
@@ -170,7 +238,9 @@ export function PipelineSection({ disabled, onChange }: PipelineSectionProps) {
 
       {expanded && (
         <>
-          <p className="text-xs text-low">{t('taskPipeline.description')}</p>
+          <p className="text-xs text-low">
+            {helperText ?? t('taskPipeline.description')}
+          </p>
 
           <div className="space-y-half">
             <label className="text-xs text-low block">
@@ -256,6 +326,8 @@ export function PipelineSection({ disabled, onChange }: PipelineSectionProps) {
               className="w-full rounded-sm border bg-panel/40 px-half py-half text-sm text-high font-mono resize-y disabled:opacity-50"
             />
           </div>
+
+          {footer}
         </>
       )}
     </div>

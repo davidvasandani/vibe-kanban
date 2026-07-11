@@ -37,6 +37,15 @@ contributed to it.
   error/recovery callback chain to the navbar banner, why the readiness timeout
   must fall back silently ("falling back is recovery, not an error"), and the
   stable-callback / caching / testing gotchas.
+- [task-pipeline-block.md](task-pipeline-block.md) — Per-task pipelines as
+  a generated `## Pipeline` block in the issue description: the
+  compose/parse round-trip contract, why under-recognizing the selection is
+  destructive on recompose (duplicate names scored by block stages, greedy
+  heading segmentation), the strict-regex rule for the destructive legacy
+  strip path, uncontrolled seeding + remount-by-key, incremental tick
+  adjustment on toggle (never a selection-watching reseed effect), and the
+  edit-mode "Update Issue" apply rules (cancel debounce, latest-description
+  ref, pending-attachments guard).
 - [kanban-issue-panel-sections.md](kanban-issue-panel-sections.md) — The
   issue detail/create panel (`KanbanIssuePanel.tsx`): section order is owned
   by the `packages/ui` component (containers only supply render props), the

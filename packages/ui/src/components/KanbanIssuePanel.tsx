@@ -121,9 +121,11 @@ export interface KanbanIssuePanelProps {
     props: KanbanIssueDescriptionEditorProps
   ) => ReactNode;
 
-  // Optional per-task "Pipeline" control, rendered in create mode only
-  // (stage checkboxes + editable prompt addon). Logic lives in the container;
-  // this is just a render slot.
+  // Optional per-task "Pipeline" control (stage checkboxes + editable
+  // prompt addon). Rendered in both modes; the container supplies per-mode
+  // content (create: stash-until-submit; edit: seeded from the issue with
+  // an Update Issue apply button) and may return null. Logic lives in the
+  // container; this is just a render slot.
   renderPipeline?: () => ReactNode;
 
   // Loading states
@@ -503,9 +505,11 @@ export function KanbanIssuePanel({
           </div>
         </div>
 
-        {/* Per-task Pipeline control (Create mode only). PipelineSection
-            renders its own border-t/padding. */}
-        {isCreateMode && renderPipeline && renderPipeline()}
+        {/* Per-task Pipeline control. The container decides the per-mode
+            content (create: compose-and-stash; edit: seeded from the issue
+            with an Update Issue apply button) and may return null.
+            PipelineSection renders its own border-t/padding. */}
+        {renderPipeline && renderPipeline()}
 
         {/* Create Draft Workspace Toggle (Create mode only) */}
         {isCreateMode && (
