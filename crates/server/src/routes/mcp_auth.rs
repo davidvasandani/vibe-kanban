@@ -34,6 +34,7 @@ use executors::{
     mcp_oauth,
     profile::{ExecutorConfigs, ExecutorProfileId},
 };
+use relay_client::RELAY_HEADER;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
@@ -166,6 +167,22 @@ async fn start(
         )));
     };
 
+    // Relay-proxied requests reach us with a loopback Host the user's browser
+    // cannot be redirected back to, so the flow could never complete — fail
+    // loudly instead of handing out a broken authorize URL.
+    if headers
+        .get(RELAY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim() == "1")
+    {
+        return Ok(ResponseJson(ApiResponse::error(
+            "Connect is only available when accessing Vibe Kanban directly \
+             (not through a relayed host). Open this machine's own UI and try \
+             again, or paste a token into the server's headers in the edit \
+             dialog.",
+        )));
+    }
+
     // The browser reached us at this host, so it can be redirected back to it.
     let Some(host) = headers.get(HOST).and_then(|v| v.to_str().ok()) else {
         return Ok(ResponseJson(ApiResponse::error(
@@ -275,11 +292,15 @@ async fn callback(Query(query): Query<CallbackQuery>) -> Result<Response<String>
         (*id, exchange, flow.executor, flow.server_name.clone())
     };
 
+    // The failure text can carry attacker-influenced content (OAuth `error` /
+    // `error_description` query params, authorization-server response bodies),
+    // and the result pages interpolate their message into HTML — escape it.
+    // The raw text still reaches the UI via the JSON status endpoint.
     let fail = |message: String| async move {
         if let Some(flow) = FLOWS.write().await.get_mut(&flow_id) {
             flow.outcome = FlowOutcome::Failed(message.clone());
         }
-        simple_html_response(StatusCode::BAD_REQUEST, message)
+        simple_html_response(StatusCode::BAD_REQUEST, html_escape(&message))
     };
 
     if let Some(error) = query.error {
@@ -319,9 +340,21 @@ async fn callback(Query(query): Query<CallbackQuery>) -> Result<Response<String>
         flow.outcome = FlowOutcome::Completed;
     }
     Ok(close_window_response(
-        format!("Connected {server_name}. You can return to the app."),
+        format!(
+            "Connected {}. You can return to the app.",
+            html_escape(&server_name)
+        ),
         false,
     ))
+}
+
+/// Minimal HTML escaping for text interpolated into the OAuth result pages.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// Write the token as an `Authorization: Bearer …` header on the server's
