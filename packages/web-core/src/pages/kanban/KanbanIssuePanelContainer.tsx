@@ -22,7 +22,11 @@ import { IssueRelationshipsSectionContainer } from './IssueRelationshipsSectionC
 import { IssueWorkspacesSectionContainer } from './IssueWorkspacesSectionContainer';
 import { PipelineSection, type PipelineSelection } from './PipelineSection';
 import { SpecKitSection } from '../speckit/SpecKitSection';
-import { appendPipelineToDescription } from '@/shared/lib/pipeline/taskPipeline';
+import {
+  appendPipelineToDescription,
+  extractPipelineBlock,
+} from '@/shared/lib/pipeline/taskPipeline';
+import { PrimaryButton } from '@vibe/ui/components/PrimaryButton';
 import {
   KanbanIssuePanel,
   type IssueFormData,
@@ -376,6 +380,22 @@ export function KanbanIssuePanelContainer({
   useEffect(() => {
     pipelineRef.current = null;
   }, [issueComposerKey]);
+
+  // Edit-mode Pipeline selection (state, not a ref: the Update Issue
+  // button's enabled/disabled derives from it). Reset on issue switch, in
+  // lockstep with the section's `key` remount.
+  const [editPipelineSelection, setEditPipelineSelection] =
+    useState<PipelineSelection | null>(null);
+  useEffect(() => {
+    setEditPipelineSelection(null);
+  }, [selectedKanbanIssueId]);
+
+  // The pipeline block stored in the issue's description, for seeding the
+  // edit-mode PipelineSection ('' when the issue has none).
+  const issuePipelineBlock = useMemo(
+    () => extractPipelineBlock(selectedIssue?.description),
+    [selectedIssue?.description]
+  );
 
   const isCreateDraftDirty = useMemo(() => {
     return selectIsCreateDraftDirty({
@@ -1040,6 +1060,45 @@ export function KanbanIssuePanelContainer({
     pipelineRef.current = selection.block ? selection : null;
   }, []);
 
+  // Edit mode: the pipeline card is dirty when its composed block differs
+  // from the block in the *live* description (local edits included, so
+  // deleting the block as prose reads as dirty too). Empty-vs-empty is
+  // clean.
+  const editPipelineDirty = useMemo(() => {
+    if (mode !== 'edit' || !editPipelineSelection) return false;
+    const currentBlock = extractPipelineBlock(displayData.description).trim();
+    return editPipelineSelection.block.trim() !== currentBlock;
+  }, [mode, editPipelineSelection, displayData.description]);
+
+  // Edit mode: apply the pipeline card to the issue. Replaces (or strips,
+  // when the selection is empty) the block at the end of the latest
+  // description and persists it. Cancels the pending debounced description
+  // save first so a stale debounce can't resurrect the old block.
+  const handleUpdateIssuePipeline = useCallback(() => {
+    if (!selectedKanbanIssueId || !editPipelineSelection) return;
+    // Same guard as the debounced description save: while attachment
+    // uploads are pending the description holds temporary local sources
+    // that must not be persisted.
+    if (hasPendingAttachmentsRef.current) return;
+    cancelDebouncedDescription();
+    const nextDescription =
+      appendPipelineToDescription(
+        latestDescriptionRef.current,
+        editPipelineSelection.block
+      ) || null;
+    updateIssue(selectedKanbanIssueId, { description: nextDescription });
+    dispatchFormState({
+      type: 'setEditDescription',
+      description: nextDescription,
+    });
+    latestDescriptionRef.current = nextDescription;
+  }, [
+    selectedKanbanIssueId,
+    editPipelineSelection,
+    cancelDebouncedDescription,
+    updateIssue,
+  ]);
+
   const handleTitleMultiLinePaste = useCallback(
     (overflow: string) => {
       const currentDescription = displayData.description ?? '';
@@ -1169,16 +1228,36 @@ export function KanbanIssuePanelContainer({
       renderDescriptionEditor={(props) => (
         <WYSIWYGEditor {...props} localAttachments={localAttachments} />
       )}
-      renderPipeline={() => (
-        <PipelineSection
-          // PipelineSection seeds its default selection on mount; key it on
-          // the composer (and the delete-draft reset counter) so a fresh
-          // composer or a deleted draft gets a fresh instance.
-          key={`create:${issueComposerKey}:${pipelineResetKey}`}
-          disabled={isSubmitting}
-          onChange={handlePipelineChange}
-        />
-      )}
+      renderPipeline={() =>
+        mode === 'create' ? (
+          <PipelineSection
+            // PipelineSection seeds its default selection on mount; key it on
+            // the composer (and the delete-draft reset counter) so a fresh
+            // composer or a deleted draft gets a fresh instance.
+            key={`create:${issueComposerKey}:${pipelineResetKey}`}
+            disabled={isSubmitting}
+            onChange={handlePipelineChange}
+          />
+        ) : selectedKanbanIssueId ? (
+          <PipelineSection
+            // Seeds once from the issue's stored block; key on the issue so
+            // switching issues reseeds.
+            key={`edit:${selectedKanbanIssueId}`}
+            initialBlock={issuePipelineBlock}
+            seedDefaultPipeline={false}
+            helperText={t('taskPipeline.editModeDescription')}
+            onChange={setEditPipelineSelection}
+            footer={
+              <PrimaryButton
+                value={t('taskPipeline.updateIssue')}
+                onClick={handleUpdateIssuePipeline}
+                disabled={!editPipelineDirty || hasPendingAttachments}
+                variant="default"
+              />
+            }
+          />
+        ) : null
+      }
       renderWorkspacesSection={(issueId) => (
         <IssueWorkspacesSectionContainer issueId={issueId} />
       )}

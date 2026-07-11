@@ -326,6 +326,14 @@ pub struct SpawnedChild {
     pub exit_signal: Option<ExecutorExitSignal>,
     /// Container → Executor: signals when container wants to cancel the execution
     pub cancel: Option<CancellationToken>,
+    /// Executor → Container: when true, this child is a persistent app-server
+    /// (Codex/OpenCode/ACP) that ends a turn by signalling over the wire rather
+    /// than exiting. On a *clean* turn-completion signal the container ends the
+    /// turn but keeps the process alive (warm) for the next turn instead of
+    /// killing its process group. Defaults to `false`, so one-shot CLI executors
+    /// that exit naturally are unaffected. See
+    /// `specs/vk/1a64-coding-agent-pro/` (VAS-107 fix #2).
+    pub keep_warm: bool,
 }
 
 impl From<AsyncGroupChild> for SpawnedChild {
@@ -334,6 +342,7 @@ impl From<AsyncGroupChild> for SpawnedChild {
             child,
             exit_signal: None,
             cancel: None,
+            keep_warm: false,
         }
     }
 }

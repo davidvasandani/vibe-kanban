@@ -34,7 +34,9 @@
         "pairOtherMachines": "Pair other machines",
         "selectHost": "Select host",
         "attachments": "附件",
-        "attachmentsDesc": "附件儲存狀態"
+        "attachmentsDesc": "附件儲存狀態",
+        "slack": "Slack",
+        "slackDesc": "Slack 工作區連線"
       }
     },
     "general": {

@@ -29,6 +29,7 @@ use remote::{
         },
     },
     shape_routes::all_shape_routes,
+    slack::types::{SlackConfigResponse, SlackTestConnectionResponse, UpsertSlackConfigRequest},
 };
 use ts_rs::TS;
 
@@ -151,6 +152,10 @@ fn export_shapes() -> String {
         JiraTestConnectionRequest::decl(),
         JiraTestConnectionResponse::decl(),
         JiraSyncNowResponse::decl(),
+        // Slack integration types
+        SlackConfigResponse::decl(),
+        UpsertSlackConfigRequest::decl(),
+        SlackTestConnectionResponse::decl(),
     ];
 
     for decl in type_decls {

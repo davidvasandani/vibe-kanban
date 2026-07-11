@@ -8,6 +8,7 @@ import {
   composePipelineBlock,
   extractPipelineBlock,
   orderedEnabledStages,
+  parsePipelineSelection,
   parsePipelineStages,
 } from './taskPipeline';
 
@@ -547,6 +548,41 @@ describe('extractPipelineBlock', () => {
     expect(extractPipelineBlock(null)).toBe('');
     expect(extractPipelineBlock(undefined)).toBe('');
   });
+
+  it('falls back to the bare heading for a legacy block without delimiters', () => {
+    const legacy = 'Task prose.\n\n## Pipeline\n\n1. Write a spec.';
+    expect(extractPipelineBlock(legacy)).toBe(
+      '## Pipeline\n\n1. Write a spec.'
+    );
+    const legacyNamed = 'Task prose.\n\n## Pipeline: Basic\n\n1. Write a spec.';
+    expect(extractPipelineBlock(legacyNamed)).toBe(
+      '## Pipeline: Basic\n\n1. Write a spec.'
+    );
+    // Not fooled by "## Pipeline" mentioned mid-line.
+    expect(extractPipelineBlock('See the ## Pipeline heading.')).toBe('');
+  });
+
+  it('does not treat a prose heading like "## Pipeline risks" as a legacy block', () => {
+    const prose = 'Summary\n\n## Pipeline risks\nDo not delete this section.';
+    expect(extractPipelineBlock(prose)).toBe('');
+    // The strip path (via append) must not delete the prose section either.
+    const block = composePipelineBlock(pipeline, ['spec'], '', null);
+    const appended = appendPipelineToDescription(prose, block);
+    expect(appended).toContain('## Pipeline risks');
+    expect(appended).toContain('Do not delete this section.');
+  });
+
+  it('appendPipelineToDescription replaces a legacy undelimited block instead of stacking', () => {
+    const legacy = 'Task prose.\n\n## Pipeline\n\n1. Write a spec.';
+    const block = composePipelineBlock(pipeline, ['plan'], '', null);
+    const replaced = appendPipelineToDescription(legacy, block);
+    expect(replaced).toContain('Task prose.');
+    expect(replaced).toContain('1. Write a plan.');
+    expect(replaced).not.toContain('Write a spec.');
+    expect(replaced.match(/## Pipeline/g)?.length).toBe(1);
+    // An empty block strips the legacy block entirely.
+    expect(appendPipelineToDescription(legacy, '')).toBe('Task prose.');
+  });
 });
 
 describe('parsePipelineStages', () => {
@@ -610,5 +646,213 @@ describe('parsePipelineStages', () => {
       { index: 1, label: 'First stage' },
       { index: 2, label: 'Second stage' },
     ]);
+  });
+});
+
+describe('parsePipelineSelection', () => {
+  const catalog = [basicPipeline, wikillmPipeline];
+
+  it('round-trips a composed block back to the same selection', () => {
+    const block = composePipelineBlock(
+      catalog,
+      basicWikillmEnabledUnion,
+      '',
+      null
+    );
+    const parsed = parsePipelineSelection(block, catalog);
+    expect(parsed.pipelineIds).toEqual(['basic', 'wikillm']);
+    // Same set of stage ids, in the composed block's (canonical) order.
+    expect(parsed.enabledIds).toEqual(
+      orderedEnabledStages(catalog, basicWikillmEnabledUnion).map((s) => s.id)
+    );
+  });
+
+  it('parses from a full description containing prose plus the delimited block', () => {
+    const block = composePipelineBlock(
+      [basicPipeline],
+      ['spec', 'plan'],
+      '',
+      null
+    );
+    const description = appendPipelineToDescription(
+      'Some prose.\n1. A prose list.',
+      block
+    );
+    const parsed = parsePipelineSelection(description, catalog);
+    expect(parsed.pipelineIds).toEqual(['basic']);
+    expect(parsed.enabledIds).toEqual(['spec', 'plan']);
+  });
+
+  it('drops pipeline names that no longer exist in the catalog', () => {
+    const block = [
+      PIPELINE_START,
+      '## Pipeline: Basic + Retired Flow',
+      '',
+      '1. Write a spec.',
+      PIPELINE_END,
+    ].join('\n');
+    const parsed = parsePipelineSelection(block, catalog);
+    expect(parsed.pipelineIds).toEqual(['basic']);
+    expect(parsed.enabledIds).toEqual(['spec']);
+  });
+
+  it('ignores manual and hand-edited numbered lines (they stay manual text)', () => {
+    const block = [
+      PIPELINE_START,
+      '## Pipeline: Basic',
+      '',
+      '1. Write a spec.',
+      '2. Write a plan, focusing on the migration risk.',
+      'Also ping the on-call before merging.',
+      PIPELINE_END,
+    ].join('\n');
+    const parsed = parsePipelineSelection(block, catalog);
+    expect(parsed.pipelineIds).toEqual(['basic']);
+    expect(parsed.enabledIds).toEqual(['spec']);
+  });
+
+  it('dedupes a stage line that appears twice', () => {
+    const block = [
+      PIPELINE_START,
+      '## Pipeline: Basic',
+      '',
+      '1. Write a spec.',
+      '2. Write a spec.',
+      PIPELINE_END,
+    ].join('\n');
+    expect(parsePipelineSelection(block, catalog).enabledIds).toEqual(['spec']);
+  });
+
+  it('handles pipeline names that themselves contain " + "', () => {
+    const plusPipeline: Pipeline = {
+      id: 'spec-review',
+      name: 'Spec + Review',
+      description: '',
+      stages: [
+        {
+          id: 'spec',
+          label: 'Create spec',
+          prompt_fragment: 'Write a spec.',
+          default_enabled: true,
+          heavy: false,
+        },
+      ],
+    };
+    const withPlus = [basicPipeline, plusPipeline];
+    expect(
+      parsePipelineSelection(
+        `${PIPELINE_START}\n## Pipeline: Spec + Review\n\n1. Write a spec.\n${PIPELINE_END}`,
+        withPlus
+      ).pipelineIds
+    ).toEqual(['spec-review']);
+    expect(
+      parsePipelineSelection(
+        `${PIPELINE_START}\n## Pipeline: Basic + Spec + Review\n\n1. Write a spec.\n${PIPELINE_END}`,
+        withPlus
+      ).pipelineIds
+    ).toEqual(['basic', 'spec-review']);
+  });
+
+  it('maps repeated occurrences of a duplicated name to successive pipelines', () => {
+    const releaseA: Pipeline = {
+      id: 'release-a',
+      name: 'Release',
+      description: '',
+      stages: [
+        {
+          id: 'spec',
+          label: 'Create spec',
+          prompt_fragment: 'Write a spec.',
+          default_enabled: true,
+          heavy: false,
+        },
+      ],
+    };
+    const releaseB: Pipeline = {
+      id: 'release-b',
+      name: 'Release',
+      description: '',
+      stages: [
+        {
+          id: 'ship',
+          label: 'Ship it',
+          prompt_fragment: 'Ship it.',
+          default_enabled: true,
+          heavy: false,
+        },
+      ],
+    };
+    const parsed = parsePipelineSelection(
+      `${PIPELINE_START}\n## Pipeline: Release + Release\n\n1. Write a spec.\n2. Ship it.\n${PIPELINE_END}`,
+      [releaseA, releaseB]
+    );
+    expect(parsed.pipelineIds).toEqual(['release-a', 'release-b']);
+    expect(parsed.enabledIds).toEqual(['spec', 'ship']);
+  });
+
+  it('disambiguates a single duplicated name by the stages present in the block', () => {
+    const releaseA: Pipeline = {
+      id: 'release-a',
+      name: 'Release',
+      description: '',
+      stages: [
+        {
+          id: 'spec',
+          label: 'Create spec',
+          prompt_fragment: 'Write a spec.',
+          default_enabled: true,
+          heavy: false,
+        },
+      ],
+    };
+    const releaseB: Pipeline = {
+      id: 'release-b',
+      name: 'Release',
+      description: '',
+      stages: [
+        {
+          id: 'ship',
+          label: 'Ship it',
+          prompt_fragment: 'Ship it.',
+          default_enabled: true,
+          heavy: false,
+        },
+      ],
+    };
+    // The issue was created with release-b (its block lists "Ship it."), so
+    // seeding must pick release-b, not the first catalog entry — otherwise
+    // recompose would drop the recognized-but-unselected stage line and an
+    // apply would destroy the stored pipeline.
+    const parsed = parsePipelineSelection(
+      `${PIPELINE_START}\n## Pipeline: Release\n\n1. Ship it.\n${PIPELINE_END}`,
+      [releaseA, releaseB]
+    );
+    expect(parsed.pipelineIds).toEqual(['release-b']);
+    expect(parsed.enabledIds).toEqual(['ship']);
+  });
+
+  it('parses a legacy undelimited block', () => {
+    const legacy = 'Prose.\n\n## Pipeline: Basic\n\n1. Write a spec.';
+    const parsed = parsePipelineSelection(legacy, catalog);
+    expect(parsed.pipelineIds).toEqual(['basic']);
+    expect(parsed.enabledIds).toEqual(['spec']);
+  });
+
+  it('a bare "## Pipeline" heading selects no pipelines', () => {
+    const block = composePipelineBlock(null, [], 'Custom line only.', null);
+    const parsed = parsePipelineSelection(block, catalog);
+    expect(parsed.pipelineIds).toEqual([]);
+    expect(parsed.enabledIds).toEqual([]);
+  });
+
+  it('returns an empty selection for empty or block-less input', () => {
+    expect(parsePipelineSelection('', catalog)).toEqual({
+      pipelineIds: [],
+      enabledIds: [],
+    });
+    expect(parsePipelineSelection('Just prose.', catalog)).toEqual({
+      pipelineIds: [],
+      enabledIds: [],
+    });
   });
 });
