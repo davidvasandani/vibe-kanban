@@ -1,6 +1,6 @@
 # MCP connectivity testing
 
-Tags: `6286-mcp-status-and-t`
+Tags: `6286-mcp-status-and-t`, `0c92-mcp-test-connect`
 
 ## The key architectural fact
 
@@ -21,8 +21,14 @@ probe client. Public surface:
 - `test_mcp_servers(servers: HashMap<String, Value>, per_server_timeout) -> Vec<McpServerTestResult>`
   — normalizes each entry, probes concurrently (`futures::future::join_all`),
   each probe wrapped in `tokio::time::timeout`, results sorted by name.
-- Types `McpServerTestResult` / `McpServerTestStatus { Ok, Failed, Unsupported }`
+- Types `McpServerTestResult` / `McpServerTestStatus { Ok, Failed, AuthRequired, Unsupported }`
   are ts-rs-exported (registered in `crates/server/src/bin/generate_types.rs`).
+  HTTP/SSE probes rejected with 401/403 classify as `auth_required` (not
+  `failed`) and carry the raw `WWW-Authenticate` header in
+  `McpServerTestResult.www_authenticate` — the UI's Connect flow feeds it to
+  OAuth discovery (see [mcp-oauth-connect](mcp-oauth-connect.md)). The
+  classification lives in one choke point, `http_status_error()`; stdio and
+  timeout failures stay `failed`.
 - Route: `POST /api/mcp-config/test?executor=<agent>` with optional
   `{ servers?: string[] }`; read-only (reuses the same on-disk read path as
   `get_mcp_servers`, never writes).
