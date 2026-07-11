@@ -6,6 +6,7 @@ pub mod executor_discovery;
 pub mod executors;
 pub mod logs;
 pub mod mcp_config;
+pub mod mcp_oauth;
 pub mod mcp_test;
 pub mod model_selector;
 pub mod profile;

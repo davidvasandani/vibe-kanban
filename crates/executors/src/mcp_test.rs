@@ -21,7 +21,7 @@ use std::{
 
 use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderName, HeaderValue};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderName, HeaderValue, WWW_AUTHENTICATE};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
@@ -46,6 +46,9 @@ pub enum McpServerTestStatus {
     Ok,
     /// A recognized transport that failed to connect / handshake / list tools.
     Failed,
+    /// An HTTP/SSE probe was rejected with 401/403: the server is up but wants
+    /// credentials Vibe Kanban doesn't have.
+    AuthRequired,
     /// The config shape was not recognized as any known transport (no probe run).
     Unsupported,
 }
@@ -62,6 +65,27 @@ pub struct McpServerTestResult {
     pub server_name: Option<String>,
     pub server_version: Option<String>,
     pub error: Option<String>,
+    /// Raw `WWW-Authenticate` header from a 401/403 probe response, when the
+    /// server sent one (per RFC 9728 it points at the protected-resource
+    /// metadata needed to start OAuth).
+    pub www_authenticate: Option<String>,
+}
+
+/// Probe failure, split so auth rejections can be surfaced distinctly.
+#[derive(Debug)]
+enum ProbeError {
+    /// HTTP 401/403 from an http/sse transport.
+    AuthRequired {
+        www_authenticate: Option<String>,
+        message: String,
+    },
+    Other(String),
+}
+
+impl From<String> for ProbeError {
+    fn from(message: String) -> Self {
+        ProbeError::Other(message)
+    }
 }
 
 /// A normalized, probe-ready view of an (untyped) MCP server config entry.
@@ -139,6 +163,7 @@ async fn test_one(
             server_name: None,
             server_version: None,
             error: Some(reason.clone()),
+            www_authenticate: None,
         };
     }
 
@@ -154,35 +179,52 @@ async fn test_one(
             server_name: ok.server_name,
             server_version: ok.server_version,
             error: None,
+            www_authenticate: None,
         },
         Ok(Err(err)) => failed(name, transport, err),
         Err(_) => failed(
             name,
             transport,
-            format!("timed out after {}s", per_server_timeout.as_secs().max(1)),
+            ProbeError::Other(format!(
+                "timed out after {}s",
+                per_server_timeout.as_secs().max(1)
+            )),
         ),
     }
 }
 
-fn failed(name: String, transport: String, error: String) -> McpServerTestResult {
+fn failed(name: String, transport: String, error: ProbeError) -> McpServerTestResult {
+    let (status, message, www_authenticate) = match error {
+        ProbeError::AuthRequired {
+            www_authenticate,
+            message,
+        } => (McpServerTestStatus::AuthRequired, message, www_authenticate),
+        ProbeError::Other(message) => (McpServerTestStatus::Failed, message, None),
+    };
     McpServerTestResult {
         name,
         transport,
-        status: McpServerTestStatus::Failed,
+        status,
         latency_ms: None,
         tool_count: None,
         server_name: None,
         server_version: None,
-        error: Some(error),
+        error: Some(message),
+        www_authenticate,
     }
 }
 
-async fn run_probe(client: &reqwest::Client, target: &McpProbeTarget) -> Result<ProbeOk, String> {
+async fn run_probe(
+    client: &reqwest::Client,
+    target: &McpProbeTarget,
+) -> Result<ProbeOk, ProbeError> {
     match target {
-        McpProbeTarget::Stdio { command, args, env } => probe_stdio(command, args, env).await,
+        McpProbeTarget::Stdio { command, args, env } => probe_stdio(command, args, env)
+            .await
+            .map_err(ProbeError::Other),
         McpProbeTarget::Http { url, headers } => probe_http(client, url, headers).await,
         McpProbeTarget::Sse { url, headers } => probe_sse(client, url, headers).await,
-        McpProbeTarget::Unsupported { reason } => Err(reason.clone()),
+        McpProbeTarget::Unsupported { reason } => Err(ProbeError::Other(reason.clone())),
     }
 }
 
@@ -499,11 +541,32 @@ async fn read_result_for_id<R: AsyncBufRead + Unpin>(
 
 // --- streamable HTTP probe --------------------------------------------------
 
+/// Turn a non-success HTTP response into a `ProbeError`, classifying 401/403
+/// as `AuthRequired` and capturing the `WWW-Authenticate` header.
+async fn http_status_error(resp: reqwest::Response) -> ProbeError {
+    let status = resp.status();
+    let www_authenticate = resp
+        .headers()
+        .get(WWW_AUTHENTICATE)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let text = resp.text().await.unwrap_or_default();
+    let message = format!("HTTP {}: {}", status.as_u16(), snippet(&text));
+    if matches!(status.as_u16(), 401 | 403) {
+        ProbeError::AuthRequired {
+            www_authenticate,
+            message,
+        }
+    } else {
+        ProbeError::Other(message)
+    }
+}
+
 async fn probe_http(
     client: &reqwest::Client,
     url: &str,
     headers: &HashMap<String, String>,
-) -> Result<ProbeOk, String> {
+) -> Result<ProbeOk, ProbeError> {
     let (init, session) = http_send(
         client,
         url,
@@ -553,7 +616,7 @@ async fn http_send(
     session: Option<&str>,
     body: &Value,
     want_id: Option<i64>,
-) -> Result<(Option<Value>, Option<String>), String> {
+) -> Result<(Option<Value>, Option<String>), ProbeError> {
     let mut req = client
         .post(url)
         .header(ACCEPT, "application/json, text/event-stream")
@@ -579,8 +642,7 @@ async fn http_send(
         .map(String::from);
 
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("HTTP {}: {}", status.as_u16(), snippet(&text)));
+        return Err(http_status_error(resp).await);
     }
 
     let Some(want) = want_id else {
@@ -617,16 +679,14 @@ async fn probe_sse(
     client: &reqwest::Client,
     url: &str,
     headers: &HashMap<String, String>,
-) -> Result<ProbeOk, String> {
+) -> Result<ProbeOk, ProbeError> {
     let req = apply_headers(client.get(url).header(ACCEPT, "text/event-stream"), headers);
     let resp = req
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
     if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("HTTP {}: {}", status.as_u16(), snippet(&text)));
+        return Err(http_status_error(resp).await);
     }
 
     let mut stream = resp.bytes_stream().eventsource();
@@ -636,8 +696,8 @@ async fn probe_sse(
         match stream.next().await {
             Some(Ok(ev)) if ev.event == "endpoint" => break ev.data.trim().to_string(),
             Some(Ok(_)) => continue,
-            Some(Err(e)) => return Err(format!("SSE stream error: {e}")),
-            None => return Err("SSE stream closed before endpoint event".to_string()),
+            Some(Err(e)) => return Err(format!("SSE stream error: {e}").into()),
+            None => return Err("SSE stream closed before endpoint event".to_string().into()),
         }
     };
 
@@ -666,7 +726,7 @@ async fn sse_post(
     message_url: &reqwest::Url,
     headers: &HashMap<String, String>,
     body: &Value,
-) -> Result<(), String> {
+) -> Result<(), ProbeError> {
     let req = apply_headers(
         client
             .post(message_url.clone())
@@ -680,9 +740,7 @@ async fn sse_post(
         .await
         .map_err(|e| format!("request failed: {e}"))?;
     if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("HTTP {}: {}", status.as_u16(), snippet(&text)));
+        return Err(http_status_error(resp).await);
     }
     Ok(())
 }
@@ -905,6 +963,99 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("failed to spawn"), "got: {err}");
+    }
+
+    /// Serve one canned HTTP/1.1 response on a loopback listener, returning
+    /// the URL to hit. Enough for probes that fail on their first request.
+    async fn one_shot_http_server(response: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock.write_all(response.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn http_401_with_www_authenticate_is_auth_required() {
+        let url = one_shot_http_server(
+            "HTTP/1.1 401 Unauthorized\r\n\
+             WWW-Authenticate: Bearer resource_metadata=\"https://x.dev/prm\"\r\n\
+             content-length: 12\r\nconnection: close\r\n\r\nunauthorized",
+        )
+        .await;
+        let servers = HashMap::from([("s".to_string(), json!({ "type": "http", "url": url }))]);
+        let results = test_mcp_servers(servers, Duration::from_secs(5)).await;
+        assert_eq!(results[0].status, McpServerTestStatus::AuthRequired);
+        assert_eq!(
+            results[0].www_authenticate.as_deref(),
+            Some("Bearer resource_metadata=\"https://x.dev/prm\"")
+        );
+        let error = results[0].error.as_deref().unwrap();
+        assert!(error.contains("HTTP 401"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn http_403_is_auth_required_even_without_header() {
+        let url = one_shot_http_server(
+            "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        )
+        .await;
+        let servers = HashMap::from([("s".to_string(), json!({ "type": "http", "url": url }))]);
+        let results = test_mcp_servers(servers, Duration::from_secs(5)).await;
+        assert_eq!(results[0].status, McpServerTestStatus::AuthRequired);
+        assert_eq!(results[0].www_authenticate, None);
+        assert!(results[0].error.as_deref().unwrap().contains("HTTP 403"));
+    }
+
+    #[tokio::test]
+    async fn http_500_is_plain_failure() {
+        let url = one_shot_http_server(
+            "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 4\r\nconnection: close\r\n\r\nboom",
+        )
+        .await;
+        let servers = HashMap::from([("s".to_string(), json!({ "type": "http", "url": url }))]);
+        let results = test_mcp_servers(servers, Duration::from_secs(5)).await;
+        assert_eq!(results[0].status, McpServerTestStatus::Failed);
+        assert_eq!(results[0].www_authenticate, None);
+        assert!(results[0].error.as_deref().unwrap().contains("HTTP 500"));
+    }
+
+    #[tokio::test]
+    async fn sse_401_is_auth_required() {
+        let base = one_shot_http_server(
+            "HTTP/1.1 401 Unauthorized\r\n\
+             WWW-Authenticate: Bearer realm=\"mcp\"\r\n\
+             content-length: 0\r\nconnection: close\r\n\r\n",
+        )
+        .await;
+        let url = format!("{base}/sse");
+        let servers = HashMap::from([("s".to_string(), json!({ "url": url }))]);
+        let results = test_mcp_servers(servers, Duration::from_secs(5)).await;
+        assert_eq!(results[0].transport, "sse");
+        assert_eq!(results[0].status, McpServerTestStatus::AuthRequired);
+        assert_eq!(
+            results[0].www_authenticate.as_deref(),
+            Some("Bearer realm=\"mcp\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_refused_is_plain_failure() {
+        // Bind-then-drop to get a port with nothing listening.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let servers = HashMap::from([("s".to_string(), json!({ "type": "http", "url": url }))]);
+        let results = test_mcp_servers(servers, Duration::from_secs(5)).await;
+        assert_eq!(results[0].status, McpServerTestStatus::Failed);
+        assert_eq!(results[0].www_authenticate, None);
     }
 
     #[tokio::test]
