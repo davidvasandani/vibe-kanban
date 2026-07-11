@@ -54,6 +54,20 @@ use crate::{
 /// Abandoned flows are unusable after this long (pruned on access).
 const FLOW_TTL: Duration = Duration::from_secs(600);
 
+/// Per-request bound for every outbound OAuth call (discovery, DCR, code
+/// exchange) so a stalled endpoint can't hang `start` or `callback` — the
+/// same discipline as the probe's `MCP_TEST_TIMEOUT`.
+const OAUTH_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn oauth_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(OAUTH_HTTP_TIMEOUT)
+        .build()
+        // Builder failure here means TLS init failed; a client without the
+        // timeout still beats returning 500 for every Connect attempt.
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct McpAuthQuery {
     executor: BaseCodingAgent,
@@ -198,7 +212,7 @@ async fn start(
     };
     let redirect_uri = format!("http://{host}/api/mcp-auth/callback");
 
-    let client = reqwest::Client::new();
+    let client = oauth_http_client();
     let meta = match mcp_oauth::discover(&client, url, payload.www_authenticate.as_deref()).await {
         Ok(meta) => meta,
         Err(e) => return Ok(ResponseJson(ApiResponse::error(&e))),
@@ -323,7 +337,7 @@ async fn callback(Query(query): Query<CallbackQuery>) -> Result<Response<String>
         return Ok(fail("Missing authorization code in callback".to_string()).await);
     };
 
-    let client = reqwest::Client::new();
+    let client = oauth_http_client();
     let access_token = match mcp_oauth::exchange_code(
         &client,
         &exchange.token_endpoint,

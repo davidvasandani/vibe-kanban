@@ -435,6 +435,20 @@ export function McpSettingsSection() {
       setConnectingServer(serverName);
       setTestError(null);
 
+      // Open the popup synchronously inside the click gesture and navigate
+      // it once the start request resolves — a popup opened after an await
+      // can lose the transient user activation and get blocked.
+      const popup = window.open(
+        'about:blank',
+        'vk-mcp-oauth',
+        'width=600,height=700,popup=yes'
+      );
+      if (!popup) {
+        setTestError(t('settings.mcp.test.popupBlocked'));
+        setConnectingServer(null);
+        return;
+      }
+
       try {
         // Hand the probe's captured challenge to discovery — some servers
         // only send WWW-Authenticate on the JSON-RPC POST the probe makes.
@@ -443,15 +457,11 @@ export function McpSettingsSection() {
           serverName,
           testResults?.[serverName]?.www_authenticate
         );
-        const popup = window.open(
-          started.authorize_url,
-          'vk-mcp-oauth',
-          'width=600,height=700,popup=yes'
-        );
-        if (!popup) {
-          if (!isStale()) setTestError(t('settings.mcp.test.popupBlocked'));
+        if (isStale()) {
+          popup.close();
           return;
         }
+        popup.location.href = started.authorize_url;
 
         const outcome = await waitForAuthFlow(started.flow_id, popup);
         if (isStale()) return;
@@ -487,6 +497,7 @@ export function McpSettingsSection() {
           return next;
         });
       } catch (err) {
+        if (!popup.closed) popup.close();
         if (isStale()) return;
         setTestError(
           err instanceof Error
