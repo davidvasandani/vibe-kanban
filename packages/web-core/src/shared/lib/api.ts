@@ -123,6 +123,9 @@ import type {
   JiraTestConnectionRequest,
   JiraTestConnectionResponse,
   UpsertJiraSyncConfigRequest,
+  SlackConfigResponse,
+  SlackTestConnectionResponse,
+  UpsertSlackConfigRequest,
 } from 'shared/remote-types';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
 import { createWorkspaceWithSession } from '@/shared/types/attempt';
@@ -1685,6 +1688,49 @@ export const jiraSyncApi = {
       { method: 'POST' }
     );
     return handleRemoteResponse<JiraSyncNowResponse>(response);
+  },
+};
+
+export const slackApi = {
+  getConfig: async (orgId: string): Promise<SlackConfigResponse | null> => {
+    const response = await makeRemoteRequest(
+      `/v1/organizations/${orgId}/slack`
+    );
+    if (response.status === 404) return null;
+    return handleRemoteResponse<SlackConfigResponse>(response);
+  },
+
+  saveConfig: async (
+    orgId: string,
+    data: UpsertSlackConfigRequest
+  ): Promise<SlackConfigResponse> => {
+    const response = await makeRemoteRequest(
+      `/v1/organizations/${orgId}/slack`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }
+    );
+    return handleRemoteResponse<SlackConfigResponse>(response);
+  },
+
+  deleteConfig: async (orgId: string): Promise<void> => {
+    const response = await makeRemoteRequest(
+      `/v1/organizations/${orgId}/slack`,
+      { method: 'DELETE' }
+    );
+    return handleRemoteResponse<void>(response);
+  },
+
+  testConnection: async (
+    orgId: string
+  ): Promise<SlackTestConnectionResponse> => {
+    const response = await makeRemoteRequest(
+      `/v1/organizations/${orgId}/slack/test`,
+      { method: 'POST' }
+    );
+    return handleRemoteResponse<SlackTestConnectionResponse>(response);
   },
 };
 

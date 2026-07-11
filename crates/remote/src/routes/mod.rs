@@ -52,6 +52,7 @@ pub mod pull_request_issues;
 mod pull_requests;
 mod review;
 mod single_user;
+mod slack;
 pub mod tags;
 mod tokens;
 mod workspaces;
@@ -112,6 +113,7 @@ pub fn router(state: AppState) -> Router {
         .merge(tokens::public_router())
         .merge(review::public_router())
         .merge(github_app::public_router())
+        .merge(slack::public_router())
         .merge(billing::public_router())
         .merge(single_user::public_router());
 
@@ -131,6 +133,7 @@ pub fn router(state: AppState) -> Router {
         .merge(issue_comment_reactions::router())
         .merge(issues::router())
         .merge(jira_sync::router())
+        .merge(slack::router())
         .merge(issue_assignees::router())
         .merge(attachments::router())
         .merge(issue_followers::router())

@@ -34,7 +34,9 @@
         "relay": "Remote Access",
         "relayDesc": "Relay tunnel and enrollment",
         "attachments": "Attachments",
-        "attachmentsDesc": "Attachment storage status"
+        "attachmentsDesc": "Attachment storage status",
+        "slack": "Slack",
+        "slackDesc": "Slack workspace connection"
       }
     },
     "hostPicker": {
