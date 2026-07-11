@@ -8,6 +8,7 @@ import {
   BroadcastIcon,
   PaperclipIcon,
   KanbanIcon,
+  SlackLogoIcon,
 } from '@phosphor-icons/react';
 import type { Icon } from '@phosphor-icons/react';
 import { GeneralSettingsSection } from './GeneralSettingsSection';
@@ -19,6 +20,7 @@ import { McpSettingsSection } from './McpSettingsSection';
 import { RelaySettingsSectionContent } from './RelaySettingsSection';
 import { AttachmentsSettingsSection } from './AttachmentsSettingsSection';
 import { JiraSyncSettingsSection } from './JiraSyncSettingsSection';
+import { SlackSettingsSection } from './SlackSettingsSection';
 
 export type SettingsSectionType =
   | 'general'
@@ -29,7 +31,8 @@ export type SettingsSectionType =
   | 'mcp'
   | 'relay'
   | 'attachments'
-  | 'jira-sync';
+  | 'jira-sync'
+  | 'slack';
 
 export type SettingsSectionGroup = 'host' | 'universal';
 
@@ -45,6 +48,7 @@ export type SettingsSectionInitialState = {
   relay: { hostId?: string } | undefined;
   attachments: undefined;
   'jira-sync': { organizationId?: string; projectId?: string } | undefined;
+  slack: { organizationId?: string } | undefined;
 };
 
 export interface SettingsSectionDefinition {
@@ -63,6 +67,7 @@ export const SETTINGS_SECTION_DEFINITIONS: SettingsSectionDefinition[] = [
   { id: 'relay', icon: BroadcastIcon, group: 'universal' },
   { id: 'attachments', icon: PaperclipIcon, group: 'universal' },
   { id: 'jira-sync', icon: KanbanIcon, group: 'universal' },
+  { id: 'slack', icon: SlackLogoIcon, group: 'universal' },
 ];
 
 export function isHostSpecificSettingsSection(
@@ -117,6 +122,12 @@ export function renderSettingsSection(
           initialState={
             initialState as SettingsSectionInitialState['jira-sync']
           }
+        />
+      );
+    case 'slack':
+      return (
+        <SlackSettingsSection
+          initialState={initialState as SettingsSectionInitialState['slack']}
         />
       );
     default:
