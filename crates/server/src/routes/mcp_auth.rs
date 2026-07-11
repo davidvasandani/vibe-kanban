@@ -187,12 +187,11 @@ async fn start(
             meta.authorization_endpoint
         ))));
     };
-    let client_id = match mcp_oauth::register_client(&client, registration_endpoint, &redirect_uri)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => return Ok(ResponseJson(ApiResponse::error(&e))),
-    };
+    let client_id =
+        match mcp_oauth::register_client(&client, registration_endpoint, &redirect_uri).await {
+            Ok(id) => id,
+            Err(e) => return Ok(ResponseJson(ApiResponse::error(&e))),
+        };
 
     let pkce = mcp_oauth::Pkce::generate();
     let state = mcp_oauth::generate_state();
@@ -285,7 +284,12 @@ async fn callback(Query(query): Query<CallbackQuery>) -> Result<Response<String>
 
     if let Some(error) = query.error {
         let detail = query.error_description.unwrap_or_default();
-        return Ok(fail(format!("Authorization failed: {error} {detail}").trim().to_string()).await);
+        return Ok(fail(
+            format!("Authorization failed: {error} {detail}")
+                .trim()
+                .to_string(),
+        )
+        .await);
     }
     let Some(code) = query.code else {
         return Ok(fail("Missing authorization code in callback".to_string()).await);
@@ -339,9 +343,7 @@ async fn persist_token(
     let obj = entry
         .as_object_mut()
         .ok_or_else(|| format!("MCP server `{server_name}` entry is not an object"))?;
-    let headers = obj
-        .entry("headers")
-        .or_insert_with(|| json!({}));
+    let headers = obj.entry("headers").or_insert_with(|| json!({}));
     if !headers.is_object() {
         *headers = json!({});
     }

@@ -189,7 +189,9 @@ pub async fn discover(
     for candidate in &prm_candidates {
         match fetch_json(client, candidate).await {
             Ok(prm) => {
-                if let Some(first) = string_array(&prm, "authorization_servers").into_iter().next()
+                if let Some(first) = string_array(&prm, "authorization_servers")
+                    .into_iter()
+                    .next()
                 {
                     auth_server = first;
                 }
@@ -596,9 +598,8 @@ mod tests {
         let origin = format!("http://{addr}");
 
         let prm = format!(r#"{{"authorization_servers":["{origin}"]}}"#);
-        let as_meta = format!(
-            r#"{{"authorization_endpoint":"{origin}/a","token_endpoint":"{origin}/t"}}"#
-        );
+        let as_meta =
+            format!(r#"{{"authorization_endpoint":"{origin}/a","token_endpoint":"{origin}/t"}}"#);
         let responses = vec![http_json("200 OK", &prm), http_json("200 OK", &as_meta)];
         tokio::spawn(async move {
             for response in responses {

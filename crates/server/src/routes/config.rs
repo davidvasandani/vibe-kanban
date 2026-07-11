@@ -482,7 +482,10 @@ pub(crate) async fn update_mcp_servers_in_config(
 }
 
 /// Helper function to get MCP servers from config using a path
-pub(crate) fn get_mcp_servers_from_config_path(raw_config: &Value, path: &[String]) -> HashMap<String, Value> {
+pub(crate) fn get_mcp_servers_from_config_path(
+    raw_config: &Value,
+    path: &[String],
+) -> HashMap<String, Value> {
     let mut current = raw_config;
     for part in path {
         current = match current.get(part) {

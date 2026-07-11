@@ -446,17 +446,14 @@ export function McpSettingsSection() {
           'width=600,height=700,popup=yes'
         );
         if (!popup) {
-          if (!isStale())
-            setTestError(t('settings.mcp.test.popupBlocked'));
+          if (!isStale()) setTestError(t('settings.mcp.test.popupBlocked'));
           return;
         }
 
         const outcome = await waitForAuthFlow(started.flow_id, popup);
         if (isStale()) return;
         if (outcome.status !== 'completed') {
-          setTestError(
-            outcome.error ?? t('settings.mcp.test.connectFailed')
-          );
+          setTestError(outcome.error ?? t('settings.mcp.test.connectFailed'));
           return;
         }
 
@@ -811,9 +808,7 @@ export function McpSettingsSection() {
                               )}
                             </div>
                             <div className="flex shrink-0 items-center gap-1">
-                              <McpTestStatusIcon
-                                result={testResults?.[name]}
-                              />
+                              <McpTestStatusIcon result={testResults?.[name]} />
                               <button
                                 type="button"
                                 onClick={() => openDialog({ name, entry })}
