@@ -34,7 +34,9 @@
         "pairOtherMachines": "Pair other machines",
         "selectHost": "Select host",
         "attachments": "Archivos adjuntos",
-        "attachmentsDesc": "Estado del almacenamiento de archivos adjuntos"
+        "attachmentsDesc": "Estado del almacenamiento de archivos adjuntos",
+        "slack": "Slack",
+        "slackDesc": "Conexión del espacio de trabajo de Slack"
       }
     },
     "general": {
