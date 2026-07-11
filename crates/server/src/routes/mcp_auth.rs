@@ -204,13 +204,34 @@ async fn start(
         )));
     }
 
-    // The browser reached us at this host, so it can be redirected back to it.
-    let Some(host) = headers.get(HOST).and_then(|v| v.to_str().ok()) else {
+    // The browser reached us through this host, so it can be redirected back
+    // to it. Behind an HTTPS reverse proxy (e.g. the Caddyfile.example setup)
+    // the browser-facing scheme/host arrive in X-Forwarded-* headers — using
+    // plain `http://{Host}` there would register a redirect URI the AS may
+    // reject and the browser can't load.
+    let forwarded_header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let scheme = forwarded_header("x-forwarded-proto")
+        .filter(|v| v == "https" || v == "http")
+        .unwrap_or_else(|| "http".to_string());
+    let host = forwarded_header("x-forwarded-host").or_else(|| {
+        headers
+            .get(HOST)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+    });
+    let Some(host) = host else {
         return Ok(ResponseJson(ApiResponse::error(
             "Missing Host header; cannot build a redirect URI",
         )));
     };
-    let redirect_uri = format!("http://{host}/api/mcp-auth/callback");
+    let redirect_uri = format!("{scheme}://{host}/api/mcp-auth/callback");
 
     let client = oauth_http_client();
     let meta = match mcp_oauth::discover(&client, url, payload.www_authenticate.as_deref()).await {
