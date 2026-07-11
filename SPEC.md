@@ -1,151 +1,105 @@
-# Spec: Edit-mode Pipeline editing with "Update Issue" button
+# Technical Spec: MCP Test connection — surface auth failures + Connect (OAuth)
 
-Task: `vk/77eb-vk-pipeline` — "Pipelines are available when creating an issue but
-they should also be available to add after the issue is created with an
-'Update Issue' button."
+> Task 0c92. Full SpecKit artifacts live in
+> `homelab/specs/vk/0c92-mcp-test-connect/` (`spec.md`, `plan.md`,
+> `research.md`, `data-model.md`, `contracts/`, `tasks.md`). This file is the
+> repo-root technical summary.
 
-## Background
+## Problem
 
-The per-task **Pipeline** control (`PipelineSection`) lets an operator pick one
-or more file-based pipelines, tick stages, and edit the composed
-`## Pipeline` markdown block. The block is appended to the issue description
-(delimited by `<!-- vk:pipeline:start/end -->`) when the issue is **created**
-(`KanbanIssuePanelContainer.handleSubmit`, create branch). The render slot in
-`KanbanIssuePanel` is gated `isCreateMode && renderPipeline`.
+The MCP "Test connection" feature (PR #77) shows an OAuth-protected server
+(e.g. `sgsc-mcp`) as a red ✕ indistinguishable from a server that is down, the
+error text hides in a hover `title` tooltip (invisible on touch), and there is
+no way to authenticate the server from Vibe Kanban — the user must run an
+interactive `claude mcp` / `/mcp` session elsewhere.
 
-Today there is **no way to add or change a pipeline after creation** short of
-hand-editing the raw description markdown. Groundwork already exists:
-`extractPipelineBlock()` in `packages/web-core/src/shared/lib/pipeline/taskPipeline.ts`
-was written "for seeding the edit-mode `PipelineSection`" but is currently
-unused.
+## Solution
 
-## Goal
+### 1. Probe classification (`crates/executors/src/mcp_test.rs`)
 
-In the issue detail panel (edit mode), show the same Pipeline control, seeded
-from the issue's existing pipeline block (if any), with an **"Update Issue"**
-button that persists the recomposed block into the issue description.
+`McpServerTestStatus` gains `AuthRequired` (`"auth_required"`). An internal
+`ProbeError { AuthRequired, Other }` threads through the http/sse probe paths;
+`http_status_error()` classifies HTTP 401/403 and captures the
+`WWW-Authenticate` header into a new `McpServerTestResult.www_authenticate:
+Option<String>` field. Stdio probes and non-auth failures (timeouts,
+connection refused, other HTTP statuses) are unchanged (`failed` /
+`unsupported`).
 
-## Non-goals
+### 2. OAuth client plumbing (`crates/executors/src/mcp_oauth.rs`, new)
 
-- No backend/Rust changes: the pipeline block continues to live inside
-  `issues.description`; persistence goes through the existing `updateIssue`
-  mutation (ElectricSQL optimistic write).
-- No change to how executions consume the block (`parsePipelineStages`,
-  VK-PIPELINE-STAGE progress markers) — the block format is unchanged.
-- No auto-save of pipeline edits in edit mode; changes apply only on the
-  explicit "Update Issue" click (that is the requested UX).
+Hand-rolled over existing workspace deps (`reqwest`, `sha2`, `rand`,
+`base64` — no new dependency), implementing the MCP authorization spec
+(2025-06-18):
 
-## Design
+- `discover()` — protected-resource metadata via `WWW-Authenticate`
+  `resource_metadata` (RFC 9728) with `/.well-known/oauth-protected-resource`
+  path-insertion fallbacks, then AS metadata (RFC 8414 → OIDC discovery
+  fallback); falls back to the MCP origin as AS for pre-9728 servers.
+- `register_client()` — RFC 7591 dynamic client registration as a public
+  client (`token_endpoint_auth_method: "none"`).
+- `Pkce::generate()` (S256, verified against RFC 7636 appendix B),
+  `build_authorize_url()` (includes RFC 8707 `resource`), `exchange_code()`
+  (returns only the access-token string).
 
-### 1. Parse an existing block back into a selection (`taskPipeline.ts`)
+### 3. Flow endpoints (`crates/server/src/routes/mcp_auth.rs`, new)
 
-New exported helper:
+Mounted in `relay_signed_routes` (same middleware group as `/mcp-config/*`
+and the existing `handoff_complete` browser-redirect callback):
 
-```ts
-export function parsePipelineSelection(
-  block: string,
-  pipelines: readonly Pipeline[]
-): { pipelineIds: string[]; enabledIds: string[] }
-```
+- `POST /api/mcp-auth/start?executor=` `{ server_name }` — resolves the
+  agent's on-disk config entry, requires a URL transport, runs discovery +
+  DCR, builds the redirect URI from the request's `Host` header
+  (`http://{host}/api/mcp-auth/callback` — same-origin with the frontend, so
+  auto-assigned dev ports need no config), stores a pending flow, returns
+  `{ flow_id, authorize_url }`.
+- `GET /api/mcp-auth/callback?code&state` — looks up the flow by the random
+  `state` (CSRF binding), **consumes the exchange inputs atomically** (a
+  state can't be redeemed twice), exchanges the code, writes
+  `headers.Authorization = "Bearer <token>"` onto the server's config entry
+  via the existing `update_mcp_servers_in_config` path, and returns the
+  auto-closing HTML success page (reused from `routes/oauth.rs`).
+- `GET /api/mcp-auth/status?flow_id` — `pending | completed | failed` (+
+  error). Never returns the token.
 
-Best-effort inverse of `composePipelineBlock`:
+Pending flows live in a module-local `LazyLock<RwLock<HashMap<Uuid,
+PendingFlow>>>` with a 10-minute TTL, pruned on access. Tokens are never
+logged, never stored in the flow map, and never returned in JSON.
 
-- **pipelineIds**: from the `## Pipeline: <Name> + <Name>` heading — split the
-  remainder on `" + "` and match each part against `pipelines[].name`
-  (first match wins); unmatched names are dropped. Bare `## Pipeline` (or a
-  missing heading) → `[]`.
-- **enabledIds**: each numbered line `N. <rest>` whose `<rest>` exactly equals
-  some stage's `prompt_fragment` (across ALL provided pipelines) maps to that
-  stage id, deduped, in block order.
-- Manual lines are NOT returned — they are preserved by the existing
-  non-destructive recompose (`extractManualLines` via
-  `composePipelineBlock({previousBlock})`) when the seeded block is used as
-  the section's initial text.
+### 4. Frontend (`packages/web-core`)
 
-### 2. `PipelineSection` gains seeding + edit-mode props
+- `McpTestStatusIcon`: `auth_required` → Phosphor `LockKeyIcon` +
+  `text-warning`, distinct from ✕ `failed`.
+- New `McpTestResultDetails` line under each non-ok server card: the error
+  text renders inline (clamped to 2 lines, click to expand — readable
+  without hover on all pointer types); warning palette for auth-required
+  (with an "Authentication required" label), error palette for failures,
+  neutral for unsupported.
+- **Connect** button on auth-required cards (disabled while dirty, mirroring
+  the Test button): `startMcpAuth` → `window.open` consent popup
+  (OAuthDialog pattern) → 1s status polling (stops on completed/failed/popup
+  closed, with a final re-check to beat the auto-close race) → on completion
+  the connected server's fresh on-disk entry is merged into both the working
+  state and the pristine snapshot (so a later Save cannot wipe the token)
+  and just that server is re-tested via the existing subset-test body.
+- `machineClient.startMcpAuth` / `getMcpAuthStatus`; ts-rs types regenerated
+  (`McpAuthStartRequest/Response`, `McpAuthFlowState`,
+  `McpAuthStatusResponse`); translations added for all 7 locales.
 
-New optional props:
+## Verification
 
-- `initialBlock?: string` — when non-empty, the once-only seed effect (which
-  today defaults the picker to `basic`) instead calls
-  `parsePipelineSelection(initialBlock, pipelines)` and seeds
-  `selectedIds`, `enabledIds`, and the composed `text` from the block. A ref
-  flag suppresses the immediately following "reseed ticks on selection
-  change" effect once, so the parsed tick state isn't clobbered by the
-  `default_enabled` union.
-- `seedDefaultPipeline?: boolean` (default `true`) — edit mode passes `false`
-  when the issue has no block, so an issue without a pipeline starts with
-  nothing selected (and therefore no spurious dirty state) instead of
-  defaulting to `basic`.
-- `footer?: ReactNode` — rendered at the bottom of the expanded section; the
-  container uses it for the "Update Issue" button so the button sits inside
-  the Pipeline card.
+- 14 new unit tests (`cargo test -p executors mcp_`): 401/403/500/refused
+  classification, `WWW-Authenticate` capture, discovery fallbacks, DCR,
+  PKCE vector, authorize-URL assembly, code exchange, replay of existing
+  transport-normalization behavior.
+- Stub E2E against the real server binary: 401 → `auth_required` with header
+  captured → `start` returns a PKCE authorize URL → simulated redirect to
+  `callback` exchanges the code → token lands in `~/.claude.json` → re-test
+  returns `ok` (1 tool) → replayed callback rejected with 400.
+- Gates: `pnpm run generate-types:check`, `pnpm run check`, `pnpm run lint`,
+  `cargo test --workspace`, `pnpm run format` — all green.
 
-Create mode passes none of these and behaves exactly as today.
+## Out of scope (v1)
 
-### 3. Render slot opens in edit mode (`KanbanIssuePanel.tsx`)
-
-Change `{isCreateMode && renderPipeline && renderPipeline()}` to
-`{renderPipeline && renderPipeline()}` and update the slot comment: the
-container decides per-mode content (and can return `null`). Placement is
-unchanged (after the description editor); in edit mode this puts the Pipeline
-card between the description and the SpecKit/Relationships sections.
-
-### 4. Container wires edit mode (`KanbanIssuePanelContainer.tsx`)
-
-- `renderPipeline` now branches on mode:
-  - **create**: exactly today's `<PipelineSection …/>` (keyed on composer +
-    reset counter).
-  - **edit**: `<PipelineSection key={'edit:' + issueId} initialBlock={extractPipelineBlock(selectedIssue.description)} seedDefaultPipeline={false} footer={<UpdateIssueButton/>} onChange={setEditPipelineSelection}/>`.
-    Keyed on the issue id so switching issues reseeds.
-- Edit-mode pipeline selection lives in `useState<PipelineSelection | null>`
-  (create mode keeps its existing ref).
-- **Dirty check**: `editPipelineSelection.block` (trimmed) differs from
-  `extractPipelineBlock(latest description)` (trimmed). The "Update Issue"
-  button renders enabled only when dirty (disabled otherwise), so idle issues
-  show an inert button rather than a phantom pending change.
-- **Apply (`handleUpdateIssuePipeline`)**:
-  `updateIssue(issueId, { description: appendPipelineToDescription(latestDescriptionRef.current, block) || null })`,
-  plus `dispatchFormState({type:'setEditDescription', …})` and
-  `latestDescriptionRef.current = next` so the on-screen editor reflects the
-  new description immediately. Deselecting everything yields an empty block,
-  which `appendPipelineToDescription` treats as "strip the block" —
-  removing a pipeline is therefore also supported.
-- Uses `latestDescriptionRef` (not `selectedIssue.description`) as the base so
-  in-flight debounced prose edits aren't reverted.
-
-### 5. i18n
-
-New keys under `taskPipeline` in all 7
-`packages/web-core/src/i18n/locales/*/common.json`:
-
-- `updateIssue` = "Update Issue" — the apply button label.
-- `editModeDescription` — edit-mode helper copy explaining stages are stored
-  in the issue description and applied on Update Issue.
-
-## Edge cases
-
-| Case | Behavior |
-|---|---|
-| Issue has no pipeline block | Section starts empty (no `basic` default), button disabled until something is selected |
-| Block contains manual/custom lines | Preserved verbatim through recompose (existing `extractManualLines` path) |
-| Block references stages/pipelines that no longer exist in the TOML files | Unmatched heading names dropped from selection; unmatched numbered lines survive as manual lines (existing behavior of `extractManualLines`) |
-| Concurrent prose edits in the description editor | Apply merges onto `latestDescriptionRef`, so prose typed while the pipeline card is dirty is kept |
-| Deselect all stages/pipelines then Update | Block stripped from the description entirely |
-| Switching issues with the panel open | `key` remount reseeds from the newly selected issue |
-| Pipelines list still loading | Section renders `null` (existing `pipelines.length === 0` guard); no seeding happens until loaded |
-
-## Testing
-
-- `taskPipeline.test.ts`: unit tests for `parsePipelineSelection`
-  (round-trip with `composePipelineBlock`, bare heading, unknown names,
-  manual lines ignored, shared stages deduped).
-- `pnpm run check` and `pnpm run lint` must pass; run existing Vitest suite.
-
-## Files touched
-
-- `packages/web-core/src/shared/lib/pipeline/taskPipeline.ts` (+ tests)
-- `packages/web-core/src/pages/kanban/PipelineSection.tsx`
-- `packages/web-core/src/pages/kanban/KanbanIssuePanelContainer.tsx`
-- `packages/ui/src/components/KanbanIssuePanel.tsx`
-- `packages/web-core/src/i18n/locales/*/common.json` (7 locales)
+Token refresh/expiry management, stdio-server auth, encrypted secret
+storage (parity with hand-pasted headers), remote deployment, mirroring the
+token to other agents' configs.

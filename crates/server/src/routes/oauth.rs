@@ -498,7 +498,7 @@ fn hash_sha256_hex(input: &str) -> String {
     output
 }
 
-fn simple_html_response(status: StatusCode, message: String) -> Response<String> {
+pub(crate) fn simple_html_response(status: StatusCode, message: String) -> Response<String> {
     let body = format!(
         r#"<!doctype html>
 <html>
@@ -526,7 +526,7 @@ fn simple_html_response(status: StatusCode, message: String) -> Response<String>
         .unwrap()
 }
 
-fn close_window_response(message: String, skip_auto_close: bool) -> Response<String> {
+pub(crate) fn close_window_response(message: String, skip_auto_close: bool) -> Response<String> {
     let script = if skip_auto_close {
         "" // Desktop app: leave the tab open so the user sees the message
     } else {

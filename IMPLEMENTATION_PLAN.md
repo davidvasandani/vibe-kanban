@@ -1,130 +1,90 @@
-# Implementation Plan: Edit-mode Pipeline editing with "Update Issue" button (task vk/77eb-vk-pipeline)
+# Implementation Plan: MCP auth-failure surfacing + Connect (task vk/0c92-mcp-test-connect)
 
-Step-by-step build order. Rationale and edge-case matrix in `SPEC.md`;
-prior-art recall in `PRIOR_KNOWLEDGE.md`. SpecKit artifacts (spec/plan/tasks)
-live under `homelab/specs/vk/77eb-vk-pipeline/` once generated.
+Step-by-step build order. The authoritative dependency-ordered task list is
+`homelab/specs/vk/0c92-mcp-test-connect/tasks.md` (T001–T012); this is the
+executable narrative. Rationale in `SPEC.md`; prior-art recall in
+`PRIOR_KNOWLEDGE.md`.
 
-## Step 1 — `parsePipelineSelection` helper + unit tests
+## Step 1 — Classify 401/403 in the probe (T001–T002)
 
-File: `packages/web-core/src/shared/lib/pipeline/taskPipeline.ts` (+
-`taskPipeline.test.ts` alongside).
+In `crates/executors/src/mcp_test.rs`: add `AuthRequired` to
+`McpServerTestStatus` and `www_authenticate: Option<String>` to
+`McpServerTestResult`; introduce private `ProbeError { AuthRequired { www_authenticate, message }, Other }`
+with `From<String>` so existing `format!(...)?` sites keep converting; add
+`http_status_error(resp)` as the single non-success choke point and call it
+from `http_send`, `probe_sse`'s initial GET, and `sse_post`; map the error in
+`test_one`/`failed`. Stdio and timeout paths stay `Failed`. Tests: one-shot
+`tokio::net::TcpListener` stubs for 401(+header)/403/500, bind-then-drop for
+connection-refused, existing unsupported/stdio tests untouched.
 
-1. Export `parsePipelineSelection(block, pipelines) → { pipelineIds, enabledIds }`:
-   - Slice the inner block text (reuse the `PIPELINE_START`/`PIPELINE_END` +
-     heading fallback logic already in `extractPipelineBlockText`).
-   - Heading `## Pipeline: A + B` → split remainder on `" + "`, match each
-     name against `pipelines[].name` (first match), keep matches in heading
-     order, dedupe. Bare `## Pipeline`/no heading → `[]`.
-   - Numbered lines `N. <rest>`: build a `prompt_fragment → stage id` map
-     across all `pipelines[].stages`; collect matching ids in order, dedupe.
-     Non-matching numbered lines are ignored (they're manual text).
-2. Tests: round-trip (`composePipelineBlock` → `parsePipelineSelection`
-   returns the same selection), multi-pipeline heading, unknown pipeline
-   name dropped, manual/unknown numbered lines ignored, stage shared by two
-   pipelines returned once, empty/no-block input → empty selection.
+## Step 2 — OAuth client plumbing (T003)
 
-No dependencies; pure function. Verify: `pnpm --filter web-core test` (or the
-repo's vitest invocation for `taskPipeline.test.ts`).
+New `crates/executors/src/mcp_oauth.rs` (register in `lib.rs`): pure helpers
+over `reqwest::Client` — `discover(client, mcp_url, www_authenticate_hint)`
+(RFC 9728 `resource_metadata` parse → well-known path-insertion fallbacks →
+PRM → RFC 8414/OIDC AS metadata, MCP-origin fallback), `register_client`
+(RFC 7591, public client), `Pkce::generate` (S256), `build_authorize_url`
+(PKCE + `state` + RFC 8707 `resource` + scopes), `exchange_code` (returns
+only the token string; encode the form body via `Url::query_pairs_mut` —
+this reqwest build has no `.form()`). Unit-test pure parts without I/O
+(PKCE against RFC 7636 appendix B) and network parts against loopback stubs.
 
-## Step 2 — `PipelineSection` seeding + footer props
+## Step 3 — Flow endpoints (T004–T006)
 
-File: `packages/web-core/src/pages/kanban/PipelineSection.tsx`.
+Make `update_mcp_servers_in_config` / `get_mcp_servers_from_config_path`
+`pub(crate)` in `routes/config.rs` and `simple_html_response` /
+`close_window_response` `pub(crate)` in `routes/oauth.rs`. New
+`crates/server/src/routes/mcp_auth.rs` with a module-local
+`LazyLock<RwLock<HashMap<Uuid, PendingFlow>>>` (10-min TTL, pruned on
+access; `ExchangeInputs` held in an `Option` and `take()`n under the write
+lock so a state can't be redeemed twice):
 
-1. Add props `initialBlock?: string`, `seedDefaultPipeline?: boolean`
-   (default `true`), `footer?: ReactNode`.
-2. In the once-only seed effect (currently defaults to `basic`):
-   - If `initialBlock` is non-empty: `parsePipelineSelection(initialBlock,
-     pipelines)` → `setSelectedIds`, `setEnabledIds`, `setText(initialBlock)`;
-     set a `seededFromBlockRef` so the "reseed ticks when selection changes"
-     effect skips exactly one run (otherwise it clobbers parsed ticks with
-     the `default_enabled` union).
-   - Else if `seedDefaultPipeline`: today's behavior (`basic` or first).
-   - Else: leave everything empty.
-3. Render `{footer}` at the bottom of the expanded content.
-4. The section is remount-keyed by callers, so no reseed-on-prop-change
-   logic is needed.
+- `POST /mcp-auth/start?executor=` `{ server_name }` — agent → config path →
+  server entry URL (`url`/`httpUrl`; stdio → error) → redirect URI from the
+  request `Host` header → discover + DCR (missing `registration_endpoint` →
+  actionable error naming the authorization endpoint) → store flow → return
+  `{ flow_id, authorize_url }`.
+- `GET /mcp-auth/callback` — flow by `state`; `error` param or exchange
+  failure → mark failed + error page; success → write
+  `headers.Authorization = "Bearer <token>"` on the entry through the
+  existing config read-modify-write, mark completed, auto-closing page.
+- `GET /mcp-auth/status?flow_id` — pending/completed/failed (+ error), never
+  the token.
 
-Depends on Step 1. Verify: `pnpm run check` (types), create-mode behavior
-unchanged by default props.
+Mount `mcp_auth::router()` next to `config::router()` in
+`routes/mod.rs` `relay_signed_routes` (origin middleware passes header-less
+top-level navigations; signature middleware passes non-relay requests — the
+`handoff_complete` precedent).
 
-## Step 3 — Open the panel slot in edit mode
+## Step 4 — Types (T007)
 
-File: `packages/ui/src/components/KanbanIssuePanel.tsx`.
+Register the four new types in `crates/server/src/bin/generate_types.rs`;
+`pnpm run generate-types` (never hand-edit `shared/types.ts`).
 
-- `{isCreateMode && renderPipeline && renderPipeline()}` →
-  `{renderPipeline && renderPipeline()}`; update the slot comment (container
-  decides per-mode content; renders `null` when inapplicable). Same slot
-  position ⇒ no border flip needed (card draws its own `border-t`).
+## Step 5 — Frontend (T008–T010)
 
-Independent of Steps 1–2 (safe because the current container only returns
-content in create mode until Step 4 lands, and this PR lands them together).
+`machineClient.ts`: `startMcpAuth(query, serverName)` / `getMcpAuthStatus`
+modeled on `testMcpServers`. `McpSettingsSection.tsx`: extend
+`McpTestStatusIcon` (`auth_required` → `LockKeyIcon` + `text-warning`); new
+`McpTestResultDetails` inline line under each non-ok card (clamped
+`line-clamp-2`, click-to-expand button, warning/error/neutral palettes,
+"Authentication required" label); card row becomes a column. Connect flow:
+start → `window.open` popup → 1s poll loop that stops on non-pending status
+or popup close (with a final status re-check to beat the success page's
+auto-close race) → on completed, merge the fresh on-disk entry into **both**
+`servers` and `originalSnapshot` (so Save can't wipe the token and other
+unsaved edits survive) → subset re-test `{ servers: [name] }` merged into
+`testResults`. Respect the `activeProfileRef` stale-guard everywhere;
+disable Connect while `isDirty` (same rule as Test). Add the six new
+`settings.mcp.test.*` strings to all 7 locales.
 
-## Step 4 — Container: edit-mode wiring + Update Issue button
+## Step 6 — Gates + E2E (T011–T012)
 
-File: `packages/web-core/src/pages/kanban/KanbanIssuePanelContainer.tsx`.
-
-1. Edit-mode selection state:
-   `const [editPipelineSelection, setEditPipelineSelection] = useState<PipelineSelection | null>(null)`;
-   handler `handleEditPipelineChange` stores every emission (including empty
-   block, which means "cleared").
-2. Seed block: `const issuePipelineBlock = extractPipelineBlock(selectedIssue?.description)`
-   computed for edit mode.
-3. Dirty check (memo): normalize both sides with `.trim()`;
-   `dirty = editPipelineSelection != null && editPipelineSelection.block.trim() !== extractPipelineBlock(latest description).trim()`.
-   Use the *live* description (local edit state / `displayData.description`)
-   so a prose edit that deletes the block is compared against correctly.
-4. Apply handler:
-   ```ts
-   const next = appendPipelineToDescription(
-     latestDescriptionRef.current, editPipelineSelection.block) || null;
-   updateIssue(selectedKanbanIssueId, { description: next });
-   dispatchFormState({ type: 'setEditDescription', description: next });
-   latestDescriptionRef.current = next;
-   ```
-   Cancel the pending debounced description save first
-   (`cancelDebouncedDescription()`) so a stale debounce doesn't overwrite the
-   applied description.
-5. `renderPipeline` branches on mode; edit mode renders
-   `<PipelineSection key={'edit:' + selectedKanbanIssueId} initialBlock={issuePipelineBlock} seedDefaultPipeline={false} disabled={false} footer={<update button/>} onChange={handleEditPipelineChange}/>`.
-   The footer button: `PrimaryButton`-style, label
-   `t('taskPipeline.updateIssue')`, `disabled={!dirty}`.
-6. Reset `editPipelineSelection` to `null` when `selectedKanbanIssueId`
-   changes (effect), matching the keyed remount.
-
-Depends on Steps 1–3.
-
-## Step 5 — i18n
-
-Add to `taskPipeline` in all 7 locales
-(`packages/web-core/src/i18n/locales/{en,es,fr,ja,ko,zh-Hans,zh-Hant}/common.json`):
-
-- `updateIssue`: "Update Issue" (translated per locale).
-- `editModeDescription`: helper copy for edit mode ("Stages are stored in
-  the issue description; click Update Issue to apply changes.") — used in
-  place of the create-mode `description` string when `initialBlock`/edit
-  mode is active (pass a `description` override or a `mode` hint via the
-  existing `description` copy; simplest: new optional `helperText` prop —
-  decide at implementation, keep create-mode copy untouched).
-
-## Step 6 — Verification
-
-1. `pnpm run check` — web + Rust type checks.
-2. `pnpm run lint`.
-3. Vitest for `taskPipeline.test.ts`.
-4. `pnpm run format` before finishing (repo rule).
-5. Manual/E2E-ish sanity via `/verify`-style run if feasible: open an
-   existing issue → Pipeline card shows current stages → tick/untick →
-   Update Issue → description block updates; issue without pipeline starts
-   empty; deselect-all strips the block.
-
-## Risks / watchpoints
-
-- The reseed-ticks effect in `PipelineSection` is keyed on `selectedIds`
-  only (deliberate eslint-disable); the skip-once ref must be set *before*
-  the seeding `setSelectedIds` call takes effect.
-- `pipelines.length === 0` renders `null` — the seed effect must still be
-  safe when pipelines load after mount (it already waits for
-  `pipelines.length > 0`).
-- Don't regress create mode: default prop values must reproduce today's
-  behavior byte-for-byte (default `basic` selection, same emissions).
-- The debounced-save interplay (step 4.4): always cancel before applying.
+`pnpm run generate-types:check` && `pnpm run check` && `pnpm run lint` &&
+`cargo test --workspace` && `pnpm run format`. E2E against the real binary:
+python stub playing MCP server + OAuth AS (401 with `resource_metadata`,
+PRM, AS metadata, DCR, token endpoint, MCP handshake when authorized);
+scratch server entry in `~/.claude.json` (backed up); drive
+test → start → callback → status → re-test via curl; assert `auth_required`
+→ token persisted → `ok` (tool count 1) → replayed callback 400; restore the
+config byte-for-byte and kill the processes.

@@ -448,7 +448,13 @@
       "test": {
         "button": "Test connection",
         "dirtyHint": "Save your changes before testing.",
-        "failed": "Failed to test MCP servers"
+        "failed": "Failed to test MCP servers",
+        "authRequired": "Authentication required",
+        "connect": "Connect",
+        "connecting": "Connecting…",
+        "connectFailed": "Authorization failed",
+        "popupClosed": "The authorization window was closed before completing.",
+        "popupBlocked": "Popup blocked — allow popups for this site and try again."
       }
     },
     "projects": {

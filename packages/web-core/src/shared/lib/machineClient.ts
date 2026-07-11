@@ -2,6 +2,8 @@ import type {
   Config,
   GetMcpServerResponse,
   GitBranch,
+  McpAuthStartResponse,
+  McpAuthStatusResponse,
   McpServerQuery,
   McpServerTestResult,
   Repo,
@@ -55,6 +57,12 @@ export interface MachineClient {
     query: McpServerQuery,
     body?: TestMcpServersBody
   ) => Promise<McpServerTestResult[]>;
+  startMcpAuth: (
+    query: McpServerQuery,
+    serverName: string,
+    wwwAuthenticate?: string | null
+  ) => Promise<McpAuthStartResponse>;
+  getMcpAuthStatus: (flowId: string) => Promise<McpAuthStatusResponse>;
 }
 
 function getMachineRequestOptions(
@@ -201,6 +209,33 @@ export function createMachineClient(
             method: 'POST',
             body: JSON.stringify(body ?? {}),
           }
+        )
+      );
+    },
+    startMcpAuth: async (query, serverName, wwwAuthenticate) => {
+      const params = new URLSearchParams(query);
+      return handleApiResponse<McpAuthStartResponse>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/mcp-auth/start?${params.toString()}`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              server_name: serverName,
+              www_authenticate: wwwAuthenticate ?? null,
+            }),
+          }
+        )
+      );
+    },
+    getMcpAuthStatus: async (flowId) => {
+      const params = new URLSearchParams({ flow_id: flowId });
+      return handleApiResponse<McpAuthStatusResponse>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/mcp-auth/status?${params.toString()}`
         )
       );
     },

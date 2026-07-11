@@ -360,9 +360,31 @@ export type McpServerTestResult = { name: string,
 /**
  * `"stdio" | "http" | "sse" | "unknown"`.
  */
-transport: string, status: McpServerTestStatus, latency_ms: bigint | null, tool_count: number | null, server_name: string | null, server_version: string | null, error: string | null, };
+transport: string, status: McpServerTestStatus, latency_ms: bigint | null, tool_count: number | null, server_name: string | null, server_version: string | null, error: string | null, 
+/**
+ * Raw `WWW-Authenticate` header from a 401/403 probe response, when the
+ * server sent one (per RFC 9728 it points at the protected-resource
+ * metadata needed to start OAuth).
+ */
+www_authenticate: string | null, };
 
-export type McpServerTestStatus = "ok" | "failed" | "unsupported";
+export type McpServerTestStatus = "ok" | "failed" | "auth_required" | "unsupported";
+
+export type McpAuthStartRequest = { server_name: string, 
+/**
+ * The `WWW-Authenticate` header a probe captured for this server, if
+ * any. Some servers only issue their challenge (and its
+ * `resource_metadata` pointer) on the JSON-RPC POST the probe makes —
+ * passing it here lets discovery start from it instead of hoping a
+ * plain GET re-elicits one.
+ */
+www_authenticate: string | null, };
+
+export type McpAuthStartResponse = { flow_id: string, authorize_url: string, };
+
+export type McpAuthFlowState = "pending" | "completed" | "failed";
+
+export type McpAuthStatusResponse = { status: McpAuthFlowState, error: string | null, };
 
 export type CheckEditorAvailabilityQuery = { editor_type: EditorType, };
 

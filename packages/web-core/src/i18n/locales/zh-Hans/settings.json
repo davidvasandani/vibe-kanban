@@ -440,7 +440,13 @@
       "test": {
         "button": "测试连接",
         "dirtyHint": "测试前请先保存更改。",
-        "failed": "测试 MCP 服务器失败"
+        "failed": "测试 MCP 服务器失败",
+        "authRequired": "需要身份验证",
+        "connect": "连接",
+        "connecting": "连接中…",
+        "connectFailed": "授权失败",
+        "popupClosed": "授权窗口在完成前已关闭。",
+        "popupBlocked": "弹出窗口被拦截 — 请允许此网站的弹出窗口后重试。"
       }
     },
     "projects": {

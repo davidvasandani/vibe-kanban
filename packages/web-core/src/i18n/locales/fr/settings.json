@@ -440,7 +440,13 @@
       "test": {
         "button": "Tester la connexion",
         "dirtyHint": "Enregistrez vos modifications avant de tester.",
-        "failed": "Échec du test des serveurs MCP"
+        "failed": "Échec du test des serveurs MCP",
+        "authRequired": "Authentification requise",
+        "connect": "Connecter",
+        "connecting": "Connexion…",
+        "connectFailed": "Échec de l'autorisation",
+        "popupClosed": "La fenêtre d'autorisation a été fermée avant la fin.",
+        "popupBlocked": "Fenêtre contextuelle bloquée — autorisez les fenêtres contextuelles pour ce site et réessayez."
       }
     },
     "projects": {
