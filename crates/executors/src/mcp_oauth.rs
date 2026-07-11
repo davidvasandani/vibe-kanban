@@ -107,6 +107,22 @@ fn well_known_candidates(base: &Url, suffix: &str) -> Vec<String> {
     candidates
 }
 
+/// Metadata URL candidates for an authorization-server issuer: RFC 8414
+/// path-insertion forms first, then OIDC issuer-suffix discovery (how
+/// path-based issuers like Keycloak realms actually publish it — RFC 8414
+/// insertion would miss them), then OIDC insertion forms, deduplicated.
+fn as_metadata_candidates(as_url: &Url) -> Vec<String> {
+    let mut candidates = well_known_candidates(as_url, "oauth-authorization-server");
+    let issuer = as_url.as_str().trim_end_matches('/');
+    candidates.push(format!("{issuer}/.well-known/openid-configuration"));
+    for candidate in well_known_candidates(as_url, "openid-configuration") {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
 /// GET a JSON document, treating any non-success status or parse failure as
 /// a soft error (the caller tries the next candidate URL).
 async fn fetch_json(client: &reqwest::Client, url: &str) -> Result<Value, String> {
@@ -209,8 +225,7 @@ pub async fn discover(
     // 3. Fetch authorization-server metadata (RFC 8414, then OIDC discovery).
     let as_url = Url::parse(auth_server.trim_end_matches('/'))
         .map_err(|e| format!("invalid authorization server url `{auth_server}`: {e}"))?;
-    let mut as_candidates = well_known_candidates(&as_url, "oauth-authorization-server");
-    as_candidates.extend(well_known_candidates(&as_url, "openid-configuration"));
+    let as_candidates = as_metadata_candidates(&as_url);
 
     let mut as_errors = Vec::new();
     for candidate in &as_candidates {
@@ -419,6 +434,36 @@ mod tests {
                 "http://127.0.0.1:3334/.well-known/oauth-authorization-server/mcp".to_string(),
                 "http://127.0.0.1:3334/.well-known/oauth-authorization-server".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn as_metadata_candidates_cover_path_based_oidc_issuers() {
+        // Keycloak-style issuer: OIDC discovery is appended to the issuer
+        // path, which the RFC 8414 insertion form does not produce.
+        let keycloak = Url::parse("https://kc.example.com/realms/myrealm").unwrap();
+        let candidates = as_metadata_candidates(&keycloak);
+        assert!(candidates.contains(
+            &"https://kc.example.com/realms/myrealm/.well-known/openid-configuration".to_string()
+        ));
+        assert!(
+            candidates.contains(
+                &"https://kc.example.com/.well-known/oauth-authorization-server/realms/myrealm"
+                    .to_string()
+            )
+        );
+        // RFC 8414 forms are preferred (tried first).
+        assert!(candidates[0].contains("oauth-authorization-server"));
+
+        // Root issuer: appended and insertion OIDC forms coincide — no dupes.
+        let root = Url::parse("https://as.example.com").unwrap();
+        let candidates = as_metadata_candidates(&root);
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|c| c.contains("openid-configuration"))
+                .count(),
+            1
         );
     }
 
