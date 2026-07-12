@@ -68,6 +68,36 @@ fn oauth_http_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
+/// Enrich a dynamic-client-registration failure with actionable guidance.
+///
+/// Some authorization servers only accept redirect URIs belonging to a
+/// hardcoded allowlist of known MCP clients (Claude, ChatGPT/Codex, Cursor) or
+/// to `localhost`. A server-hosted Vibe Kanban reached through a public host
+/// registers a non-loopback callback those servers reject — the raw error
+/// ("redirect_uri must be a trusted … callback") is opaque, so spell out the
+/// two ways forward.
+fn connect_error(raw: String, redirect_uri: &str) -> String {
+    let looks_like_redirect_rejection = {
+        let lower = raw.to_ascii_lowercase();
+        lower.contains("redirect_uri") || lower.contains("redirect uri")
+    };
+    let is_loopback = redirect_uri.contains("://localhost")
+        || redirect_uri.contains("://127.0.0.1")
+        || redirect_uri.contains("://[::1]");
+    if looks_like_redirect_rejection && !is_loopback {
+        format!(
+            "{raw}\n\nThis authorization server only trusts callbacks from known \
+             MCP clients or localhost, and Vibe Kanban registered \
+             `{redirect_uri}`. Open Vibe Kanban on localhost (so the callback \
+             is a loopback URL this server accepts) and click Connect there, or \
+             obtain a token another way and paste it into this server's headers \
+             (Authorization: Bearer …) via the edit dialog."
+        )
+    } else {
+        raw
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct McpAuthQuery {
     executor: BaseCodingAgent,
@@ -249,7 +279,12 @@ async fn start(
     let client_id =
         match mcp_oauth::register_client(&client, registration_endpoint, &redirect_uri).await {
             Ok(id) => id,
-            Err(e) => return Ok(ResponseJson(ApiResponse::error(&e))),
+            Err(e) => {
+                return Ok(ResponseJson(ApiResponse::error(&connect_error(
+                    e,
+                    &redirect_uri,
+                ))));
+            }
         };
 
     let pkce = mcp_oauth::Pkce::generate();
@@ -466,4 +501,36 @@ async fn status(
         },
     };
     Ok(ResponseJson(ApiResponse::success(response)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connect_error_adds_guidance_for_public_redirect_rejection() {
+        let raw = "client registration failed (HTTP 400): redirect_uri must be a \
+                   trusted MCP client callback (Claude, ChatGPT/Codex, Cursor, or localhost)"
+            .to_string();
+        let enriched = connect_error(raw.clone(), "https://vk.example.com/api/mcp-auth/callback");
+        assert!(enriched.starts_with(&raw));
+        assert!(enriched.contains("localhost"));
+        assert!(enriched.contains("Authorization: Bearer"));
+    }
+
+    #[test]
+    fn connect_error_untouched_when_already_loopback() {
+        // A loopback callback that still gets a redirect complaint shouldn't
+        // be told to "open on localhost" — it already is.
+        let raw = "client registration failed (HTTP 400): redirect_uri invalid".to_string();
+        let enriched = connect_error(raw.clone(), "http://localhost:8080/api/mcp-auth/callback");
+        assert_eq!(enriched, raw);
+    }
+
+    #[test]
+    fn connect_error_untouched_for_unrelated_failures() {
+        let raw = "client registration failed (HTTP 500): internal error".to_string();
+        let enriched = connect_error(raw.clone(), "https://vk.example.com/api/mcp-auth/callback");
+        assert_eq!(enriched, raw);
+    }
 }

@@ -117,16 +117,19 @@ function McpTestStatusIcon({
 function McpTestResultDetails({
   result,
   connecting,
+  connectError,
   onConnect,
   connectDisabled,
 }: {
   result: McpServerTestResult | undefined;
   connecting: boolean;
+  connectError: string | undefined;
   onConnect: () => void;
   connectDisabled: boolean;
 }) {
   const { t } = useTranslation('settings');
   const [expanded, setExpanded] = useState(false);
+  const [connectExpanded, setConnectExpanded] = useState(false);
   if (!result || result.status === 'ok') return null;
 
   const authRequired = result.status === 'auth_required';
@@ -137,53 +140,63 @@ function McpTestResultDetails({
       : 'border-error/50 bg-error/10 text-error';
 
   return (
-    <div
-      className={cn(
-        'flex items-start gap-2 rounded-sm border p-2 text-xs',
-        palette
-      )}
-    >
-      <div className="min-w-0 flex-1">
+    <div className={cn('rounded-sm border p-2 text-xs', palette)}>
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          {authRequired && (
+            <div className="font-medium">
+              {t('settings.mcp.test.authRequired')}
+            </div>
+          )}
+          {result.error && (
+            <button
+              type="button"
+              onClick={() => setExpanded((prev) => !prev)}
+              className={cn(
+                'w-full text-left font-mono break-words',
+                !expanded && 'line-clamp-2'
+              )}
+              title={result.error}
+            >
+              {result.error}
+            </button>
+          )}
+        </div>
         {authRequired && (
-          <div className="font-medium">
-            {t('settings.mcp.test.authRequired')}
-          </div>
-        )}
-        {result.error && (
-          <button
+          <Button
+            variant="outline"
+            size="sm"
             type="button"
-            onClick={() => setExpanded((prev) => !prev)}
-            className={cn(
-              'w-full text-left font-mono break-words',
-              !expanded && 'line-clamp-2'
-            )}
-            title={result.error}
+            className="shrink-0"
+            onClick={onConnect}
+            disabled={connecting || connectDisabled}
           >
-            {result.error}
-          </button>
+            {connecting ? (
+              <CircleNotchIcon
+                className="size-icon-xs mr-1 animate-spin"
+                weight="bold"
+              />
+            ) : (
+              <LockKeyIcon className="size-icon-xs mr-1" weight="bold" />
+            )}
+            {connecting
+              ? t('settings.mcp.test.connecting')
+              : t('settings.mcp.test.connect')}
+          </Button>
         )}
       </div>
-      {authRequired && (
-        <Button
-          variant="outline"
-          size="sm"
+      {connectError && (
+        <button
           type="button"
-          className="shrink-0"
-          onClick={onConnect}
-          disabled={connecting || connectDisabled}
-        >
-          {connecting ? (
-            <CircleNotchIcon
-              className="size-icon-xs mr-1 animate-spin"
-              weight="bold"
-            />
-          ) : (
-            <LockKeyIcon className="size-icon-xs mr-1" weight="bold" />
+          onClick={() => setConnectExpanded((prev) => !prev)}
+          className={cn(
+            'mt-2 block w-full whitespace-pre-wrap break-words rounded-sm border border-error/50 bg-error/10 p-2 text-left text-error',
+            !connectExpanded && 'line-clamp-3'
           )}
-          {connecting
-            ? t('settings.mcp.test.connecting')
-            : t('settings.mcp.test.connect')}
-        </Button>
+          title={connectError}
+        >
+          {connectError}
+        </button>
       )}
     </div>
   );
@@ -275,6 +288,7 @@ export function McpSettingsSection() {
       setTestResults(null);
       setTestError(null);
       setTesting(false);
+      setConnectErrors({});
 
       try {
         const profileKey = profiles
@@ -326,6 +340,7 @@ export function McpSettingsSection() {
       // Saved config changed the server set; drop stale statuses.
       setTestResults(null);
       setTestError(null);
+      setConnectErrors({});
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
     } catch (err) {
@@ -363,6 +378,7 @@ export function McpSettingsSection() {
     setTesting(true);
     setTestError(null);
     setTestResults(null);
+    setConnectErrors({});
 
     try {
       const results = await machineClient.testMcpServers({
@@ -387,6 +403,11 @@ export function McpSettingsSection() {
   // callback wrote the token behind the UI's back — a later Save must not
   // wipe it) and re-test just that server.
   const [connectingServer, setConnectingServer] = useState<string | null>(null);
+  // Connect failures are shown on the originating server's card, not the
+  // global test banner, so the message stays next to what it's about.
+  const [connectErrors, setConnectErrors] = useState<Record<string, string>>(
+    {}
+  );
 
   const waitForAuthFlow = useCallback(
     async (
@@ -433,7 +454,13 @@ export function McpSettingsSection() {
       };
 
       setConnectingServer(serverName);
-      setTestError(null);
+      setConnectErrors((prev) => {
+        const next = { ...prev };
+        delete next[serverName];
+        return next;
+      });
+      const failConnect = (message: string) =>
+        setConnectErrors((prev) => ({ ...prev, [serverName]: message }));
 
       // Open the popup synchronously inside the click gesture and navigate
       // it once the start request resolves — a popup opened after an await
@@ -444,7 +471,7 @@ export function McpSettingsSection() {
         'width=600,height=700,popup=yes'
       );
       if (!popup) {
-        setTestError(t('settings.mcp.test.popupBlocked'));
+        failConnect(t('settings.mcp.test.popupBlocked'));
         setConnectingServer(null);
         return;
       }
@@ -466,7 +493,7 @@ export function McpSettingsSection() {
         const outcome = await waitForAuthFlow(started.flow_id, popup);
         if (isStale()) return;
         if (outcome.status !== 'completed') {
-          setTestError(outcome.error ?? t('settings.mcp.test.connectFailed'));
+          failConnect(outcome.error ?? t('settings.mcp.test.connectFailed'));
           return;
         }
 
@@ -499,7 +526,7 @@ export function McpSettingsSection() {
       } catch (err) {
         if (!popup.closed) popup.close();
         if (isStale()) return;
-        setTestError(
+        failConnect(
           err instanceof Error
             ? err.message
             : t('settings.mcp.test.connectFailed')
@@ -857,6 +884,7 @@ export function McpSettingsSection() {
                           <McpTestResultDetails
                             result={testResults?.[name]}
                             connecting={connectingServer === name}
+                            connectError={connectErrors[name]}
                             onConnect={() => handleConnect(name)}
                             connectDisabled={
                               connectingServer !== null || isDirty
