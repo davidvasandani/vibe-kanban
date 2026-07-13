@@ -1,12 +1,15 @@
 //! Minimal Slack Web API client.
 //!
-//! Five methods, all `POST https://slack.com/api/{method}` with a bearer
-//! bot token. Error strings must never contain the token; auth material
-//! only ever goes into request headers.
+//! All methods are `POST https://slack.com/api/{method}` with a bearer bot
+//! token. Error strings must never contain the token; auth material only
+//! ever goes into request headers.
 
 use serde_json::{Value, json};
 
-use super::types::{SlackApiEnvelope, SlackAuthTestResponse, SlackConversationsOpenResponse};
+use super::types::{
+    SlackApiEnvelope, SlackAuthTestResponse, SlackConversationsOpenResponse,
+    SlackConversationsRepliesResponse, SlackReplyMessage, SlackViewsOpenResponse,
+};
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
 
@@ -83,13 +86,55 @@ impl SlackClient {
     }
 
     /// Open a modal from an interaction's `trigger_id` (valid for 3s).
-    pub async fn views_open(&self, trigger_id: &str, view: Value) -> Result<(), SlackClientError> {
-        self.call(
-            "views.open",
-            json!({"trigger_id": trigger_id, "view": view}),
-        )
-        .await?;
+    /// Returns the created view's id so a follow-up `views_update` can swap in
+    /// the AI summary (FR-1/FR-8); `None` if Slack omits it.
+    pub async fn views_open(
+        &self,
+        trigger_id: &str,
+        view: Value,
+    ) -> Result<Option<String>, SlackClientError> {
+        let value = self
+            .call(
+                "views.open",
+                json!({"trigger_id": trigger_id, "view": view}),
+            )
+            .await?;
+        let response: SlackViewsOpenResponse = serde_json::from_value(value).map_err(|_| {
+            SlackClientError::Transport("Slack returned an unexpected response".to_string())
+        })?;
+        Ok(response.view.map(|v| v.id))
+    }
+
+    /// Replace an already-open modal by its view id (`views.update`). Used to
+    /// swap the mechanical prefill for the AI summary, or to drop the
+    /// "Summarizing…" hint on the AI-failure path.
+    pub async fn views_update(&self, view_id: &str, view: Value) -> Result<(), SlackClientError> {
+        self.call("views.update", json!({"view_id": view_id, "view": view}))
+            .await?;
         Ok(())
+    }
+
+    /// Fetch the replies of a thread (root at index 0), for AI summarization.
+    /// Requires a message-history read scope (`channels:history` etc.); a
+    /// missing scope surfaces as `Api("missing_scope")` and the caller falls
+    /// back to the mechanical prefill (FR-5/FR-13).
+    pub async fn conversations_replies(
+        &self,
+        channel_id: &str,
+        thread_ts: &str,
+        limit: usize,
+    ) -> Result<Vec<SlackReplyMessage>, SlackClientError> {
+        let value = self
+            .call(
+                "conversations.replies",
+                json!({"channel": channel_id, "ts": thread_ts, "limit": limit}),
+            )
+            .await?;
+        let response: SlackConversationsRepliesResponse =
+            serde_json::from_value(value).map_err(|_| {
+                SlackClientError::Transport("Slack returned an unexpected response".to_string())
+            })?;
+        Ok(response.messages)
     }
 
     /// Post a message only the given user can see, in the given channel.

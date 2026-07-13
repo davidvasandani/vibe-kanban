@@ -1,50 +1,51 @@
-# Prior Knowledge — recalled for `vk/0c92-mcp-test-connect`
+# Prior Knowledge — recalled for `vk/0f53-slack-shortcut-a`
 
-Searched both project knowledge bases — `docs/knowledge-base/` (3 pages +
-INDEX) and `wiki/` (8 topic pages + INDEX) — for pages relevant to this task
-(classifying MCP probe auth failures, surfacing them in the settings UI, and
-adding an OAuth "Connect" flow). One page is directly on-topic; two more set
-constraints the design must honor.
+Searched the project knowledge base (`wiki/` — 11 topic pages + INDEX) for
+pages relevant to this task (adding optional AI summarization to the merged
+Slack "Create issue from message" shortcut). One page is directly on-topic;
+the rest are unrelated (kanban UI, sync, deployment, agent lifecycle).
 
 ## Relevant findings
 
-**[docs/knowledge-base/mcp-connectivity-testing.md] — directly on-topic.**
-The feature this task extends. Key facts reused wholesale: VK is an MCP
-*config-writer*, and the probe in `crates/executors/src/mcp_test.rs` is the
-codebase's only MCP client — hand-rolled over `reqwest`/`tokio`/`serde_json`/
-`eventsource-stream` because rmcp 1.3 lacks a legacy-SSE client. Server
-entries are untyped `serde_json::Value` adapted per agent (Gemini `httpUrl`,
-Opencode `type: local` arrays, Codex stdio-only TOML) — `normalize()` must
-stay tolerant and `unsupported` must never become a false `failed`. The route
-(`POST /api/mcp-config/test?executor=`) already supports subset testing via
-`{ servers: [name] }` — this is what makes the post-Connect single-server
-re-test free. Testing pattern to follow: IO-generic handshake + in-memory
-mocks, no external processes. Direct consequence for this task: classify
-401/403 inside the probe's HTTP error path (one choke point,
-`http_status_error`), and test with loopback stubs in the same spirit.
+**[wiki/external-connector-sync.md] — the credential pattern this task reuses
+wholesale.** Written for the Jira connector but explicitly connector-agnostic:
 
-**[wiki/external-connector-sync.md] — credential rules that transfer.** Two
-rules from the Jira connector shaped the OAuth flow design:
-(1) *secrets never appear in API responses, logs, or error messages* — hence
-the status endpoint never returns the token, `exchange_code()` returns only
-the token string, and only OAuth *error* bodies (RFC 6749 §5.2, no secrets)
-are echoed into messages; (2) *the stored-credential destination-pinning
-rule*: any endpoint that combines a stored secret with a caller-supplied URL
-is an exfiltration primitive. The `/mcp-auth/start` endpoint honors this by
-taking only a server *name* in the body — the URL is read from the agent's
-on-disk config, never from the request — and the token endpoint the code is
-redeemed against comes from the server's own discovered metadata, pinned in
-the pending flow at start time, not from the callback request.
+- Connectors live in the **remote** stack (`crates/remote`), because the board
+  users see is Postgres/Electric, not the local SQLite model. The Slack
+  integration already lives there (`crates/remote/src/slack/`); the Anthropic
+  key rides on the same `organization_slack_configs` row.
+- **Credential storage rule (applied verbatim to the Anthropic key):** store as
+  `state.jwt.encrypt_string(...)` ciphertext (AES-256-GCM); read APIs expose
+  only a `has_*: bool` indicator, never the secret; `null`/empty on update means
+  "keep" (COALESCE in the repo upsert). Credential-bearing routes gate on org
+  admin (`assert_admin`).
+- **The destination-pinning / exfiltration rule** ("a stored secret may only be
+  sent to the stored destination") is why the Anthropic base URL is a **code
+  constant** (`https://api.anthropic.com/v1/messages`), never caller-supplied —
+  there is no exfiltration primitive here, unlike Jira's admin-supplied URL.
 
-**[wiki/self-hosted-deployment.md, wiki/project-context-map.md] — scope
-boundary.** The MCP settings screen is the *local* stack
-(`packages/web-core` settings dialog + local axum server), not the remote
-Postgres/Electric stack — so no migrations, no `crates/remote` involvement,
-and per-flow state can be process-local in-memory (matching the existing
-`oauth_handoffs` precedent in `crates/local-deployment`).
+## What this task adds beyond prior knowledge (candidate for a new page)
 
-## Checked and not relevant
+Nothing in the KB covers **outbound AI/LLM egress** or the **Slack
+interactivity ack-then-enrich** flow. New, reusable material this task
+established (distilled in the knowledge-base stage into
+`slack-shortcut-ai-summarization.md`):
 
-`claude-log-normalization`, `collapsing-repeated-log-entries` (log pipeline),
-`appbar-rail-and-org-tiles`, `kanban-*`, `mobile-kanban-scrolling` (kanban
-UI), `electric-sync-fallback` (remote sync) — different subsystems.
+- The Slack shortcut's ack-fast/enrich-later shape: ack ≤3s, `views.open` the
+  mechanical modal, then in the *same* spawned task fetch the thread + call the
+  LLM + `views.update`. Enrichment is strictly optional and post-ack.
+- Outbound LLM call = raw reqwest over the shared `http_client`, Jira-style
+  HTTP-status errors (not Slack's `ok` envelope), structured outputs via
+  `output_config.format` (json_schema; `maxLength` unsupported, so lengths are
+  enforced by prompt + post-truncation reusing `prefill.rs`).
+- The universal degrade-to-deterministic rule (constitution v0.8.0): every AI
+  failure falls back to the mechanical prefill; the key/thread text never hit
+  logs or error strings.
+- The `views.update` mid-edit race and its v1 mitigation (a "✨ Summarizing…"
+  hint + single fast update; block_actions checkbox is the deferred upgrade).
+
+## Notes
+
+The base shortcut (`vk/fec4-vk-slack-shortcu`, PR #94) has a full SpecKit spec
+under `homelab/specs/vk/fec4-vk-slack-shortcu/` but had no wiki page — this
+task's knowledge-base entry is the first for the Slack integration.

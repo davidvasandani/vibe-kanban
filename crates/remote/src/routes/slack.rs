@@ -29,6 +29,7 @@ use uuid::Uuid;
 use super::error::ErrorResponse;
 use crate::{
     AppState,
+    anthropic::{client::AnthropicClient, prompt::MAX_THREAD_MESSAGES},
     auth::RequestContext,
     db::{
         identity_errors::IdentityError,
@@ -95,6 +96,10 @@ fn interactivity_url(state: &AppState) -> String {
 }
 
 fn build_response(state: &AppState, config: SlackConfig) -> SlackConfigResponse {
+    let has_anthropic_api_key = config
+        .encrypted_anthropic_api_key
+        .as_deref()
+        .is_some_and(|k| !k.is_empty());
     SlackConfigResponse {
         organization_id: config.organization_id,
         slack_team_id: config.slack_team_id,
@@ -103,6 +108,8 @@ fn build_response(state: &AppState, config: SlackConfig) -> SlackConfigResponse 
         has_credentials: !config.encrypted_bot_token.is_empty()
             && !config.encrypted_signing_secret.is_empty(),
         interactivity_url: interactivity_url(state),
+        ai_summarization_enabled: config.ai_summarization_enabled,
+        has_anthropic_api_key,
         created_at: config.created_at,
         updated_at: config.updated_at,
     }
@@ -193,6 +200,19 @@ async fn upsert_config(
         .map_err(|_| internal("failed to encrypt credential"))?;
     let (slack_team_id, slack_team_name) = team.unzip();
 
+    // Anthropic key: write-only, encrypted like the bot token. Empty/absent
+    // keeps the stored value (COALESCE in the repo). Not validated at save —
+    // a bad key degrades to the mechanical prefill at first use (FR-5).
+    let anthropic_api_key = payload
+        .anthropic_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty());
+    let encrypted_anthropic_api_key = anthropic_api_key
+        .map(|k| state.jwt.encrypt_string(k))
+        .transpose()
+        .map_err(|_| internal("failed to encrypt credential"))?;
+
     let config = SlackConfigRepository::upsert(
         &state.pool,
         UpsertSlackConfigArgs {
@@ -203,6 +223,15 @@ async fn upsert_config(
             slack_team_name,
             enabled: payload.enabled,
             created_by_user_id: ctx.user.id,
+            encrypted_anthropic_api_key,
+            // Omitted ⇒ keep the stored value (the repo sets this column
+            // directly, not via COALESCE).
+            ai_summarization_enabled: payload.ai_summarization_enabled.unwrap_or_else(|| {
+                existing
+                    .as_ref()
+                    .map(|c| c.ai_summarization_enabled)
+                    .unwrap_or(false)
+            }),
         },
     )
     .await
@@ -373,19 +402,42 @@ async fn handle_message_action(
     let state = state.clone();
     let organization_id = config.organization_id;
     let enabled = config.enabled;
+    // Whether the AI summary will run (FR-11), and the encrypted key it needs
+    // (decrypted inside the spawned task, off the ack path).
+    let ai_active = config.ai_summarization_active();
+    let encrypted_anthropic_api_key = config.encrypted_anthropic_api_key.clone();
     tokio::spawn(async move {
-        open_shortcut_modal(state, organization_id, enabled, bot_token, action).await;
+        open_shortcut_modal(
+            state,
+            organization_id,
+            enabled,
+            ai_active,
+            encrypted_anthropic_api_key,
+            bot_token,
+            action,
+        )
+        .await;
     });
     StatusCode::OK.into_response()
 }
 
+/// While the AI summary is generated, the initial modal carries this hint so
+/// the user knows an update is coming (FR-8).
+const SUMMARIZING_HINT: &str = "✨ Summarizing this thread — the title and description will \
+update in a moment.";
+
 /// The deferred half of `handle_message_action`: decide which modal to show
-/// and open it. Failures here are delivery problems (logged); the request
-/// was already acked.
+/// and open it, then (when AI is active) fetch the thread, summarize it, and
+/// swap the summary into the open modal. Failures here are delivery/enrichment
+/// problems (logged); the request was already acked, and any AI failure leaves
+/// the mechanical prefill in place (FR-5).
+#[allow(clippy::too_many_arguments)]
 async fn open_shortcut_modal(
     state: AppState,
     organization_id: Uuid,
     enabled: bool,
+    ai_active: bool,
+    encrypted_anthropic_api_key: Option<String>,
     bot_token: String,
     action: MessageActionPayload,
 ) {
@@ -449,11 +501,20 @@ async fn open_shortcut_modal(
             name: p.name.clone(),
         })
         .collect();
+
+    // Build the mechanical prefill (spec FR-2/FR-3) — shown immediately,
+    // independently of the AI path. When AI is active, carry the hint so the
+    // user is told an update is coming before the single follow-up lands.
+    let mechanical_title = prefill::title_from_message(message_text);
+    let mechanical_description =
+        prefill::description_from_message(message_text, permalink.as_deref());
+    let hint = ai_active.then_some(SUMMARIZING_HINT);
     let created = modal::build_create_issue_modal(
         &options,
-        &prefill::title_from_message(message_text),
-        &prefill::description_from_message(message_text, permalink.as_deref()),
+        &mechanical_title,
+        &mechanical_description,
         &private_metadata,
+        hint,
     );
     if created.truncated_projects > 0 {
         warn!(
@@ -463,8 +524,115 @@ async fn open_shortcut_modal(
         );
     }
 
-    if let Err(error) = client.views_open(&action.trigger_id, created.view).await {
-        warn!(%error, "failed to open create-issue modal");
+    let view_id = match client.views_open(&action.trigger_id, created.view).await {
+        Ok(view_id) => view_id,
+        Err(error) => {
+            warn!(%error, "failed to open create-issue modal");
+            return;
+        }
+    };
+
+    // The mechanical modal is open and usable. Everything below is optional
+    // enrichment; nothing here can block or undo the modal (FR-2/FR-5).
+    if !ai_active {
+        return;
+    }
+    let Some(view_id) = view_id else {
+        // No view id to update — leave the (hinted) mechanical modal as-is.
+        warn!("slack views.open returned no view id; skipping AI summary");
+        return;
+    };
+
+    let summary = summarize_thread_for_modal(
+        &state,
+        &client,
+        encrypted_anthropic_api_key.as_deref(),
+        &action,
+    )
+    .await;
+
+    match summary {
+        Some(summary) => {
+            let ai_title = prefill::title_from_message(&summary.title);
+            let ai_description =
+                prefill::description_from_message(&summary.description, permalink.as_deref());
+            // Drop the hint (hint = None) and swap in the AI title/description.
+            let updated = modal::build_create_issue_modal(
+                &options,
+                &ai_title,
+                &ai_description,
+                &private_metadata,
+                None,
+            );
+            if let Err(error) = client.views_update(&view_id, updated.view).await {
+                warn!(%error, "failed to apply AI summary to slack modal");
+            }
+        }
+        None => {
+            // Degrade (FR-5): re-render the mechanical modal without the hint
+            // so no stale "Summarizing…" notice lingers.
+            let reverted = modal::build_create_issue_modal(
+                &options,
+                &mechanical_title,
+                &mechanical_description,
+                &private_metadata,
+                None,
+            );
+            if let Err(error) = client.views_update(&view_id, reverted.view).await {
+                warn!(%error, "failed to clear AI summarizing hint after failure");
+            }
+        }
+    }
+}
+
+/// Fetch the target thread and ask Anthropic for a title/description. Returns
+/// `None` on any failure (thread fetch, key decrypt, provider error); the
+/// caller degrades to the mechanical prefill (FR-5). Logs are error-class only
+/// — never the thread transcript or the API key (FR-15).
+async fn summarize_thread_for_modal(
+    state: &AppState,
+    client: &SlackClient,
+    encrypted_anthropic_api_key: Option<&str>,
+    action: &MessageActionPayload,
+) -> Option<crate::anthropic::types::IssueSummary> {
+    // A threaded reply summarizes its parent thread; a standalone message
+    // summarizes itself (FR-3).
+    let thread_ts = action
+        .message
+        .thread_ts
+        .as_deref()
+        .or(action.message.ts.as_deref())
+        .filter(|t| !t.is_empty())?;
+
+    let messages = match client
+        .conversations_replies(&action.channel.id, thread_ts, MAX_THREAD_MESSAGES)
+        .await
+    {
+        Ok(messages) => messages,
+        Err(error) => {
+            warn!(%error, "slack thread fetch for AI summary failed; using mechanical prefill");
+            return None;
+        }
+    };
+
+    let api_key = match encrypted_anthropic_api_key.map(|k| state.jwt.decrypt_string(k)) {
+        Some(Ok(key)) => key,
+        Some(Err(_)) => {
+            warn!("failed to decrypt anthropic api key; using mechanical prefill");
+            return None;
+        }
+        None => return None,
+    };
+
+    let anthropic = AnthropicClient::new(state.http_client.clone(), api_key);
+    match anthropic.summarize_thread(&messages).await {
+        Ok(summary) => Some(summary),
+        Err(error) => {
+            // `error` is an error class / Anthropic message — never the key or
+            // the thread text (FR-15).
+            warn!(%error, "anthropic thread summary failed; using mechanical prefill");
+            None
+        }
     }
 }
 

@@ -228,9 +228,27 @@ jira_statuses: Array<string>, error: string | null, };
 
 export type JiraSyncNowResponse = { requested_at: string, };
 
-export type SlackConfigResponse = { organization_id: string, slack_team_id: string, slack_team_name: string, enabled: boolean, has_credentials: boolean, interactivity_url: string, created_at: string, updated_at: string, };
+export type SlackConfigResponse = { organization_id: string, slack_team_id: string, slack_team_name: string, enabled: boolean, has_credentials: boolean, interactivity_url: string, 
+/**
+ * AI summarization toggle (spec FR-9).
+ */
+ai_summarization_enabled: boolean, 
+/**
+ * True iff an Anthropic API key is stored — the key itself is never
+ * returned (FR-10).
+ */
+has_anthropic_api_key: boolean, created_at: string, updated_at: string, };
 
-export type UpsertSlackConfigRequest = { bot_token: string | null, signing_secret: string | null, enabled: boolean, };
+export type UpsertSlackConfigRequest = { bot_token: string | null, signing_secret: string | null, enabled: boolean, 
+/**
+ * AI summarization toggle. `None` keeps the stored value.
+ */
+ai_summarization_enabled: boolean | null, 
+/**
+ * Anthropic API key. `None`/empty keeps the stored value (write-only,
+ * same semantics as `bot_token`).
+ */
+anthropic_api_key: string | null, };
 
 export type SlackTestConnectionResponse = { ok: boolean, team_name: string | null, error: string | null, };
 

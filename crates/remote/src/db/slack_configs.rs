@@ -33,6 +33,7 @@ impl From<sqlx::Error> for SlackConfigDbError {
 const SELECT_COLUMNS: &str = r#"
     id, organization_id, encrypted_bot_token, encrypted_signing_secret,
     slack_team_id, slack_team_name, enabled, created_by_user_id,
+    encrypted_anthropic_api_key, ai_summarization_enabled,
     created_at, updated_at
 "#;
 
@@ -49,6 +50,11 @@ pub struct UpsertSlackConfigArgs {
     pub slack_team_name: Option<String>,
     pub enabled: bool,
     pub created_by_user_id: Uuid,
+    /// AES-256-GCM ciphertext of the Anthropic API key. `None` keeps the
+    /// stored value (write-only, same as the bot token); `Some("")` is never
+    /// passed — the route filters empty input to `None`.
+    pub encrypted_anthropic_api_key: Option<String>,
+    pub ai_summarization_enabled: bool,
 }
 
 pub struct SlackConfigRepository;
@@ -97,9 +103,10 @@ impl SlackConfigRepository {
             r#"
             INSERT INTO organization_slack_configs (
                 organization_id, encrypted_bot_token, encrypted_signing_secret,
-                slack_team_id, slack_team_name, enabled, created_by_user_id
+                slack_team_id, slack_team_name, enabled, created_by_user_id,
+                encrypted_anthropic_api_key, ai_summarization_enabled
             )
-            VALUES ($1, COALESCE($2, ''), COALESCE($3, ''), COALESCE($4, ''), COALESCE($5, ''), $6, $7)
+            VALUES ($1, COALESCE($2, ''), COALESCE($3, ''), COALESCE($4, ''), COALESCE($5, ''), $6, $7, $8, $9)
             ON CONFLICT (organization_id) DO UPDATE SET
                 encrypted_bot_token =
                     COALESCE($2, organization_slack_configs.encrypted_bot_token),
@@ -108,7 +115,10 @@ impl SlackConfigRepository {
                 slack_team_id = COALESCE($4, organization_slack_configs.slack_team_id),
                 slack_team_name = COALESCE($5, organization_slack_configs.slack_team_name),
                 enabled = $6,
-                created_by_user_id = $7
+                created_by_user_id = $7,
+                encrypted_anthropic_api_key =
+                    COALESCE($8, organization_slack_configs.encrypted_anthropic_api_key),
+                ai_summarization_enabled = $9
             RETURNING {SELECT_COLUMNS}
             "#
         );
@@ -120,6 +130,8 @@ impl SlackConfigRepository {
             .bind(args.slack_team_name)
             .bind(args.enabled)
             .bind(args.created_by_user_id)
+            .bind(args.encrypted_anthropic_api_key)
+            .bind(args.ai_summarization_enabled)
             .fetch_one(pool)
             .await?;
         Ok(record)

@@ -1,4 +1,5 @@
 mod analytics;
+pub mod anthropic;
 mod app;
 pub mod attachments;
 pub mod audit;

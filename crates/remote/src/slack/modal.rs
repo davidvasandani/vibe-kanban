@@ -34,11 +34,16 @@ fn option_label(name: &str) -> String {
 /// The create-issue modal (contract §2): project select + title +
 /// description, prefilled from the message. `private_metadata` is the
 /// serialized [`super::types::ModalMetadata`].
+///
+/// When `hint` is `Some`, a leading context block is shown — used for the
+/// "✨ Summarizing thread…" notice while the AI summary is generated (FR-8).
+/// The follow-up `views.update` re-renders with `hint = None`.
 pub fn build_create_issue_modal(
     projects: &[ProjectOption],
     title_prefill: &str,
     description_prefill: &str,
     private_metadata: &str,
+    hint: Option<&str>,
 ) -> CreateIssueModal {
     let truncated_projects = projects.len().saturating_sub(MAX_PROJECT_OPTIONS);
     let options: Vec<Value> = projects
@@ -70,6 +75,38 @@ pub fn build_create_issue_modal(
         description_input["initial_value"] = json!(description_prefill);
     }
 
+    let mut blocks: Vec<Value> = Vec::new();
+    if let Some(hint) = hint.filter(|h| !h.is_empty()) {
+        blocks.push(json!({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": hint}],
+        }));
+    }
+    blocks.push(json!({
+        "type": "input",
+        "block_id": "project",
+        "label": {"type": "plain_text", "text": "Project"},
+        "element": {
+            "type": "static_select",
+            "action_id": "project_select",
+            "placeholder": {"type": "plain_text", "text": "Select a project"},
+            "options": options,
+        },
+    }));
+    blocks.push(json!({
+        "type": "input",
+        "block_id": "title",
+        "label": {"type": "plain_text", "text": "Title"},
+        "element": title_input,
+    }));
+    blocks.push(json!({
+        "type": "input",
+        "block_id": "description",
+        "optional": true,
+        "label": {"type": "plain_text", "text": "Description"},
+        "element": description_input,
+    }));
+
     let view = json!({
         "type": "modal",
         "callback_id": CREATE_ISSUE_MODAL_CALLBACK_ID,
@@ -77,32 +114,7 @@ pub fn build_create_issue_modal(
         "title": {"type": "plain_text", "text": "Create issue"},
         "submit": {"type": "plain_text", "text": "Create"},
         "close": {"type": "plain_text", "text": "Cancel"},
-        "blocks": [
-            {
-                "type": "input",
-                "block_id": "project",
-                "label": {"type": "plain_text", "text": "Project"},
-                "element": {
-                    "type": "static_select",
-                    "action_id": "project_select",
-                    "placeholder": {"type": "plain_text", "text": "Select a project"},
-                    "options": options,
-                },
-            },
-            {
-                "type": "input",
-                "block_id": "title",
-                "label": {"type": "plain_text", "text": "Title"},
-                "element": title_input,
-            },
-            {
-                "type": "input",
-                "block_id": "description",
-                "optional": true,
-                "label": {"type": "plain_text", "text": "Description"},
-                "element": description_input,
-            },
-        ],
+        "blocks": blocks,
     });
 
     CreateIssueModal {
@@ -142,7 +154,7 @@ mod tests {
 
     #[test]
     fn modal_has_expected_blocks_and_callback() {
-        let modal = build_create_issue_modal(&projects(2), "Title", "Desc", "{\"a\":1}");
+        let modal = build_create_issue_modal(&projects(2), "Title", "Desc", "{\"a\":1}", None);
         assert_eq!(modal.truncated_projects, 0);
         assert_eq!(modal.view["callback_id"], CREATE_ISSUE_MODAL_CALLBACK_ID);
         assert_eq!(modal.view["private_metadata"], "{\"a\":1}");
@@ -162,15 +174,29 @@ mod tests {
     #[test]
     fn empty_prefills_omit_initial_value() {
         // Slack rejects initial_value: "" — the key must be absent instead.
-        let modal = build_create_issue_modal(&projects(1), "", "", "{}");
+        let modal = build_create_issue_modal(&projects(1), "", "", "{}", None);
         let blocks = modal.view["blocks"].as_array().unwrap();
         assert!(blocks[1]["element"].get("initial_value").is_none());
         assert!(blocks[2]["element"].get("initial_value").is_none());
     }
 
     #[test]
+    fn hint_adds_leading_context_block() {
+        let with = build_create_issue_modal(&projects(1), "t", "d", "{}", Some("✨ Summarizing…"));
+        let blocks = with.view["blocks"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "context");
+        // Inputs shift down by one; project is now at index 1.
+        assert_eq!(blocks[1]["block_id"], "project");
+        assert_eq!(blocks[3]["block_id"], "description");
+
+        // Empty hint is treated as no hint.
+        let without = build_create_issue_modal(&projects(1), "t", "d", "{}", Some(""));
+        assert_eq!(without.view["blocks"][0]["block_id"], "project");
+    }
+
+    #[test]
     fn caps_projects_at_100_and_reports_truncation() {
-        let modal = build_create_issue_modal(&projects(130), "t", "d", "{}");
+        let modal = build_create_issue_modal(&projects(130), "t", "d", "{}", None);
         let options = modal.view["blocks"][0]["element"]["options"]
             .as_array()
             .unwrap();
@@ -189,6 +215,7 @@ mod tests {
             "t",
             "d",
             "{}",
+            None,
         );
         let label = modal.view["blocks"][0]["element"]["options"][0]["text"]["text"]
             .as_str()
