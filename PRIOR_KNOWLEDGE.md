@@ -1,50 +1,38 @@
-# Prior Knowledge — recalled for `vk/0c92-mcp-test-connect`
+# Prior Knowledge — recalled for `vk/c59f-default-to-origi`
 
-Searched both project knowledge bases — `docs/knowledge-base/` (3 pages +
-INDEX) and `wiki/` (8 topic pages + INDEX) — for pages relevant to this task
-(classifying MCP probe auth failures, surfacing them in the settings UI, and
-adding an OAuth "Connect" flow). One page is directly on-topic; two more set
-constraints the design must honor.
+Searched the project knowledge base (`wiki/` — 11 topic pages + INDEX) for
+pages relevant to this task: defaulting a repository's target branch to
+`origin/main` on the create-issue repo-picker screen
+(`CreateModeRepoPickerBar.tsx`, create-mode state, `repoApi.getBranches`).
 
-## Relevant findings
+## Result: no directly on-topic page
 
-**[docs/knowledge-base/mcp-connectivity-testing.md] — directly on-topic.**
-The feature this task extends. Key facts reused wholesale: VK is an MCP
-*config-writer*, and the probe in `crates/executors/src/mcp_test.rs` is the
-codebase's only MCP client — hand-rolled over `reqwest`/`tokio`/`serde_json`/
-`eventsource-stream` because rmcp 1.3 lacks a legacy-SSE client. Server
-entries are untyped `serde_json::Value` adapted per agent (Gemini `httpUrl`,
-Opencode `type: local` arrays, Codex stdio-only TOML) — `normalize()` must
-stay tolerant and `unsupported` must never become a false `failed`. The route
-(`POST /api/mcp-config/test?executor=`) already supports subset testing via
-`{ servers: [name] }` — this is what makes the post-Connect single-server
-re-test free. Testing pattern to follow: IO-generic handshake + in-memory
-mocks, no external processes. Direct consequence for this task: classify
-401/403 inside the probe's HTTP error path (one choke point,
-`http_status_error`), and test with loopback stubs in the same spirit.
+No existing page covers the create-mode repo/branch picker, target-branch
+defaulting, or the `create-mode` state machine. The `branch` hits across the
+wiki are all incidental — git branches of *code* or executor turn-completion
+branches, not repository branch selection. So this task builds on the code, not
+on recorded knowledge.
 
-**[wiki/external-connector-sync.md] — credential rules that transfer.** Two
-rules from the Jira connector shaped the OAuth flow design:
-(1) *secrets never appear in API responses, logs, or error messages* — hence
-the status endpoint never returns the token, `exchange_code()` returns only
-the token string, and only OAuth *error* bodies (RFC 6749 §5.2, no secrets)
-are echoed into messages; (2) *the stored-credential destination-pinning
-rule*: any endpoint that combines a stored secret with a caller-supplied URL
-is an exfiltration primitive. The `/mcp-auth/start` endpoint honors this by
-taking only a server *name* in the body — the URL is read from the agent's
-on-disk config, never from the request — and the token endpoint the code is
-redeemed against comes from the server's own discovered metadata, pinned in
-the pending flow at start time, not from the callback request.
+## Tangentially related pages (constraints noted, not reused wholesale)
 
-**[wiki/self-hosted-deployment.md, wiki/project-context-map.md] — scope
-boundary.** The MCP settings screen is the *local* stack
-(`packages/web-core` settings dialog + local axum server), not the remote
-Postgres/Electric stack — so no migrations, no `crates/remote` involvement,
-and per-flow state can be process-local in-memory (matching the existing
-`oauth_handoffs` precedent in `crates/local-deployment`).
+- **[kanban-issue-panel-sections.md]** — the *other* create/edit panel
+  (`KanbanIssuePanel.tsx`, the local-kanban issue detail/create panel). Distinct
+  component from the create-mode chat screen this task touches
+  (`CreateChatBoxContainer` → `CreateModeRepoPickerBar`). Useful only as a
+  reminder that VK has more than one "create" surface; the change here is
+  scoped to the create-mode chat flow and does not touch `KanbanIssuePanel`.
+- **[task-pipeline-block.md]** — establishes the repo's convention of small,
+  well-tested, uncontrolled-seeding UI logic with round-trip contracts. The
+  approach here mirrors that ethos: a pure, unit-tested resolver rather than
+  branch-defaulting logic scattered through the component.
 
-## Checked and not relevant
+## Constraints carried into design (from the constitution, not the wiki)
 
-`claude-log-normalization`, `collapsing-repeated-log-entries` (log pipeline),
-`appbar-rail-and-org-tiles`, `kanban-*`, `mobile-kanban-scrolling` (kanban
-UI), `electric-sync-fallback` (remote sync) — different subsystems.
+- VK fork must **stay mergeable with upstream**: prefer additive files, keep the
+  one edited upstream file's diff minimal and local. → New `defaultBranch.ts`
+  helper + a localized edit to `CreateModeRepoPickerBar.addRepoWithBranchSelection`.
+- **Generated artifacts have one source**: this task deliberately avoids any
+  Rust/type change so no `generate-types` / `prepare-db` regeneration is needed.
+
+If reusable knowledge emerges from this task, it will seed a new wiki page in
+stage 12 (there is currently no page to extend).

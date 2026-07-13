@@ -12,6 +12,7 @@ import { useTranslation } from 'react-i18next';
 import type { Repo } from 'shared/types';
 import type { BranchItem, RepoItem } from '@/shared/types/selectionItems';
 import { repoApi } from '@/shared/lib/api';
+import { resolveDefaultBranch } from '@/shared/lib/defaultBranch';
 import { cn } from '@/shared/lib/utils';
 import { useCreateMode } from '@/features/create-mode/model/useCreateMode';
 import { FolderPickerDialog } from '@/shared/dialogs/shared/FolderPickerDialog';
@@ -138,14 +139,23 @@ export function CreateModeRepoPickerBar({
         return false;
       }
 
-      const selectedBranch = await pickBranchForRepo(repo);
-      if (!selectedBranch) return false;
+      // Default the target branch (to origin/main when present) so the common
+      // case needs no manual pick; the "Change branch" button can override it.
+      const branches = await repoApi.getBranches(repo.id);
+      const defaultBranch = resolveDefaultBranch(
+        branches,
+        repo.default_target_branch
+      );
+      if (!defaultBranch) {
+        setPickerError('No branches found for repository');
+        return false;
+      }
 
       addRepo(repo);
-      setTargetBranch(repo.id, selectedBranch);
+      setTargetBranch(repo.id, defaultBranch);
       return true;
     },
-    [addRepo, pickBranchForRepo, selectedRepoIds, setTargetBranch]
+    [addRepo, selectedRepoIds, setTargetBranch]
   );
 
   const handleChooseRepo = useCallback(async () => {
