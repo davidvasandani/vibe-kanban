@@ -1,38 +1,58 @@
-# Prior Knowledge — recalled for `vk/c59f-default-to-origi`
+# Prior Knowledge — recalled for `vk/826e-coding-agent-war`
 
-Searched the project knowledge base (`wiki/` — 11 topic pages + INDEX) for
-pages relevant to this task: defaulting a repository's target branch to
-`origin/main` on the create-issue repo-picker screen
-(`CreateModeRepoPickerBar.tsx`, create-mode state, `repoApi.getBranches`).
+Searched the project knowledge base (`wiki/` — 12 topic pages + INDEX) for pages
+relevant to this task: keeping persistent coding-agent app-servers (OpenCode/
+Codex/ACP) warm across turns, and owning their reaping at teardown.
 
-## Result: no directly on-topic page
+## Result: one directly on-topic page (the Phase-1 page for this same line)
 
-No existing page covers the create-mode repo/branch picker, target-branch
-defaulting, or the `create-mode` state machine. The `branch` hits across the
-wiki are all incidental — git branches of *code* or executor turn-completion
-branches, not repository branch selection. So this task builds on the code, not
-on recorded knowledge.
+- **[agent-process-lifecycle.md]** — the single most relevant page, contributed by
+  the immediately-preceding task `vk/1a64-coding-agent-pro` (Phase 1). It is the
+  authoritative recall for this task and was used directly. Key facts carried in:
+  - **The identity chain** — one turn = one `ExecutionProcess` = (today) one OS
+    process lifetime; per-execution facilities are `HashMap<Uuid, …>` keyed by
+    exec id. Making a process outlive its turn means re-attaching it to the next
+    turn's execution — the streaming/normalization pipeline is per-turn and must
+    be rebuilt. → Drove the design of the reuse path re-wrapping the same child in
+    a fresh `SpawnedChild` that flows through the identical downstream pipeline.
+  - **Persistent app-server vs one-shot is implicit** — encoded only as
+    `SpawnedChild.exit_signal: Some(..)`; `is_persistent()` is a *different* axis
+    (dev servers / background helpers) that must NOT be flipped for coding agents.
+    Use the narrow `keep_warm` capability. → We added `warm_reuse` alongside
+    `keep_warm`, not a new run-reason.
+  - **The exit monitor kills twice** (exit-signal `killpg` + tail
+    `start_kill`/`child_store.remove`); both already thread `kept_warm`. → We
+    changed only the tail: on `kept_warm`, MOVE the child into the registry
+    instead of leaving it in `child_store`.
+  - **The OS exit watcher is a poll loop** that must check `tx.is_closed()` or it
+    spins against a long-lived child. → Confirmed the parked-child move doesn't
+    reintroduce a spin (the watcher breaks once the monitor's rx drops).
+  - **Teardown only stops `Running` executions** — the warm-process trap: a warm
+    child's row is `Completed`, so the registry must own reaping at attempt/
+    workspace end. → This task's central deliverable: the `try_stop` reap hook.
+  - **The pgid re-adoption substrate** already reclaims/cleans process groups
+    across a restart. → Reused for shutdown/restart rather than a new scheme; also
+    the shared foundation for the deferred Tier-3 designs recorded on that page.
 
-## Tangentially related pages (constraints noted, not reused wholesale)
+## Tangentially related
 
-- **[kanban-issue-panel-sections.md]** — the *other* create/edit panel
-  (`KanbanIssuePanel.tsx`, the local-kanban issue detail/create panel). Distinct
-  component from the create-mode chat screen this task touches
-  (`CreateChatBoxContainer` → `CreateModeRepoPickerBar`). Useful only as a
-  reminder that VK has more than one "create" surface; the change here is
-  scoped to the create-mode chat flow and does not touch `KanbanIssuePanel`.
-- **[task-pipeline-block.md]** — establishes the repo's convention of small,
-  well-tested, uncontrolled-seeding UI logic with round-trip contracts. The
-  approach here mirrors that ethos: a pure, unit-tested resolver rather than
-  branch-defaulting logic scattered through the component.
+- **[self-hosted-deployment.md]** — the versioned-release deploy contract; relevant
+  only to Tier-3 (the deploy *trigger* for exec-in-place vs. supervisor split lives
+  in that contract). Noted in `tier3-restart-survival.md`, not otherwise used.
 
-## Constraints carried into design (from the constitution, not the wiki)
+## Constraints carried into design (from the constitution)
 
-- VK fork must **stay mergeable with upstream**: prefer additive files, keep the
-  one edited upstream file's diff minimal and local. → New `defaultBranch.ts`
-  helper + a localized edit to `CreateModeRepoPickerBar.addRepoWithBranchSelection`.
-- **Generated artifacts have one source**: this task deliberately avoids any
-  Rust/type change so no `generate-types` / `prepare-db` regeneration is needed.
+- **Stay mergeable with upstream** → all hot-file edits (`container.rs`, `mod.rs`)
+  are additive (one `SpawnedChild` field, one registry map + helpers, one
+  `try_stop` hook); no rewrites, no generated-file edits, no migration.
+- **Turn is a protocol event** (VK-fork principle, sharpened this task to name the
+  `try_stop`-only-`Running` leak) → the registry-as-single-reaper is the direct
+  implementation.
+- **Never break a running service (IV)** → live reuse gated off by default because
+  it is unobservable E2E here.
 
-If reusable knowledge emerges from this task, it will seed a new wiki page in
-stage 12 (there is currently no page to extend).
+## Knowledge to record in stage 12
+This task extends **agent-process-lifecycle.md** with the Phase-2 mechanism
+(the warm registry, the reaping owner that closes the leak, the gate, the async
+reuse-handle surfacing, and the Codex/ACP Phase-3 decisions) and adds this task
+id to its "Contributed by" list.

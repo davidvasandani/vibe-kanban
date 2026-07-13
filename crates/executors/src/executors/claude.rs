@@ -712,6 +712,7 @@ impl ClaudeCode {
             exit_signal: None,
             cancel: Some(cancel),
             keep_warm: false,
+            warm_reuse: None,
         })
     }
 }

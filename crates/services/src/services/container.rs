@@ -949,6 +949,13 @@ pub trait ContainerService {
         };
 
         for session in sessions {
+            // Reap any warm (kept-alive) app-server parked for this session. Its
+            // turn row is `Completed`, so the `Running`-only loop below would skip
+            // it and the process would outlive the torn-down workspace — the leak
+            // this hook closes (spec FR-4b, task 826e). Default no-op; the local
+            // container overrides it to drain its warm registry.
+            self.reap_warm_processes_for_session(session.id).await;
+
             if let Ok(processes) =
                 ExecutionProcess::find_by_session_id(&self.db().pool, session.id, false).await
             {
@@ -974,6 +981,14 @@ pub trait ContainerService {
             }
         }
     }
+
+    /// Reap any warm (kept-alive) app-server parked for this session (Phase 2).
+    /// Default no-op so non-local `ContainerService` impls are unaffected;
+    /// `LocalContainerService` overrides it to drain its warm registry. Called
+    /// from `try_stop` because a warm process's turn row is `Completed` and the
+    /// `Running`-only stop loop would otherwise leak it. See
+    /// `specs/vk/826e-coding-agent-war/`.
+    async fn reap_warm_processes_for_session(&self, _session_id: Uuid) {}
 
     async fn ensure_container_exists(
         &self,

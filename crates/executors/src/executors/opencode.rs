@@ -18,7 +18,7 @@ use crate::{
     env::{ExecutionEnv, RepoContext},
     executors::{
         AppendPrompt, AvailabilityInfo, BaseCodingAgent, ExecutorError, ExecutorExitResult,
-        SlashCommandDescription, SpawnedChild, StandardCodingAgentExecutor,
+        SlashCommandDescription, SpawnedChild, StandardCodingAgentExecutor, WarmReuseHandle,
         opencode::types::OpencodeExecutorEvent, utils::reorder_slash_commands,
     },
     logs::utils::patch,
@@ -35,8 +35,8 @@ pub(crate) mod types;
 
 use sdk::{
     AgentInfo as SDKAgentInfo, LogWriter, RunConfig, build_authenticated_client,
-    generate_server_password, list_agents, list_commands, list_providers, run_session,
-    run_slash_command,
+    check_warm_server_ready, generate_server_password, list_agents, list_commands, list_providers,
+    run_session, run_slash_command,
 };
 use slash_commands::{OpencodeSlashCommand, hardcoded_slash_commands};
 use types::{Config, ProviderModelInfo};
@@ -178,6 +178,12 @@ impl Opencode {
         let log_writer = LogWriter::new(stdout);
 
         let (exit_signal_tx, exit_signal_rx) = tokio::sync::oneshot::channel();
+        // Surfaces the warm-reuse handle (base_url + password) to the container
+        // once the server has printed its listening URL, so a follow-up turn can
+        // reach the warm server instead of spawning a new one. The container only
+        // reads it when it decides to keep this child warm (gate + clean success);
+        // otherwise the receiver is dropped and this send is a harmless no-op.
+        let (warm_reuse_tx, warm_reuse_rx) = tokio::sync::oneshot::channel();
         let cancel = tokio_util::sync::CancellationToken::new();
 
         // Prepare config values that will be moved into the spawned task
@@ -207,6 +213,16 @@ impl Opencode {
                     return;
                 }
             };
+
+            // Hand the container what a follow-up needs to reuse this warm
+            // server. Sent before the turn runs so it is available by the time
+            // the turn completes cleanly and the container moves the child into
+            // its warm registry.
+            let _ = warm_reuse_tx.send(WarmReuseHandle {
+                base_url: base_url.clone(),
+                server_password: server_password.clone(),
+                agent_session_id: resume_session_id.clone(),
+            });
 
             let config = RunConfig {
                 base_url,
@@ -247,9 +263,120 @@ impl Opencode {
             child,
             exit_signal: Some(exit_signal_rx),
             cancel: Some(cancel),
-            // Phase 1: substrate only — not yet kept warm across turns (see
-            // specs/vk/1a64-coding-agent-pro/plan.md, Phase 2 enables OpenCode).
-            keep_warm: false,
+            // OpenCode is a persistent HTTP app-server: declare the keep-warm
+            // capability. The container gates whether to actually honor it
+            // (`VK_KEEP_WARM_AGENTS`, default off) — see
+            // specs/vk/826e-coding-agent-war/plan.md (Phase 2).
+            keep_warm: true,
+            warm_reuse: Some(warm_reuse_rx),
+        })
+    }
+
+    /// Run a follow-up turn against an **already-running** warm OpenCode server
+    /// (Phase 2 reuse). Unlike `spawn_inner`, this does **not** spawn a new
+    /// `opencode serve` process or wait for a listening URL — it takes the warm
+    /// server's `child` and reuse handle from the container's registry, installs
+    /// a fresh per-turn stdout pipe on that same child, and streams the turn over
+    /// HTTP to the stored `base_url`. Returns a `SpawnedChild` re-wrapping the
+    /// same child (still `keep_warm: true`) so the container re-tracks it under
+    /// the new turn's execution id. See `specs/vk/826e-coding-agent-war/`.
+    pub async fn warm_follow_up(
+        &self,
+        mut child: AsyncGroupChild,
+        reuse: &WarmReuseHandle,
+        current_dir: &Path,
+        prompt: &str,
+        session_id: &str,
+        env: &ExecutionEnv,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        let slash_command = OpencodeSlashCommand::parse(prompt);
+        let combined_prompt = if slash_command.is_some() {
+            prompt.to_string()
+        } else {
+            self.append_prompt.combine_prompt(prompt)
+        };
+
+        let directory = current_dir.to_string_lossy().to_string();
+
+        // Validate the warm server is actually reachable/healthy *before*
+        // committing to reuse. On failure we return `Err` (leaving `child` to be
+        // dropped + killed) so the container cold-starts a fresh server instead
+        // of failing the turn on an alive-but-hung warm process.
+        check_warm_server_ready(&directory, &reuse.base_url, &reuse.server_password).await?;
+
+        // Fresh per-turn output pipe on the warm child (the server's own stdout
+        // was drained at startup; turn output arrives over HTTP/SSE).
+        let stdout = create_stdout_pipe_writer(&mut child)?;
+        let log_writer = LogWriter::new(stdout);
+
+        let (exit_signal_tx, exit_signal_rx) = tokio::sync::oneshot::channel();
+        let (warm_reuse_tx, warm_reuse_rx) = tokio::sync::oneshot::channel();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let base_url = reuse.base_url.clone();
+        let server_password = reuse.server_password.clone();
+        let approvals = self.approvals.clone();
+        let model = self.model.clone();
+        let model_variant = self.variant.clone();
+        let agent = self.agent.clone();
+        let auto_approve = self.auto_approve;
+        let resume_session_id = Some(session_id.to_string());
+        let models_cache_key = self.compute_models_cache_key();
+        let cancel_for_task = cancel.clone();
+        let commit_reminder = env.commit_reminder;
+        let commit_reminder_prompt = env.commit_reminder_prompt.clone();
+        let repo_context = env.repo_context.clone();
+
+        tokio::spawn(async move {
+            // Re-surface the (unchanged) reuse handle so the container can re-park
+            // this warm server after the follow-up turn completes cleanly.
+            let _ = warm_reuse_tx.send(WarmReuseHandle {
+                base_url: base_url.clone(),
+                server_password: server_password.clone(),
+                agent_session_id: resume_session_id.clone(),
+            });
+
+            let config = RunConfig {
+                base_url,
+                directory,
+                prompt: combined_prompt,
+                resume_session_id,
+                model,
+                model_variant,
+                agent,
+                approvals,
+                auto_approve,
+                server_password,
+                models_cache_key,
+                commit_reminder,
+                commit_reminder_prompt,
+                repo_context,
+            };
+
+            let result = match slash_command {
+                Some(command) => {
+                    run_slash_command(config, log_writer.clone(), command, cancel_for_task).await
+                }
+                None => run_session(config, log_writer.clone(), cancel_for_task).await,
+            };
+            let exit_result = match result {
+                Ok(()) => ExecutorExitResult::Success,
+                Err(err) => {
+                    let _ = log_writer
+                        .log_error(format!("OpenCode executor error: {err}"))
+                        .await;
+                    ExecutorExitResult::Failure
+                }
+            };
+            let _ = exit_signal_tx.send(exit_result);
+        });
+
+        Ok(SpawnedChild {
+            child,
+            exit_signal: Some(exit_signal_rx),
+            cancel: Some(cancel),
+            keep_warm: true,
+            warm_reuse: Some(warm_reuse_rx),
         })
     }
 

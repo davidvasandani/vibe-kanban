@@ -129,9 +129,11 @@ impl AcpAgentHarness {
             child,
             exit_signal: Some(exit_rx),
             cancel: Some(cancel),
-            // Phase 1: substrate only — not yet kept warm across turns (see
-            // specs/vk/1a64-coding-agent-pro/plan.md, Phase 3 enables ACP).
+            // ACP stays one-shot: resume already replays the `.jsonl` transcript
+            // into a fresh process, so warm reuse buys the least here. Decision
+            // recorded in specs/vk/826e-coding-agent-war/research.md (Phase 3).
             keep_warm: false,
+            warm_reuse: None,
         })
     }
 
@@ -185,9 +187,11 @@ impl AcpAgentHarness {
             child,
             exit_signal: Some(exit_rx),
             cancel: Some(cancel),
-            // Phase 1: substrate only — not yet kept warm across turns (see
-            // specs/vk/1a64-coding-agent-pro/plan.md, Phase 3 enables ACP).
+            // ACP stays one-shot: resume already replays the `.jsonl` transcript
+            // into a fresh process, so warm reuse buys the least here. Decision
+            // recorded in specs/vk/826e-coding-agent-war/research.md (Phase 3).
             keep_warm: false,
+            warm_reuse: None,
         })
     }
 
