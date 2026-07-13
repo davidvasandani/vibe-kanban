@@ -1701,6 +1701,21 @@ impl ContainerService for LocalContainerService {
         env.insert("VK_WORKSPACE_ID", workspace.id.to_string());
         env.insert("VK_WORKSPACE_BRANCH", &workspace.branch);
 
+        // Expose app-installed CLI tools (services::cli_tools) to agents.
+        // Appended after the inherited PATH so a host-provided copy of the
+        // same tool always wins over an app-installed one. PATH is a reserved
+        // env name (org vars can't set it), but base the merge on any PATH
+        // already in the env so this stays correct if that ever changes.
+        let cli_tools_bin = services::services::cli_tools::cli_tools_bin_dir();
+        if cli_tools_bin.is_dir() {
+            let inherited = env
+                .get("PATH")
+                .map(std::ffi::OsString::from)
+                .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+            let merged = utils::shell::merge_paths(&inherited, cli_tools_bin.as_os_str());
+            env.insert("PATH", merged.to_string_lossy().into_owned());
+        }
+
         // Persistent processes (dev servers, background helpers) write their
         // output straight to a raw log file (instead of pipes) so they can
         // keep running across a server restart; the server tails the file.

@@ -23,6 +23,15 @@
       ],
       "datasourceTemplate": "npm",
       "versioningTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "description": "CLI tool catalog pins in services/cli_tools.rs (// renovate: datasource=... depName=... above each *_VERSION const)",
+      "managerFilePatterns": ["/crates/services/src/services/cli_tools\\.rs$/"],
+      "matchStrings": [
+        "//\\s*renovate:\\s*datasource=(?<datasource>[a-z0-9-]+)\\s+depName=(?<depName>\\S+)\\s*\\nconst\\s+[A-Z0-9_]+_VERSION:\\s*&str\\s*=\\s*\"(?<currentValue>[^\"]+)\""
+      ],
+      "extractVersionTemplate": "^v?(?<version>.*)$"
     }
   ],
   "packageRules": [
@@ -34,6 +43,16 @@
       "automerge": true,
       "prBodyNotes": [
         "This dependency is pinned inside Rust source (see `crates/executors/src/executors/*.rs`) and is managed by a Renovate custom manager — do not hand-edit the version."
+      ]
+    },
+    {
+      "description": "CLI tool catalog pins: never auto-merge — bumping a version requires refreshing the matching per-platform sha256 pins in cli_tools.rs, or installs fail (loudly) at checksum verification.",
+      "matchManagers": ["custom.regex"],
+      "matchDatasources": ["github-tags", "github-releases", "pypi"],
+      "automerge": false,
+      "addLabels": ["needs-review"],
+      "prBodyNotes": [
+        ":warning: **Refresh the sha256 pins:** this version is pinned in `crates/services/src/services/cli_tools.rs` next to per-platform `sha256` hashes. Download the new artifacts, recompute the hashes, and update them in the same PR — a stale hash makes the in-app install fail at verification."
       ]
     },
     {

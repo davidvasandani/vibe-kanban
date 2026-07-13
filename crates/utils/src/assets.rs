@@ -32,6 +32,12 @@ pub fn config_path() -> std::path::PathBuf {
     asset_dir().join("config.json")
 }
 
+/// App-owned directory for CLI tools installed by the CLI tool manager.
+/// Its `bin/` subdirectory is the only path exposed on spawned agents' PATH.
+pub fn cli_tools_dir() -> std::path::PathBuf {
+    asset_dir().join("cli-tools")
+}
+
 pub fn profiles_path() -> std::path::PathBuf {
     asset_dir().join("profiles.json")
 }

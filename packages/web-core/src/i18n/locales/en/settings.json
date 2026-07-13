@@ -27,6 +27,8 @@
         "agentsDesc": "Coding agent configurations",
         "mcp": "MCP Servers",
         "mcpDesc": "Model Context Protocol servers",
+        "cli-tools": "CLI Tools",
+        "cli-toolsDesc": "App-managed command line tools for agents",
         "organizations": "Organization Settings",
         "organizationsDesc": "Manage organization members and permissions",
         "remote-projects": "Projects",
@@ -595,6 +597,25 @@
         "unsavedChanges": "You have unsaved changes",
         "discard": "Discard",
         "confirmSwitch": "You have unsaved changes. Are you sure you want to switch repositories? Your changes will be lost."
+      }
+    },
+    "cliTools": {
+      "title": "CLI Tools",
+      "description": "Install pinned versions of vendor CLI tools into an app-owned directory. Installed tools are appended to agents' PATH, so a copy already provided by this machine always wins. Authentication stays your responsibility — the app never stores tool credentials.",
+      "loading": "Checking tool availability…",
+      "docs": "Vendor documentation",
+      "actions": {
+        "install": "Install",
+        "update": "Update to {{version}}",
+        "remove": "Remove"
+      },
+      "status": {
+        "host": "Provided by this machine: {{path}}",
+        "app": "Installed by Vibe Kanban ({{version}})",
+        "outdated": "catalog now pins {{version}}",
+        "shadowed": "the machine's copy takes precedence on PATH",
+        "notAvailable": "Not installed. Catalog version: {{version}}",
+        "unsupported": "Not installable here"
       }
     },
     "attachments": {
