@@ -465,13 +465,20 @@ impl LocalContainerService {
 
     /// Move a warm child (already removed from `child_store`) into the registry,
     /// keyed by session id (spec FR-1/FR-7).
-    async fn register_warm_server(
-        &self,
-        session_id: Uuid,
-        child: Arc<RwLock<AsyncGroupChild>>,
-        reuse: WarmReuseHandle,
-    ) {
+    /// Park a cleanly-finished warm child (still in `child_store`) into the warm
+    /// registry, keyed by session. The child is inserted into `warm_app_servers`
+    /// **before** it is removed from `child_store`, so a concurrent stop/teardown
+    /// always finds it in at least one owner — never in a gap where it is invisible
+    /// to both and could leak (Codex-review finding). Reaps any displaced
+    /// same-session entry (one-per-session, FR-1/FR-7). A no-op if the child was
+    /// already removed (e.g. a concurrent stop won the race).
+    async fn park_warm_child(&self, session_id: Uuid, exec_id: Uuid, reuse: WarmReuseHandle) {
+        let Some(child) = self.child_store.read().await.get(&exec_id).cloned() else {
+            return;
+        };
         register_warm_entry(&self.warm_app_servers, session_id, child, reuse).await;
+        // The registry now owns the child; drop the child_store handle last.
+        self.child_store.write().await.remove(&exec_id);
     }
 
     /// Reap the warm app-server for a session: kill its group + drop the entry.
@@ -970,6 +977,31 @@ impl LocalContainerService {
                 }
             }
 
+            // Park a cleanly-finished warm app-server into the registry *now*,
+            // before finalization runs `try_start_next_action` / queued
+            // follow-ups — so an immediately chained follow-up reuses the warm
+            // server instead of cold-starting. The reuse handle was sent by the
+            // executor before the turn ran, so `try_recv` gets it without an
+            // `.await` (no window where the child is invisible to teardown). If
+            // it is somehow absent we reap rather than strand the process.
+            if kept_warm {
+                let handle = warm_reuse.and_then(|mut rx| rx.try_recv().ok());
+                match handle {
+                    Some(handle) => {
+                        container.park_warm_child(session_id, exec_id, handle).await;
+                    }
+                    None => {
+                        if let Some(child_lock) = child_store.write().await.remove(&exec_id) {
+                            let mut c = child_lock.write().await;
+                            let _ = command::kill_process_group(&mut c).await;
+                        }
+                        tracing::warn!(
+                            "Warm turn for session {session_id} produced no reuse handle; reaped"
+                        );
+                    }
+                }
+            }
+
             let (exit_code, status) = match status_result {
                 Ok(exit_status) => {
                     let code = exit_status.code().unwrap_or(-1) as i64;
@@ -1253,47 +1285,13 @@ impl LocalContainerService {
             // process group. The executor itself is already done — either it
             // exited naturally or was killed in the exit-signal branch above.
             //
-            // A warm app-server is exempt from the kill: instead of leaving it
-            // in `child_store` (where its `Completed` turn row makes it invisible
-            // to the `Running`-only teardown — the leak documented here in Phase
-            // 1), we MOVE it into the session-keyed `warm_app_servers` registry,
-            // which becomes its single reaper (stop/teardown/idle/death). Moving
-            // requires the reuse handle the executor surfaced over `warm_reuse`;
-            // by warm-turn-end it has been sent (the server started and ran a
-            // turn). If it is somehow absent we reap rather than strand the
-            // process. See `specs/vk/826e-coding-agent-war/`.
-            //
-            // Known limitation (not a leak): the park happens here, after
-            // finalization already ran `try_start_next_action` / queued-follow-up
-            // dispatch. So an *immediately chained* follow-up sees no warm entry
-            // yet and cold-starts. It self-heals — when that cold-started turn
-            // ends warm, `register_warm_entry` atomically replaces + reaps this
-            // parked child (one-per-session), so at most one extra cold start and
-            // no orphan result. Reuse still hits for the common case (a
-            // user-initiated follow-up after this turn has fully finalized).
-            if kept_warm {
-                let child_opt = child_store.write().await.remove(&exec_id);
-                if let Some(child) = child_opt {
-                    let handle = match warm_reuse {
-                        Some(rx) => rx.await.ok(),
-                        None => None,
-                    };
-                    match handle {
-                        Some(handle) => {
-                            container
-                                .register_warm_server(session_id, child, handle)
-                                .await;
-                        }
-                        None => {
-                            let mut c = child.write().await;
-                            let _ = command::kill_process_group(&mut c).await;
-                            tracing::warn!(
-                                "Warm turn for session {session_id} produced no reuse handle; reaped"
-                            );
-                        }
-                    }
-                }
-            } else {
+            // A warm app-server is exempt: it was already moved into the
+            // session-keyed `warm_app_servers` registry above (before
+            // finalization), which becomes its single reaper
+            // (stop/teardown/idle/death/shutdown), so it is no longer in
+            // `child_store` and must not be killed here. Only non-warm children
+            // are reaped at this tail.
+            if !kept_warm {
                 if let Some(child_lock) = child_store.read().await.get(&exec_id).cloned() {
                     let mut child = child_lock.write().await;
                     let _ = child.start_kill();
@@ -2107,8 +2105,9 @@ impl ContainerService for LocalContainerService {
         // Create the child and stream, add to execution tracker with timeout.
         // On a warm-reuse hit, try the warm path first; if it errors (e.g. the
         // warm server failed a health check), fall back to a normal cold start
-        // rather than failing the whole turn — the warm child was already taken
-        // from the registry (and dropped on error), so a fresh server is spawned.
+        // rather than failing the whole turn — `spawn_warm_follow_up` has already
+        // killed the warm server's process group on that error path, so a fresh
+        // server is cleanly spawned with no orphan.
         let warm_spawned = if let Some((warm_child, reuse)) = warm_reuse_hit {
             let ExecutorActionType::CodingAgentFollowUpRequest(follow_up) = executor_action.typ()
             else {

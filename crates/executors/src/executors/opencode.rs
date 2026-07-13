@@ -298,15 +298,30 @@ impl Opencode {
 
         let directory = current_dir.to_string_lossy().to_string();
 
+        // On any pre-spawn failure, explicitly kill the warm server's *process
+        // group* before returning — `kill_on_drop` only reaps the direct child,
+        // not the group, and this codebase treats it as unreliable (see
+        // `OpencodeServer::drop`). The container then cold-starts a fresh server.
+        async fn reap_on_error(mut child: AsyncGroupChild, err: ExecutorError) -> ExecutorError {
+            let _ = workspace_utils::process::kill_process_group(&mut child).await;
+            err
+        }
+
         // Validate the warm server is actually reachable/healthy *before*
-        // committing to reuse. On failure we return `Err` (leaving `child` to be
-        // dropped + killed) so the container cold-starts a fresh server instead
-        // of failing the turn on an alive-but-hung warm process.
-        check_warm_server_ready(&directory, &reuse.base_url, &reuse.server_password).await?;
+        // committing to reuse, so an alive-but-hung warm process cold-starts
+        // (container fallback) instead of failing the turn.
+        if let Err(e) =
+            check_warm_server_ready(&directory, &reuse.base_url, &reuse.server_password).await
+        {
+            return Err(reap_on_error(child, e).await);
+        }
 
         // Fresh per-turn output pipe on the warm child (the server's own stdout
         // was drained at startup; turn output arrives over HTTP/SSE).
-        let stdout = create_stdout_pipe_writer(&mut child)?;
+        let stdout = match create_stdout_pipe_writer(&mut child) {
+            Ok(stdout) => stdout,
+            Err(e) => return Err(reap_on_error(child, e).await),
+        };
         let log_writer = LogWriter::new(stdout);
 
         let (exit_signal_tx, exit_signal_rx) = tokio::sync::oneshot::channel();

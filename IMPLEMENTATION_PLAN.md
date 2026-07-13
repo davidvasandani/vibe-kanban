@@ -80,6 +80,11 @@ Backend-only; live reuse gated **off** by default (`VK_KEEP_WARM_AGENTS`).
 
 ## Status
 
-All Increment A + B steps complete and compiling; 14 warm tests + full suites for
-the three crates pass; clippy + fmt clean. Live reuse gated off. Independent Codex
-review of the diff is the next stage.
+All Increment A + B steps complete and compiling; 16 warm tests + full suites for
+the three crates pass (executors 84, services 25, local-deployment 58 + 1
+pre-existing ignored); clippy + fmt clean. Live reuse gated off. Independent Codex
+review ran 5 rounds — every confirmed finding fixed (stderr-panic on reuse, the
+register/sweep concurrency races, `try_unwrap`-kills-live, warm-error cold-start
+fallback, shutdown reap, park-before-finalization + insert-before-remove) — final
+verdict **NO SIGNIFICANT FINDINGS**. Knowledge distilled into
+`wiki/agent-process-lifecycle.md` (stage 12).

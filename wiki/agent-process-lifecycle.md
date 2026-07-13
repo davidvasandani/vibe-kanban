@@ -61,8 +61,66 @@ Workspace/attempt teardown (`try_stop`) calls `stop_execution` only for
 executions whose DB status is `Running`. A warm child's turn row is
 `Completed`, so once `keep_warm` is enabled the warm registry must own
 reaping at attempt/workspace end explicitly — otherwise the app-server
-outlives its deleted worktree. (Tracked as the Phase-2 must-cover in
-`homelab/specs/vk/1a64-coding-agent-pro/tasks.md` T100.)
+outlives its deleted worktree. Phase 2 (task 826e) closed this: a
+`ContainerService::reap_warm_processes_for_session` hook (default no-op,
+overridden by `LocalContainerService`) is called from `try_stop` for **every**
+session regardless of status, plus `stop_execution` reaps by session key, and
+`kill_all_running_processes` (shutdown) drains the whole registry — because a
+warm `CodingAgent` is `Completed` (missed by `find_running()`) **and** is not in
+the persistent-process boot re-adoption path, so nothing else would reclaim it.
+
+## Phase 2 warm registry: the reuse mechanism and its concurrency traps
+
+The warm registry (`warm_app_servers: HashMap<session_id, WarmAppServer>` on
+`LocalContainerService`, task 826e) is the single owner of a kept-warm process.
+Non-obvious gotchas found building it (several via adversarial Codex review):
+
+- **`base_url` is discovered asynchronously**, *after* `spawn` returns (OpenCode
+  prints its listening URL from the spawned task). So the reuse handle can't ride
+  on `SpawnedChild` synchronously — it's surfaced over a
+  `oneshot` (`SpawnedChild.warm_reuse`). At warm-turn-end the value is already
+  sent, so the exit monitor reads it with `try_recv` (not `.await`) to avoid any
+  suspension window.
+- **Park before finalization, not after.** The exit monitor must move the child
+  into the registry *before* it runs `try_start_next_action`/queued-follow-up
+  dispatch, or an immediately chained follow-up misses the warm entry and
+  cold-starts.
+- **Insert-before-remove (no invisibility gap).** `park_warm_child` inserts into
+  the registry *before* removing from `child_store`, so a concurrent teardown
+  always finds the child in at least one owner — never a gap where it is in
+  neither and leaks.
+- **Owned child via `Arc::try_unwrap`.** The registry holds
+  `Arc<RwLock<AsyncGroupChild>>`; reuse needs an owned `AsyncGroupChild`
+  (`SpawnedChild.child`). Once removed from the registry the Arc is uniquely
+  owned, so `try_unwrap` succeeds — but **only** because the idle sweep is
+  written to *not* clone child handles. If a sweep held a transient clone,
+  `try_unwrap` would fail and (naively) kill a healthy server. On the
+  should-not-happen shared case, re-park instead of killing.
+- **Generation-conditional reap.** The idle sweep collects stale candidates under
+  the registry read lock, drops it, then reaps — so it must reap *only if the
+  entry's `last_active` still matches* (`reap_warm_entry_if_unchanged`), else it
+  can kill a server that was reaped-and-re-registered in the window.
+- **Never hold the registry lock across a child-kill/`try_wait` await** (and vice
+  versa) — reap removes under the map lock, then kills after dropping it.
+- **Cold-start fallback must be clean.** A warm follow-up validates the server
+  synchronously (`check_warm_server_ready`) before reuse and, on any pre-spawn
+  error, kills the server's *process group* explicitly (not `kill_on_drop`, which
+  only reaps the direct child and is treated as unreliable here) so the container
+  can cold-start with no orphan. An alive-but-hung server thus cold-starts instead
+  of failing the turn.
+- **Re-tracking a warm child** installs a fresh stdout pipe, but its stderr was
+  consumed by the first turn's forwarder — so `track_child_msgs_in_store` must
+  tolerate an absent stream (treat as empty) rather than `expect` it.
+- **Enablement is gated** behind env `VK_KEEP_WARM_AGENTS` (default off): the
+  executor declares `keep_warm: true`, the container ANDs it with the gate, so
+  default behavior is byte-for-byte unchanged (the live reuse path is
+  unobservable in CI — Constitution IV). Idle window default 30 min, swept every
+  5 min.
+- **Phase 3 decisions (task 826e):** Codex warm reuse is deferred — its
+  `turn/completed` is coupled to the reader-loop teardown (breaking the loop →
+  `send_exit_signal` → kill), so warming it needs an out-of-band per-turn
+  completion signal. ACP is deliberately left one-shot — resume already replays a
+  `.jsonl` transcript into a fresh process, so warm reuse buys the least.
 
 ## What already survives restarts (reuse, don't reinvent)
 
@@ -86,3 +144,4 @@ the stored `base_url` + password. Codex (stdio JSON-RPC; turn end currently
 ## Contributed by
 
 - vk/1a64-coding-agent-pro
+- vk/826e-coding-agent-war
