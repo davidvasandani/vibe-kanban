@@ -606,10 +606,38 @@ export function McpSettingsSection() {
 
         if (started.loopback) {
           // The browser may not be able to reach the localhost callback
-          // (VK opened remotely), so don't wait on an automatic callback —
-          // reveal the manual paste field and let the user finish the flow
-          // by pasting the redirected URL/code.
-          setManualFlow({ server: serverName, flowId: started.flow_id });
+          // (VK opened remotely), so reveal the manual paste field. But if the
+          // callback *is* reachable (same machine / port-forward) it completes
+          // on its own — poll in the background so that case still finalizes
+          // (refresh the snapshot so Save can't drop the token) and dismisses
+          // the manual field. A closed popup is not treated as failure here;
+          // pasting is the fallback.
+          const { flow_id: loopbackFlowId } = started;
+          setManualFlow({ server: serverName, flowId: loopbackFlowId });
+          void (async () => {
+            for (;;) {
+              await new Promise((resolve) => setTimeout(resolve, 1000));
+              if (isStale()) return;
+              let status: McpAuthStatusResponse | null = null;
+              try {
+                status = await machineClient.getMcpAuthStatus(loopbackFlowId);
+              } catch {
+                // transient; keep polling until completion or popup close
+              }
+              if (status?.status === 'completed') {
+                await finalizeConnected(serverName);
+                if (!isStale()) {
+                  setManualFlow((cur) =>
+                    cur?.flowId === loopbackFlowId ? null : cur
+                  );
+                }
+                return;
+              }
+              // On explicit failure or once the popup is gone, stop the
+              // background poll and leave the manual field for the user.
+              if (status?.status === 'failed' || popup.closed) return;
+            }
+          })();
           return;
         }
 
