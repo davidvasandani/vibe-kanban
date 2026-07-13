@@ -100,6 +100,18 @@ the same VK issue if they return.
   `VIBEKANBAN_SINGLE_USER_MODE=1` (POST `/v1/auth/single-user/login` returns
   a bearer token) + a python mock of the external API + a 1 s tick env var.
 
+## Surfacing the link in the UI
+
+The connector link is streamed to the client on the link row
+(`jira_browse_url` + `link_state`) via `PROJECT_JIRA_LINKS_SHAPE` and read with
+`getJiraLinkForIssue(issueId)` from `useProjectContext()`. It surfaces in two
+places that share one `JiraBadge` component, one `jiraLink` data prop, and that
+one lookup — the kanban card and the issue detail panel header. Adding the link
+to a new UI surface is therefore pure presentational wiring (no
+backend/schema/type change). Details + placement/gating rules:
+[kanban-issue-panel-sections.md](kanban-issue-panel-sections.md).
+
 ## Contributed by
 
 - `vk/d2aa-sync-vk-and-jira`
+- `vk/a793-vk-jira-bi-direc`

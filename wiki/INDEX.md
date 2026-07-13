@@ -64,8 +64,10 @@ contributed to it.
   by the `packages/ui` component (containers only supply render props), the
   edit-mode section guard, the one-separator border convention (flip
   `border-t`/`border-b` when moving a section across the title/description
-  block), and the rendered-DOM order-test recipe incl. the
-  `NODE_ENV=production` act() gotcha.
+  block), the rendered-DOM order-test recipe incl. the
+  `NODE_ENV=production` act() gotcha, and how an external-connector link
+  (Jira badge) is surfaced identically on the card and the panel header (one
+  `JiraBadge` + `jiraLink` data prop + `getJiraLinkForIssue` lookup).
 - [kanban-items-state-and-activity-grouping.md](kanban-items-state-and-activity-grouping.md)
   — The `items` array ↔ drag-and-drop index/sort_order contract, the
   `isSyncingRef` rebuild-swallowing gotcha, the In progress Active/Waiting
