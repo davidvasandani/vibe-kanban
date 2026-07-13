@@ -24,7 +24,11 @@ contributed to it.
   from `is_persistent()`), the exit monitor's **two** kill points (exit-signal
   `killpg` + tail `start_kill`/`kill_on_drop`), the 250ms OS-exit-watcher
   poll-loop gotcha, why teardown skips `Completed` executions (warm-process
-  trap), the pgid re-adoption substrate, and the keep-warm enablement order.
+  trap), the pgid re-adoption substrate, the keep-warm enablement order, **and
+  the Phase-2 warm registry** — the async `base_url` surfacing over a oneshot,
+  park-before-finalization + insert-before-remove, `Arc::try_unwrap` ownership
+  (and why the idle sweep must not clone child handles), generation-conditional
+  reap, the env gate, and the Codex/ACP Phase-3 decisions.
 - [external-connector-sync.md](external-connector-sync.md) — Connecting the
   remote server to an outside system (shipped for Jira): why connectors live
   in `crates/remote` (not the local SQLite model), the stored-credential
