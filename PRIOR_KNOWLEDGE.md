@@ -1,58 +1,39 @@
-# Prior Knowledge — recalled for `vk/826e-coding-agent-war`
+# Prior Knowledge — recalled for `vk/2f63-auto-archive-wor`
 
-Searched the project knowledge base (`wiki/` — 12 topic pages + INDEX) for pages
-relevant to this task: keeping persistent coding-agent app-servers (OpenCode/
-Codex/ACP) warm across turns, and owning their reaping at teardown.
+Searched the project knowledge base (`docs/knowledge-base/` — `INDEX.md` + topic
+pages) for anything about issue status changes, workspace archiving, or the
+remote issue-mutation path.
 
-## Result: one directly on-topic page (the Phase-1 page for this same line)
+## Matches
 
-- **[agent-process-lifecycle.md]** — the single most relevant page, contributed by
-  the immediately-preceding task `vk/1a64-coding-agent-pro` (Phase 1). It is the
-  authoritative recall for this task and was used directly. Key facts carried in:
-  - **The identity chain** — one turn = one `ExecutionProcess` = (today) one OS
-    process lifetime; per-execution facilities are `HashMap<Uuid, …>` keyed by
-    exec id. Making a process outlive its turn means re-attaching it to the next
-    turn's execution — the streaming/normalization pipeline is per-turn and must
-    be rebuilt. → Drove the design of the reuse path re-wrapping the same child in
-    a fresh `SpawnedChild` that flows through the identical downstream pipeline.
-  - **Persistent app-server vs one-shot is implicit** — encoded only as
-    `SpawnedChild.exit_signal: Some(..)`; `is_persistent()` is a *different* axis
-    (dev servers / background helpers) that must NOT be flipped for coding agents.
-    Use the narrow `keep_warm` capability. → We added `warm_reuse` alongside
-    `keep_warm`, not a new run-reason.
-  - **The exit monitor kills twice** (exit-signal `killpg` + tail
-    `start_kill`/`child_store.remove`); both already thread `kept_warm`. → We
-    changed only the tail: on `kept_warm`, MOVE the child into the registry
-    instead of leaving it in `child_store`.
-  - **The OS exit watcher is a poll loop** that must check `tx.is_closed()` or it
-    spins against a long-lived child. → Confirmed the parked-child move doesn't
-    reintroduce a spin (the watcher breaks once the monitor's rx drops).
-  - **Teardown only stops `Running` executions** — the warm-process trap: a warm
-    child's row is `Completed`, so the registry must own reaping at attempt/
-    workspace end. → This task's central deliverable: the `try_stop` reap hook.
-  - **The pgid re-adoption substrate** already reclaims/cleans process groups
-    across a restart. → Reused for shutdown/restart rather than a new scheme; also
-    the shared foundation for the deferred Tier-3 designs recorded on that page.
+- **`remote-external-integrations.md`** — closest hit. Confirms the `crates/remote`
+  conventions this task rides on: mutations go through REST handlers that run
+  their DB work inside a transaction and return a Postgres `txid`; the client
+  waits on that `txid` over the ElectricSQL stream before dropping optimistic
+  state. Any side-effect (like archiving) must happen **inside the same
+  transaction** as the triggering write so it is covered by the returned `txid`.
+  (Contributing task: `fec4-vk-slack-shortcu`.)
 
-## Tangentially related
+## No direct match
 
-- **[self-hosted-deployment.md]** — the versioned-release deploy contract; relevant
-  only to Tier-3 (the deploy *trigger* for exec-in-place vs. supervisor split lives
-  in that contract). Noted in `tier3-restart-survival.md`, not otherwise used.
+There is **no** existing KB page about issue-status → workspace archiving, the
+`project_statuses` name-matching approach, or terminal-status handling. The KB
+is otherwise about log normalization and MCP connectivity/OAuth — unrelated.
 
-## Constraints carried into design (from the constitution)
+## What I relied on instead (from the code, not the KB)
 
-- **Stay mergeable with upstream** → all hot-file edits (`container.rs`, `mod.rs`)
-  are additive (one `SpawnedChild` field, one registry map + helpers, one
-  `try_stop` hook); no rewrites, no generated-file edits, no migration.
-- **Turn is a protocol event** (VK-fork principle, sharpened this task to name the
-  `try_stop`-only-`Running` leak) → the registry-as-single-reaper is the direct
-  implementation.
-- **Never break a running service (IV)** → live reuse gated off by default because
-  it is unobservable E2E here.
+- `crates/remote/AGENTS.md` — ElectricSQL read-path vs REST write-path; the
+  txid handshake; "writes go through the REST API".
+- Existing feature `archive_workspaces_for_done_issue` (commit `3510c588`) in
+  `crates/remote/src/routes/issues.rs` — the exact pattern to generalise:
+  status-change guard → name-match → list active → (Done-only) unmerged-PR warn →
+  archive, all on the caller's `&mut PgConnection`.
+- `db/project_statuses.rs::DEFAULT_STATUSES` — confirms `"Done"`/`"Cancelled"`
+  are the built-in terminal status names matched by the hook.
 
-## Knowledge to record in stage 12
-This task extends **agent-process-lifecycle.md** with the Phase-2 mechanism
-(the warm registry, the reaping owner that closes the leak, the gate, the async
-reuse-handle surfacing, and the Codex/ACP Phase-3 decisions) and adds this task
-id to its "Contributed by" list.
+## Reusable knowledge to capture on completion (stage 12)
+
+A page on "terminal-status side effects on the remote issue-update path": the
+status-change guard + `project_statuses` name-match idiom, why the side effect
+must share the update transaction (txid), and the Done-vs-Cancelled warning
+distinction. Not yet in the KB — worth adding.

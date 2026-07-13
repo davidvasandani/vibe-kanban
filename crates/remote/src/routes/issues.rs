@@ -173,73 +173,104 @@ async fn notify_issue_update_changes(
     }
 }
 
-/// When an issue moves into the "Done" status, archive its still-active
-/// workspaces. Emits a warning when the issue's pull requests are not all
-/// merged, since archiving hides work that was never merged.
+/// Recognises the terminal issue statuses that trigger workspace archiving.
+///
+/// Statuses are per-project and user-customisable and carry no terminal flag,
+/// so — like the existing behaviour did for "Done" — we identify them by
+/// case-insensitive name. Returns the canonical label ("Done" / "Cancelled")
+/// for a match, or `None` for any non-terminal status. The American spelling
+/// "Canceled" is accepted and normalised to "Cancelled".
+fn terminal_status_name(name: &str) -> Option<&'static str> {
+    if name.eq_ignore_ascii_case("Done") {
+        Some("Done")
+    } else if name.eq_ignore_ascii_case("Cancelled") || name.eq_ignore_ascii_case("Canceled") {
+        Some("Cancelled")
+    } else {
+        None
+    }
+}
+
+/// When an issue moves into a terminal status ("Done" or "Cancelled"), archive
+/// its still-active workspaces. When the status is "Done", emits a warning if
+/// the issue's pull requests are not all merged, since archiving then hides work
+/// that was never merged; "Cancelled" work is intentionally abandoned, so no
+/// such warning is emitted for it.
 ///
 /// Runs on the caller's transaction connection so the archive is committed
 /// atomically with the issue status update and is covered by the same txid
 /// the client waits on.
-async fn archive_workspaces_for_done_issue(
+async fn archive_workspaces_for_terminal_issue(
     conn: &mut sqlx::PgConnection,
     old_issue: &Issue,
     new_issue: &Issue,
 ) -> Result<(), ErrorResponse> {
-    // Only react when the status actually changes into "Done".
+    // Only react when the status actually changes.
     if old_issue.status_id == new_issue.status_id {
         return Ok(());
     }
 
-    let moved_to_done = ProjectStatusRepository::find_by_id(&mut *conn, new_issue.status_id)
+    let status = ProjectStatusRepository::find_by_id(&mut *conn, new_issue.status_id)
         .await
         .map_err(|error| {
-            tracing::error!(?error, issue_id = %new_issue.id, "failed to load status while archiving done issue");
+            tracing::error!(?error, issue_id = %new_issue.id, "failed to load status while archiving terminal issue");
             ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
-        })?
-        .is_some_and(|status| status.name.eq_ignore_ascii_case("Done"));
-    if !moved_to_done {
+        })?;
+    let Some(terminal) = status
+        .as_ref()
+        .and_then(|status| terminal_status_name(&status.name))
+    else {
         return Ok(());
-    }
+    };
 
     let workspaces = WorkspaceRepository::list_active_by_issue_id(&mut *conn, new_issue.id)
         .await
         .map_err(|error| {
-            tracing::error!(?error, issue_id = %new_issue.id, "failed to list workspaces while archiving done issue");
+            tracing::error!(?error, issue_id = %new_issue.id, "failed to list workspaces while archiving terminal issue");
             ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
         })?;
     if workspaces.is_empty() {
         return Ok(());
     }
 
-    // Warn once if the issue's work was never fully merged. Pull requests are
-    // linked to issues, not reliably to individual workspaces (the
-    // pull_requests.workspace_id column is not populated on creation), so this
-    // is evaluated at the issue level. A lookup failure downgrades to "no
-    // warning" rather than failing the request.
-    let pull_requests = PullRequestRepository::list_by_issue(&mut *conn, new_issue.id)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(?error, issue_id = %new_issue.id, "failed to load pull requests while archiving done issue");
-            Vec::new()
-        });
-    let work_merged = !pull_requests.is_empty()
-        && pull_requests
-            .iter()
-            .all(|pr| pr.status == PullRequestStatus::Merged);
-    if !work_merged {
-        tracing::warn!(
-            issue_id = %new_issue.id,
-            workspace_count = workspaces.len(),
-            "archiving workspaces for issue marked Done, but its pull requests are not all merged"
-        );
+    // For "Done" only, warn once if the issue's work was never fully merged.
+    // Pull requests are linked to issues, not reliably to individual workspaces
+    // (the pull_requests.workspace_id column is not populated on creation), so
+    // this is evaluated at the issue level. A lookup failure downgrades to "no
+    // warning" rather than failing the request. "Cancelled" work is expected to
+    // be discarded, so the unmerged warning would be noise there.
+    if terminal == "Done" {
+        let pull_requests = PullRequestRepository::list_by_issue(&mut *conn, new_issue.id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(?error, issue_id = %new_issue.id, "failed to load pull requests while archiving done issue");
+                Vec::new()
+            });
+        let work_merged = !pull_requests.is_empty()
+            && pull_requests
+                .iter()
+                .all(|pr| pr.status == PullRequestStatus::Merged);
+        if !work_merged {
+            tracing::warn!(
+                issue_id = %new_issue.id,
+                workspace_count = workspaces.len(),
+                "archiving workspaces for issue marked Done, but its pull requests are not all merged"
+            );
+        }
     }
 
     WorkspaceRepository::archive_active_by_issue_id(&mut *conn, new_issue.id)
         .await
         .map_err(|error| {
-            tracing::error!(?error, issue_id = %new_issue.id, "failed to archive workspaces for done issue");
+            tracing::error!(?error, issue_id = %new_issue.id, "failed to archive workspaces for terminal issue");
             ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
         })?;
+
+    tracing::info!(
+        issue_id = %new_issue.id,
+        status = terminal,
+        workspace_count = workspaces.len(),
+        "archived workspaces for issue moved to terminal status"
+    );
 
     Ok(())
 }
@@ -457,7 +488,7 @@ async fn update_issue(
 
     // Archive workspaces within the same transaction so the change is covered
     // by the returned txid the client waits on.
-    archive_workspaces_for_done_issue(&mut tx, &issue, &data).await?;
+    archive_workspaces_for_terminal_issue(&mut tx, &issue, &data).await?;
 
     let txid = get_txid(&mut *tx).await.map_err(|error| {
         tracing::error!(?error, "failed to get txid");
@@ -637,7 +668,7 @@ async fn bulk_update_issues(
 
         // Archive workspaces in the same transaction as the status change so
         // they are covered by the returned txid.
-        archive_workspaces_for_done_issue(&mut tx, &issue, &updated).await?;
+        archive_workspaces_for_terminal_issue(&mut tx, &issue, &updated).await?;
 
         notification_pairs.push((issue, updated.clone()));
         results.push(updated);
@@ -661,4 +692,34 @@ async fn bulk_update_issues(
         data: results,
         txid,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_status_name;
+
+    #[test]
+    fn recognizes_done_case_insensitively() {
+        assert_eq!(terminal_status_name("Done"), Some("Done"));
+        assert_eq!(terminal_status_name("done"), Some("Done"));
+        assert_eq!(terminal_status_name("DONE"), Some("Done"));
+    }
+
+    #[test]
+    fn recognizes_cancelled_and_american_spelling() {
+        assert_eq!(terminal_status_name("Cancelled"), Some("Cancelled"));
+        assert_eq!(terminal_status_name("cancelled"), Some("Cancelled"));
+        assert_eq!(terminal_status_name("Canceled"), Some("Cancelled"));
+        assert_eq!(terminal_status_name("CANCELED"), Some("Cancelled"));
+    }
+
+    #[test]
+    fn rejects_non_terminal_statuses() {
+        assert_eq!(terminal_status_name("In progress"), None);
+        assert_eq!(terminal_status_name("In review"), None);
+        assert_eq!(terminal_status_name("Backlog"), None);
+        assert_eq!(terminal_status_name("To do"), None);
+        assert_eq!(terminal_status_name(""), None);
+        assert_eq!(terminal_status_name("Do"), None);
+    }
 }
