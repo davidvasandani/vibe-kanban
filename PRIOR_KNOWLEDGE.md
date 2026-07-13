@@ -1,49 +1,39 @@
-# Prior Knowledge — recalled for `vk/a793-vk-jira-bi-direc`
+# Prior Knowledge — recalled for `vk/2f63-auto-archive-wor`
 
-Searched the project knowledge base (`wiki/` — INDEX + topic pages) for pages
-relevant to this task: surfacing the source Jira ticket URL in the VK issue
-detail panel, and confirming VK-Done ⇄ Jira status sync. **Two pages are
-directly on-topic** — this task builds heavily on recorded knowledge.
+Searched the project knowledge base (`docs/knowledge-base/` — `INDEX.md` + topic
+pages) for anything about issue status changes, workspace archiving, or the
+remote issue-mutation path.
 
-## Directly relevant pages (reused)
+## Matches
 
-- **[external-connector-sync.md]** (from `vk/d2aa-sync-vk-and-jira`) — the whole
-  Jira connector design. Key facts this task relied on:
-  - The connector lives in the **remote** stack (`crates/remote`), not the local
-    SQLite model; issues are `Issue` rows streamed via Electric shapes. The Jira
-    link is a `jira_issue_links` row (`jira_issue_key`, `jira_browse_url`,
-    `link_state`) streamed via `PROJECT_JIRA_LINKS_SHAPE` — **the URL is already
-    on the client**, so surfacing it in the panel is pure presentational wiring
-    (no backend/schema/type work).
-  - Echo-free per-field 3-way merge already syncs status both ways → **Req 2
-    (Done ⇄ Jira) is already done and tested** (`mapping.rs`); do not rebuild it.
+- **`remote-external-integrations.md`** — closest hit. Confirms the `crates/remote`
+  conventions this task rides on: mutations go through REST handlers that run
+  their DB work inside a transaction and return a Postgres `txid`; the client
+  waits on that `txid` over the ElectricSQL stream before dropping optimistic
+  state. Any side-effect (like archiving) must happen **inside the same
+  transaction** as the triggering write so it is covered by the returned `txid`.
+  (Contributing task: `fec4-vk-slack-shortcu`.)
 
-- **[kanban-issue-panel-sections.md]** (from `vk/b37f-move-issue-works`,
-  `vk/77eb-vk-pipeline`) — the panel this task edits. Key facts:
-  - `KanbanIssuePanel.tsx` (in `packages/ui`) **owns its own layout**; the
-    container (`KanbanIssuePanelContainer.tsx` in `web-core`) only supplies data.
-    The panel is shared by local-web **and** remote-web → both frontends are the
-    blast radius. (I added a leaf data prop + badge, not a new bordered section,
-    so no section reorder / border-convention concern.)
-  - **Testing recipe** (used verbatim for the new test): `@vibe/ui` component
-    tests live in `packages/remote-web/src/test/*.test.tsx` (jsdom +
-    testing-library). **`NODE_ENV` gotcha**: the dev env exports
-    `NODE_ENV=production`, which breaks testing-library; run with `NODE_ENV=test`
-    (I ran `NODE_ENV=test npx vitest run ...`). Without an i18n provider `t()`
-    returns raw keys → assert on aria-labels / roles / testids, not translated
-    strings (my test asserts on the badge's link role + Jira key, not `t()`).
+## No direct match
 
-## Constraints carried into design (constitution + wiki)
+There is **no** existing KB page about issue-status → workspace archiving, the
+`project_statuses` name-matching approach, or terminal-status handling. The KB
+is otherwise about log normalization and MCP connectivity/OAuth — unrelated.
 
-- Reuse over new plumbing: the card already renders `JiraBadge` from a
-  `{ issueKey, url, active }` prop fed by `getJiraLinkForIssue`. I mirrored that
-  exact shape and lookup on the panel → single source of truth, card and panel
-  can't diverge.
-- Additive + optional prop → small, reversible; unlinked issues and create mode
-  unaffected.
+## What I relied on instead (from the code, not the KB)
 
-## Enrichment note (stage 12)
-`external-connector-sync.md` is about the reconciler/backend; it does not cover
-*where the connector link surfaces in the UI*. That's a small, reusable gap —
-stage 12 adds a short "Surfacing the link in the UI" note to
-`kanban-issue-panel-sections.md` (card + panel share one `JiraBadge`/prop/lookup).
+- `crates/remote/AGENTS.md` — ElectricSQL read-path vs REST write-path; the
+  txid handshake; "writes go through the REST API".
+- Existing feature `archive_workspaces_for_done_issue` (commit `3510c588`) in
+  `crates/remote/src/routes/issues.rs` — the exact pattern to generalise:
+  status-change guard → name-match → list active → (Done-only) unmerged-PR warn →
+  archive, all on the caller's `&mut PgConnection`.
+- `db/project_statuses.rs::DEFAULT_STATUSES` — confirms `"Done"`/`"Cancelled"`
+  are the built-in terminal status names matched by the hook.
+
+## Reusable knowledge to capture on completion (stage 12)
+
+A page on "terminal-status side effects on the remote issue-update path": the
+status-change guard + `project_statuses` name-match idiom, why the side effect
+must share the update transaction (txid), and the Done-vs-Cancelled warning
+distinction. Not yet in the KB — worth adding.
