@@ -319,6 +319,38 @@ pub type ExecutorExitSignal = tokio::sync::oneshot::Receiver<ExecutorExitResult>
 /// When cancelled, the executor should attempt to cancel gracefully before being killed.
 pub type CancellationToken = tokio_util::sync::CancellationToken;
 
+/// Executor → Container: the connection facts a follow-up turn needs to reach a
+/// warm (kept-alive) app-server instead of spawning a fresh process.
+///
+/// Surfaced over a `oneshot` on `SpawnedChild::warm_reuse` because some of these
+/// facts (e.g. OpenCode's `base_url`) are only discovered *asynchronously* after
+/// `spawn` returns — see `specs/vk/826e-coding-agent-war/research.md`. Fields are
+/// transport-agnostic strings so Codex/ACP can fill a subset later (Phase 3).
+#[derive(Clone)]
+pub struct WarmReuseHandle {
+    /// Base URL of the persistent app-server (OpenCode: `http://127.0.0.1:PORT`).
+    pub base_url: String,
+    /// Auth secret for the app-server. Treated as a credential: redacted from
+    /// `Debug`, never logged (Constitution — VK fork "credentials never logged").
+    pub server_password: String,
+    /// The agent session id to continue on the warm process, when known.
+    pub agent_session_id: Option<String>,
+}
+
+impl std::fmt::Debug for WarmReuseHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WarmReuseHandle")
+            .field("base_url", &self.base_url)
+            .field("server_password", &"<redacted>")
+            .field("agent_session_id", &self.agent_session_id)
+            .finish()
+    }
+}
+
+/// Channel by which an executor surfaces its `WarmReuseHandle` once the warm
+/// process is ready (post async startup). One-shot per warm turn.
+pub type WarmReuseSignal = tokio::sync::oneshot::Receiver<WarmReuseHandle>;
+
 #[derive(Debug)]
 pub struct SpawnedChild {
     pub child: AsyncGroupChild,
@@ -334,6 +366,12 @@ pub struct SpawnedChild {
     /// that exit naturally are unaffected. See
     /// `specs/vk/1a64-coding-agent-pro/` (VAS-107 fix #2).
     pub keep_warm: bool,
+    /// Executor → Container: when `keep_warm` leaves this child alive, the
+    /// container awaits this receiver to learn how to drive the next turn against
+    /// the warm process (stored in the container's warm registry). `None` for
+    /// one-shot executors and until an executor opts in. See
+    /// `specs/vk/826e-coding-agent-war/` (Phase 2).
+    pub warm_reuse: Option<WarmReuseSignal>,
 }
 
 impl From<AsyncGroupChild> for SpawnedChild {
@@ -343,6 +381,7 @@ impl From<AsyncGroupChild> for SpawnedChild {
             exit_signal: None,
             cancel: None,
             keep_warm: false,
+            warm_reuse: None,
         }
     }
 }
@@ -428,5 +467,24 @@ mod tests {
         let result: Result<BaseCodingAgent, _> = serde_json::from_str(r#""CURSOR""#);
         assert!(result.is_ok(), "CURSOR should deserialize via serde");
         assert_eq!(result.unwrap(), BaseCodingAgent::CursorAgent);
+    }
+
+    #[test]
+    fn warm_reuse_handle_debug_redacts_password() {
+        // The reuse handle carries an app-server credential; it must never leak
+        // via Debug/logs (Constitution — VK fork "credentials never logged").
+        let handle = WarmReuseHandle {
+            base_url: "http://127.0.0.1:4096".to_string(),
+            server_password: "hunter2-super-secret".to_string(),
+            agent_session_id: Some("sess-123".to_string()),
+        };
+        let dbg = format!("{handle:?}");
+        assert!(
+            !dbg.contains("hunter2-super-secret"),
+            "password must be redacted"
+        );
+        assert!(dbg.contains("<redacted>"));
+        assert!(dbg.contains("http://127.0.0.1:4096"));
+        assert!(dbg.contains("sess-123"));
     }
 }

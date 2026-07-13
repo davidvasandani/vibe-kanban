@@ -516,6 +516,19 @@ where
     Ok(())
 }
 
+/// Synchronously verify a warm server is reachable and healthy before a
+/// follow-up turn commits to reusing it. Lets the container cold-start on an
+/// alive-but-unhealthy (e.g. hung) warm server instead of failing the turn
+/// (Phase 2 reuse — `warm_follow_up`).
+pub(super) async fn check_warm_server_ready(
+    directory: &str,
+    base_url: &str,
+    server_password: &str,
+) -> Result<(), ExecutorError> {
+    let client = build_opencode_client(directory, server_password)?;
+    wait_for_health(&client, base_url).await
+}
+
 pub(super) async fn wait_for_health(
     client: &reqwest::Client,
     base_url: &str,
