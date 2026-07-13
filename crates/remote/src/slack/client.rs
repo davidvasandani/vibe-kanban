@@ -114,27 +114,56 @@ impl SlackClient {
         Ok(())
     }
 
-    /// Fetch the replies of a thread (root at index 0), for AI summarization.
-    /// Requires a message-history read scope (`channels:history` etc.); a
-    /// missing scope surfaces as `Api("missing_scope")` and the caller falls
-    /// back to the mechanical prefill (FR-5/FR-13).
+    /// Fetch a thread's messages (root at index 0), oldest-first, for AI
+    /// summarization. `conversations.replies` is oldest-first and paginated, so
+    /// we walk `response_metadata.next_cursor` up to `max_pages` to reach the
+    /// most-recent replies (the summarizer keeps root + newest). The thread
+    /// root is repeated as the first message of every page, so we dedup by
+    /// message `ts`. Requires a message-history read scope
+    /// (`channels:history` etc.); a missing scope surfaces as
+    /// `Api("missing_scope")` and the caller falls back to the mechanical
+    /// prefill (FR-5/FR-13).
     pub async fn conversations_replies(
         &self,
         channel_id: &str,
         thread_ts: &str,
-        limit: usize,
+        per_page: usize,
+        max_pages: usize,
     ) -> Result<Vec<SlackReplyMessage>, SlackClientError> {
-        let value = self
-            .call(
-                "conversations.replies",
-                json!({"channel": channel_id, "ts": thread_ts, "limit": limit}),
-            )
-            .await?;
-        let response: SlackConversationsRepliesResponse =
-            serde_json::from_value(value).map_err(|_| {
-                SlackClientError::Transport("Slack returned an unexpected response".to_string())
-            })?;
-        Ok(response.messages)
+        let mut all: Vec<SlackReplyMessage> = Vec::new();
+        let mut seen_ts: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut cursor: Option<String> = None;
+
+        for _ in 0..max_pages.max(1) {
+            let mut body = json!({"channel": channel_id, "ts": thread_ts, "limit": per_page});
+            if let Some(c) = &cursor {
+                body["cursor"] = json!(c);
+            }
+            let value = self.call("conversations.replies", body).await?;
+            let response: SlackConversationsRepliesResponse = serde_json::from_value(value)
+                .map_err(|_| {
+                    SlackClientError::Transport("Slack returned an unexpected response".to_string())
+                })?;
+
+            for message in response.messages {
+                // Dedup the repeated root by ts; messages without a ts (rare)
+                // are kept as-is.
+                match &message.ts {
+                    Some(ts) if !seen_ts.insert(ts.clone()) => continue,
+                    _ => all.push(message),
+                }
+            }
+
+            match response
+                .response_metadata
+                .and_then(|m| m.next_cursor)
+                .filter(|c| !c.is_empty())
+            {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        Ok(all)
     }
 
     /// Post a message only the given user can see, in the given channel.

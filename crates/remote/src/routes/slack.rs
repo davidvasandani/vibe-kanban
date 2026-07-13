@@ -29,7 +29,10 @@ use uuid::Uuid;
 use super::error::ErrorResponse;
 use crate::{
     AppState,
-    anthropic::{client::AnthropicClient, prompt::MAX_THREAD_MESSAGES},
+    anthropic::{
+        client::AnthropicClient,
+        prompt::{MAX_THREAD_MESSAGES, MAX_THREAD_PAGES},
+    },
     auth::RequestContext,
     db::{
         identity_errors::IdentityError,
@@ -515,6 +518,7 @@ async fn open_shortcut_modal(
         &mechanical_description,
         &private_metadata,
         hint,
+        false,
     );
     if created.truncated_projects > 0 {
         warn!(
@@ -556,13 +560,16 @@ async fn open_shortcut_modal(
             let ai_title = prefill::title_from_message(&summary.title);
             let ai_description =
                 prefill::description_from_message(&summary.description, permalink.as_deref());
-            // Drop the hint (hint = None) and swap in the AI title/description.
+            // Drop the hint and swap in the AI title/description. `ai_variant
+            // = true` uses fresh input ids so Slack actually shows the new
+            // values on views.update (input-state preservation gotcha).
             let updated = modal::build_create_issue_modal(
                 &options,
                 &ai_title,
                 &ai_description,
                 &private_metadata,
                 None,
+                true,
             );
             if let Err(error) = client.views_update(&view_id, updated.view).await {
                 warn!(%error, "failed to apply AI summary to slack modal");
@@ -577,6 +584,7 @@ async fn open_shortcut_modal(
                 &mechanical_description,
                 &private_metadata,
                 None,
+                false,
             );
             if let Err(error) = client.views_update(&view_id, reverted.view).await {
                 warn!(%error, "failed to clear AI summarizing hint after failure");
@@ -605,7 +613,12 @@ async fn summarize_thread_for_modal(
         .filter(|t| !t.is_empty())?;
 
     let messages = match client
-        .conversations_replies(&action.channel.id, thread_ts, MAX_THREAD_MESSAGES)
+        .conversations_replies(
+            &action.channel.id,
+            thread_ts,
+            MAX_THREAD_MESSAGES,
+            MAX_THREAD_PAGES,
+        )
         .await
     {
         Ok(messages) => messages,
@@ -660,9 +673,36 @@ async fn handle_view_submission(
         return StatusCode::OK.into_response();
     }
 
+    let state_values = &submission.view.state;
+
+    // The submitted view uses either the mechanical input ids or the AI-variant
+    // ids (a views.update to the AI summary re-renders with fresh ids — see
+    // `modal.rs`). Read from whichever is present, and remember the title
+    // block id so in-modal errors target a block that actually exists.
+    let (title_block, title) = state_values
+        .text_input(modal::TITLE_BLOCK_ID, modal::TITLE_ACTION_ID)
+        .map(|t| (modal::TITLE_BLOCK_ID, t))
+        .or_else(|| {
+            state_values
+                .text_input(modal::TITLE_BLOCK_ID_AI, modal::TITLE_ACTION_ID_AI)
+                .map(|t| (modal::TITLE_BLOCK_ID_AI, t))
+        })
+        .unwrap_or((modal::TITLE_BLOCK_ID, String::new()));
+    let title = title.trim().to_string();
+    let description = state_values
+        .text_input(modal::DESCRIPTION_BLOCK_ID, modal::DESCRIPTION_ACTION_ID)
+        .or_else(|| {
+            state_values.text_input(
+                modal::DESCRIPTION_BLOCK_ID_AI,
+                modal::DESCRIPTION_ACTION_ID_AI,
+            )
+        })
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
+
     if !config.enabled {
         return submission_errors(
-            "title",
+            title_block,
             "The Vibe Kanban Slack integration was disabled before this issue was created.",
         );
     }
@@ -670,24 +710,15 @@ async fn handle_view_submission(
     let metadata: ModalMetadata =
         serde_json::from_str(&submission.view.private_metadata).unwrap_or_default();
 
-    let state_values = &submission.view.state;
     let Some(project_id) = state_values
         .selected_option("project", "project_select")
         .and_then(|v| Uuid::parse_str(&v).ok())
     else {
         return submission_errors("project", "Select a project.");
     };
-    let title = state_values
-        .text_input("title", "title_input")
-        .map(|t| t.trim().to_string())
-        .unwrap_or_default();
     if title.is_empty() {
-        return submission_errors("title", "Enter a title.");
+        return submission_errors(title_block, "Enter a title.");
     }
-    let description = state_values
-        .text_input("description", "description_input")
-        .map(|d| d.trim().to_string())
-        .filter(|d| !d.is_empty());
 
     // The project must belong to the connected org — the modal only offers
     // org projects, but the submission payload is client-controlled beyond
@@ -705,7 +736,7 @@ async fn handle_view_submission(
 
     let Some(creator_user_id) = config.created_by_user_id else {
         return submission_errors(
-            "title",
+            title_block,
             "The Slack connection has no owning admin (they may have left). \
              An organization admin must re-save the Slack settings in Vibe Kanban.",
         );
@@ -733,7 +764,7 @@ async fn handle_view_submission(
             Ok(None) => {}
             Err(error) => {
                 tracing::error!(?error, "failed idempotency lookup for slack submission");
-                return submission_errors("title", "Failed to create the issue. Try again.");
+                return submission_errors(title_block, "Failed to create the issue. Try again.");
             }
         }
     }
@@ -762,7 +793,7 @@ async fn handle_view_submission(
         Ok(sort_order) => sort_order,
         Err(error) => {
             tracing::error!(?error, "failed to compute sort order");
-            return submission_errors("title", "Failed to create the issue. Try again.");
+            return submission_errors(title_block, "Failed to create the issue. Try again.");
         }
     };
 
@@ -817,7 +848,7 @@ async fn handle_view_submission(
                 return StatusCode::OK.into_response();
             }
             tracing::error!(?error, "failed to create issue from slack");
-            return submission_errors("title", "Failed to create the issue. Try again.");
+            return submission_errors(title_block, "Failed to create the issue. Try again.");
         }
     };
 

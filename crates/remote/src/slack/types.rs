@@ -274,6 +274,8 @@ pub struct SlackViewIdRef {
 
 /// `conversations.replies` response — the thread's messages, oldest-first
 /// (root at index 0). Used only to build the AI summarization transcript.
+/// `conversations.replies` is oldest-first and paginated, so the client walks
+/// `response_metadata.next_cursor` to reach the most-recent replies.
 #[derive(Debug, Deserialize)]
 pub struct SlackConversationsRepliesResponse {
     pub ok: bool,
@@ -281,6 +283,14 @@ pub struct SlackConversationsRepliesResponse {
     pub error: Option<String>,
     #[serde(default)]
     pub messages: Vec<SlackReplyMessage>,
+    #[serde(default)]
+    pub response_metadata: Option<SlackResponseMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SlackResponseMetadata {
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -289,6 +299,10 @@ pub struct SlackReplyMessage {
     pub user: Option<String>,
     #[serde(default)]
     pub text: Option<String>,
+    /// Message timestamp — used to dedup the thread root, which Slack repeats
+    /// as the first message of every `conversations.replies` page.
+    #[serde(default)]
+    pub ts: Option<String>,
 }
 
 #[cfg(test)]
