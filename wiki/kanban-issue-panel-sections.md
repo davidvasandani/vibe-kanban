@@ -56,6 +56,33 @@ card + "Update Issue" apply button — see
 - Prove an order test bites: `git stash push <component file>`, test must
   fail, `git stash pop`.
 
+## Surfacing an external-connector link (Jira badge) in the panel
+
+An external-connector link (see
+[external-connector-sync.md](external-connector-sync.md)) surfaces in **two**
+UI places, and they must not diverge: the kanban card
+(`KanbanCardContent.tsx`) and the issue detail panel
+(`KanbanIssuePanel.tsx`). Both use the **same** three things:
+
+- one presentational leaf, `packages/ui/src/components/JiraBadge.tsx`
+  (an `<a target="_blank">` with the issue key; dims on `active={false}`);
+- one prop shape, `jiraLink?: { issueKey: string; url: string; active: boolean }
+  | null` — a plain **data prop**, not a render prop, because it's a leaf, not a
+  container-owned section;
+- one lookup, `getJiraLinkForIssue(issueId)` from `useProjectContext()`
+  (backed by the `PROJECT_JIRA_LINKS_SHAPE` shape). `active` is derived
+  identically on both sides: `link.link_state === 'active'`.
+
+The panel renders the badge in the **header** id-group (next to `displayId`,
+after the copy-link button), gated `!isCreateMode && jiraLink` — a create-mode
+issue has no persisted link, and this avoids a new bordered section (so none of
+the border-convention pitfalls above apply). The container passes
+`jiraLink={mode === 'edit' ? jiraLink : undefined}`. Because the URL is already
+on the client via the link shape, this is pure presentational wiring — **no
+backend/schema/type change** is needed to surface a connector link in a new
+place.
+
 ## Contributed by
 - vk/b37f-move-issue-works
 - vk/77eb-vk-pipeline
+- vk/a793-vk-jira-bi-direc

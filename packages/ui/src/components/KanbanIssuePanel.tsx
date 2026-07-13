@@ -30,6 +30,7 @@ import {
   type IssuePropertyRowProps,
 } from './IssuePropertyRow';
 import { IconButton } from './IconButton';
+import { JiraBadge } from './JiraBadge';
 import { AutoResizeTextarea } from './AutoResizeTextarea';
 import {
   Tooltip,
@@ -146,6 +147,12 @@ export interface KanbanIssuePanelProps {
   // More actions callback (edit mode only) - opens command bar with issue actions
   onMoreActions?: () => void;
 
+  // Source Jira ticket link (edit mode only). Same shape and source of truth
+  // as the kanban card's badge (`getJiraLinkForIssue`); surfaced in the header
+  // so a synced issue points back at its origin. Omitted when the issue has no
+  // Jira link.
+  jiraLink?: { issueKey: string; url: string; active: boolean } | null;
+
   // Image attachment upload
   onPasteFiles?: (files: File[]) => void;
   localAttachments?: LocalAttachmentMetadata[];
@@ -196,6 +203,7 @@ export function KanbanIssuePanel({
   onTitleMultiLinePaste,
   onCopyLink,
   onMoreActions,
+  jiraLink,
   onPasteFiles,
   localAttachments,
   dropzoneProps,
@@ -285,6 +293,13 @@ export function KanbanIssuePanel({
             >
               <LinkIcon className="size-icon-sm" weight="bold" />
             </button>
+          )}
+          {!isCreateMode && jiraLink && (
+            <JiraBadge
+              issueKey={jiraLink.issueKey}
+              url={jiraLink.url}
+              active={jiraLink.active}
+            />
           )}
         </div>
         <div className="flex items-center gap-half">
