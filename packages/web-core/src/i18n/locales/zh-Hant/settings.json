@@ -629,6 +629,11 @@
         "color": {
           "label": "Project Color"
         },
+        "context": {
+          "label": "Project Context",
+          "description": "Freeform briefing injected into the agent prompt for every issue spawned from this project. Describe what the project is, current focus, and where things live (e.g. point agents at each repo’s project-context.json).",
+          "placeholder": "e.g. Homelab monorepo. Focus: the family-os brain service (apps/family-os). IaC in terragrunt/ and modules/. See each repo’s project-context.json for service → path → IaC."
+        },
         "statuses": {
           "label": "Project Statuses",
           "description": "Manage kanban columns for this project."

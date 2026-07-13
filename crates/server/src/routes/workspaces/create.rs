@@ -374,7 +374,10 @@ mod tests {
 
     #[test]
     fn project_context_empty_leaves_prompt_unchanged() {
-        assert_eq!(compose_prompt_with_project_context("", "do the thing"), "do the thing");
+        assert_eq!(
+            compose_prompt_with_project_context("", "do the thing"),
+            "do the thing"
+        );
         assert_eq!(
             compose_prompt_with_project_context("   \n\t ", "do the thing"),
             "do the thing"
@@ -384,7 +387,10 @@ mod tests {
     #[test]
     fn project_context_nonempty_is_prepended_and_labelled() {
         let out = compose_prompt_with_project_context("  homelab monorepo  ", "fix the bug");
-        assert_eq!(out, "# Project context\n\nhomelab monorepo\n\n---\n\nfix the bug");
+        assert_eq!(
+            out,
+            "# Project context\n\nhomelab monorepo\n\n---\n\nfix the bug"
+        );
         // The task prompt is preserved verbatim after the briefing.
         assert!(out.ends_with("fix the bug"));
         assert!(out.starts_with("# Project context"));
