@@ -17,6 +17,7 @@ import {
 } from '@/shared/stores/useUiPreferencesStore';
 import { useUserOrganizations } from '@/shared/hooks/useUserOrganizations';
 import { useOrganizationProjects } from '@/shared/hooks/useOrganizationProjects';
+import { useAllOrganizationProjects } from '@/shared/hooks/useAllOrganizationProjects';
 import { useOrganizationStore } from '@/shared/stores/useOrganizationStore';
 import { useAuth } from '@/shared/hooks/auth/useAuth';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
@@ -223,19 +224,46 @@ function useFindProjectById(projectId: string | undefined) {
   // Use stored org ID, or fall back to first org
   const orgIdToUse = selectedOrgId ?? organizations[0]?.id ?? null;
 
-  const { data: projects = [], isLoading: projectsLoading } =
+  const { data: selectedOrgProjects = [], isLoading: projectsLoading } =
     useOrganizationProjects(orgIdToUse);
+
+  const projectInSelectedOrg = useMemo(() => {
+    if (!projectId) return undefined;
+    return selectedOrgProjects.find((p) => p.id === projectId);
+  }, [projectId, selectedOrgProjects]);
+
+  // The project may belong to an organization other than the currently
+  // selected one — e.g. when arriving via a workspace breadcrumb or a deep
+  // link. In that case fall back to searching across every organization so we
+  // resolve the project's real org instead of rendering "No project found".
+  // We deliberately do NOT switch the selected org here: SharedAppLayout
+  // redirects to the new org's first project whenever the selection changes,
+  // which would bounce the user away from the project they navigated to.
+  //
+  // Enable the fallback whenever the project isn't (yet) found in the selected
+  // org — including while that org's shape is still loading. Keeping it enabled
+  // from mount means `allProjectsLoading` is meaningful during the whole
+  // resolution, so we never briefly report "not found" while the cross-org
+  // lookup is spinning up. Once the project is found in the selected org this
+  // disables again, preserving the fast single-org path for the common case.
+  const needsCrossOrgLookup = Boolean(projectId) && !projectInSelectedOrg;
+  const { data: allProjects, isLoading: allProjectsLoading } =
+    useAllOrganizationProjects({ enabled: needsCrossOrgLookup });
 
   const project = useMemo(() => {
     if (!projectId) return undefined;
-    return projects.find((p) => p.id === projectId);
-  }, [projectId, projects]);
+    return projectInSelectedOrg ?? allProjects.find((p) => p.id === projectId);
+  }, [projectId, projectInSelectedOrg, allProjects]);
 
   return {
     project,
     organizationId: project?.organization_id ?? selectedOrgId,
     // Include auth loading state - we can't determine project access until auth loads
-    isLoading: !authLoaded || orgsLoading || projectsLoading,
+    isLoading:
+      !authLoaded ||
+      orgsLoading ||
+      projectsLoading ||
+      (needsCrossOrgLookup && allProjectsLoading),
   };
 }
 
