@@ -4,7 +4,12 @@
 // Electric row types
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]?: JsonValue } | null;
 
-export type Project = { id: string, organization_id: string, name: string, color: string, sort_order: number, created_at: string, updated_at: string, };
+export type Project = { id: string, organization_id: string, name: string, color: string, 
+/**
+ * Freeform project briefing, injected into the agent prompt for every
+ * issue spawned from this project. Empty string = no context.
+ */
+context: string, sort_order: number, created_at: string, updated_at: string, };
 
 export type Notification = { id: string, organization_id: string, user_id: string, notification_type: NotificationType, payload: NotificationPayload, issue_id: string | null, comment_id: string | null, seen: boolean, dismissed_at: string | null, created_at: string, };
 
@@ -88,7 +93,7 @@ export type CreateProjectRequest = {
  */
 id?: string, organization_id: string, name: string, color: string, };
 
-export type UpdateProjectRequest = { name: string | null, color: string | null, sort_order: number | null, };
+export type UpdateProjectRequest = { name: string | null, color: string | null, context: string | null, sort_order: number | null, };
 
 export type UpdateNotificationRequest = { seen: boolean | null, };
 

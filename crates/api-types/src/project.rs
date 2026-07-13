@@ -11,6 +11,9 @@ pub struct Project {
     pub organization_id: Uuid,
     pub name: String,
     pub color: String,
+    /// Freeform project briefing, injected into the agent prompt for every
+    /// issue spawned from this project. Empty string = no context.
+    pub context: String,
     pub sort_order: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -33,6 +36,8 @@ pub struct UpdateProjectRequest {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "some_if_present")]
     pub color: Option<String>,
+    #[serde(default, deserialize_with = "some_if_present")]
+    pub context: Option<String>,
     #[serde(default, deserialize_with = "some_if_present")]
     pub sort_order: Option<i32>,
 }

@@ -1,0 +1,69 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE projects\n            SET\n                name = COALESCE($1, name),\n                color = COALESCE($2, color),\n                context = COALESCE($3, context),\n                sort_order = COALESCE($4, sort_order),\n                updated_at = $5\n            WHERE id = $6\n            RETURNING\n                id               AS \"id!: Uuid\",\n                organization_id  AS \"organization_id!: Uuid\",\n                name             AS \"name!\",\n                color            AS \"color!\",\n                context          AS \"context!\",\n                sort_order       AS \"sort_order!\",\n                created_at       AS \"created_at!: DateTime<Utc>\",\n                updated_at       AS \"updated_at!: DateTime<Utc>\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "color!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "context!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "sort_order!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at!: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "updated_at!: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Varchar",
+        "Text",
+        "Int4",
+        "Timestamptz",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "dbd78eb43ae1ee19c50b249aa5395e4f7d296dcc4aa0becc6640288e9cb02083"
+}

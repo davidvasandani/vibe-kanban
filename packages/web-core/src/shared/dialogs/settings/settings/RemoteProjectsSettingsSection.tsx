@@ -60,6 +60,7 @@ import {
   SettingsCard,
   SettingsField,
   SettingsInput,
+  SettingsTextarea,
   SettingsSaveBar,
   TwoColumnPicker,
   TwoColumnPickerColumn,
@@ -87,6 +88,7 @@ import {
 interface FormState {
   name: string;
   color: string;
+  context: string;
 }
 
 interface RemoteProjectsSettingsSectionProps {
@@ -414,7 +416,11 @@ export function RemoteProjectsSettingsSection({
     if (initialState?.projectId && projects.length > 0 && !formState) {
       const project = projects.find((p) => p.id === initialState.projectId);
       if (project) {
-        setFormState({ name: project.name, color: project.color });
+        setFormState({
+          name: project.name,
+          color: project.color,
+          context: project.context ?? '',
+        });
       }
     }
   }, [initialState?.projectId, projects, formState]);
@@ -672,7 +678,8 @@ export function RemoteProjectsSettingsSection({
     if (!selectedProject || !formState) return false;
     return (
       formState.name !== selectedProject.name ||
-      formState.color !== selectedProject.color
+      formState.color !== selectedProject.color ||
+      formState.context !== (selectedProject.context ?? '')
     );
   }, [selectedProject, formState]);
 
@@ -857,7 +864,15 @@ export function RemoteProjectsSettingsSection({
     }
     const project = projects.find((p) => p.id === projectId);
     setSelectedProjectId(projectId);
-    setFormState(project ? { name: project.name, color: project.color } : null);
+    setFormState(
+      project
+        ? {
+            name: project.name,
+            color: project.color,
+            context: project.context ?? '',
+          }
+        : null
+    );
     setHasStatusChanges(false);
     setEditingStatusId(null);
     setEditingStatusColorId(null);
@@ -878,6 +893,7 @@ export function RemoteProjectsSettingsSection({
         setFormState({
           name: result.project.name,
           color: result.project.color,
+          context: result.project.context ?? '',
         });
         setSuccess(
           t(
@@ -936,6 +952,7 @@ export function RemoteProjectsSettingsSection({
         const result = update(selectedProjectId, {
           name: trimmedName,
           color: formState.color,
+          context: formState.context,
         });
         await result.persisted;
       }
@@ -968,6 +985,7 @@ export function RemoteProjectsSettingsSection({
       setFormState({
         name: selectedProject.name,
         color: selectedProject.color,
+        context: selectedProject.context ?? '',
       });
     }
     setLocalStatuses(
@@ -1192,6 +1210,30 @@ export function RemoteProjectsSettingsSection({
                   setFormState((s) => (s ? { ...s, color } : null))
                 }
                 colors={PRESET_COLORS}
+                disabled={isSaving}
+              />
+            </SettingsField>
+
+            <SettingsField
+              label={t(
+                'settings.remoteProjects.form.context.label',
+                'Project Context'
+              )}
+              description={t(
+                'settings.remoteProjects.form.context.description',
+                'Freeform briefing injected into the agent prompt for every issue spawned from this project. Describe what the project is, current focus, and where things live (e.g. point agents at each repo’s project-context.json).'
+              )}
+            >
+              <SettingsTextarea
+                value={formState.context}
+                onChange={(context) =>
+                  setFormState((s) => (s ? { ...s, context } : null))
+                }
+                placeholder={t(
+                  'settings.remoteProjects.form.context.placeholder',
+                  'e.g. Homelab monorepo. Focus: the family-os brain service (apps/family-os). IaC in terragrunt/ and modules/. See each repo’s project-context.json for service → path → IaC.'
+                )}
+                rows={6}
                 disabled={isSaving}
               />
             </SettingsField>

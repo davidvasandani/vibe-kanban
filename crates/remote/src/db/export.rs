@@ -30,6 +30,7 @@ impl ExportRepository {
                 p.organization_id  AS "organization_id!: Uuid",
                 p.name             AS "name!",
                 p.color            AS "color!",
+                p.context          AS "context!",
                 p.sort_order       AS "sort_order!",
                 p.created_at       AS "created_at!: DateTime<Utc>",
                 p.updated_at       AS "updated_at!: DateTime<Utc>"
@@ -64,6 +65,7 @@ impl ExportRepository {
                 p.organization_id  AS "organization_id!: Uuid",
                 p.name             AS "name!",
                 p.color            AS "color!",
+                p.context          AS "context!",
                 p.sort_order       AS "sort_order!",
                 p.created_at       AS "created_at!: DateTime<Utc>",
                 p.updated_at       AS "updated_at!: DateTime<Utc>"
