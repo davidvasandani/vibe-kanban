@@ -35,10 +35,13 @@ use executors::{
     },
     approvals::{ExecutorApprovalService, NoopExecutorApprovalService},
     env::{ExecutionEnv, RepoContext},
-    executors::{BaseCodingAgent, CancellationToken, ExecutorExitResult, ExecutorExitSignal},
+    executors::{
+        BaseCodingAgent, CancellationToken, ExecutorExitResult, ExecutorExitSignal,
+        WarmReuseHandle, WarmReuseSignal,
+    },
     logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
 };
-use futures::{FutureExt, TryStreamExt, stream::select};
+use futures::{FutureExt, StreamExt, TryStreamExt, stream::select};
 use git::GitService;
 use serde_json::json;
 use services::services::{
@@ -67,6 +70,226 @@ use crate::{command, copy};
 
 const WORKSPACE_TOUCH_DEBOUNCE: Duration = Duration::from_mins(2);
 
+/// Env gate for warm coding-agent process reuse (Phase 2). Default off: until
+/// this is set truthy, no app-server is kept warm and the runtime behaves
+/// exactly as before (Constitution IV — do not enable a runtime path we cannot
+/// observe E2E here). See `specs/vk/826e-coding-agent-war/`.
+const KEEP_WARM_ENV: &str = "VK_KEEP_WARM_AGENTS";
+
+/// A warm app-server with no active turn for longer than this is proactively
+/// reaped so an abandoned-but-not-closed attempt cannot pin a process forever
+/// (spec FR-5). The periodic workspace-cleanup sweep enforces it.
+const WARM_IDLE_TIMEOUT: Duration = Duration::from_mins(30);
+
+/// A persistent app-server (e.g. OpenCode) kept alive between turns for reuse.
+/// Owned by the container's `warm_app_servers` registry, which is the single
+/// reaper of its lifetime (Constitution V) at attempt/workspace teardown, stop,
+/// idle-timeout, out-of-band death, and shutdown. See
+/// `specs/vk/826e-coding-agent-war/data-model.md`.
+struct WarmAppServer {
+    /// The live warm process, moved out of `child_store` on a clean warm turn end.
+    child: Arc<RwLock<AsyncGroupChild>>,
+    /// Process-group id (mirrors `ExecutionProcess.pgid`); informational — the
+    /// `child` handle is what `kill_process_group` reaps. Kept for parity with
+    /// the restart re-adoption path.
+    #[allow(dead_code)]
+    pgid: Option<i32>,
+    /// Connection facts a follow-up turn uses to reach this server (base_url,
+    /// password, session id).
+    reuse: WarmReuseHandle,
+    /// Last time a turn started/ended on this server; drives the idle reaper.
+    last_active: Instant,
+}
+
+impl WarmAppServer {
+    /// True while the underlying process has not exited. A dead entry must be
+    /// reaped and treated as a reuse miss (spec FR-6).
+    async fn is_alive(&self) -> bool {
+        let mut child = self.child.write().await;
+        matches!(child.try_wait(), Ok(None))
+    }
+}
+
+/// The warm app-server registry: session id → warm entry. Kept as a free type +
+/// free functions (below) so the reap/register/take/sweep logic is unit-testable
+/// against a real child process without standing up a DB-backed container.
+type WarmRegistry = RwLock<HashMap<Uuid, WarmAppServer>>;
+
+/// Parse a keep-warm gate value. Truthy = `1`/`true`/`yes`/`on`
+/// (case-insensitive, trimmed); everything else (incl. unset/empty) is off.
+fn parse_keep_warm(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Whether the keep-warm env gate (`VK_KEEP_WARM_AGENTS`) is on. Default off
+/// keeps runtime behavior byte-for-byte identical to today (spec FR-8).
+fn keep_warm_env_enabled() -> bool {
+    parse_keep_warm(&std::env::var(KEEP_WARM_ENV).unwrap_or_default())
+}
+
+/// Reap the warm entry for a session: kill its process group and drop the entry.
+/// Idempotent. This is the owner that closes the leak where a `Completed` turn
+/// row is skipped by the `Running`-only teardown (spec FR-4).
+async fn reap_warm_entry(registry: &WarmRegistry, session_id: &Uuid) {
+    // Remove under the map lock, then kill after releasing it (never hold the
+    // registry lock across the child-kill await).
+    let entry = registry.write().await.remove(session_id);
+    if let Some(entry) = entry {
+        let mut child = entry.child.write().await;
+        if let Err(err) = command::kill_process_group(&mut child).await {
+            tracing::warn!("Failed to reap warm app-server for session {session_id}: {err}");
+        } else {
+            tracing::info!("Reaped warm app-server for session {session_id}");
+        }
+    }
+}
+
+/// Reap a warm entry only if it is still the same generation observed earlier
+/// (matched by `last_active`, which is set fresh on every (re)registration). This
+/// prevents a deferred sweep from killing a warm server that was reaped and
+/// re-registered in the window after it was inspected (a TOCTOU the plain
+/// session-keyed reap would hit).
+async fn reap_warm_entry_if_unchanged(
+    registry: &WarmRegistry,
+    session_id: &Uuid,
+    expected_generation: Instant,
+) {
+    let entry = {
+        let mut map = registry.write().await;
+        match map.get(session_id) {
+            Some(e) if e.last_active == expected_generation => map.remove(session_id),
+            _ => None,
+        }
+    };
+    if let Some(entry) = entry {
+        let mut child = entry.child.write().await;
+        let _ = command::kill_process_group(&mut child).await;
+        tracing::info!("Reaped idle/dead warm app-server for session {session_id}");
+    }
+}
+
+/// Insert a warm child into the registry, reaping any pre-existing entry for the
+/// session — enforcing the at-most-one-warm-process-per-session invariant (spec
+/// FR-1/FR-7). The replace is a single `insert` under one lock so two concurrent
+/// same-session completions can't both see "no old entry" and silently orphan
+/// one process; the displaced entry (if any) is reaped after the lock is dropped.
+async fn register_warm_entry(
+    registry: &WarmRegistry,
+    session_id: Uuid,
+    child: Arc<RwLock<AsyncGroupChild>>,
+    reuse: WarmReuseHandle,
+) {
+    let pgid = child.read().await.id().map(|id| id as i32);
+    let displaced = registry.write().await.insert(
+        session_id,
+        WarmAppServer {
+            child,
+            pgid,
+            reuse,
+            last_active: Instant::now(),
+        },
+    );
+    if let Some(old) = displaced {
+        let mut old_child = old.child.write().await;
+        let _ = command::kill_process_group(&mut old_child).await;
+        tracing::info!("Replaced + reaped prior warm app-server for session {session_id}");
+    }
+    tracing::info!("Registered warm app-server for session {session_id}");
+}
+
+/// Take a live warm entry's child + reuse handle, removing it. Returns the child
+/// as an **owned** `AsyncGroupChild` so a follow-up can re-wrap it. `None` on a
+/// miss, a died-out-of-band entry (reaped, spec FR-6), or the should-not-happen
+/// still-shared case — all of which make the caller cold-start.
+async fn take_live_warm_entry(
+    registry: &WarmRegistry,
+    session_id: &Uuid,
+) -> Option<(AsyncGroupChild, WarmReuseHandle)> {
+    let entry = registry.write().await.remove(session_id)?;
+    if !entry.is_alive().await {
+        let mut child = entry.child.write().await;
+        let _ = command::kill_process_group(&mut child).await;
+        tracing::info!("Warm app-server for session {session_id} died out-of-band; cold-starting");
+        return None;
+    }
+    // Removed from the map, so the registry no longer holds a reference; the sweep
+    // deliberately does not clone child handles, so the Arc is uniquely owned here
+    // and unwraps to an owned child for the follow-up turn.
+    match Arc::try_unwrap(entry.child) {
+        Ok(lock) => Some((lock.into_inner(), entry.reuse)),
+        Err(arc) => {
+            // Should-not-happen: a transient extra reference. Do NOT kill a live
+            // server — re-park it (unchanged generation) and report a miss so the
+            // caller cold-starts; the next turn will find it again.
+            registry.write().await.insert(
+                *session_id,
+                WarmAppServer {
+                    child: arc,
+                    pgid: entry.pgid,
+                    reuse: entry.reuse,
+                    last_active: entry.last_active,
+                },
+            );
+            tracing::warn!(
+                "Warm app-server child for session {session_id} transiently shared; re-parked, cold-starting this turn"
+            );
+            None
+        }
+    }
+}
+
+/// Pure staleness predicate: a warm entry last active at `last_active` is idle
+/// once `timeout` has elapsed by `now`. Extracted so the idle rule is unit-tested
+/// without depending on wall-clock `Instant::now()` (spec FR-5).
+fn warm_entry_is_idle(last_active: Instant, now: Instant, timeout: Duration) -> bool {
+    now.saturating_duration_since(last_active) >= timeout
+}
+
+/// Reap every warm entry whose process has died or has been idle past the
+/// timeout (spec FR-5/FR-6). Level-triggered (Constitution VI).
+///
+/// Each stale candidate is tagged with its `last_active` generation while the
+/// registry is read-locked, then reaped only if that generation is still current
+/// (`reap_warm_entry_if_unchanged`) — so a server reaped-and-re-registered in the
+/// interim is not killed. Liveness (`try_wait`) is a non-blocking poll and the
+/// child locks here are uncontended (a parked warm child has no running turn), so
+/// the brief read-lock hold does not stall registration/reuse; crucially the
+/// sweep does **not** clone child handles, so it never makes `take_live_warm_entry`
+/// see a shared Arc and cold-start a healthy server.
+async fn sweep_idle_warm_entries(registry: &WarmRegistry) {
+    let now = Instant::now();
+    let stale: Vec<(Uuid, Instant)> = {
+        let map = registry.read().await;
+        let mut stale = Vec::new();
+        for (session_id, entry) in map.iter() {
+            let dead = !matches!(entry.child.write().await.try_wait(), Ok(None));
+            if dead || warm_entry_is_idle(entry.last_active, now, WARM_IDLE_TIMEOUT) {
+                stale.push((*session_id, entry.last_active));
+            }
+        }
+        stale
+    };
+    for (session_id, generation) in stale {
+        reap_warm_entry_if_unchanged(registry, &session_id, generation).await;
+    }
+}
+
+/// Reap every warm entry (kill each group, drop all entries). Used on server
+/// shutdown: a warm coding-agent process is a `Completed` row and is **not** in
+/// the persistent-process boot re-adoption path, so it must be killed here or it
+/// orphans across a restart (spec FR-4c).
+async fn reap_all_warm_entries(registry: &WarmRegistry) {
+    let entries: Vec<(Uuid, WarmAppServer)> = registry.write().await.drain().collect();
+    for (session_id, entry) in entries {
+        let mut child = entry.child.write().await;
+        let _ = command::kill_process_group(&mut child).await;
+        tracing::info!("Reaped warm app-server for session {session_id} on shutdown");
+    }
+}
+
 #[derive(Clone)]
 pub struct LocalContainerService {
     db: DBService,
@@ -84,6 +307,12 @@ pub struct LocalContainerService {
     /// Process group ids of dev servers adopted from a previous server
     /// instance. These have no child handle; they are managed by pgid.
     adopted_pgids: Arc<RwLock<HashMap<Uuid, i32>>>,
+    /// Warm app-servers kept alive between turns, keyed by **session id** (one
+    /// active agent session per attempt). This registry is the single owner of a
+    /// warm process's lifetime — it reaps at teardown/stop/idle/death, closing
+    /// the leak where a `Completed` turn row is skipped by `try_stop`. Phase 2,
+    /// see `specs/vk/826e-coding-agent-war/`.
+    warm_app_servers: Arc<RwLock<HashMap<Uuid, WarmAppServer>>>,
     workspace_touch_times: Arc<RwLock<HashMap<Uuid, Instant>>>,
     config: Arc<RwLock<Config>>,
     git: GitService,
@@ -115,6 +344,7 @@ impl LocalContainerService {
         let exit_monitor_handles = Arc::new(RwLock::new(HashMap::new()));
         let raw_log_tailers = Arc::new(RwLock::new(HashMap::new()));
         let adopted_pgids = Arc::new(RwLock::new(HashMap::new()));
+        let warm_app_servers = Arc::new(RwLock::new(HashMap::new()));
         let workspace_touch_times = Arc::new(RwLock::new(HashMap::new()));
         let notification_service = NotificationService::new(config.clone());
 
@@ -128,6 +358,7 @@ impl LocalContainerService {
             exit_monitor_handles,
             raw_log_tailers,
             adopted_pgids,
+            warm_app_servers,
             workspace_touch_times,
             config,
             git,
@@ -218,6 +449,61 @@ impl LocalContainerService {
     async fn remove_child_from_store(&self, id: &Uuid) {
         let mut map = self.child_store.write().await;
         map.remove(id);
+    }
+
+    // ===== Warm app-server registry (Phase 2) =========================
+    // The registry is the single owner of a warm process's lifetime. It is
+    // populated when a persistent app-server finishes a turn cleanly (and the
+    // gate is on) and drained by the reap paths below. See
+    // `specs/vk/826e-coding-agent-war/`.
+
+    /// Whether warm coding-agent process reuse is enabled (env gate, default off,
+    /// spec FR-8). Thin wrapper over `keep_warm_env_enabled` (unit-tested).
+    fn warm_agents_enabled(&self) -> bool {
+        keep_warm_env_enabled()
+    }
+
+    /// Move a warm child (already removed from `child_store`) into the registry,
+    /// keyed by session id (spec FR-1/FR-7).
+    /// Park a cleanly-finished warm child (still in `child_store`) into the warm
+    /// registry, keyed by session. The child is inserted into `warm_app_servers`
+    /// **before** it is removed from `child_store`, so a concurrent stop/teardown
+    /// always finds it in at least one owner — never in a gap where it is invisible
+    /// to both and could leak (Codex-review finding). Reaps any displaced
+    /// same-session entry (one-per-session, FR-1/FR-7). A no-op if the child was
+    /// already removed (e.g. a concurrent stop won the race).
+    async fn park_warm_child(&self, session_id: Uuid, exec_id: Uuid, reuse: WarmReuseHandle) {
+        let Some(child) = self.child_store.read().await.get(&exec_id).cloned() else {
+            return;
+        };
+        register_warm_entry(&self.warm_app_servers, session_id, child, reuse).await;
+        // The registry now owns the child; drop the child_store handle last.
+        self.child_store.write().await.remove(&exec_id);
+    }
+
+    /// Reap the warm app-server for a session: kill its group + drop the entry.
+    /// Idempotent. Closes the `Completed`-row teardown leak (spec FR-4).
+    async fn reap_warm_server(&self, session_id: &Uuid) {
+        reap_warm_entry(&self.warm_app_servers, session_id).await;
+    }
+
+    /// Take a live warm entry's child + reuse handle for a follow-up turn
+    /// (spec FR-2/FR-6). Returns `None` on a miss / dead entry (cold start).
+    async fn take_live_warm_server(
+        &self,
+        session_id: &Uuid,
+    ) -> Option<(AsyncGroupChild, WarmReuseHandle)> {
+        take_live_warm_entry(&self.warm_app_servers, session_id).await
+    }
+
+    /// Reap warm entries that are dead or idle past the timeout (spec FR-5/FR-6).
+    async fn sweep_idle_warm_servers(&self) {
+        sweep_idle_warm_entries(&self.warm_app_servers).await;
+    }
+
+    /// Reap every warm app-server on shutdown (spec FR-4c).
+    async fn reap_all_warm_servers(&self) {
+        reap_all_warm_entries(&self.warm_app_servers).await;
     }
 
     async fn add_cancellation_token(&self, id: Uuid, token: CancellationToken) {
@@ -448,6 +734,20 @@ impl LocalContainerService {
                     });
             }
         });
+
+        // Warm app-server idle reaper (Phase 2). A separate, lighter cadence than
+        // the 30-min workspace sweep so an idle warm process is reaped within a
+        // few minutes of crossing WARM_IDLE_TIMEOUT rather than up to an extra
+        // 30 minutes later. Level-triggered (Constitution VI); a no-op while the
+        // registry is empty (i.e. whenever the keep-warm gate is off).
+        let warm_container = self.clone();
+        tokio::spawn(async move {
+            let mut sweep_interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // 5 minutes
+            loop {
+                sweep_interval.tick().await;
+                warm_container.sweep_idle_warm_servers().await;
+            }
+        });
     }
 
     /// Record the current HEAD commit for each repository as the "after" state.
@@ -611,8 +911,10 @@ impl LocalContainerService {
     fn spawn_exit_monitor(
         &self,
         exec_id: &Uuid,
+        session_id: Uuid,
         exit_signal: Option<ExecutorExitSignal>,
         keep_warm: bool,
+        warm_reuse: Option<WarmReuseSignal>,
     ) -> JoinHandle<()> {
         let exec_id = *exec_id;
         let child_store = self.child_store.clone();
@@ -672,6 +974,31 @@ impl LocalContainerService {
                 // Process exit
                 exit_status_result = &mut process_exit_rx => {
                     status_result = exit_status_result.unwrap_or_else(|e| Err(std::io::Error::other(e)));
+                }
+            }
+
+            // Park a cleanly-finished warm app-server into the registry *now*,
+            // before finalization runs `try_start_next_action` / queued
+            // follow-ups — so an immediately chained follow-up reuses the warm
+            // server instead of cold-starting. The reuse handle was sent by the
+            // executor before the turn ran, so `try_recv` gets it without an
+            // `.await` (no window where the child is invisible to teardown). If
+            // it is somehow absent we reap rather than strand the process.
+            if kept_warm {
+                let handle = warm_reuse.and_then(|mut rx| rx.try_recv().ok());
+                match handle {
+                    Some(handle) => {
+                        container.park_warm_child(session_id, exec_id, handle).await;
+                    }
+                    None => {
+                        if let Some(child_lock) = child_store.write().await.remove(&exec_id) {
+                            let mut c = child_lock.write().await;
+                            let _ = command::kill_process_group(&mut c).await;
+                        }
+                        tracing::warn!(
+                            "Warm turn for session {session_id} produced no reuse handle; reaped"
+                        );
+                    }
                 }
             }
 
@@ -957,12 +1284,13 @@ impl LocalContainerService {
             // SIGKILL any orphaned children (e.g. MCP servers) still in the
             // process group. The executor itself is already done — either it
             // exited naturally or was killed in the exit-signal branch above.
-            // A warm app-server is exempt: it stays alive (and in the child
-            // store, so it remains reachable by the stop/teardown paths) for
-            // reuse by the next turn. NOTE for enabling keep_warm (Phase 2):
-            // its execution row is Completed here, and workspace teardown
-            // (try_stop) only stops Running executions — the warm registry
-            // must own reaping at attempt/workspace end or the process leaks.
+            //
+            // A warm app-server is exempt: it was already moved into the
+            // session-keyed `warm_app_servers` registry above (before
+            // finalization), which becomes its single reaper
+            // (stop/teardown/idle/death/shutdown), so it is no longer in
+            // `child_store` and must not be killed here. Only non-warm children
+            // are reaped at this tail.
             if !kept_warm {
                 if let Some(child_lock) = child_store.read().await.get(&exec_id).cloned() {
                     let mut child = child_lock.write().await;
@@ -1081,16 +1409,24 @@ impl LocalContainerService {
     async fn track_child_msgs_in_store(&self, id: Uuid, child: &mut AsyncGroupChild) {
         let store = Arc::new(MsgStore::new());
 
-        let out = child.inner().stdout.take().expect("no stdout");
-        let err = child.inner().stderr.take().expect("no stderr");
-
-        // Map stdout bytes -> LogMsg::Stdout
-        let out = ReaderStream::new(out)
-            .map_ok(|chunk| LogMsg::Stdout(String::from_utf8_lossy(&chunk).into_owned()));
-
-        // Map stderr bytes -> LogMsg::Stderr
-        let err = ReaderStream::new(err)
-            .map_ok(|chunk| LogMsg::Stderr(String::from_utf8_lossy(&chunk).into_owned()));
+        // stdout/stderr may be absent when re-tracking a warm-reused child: its
+        // original streams were consumed by the first turn's forwarder (a warm
+        // follow-up installs a fresh stdout pipe but has no new stderr). Treat a
+        // missing stream as empty instead of panicking (Phase 2 reuse path).
+        let out: futures::stream::BoxStream<'static, Result<LogMsg, io::Error>> =
+            match child.inner().stdout.take() {
+                Some(out) => ReaderStream::new(out)
+                    .map_ok(|chunk| LogMsg::Stdout(String::from_utf8_lossy(&chunk).into_owned()))
+                    .boxed(),
+                None => futures::stream::empty().boxed(),
+            };
+        let err: futures::stream::BoxStream<'static, Result<LogMsg, io::Error>> =
+            match child.inner().stderr.take() {
+                Some(err) => ReaderStream::new(err)
+                    .map_ok(|chunk| LogMsg::Stderr(String::from_utf8_lossy(&chunk).into_owned()))
+                    .boxed(),
+                None => futures::stream::empty().boxed(),
+            };
 
         // If you have a JSON Patch source, map it to LogMsg::JsonPatch too, then select all three.
 
@@ -1460,6 +1796,13 @@ impl ContainerService for LocalContainerService {
         &self.msg_stores
     }
 
+    /// Drain the warm registry for this session on teardown (the leak fix — the
+    /// warm process's turn row is `Completed` and the `Running`-only stop loop
+    /// would skip it). See `specs/vk/826e-coding-agent-war/` (spec FR-4b).
+    async fn reap_warm_processes_for_session(&self, session_id: Uuid) {
+        self.reap_warm_server(&session_id).await;
+    }
+
     fn db(&self) -> &DBService {
         &self.db
     }
@@ -1741,22 +2084,84 @@ impl ContainerService for LocalContainerService {
         #[cfg(not(unix))]
         let dev_server_raw_log: Option<PathBuf> = None;
 
-        // Create the child and stream, add to execution tracker with timeout
-        let mut spawned = tokio::time::timeout(
-            Duration::from_secs(30),
-            executor_action.spawn(&current_dir, approvals_service, &env),
-        )
-        .await
-        .map_err(|_| {
-            ContainerError::Other(anyhow!(
-                "Timeout: process took more than 30 seconds to start"
-            ))
-        })??;
+        // Phase 2 warm reuse: when the gate is on and this is an OpenCode
+        // follow-up whose session has a *live* warm server parked, drive the turn
+        // against that server instead of spawning a new process. A miss or a
+        // died-out-of-band entry reaps itself and falls through to a normal cold
+        // start. The `SpawnedChild` from either path flows through the identical
+        // pipeline below (pgid record, msg tracking, exit monitor).
+        let warm_reuse_hit = if self.warm_agents_enabled()
+            && executor_action.base_executor() == Some(BaseCodingAgent::Opencode)
+            && matches!(
+                executor_action.typ(),
+                ExecutorActionType::CodingAgentFollowUpRequest(_)
+            ) {
+            self.take_live_warm_server(&execution_process.session_id)
+                .await
+        } else {
+            None
+        };
+
+        // Create the child and stream, add to execution tracker with timeout.
+        // On a warm-reuse hit, try the warm path first; if it errors (e.g. the
+        // warm server failed a health check), fall back to a normal cold start
+        // rather than failing the whole turn — `spawn_warm_follow_up` has already
+        // killed the warm server's process group on that error path, so a fresh
+        // server is cleanly spawned with no orphan.
+        let warm_spawned = if let Some((warm_child, reuse)) = warm_reuse_hit {
+            let ExecutorActionType::CodingAgentFollowUpRequest(follow_up) = executor_action.typ()
+            else {
+                unreachable!("warm reuse is only taken for follow-up requests")
+            };
+            tracing::info!(
+                "Reusing warm OpenCode server for session {}",
+                execution_process.session_id
+            );
+            match follow_up
+                .spawn_warm_follow_up(
+                    warm_child,
+                    &reuse,
+                    &current_dir,
+                    approvals_service.clone(),
+                    &env,
+                )
+                .await
+            {
+                Ok(spawned) => Some(spawned),
+                Err(e) => {
+                    tracing::warn!(
+                        "Warm reuse failed for session {}, cold-starting instead: {e}",
+                        execution_process.session_id
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut spawned = match warm_spawned {
+            Some(spawned) => spawned,
+            None => tokio::time::timeout(
+                Duration::from_secs(30),
+                executor_action.spawn(&current_dir, approvals_service, &env),
+            )
+            .await
+            .map_err(|_| {
+                ContainerError::Other(anyhow!(
+                    "Timeout: process took more than 30 seconds to start"
+                ))
+            })??,
+        };
 
         // Persistent app-servers ask to be kept warm across turns: on a clean
         // turn-completion signal the exit monitor ends the turn without killing
-        // the process group. Captured before `spawned` is consumed below.
-        let keep_warm = spawned.keep_warm;
+        // the process group. The container is the gate authority — an executor's
+        // declared capability is only honored when the env gate is on (spec
+        // FR-8), so default behavior is unchanged. Captured before `spawned` is
+        // consumed below, along with the reuse handle the executor surfaces.
+        let keep_warm = spawned.keep_warm && self.warm_agents_enabled();
+        let warm_reuse = spawned.warm_reuse.take();
 
         // Record the process group id (== leader pid for grouped spawns) so a
         // later boot can clean up the group if this server dies uncleanly.
@@ -1788,8 +2193,16 @@ impl ContainerService for LocalContainerService {
                 .await;
         }
 
-        // Spawn unified exit monitor: watches OS exit and optional executor signal
-        let hn = self.spawn_exit_monitor(&execution_process.id, spawned.exit_signal, keep_warm);
+        // Spawn unified exit monitor: watches OS exit and optional executor
+        // signal. When kept warm, the monitor moves the child into the warm
+        // registry keyed by this session, using `warm_reuse` as the handle.
+        let hn = self.spawn_exit_monitor(
+            &execution_process.id,
+            execution_process.session_id,
+            spawned.exit_signal,
+            keep_warm,
+            warm_reuse,
+        );
         self.add_exit_monitor_handle(execution_process.id, hn).await;
 
         Ok(())
@@ -1800,6 +2213,12 @@ impl ContainerService for LocalContainerService {
         execution_process: &ExecutionProcess,
         status: ExecutionProcessStatus,
     ) -> Result<(), ContainerError> {
+        // Explicitly stopping any execution in a session also reaps that
+        // session's warm app-server, if one is parked (spec FR-4a). A warm
+        // process has no running turn so it is not the `child` below — reap it
+        // by session key. Idempotent no-op when there is none.
+        self.reap_warm_server(&execution_process.session_id).await;
+
         let Some(child) = self.get_child_from_store(&execution_process.id).await else {
             // No in-memory handle: the process may have been adopted from a
             // previous server instance and is managed by pgid only.
@@ -2083,6 +2502,13 @@ impl ContainerService for LocalContainerService {
 
     async fn kill_all_running_processes(&self) -> Result<(), ContainerError> {
         tracing::info!("Killing all running processes");
+
+        // Parked warm app-servers are `Completed` rows, so `find_running()` below
+        // does not see them, and (being non-persistent `CodingAgent`s) they are
+        // not in the boot re-adoption path — reap them explicitly on shutdown or
+        // they orphan across a restart (spec FR-4c).
+        self.reap_all_warm_servers().await;
+
         let running_processes = ExecutionProcess::find_running(&self.db.pool).await?;
 
         tracing::info!(
@@ -2141,7 +2567,17 @@ fn success_exit_status() -> std::process::ExitStatus {
 
 #[cfg(test)]
 mod warm_tests {
-    use super::should_keep_warm;
+    use std::{sync::Arc, time::Duration};
+
+    use command_group::{AsyncCommandGroup, AsyncGroupChild};
+    use tokio::sync::RwLock;
+    use uuid::Uuid;
+
+    use super::{
+        WARM_IDLE_TIMEOUT, WarmAppServer, WarmRegistry, WarmReuseHandle, parse_keep_warm,
+        reap_all_warm_entries, reap_warm_entry, reap_warm_entry_if_unchanged, register_warm_entry,
+        should_keep_warm, sweep_idle_warm_entries, take_live_warm_entry, warm_entry_is_idle,
+    };
 
     // The exit-monitor keeps a persistent app-server warm only on a clean turn
     // end: warm executor + success + not explicitly stopped. Every other cell of
@@ -2170,5 +2606,275 @@ mod warm_tests {
         assert!(!should_keep_warm(false, true, false));
         assert!(!should_keep_warm(false, false, false));
         assert!(!should_keep_warm(false, true, true));
+    }
+
+    // ===== Phase 2 warm registry ==================================
+
+    fn handle(url: &str) -> WarmReuseHandle {
+        WarmReuseHandle {
+            base_url: url.to_string(),
+            server_password: "secret".to_string(),
+            agent_session_id: None,
+        }
+    }
+
+    /// A long-lived child process to stand in for a warm app-server.
+    async fn spawn_live_child() -> Arc<RwLock<AsyncGroupChild>> {
+        let child = tokio::process::Command::new("sleep")
+            .arg("300")
+            .group_spawn()
+            .expect("spawn sleep");
+        Arc::new(RwLock::new(child))
+    }
+
+    /// A child that has already exited and been reaped (stands in for a warm
+    /// server that died out-of-band).
+    async fn spawn_dead_child() -> Arc<RwLock<AsyncGroupChild>> {
+        let arc = spawn_live_child().await;
+        {
+            let mut c = arc.write().await;
+            let _ = c.kill().await;
+            let _ = c.wait().await;
+        }
+        arc
+    }
+
+    fn empty_registry() -> WarmRegistry {
+        RwLock::new(std::collections::HashMap::new())
+    }
+
+    #[test]
+    fn gate_parsing_default_off_truthy_on() {
+        // Default (unset/empty) and junk values are off; only explicit truthy
+        // strings turn it on (spec FR-8).
+        for off in ["", "  ", "0", "false", "no", "off", "nope"] {
+            assert!(!parse_keep_warm(off), "{off:?} should be off");
+        }
+        for on in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(parse_keep_warm(on), "{on:?} should be on");
+        }
+    }
+
+    #[test]
+    fn idle_predicate_uses_timeout() {
+        let base = std::time::Instant::now();
+        let timeout = Duration::from_secs(60);
+        // Fresh: not idle. Exactly-and-past the timeout: idle.
+        assert!(!warm_entry_is_idle(base, base, timeout));
+        assert!(!warm_entry_is_idle(
+            base,
+            base + Duration::from_secs(59),
+            timeout
+        ));
+        assert!(warm_entry_is_idle(base, base + timeout, timeout));
+        assert!(warm_entry_is_idle(
+            base,
+            base + Duration::from_secs(120),
+            timeout
+        ));
+    }
+
+    #[tokio::test]
+    async fn register_then_take_returns_live_child() {
+        let reg = empty_registry();
+        let session = Uuid::new_v4();
+        register_warm_entry(&reg, session, spawn_live_child().await, handle("http://a")).await;
+
+        let taken = take_live_warm_entry(&reg, &session).await;
+        assert!(taken.is_some(), "a live warm entry is a reuse hit (FR-2)");
+        let (mut child, reuse) = taken.unwrap();
+        assert_eq!(reuse.base_url, "http://a");
+        // The take removed it: registry is empty, no double-reuse.
+        assert!(reg.read().await.is_empty());
+        let _ = child.kill().await;
+    }
+
+    #[tokio::test]
+    async fn register_enforces_one_per_session() {
+        let reg = empty_registry();
+        let session = Uuid::new_v4();
+        // Registering a second warm server for the same session reaps the first
+        // and keeps exactly one entry (FR-1/FR-7).
+        register_warm_entry(
+            &reg,
+            session,
+            spawn_live_child().await,
+            handle("http://first"),
+        )
+        .await;
+        register_warm_entry(
+            &reg,
+            session,
+            spawn_live_child().await,
+            handle("http://second"),
+        )
+        .await;
+        assert_eq!(reg.read().await.len(), 1);
+        let (mut child, reuse) = take_live_warm_entry(&reg, &session).await.unwrap();
+        assert_eq!(reuse.base_url, "http://second", "the newer server wins");
+        let _ = child.kill().await;
+    }
+
+    #[tokio::test]
+    async fn reap_removes_and_kills() {
+        let reg = empty_registry();
+        let session = Uuid::new_v4();
+        let child = spawn_live_child().await;
+        let watch = child.clone(); // inspect liveness after reap
+        register_warm_entry(&reg, session, child, handle("http://a")).await;
+
+        reap_warm_entry(&reg, &session).await;
+        assert!(reg.read().await.is_empty(), "reap drops the entry (FR-4)");
+
+        // The process was killed by the reap.
+        let mut guard = watch.write().await;
+        let _ = guard.wait().await;
+        assert!(
+            matches!(guard.try_wait(), Ok(Some(_)) | Err(_)),
+            "reaped process is dead"
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_is_idempotent_noop_when_absent() {
+        let reg = empty_registry();
+        // Reaping a session with no warm entry is a harmless no-op (FR-4).
+        reap_warm_entry(&reg, &Uuid::new_v4()).await;
+        assert!(reg.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn take_dead_entry_is_miss_and_reaped() {
+        let reg = empty_registry();
+        let session = Uuid::new_v4();
+        register_warm_entry(
+            &reg,
+            session,
+            spawn_dead_child().await,
+            handle("http://dead"),
+        )
+        .await;
+
+        // A dead warm server is not attached to — it is treated as a miss so the
+        // caller cold-starts, and the entry is dropped (FR-6).
+        assert!(take_live_warm_entry(&reg, &session).await.is_none());
+        assert!(reg.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_reaps_all_warm_entries() {
+        let reg = empty_registry();
+        // On shutdown every parked warm server is reaped (FR-4c) — none survive.
+        register_warm_entry(
+            &reg,
+            Uuid::new_v4(),
+            spawn_live_child().await,
+            handle("http://a"),
+        )
+        .await;
+        register_warm_entry(
+            &reg,
+            Uuid::new_v4(),
+            spawn_live_child().await,
+            handle("http://b"),
+        )
+        .await;
+        assert_eq!(reg.read().await.len(), 2);
+
+        reap_all_warm_entries(&reg).await;
+        assert!(
+            reg.read().await.is_empty(),
+            "all warm entries reaped on shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn conditional_reap_respects_generation() {
+        let reg = empty_registry();
+        let session = Uuid::new_v4();
+        let generation = std::time::Instant::now();
+        let child = spawn_live_child().await;
+        reg.write().await.insert(
+            session,
+            WarmAppServer {
+                child,
+                pgid: None,
+                reuse: handle("http://x"),
+                last_active: generation,
+            },
+        );
+
+        // A stale (non-matching) generation must NOT reap — models a server that
+        // was reaped + re-registered after the sweep inspected it.
+        reap_warm_entry_if_unchanged(&reg, &session, generation + Duration::from_secs(1)).await;
+        assert_eq!(
+            reg.read().await.len(),
+            1,
+            "mismatched generation is not reaped"
+        );
+
+        // The matching generation reaps it.
+        reap_warm_entry_if_unchanged(&reg, &session, generation).await;
+        assert!(reg.read().await.is_empty(), "matching generation is reaped");
+    }
+
+    #[tokio::test]
+    async fn idle_sweep_reaps_stale_entry() {
+        let reg = empty_registry();
+        let session = Uuid::new_v4();
+        // Insert directly with a last_active well past the timeout to exercise the
+        // idle branch deterministically (FR-5).
+        let child = spawn_live_child().await;
+        let watch = child.clone();
+        let stale_since = std::time::Instant::now()
+            .checked_sub(WARM_IDLE_TIMEOUT + Duration::from_secs(60))
+            .unwrap_or_else(std::time::Instant::now);
+        reg.write().await.insert(
+            session,
+            WarmAppServer {
+                child,
+                pgid: None,
+                reuse: handle("http://idle"),
+                last_active: stale_since,
+            },
+        );
+
+        sweep_idle_warm_entries(&reg).await;
+        assert!(reg.read().await.is_empty(), "idle entry reaped (FR-5)");
+        let mut guard = watch.write().await;
+        let _ = guard.wait().await;
+        assert!(matches!(guard.try_wait(), Ok(Some(_)) | Err(_)));
+    }
+
+    #[tokio::test]
+    async fn idle_sweep_keeps_fresh_live_entry_but_reaps_dead() {
+        let reg = empty_registry();
+        let fresh = Uuid::new_v4();
+        let dead = Uuid::new_v4();
+        register_warm_entry(
+            &reg,
+            fresh,
+            spawn_live_child().await,
+            handle("http://fresh"),
+        )
+        .await;
+        register_warm_entry(&reg, dead, spawn_dead_child().await, handle("http://dead")).await;
+
+        sweep_idle_warm_entries(&reg).await;
+
+        let map = reg.read().await;
+        assert!(
+            map.contains_key(&fresh),
+            "a fresh live entry survives the sweep"
+        );
+        assert!(
+            !map.contains_key(&dead),
+            "a dead entry is reaped by the sweep (FR-6)"
+        );
+        drop(map);
+        // cleanup
+        if let Some((mut child, _)) = take_live_warm_entry(&reg, &fresh).await {
+            let _ = child.kill().await;
+        }
     }
 }

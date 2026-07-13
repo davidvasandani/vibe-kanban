@@ -121,6 +121,7 @@ export function KanbanIssuePanelContainer({
     getTagsForIssue,
     getPullRequestsForIssue,
     getWorkspacesForIssue,
+    getJiraLinkForIssue,
     isLoading: projectLoading,
   } = useProjectContext();
   const selectedKanbanIssueId = routeState.issueId;
@@ -224,6 +225,19 @@ export function KanbanIssuePanelContainer({
     if (!creatorUserId) return null;
     return membersWithProfilesById.get(creatorUserId) ?? null;
   }, [membersWithProfilesById, creatorUserId]);
+
+  // Source Jira ticket for the open issue, shaped for the panel header badge.
+  // Same lookup the kanban card uses, so card and panel never diverge.
+  const jiraLink = useMemo(() => {
+    if (!selectedIssue) return undefined;
+    const link = getJiraLinkForIssue(selectedIssue.id);
+    if (!link) return undefined;
+    return {
+      issueKey: link.jira_issue_key,
+      url: link.jira_browse_url,
+      active: link.link_state === 'active',
+    };
+  }, [selectedIssue, getJiraLinkForIssue]);
 
   // Find parent issue if current issue has one
   const parentIssue = useMemo(() => {
@@ -1218,6 +1232,7 @@ export function KanbanIssuePanelContainer({
       }
       onCopyLink={mode === 'edit' ? handleCopyLink : undefined}
       onMoreActions={mode === 'edit' ? handleMoreActions : undefined}
+      jiraLink={mode === 'edit' ? jiraLink : undefined}
       onPasteFiles={onPasteFiles}
       localAttachments={localAttachments}
       dropzoneProps={{ getRootProps, getInputProps, isDragActive }}

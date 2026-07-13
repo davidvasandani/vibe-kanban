@@ -81,6 +81,7 @@ pub fn spawn_local_output_process()
         exit_signal: None,
         cancel: None,
         keep_warm: false,
+        warm_reuse: None,
     };
 
     Ok((spawned, writer))

@@ -788,9 +788,11 @@ impl Codex {
             child,
             exit_signal: Some(exit_signal_rx),
             cancel: Some(cancel),
-            // Phase 1: substrate only — not yet kept warm across turns (see
-            // specs/vk/1a64-coding-agent-pro/plan.md, Phase 3 enables Codex).
+            // Phase 1: substrate only — not yet kept warm across turns. Codex
+            // warm reuse requires decoupling `turn/completed` from the reader-loop
+            // teardown — see specs/vk/826e-coding-agent-war/research.md (Phase 3).
             keep_warm: false,
+            warm_reuse: None,
         })
     }
 }

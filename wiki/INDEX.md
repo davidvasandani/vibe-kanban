@@ -24,7 +24,11 @@ contributed to it.
   from `is_persistent()`), the exit monitor's **two** kill points (exit-signal
   `killpg` + tail `start_kill`/`kill_on_drop`), the 250ms OS-exit-watcher
   poll-loop gotcha, why teardown skips `Completed` executions (warm-process
-  trap), the pgid re-adoption substrate, and the keep-warm enablement order.
+  trap), the pgid re-adoption substrate, the keep-warm enablement order, **and
+  the Phase-2 warm registry** — the async `base_url` surfacing over a oneshot,
+  park-before-finalization + insert-before-remove, `Arc::try_unwrap` ownership
+  (and why the idle sweep must not clone child handles), generation-conditional
+  reap, the env gate, and the Codex/ACP Phase-3 decisions.
 - [slack-shortcut-ai-summarization.md](slack-shortcut-ai-summarization.md) —
   Optional AI thread summarization for the Slack "Create issue from message"
   shortcut: the ack-fast/enrich-later shape (all slow work in the post-ack
@@ -56,13 +60,24 @@ contributed to it.
   adjustment on toggle (never a selection-watching reseed effect), and the
   edit-mode "Update Issue" apply rules (cancel debounce, latest-description
   ref, pending-attachments guard).
+- [create-mode-repo-branch-defaulting.md](create-mode-repo-branch-defaulting.md)
+  — How the create-issue screen ("Which repositories…") picks a repo's target
+  branch: the single `addRepoWithBranchSelection` seam (vs the separate
+  "Change branch" modal path), the `resolveDefaultBranch` fallback order
+  (configured default → `origin/main` → `origin/master` → current → first),
+  and the gotchas — remote-prefixed branch names (`origin/main`, not `main`),
+  `get_all_branches` sorting current-first (so `branches[0]` ≠ mainline),
+  NULL-at-registration `default_target_branch`, and the dormant importer-less
+  `useRepoBranchSelection`/`RepoBranchSelector` stack with divergent defaults.
 - [kanban-issue-panel-sections.md](kanban-issue-panel-sections.md) — The
   issue detail/create panel (`KanbanIssuePanel.tsx`): section order is owned
   by the `packages/ui` component (containers only supply render props), the
   edit-mode section guard, the one-separator border convention (flip
   `border-t`/`border-b` when moving a section across the title/description
-  block), and the rendered-DOM order-test recipe incl. the
-  `NODE_ENV=production` act() gotcha.
+  block), the rendered-DOM order-test recipe incl. the
+  `NODE_ENV=production` act() gotcha, and how an external-connector link
+  (Jira badge) is surfaced identically on the card and the panel header (one
+  `JiraBadge` + `jiraLink` data prop + `getJiraLinkForIssue` lookup).
 - [kanban-items-state-and-activity-grouping.md](kanban-items-state-and-activity-grouping.md)
   — The `items` array ↔ drag-and-drop index/sort_order contract, the
   `isSyncingRef` rebuild-swallowing gotcha, the In progress Active/Waiting
