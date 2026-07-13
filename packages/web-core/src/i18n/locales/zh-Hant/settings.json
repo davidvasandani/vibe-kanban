@@ -446,7 +446,11 @@
         "connecting": "連線中…",
         "connectFailed": "授權失敗",
         "popupClosed": "授權視窗在完成前已關閉。",
-        "popupBlocked": "彈出視窗被封鎖 — 請允許此網站的彈出視窗後重試。"
+        "popupBlocked": "彈出視窗被封鎖 — 請允許此網站的彈出視窗後重試。",
+        "useLocalhostCallback": "使用 localhost 回呼（適用於嚴格的伺服器或手動核准）",
+        "manualHint": "在彈出視窗中核准，然後將導向頁面的網址（或代碼）貼在此處。",
+        "manualPlaceholder": "貼上重新導向的網址或代碼",
+        "finishConnect": "完成"
       }
     },
     "projects": {

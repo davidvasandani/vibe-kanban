@@ -20,10 +20,13 @@ user would paste one by hand. No new secret store, no DB change.
   already has `sha2`/`rand`/`base64`.
 - **Flow routes**: `crates/server/src/routes/mcp_auth.rs` —
   `POST /api/mcp-auth/start?executor=`, `GET /api/mcp-auth/callback`,
-  `GET /api/mcp-auth/status`. Mounted in `relay_signed_routes`; the origin
-  middleware passes header-less top-level navigations and the signature
-  middleware passes non-relay requests, so a browser redirect reaches the
-  callback (precedent: `handoff_complete` in `routes/oauth.rs`).
+  `POST /api/mcp-auth/complete`, `GET /api/mcp-auth/status`. Mounted in
+  `relay_signed_routes`; the origin middleware passes header-less top-level
+  navigations and the signature middleware passes non-relay requests, so a
+  browser redirect reaches the callback (precedent: `handoff_complete` in
+  `routes/oauth.rs`). `callback` and `complete` share one `exchange_and_store`
+  helper (code exchange + token persist) so the browser and manual paths can't
+  drift.
 - **Flow state**: module-local `LazyLock<RwLock<HashMap<Uuid, PendingFlow>>>`,
   10-min TTL pruned on access. The exchange inputs (PKCE verifier, client_id,
   token endpoint) live in an `Option` and are `take()`n under the write lock —
@@ -48,6 +51,22 @@ user would paste one by hand. No new secret store, no DB change.
   `Caddyfile.example` would otherwise register an `http://` URI the AS
   rejects). Relay-proxied requests get a loud error instead — their Host is
   a loopback the user's browser can never reach.
+- **Strict-allowlist servers + the loopback escape hatch.** Some
+  authorization servers (e.g. `sgsc-mcp`) only accept redirect URIs belonging
+  to known MCP clients (Claude/ChatGPT/Codex/Cursor) or `localhost` — a
+  server-hosted VK's public callback is rejected at DCR
+  ("redirect_uri must be a trusted … callback"). The `loopback: bool` on
+  `start` registers `http://localhost:<vk-port>/api/mcp-auth/callback`
+  instead (port from `deployment.client_info().get_server_addr()`) and skips
+  the relay guard. When the browser can reach that loopback (same machine /
+  SSH port-forward) the callback auto-completes; otherwise the user pastes the
+  redirected URL — or the bare code — into `/mcp-auth/complete`, which
+  `parse_pasted_code`s it, enforces the `state` CSRF binding when the paste
+  carried one, consumes the flow's exchange inputs once, and runs
+  `exchange_and_store`. The frontend reveals the paste field for loopback
+  flows **and** background-polls `status` so the reachable case still
+  finalizes (refresh snapshot + re-test) rather than getting stuck in manual
+  mode — otherwise a later Save would drop the just-written token.
 - **Popup blockers**: `window.open('about:blank', …)` must happen
   synchronously in the click handler; navigate it after the async start call
   resolves. Opening after an `await` loses the transient user activation.

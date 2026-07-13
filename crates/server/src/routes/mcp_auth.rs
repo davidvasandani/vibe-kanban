@@ -23,11 +23,12 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::Query,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode, header::HOST},
     response::{Json as ResponseJson, Response},
     routing::{get, post},
 };
+use deployment::Deployment;
 use executors::{
     executors::{BaseCodingAgent, StandardCodingAgentExecutor},
     mcp_config::read_agent_config,
@@ -113,12 +114,33 @@ pub struct McpAuthStartRequest {
     /// plain GET re-elicits one.
     #[serde(default)]
     pub www_authenticate: Option<String>,
+    /// Register a `http://localhost:<port>` callback instead of deriving it
+    /// from the request host. Authorization servers with a strict allowlist
+    /// (Claude/ChatGPT/Codex/Cursor/localhost) reject a public callback; a
+    /// loopback one is accepted. When the browser can reach that loopback
+    /// (same machine or an SSH port-forward) the callback completes
+    /// automatically; otherwise the user pastes the redirected URL/code back
+    /// via `/mcp-auth/complete`.
+    #[serde(default)]
+    pub loopback: bool,
 }
 
 #[derive(TS, Debug, Serialize)]
 pub struct McpAuthStartResponse {
     pub flow_id: Uuid,
     pub authorize_url: String,
+    /// True when this flow used a loopback callback, so the frontend knows to
+    /// offer manual code entry if the popup can't reach it.
+    pub loopback: bool,
+}
+
+#[derive(TS, Debug, Deserialize)]
+pub struct McpAuthCompleteRequest {
+    pub flow_id: Uuid,
+    /// Either the bare authorization `code`, or the full redirect URL the
+    /// browser landed on (`http://localhost:…/callback?code=…&state=…`) — the
+    /// user copies whichever is easier.
+    pub code: String,
 }
 
 #[derive(TS, Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -171,6 +193,7 @@ pub fn router() -> Router<DeploymentImpl> {
     Router::new()
         .route("/mcp-auth/start", post(start))
         .route("/mcp-auth/callback", get(callback))
+        .route("/mcp-auth/complete", post(complete))
         .route("/mcp-auth/status", get(status))
 }
 
@@ -191,6 +214,7 @@ fn agent_config_path(
 }
 
 async fn start(
+    State(deployment): State<DeploymentImpl>,
     Query(query): Query<McpAuthQuery>,
     headers: HeaderMap,
     Json(payload): Json<McpAuthStartRequest>,
@@ -218,50 +242,69 @@ async fn start(
         )));
     };
 
-    // Relay-proxied requests reach us with a loopback Host the user's browser
-    // cannot be redirected back to, so the flow could never complete — fail
-    // loudly instead of handing out a broken authorize URL.
-    if headers
-        .get(RELAY_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.trim() == "1")
-    {
-        return Ok(ResponseJson(ApiResponse::error(
-            "Connect is only available when accessing Vibe Kanban directly \
-             (not through a relayed host). Open this machine's own UI and try \
-             again, or paste a token into the server's headers in the edit \
-             dialog.",
-        )));
-    }
+    let redirect_uri = if payload.loopback {
+        // Loopback mode: register a localhost callback so a strict-allowlist
+        // authorization server accepts it. This works from anywhere because the
+        // flow can be finished by pasting the redirected URL back via
+        // `/mcp-auth/complete` — so it deliberately does not require a
+        // browser-reachable host and skips the relay guard below.
+        let Some(port) = deployment
+            .client_info()
+            .get_server_addr()
+            .map(|addr| addr.port())
+        else {
+            return Ok(ResponseJson(ApiResponse::error(
+                "Could not determine the local server port for a loopback callback",
+            )));
+        };
+        format!("http://localhost:{port}/api/mcp-auth/callback")
+    } else {
+        // Relay-proxied requests reach us with a loopback Host the user's
+        // browser cannot be redirected back to, so an auto-callback flow could
+        // never complete — fail loudly instead of handing out a broken
+        // authorize URL. (Loopback mode above is the escape hatch.)
+        if headers
+            .get(RELAY_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim() == "1")
+        {
+            return Ok(ResponseJson(ApiResponse::error(
+                "Connect is only available when accessing Vibe Kanban directly \
+                 (not through a relayed host). Retry with the localhost-callback \
+                 option, open this machine's own UI, or paste a token into the \
+                 server's headers in the edit dialog.",
+            )));
+        }
 
-    // The browser reached us through this host, so it can be redirected back
-    // to it. Behind an HTTPS reverse proxy (e.g. the Caddyfile.example setup)
-    // the browser-facing scheme/host arrive in X-Forwarded-* headers — using
-    // plain `http://{Host}` there would register a redirect URI the AS may
-    // reject and the browser can't load.
-    let forwarded_header = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
+        // The browser reached us through this host, so it can be redirected
+        // back to it. Behind an HTTPS reverse proxy (e.g. the
+        // Caddyfile.example setup) the browser-facing scheme/host arrive in
+        // X-Forwarded-* headers — using plain `http://{Host}` there would
+        // register a redirect URI the AS may reject and the browser can't load.
+        let forwarded_header = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(',').next())
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let scheme = forwarded_header("x-forwarded-proto")
+            .filter(|v| v == "https" || v == "http")
+            .unwrap_or_else(|| "http".to_string());
+        let host = forwarded_header("x-forwarded-host").or_else(|| {
+            headers
+                .get(HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(String::from)
+        });
+        let Some(host) = host else {
+            return Ok(ResponseJson(ApiResponse::error(
+                "Missing Host header; cannot build a redirect URI",
+            )));
+        };
+        format!("{scheme}://{host}/api/mcp-auth/callback")
     };
-    let scheme = forwarded_header("x-forwarded-proto")
-        .filter(|v| v == "https" || v == "http")
-        .unwrap_or_else(|| "http".to_string());
-    let host = forwarded_header("x-forwarded-host").or_else(|| {
-        headers
-            .get(HOST)
-            .and_then(|v| v.to_str().ok())
-            .map(String::from)
-    });
-    let Some(host) = host else {
-        return Ok(ResponseJson(ApiResponse::error(
-            "Missing Host header; cannot build a redirect URI",
-        )));
-    };
-    let redirect_uri = format!("{scheme}://{host}/api/mcp-auth/callback");
 
     let client = oauth_http_client();
     let meta = match mcp_oauth::discover(&client, url, payload.www_authenticate.as_deref()).await {
@@ -326,6 +369,7 @@ async fn start(
     Ok(ResponseJson(ApiResponse::success(McpAuthStartResponse {
         flow_id,
         authorize_url,
+        loopback: payload.loopback,
     })))
 }
 
@@ -393,36 +437,134 @@ async fn callback(Query(query): Query<CallbackQuery>) -> Result<Response<String>
         return Ok(fail("Missing authorization code in callback".to_string()).await);
     };
 
+    match exchange_and_store(exchange, executor, &server_name, &code).await {
+        Ok(()) => {
+            if let Some(flow) = FLOWS.write().await.get_mut(&flow_id) {
+                flow.outcome = FlowOutcome::Completed;
+            }
+            Ok(close_window_response(
+                format!(
+                    "Connected {}. You can return to the app.",
+                    html_escape(&server_name)
+                ),
+                false,
+            ))
+        }
+        Err(e) => Ok(fail(e).await),
+    }
+}
+
+/// Redeem an authorization code and write the resulting token onto the
+/// server's config entry. Shared by the browser `callback` and the manual
+/// `complete` endpoint. The access token never leaves this function except
+/// into the agent config file.
+async fn exchange_and_store(
+    exchange: ExchangeInputs,
+    executor: BaseCodingAgent,
+    server_name: &str,
+    code: &str,
+) -> Result<(), String> {
     let client = oauth_http_client();
-    let access_token = match mcp_oauth::exchange_code(
+    let access_token = mcp_oauth::exchange_code(
         &client,
         &exchange.token_endpoint,
         &exchange.client_id,
-        &code,
+        code,
         &exchange.pkce_verifier,
         &exchange.redirect_uri,
         &exchange.resource,
     )
-    .await
-    {
-        Ok(token) => token,
-        Err(e) => return Ok(fail(e).await),
+    .await?;
+    persist_token(executor, server_name, &access_token).await
+}
+
+/// Extract the authorization `code` from a manual paste that is either the
+/// bare code or the full redirect URL the browser landed on. When a URL
+/// carries `error`/`state`, honor them (surface the error, enforce the CSRF
+/// binding). Returns `(code, state_if_present)`.
+fn parse_pasted_code(input: &str) -> Result<(String, Option<String>), String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Paste the redirected URL or the authorization code".to_string());
+    }
+    // A bare code (no URL structure) is used as-is.
+    if !trimmed.contains("://") && !trimmed.contains("code=") && !trimmed.contains('?') {
+        return Ok((trimmed.to_string(), None));
+    }
+    let url = reqwest::Url::parse(trimmed)
+        .map_err(|_| "Could not read that as a URL or a code".to_string())?;
+    let mut code = None;
+    let mut state = None;
+    let mut oauth_error = None;
+    for (k, v) in url.query_pairs() {
+        match k.as_ref() {
+            "code" => code = Some(v.into_owned()),
+            "state" => state = Some(v.into_owned()),
+            "error" => oauth_error = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+    if let Some(err) = oauth_error {
+        return Err(format!("Authorization failed: {err}"));
+    }
+    match code {
+        Some(code) => Ok((code, state)),
+        None => Err("That URL has no `code` parameter".to_string()),
+    }
+}
+
+async fn complete(
+    Query(_query): Query<McpAuthQuery>,
+    Json(payload): Json<McpAuthCompleteRequest>,
+) -> Result<ResponseJson<ApiResponse<McpAuthStatusResponse>>, ApiError> {
+    let (code, pasted_state) = match parse_pasted_code(&payload.code) {
+        Ok(v) => v,
+        Err(e) => return Ok(ResponseJson(ApiResponse::error(&e))),
     };
 
-    if let Err(e) = persist_token(executor, &server_name, &access_token).await {
-        return Ok(fail(e).await);
-    }
+    // Look up the flow by id and consume its exchange inputs atomically, so a
+    // pasted code — like a browser callback — can only be redeemed once. If
+    // the paste carried a `state`, it must match the flow's (CSRF binding).
+    let (exchange, executor, server_name) = {
+        let mut flows = FLOWS.write().await;
+        flows.retain(|_, f| f.created_at.elapsed() < FLOW_TTL);
+        let Some(flow) = flows.get_mut(&payload.flow_id) else {
+            return Ok(ResponseJson(ApiResponse::error(
+                "Authorization flow not found or expired",
+            )));
+        };
+        if let Some(state) = &pasted_state
+            && state != &flow.state
+        {
+            return Ok(ResponseJson(ApiResponse::error(
+                "The pasted URL's state does not match this authorization flow",
+            )));
+        }
+        let Some(exchange) = flow.exchange.take() else {
+            return Ok(ResponseJson(ApiResponse::error(
+                "This authorization flow was already completed",
+            )));
+        };
+        (exchange, flow.executor, flow.server_name.clone())
+    };
 
-    if let Some(flow) = FLOWS.write().await.get_mut(&flow_id) {
-        flow.outcome = FlowOutcome::Completed;
+    match exchange_and_store(exchange, executor, &server_name, &code).await {
+        Ok(()) => {
+            if let Some(flow) = FLOWS.write().await.get_mut(&payload.flow_id) {
+                flow.outcome = FlowOutcome::Completed;
+            }
+            Ok(ResponseJson(ApiResponse::success(McpAuthStatusResponse {
+                status: McpAuthFlowState::Completed,
+                error: None,
+            })))
+        }
+        Err(e) => {
+            if let Some(flow) = FLOWS.write().await.get_mut(&payload.flow_id) {
+                flow.outcome = FlowOutcome::Failed(e.clone());
+            }
+            Ok(ResponseJson(ApiResponse::error(&e)))
+        }
     }
-    Ok(close_window_response(
-        format!(
-            "Connected {}. You can return to the app.",
-            html_escape(&server_name)
-        ),
-        false,
-    ))
 }
 
 /// Minimal HTML escaping for text interpolated into the OAuth result pages.
@@ -532,5 +674,37 @@ mod tests {
         let raw = "client registration failed (HTTP 500): internal error".to_string();
         let enriched = connect_error(raw.clone(), "https://vk.example.com/api/mcp-auth/callback");
         assert_eq!(enriched, raw);
+    }
+
+    #[test]
+    fn parse_pasted_code_accepts_bare_code() {
+        assert_eq!(
+            parse_pasted_code("  abc123 ").unwrap(),
+            ("abc123".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn parse_pasted_code_extracts_from_redirect_url() {
+        let (code, state) =
+            parse_pasted_code("http://localhost:8080/api/mcp-auth/callback?code=xyz789&state=st-1")
+                .unwrap();
+        assert_eq!(code, "xyz789");
+        assert_eq!(state.as_deref(), Some("st-1"));
+    }
+
+    #[test]
+    fn parse_pasted_code_surfaces_oauth_error() {
+        let err = parse_pasted_code(
+            "http://localhost:8080/cb?error=access_denied&error_description=nope",
+        )
+        .unwrap_err();
+        assert!(err.contains("access_denied"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_pasted_code_rejects_empty_and_codeless() {
+        assert!(parse_pasted_code("   ").is_err());
+        assert!(parse_pasted_code("http://localhost:8080/cb?state=only").is_err());
     }
 }

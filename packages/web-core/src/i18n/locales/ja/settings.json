@@ -446,7 +446,11 @@
         "connecting": "接続中…",
         "connectFailed": "認可に失敗しました",
         "popupClosed": "認可ウィンドウが完了前に閉じられました。",
-        "popupBlocked": "ポップアップがブロックされました。このサイトのポップアップを許可して再試行してください。"
+        "popupBlocked": "ポップアップがブロックされました。このサイトのポップアップを許可して再試行してください。",
+        "useLocalhostCallback": "localhost コールバックを使用（厳格なサーバーまたは手動承認向け）",
+        "manualHint": "ポップアップで承認し、遷移先ページの URL（またはコード）をここに貼り付けてください。",
+        "manualPlaceholder": "リダイレクト URL またはコードを貼り付け",
+        "finishConnect": "完了"
       }
     },
     "projects": {

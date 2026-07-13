@@ -109,6 +109,7 @@ fn generate_types_content() -> String {
         executors::mcp_test::McpServerTestStatus::decl(),
         server::routes::mcp_auth::McpAuthStartRequest::decl(),
         server::routes::mcp_auth::McpAuthStartResponse::decl(),
+        server::routes::mcp_auth::McpAuthCompleteRequest::decl(),
         server::routes::mcp_auth::McpAuthFlowState::decl(),
         server::routes::mcp_auth::McpAuthStatusResponse::decl(),
         server::routes::config::CheckEditorAvailabilityQuery::decl(),

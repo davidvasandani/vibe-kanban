@@ -446,7 +446,11 @@
         "connecting": "Connexion…",
         "connectFailed": "Échec de l'autorisation",
         "popupClosed": "La fenêtre d'autorisation a été fermée avant la fin.",
-        "popupBlocked": "Fenêtre contextuelle bloquée — autorisez les fenêtres contextuelles pour ce site et réessayez."
+        "popupBlocked": "Fenêtre contextuelle bloquée — autorisez les fenêtres contextuelles pour ce site et réessayez.",
+        "useLocalhostCallback": "Utiliser un callback localhost (pour serveurs stricts ou validation manuelle)",
+        "manualHint": "Validez dans la fenêtre, puis collez ici l'URL de la page d'arrivée (ou le code).",
+        "manualPlaceholder": "Collez l'URL redirigée ou le code",
+        "finishConnect": "Terminer"
       }
     },
     "projects": {

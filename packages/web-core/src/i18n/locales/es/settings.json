@@ -446,7 +446,11 @@
         "connecting": "Conectando…",
         "connectFailed": "Falló la autorización",
         "popupClosed": "La ventana de autorización se cerró antes de completar.",
-        "popupBlocked": "Ventana emergente bloqueada: permite las ventanas emergentes para este sitio y vuelve a intentarlo."
+        "popupBlocked": "Ventana emergente bloqueada: permite las ventanas emergentes para este sitio y vuelve a intentarlo.",
+        "useLocalhostCallback": "Usar callback de localhost (para servidores estrictos o aprobación manual)",
+        "manualHint": "Aprueba en la ventana emergente y pega aquí la URL de la página final (o el código).",
+        "manualPlaceholder": "Pega la URL redirigida o el código",
+        "finishConnect": "Finalizar"
       }
     },
     "projects": {
