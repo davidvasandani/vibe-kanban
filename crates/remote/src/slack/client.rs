@@ -1,12 +1,15 @@
 //! Minimal Slack Web API client.
 //!
-//! Five methods, all `POST https://slack.com/api/{method}` with a bearer
-//! bot token. Error strings must never contain the token; auth material
-//! only ever goes into request headers.
+//! All methods are `POST https://slack.com/api/{method}` with a bearer bot
+//! token. Error strings must never contain the token; auth material only
+//! ever goes into request headers.
 
 use serde_json::{Value, json};
 
-use super::types::{SlackApiEnvelope, SlackAuthTestResponse, SlackConversationsOpenResponse};
+use super::types::{
+    SlackApiEnvelope, SlackAuthTestResponse, SlackConversationsOpenResponse,
+    SlackConversationsRepliesResponse, SlackReplyMessage, SlackViewsOpenResponse,
+};
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
 
@@ -83,13 +86,84 @@ impl SlackClient {
     }
 
     /// Open a modal from an interaction's `trigger_id` (valid for 3s).
-    pub async fn views_open(&self, trigger_id: &str, view: Value) -> Result<(), SlackClientError> {
-        self.call(
-            "views.open",
-            json!({"trigger_id": trigger_id, "view": view}),
-        )
-        .await?;
+    /// Returns the created view's id so a follow-up `views_update` can swap in
+    /// the AI summary (FR-1/FR-8); `None` if Slack omits it.
+    pub async fn views_open(
+        &self,
+        trigger_id: &str,
+        view: Value,
+    ) -> Result<Option<String>, SlackClientError> {
+        let value = self
+            .call(
+                "views.open",
+                json!({"trigger_id": trigger_id, "view": view}),
+            )
+            .await?;
+        let response: SlackViewsOpenResponse = serde_json::from_value(value).map_err(|_| {
+            SlackClientError::Transport("Slack returned an unexpected response".to_string())
+        })?;
+        Ok(response.view.map(|v| v.id))
+    }
+
+    /// Replace an already-open modal by its view id (`views.update`). Used to
+    /// swap the mechanical prefill for the AI summary, or to drop the
+    /// "Summarizing…" hint on the AI-failure path.
+    pub async fn views_update(&self, view_id: &str, view: Value) -> Result<(), SlackClientError> {
+        self.call("views.update", json!({"view_id": view_id, "view": view}))
+            .await?;
         Ok(())
+    }
+
+    /// Fetch a thread's messages (root at index 0), oldest-first, for AI
+    /// summarization. `conversations.replies` is oldest-first and paginated, so
+    /// we walk `response_metadata.next_cursor` up to `max_pages` to reach the
+    /// most-recent replies (the summarizer keeps root + newest). The thread
+    /// root is repeated as the first message of every page, so we dedup by
+    /// message `ts`. Requires a message-history read scope
+    /// (`channels:history` etc.); a missing scope surfaces as
+    /// `Api("missing_scope")` and the caller falls back to the mechanical
+    /// prefill (FR-5/FR-13).
+    pub async fn conversations_replies(
+        &self,
+        channel_id: &str,
+        thread_ts: &str,
+        per_page: usize,
+        max_pages: usize,
+    ) -> Result<Vec<SlackReplyMessage>, SlackClientError> {
+        let mut all: Vec<SlackReplyMessage> = Vec::new();
+        let mut seen_ts: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut cursor: Option<String> = None;
+
+        for _ in 0..max_pages.max(1) {
+            let mut body = json!({"channel": channel_id, "ts": thread_ts, "limit": per_page});
+            if let Some(c) = &cursor {
+                body["cursor"] = json!(c);
+            }
+            let value = self.call("conversations.replies", body).await?;
+            let response: SlackConversationsRepliesResponse = serde_json::from_value(value)
+                .map_err(|_| {
+                    SlackClientError::Transport("Slack returned an unexpected response".to_string())
+                })?;
+
+            for message in response.messages {
+                // Dedup the repeated root by ts; messages without a ts (rare)
+                // are kept as-is.
+                match &message.ts {
+                    Some(ts) if !seen_ts.insert(ts.clone()) => continue,
+                    _ => all.push(message),
+                }
+            }
+
+            match response
+                .response_metadata
+                .and_then(|m| m.next_cursor)
+                .filter(|c| !c.is_empty())
+            {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        Ok(all)
     }
 
     /// Post a message only the given user can see, in the given channel.

@@ -1,47 +1,75 @@
-# Implementation Plan: Auto-archive workspaces on Done **or Cancelled** (task vk/2f63-auto-archive-wor)
+# Implementation Plan: Slack AI summarization (task `vk/0f53-slack-shortcut-a`)
 
-Single-file backend change in `crates/remote/src/routes/issues.rs`. It
-generalises the existing "archive on Done" hook to a "terminal status" hook that
-also covers "Cancelled". No migration, API, generated-type, or frontend change.
+Step-by-step build order. The authoritative dependency-ordered task list is
+`homelab/specs/vk/0f53-slack-shortcut-a/tasks.md` (T001–T019); this is the
+executable narrative. Rationale in `SPEC.md`; prior-art recall in
+`PRIOR_KNOWLEDGE.md`.
 
-## Steps
+## Step 1 — Schema + config storage (T001–T002)
 
-1. **Add helper `terminal_status_name(name: &str) -> Option<&'static str>`.**
-   - `"Done"` (case-insensitive) → `Some("Done")`.
-   - `"Cancelled"` / `"Canceled"` (case-insensitive) → `Some("Cancelled")`.
-   - anything else → `None`.
-   Pure function, no I/O, unit-testable.
+Migration `crates/remote/migrations/20260711000000_slack_ai_summarization.sql`
+adds nullable `encrypted_anthropic_api_key TEXT` and
+`ai_summarization_enabled BOOLEAN NOT NULL DEFAULT FALSE`. In
+`db/slack_configs.rs`: both columns into `SELECT_COLUMNS`; `UpsertSlackConfigArgs`
+gains the two fields; the `upsert` gets `COALESCE($8, …)` for the key
+(write-only keep-on-None) and sets the flag directly (`$9`).
 
-2. **Rename `archive_workspaces_for_done_issue` → `archive_workspaces_for_terminal_issue`**
-   and rework its body:
-   - keep the `old_issue.status_id == new_issue.status_id` early-return;
-   - load the new status via `ProjectStatusRepository::find_by_id(&mut *conn, …)`;
-   - `let Some(terminal) = status.and_then(|s| terminal_status_name(&s.name)) else { return Ok(()) };`
-   - list active workspaces (`list_active_by_issue_id`); early-return if empty;
-   - gate the existing unmerged-PR `tracing::warn!` behind `terminal == "Done"`;
-   - `archive_active_by_issue_id(&mut *conn, new_issue.id)`;
-   - add a `tracing::info!(issue_id, status = terminal, workspace_count, …)` line.
-   - update the doc-comment to say "Done or Cancelled" and explain the
-     Done-only warning.
+## Step 2 — Anthropic client (T003–T006)
 
-3. **Update both call sites** (`update_issue`, `bulk_update_issues`) to call the
-   renamed function. No other change — they already run it inside the tx before
-   `get_txid`.
+New `crates/remote/src/anthropic/`: `types.rs` (`IssueSummary`, response +
+error bodies), `prompt.rs` (pure — system prompt + FR-16-capped transcript with
+unit tests), `client.rs` (`AnthropicClient::summarize_thread`, HTTP-status
+errors, structured-outputs request, first-text-block JSON parse; `AnthropicError`
+whose `Transport`/`Api` variants never carry the key). Register
+`pub mod anthropic;` in `lib.rs`.
 
-4. **Add `#[cfg(test)] mod tests`** at the bottom of the file with a
-   `terminal_status_name` table test (Done/done/DONE, Cancelled/cancelled/Canceled,
-   negatives: "In progress", "Backlog", "To do", "").
+## Step 3 — Slack client + types (T007–T008)
 
-## Validation
+`slack/types.rs`: `SlackConfig` FromRow gains the two columns +
+`ai_summarization_active()`; DTOs gain the AI fields; add `thread_ts` to
+`SlackMessageRef`; add `SlackConversationsRepliesResponse`/`SlackReplyMessage`
+and `SlackViewsOpenResponse`. `slack/client.rs`: `conversations_replies`,
+`views_open` returns the view id, `views_update`.
 
-- `cargo test -p remote` → new unit test green.
-- `cargo clippy -p remote` / `pnpm run backend:check` → clean.
-- `pnpm run format`.
-- Logical trace of the tx path: status change into Cancelled archives active
-  workspaces atomically with the status write (same txid); no-op transitions and
-  non-terminal statuses do nothing.
+## Step 4 — Modal hint (T009)
 
-## Risk / rollback
+`slack/modal.rs`: `build_create_issue_modal` gains a `hint: Option<&str>` param;
+when `Some`, a leading `context` block renders the "✨ Summarizing thread…"
+notice. All existing callers/tests pass `None`.
 
-Low: additive to a single, already-tested code path; "Done" behaviour is byte-for
--byte preserved (same list/warn/archive calls). Rollback = revert the one file.
+## Step 5 — Wiring (T010)
+
+`routes/slack.rs`: `handle_message_action` passes `ai_active` +
+`encrypted_anthropic_api_key` into the spawned `open_shortcut_modal`. There, the
+gate is computed **before** building the initial modal (so the hint is included
+only when AI will run — resolves the analyze `[error]`); `views.open` captures
+the view id; then `summarize_thread_for_modal` fetches the thread
+(`thread_ts` else `ts`), decrypts, summarizes, and the caller `views.update`s the
+AI result (permalink appended) or reverts to the plain modal on failure. Logs
+are error-class only (never transcript/key — resolves the analyze logging-hygiene
+`[warning]`).
+
+## Step 6 — Admin API + settings UI (T011–T016)
+
+`upsert_config` encrypts a supplied key (keep-on-empty) and persists the flag
+(defaulting to the stored value when omitted); `build_response` fills the AI
+fields. Regenerate `shared/remote-types.ts` (`pnpm run remote:generate-types`).
+`SlackSettingsSection.tsx` adds the toggle, masked key field, disclosure copy,
+and manifest history scopes + re-install note. The hook/api carry the fields
+generically. i18n uses inline `t()` fallbacks, matching the base feature (no new
+locale keys — passes `check-unused-i18n-keys`).
+
+## Step 7 — Tests & gates (T017–T019)
+
+Unit tests: `anthropic::prompt` caps, `IssueSummary` fixture parse, the gate,
+`conversations.replies` parse. Gates: `cargo fmt`/clippy clean on remote;
+`pnpm run check` (all TS type-checks pass); i18n + ui lint pass;
+`cargo test --workspace`. Then the independent Codex review pass.
+
+## Deviations from the SpecKit plan
+
+None material. The remote type generator bin is `generate_types.rs`
+(bin-named `remote-generate-types`), not `remote-generate-types.rs` — verified
+against `package.json` (resolves the analyze `[warning]` on the filename). Its
+DTOs were already registered, so no generator edit was needed — only the struct
+fields.

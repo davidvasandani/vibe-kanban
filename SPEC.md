@@ -1,84 +1,79 @@
-# Technical Spec: Auto-archive workspaces when an issue is marked Done **or Cancelled**
+# Technical Spec: Slack shortcut — AI-summarize the thread into title & description
 
-> Task `vk/2f63-auto-archive-wor`. Full SpecKit artifacts live in
-> `specs/002-auto-archive-terminal/` (`spec.md`, `plan.md`, `tasks.md`,
-> `analyze.md`) and the constitution in `.specify/memory/constitution.md`.
-> This file is the repo-root technical summary required by the task pipeline.
+> Task `vk/0f53-slack-shortcut-a`. Full SpecKit artifacts live in
+> `homelab/specs/vk/0f53-slack-shortcut-a/` (`spec.md`, `plan.md`,
+> `research.md`, `data-model.md`, `contracts/`, `tasks.md`). This file is the
+> repo-root technical summary. Builds on the merged shortcut (PR #94, spec
+> `fec4-vk-slack-shortcu`).
 
-## Context — what already ships
+## Problem
 
-The remote/cloud server already archives an issue's still-active workspaces
-when the issue is moved into the **"Done"** status. It was added in upstream
-commit `3510c588` ("Archive workspaces when an issue is manually marked Done")
-and lives entirely server-side in
-`crates/remote/src/routes/issues.rs::archive_workspaces_for_done_issue`, invoked
-from both `update_issue` and `bulk_update_issues` **inside the same Postgres
-transaction** as the status write, so the archive is covered by the `txid` the
-client waits on. The frontend has no archive-on-status logic; it simply renders
-the `archived` flag streamed over the ElectricSQL workspace shape.
-
-Data model (remote / Postgres):
-- `issues.status_id` → `project_statuses(id)`. Statuses are per-project and
-  user-customisable; the built-in defaults (`db/project_statuses.rs::DEFAULT_STATUSES`)
-  include `"Done"` and `"Cancelled"`. There is **no** category/terminal flag on
-  the row — the existing code matches by status **name** (`eq_ignore_ascii_case("Done")`).
-- `workspaces.archived: bool`; helpers `list_active_by_issue_id` /
-  `archive_active_by_issue_id` already exist and are executor-generic (run inside
-  a tx).
-
-## The gap
-
-Cancelling an issue leaves its workspaces active — they keep consuming a
-sidebar slot and the standard 72h worktree-cleanup window instead of the
-accelerated archived (1h) window. Users expect a cancelled issue to behave like
-a done one: its workspaces should be archived automatically.
+The merged "Create issue from message" Slack shortcut prefills the issue modal
+*mechanically*: title = the message's first non-empty line, description = the
+message text + a permalink. For a threaded discussion where the decision emerges
+over many replies, that captures one message, not the conversation.
 
 ## Solution
 
-Generalise the existing hook to fire on **either** terminal status, keeping the
-name-match approach already established for "Done" (consistent, no schema
-change, respects user-renamed statuses only insofar as the current feature does).
+Add **optional, opt-in AI summarization** (the "Rovo-style" summary). When an
+org admin enables it and supplies an Anthropic API key, invoking the shortcut
+reads the whole Slack thread and generates a concise issue title + description
+from it, swapping them into the already-open modal a beat after it opens. The
+feature is strictly additive: with no key it is absent and the shortcut behaves
+exactly as before, and any AI-path failure degrades to the mechanical prefill.
 
-In `crates/remote/src/routes/issues.rs`:
+### 1. Schema — one migration (`crates/remote/migrations/20260711000000_slack_ai_summarization.sql`)
 
-1. Add a small pure helper
-   `fn terminal_status_name(name: &str) -> Option<&'static str>` returning
-   `Some("Done")` / `Some("Cancelled")` (case-insensitive; also accepts the
-   American `"Canceled"` spelling, normalised to `"Cancelled"`) else `None`.
-2. Rename `archive_workspaces_for_done_issue` →
-   `archive_workspaces_for_terminal_issue`. It:
-   - returns early if `status_id` did not change;
-   - loads the new status, returns early unless `terminal_status_name` matches;
-   - lists active workspaces, returns early if none;
-   - **only for "Done"** emits the existing "PRs not all merged" warning
-     (cancelled work is intentionally abandoned, so the warning would be noise);
-   - archives via `archive_active_by_issue_id`;
-   - logs an info line with the status name and workspace count.
-3. Update the two call sites (`update_issue`, `bulk_update_issues`) to the new
-   name. Behaviour for "Done" is unchanged; "Cancelled" is newly covered.
+Two columns on `organization_slack_configs`: nullable
+`encrypted_anthropic_api_key TEXT` (AES-256-GCM, write-only, absence = feature
+off) and `ai_summarization_enabled BOOLEAN NOT NULL DEFAULT FALSE`. Effective
+gate = `enabled AND ai_summarization_enabled AND key IS NOT NULL`
+(`SlackConfig::ai_summarization_active()`).
 
-Add a `#[cfg(test)]` unit test for `terminal_status_name` (no DB needed):
-Done/done/DONE → `Some("Done")`, Cancelled/cancelled/Canceled → `Some("Cancelled")`,
-"In progress"/"Backlog"/"To do"/"" → `None`.
+### 2. Anthropic client (`crates/remote/src/anthropic/`)
 
-## Scope
+New additive module. `AnthropicClient::summarize_thread(&[SlackReplyMessage])`
+posts one request to `https://api.anthropic.com/v1/messages` (headers
+`x-api-key`, `anthropic-version: 2023-06-01`) with model `claude-haiku-4-5` and
+`output_config.format` forcing `{title, description}`; parses the first `text`
+content block as JSON. HTTP-status errors (Jira pattern), never Slack's `ok`
+envelope. The API key never appears in any error string. `prompt.rs` (pure)
+builds the transcript with FR-16 caps (≤100 messages, ≤12000 chars, keep root +
+most-recent, truncation marker).
 
-- **Remote crate only**, mirroring where the "Done" feature lives. No local
-  (`crates/db` SQLite `Task`) change — that path has no equivalent archive hook.
-- No migration, no new API surface, no generated-type change, no frontend change
-  (the `archived` flag already streams to clients).
-- Terminal set is `{Done, Cancelled}` matched by name, exactly like the existing
-  "Done" match; no new "status category" concept is introduced.
+### 3. Slack client (`crates/remote/src/slack/client.rs`)
+
+`conversations_replies(channel, thread_ts, limit)`; `views_open` now returns the
+created `view.id`; new `views_update(view_id, view)`.
+
+### 4. Wiring (`crates/remote/src/routes/slack.rs::open_shortcut_modal`)
+
+After the mechanical `views.open` (with a "✨ Summarizing thread…" hint when AI
+is active), and only if `ai_summarization_active()`: fetch the thread
+(`thread_ts` or `ts` for a standalone message), decrypt the key, summarize, then
+`views.update` with the AI title/description (permalink still appended). On any
+failure: `views.update` back to the plain mechanical modal and `warn`-log the
+error class only (never the transcript or key). Runs inside the already-spawned,
+signature-verified post-ack task, so it never risks Slack's 3s deadline.
+`view_submission` is unchanged.
+
+### 5. Admin API + settings UI
+
+`SlackConfigResponse` gains `ai_summarization_enabled` + `has_anthropic_api_key`
+(never the key). `UpsertSlackConfigRequest` gains `ai_summarization_enabled` +
+`anthropic_api_key` (`None`/empty keeps stored). Key encrypted on save, not
+validated (degrades at first use). `SlackSettingsSection.tsx` adds the toggle, a
+masked key field, a privacy disclosure naming Anthropic + its ~30-day retention,
+and four `*:history` scopes to the app manifest with a re-install note.
 
 ## Validation
 
-- `cargo test -p remote` (new `terminal_status_name` unit test passes).
-- `pnpm run backend:check` / `cargo clippy` on `crates/remote` clean.
-- `pnpm run format` applied.
-- Manual/logical trace: moving an issue Todo→Cancelled archives its active
-  workspaces in the same txid; Todo→In-progress does not; Done→Done (no change)
-  does not re-run.
+`pnpm run check`, `pnpm run lint`, `cargo test --workspace`, `pnpm run format`.
+Unit tests cover the transcript caps, structured-output parsing, the effective
+gate, and `conversations.replies` parsing. Independent Codex review before merge.
 
-## Files
+## Constitution
 
-- `crates/remote/src/routes/issues.rs` (edited)
+Honors the new outbound-AI-egress principle (v0.8.0): off by default,
+admin-controlled write-only encrypted key, graceful degrade, UI disclosure. The
+inbound-interaction rule is preserved (AI runs post-verification, post-ack).

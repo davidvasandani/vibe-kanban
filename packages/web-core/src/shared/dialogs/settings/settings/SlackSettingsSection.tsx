@@ -37,12 +37,18 @@ interface FormState {
   /** Empty string means "keep the stored credential". */
   signingSecret: string;
   enabled: boolean;
+  /** AI summarization toggle. */
+  aiSummarizationEnabled: boolean;
+  /** Empty string means "keep the stored Anthropic key". */
+  anthropicApiKey: string;
 }
 
 const EMPTY_FORM: FormState = {
   botToken: '',
   signingSecret: '',
   enabled: true,
+  aiSummarizationEnabled: false,
+  anthropicApiKey: '',
 };
 
 /** Password-masked variant of SettingsInput (which hardcodes type="text"). */
@@ -93,6 +99,10 @@ oauth_config:
       - commands
       - chat:write
       - im:write
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
 settings:
   interactivity:
     is_enabled: true
@@ -153,6 +163,9 @@ export function SlackSettingsSection({
       botToken: '',
       signingSecret: '',
       enabled: config?.enabled ?? EMPTY_FORM.enabled,
+      aiSummarizationEnabled:
+        config?.ai_summarization_enabled ?? EMPTY_FORM.aiSummarizationEnabled,
+      anthropicApiKey: '',
     });
   }, [selectedOrgId, config, configLoading, dirty]);
 
@@ -179,6 +192,8 @@ export function SlackSettingsSection({
         bot_token: form.botToken.trim() || null,
         signing_secret: form.signingSecret.trim() || null,
         enabled: form.enabled,
+        ai_summarization_enabled: form.aiSummarizationEnabled,
+        anthropic_api_key: form.anthropicApiKey.trim() || null,
       });
       setDirty(false);
       setForm(null); // rebuilt from the refetched config
@@ -457,6 +472,69 @@ export function SlackSettingsSection({
                     ))}
                 </div>
               )}
+            </div>
+
+            {/* AI summarization */}
+            <div className="bg-secondary/50 border border-border rounded-sm p-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-normal">
+                    {t(
+                      'settings.slack.form.aiSummarization.label',
+                      'AI summarization'
+                    )}
+                  </p>
+                  <p className="text-sm text-low mt-1">
+                    {t(
+                      'settings.slack.form.aiSummarization.description',
+                      'When enabled, the messages in the Slack thread are sent to Anthropic’s API (claude-haiku-4-5) to draft the issue title and description. Anthropic retains API inputs for about 30 days. Leave this off to keep thread content within Slack and Vibe Kanban.'
+                    )}
+                  </p>
+                </div>
+                <Switch
+                  checked={form.aiSummarizationEnabled}
+                  onCheckedChange={(aiSummarizationEnabled) =>
+                    updateForm({ aiSummarizationEnabled })
+                  }
+                  disabled={saving}
+                />
+              </div>
+
+              <SettingsField
+                label={t(
+                  'settings.slack.form.anthropicApiKey.label',
+                  'Anthropic API key'
+                )}
+                description={
+                  config?.has_anthropic_api_key
+                    ? t(
+                        'settings.slack.form.anthropicApiKey.stored',
+                        'A key is stored. Leave blank to keep it.'
+                      )
+                    : t(
+                        'settings.slack.form.anthropicApiKey.description',
+                        'An Anthropic API key (sk-ant-…). Required for AI summarization; the feature stays off until a key is set.'
+                      )
+                }
+              >
+                <SecretInput
+                  value={form.anthropicApiKey}
+                  onChange={(anthropicApiKey) =>
+                    updateForm({ anthropicApiKey })
+                  }
+                  placeholder={
+                    config?.has_anthropic_api_key ? '••••••••' : 'sk-ant-...'
+                  }
+                  disabled={saving}
+                />
+              </SettingsField>
+
+              <p className="text-xs text-low">
+                {t(
+                  'settings.slack.form.aiSummarization.reinstallNote',
+                  'Reading a thread needs extra Slack scopes (channels:history, groups:history, im:history, mpim:history). They are already in the manifest below — after enabling this, re-install the Slack app to your workspace to grant them.'
+                )}
+              </p>
             </div>
 
             {/* App manifest */}

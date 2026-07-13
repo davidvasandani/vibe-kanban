@@ -19,8 +19,26 @@ pub struct SlackConfig {
     pub slack_team_name: String,
     pub enabled: bool,
     pub created_by_user_id: Option<Uuid>,
+    /// AES-256-GCM ciphertext of the org's Anthropic API key. `None` (the
+    /// column is nullable) means AI summarization is not configured.
+    pub encrypted_anthropic_api_key: Option<String>,
+    pub ai_summarization_enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl SlackConfig {
+    /// AI summarization runs only when the connection is enabled, the toggle
+    /// is on, and a key is stored (spec FR-11 — any one false ⇒ mechanical
+    /// prefill only, no thread fetch, no Anthropic call).
+    pub fn ai_summarization_active(&self) -> bool {
+        self.enabled
+            && self.ai_summarization_enabled
+            && self
+                .encrypted_anthropic_api_key
+                .as_deref()
+                .is_some_and(|k| !k.is_empty())
+    }
 }
 
 /// Client-facing view of the config: credentials replaced by
@@ -34,6 +52,11 @@ pub struct SlackConfigResponse {
     pub enabled: bool,
     pub has_credentials: bool,
     pub interactivity_url: String,
+    /// AI summarization toggle (spec FR-9).
+    pub ai_summarization_enabled: bool,
+    /// True iff an Anthropic API key is stored — the key itself is never
+    /// returned (FR-10).
+    pub has_anthropic_api_key: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -45,6 +68,13 @@ pub struct UpsertSlackConfigRequest {
     pub bot_token: Option<String>,
     pub signing_secret: Option<String>,
     pub enabled: bool,
+    /// AI summarization toggle. `None` keeps the stored value.
+    #[serde(default)]
+    pub ai_summarization_enabled: Option<bool>,
+    /// Anthropic API key. `None`/empty keeps the stored value (write-only,
+    /// same semantics as `bot_token`).
+    #[serde(default)]
+    pub anthropic_api_key: Option<String>,
 }
 
 /// Result of `auth.test` against the stored bot token. `error` is Slack's
@@ -106,6 +136,12 @@ pub struct SlackChannelRef {
 pub struct SlackMessageRef {
     #[serde(default)]
     pub ts: Option<String>,
+    /// The parent thread's timestamp when this message is a threaded reply;
+    /// absent for a standalone message. The AI summary fetches replies of
+    /// `thread_ts`, falling back to `ts` so a standalone message summarizes
+    /// itself (spec FR-3).
+    #[serde(default)]
+    pub thread_ts: Option<String>,
     /// Absent in contexts where Slack does not deliver message content;
     /// the modal then opens with empty prefills (FR-8).
     #[serde(default)]
@@ -220,9 +256,128 @@ pub struct SlackConversationsOpenResponse {
     pub channel: Option<SlackChannelRef>,
 }
 
+/// `views.open` response — we keep the created view's id so a later
+/// `views.update` can swap in the AI summary (spec FR-1/FR-8).
+#[derive(Debug, Deserialize)]
+pub struct SlackViewsOpenResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub view: Option<SlackViewIdRef>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SlackViewIdRef {
+    pub id: String,
+}
+
+/// `conversations.replies` response — the thread's messages, oldest-first
+/// (root at index 0). Used only to build the AI summarization transcript.
+/// `conversations.replies` is oldest-first and paginated, so the client walks
+/// `response_metadata.next_cursor` to reach the most-recent replies.
+#[derive(Debug, Deserialize)]
+pub struct SlackConversationsRepliesResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub messages: Vec<SlackReplyMessage>,
+    #[serde(default)]
+    pub response_metadata: Option<SlackResponseMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SlackResponseMetadata {
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SlackReplyMessage {
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Message timestamp — used to dedup the thread root, which Slack repeats
+    /// as the first message of every `conversations.replies` page.
+    #[serde(default)]
+    pub ts: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config_with(enabled: bool, ai_enabled: bool, key: Option<&str>) -> SlackConfig {
+        SlackConfig {
+            id: Uuid::nil(),
+            organization_id: Uuid::nil(),
+            encrypted_bot_token: "bt".into(),
+            encrypted_signing_secret: "ss".into(),
+            slack_team_id: "T0".into(),
+            slack_team_name: "Acme".into(),
+            enabled,
+            created_by_user_id: None,
+            encrypted_anthropic_api_key: key.map(str::to_string),
+            ai_summarization_enabled: ai_enabled,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn ai_summarization_active_requires_all_three() {
+        assert!(config_with(true, true, Some("k")).ai_summarization_active());
+        // Any one false ⇒ inactive (FR-11).
+        assert!(!config_with(false, true, Some("k")).ai_summarization_active());
+        assert!(!config_with(true, false, Some("k")).ai_summarization_active());
+        assert!(!config_with(true, true, None).ai_summarization_active());
+        assert!(!config_with(true, true, Some("")).ai_summarization_active());
+    }
+
+    #[test]
+    fn parses_conversations_replies_response() {
+        let raw = serde_json::json!({
+            "ok": true,
+            "messages": [
+                {"user": "U1", "text": "root", "ts": "1.0001"},
+                {"user": "U2", "text": "reply"},
+                {"ts": "1.0003"} // no user/text — tolerated
+            ]
+        })
+        .to_string();
+        let parsed: SlackConversationsRepliesResponse = serde_json::from_str(&raw).unwrap();
+        assert!(parsed.ok);
+        assert_eq!(parsed.messages.len(), 3);
+        assert_eq!(parsed.messages[0].user.as_deref(), Some("U1"));
+        assert_eq!(parsed.messages[2].text, None);
+
+        let err = serde_json::json!({"ok": false, "error": "missing_scope"}).to_string();
+        let parsed_err: SlackConversationsRepliesResponse = serde_json::from_str(&err).unwrap();
+        assert!(!parsed_err.ok);
+        assert_eq!(parsed_err.error.as_deref(), Some("missing_scope"));
+    }
+
+    #[test]
+    fn parses_thread_ts_and_views_open_view_id() {
+        let action = serde_json::json!({
+            "type": "message_action",
+            "callback_id": "vk_create_issue_from_message",
+            "trigger_id": "t",
+            "team": {"id": "T0"},
+            "user": {"id": "U0"},
+            "channel": {"id": "C0"},
+            "message": {"ts": "2.0", "thread_ts": "1.0", "text": "reply in thread"}
+        })
+        .to_string();
+        let parsed: MessageActionPayload = serde_json::from_str(&action).unwrap();
+        assert_eq!(parsed.message.thread_ts.as_deref(), Some("1.0"));
+
+        let open = serde_json::json!({"ok": true, "view": {"id": "V123"}}).to_string();
+        let parsed_open: SlackViewsOpenResponse = serde_json::from_str(&open).unwrap();
+        assert_eq!(parsed_open.view.map(|v| v.id).as_deref(), Some("V123"));
+    }
 
     #[test]
     fn parses_message_action_payload() {

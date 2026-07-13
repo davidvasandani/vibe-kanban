@@ -29,6 +29,16 @@ contributed to it.
   park-before-finalization + insert-before-remove, `Arc::try_unwrap` ownership
   (and why the idle sweep must not clone child handles), generation-conditional
   reap, the env gate, and the Codex/ACP Phase-3 decisions.
+- [slack-shortcut-ai-summarization.md](slack-shortcut-ai-summarization.md) —
+  Optional AI thread summarization for the Slack "Create issue from message"
+  shortcut: the ack-fast/enrich-later shape (all slow work in the post-ack
+  spawned task, `views.open` returns the view id, single `views.update` swap),
+  the mid-edit race + "✨ Summarizing…" hint mitigation, the outbound LLM call
+  (raw reqwest, Jira-style HTTP-status errors not Slack's `ok` envelope,
+  `output_config.format` for `{title,description}`, `maxLength` unsupported →
+  prompt+post-truncate), degrade-to-mechanical on every failure, write-only
+  encrypted key + no-key/transcript-in-logs hygiene, the all-three effective
+  gate, and the non-retroactive `*:history` scopes needing a re-install.
 - [external-connector-sync.md](external-connector-sync.md) — Connecting the
   remote server to an outside system (shipped for Jira): why connectors live
   in `crates/remote` (not the local SQLite model), the stored-credential
