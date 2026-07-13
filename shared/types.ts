@@ -378,9 +378,32 @@ export type McpAuthStartRequest = { server_name: string,
  * passing it here lets discovery start from it instead of hoping a
  * plain GET re-elicits one.
  */
-www_authenticate: string | null, };
+www_authenticate: string | null, 
+/**
+ * Register a `http://localhost:<port>` callback instead of deriving it
+ * from the request host. Authorization servers with a strict allowlist
+ * (Claude/ChatGPT/Codex/Cursor/localhost) reject a public callback; a
+ * loopback one is accepted. When the browser can reach that loopback
+ * (same machine or an SSH port-forward) the callback completes
+ * automatically; otherwise the user pastes the redirected URL/code back
+ * via `/mcp-auth/complete`.
+ */
+loopback: boolean, };
 
-export type McpAuthStartResponse = { flow_id: string, authorize_url: string, };
+export type McpAuthStartResponse = { flow_id: string, authorize_url: string, 
+/**
+ * True when this flow used a loopback callback, so the frontend knows to
+ * offer manual code entry if the popup can't reach it.
+ */
+loopback: boolean, };
+
+export type McpAuthCompleteRequest = { flow_id: string, 
+/**
+ * Either the bare authorization `code`, or the full redirect URL the
+ * browser landed on (`http://localhost:…/callback?code=…&state=…`) — the
+ * user copies whichever is easier.
+ */
+code: string, };
 
 export type McpAuthFlowState = "pending" | "completed" | "failed";
 

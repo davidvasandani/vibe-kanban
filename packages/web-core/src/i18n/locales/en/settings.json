@@ -454,7 +454,11 @@
         "connecting": "Connecting…",
         "connectFailed": "Authorization failed",
         "popupClosed": "The authorization window was closed before completing.",
-        "popupBlocked": "Popup blocked — allow popups for this site and try again."
+        "popupBlocked": "Popup blocked — allow popups for this site and try again.",
+        "useLocalhostCallback": "Use localhost callback (for strict servers or manual approval)",
+        "manualHint": "Approve in the popup, then paste the page URL it lands on (or the code) here.",
+        "manualPlaceholder": "Paste the redirected URL or code",
+        "finishConnect": "Finish"
       }
     },
     "projects": {

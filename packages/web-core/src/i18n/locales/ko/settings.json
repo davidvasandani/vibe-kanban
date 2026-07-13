@@ -446,7 +446,11 @@
         "connecting": "연결 중…",
         "connectFailed": "인증에 실패했습니다",
         "popupClosed": "인증 창이 완료되기 전에 닫혔습니다.",
-        "popupBlocked": "팝업이 차단되었습니다. 이 사이트의 팝업을 허용한 후 다시 시도하세요."
+        "popupBlocked": "팝업이 차단되었습니다. 이 사이트의 팝업을 허용한 후 다시 시도하세요.",
+        "useLocalhostCallback": "localhost 콜백 사용 (엄격한 서버 또는 수동 승인용)",
+        "manualHint": "팝업에서 승인한 다음 이동한 페이지의 URL(또는 코드)을 여기에 붙여넣으세요.",
+        "manualPlaceholder": "리디렉션된 URL 또는 코드 붙여넣기",
+        "finishConnect": "완료"
       }
     },
     "projects": {

@@ -120,12 +120,26 @@ function McpTestResultDetails({
   connectError,
   onConnect,
   connectDisabled,
+  loopback,
+  onToggleLoopback,
+  manualActive,
+  manualCode,
+  onManualCodeChange,
+  onManualComplete,
+  completing,
 }: {
   result: McpServerTestResult | undefined;
   connecting: boolean;
   connectError: string | undefined;
   onConnect: () => void;
   connectDisabled: boolean;
+  loopback: boolean;
+  onToggleLoopback: () => void;
+  manualActive: boolean;
+  manualCode: string;
+  onManualCodeChange: (value: string) => void;
+  onManualComplete: () => void;
+  completing: boolean;
 }) {
   const { t } = useTranslation('settings');
   const [expanded, setExpanded] = useState(false);
@@ -197,6 +211,44 @@ function McpTestResultDetails({
         >
           {connectError}
         </button>
+      )}
+      {authRequired && (
+        <label className="mt-2 flex items-center gap-2 text-low">
+          <input
+            type="checkbox"
+            checked={loopback}
+            onChange={onToggleLoopback}
+            disabled={connecting || manualActive}
+          />
+          {t('settings.mcp.test.useLocalhostCallback')}
+        </label>
+      )}
+      {manualActive && (
+        <div className="mt-2 space-y-2 border-t border-current/20 pt-2">
+          <p className="text-low">{t('settings.mcp.test.manualHint')}</p>
+          <input
+            type="text"
+            value={manualCode}
+            onChange={(e) => onManualCodeChange(e.target.value)}
+            placeholder={t('settings.mcp.test.manualPlaceholder')}
+            className="w-full rounded-sm border border-border bg-primary px-2 py-1 font-mono text-high"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            type="button"
+            onClick={onManualComplete}
+            disabled={completing || manualCode.trim().length === 0}
+          >
+            {completing ? (
+              <CircleNotchIcon
+                className="size-icon-xs mr-1 animate-spin"
+                weight="bold"
+              />
+            ) : null}
+            {t('settings.mcp.test.finishConnect')}
+          </Button>
+        </div>
       )}
     </div>
   );
@@ -289,6 +341,8 @@ export function McpSettingsSection() {
       setTestError(null);
       setTesting(false);
       setConnectErrors({});
+      setManualFlow(null);
+      setManualCode('');
 
       try {
         const profileKey = profiles
@@ -341,6 +395,8 @@ export function McpSettingsSection() {
       setTestResults(null);
       setTestError(null);
       setConnectErrors({});
+      setManualFlow(null);
+      setManualCode('');
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
     } catch (err) {
@@ -379,6 +435,8 @@ export function McpSettingsSection() {
     setTestError(null);
     setTestResults(null);
     setConnectErrors({});
+    setManualFlow(null);
+    setManualCode('');
 
     try {
       const results = await machineClient.testMcpServers({
@@ -407,6 +465,57 @@ export function McpSettingsSection() {
   // global test banner, so the message stays next to what it's about.
   const [connectErrors, setConnectErrors] = useState<Record<string, string>>(
     {}
+  );
+  // Per-card "use localhost callback" toggle, and the active manual-paste flow
+  // it produces. Loopback mode registers a http://localhost callback that
+  // strict-allowlist authorization servers accept; because the browser may not
+  // be able to reach that loopback (e.g. VK opened on a phone), the flow is
+  // finished by pasting the redirected URL/code back rather than by an
+  // automatic callback.
+  const [loopbackEnabled, setLoopbackEnabled] = useState<
+    Record<string, boolean>
+  >({});
+  const [manualFlow, setManualFlow] = useState<{
+    server: string;
+    flowId: string;
+  } | null>(null);
+  const [manualCode, setManualCode] = useState('');
+  const [completing, setCompleting] = useState(false);
+
+  // Refresh a just-connected server from disk (the token was written behind
+  // the UI's back — a later Save must not wipe it) and re-test just that one.
+  const finalizeConnected = useCallback(
+    async (serverName: string) => {
+      if (!machineClient || !selectedProfileKey) return;
+      const requestedProfile = selectedProfile;
+      const isStale = () => activeProfileRef.current !== requestedProfile;
+      const executorQuery = {
+        executor: selectedProfileKey as BaseCodingAgent,
+      };
+      const fresh = await machineClient.loadMcpServers(executorQuery);
+      if (isStale()) return;
+      const freshEntry = ((fresh.mcp_config.servers ?? {}) as ServerMap)[
+        serverName
+      ];
+      if (freshEntry !== undefined) {
+        setServers((prev) => ({ ...prev, [serverName]: freshEntry }));
+        setOriginalSnapshot((prev) => {
+          const base = JSON.parse(prev) as ServerMap;
+          base[serverName] = freshEntry;
+          return JSON.stringify(base);
+        });
+      }
+      const results = await machineClient.testMcpServers(executorQuery, {
+        servers: [serverName],
+      });
+      if (isStale()) return;
+      setTestResults((prev) => {
+        const next = { ...(prev ?? {}) };
+        for (const result of results) next[result.name] = result;
+        return next;
+      });
+    },
+    [machineClient, selectedProfile, selectedProfileKey]
   );
 
   const waitForAuthFlow = useCallback(
@@ -476,13 +585,18 @@ export function McpSettingsSection() {
         return;
       }
 
+      const useLoopback = !!loopbackEnabled[serverName];
+      setManualFlow(null);
+      setManualCode('');
+
       try {
         // Hand the probe's captured challenge to discovery — some servers
         // only send WWW-Authenticate on the JSON-RPC POST the probe makes.
         const started = await machineClient.startMcpAuth(
           executorQuery,
           serverName,
-          testResults?.[serverName]?.www_authenticate
+          testResults?.[serverName]?.www_authenticate,
+          useLoopback
         );
         if (isStale()) {
           popup.close();
@@ -490,39 +604,22 @@ export function McpSettingsSection() {
         }
         popup.location.href = started.authorize_url;
 
+        if (started.loopback) {
+          // The browser may not be able to reach the localhost callback
+          // (VK opened remotely), so don't wait on an automatic callback —
+          // reveal the manual paste field and let the user finish the flow
+          // by pasting the redirected URL/code.
+          setManualFlow({ server: serverName, flowId: started.flow_id });
+          return;
+        }
+
         const outcome = await waitForAuthFlow(started.flow_id, popup);
         if (isStale()) return;
         if (outcome.status !== 'completed') {
           failConnect(outcome.error ?? t('settings.mcp.test.connectFailed'));
           return;
         }
-
-        // Merge the connected server's on-disk entry (now holding the token
-        // header) into both the working state and the pristine snapshot so
-        // other unsaved edits survive and Save can't drop the token.
-        const fresh = await machineClient.loadMcpServers(executorQuery);
-        if (isStale()) return;
-        const freshEntry = ((fresh.mcp_config.servers ?? {}) as ServerMap)[
-          serverName
-        ];
-        if (freshEntry !== undefined) {
-          setServers((prev) => ({ ...prev, [serverName]: freshEntry }));
-          setOriginalSnapshot((prev) => {
-            const base = JSON.parse(prev) as ServerMap;
-            base[serverName] = freshEntry;
-            return JSON.stringify(base);
-          });
-        }
-
-        const results = await machineClient.testMcpServers(executorQuery, {
-          servers: [serverName],
-        });
-        if (isStale()) return;
-        setTestResults((prev) => {
-          const next = { ...(prev ?? {}) };
-          for (const result of results) next[result.name] = result;
-          return next;
-        });
+        await finalizeConnected(serverName);
       } catch (err) {
         if (!popup.closed) popup.close();
         if (isStale()) return;
@@ -541,9 +638,52 @@ export function McpSettingsSection() {
       selectedProfileKey,
       t,
       testResults,
+      loopbackEnabled,
+      finalizeConnected,
       waitForAuthFlow,
     ]
   );
+
+  const handleCompleteManual = useCallback(async () => {
+    if (!machineClient || !selectedProfileKey || !manualFlow) return;
+    const { server, flowId } = manualFlow;
+    const code = manualCode.trim();
+    if (!code) return;
+
+    setCompleting(true);
+    setConnectErrors((prev) => {
+      const next = { ...prev };
+      delete next[server];
+      return next;
+    });
+    try {
+      await machineClient.completeMcpAuth(
+        { executor: selectedProfileKey as BaseCodingAgent },
+        flowId,
+        code
+      );
+      await finalizeConnected(server);
+      setManualFlow(null);
+      setManualCode('');
+    } catch (err) {
+      setConnectErrors((prev) => ({
+        ...prev,
+        [server]:
+          err instanceof Error
+            ? err.message
+            : t('settings.mcp.test.connectFailed'),
+      }));
+    } finally {
+      setCompleting(false);
+    }
+  }, [
+    machineClient,
+    selectedProfileKey,
+    manualFlow,
+    manualCode,
+    finalizeConnected,
+    t,
+  ]);
 
   const openDialog = useCallback(
     async (initial?: { name: string; entry: JsonValue }) => {
@@ -889,6 +1029,18 @@ export function McpSettingsSection() {
                             connectDisabled={
                               connectingServer !== null || isDirty
                             }
+                            loopback={!!loopbackEnabled[name]}
+                            onToggleLoopback={() =>
+                              setLoopbackEnabled((prev) => ({
+                                ...prev,
+                                [name]: !prev[name],
+                              }))
+                            }
+                            manualActive={manualFlow?.server === name}
+                            manualCode={manualCode}
+                            onManualCodeChange={setManualCode}
+                            onManualComplete={handleCompleteManual}
+                            completing={completing}
                           />
                         </div>
                       );

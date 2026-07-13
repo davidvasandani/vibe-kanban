@@ -60,9 +60,15 @@ export interface MachineClient {
   startMcpAuth: (
     query: McpServerQuery,
     serverName: string,
-    wwwAuthenticate?: string | null
+    wwwAuthenticate?: string | null,
+    loopback?: boolean
   ) => Promise<McpAuthStartResponse>;
   getMcpAuthStatus: (flowId: string) => Promise<McpAuthStatusResponse>;
+  completeMcpAuth: (
+    query: McpServerQuery,
+    flowId: string,
+    code: string
+  ) => Promise<McpAuthStatusResponse>;
 }
 
 function getMachineRequestOptions(
@@ -212,7 +218,7 @@ export function createMachineClient(
         )
       );
     },
-    startMcpAuth: async (query, serverName, wwwAuthenticate) => {
+    startMcpAuth: async (query, serverName, wwwAuthenticate, loopback) => {
       const params = new URLSearchParams(query);
       return handleApiResponse<McpAuthStartResponse>(
         await makeMachineRequest(
@@ -224,7 +230,22 @@ export function createMachineClient(
             body: JSON.stringify({
               server_name: serverName,
               www_authenticate: wwwAuthenticate ?? null,
+              loopback: loopback ?? false,
             }),
+          }
+        )
+      );
+    },
+    completeMcpAuth: async (query, flowId, code) => {
+      const params = new URLSearchParams(query);
+      return handleApiResponse<McpAuthStatusResponse>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/mcp-auth/complete?${params.toString()}`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ flow_id: flowId, code }),
           }
         )
       );

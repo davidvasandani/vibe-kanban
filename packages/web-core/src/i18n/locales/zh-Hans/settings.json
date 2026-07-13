@@ -446,7 +446,11 @@
         "connecting": "连接中…",
         "connectFailed": "授权失败",
         "popupClosed": "授权窗口在完成前已关闭。",
-        "popupBlocked": "弹出窗口被拦截 — 请允许此网站的弹出窗口后重试。"
+        "popupBlocked": "弹出窗口被拦截 — 请允许此网站的弹出窗口后重试。",
+        "useLocalhostCallback": "使用 localhost 回调（适用于严格的服务器或手动批准）",
+        "manualHint": "在弹出窗口中批准，然后将跳转页面的网址（或代码）粘贴到此处。",
+        "manualPlaceholder": "粘贴重定向的网址或代码",
+        "finishConnect": "完成"
       }
     },
     "projects": {
