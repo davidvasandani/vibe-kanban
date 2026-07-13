@@ -1,49 +1,44 @@
-# Implementation Plan: Default repo branch to `origin/main` (task vk/c59f-default-to-origi)
+# Implementation Plan: VK ↔ Jira source URL in the issue panel (task vk/a793-vk-jira-bi-direc)
 
 Step-by-step build order. The authoritative dependency-ordered task list is
-`homelab/specs/vk/c59f-default-to-origi/tasks.md`; this is the repo-root summary.
+`specs/001-jira-source-url/tasks.md`; this is the repo-root summary.
 
-## Goal
+## Pre-work (done during exploration)
+- Confirmed the bidirectional reconciler + status sync already shipped (PR #85)
+  and that **Req 2 (Done ⇄ Jira) needs no code** — verified in
+  `crates/remote/src/jira/mapping.rs` (VK "Done" ⇄ Jira `done`-category).
+- Confirmed the Jira URL is already on the client (`jira_browse_url` on the
+  `jira_issue_links` shape; `getJiraLinkForIssue` in `ProjectProvider`) and is
+  rendered on the card but **not** in the detail panel → the only gap.
 
-On the create-issue repo picker, default each added repository's target branch
-to `origin/main` (with sensible fallbacks) instead of forcing a modal branch
-pick. Frontend-only, in `packages/web-core`.
+## Step 1 — Panel component (packages/ui) [additive]
+1. Import `JiraBadge` in `KanbanIssuePanel.tsx`.
+2. Add optional prop `jiraLink?: { issueKey: string; url: string; active:
+   boolean } | null` to `KanbanIssuePanelProps`; destructure it.
+3. Render `<JiraBadge …/>` in the header left id-group after the copy-link
+   button, gated `!isCreateMode && jiraLink`.
 
-## Steps
+## Step 2 — Container wiring (packages/web-core) [depends on Step 1's prop]
+4. Destructure `getJiraLinkForIssue` from the existing `useProjectContext()`.
+5. Add a memoized `jiraLink` computed from `getJiraLinkForIssue(selectedIssue.id)`
+   → `{ issueKey: jira_issue_key, url: jira_browse_url, active: link_state ===
+   'active' }`, else `undefined`.
+6. Pass `jiraLink={mode === 'edit' ? jiraLink : undefined}` to `<KanbanIssuePanel>`.
 
-1. **Add the pure resolver** — `packages/web-core/src/shared/lib/defaultBranch.ts`.
-   Export `DEFAULT_BRANCH_PREFERENCE = ['origin/main', 'origin/master']` and
-   `resolveDefaultBranch(branches, preferredBranch?)`. Priority: configured
-   `preferredBranch` → `origin/main` → `origin/master` → `is_current` → first →
-   `null`. Match by exact `GitBranch.name`. (T001)
+## Step 3 — Test (packages/remote-web) [depends on Steps 1–2]
+7. Extend `renderPanel` in `KanbanIssuePanel.test.tsx` with a `jiraLink`
+   override; add 3 cases: linked→badge present (href + target=_blank),
+   unlinked→absent, create-mode→absent.
 
-2. **Wire into the add path** — `CreateModeRepoPickerBar.tsx`.
-   In `addRepoWithBranchSelection`, replace the forced `pickBranchForRepo` call
-   with: `const branches = await repoApi.getBranches(repo.id)` →
-   `resolveDefaultBranch(branches, repo.default_target_branch)`. If `null`, set a
-   picker error and return `false` (don't add). Otherwise `addRepo(repo)` +
-   `setTargetBranch(repo.id, defaultBranch)`. Drop `pickBranchForRepo` from that
-   callback's deps but keep the function — `handleChangeBranch` still uses it for
-   the "Change branch" button. Add the `resolveDefaultBranch` import. (T002)
+## Step 4 — Verify
+8. `NODE_ENV=test` vitest on the panel test (5/5 green).
+9. `ui:check`, `web-core:check`, `remote-web:check`, `local-web:check` (tsc).
+10. `ui:lint`, `local-web:lint` (eslint). Prettier clean.
+11. (Req 2 regression guard) `crates/remote/src/jira/mapping.rs` tests untouched.
 
-3. **Unit tests** — `packages/web-core/src/shared/lib/defaultBranch.test.ts`.
-   Cover: empty → null; origin/main preferred; origin/master fallback;
-   configured-default precedence; stale configured-default ignored; current
-   fallback; first-branch fallback; null/empty configured default ignored. (T003)
-
-4. **Validate** — `pnpm --filter @vibe/web-core test` (all pass),
-   `pnpm --filter @vibe/web-core run check` (tsc), Prettier clean. No
-   `generate-types` / `prepare-db` (no Rust/type change). (T004)
-
-## Non-goals / deliberately untouched
-
-- Backend `git::get_all_branches` (sort/order) — frontend selects by name.
-- Dormant `useRepoBranchSelection.ts` / `RepoBranchSelector.tsx` (no importers).
-- Bootstrapped/linked-issue repos (already carry a saved `target_branch`).
-- Persisting `origin/main` as a repo's stored `default_target_branch`.
-
-## Status
-
-All steps complete. `defaultBranch.ts`, its test, and the
-`CreateModeRepoPickerBar.tsx` edit are in place; web-core tests (104) and tsc
-pass. Independent Codex review of the diff is the next stage.
+## Notes / decisions
+- No render prop — a leaf badge is passed as data, mirroring the card's contract
+  exactly (single source of truth, FR-5).
+- Header placement (not a new section) avoids the panel's border-convention
+  pitfalls documented in `wiki/kanban-issue-panel-sections.md`.
+- Blast radius: `KanbanIssuePanel` is shared local-web + remote-web (intended).
