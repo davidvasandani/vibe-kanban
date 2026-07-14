@@ -1,71 +1,65 @@
-# Technical Specification: Remote-to-Local Workspace Archive Reconciliation
+# Technical Specification: Atlassian CLI in the Managed CLI Catalog
 
-## Problem
+## Objective
 
-When a cloud issue enters a terminal status, the remote service archives its
-linked remote workspace records in the same transaction as the issue update.
-The corresponding workspace records on the connected local Vibe Kanban host
-remain active. The cloud issue panel therefore shows an archived workspace
-while the local workspace sidebar still shows the same workspace under Active.
+Add Atlassian CLI (`acli`) to Vibe Kanban's managed CLI tools so users can
+discover, install, update, remove, and expose a verified app-owned copy to
+spawned agents through the existing CLI Tools settings workflow.
 
-Local-to-remote archive updates already synchronize through the local workspace
-API and `remote_sync`; the missing direction is remote-to-local reconciliation.
+## Background
 
-## Goal
+Vibe Kanban maintains a curated catalog in
+`crates/services/src/services/cli_tools.rs`. Each catalog entry has a stable
+wire identifier, pinned version, platform-specific source and SHA-256 digest,
+installation strategy, version probe, display metadata, and vendor docs link.
+The existing service and UI derive their behavior from this catalog.
 
-Keep a linked local workspace's archive state consistent with its remote
-workspace record when remote workspace data marks it archived, including the
-automatic archive caused by moving an issue to Done or Cancelled.
+Atlassian publishes standalone ACLI artifacts for Linux amd64 and arm64. The
+vendor's Linux guide documents both direct binaries and tar archives. The
+managed installer must use a version-stable, checksum-pinned source rather
+than an unverified moving `latest` artifact.
 
-## Requirements
+## Functional Requirements
 
-1. While remote project workspace data and local workspace data are available,
-   detect linked records where the remote workspace is archived but the local
-   workspace is still active.
-2. Archive each matching local workspace through the existing local workspace
-   update API so normal archive behavior runs (database flag, process cleanup,
-   archive script, stream updates, and harmless local-to-remote convergence).
-3. Reconciliation must be idempotent and must not repeatedly submit an archive
-   request while the same workspace request is in flight.
-4. A failure archiving one local workspace must not prevent other mismatched
-   workspaces from reconciling, and failures must remain retryable after the
-   remote/local data changes or the provider remounts.
-5. Do not automatically unarchive a local workspace from remote state. Archival
-   is the safety-oriented terminal transition at issue scope; unarchiving stays
-   an explicit workspace action and avoids reviving stopped local resources due
-   to stale remote data.
-6. Remote-only workspaces and local workspaces without a remote link are ignored.
+1. Add `acli` as a serializable `CliToolId` whose wire and directory name is
+   `acli`, and include it in the complete catalog ordering.
+2. Present the tool as "Atlassian CLI" with concise Atlassian Cloud command
+   line metadata and link users to Atlassian's official ACLI documentation.
+3. Pin a concrete ACLI release and provide SHA-256 digests for every supported
+   platform artifact.
+4. Support vendor-published Linux x86-64 and Linux arm64 builds. Other hosts
+   must report a clear unsupported reason through existing behavior.
+5. Install the executable as `acli` using the existing atomic staged archive
+   workflow, and probe host copies with `acli --version`.
+6. Preserve all existing host-copy precedence, credential ownership,
+   update/outdated reporting, removal, and agent PATH behavior.
+7. Ensure generated shared TypeScript types include the new `acli` identifier
+   through the repository's normal type-generation workflow; generated files
+   must not be hand-edited.
 
-## Proposed Design
+## Integrity and Safety Requirements
 
-Add a small reconciliation hook in the shared web core and invoke it from the
-remote project provider, where the Electric workspace shape is already
-subscribed. The hook compares project remote workspace records with active local
-workspace summaries from `WorkspaceContext`, selects archived remote records by
-their `local_workspace_id`, and calls `workspacesApi.update(id, { archived:
-true })` for mismatches. An in-flight ID set prevents duplicate calls across
-Electric/render updates; settled calls leave the set so a later reconciliation
-cycle can retry failures.
-
-Keep the comparison logic as a pure exported helper so edge cases can be unit
-tested without rendering providers. Tests cover matches, remote-only records,
-already-archived local records, active remote records, duplicate links, and
-multiple eligible workspaces.
-
-## Compatibility and Scope
-
-- No database migration or API contract change is required.
-- Existing local-to-remote synchronization remains authoritative for explicit
-  local archive/unarchive actions.
-- The change belongs in `packages/web-core`; both local and remote frontends use
-  the shared provider path.
-- This task does not change which issue statuses are terminal or the remote
-  transaction that archives workspace rows.
+- Every downloadable artifact must be authenticated by an exact SHA-256 pin
+  before extraction or promotion.
+- A failed download, checksum, or extraction must leave no partial executable
+  on agents' PATH.
+- ACLI authentication and configuration remain user/host managed; Vibe Kanban
+  does not collect or persist Atlassian credentials.
+- Existing managed tools and their wire identifiers remain backward
+  compatible.
 
 ## Verification
 
-- Run focused tests for the reconciliation helper/hook.
-- Run frontend type checking and formatting for touched files.
-- Exercise the regression path conceptually or manually: move a linked issue to
-  Done, observe the remote record become archived, then observe the linked local
-  workspace leave Active and enter Archive.
+- Unit tests assert ACLI's catalog identity, supported platform mappings,
+  archive/binary layout, and docs/version probe metadata.
+- Existing CLI-tool service tests continue to pass.
+- Rust formatting and targeted service tests/checks pass.
+- Shared types are regenerated or verified with the repository generator.
+- An independent Codex diff review reports no significant findings.
+
+## Out of Scope
+
+- Managing Atlassian authentication, sites, tokens, or ACLI configuration.
+- Adding ACLI as a coding-agent executor.
+- Installing through system package managers or requiring root privileges.
+- Supporting platforms for which no verified vendor artifact is selected.
