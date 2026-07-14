@@ -684,9 +684,7 @@ export function McpSettingsSection() {
                           (item) => item.executor === profile.executor
                         );
                         const incompatible =
-                          compatibility?.compatible === false ||
-                          (profile.executor === BaseCodingAgentValue.CODEX &&
-                            server.definition.transport !== 'stdio');
+                          compatibility?.compatible === false;
                         const assigned = server.assignments.includes(
                           profile.executor
                         );
@@ -715,8 +713,7 @@ export function McpSettingsSection() {
                             </label>
                             {incompatible && (
                               <div className="mt-1 text-xs text-error">
-                                {compatibility?.reason ??
-                                  t('settings.mcp.errors.incompatibleCodex')}
+                                {compatibility?.reason}
                               </div>
                             )}
                             {assigned && (

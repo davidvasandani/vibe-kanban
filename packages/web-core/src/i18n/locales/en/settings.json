@@ -445,8 +445,7 @@
         "addServerFailed": "Failed to add preconfigured server",
         "mcpError": "MCP Configuration Error: {{error}}",
         "notSupported": "MCP Not Supported",
-        "supportMessage": "To use MCP servers, assign the logical server to an agent that supports MCP.",
-        "incompatibleCodex": "Codex supports stdio MCP servers only."
+        "supportMessage": "To use MCP servers, assign the logical server to an agent that supports MCP."
       },
       "save": {
         "button": "Save MCP Configuration",
