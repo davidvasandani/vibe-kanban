@@ -19,6 +19,12 @@ is implemented. No feature is "done" without a checkable validation.
 ### III. Small, reversible steps
 Ship the smallest change that delivers value. Avoid speculative generality.
 
+### IV. One MCP contract for all agents
+Shared MCP server configuration has one canonical definition and is adapted to
+each agent's native config format at the boundary. Agent-specific exceptions must
+be documented in the spec, preserve the shared behavior, and include validation
+for each affected agent.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -28,4 +34,4 @@ Ship the smallest change that delivers value. Avoid speculative generality.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.1.0
+**Version**: 0.2.0

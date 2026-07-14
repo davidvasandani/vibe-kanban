@@ -9,6 +9,11 @@ import type {
   McpServerQuery,
   McpServerTestResult,
   Repo,
+  SharedMcpAssignmentTestResult,
+  SharedMcpReadResponse,
+  SharedMcpTestRequest,
+  SharedMcpWriteRequest,
+  SharedMcpWriteResponse,
   TestMcpServersBody,
   UpdateMcpServersBody,
   UpdateRepo,
@@ -59,6 +64,13 @@ export interface MachineClient {
     query: McpServerQuery,
     body?: TestMcpServersBody
   ) => Promise<McpServerTestResult[]>;
+  loadSharedMcpServers: () => Promise<SharedMcpReadResponse>;
+  saveSharedMcpServers: (
+    data: SharedMcpWriteRequest
+  ) => Promise<SharedMcpWriteResponse>;
+  testSharedMcpAssignments: (
+    body?: SharedMcpTestRequest
+  ) => Promise<SharedMcpAssignmentTestResult[]>;
   startMcpAuth: (
     query: McpServerQuery,
     serverName: string,
@@ -224,6 +236,29 @@ export function createMachineClient(
         )
       );
     },
+    loadSharedMcpServers: async () =>
+      handleApiResponse<SharedMcpReadResponse>(
+        await makeMachineRequest(runtime, target, '/api/mcp-config/shared')
+      ),
+    saveSharedMcpServers: async (data) =>
+      handleApiResponse<SharedMcpWriteResponse>(
+        await makeMachineRequest(runtime, target, '/api/mcp-config/shared', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        })
+      ),
+    testSharedMcpAssignments: async (body) =>
+      handleApiResponse<SharedMcpAssignmentTestResult[]>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          '/api/mcp-config/shared/test',
+          {
+            method: 'POST',
+            body: JSON.stringify(body ?? { targets: [] }),
+          }
+        )
+      ),
     startMcpAuth: async (query, serverName, wwwAuthenticate, loopback) => {
       const params = new URLSearchParams(query);
       return handleApiResponse<McpAuthStartResponse>(

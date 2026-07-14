@@ -1,75 +1,24 @@
-# Implementation Plan: Slack AI summarization (task `vk/0f53-slack-shortcut-a`)
+# Implementation Plan: Shared MCP Servers
 
-Step-by-step build order. The authoritative dependency-ordered task list is
-`homelab/specs/vk/0f53-slack-shortcut-a/tasks.md` (T001–T019); this is the
-executable narrative. Rationale in `SPEC.md`; prior-art recall in
-`PRIOR_KNOWLEDGE.md`.
+This plan is based on `SPEC.md` and the workspace-root `PRIOR_KNOWLEDGE.md`. SpecKit stages may refine file-level details, but implementation must preserve native agent configuration formats and existing test/OAuth semantics.
 
-## Step 1 — Schema + config storage (T001–T002)
+1. **Establish the shared domain model.** Add Rust DTOs for a logical MCP server, its target agents/profiles, source/native representations, conflicts, and per-target mutation outcomes. Register exported DTOs with the existing ts-rs generator.
+2. **Build deterministic reconciliation.** Implement pure helpers that read each MCP-capable executor's native server map, normalize comparable known transports, consolidate equivalent same-name entries, retain single-agent/custom entries, and emit explicit conflicts for incompatible same-name definitions. Add unit tests first for identical, adapted, custom, and conflicting inputs.
+3. **Add shared read/write routes.** Add an authenticated shared MCP configuration endpoint that enumerates MCP-capable executors and config paths, returns reconciled state, validates assignments, and fans a desired shared state out through each executor's existing `McpConfig` writer. Preserve unrelated native settings. Return per-executor outcomes and do not claim full success on partial failure.
+4. **Keep assignment-aware operations.** Extend or wrap connectivity test and OAuth entry points so requests identify the target executor/profile. Continue probing saved native entries and refreshing OAuth-modified disk state.
+5. **Regenerate client types and API bindings.** Register new Rust types, run the project type generator, and update local/relay machine-client methods to call the shared endpoints without hand-editing generated type files.
+6. **Redesign MCP settings state.** Replace the primary executor selector flow with a unified logical-server collection. Load once, track a stable saved snapshot, surface reconciliation conflicts and partial errors, and save definitions plus assignments as one user action.
+7. **Add profile assignment controls.** Update the server dialog/card UI with an MCP-capable multi-select, require at least one assignment, show assigned profile names/count, and preserve the raw JSON escape hatch for definitions that cannot be represented by the standard form.
+8. **Make test and OAuth results per assignment.** Allow testing a server's assigned native representations and render each result beside its profile. Run OAuth Connect against one chosen assignment and merge the refreshed native credentials without erasing unrelated unsaved edits.
+9. **Update language strings and documentation.** Revise English MCP settings copy from per-agent configuration to shared servers/assignments, keep locale fallbacks structurally safe, and update user-facing MCP settings documentation if behavior or screenshots materially changed.
+10. **Verify focused behavior.** Run backend unit tests for reconciliation/write planning, frontend codec/state tests, generated-type checks, formatting, and the narrowest practical workspace checks. Resolve failures attributable to the change.
+11. **Independent review.** Run the repository's Codex review workflow against the final diff, address confirmed significant findings, and repeat review/checks until none remain.
+12. **Capture reusable knowledge.** Add or update an MCP configuration-sharing topic in the project knowledge base, tag it with `a898-allow-mcp-server`, refresh its index, and commit the knowledge-base update as required by the pipeline.
 
-Migration `crates/remote/migrations/20260711000000_slack_ai_summarization.sql`
-adds nullable `encrypted_anthropic_api_key TEXT` and
-`ai_summarization_enabled BOOLEAN NOT NULL DEFAULT FALSE`. In
-`db/slack_configs.rs`: both columns into `SELECT_COLUMNS`; `UpsertSlackConfigArgs`
-gains the two fields; the `upsert` gets `COALESCE($8, …)` for the key
-(write-only keep-on-None) and sets the flag directly (`$9`).
+## Dependency and Parallelism Notes
 
-## Step 2 — Anthropic client (T003–T006)
-
-New `crates/remote/src/anthropic/`: `types.rs` (`IssueSummary`, response +
-error bodies), `prompt.rs` (pure — system prompt + FR-16-capped transcript with
-unit tests), `client.rs` (`AnthropicClient::summarize_thread`, HTTP-status
-errors, structured-outputs request, first-text-block JSON parse; `AnthropicError`
-whose `Transport`/`Api` variants never carry the key). Register
-`pub mod anthropic;` in `lib.rs`.
-
-## Step 3 — Slack client + types (T007–T008)
-
-`slack/types.rs`: `SlackConfig` FromRow gains the two columns +
-`ai_summarization_active()`; DTOs gain the AI fields; add `thread_ts` to
-`SlackMessageRef`; add `SlackConversationsRepliesResponse`/`SlackReplyMessage`
-and `SlackViewsOpenResponse`. `slack/client.rs`: `conversations_replies`,
-`views_open` returns the view id, `views_update`.
-
-## Step 4 — Modal hint (T009)
-
-`slack/modal.rs`: `build_create_issue_modal` gains a `hint: Option<&str>` param;
-when `Some`, a leading `context` block renders the "✨ Summarizing thread…"
-notice. All existing callers/tests pass `None`.
-
-## Step 5 — Wiring (T010)
-
-`routes/slack.rs`: `handle_message_action` passes `ai_active` +
-`encrypted_anthropic_api_key` into the spawned `open_shortcut_modal`. There, the
-gate is computed **before** building the initial modal (so the hint is included
-only when AI will run — resolves the analyze `[error]`); `views.open` captures
-the view id; then `summarize_thread_for_modal` fetches the thread
-(`thread_ts` else `ts`), decrypts, summarizes, and the caller `views.update`s the
-AI result (permalink appended) or reverts to the plain modal on failure. Logs
-are error-class only (never transcript/key — resolves the analyze logging-hygiene
-`[warning]`).
-
-## Step 6 — Admin API + settings UI (T011–T016)
-
-`upsert_config` encrypts a supplied key (keep-on-empty) and persists the flag
-(defaulting to the stored value when omitted); `build_response` fills the AI
-fields. Regenerate `shared/remote-types.ts` (`pnpm run remote:generate-types`).
-`SlackSettingsSection.tsx` adds the toggle, masked key field, disclosure copy,
-and manifest history scopes + re-install note. The hook/api carry the fields
-generically. i18n uses inline `t()` fallbacks, matching the base feature (no new
-locale keys — passes `check-unused-i18n-keys`).
-
-## Step 7 — Tests & gates (T017–T019)
-
-Unit tests: `anthropic::prompt` caps, `IssueSummary` fixture parse, the gate,
-`conversations.replies` parse. Gates: `cargo fmt`/clippy clean on remote;
-`pnpm run check` (all TS type-checks pass); i18n + ui lint pass;
-`cargo test --workspace`. Then the independent Codex review pass.
-
-## Deviations from the SpecKit plan
-
-None material. The remote type generator bin is `generate_types.rs`
-(bin-named `remote-generate-types`), not `remote-generate-types.rs` — verified
-against `package.json` (resolves the analyze `[warning]` on the filename). Its
-DTOs were already registered, so no generator edit was needed — only the struct
-fields.
+- Steps 2–4 depend on the model in step 1.
+- Step 6 depends on the shared read model and generated TypeScript types.
+- UI assignment controls and copy can proceed together after the frontend state shape is fixed.
+- Tests should land with the helper or component they cover, rather than as a final bulk addition.
+- Multi-file writes are initially best-effort with explicit per-target results unless SpecKit clarification requires rollback semantics; no misleading all-or-nothing response is permitted.

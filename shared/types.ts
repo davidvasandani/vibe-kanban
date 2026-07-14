@@ -356,6 +356,50 @@ export type TestMcpServersBody = {
  */
 servers: Array<string> | null, };
 
+export type SharedMcpProfile = { executor: BaseCodingAgent, display_name: string, supports_mcp: boolean, config_path: string | null, servers_path: Array<string>, read_error: string | null, };
+
+export type McpTransportKind = "stdio" | "http" | "sse" | "unknown";
+
+export type McpServerDefinition = { transport: McpTransportKind, value: JsonValue, representable_in_form: boolean, };
+
+export type NativeMcpSource = { executor: BaseCodingAgent, config_path: string, server_name: string, entry: JsonValue, normalized_fingerprint: string | null, };
+
+export type SharedMcpAssignment = { executor: BaseCodingAgent, native_name: string, native_entry: JsonValue | null, has_credentials: boolean, representable: boolean, incompatibility_reason: string | null, };
+
+export type SharedMcpSourceKind = "reconciled" | "single_profile" | "new" | "custom";
+
+export type SharedMcpCompatibility = { executor: BaseCodingAgent, compatible: boolean, reason: string | null, };
+
+export type SharedMcpServer = { name: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, source_kind: SharedMcpSourceKind, native_sources: Array<NativeMcpSource>, compatibility: Array<SharedMcpCompatibility>, };
+
+export type SharedMcpConflictVariant = { variant_id: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, native_sources: Array<NativeMcpSource>, };
+
+export type SharedMcpConflict = { name: string, variants: Array<SharedMcpConflictVariant>, message: string, };
+
+export type SharedMcpProfileError = { executor: BaseCodingAgent, config_path: string | null, error: string, };
+
+export type SharedMcpReadResponse = { profiles: Array<SharedMcpProfile>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, preconfigured: JsonValue, read_errors: Array<SharedMcpProfileError>, };
+
+export type SharedMcpServerInput = { name: string, definition: McpServerDefinition, assignments: Array<BaseCodingAgent>, native_overrides: { [key in BaseCodingAgent]?: JsonValue }, };
+
+export type SharedMcpConflictResolution = { name: string, };
+
+export type SharedMcpWriteRequest = { servers: Array<SharedMcpServerInput>, removed_servers: Array<string>, resolved_conflicts: Array<SharedMcpConflictResolution>, };
+
+export type SharedMcpWriteStatus = "success" | "partial_failure" | "failed";
+
+export type SharedMcpProfileWriteStatus = "success" | "skipped" | "failed";
+
+export type SharedMcpProfileWriteOutcome = { executor: BaseCodingAgent, config_path: string | null, status: SharedMcpProfileWriteStatus, affected_servers: Array<string>, message: string | null, error: string | null, };
+
+export type SharedMcpWriteResponse = { status: SharedMcpWriteStatus, outcomes: Array<SharedMcpProfileWriteOutcome>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, };
+
+export type SharedMcpTestTarget = { server_name: string, executor: BaseCodingAgent, };
+
+export type SharedMcpTestRequest = { targets: Array<SharedMcpTestTarget>, };
+
+export type SharedMcpAssignmentTestResult = { server_name: string, executor: BaseCodingAgent, result: McpServerTestResult, };
+
 export type McpServerTestResult = { name: string, 
 /**
  * `"stdio" | "http" | "sse" | "unknown"`.
