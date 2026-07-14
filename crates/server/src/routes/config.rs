@@ -17,6 +17,12 @@ use executors::{
     mcp_config::{McpConfig, read_agent_config, write_agent_config},
     mcp_test::{McpServerTestResult, test_mcp_servers},
     profile::{ExecutorConfigs, ExecutorProfileId},
+    shared_mcp_config::{
+        SharedMcpProfileWriteOutcome, SharedMcpProfileWriteStatus, SharedMcpReadResponse,
+        SharedMcpTestRequest, SharedMcpTestTarget, SharedMcpWriteRequest, SharedMcpWriteResponse,
+        SharedMcpWriteStatus, load_native_snapshots, load_shared_mcp_config,
+        plan_servers_for_executor, reconcile_snapshots, validate_write_request,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -47,6 +53,14 @@ pub fn router() -> Router<DeploymentImpl> {
         .route("/config", put(update_config))
         .route("/sounds/{sound}", get(get_sound))
         .route("/mcp-config", get(get_mcp_servers).post(update_mcp_servers))
+        .route(
+            "/mcp-config/shared",
+            get(get_shared_mcp_servers).post(update_shared_mcp_servers),
+        )
+        .route(
+            "/mcp-config/shared/test",
+            post(test_shared_mcp_servers_route),
+        )
         .route("/mcp-config/test", post(test_mcp_servers_route))
         .route("/profiles", get(get_profiles).put(update_profiles))
         .route(
@@ -307,6 +321,13 @@ pub struct TestMcpServersBody {
     servers: Option<Vec<String>>,
 }
 
+#[derive(TS, Debug, Serialize, Deserialize)]
+pub struct SharedMcpAssignmentTestResult {
+    pub server_name: String,
+    pub executor: BaseCodingAgent,
+    pub result: McpServerTestResult,
+}
+
 /// Per-server connectivity timeout for the MCP test endpoint.
 const MCP_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -343,6 +364,104 @@ async fn get_mcp_servers(
     Ok(ResponseJson(ApiResponse::success(GetMcpServerResponse {
         mcp_config: mcpc,
         config_path: config_path.to_string_lossy().to_string(),
+    })))
+}
+
+async fn get_shared_mcp_servers(
+    State(_deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<SharedMcpReadResponse>>, ApiError> {
+    Ok(ResponseJson(ApiResponse::success(
+        load_shared_mcp_config().await,
+    )))
+}
+
+async fn update_shared_mcp_servers(
+    State(_deployment): State<DeploymentImpl>,
+    Json(payload): Json<SharedMcpWriteRequest>,
+) -> Result<ResponseJson<ApiResponse<SharedMcpWriteResponse>>, ApiError> {
+    if let Err(message) = validate_write_request(&payload) {
+        return Ok(ResponseJson(ApiResponse::error(&message)));
+    }
+
+    let snapshots = load_native_snapshots().await;
+    let mut outcomes = Vec::new();
+    let mut any_success = false;
+    let mut any_failed = false;
+
+    for snapshot in &snapshots {
+        let Ok((planned_servers, affected_servers)) =
+            plan_servers_for_executor(snapshot.profile.executor, &snapshot.servers, &payload)
+        else {
+            // `validate_write_request` catches compatibility before writes.
+            continue;
+        };
+
+        if affected_servers.is_empty() {
+            outcomes.push(SharedMcpProfileWriteOutcome {
+                executor: snapshot.profile.executor,
+                config_path: snapshot.profile.config_path.clone(),
+                status: SharedMcpProfileWriteStatus::Skipped,
+                affected_servers,
+                message: Some("No MCP server changes for this profile".to_string()),
+                error: None,
+            });
+            continue;
+        }
+
+        let Some(config_path) = snapshot.config_path.as_ref() else {
+            any_failed = true;
+            outcomes.push(SharedMcpProfileWriteOutcome {
+                executor: snapshot.profile.executor,
+                config_path: None,
+                status: SharedMcpProfileWriteStatus::Failed,
+                affected_servers,
+                message: None,
+                error: Some("Could not determine config file path".to_string()),
+            });
+            continue;
+        };
+
+        match update_mcp_servers_in_config(config_path, &snapshot.mcp_config, planned_servers).await
+        {
+            Ok(message) => {
+                any_success = true;
+                outcomes.push(SharedMcpProfileWriteOutcome {
+                    executor: snapshot.profile.executor,
+                    config_path: snapshot.profile.config_path.clone(),
+                    status: SharedMcpProfileWriteStatus::Success,
+                    affected_servers,
+                    message: Some(message),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                any_failed = true;
+                outcomes.push(SharedMcpProfileWriteOutcome {
+                    executor: snapshot.profile.executor,
+                    config_path: snapshot.profile.config_path.clone(),
+                    status: SharedMcpProfileWriteStatus::Failed,
+                    affected_servers,
+                    message: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    let fresh = reconcile_snapshots(load_native_snapshots().await);
+    let status = if any_failed && any_success {
+        SharedMcpWriteStatus::PartialFailure
+    } else if any_failed {
+        SharedMcpWriteStatus::Failed
+    } else {
+        SharedMcpWriteStatus::Success
+    };
+
+    Ok(ResponseJson(ApiResponse::success(SharedMcpWriteResponse {
+        status,
+        outcomes,
+        servers: fresh.servers,
+        conflicts: fresh.conflicts,
     })))
 }
 
@@ -444,6 +563,80 @@ async fn test_mcp_servers_route(
 
     let results = test_mcp_servers(servers, MCP_TEST_TIMEOUT).await;
     Ok(ResponseJson(ApiResponse::success(results)))
+}
+
+async fn test_shared_mcp_servers_route(
+    State(_deployment): State<DeploymentImpl>,
+    body: axum::body::Bytes,
+) -> Result<ResponseJson<ApiResponse<Vec<SharedMcpAssignmentTestResult>>>, ApiError> {
+    let body: SharedMcpTestRequest = if body.is_empty() {
+        SharedMcpTestRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ConfigError::ValidationError(format!("invalid request body: {e}")))?
+    };
+    let mut targets = body.targets;
+
+    if targets.is_empty() {
+        let shared = load_shared_mcp_config().await;
+        targets = shared
+            .servers
+            .iter()
+            .flat_map(|server| {
+                server
+                    .assignments
+                    .iter()
+                    .map(|assignment| SharedMcpTestTarget {
+                        server_name: server.name.clone(),
+                        executor: assignment.executor,
+                    })
+            })
+            .collect();
+    }
+
+    let mut by_executor: HashMap<BaseCodingAgent, Vec<String>> = HashMap::new();
+    for target in targets {
+        by_executor
+            .entry(target.executor)
+            .or_default()
+            .push(target.server_name);
+    }
+
+    let mut all_results = Vec::new();
+    for (executor, server_names) in by_executor {
+        let coding_agent = ExecutorConfigs::get_cached()
+            .get_coding_agent(&ExecutorProfileId::new(executor))
+            .ok_or(ConfigError::ValidationError(
+                "Executor not found".to_string(),
+            ))?;
+
+        if !coding_agent.supports_mcp() {
+            continue;
+        }
+
+        let Some(config_path) = coding_agent.default_mcp_config_path() else {
+            continue;
+        };
+        let mcpc = coding_agent.get_mcp_config();
+        let raw_config = read_agent_config(&config_path, &mcpc).await?;
+        let mut servers = get_mcp_servers_from_config_path(&raw_config, &mcpc.servers_path);
+        servers.retain(|name, _| server_names.contains(name));
+
+        for result in test_mcp_servers(servers, MCP_TEST_TIMEOUT).await {
+            all_results.push(SharedMcpAssignmentTestResult {
+                server_name: result.name.clone(),
+                executor,
+                result,
+            });
+        }
+    }
+
+    all_results.sort_by(|a, b| {
+        a.server_name
+            .cmp(&b.server_name)
+            .then_with(|| a.executor.to_string().cmp(&b.executor.to_string()))
+    });
+    Ok(ResponseJson(ApiResponse::success(all_results)))
 }
 
 pub(crate) async fn update_mcp_servers_in_config(

@@ -3,7 +3,11 @@
 //! These helpers abstract over JSON vs TOML vs JSONC formats used by different agents.
 //! JSONC (JSON with Comments) is supported with comment preservation using jsonc-parser's CST.
 
-use std::{collections::HashMap, path::Path, sync::LazyLock};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+};
 
 use jsonc_parser::{
     ParseOptions,
@@ -138,30 +142,100 @@ pub async fn write_agent_config(
     mcp_config: &McpConfig,
     config: &Value,
 ) -> Result<(), ExecutorError> {
-    if mcp_config.is_toml_config {
-        let toml_value: toml::Value = serde_json::from_str(&serde_json::to_string(config)?)?;
-        let toml_content = toml::to_string_pretty(&toml_value)?;
-        fs::write(config_path, toml_content).await?;
-    } else if is_jsonc_file(config_path) {
-        write_jsonc_preserving_comments(config_path, config).await?;
-    } else {
-        let json_content = serde_json::to_string_pretty(config)?;
-        fs::write(config_path, json_content).await?;
-    }
+    let content = serialize_agent_config(config_path, mcp_config, config).await?;
+    atomic_write_agent_config(config_path, content.as_bytes()).await?;
     Ok(())
 }
 
-async fn write_jsonc_preserving_comments(
+async fn serialize_agent_config(
+    config_path: &std::path::Path,
+    mcp_config: &McpConfig,
+    config: &Value,
+) -> Result<String, ExecutorError> {
+    if mcp_config.is_toml_config {
+        let toml_value: toml::Value = serde_json::from_str(&serde_json::to_string(config)?)?;
+        Ok(toml::to_string_pretty(&toml_value)?)
+    } else if is_jsonc_file(config_path) {
+        Ok(jsonc_content_preserving_comments(config_path, config).await?)
+    } else {
+        Ok(serde_json::to_string_pretty(config)?)
+    }
+}
+
+async fn jsonc_content_preserving_comments(
     config_path: &std::path::Path,
     new_config: &Value,
-) -> Result<(), ExecutorError> {
+) -> Result<String, ExecutorError> {
     let current_content = fs::read_to_string(config_path)
         .await
         .unwrap_or_else(|_| "{}".to_string());
 
-    let output = update_jsonc_content(&current_content, new_config);
+    Ok(update_jsonc_content(&current_content, new_config))
+}
 
-    fs::write(config_path, output).await?;
+fn backup_path(config_path: &Path) -> PathBuf {
+    let mut backup = config_path.to_path_buf();
+    let file_name = config_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("config");
+    backup.set_file_name(format!("{file_name}.bak"));
+    backup
+}
+
+fn staged_path(config_path: &Path) -> PathBuf {
+    let mut staged = config_path.to_path_buf();
+    let file_name = config_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("config");
+    staged.set_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    staged
+}
+
+/// Atomically replace an agent config file and retain a sibling `.bak` copy of
+/// the previous version when one existed. Each native file can be recovered
+/// independently after a partial shared MCP save.
+pub async fn atomic_write_agent_config(
+    config_path: &Path,
+    content: &[u8],
+) -> Result<(), ExecutorError> {
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+
+    let staged = staged_path(config_path);
+    fs::write(&staged, content).await?;
+    if let Ok(file) = fs::OpenOptions::new().read(true).open(&staged).await {
+        file.sync_all().await?;
+    }
+
+    if fs::metadata(config_path).await.is_ok() {
+        let backup = backup_path(config_path);
+        let _ = fs::remove_file(&backup).await;
+        fs::copy(config_path, &backup).await?;
+    }
+
+    match fs::rename(&staged, config_path).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&staged).await;
+            Err(ExecutorError::Io(e))
+        }
+    }
+}
+
+pub fn previous_version_backup_path(config_path: &Path) -> PathBuf {
+    backup_path(config_path)
+}
+
+#[allow(dead_code)]
+async fn write_jsonc_preserving_comments(
+    config_path: &std::path::Path,
+    new_config: &Value,
+) -> Result<(), ExecutorError> {
+    let output = jsonc_content_preserving_comments(config_path, new_config).await?;
+    atomic_write_agent_config(config_path, output.as_bytes()).await?;
     Ok(())
 }
 
@@ -462,6 +536,8 @@ impl CodingAgent {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
 
     #[test]
@@ -517,5 +593,51 @@ mod tests {
             vk["args"],
             serde_json::json!(["-y", "@ourscope/vibe-kanban@1.2.3", "--mcp"])
         );
+    }
+
+    #[tokio::test]
+    async fn atomic_write_replaces_file_and_keeps_backup() {
+        let dir = std::env::temp_dir().join(format!(
+            "vk-mcp-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, br#"{"old":true}"#).await.unwrap();
+
+        atomic_write_agent_config(&path, br#"{"new":true}"#)
+            .await
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&path).await.unwrap(), r#"{"new":true}"#);
+        assert_eq!(
+            fs::read_to_string(previous_version_backup_path(&path))
+                .await
+                .unwrap(),
+            r#"{"old":true}"#
+        );
+        let _ = fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn failed_atomic_replace_preserves_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "vk-mcp-config-fail-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, br#"{"old":true}"#).await.unwrap();
+
+        let result = atomic_write_agent_config(&path, b"replacement").await;
+        assert!(result.is_ok());
+        assert_eq!(fs::read_to_string(&path).await.unwrap(), "replacement");
+        let _ = fs::remove_dir_all(&dir).await;
     }
 }
