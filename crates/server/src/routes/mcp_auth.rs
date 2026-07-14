@@ -595,7 +595,12 @@ async fn persist_token(
     let obj = entry
         .as_object_mut()
         .ok_or_else(|| format!("MCP server `{server_name}` entry is not an object"))?;
-    let headers = obj.entry("headers").or_insert_with(|| json!({}));
+    let header_key = if executor == BaseCodingAgent::Codex {
+        "http_headers"
+    } else {
+        "headers"
+    };
+    let headers = obj.entry(header_key).or_insert_with(|| json!({}));
     if !headers.is_object() {
         *headers = json!({});
     }
