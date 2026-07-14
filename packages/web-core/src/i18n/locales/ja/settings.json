@@ -377,7 +377,12 @@
         "assignments": "割り当て",
         "assignmentsHelper": "各サーバーは、選択した互換性のある各エージェントのネイティブ設定ファイルに書き込まれます。"
       },
-      "conflicts": { "title": "ネイティブ設定の競合" },
+      "conflicts": {
+        "title": "ネイティブ設定の競合",
+        "useDefinition": "{{agents}} の定義を使用",
+        "helper": "割り当てられたすべてのエージェントに適用する定義を選択します。保存前に編集できます。",
+        "customUnsupported": "このカスタム定義は、まずエージェントのネイティブ設定で編集する必要があります。"
+      },
       "delete": "サーバーを削除",
       "deleteConfirm": "この共有 MCP サーバーを割り当て済みのすべてのエージェント設定から削除しますか？",
       "auth": {
@@ -465,6 +470,7 @@
         "connectFailed": "認可に失敗しました",
         "popupClosed": "認可ウィンドウが完了前に閉じられました。",
         "popupBlocked": "ポップアップがブロックされました。このサイトのポップアップを許可して再試行してください。",
+        "connectionOptions": "接続オプション",
         "useLocalhostCallback": "localhost コールバックを使用（厳格なサーバーまたは手動承認向け）",
         "manualHint": "ポップアップで承認し、遷移先ページの URL（またはコード）をここに貼り付けてください。",
         "manualPlaceholder": "リダイレクト URL またはコードを貼り付け",
@@ -722,7 +728,22 @@
       "actions": {
         "install": "インストール",
         "update": "{{version}} に更新",
-        "remove": "削除"
+        "remove": "削除",
+        "login": "ログイン",
+        "reauthenticate": "再認証"
+      },
+      "auth": {
+        "authenticated": "認証済み",
+        "unauthenticated": "未認証",
+        "unknown": "認証状態が不明です",
+        "unsupported": "アプリ内ログインは利用できません"
+      },
+      "login": {
+        "running": "ターミナルの指示に従ってください",
+        "connectionFailed": "ログイン接続を開けませんでした",
+        "connectionClosed": "完了前にログイン接続が閉じました",
+        "cancel": "キャンセル",
+        "retry": "再試行"
       },
       "status": {
         "host": "このマシンが提供: {{path}}",

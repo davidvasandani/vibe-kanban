@@ -623,13 +623,28 @@
     },
     "cliTools": {
       "title": "CLI Tools",
-      "description": "Install pinned versions of vendor CLI tools into an app-owned directory. Installed tools are appended to agents' PATH, so a copy already provided by this machine always wins. Authentication stays your responsibility — the app never stores tool credentials.",
+      "description": "Install pinned vendor CLI tools and launch supported sign-in flows. A copy already provided by this machine always wins. Credentials remain stored and managed by each vendor CLI.",
       "loading": "Checking tool availability…",
       "docs": "Vendor documentation",
       "actions": {
         "install": "Install",
         "update": "Update to {{version}}",
-        "remove": "Remove"
+        "remove": "Remove",
+        "login": "Login",
+        "reauthenticate": "Re-authenticate"
+      },
+      "auth": {
+        "authenticated": "Authenticated",
+        "unauthenticated": "Not authenticated",
+        "unknown": "Authentication status unknown",
+        "unsupported": "In-app login unavailable"
+      },
+      "login": {
+        "running": "Complete the prompts in the terminal",
+        "connectionFailed": "Could not open the login connection",
+        "connectionClosed": "The login connection closed before completion",
+        "cancel": "Cancel",
+        "retry": "Retry"
       },
       "status": {
         "host": "Provided by this machine: {{path}}",

@@ -15,13 +15,13 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use ts_rs::TS;
 use utils::{assets::cli_tools_dir, shell::resolve_executable_path};
 
@@ -145,6 +145,16 @@ pub struct CliToolCatalogEntry {
     /// Vendor docs for authentication/setup — the app never manages
     /// credentials for these tools.
     pub docs_url: &'static str,
+    pub auth: CliToolAuthStrategy,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum CliToolAuthStrategy {
+    Command {
+        login_args: &'static [&'static str],
+        probe_args: &'static [&'static str],
+    },
+    Unsupported(&'static str),
 }
 
 pub fn catalog() -> &'static [CliToolCatalogEntry] {
@@ -177,6 +187,9 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::Zip,
             },
             docs_url: "https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html",
+            auth: CliToolAuthStrategy::Unsupported(
+                "AWS SSO login requires choosing and configuring a profile; use the vendor setup guide",
+            ),
         },
         CliToolCatalogEntry {
             id: CliToolId::Az,
@@ -190,6 +203,10 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 package: "azure-cli",
             },
             docs_url: "https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli",
+            auth: CliToolAuthStrategy::Command {
+                login_args: &["login", "--use-device-code"],
+                probe_args: &["account", "show", "--output", "none"],
+            },
         },
         CliToolCatalogEntry {
             id: CliToolId::Op,
@@ -225,6 +242,9 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::Zip,
             },
             docs_url: "https://developer.1password.com/docs/cli/get-started/",
+            auth: CliToolAuthStrategy::Unsupported(
+                "1Password sign-in sessions are shell-scoped; authenticate the host CLI using the vendor setup guide",
+            ),
         },
         CliToolCatalogEntry {
             id: CliToolId::Gam,
@@ -260,6 +280,10 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::TarXz,
             },
             docs_url: "https://github.com/GAM-team/GAM/wiki",
+            auth: CliToolAuthStrategy::Command {
+                login_args: &["oauth", "create"],
+                probe_args: &["oauth", "verify"],
+            },
         },
         CliToolCatalogEntry {
             id: CliToolId::MgcBeta,
@@ -288,6 +312,9 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::TarGz,
             },
             docs_url: "https://learn.microsoft.com/en-us/graph/cli/overview",
+            auth: CliToolAuthStrategy::Unsupported(
+                "This pinned Graph CLI has no non-secret authentication status command; run mgc-beta login externally",
+            ),
         },
         CliToolCatalogEntry {
             id: CliToolId::Acli,
@@ -316,6 +343,9 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::TarGz,
             },
             docs_url: "https://developer.atlassian.com/cloud/acli/guides/install-acli/",
+            auth: CliToolAuthStrategy::Unsupported(
+                "Atlassian CLI authentication is site and account specific; use the vendor setup guide",
+            ),
         },
     ];
     CATALOG
@@ -365,6 +395,24 @@ pub struct CliToolStatus {
     pub host: Option<HostCopy>,
     pub app: Option<AppCopy>,
     pub docs_url: String,
+    pub login_supported: bool,
+    pub auth_state: CliToolAuthState,
+    pub auth_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CliToolAuthState {
+    Authenticated,
+    Unauthenticated,
+    Unknown,
+    Unsupported,
+}
+
+#[derive(Debug, Clone)]
+pub struct CliToolLoginCommand {
+    pub executable: PathBuf,
+    pub args: Vec<String>,
 }
 
 /// Per-tool install locks: one writer per tool directory.
@@ -379,6 +427,24 @@ fn lock_for(id: CliToolId) -> &'static Mutex<()> {
         })
         .get(&id)
         .expect("lock map covers all tool ids")
+}
+
+fn login_lock_for(id: CliToolId) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<HashMap<CliToolId, Arc<Mutex<()>>>> = OnceLock::new();
+    LOCKS
+        .get_or_init(|| {
+            CliToolId::ALL
+                .iter()
+                .map(|id| (*id, Arc::new(Mutex::new(()))))
+                .collect()
+        })
+        .get(&id)
+        .expect("login lock map covers all tool ids")
+        .clone()
+}
+
+pub fn try_begin_login(id: CliToolId) -> Option<OwnedMutexGuard<()>> {
+    login_lock_for(id).try_lock_owned().ok()
 }
 
 fn platform_source(e: &CliToolCatalogEntry) -> Option<&'static PlatformSource> {
@@ -450,6 +516,93 @@ async fn detect_host_copy(e: &CliToolCatalogEntry) -> Option<HostCopy> {
     })
 }
 
+async fn effective_binary(e: &CliToolCatalogEntry) -> Option<PathBuf> {
+    if let Some(host) = detect_host_copy(e).await {
+        return Some(PathBuf::from(host.path));
+    }
+    detect_app_copy(e).map(|_| installed_binary_path(e))
+}
+
+pub async fn login_command(id: CliToolId) -> Result<CliToolLoginCommand, CliToolError> {
+    let e = entry(id);
+    let CliToolAuthStrategy::Command { login_args, .. } = e.auth else {
+        let CliToolAuthStrategy::Unsupported(reason) = e.auth else {
+            unreachable!()
+        };
+        return Err(CliToolError::Unsupported(
+            e.display_name.to_string(),
+            reason.to_string(),
+        ));
+    };
+    let executable = effective_binary(e).await.ok_or_else(|| {
+        CliToolError::Unsupported(
+            e.display_name.to_string(),
+            "tool is not available".to_string(),
+        )
+    })?;
+    Ok(CliToolLoginCommand {
+        executable,
+        args: login_args.iter().map(|arg| (*arg).to_string()).collect(),
+    })
+}
+
+async fn probe_auth(e: &CliToolCatalogEntry) -> (CliToolAuthState, Option<String>) {
+    let CliToolAuthStrategy::Command { probe_args, .. } = e.auth else {
+        let CliToolAuthStrategy::Unsupported(reason) = e.auth else {
+            unreachable!()
+        };
+        return (CliToolAuthState::Unsupported, Some(reason.to_string()));
+    };
+    let Some(executable) = effective_binary(e).await else {
+        return (
+            CliToolAuthState::Unknown,
+            Some("Tool is not available".to_string()),
+        );
+    };
+    let mut command = tokio::process::Command::new(executable);
+    command.args(probe_args).env_clear();
+    for key in [
+        "HOME",
+        "USER",
+        "PATH",
+        "TMPDIR",
+        "TEMP",
+        "LANG",
+        "LC_ALL",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "XDG_CONFIG_HOME",
+        "AZURE_CONFIG_DIR",
+        "GAMCFGDIR",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    match tokio::time::timeout(VERSION_PROBE_TIMEOUT, command.kill_on_drop(true).output()).await {
+        Ok(Ok(output)) if output.status.success() => (CliToolAuthState::Authenticated, None),
+        Ok(Ok(_)) => (CliToolAuthState::Unauthenticated, None),
+        Ok(Err(_)) => (
+            CliToolAuthState::Unknown,
+            Some("Authentication check failed".to_string()),
+        ),
+        Err(_) => (
+            CliToolAuthState::Unknown,
+            Some("Authentication check timed out".to_string()),
+        ),
+    }
+}
+
 fn tool_dir(id: CliToolId) -> PathBuf {
     cli_tools_dir().join(entry(id).id.dir_name())
 }
@@ -491,6 +644,7 @@ fn detect_app_copy(e: &CliToolCatalogEntry) -> Option<AppCopy> {
 pub async fn status(id: CliToolId) -> CliToolStatus {
     let e = entry(id);
     let reason = unsupported_reason(e).await;
+    let (auth_state, auth_message) = probe_auth(e).await;
     CliToolStatus {
         id: e.id,
         binary_name: e.binary_name.to_string(),
@@ -502,15 +656,14 @@ pub async fn status(id: CliToolId) -> CliToolStatus {
         host: detect_host_copy(e).await,
         app: detect_app_copy(e),
         docs_url: e.docs_url.to_string(),
+        login_supported: matches!(e.auth, CliToolAuthStrategy::Command { .. }),
+        auth_state,
+        auth_message,
     }
 }
 
 pub async fn status_all() -> Vec<CliToolStatus> {
-    let mut out = Vec::with_capacity(CliToolId::ALL.len());
-    for id in CliToolId::ALL {
-        out.push(status(id).await);
-    }
-    out
+    futures::future::join_all(CliToolId::ALL.into_iter().map(status)).await
 }
 
 /// Install (or update to) the catalog's pinned version. Idempotent.
@@ -962,6 +1115,27 @@ mod tests {
     }
 
     #[test]
+    fn only_durably_verifiable_tools_offer_login() {
+        for id in [CliToolId::Az, CliToolId::Gam] {
+            assert!(matches!(
+                entry(id).auth,
+                CliToolAuthStrategy::Command { .. }
+            ));
+        }
+        for id in [
+            CliToolId::Aws,
+            CliToolId::Op,
+            CliToolId::MgcBeta,
+            CliToolId::Acli,
+        ] {
+            assert!(matches!(
+                entry(id).auth,
+                CliToolAuthStrategy::Unsupported(_)
+            ));
+        }
+    }
+
+    #[test]
     fn acli_uses_existing_unsupported_platform_matrix() {
         let e = entry(CliToolId::Acli);
         assert!(platform_source_for(e, "linux", "x86_64").is_some());
@@ -969,6 +1143,14 @@ mod tests {
         assert!(platform_source_for(e, "linux", "arm").is_none());
         assert!(platform_source_for(e, "macos", "aarch64").is_none());
         assert!(platform_source_for(e, "windows", "x86_64").is_none());
+    }
+
+    #[test]
+    fn login_lock_rejects_a_concurrent_session() {
+        let first = try_begin_login(CliToolId::Az).expect("first login owns lock");
+        assert!(try_begin_login(CliToolId::Az).is_none());
+        drop(first);
+        assert!(try_begin_login(CliToolId::Az).is_some());
     }
 
     #[test]
