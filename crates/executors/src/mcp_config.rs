@@ -400,7 +400,20 @@ fn adapt_cursor(servers: ServerMap, meta: Option<Value>) -> Value {
 }
 
 fn adapt_codex(mut servers: ServerMap, mut meta: Option<Value>) -> Value {
-    servers.retain(|_, v| v.as_object().map(is_stdio).unwrap_or(false));
+    servers.retain(|_, v| {
+        v.as_object()
+            .is_some_and(|server| is_stdio(server) || server.contains_key("url"))
+    });
+    for server in servers.values_mut() {
+        if let Value::Object(server) = server
+            && server.contains_key("url")
+        {
+            server.remove("type");
+            if let Some(headers) = server.remove("headers") {
+                server.insert("http_headers".to_string(), headers);
+            }
+        }
+    }
 
     if let Some(Value::Object(ref mut m)) = meta {
         m.retain(|k, _| servers.contains_key(k));

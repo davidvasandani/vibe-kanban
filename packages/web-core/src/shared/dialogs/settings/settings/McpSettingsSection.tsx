@@ -245,6 +245,14 @@ export function McpSettingsSection() {
     try {
       const response = await machineClient.saveSharedMcpServers({
         servers: inputsFromDraft(draft),
+        removed_servers: (readModel?.servers ?? [])
+          .filter(
+            (server) =>
+              !draft.servers.some(
+                (draftServer) => draftServer.name === server.name
+              )
+          )
+          .map((server) => server.name),
         resolved_conflicts: [],
       });
       const fresh = await machineClient.loadSharedMcpServers();
@@ -271,7 +279,7 @@ export function McpSettingsSection() {
     } finally {
       setSaving(false);
     }
-  }, [draft, machineClient, t]);
+  }, [draft, machineClient, readModel, t]);
 
   const discard = useCallback(() => {
     if (!readModel) return;

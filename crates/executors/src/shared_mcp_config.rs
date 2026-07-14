@@ -133,6 +133,8 @@ pub struct SharedMcpConflictResolution {
 pub struct SharedMcpWriteRequest {
     pub servers: Vec<SharedMcpServerInput>,
     #[serde(default)]
+    pub removed_servers: Vec<String>,
+    #[serde(default)]
     pub resolved_conflicts: Vec<SharedMcpConflictResolution>,
 }
 
@@ -457,7 +459,10 @@ pub fn canonical_definition(entry: &Value) -> McpServerDefinition {
             transport,
             value: compact_object([
                 ("url", Value::String(url.to_string())),
-                ("headers", normalize_string_map(obj, &["headers"])),
+                (
+                    "headers",
+                    normalize_string_map(obj, &["headers", "http_headers"]),
+                ),
             ]),
             representable_in_form: true,
         };
@@ -533,6 +538,7 @@ fn stable_json(value: &Value) -> String {
 fn has_credentials(entry: &Value) -> bool {
     entry
         .get("headers")
+        .or_else(|| entry.get("http_headers"))
         .and_then(Value::as_object)
         .is_some_and(|headers| {
             headers
@@ -546,9 +552,11 @@ pub fn incompatibility_reason(
     definition: &McpServerDefinition,
 ) -> Option<String> {
     if matches!(executor, BaseCodingAgent::Codex)
-        && !matches!(definition.transport, McpTransportKind::Stdio)
+        && matches!(definition.transport, McpTransportKind::Sse)
     {
-        return Some("Codex supports stdio MCP servers only".to_string());
+        return Some(
+            "Codex supports stdio and streamable HTTP MCP servers, not legacy SSE".to_string(),
+        );
     }
     if matches!(definition.transport, McpTransportKind::Unknown) {
         return Some("This server shape cannot be shared safely".to_string());
@@ -640,7 +648,10 @@ pub fn materialize_definition(
                 if matches!(executor, BaseCodingAgent::Opencode) {
                     out.insert("type".to_string(), Value::String("remote".to_string()));
                     out.insert("enabled".to_string(), Value::Bool(true));
-                } else if !matches!(executor, BaseCodingAgent::CursorAgent) {
+                } else if !matches!(
+                    executor,
+                    BaseCodingAgent::CursorAgent | BaseCodingAgent::Codex
+                ) {
                     out.insert(
                         "type".to_string(),
                         Value::String(
@@ -659,7 +670,15 @@ pub fn materialize_definition(
                 .get("headers")
                 .filter(|v| !v.as_object().is_some_and(Map::is_empty))
             {
-                out.insert("headers".to_string(), headers.clone());
+                out.insert(
+                    if matches!(executor, BaseCodingAgent::Codex) {
+                        "http_headers"
+                    } else {
+                        "headers"
+                    }
+                    .to_string(),
+                    headers.clone(),
+                );
             }
             Ok(Value::Object(out))
         }
@@ -687,14 +706,9 @@ pub fn plan_servers_for_executor(
             affected.push(server.name.clone());
         }
     }
-    for (name, entry) in current {
-        let assigned = request.servers.iter().any(|server| {
-            server.name == *name && server.assignments.contains(&executor)
-        });
-        if !assigned && canonical_definition(entry).transport != McpTransportKind::Unknown {
-            if next.remove(name).is_some() && !affected.contains(name) {
-                affected.push(name.clone());
-            }
+    for name in &request.removed_servers {
+        if next.remove(name).is_some() && !affected.contains(name) {
+            affected.push(name.clone());
         }
     }
     Ok((next, affected))
@@ -810,11 +824,29 @@ mod tests {
     }
 
     #[test]
-    fn blocks_url_assignments_to_codex() {
+    fn supports_streamable_http_assignments_for_codex() {
         let definition =
             canonical_definition(&json!({"type":"http","url":"https://example.test/mcp"}));
-        assert!(incompatibility_reason(BaseCodingAgent::Codex, &definition).is_some());
-        assert!(materialize_definition(BaseCodingAgent::Codex, &definition, None).is_err());
+        assert!(incompatibility_reason(BaseCodingAgent::Codex, &definition).is_none());
+        assert_eq!(
+            materialize_definition(BaseCodingAgent::Codex, &definition, None).unwrap(),
+            json!({"url":"https://example.test/mcp"})
+        );
+    }
+
+    #[test]
+    fn maps_codex_http_headers_to_native_toml_shape() {
+        let definition = canonical_definition(&json!({
+            "url":"https://example.test/mcp",
+            "http_headers":{"Authorization":"Bearer token"}
+        }));
+        assert_eq!(
+            materialize_definition(BaseCodingAgent::Codex, &definition, None).unwrap(),
+            json!({
+                "url":"https://example.test/mcp",
+                "http_headers":{"Authorization":"Bearer token"}
+            })
+        );
     }
 
     #[test]
@@ -827,6 +859,7 @@ mod tests {
                 native_overrides: HashMap::new(),
             }],
             resolved_conflicts: Vec::new(),
+            removed_servers: Vec::new(),
         };
         let current = HashMap::from([
             ("other".to_string(), json!({"command":"keep"})),
@@ -849,6 +882,7 @@ mod tests {
                 native_overrides: HashMap::new(),
             }],
             resolved_conflicts: Vec::new(),
+            removed_servers: Vec::new(),
         };
         let current = HashMap::from([
             ("other".to_string(), json!({"command":"keep"})),
