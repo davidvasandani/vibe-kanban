@@ -458,8 +458,8 @@
         "popupClosed": "The authorization window was closed before completing.",
         "popupBlocked": "Popup blocked — allow popups for this site and try again.",
         "useLocalhostCallback": "Use localhost callback (for strict servers or manual approval)",
-        "manualHint": "Approve in the popup, then paste the page URL it lands on (or the code) here.",
-        "manualPlaceholder": "Paste the redirected URL or code",
+        "manualHint": "Approve in the popup, then paste the full page URL it lands on here.",
+        "manualPlaceholder": "Paste the full redirected URL",
         "finishConnect": "Finish"
       }
     },

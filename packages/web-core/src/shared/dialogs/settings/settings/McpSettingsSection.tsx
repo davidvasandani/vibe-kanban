@@ -470,7 +470,7 @@ export function McpSettingsSection() {
   // it produces. Loopback mode registers a http://localhost callback that
   // strict-allowlist authorization servers accept; because the browser may not
   // be able to reach that loopback (e.g. VK opened on a phone), the flow is
-  // finished by pasting the redirected URL/code back rather than by an
+  // finished by pasting the full redirected URL back rather than by an
   // automatic callback.
   const [loopbackEnabled, setLoopbackEnabled] = useState<
     Record<string, boolean>

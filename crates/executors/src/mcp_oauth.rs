@@ -15,9 +15,14 @@
 //! unit-tests without I/O. Access tokens are returned to the caller and never
 //! logged here.
 
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    time::Duration,
+};
+
 use base64::Engine;
 use rand::{Rng, distributions::Alphanumeric};
-use reqwest::{Url, header::WWW_AUTHENTICATE};
+use reqwest::{Url, header::WWW_AUTHENTICATE, redirect::Policy};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -38,6 +43,198 @@ pub struct AuthServerMetadata {
 pub struct Pkce {
     pub verifier: String,
     pub challenge: String,
+}
+
+/// HTTP policy shared by discovery, registration, and token exchange.
+///
+/// Every request resolves and validates its destination, then pins those DNS
+/// answers into the reqwest client that makes the connection. Redirects are
+/// disabled so a validated public URL cannot bounce to an internal address.
+#[derive(Debug, Clone)]
+pub struct OAuthHttpClient {
+    timeout: Duration,
+    loopback_dev_origin: Option<Origin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Origin {
+    scheme: String,
+    host: String,
+    port: u16,
+}
+
+impl Origin {
+    fn from_url(url: &Url) -> Result<Self, String> {
+        let host = url
+            .host_str()
+            .ok_or_else(|| "OAuth URL has no host".to_string())?;
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| "OAuth URL has no usable port".to_string())?;
+        Ok(Self {
+            scheme: url.scheme().to_ascii_lowercase(),
+            host: host.trim_end_matches('.').to_ascii_lowercase(),
+            port,
+        })
+    }
+}
+
+impl OAuthHttpClient {
+    pub fn new(timeout: Duration, mcp_server_url: &str) -> Result<Self, String> {
+        let mcp_url = Url::parse(mcp_server_url)
+            .map_err(|_| "configured MCP server URL is invalid".to_string())?;
+        let origin = Origin::from_url(&mcp_url)?;
+        let loopback_dev_origin =
+            (origin.scheme == "http" && host_is_literal_loopback(&origin.host)).then_some(origin);
+        Ok(Self {
+            timeout,
+            loopback_dev_origin,
+        })
+    }
+
+    async fn client_for(&self, raw_url: &str) -> Result<(reqwest::Client, Url), String> {
+        let mut url =
+            Url::parse(raw_url).map_err(|_| "OAuth endpoint URL is invalid".to_string())?;
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err("OAuth endpoint URL must not contain credentials".to_string());
+        }
+        let origin = Origin::from_url(&url)?;
+        canonicalize_request_host(&mut url, &origin)?;
+        let loopback_dev = self.loopback_dev_origin.as_ref() == Some(&origin);
+        if origin.scheme != "https" && !(origin.scheme == "http" && loopback_dev) {
+            return Err("OAuth endpoint must use HTTPS".to_string());
+        }
+
+        let port = origin.port;
+        let addresses = tokio::time::timeout(self.timeout, resolve_host(&origin.host, port))
+            .await
+            .map_err(|_| "OAuth endpoint DNS resolution timed out".to_string())??;
+        if addresses.is_empty() {
+            return Err("OAuth endpoint host resolved to no addresses".to_string());
+        }
+        if !loopback_dev && addresses.iter().any(|addr| !is_public_ip(addr.ip())) {
+            return Err("OAuth endpoint resolves to a non-public address".to_string());
+        }
+        if loopback_dev && addresses.iter().any(|addr| !addr.ip().is_loopback()) {
+            return Err("loopback OAuth endpoint resolved outside loopback".to_string());
+        }
+
+        let mut builder = reqwest::Client::builder()
+            .timeout(self.timeout)
+            // Environment/system proxies would resolve and connect on our
+            // behalf, bypassing the validated address pinning below.
+            .no_proxy()
+            .redirect(Policy::none());
+        // Pin the exact answers that passed validation, closing the DNS
+        // rebinding window between policy evaluation and connection setup.
+        builder = builder.resolve_to_addrs(&origin.host, &addresses);
+        let client = builder
+            .build()
+            .map_err(|_| "could not initialize OAuth HTTP client".to_string())?;
+        Ok((client, url))
+    }
+
+    async fn get(&self, url: &str) -> Result<reqwest::Response, String> {
+        let (client, parsed) = self.client_for(url).await?;
+        client
+            .get(parsed)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|e| format!("OAuth request failed: {e}"))
+    }
+
+    async fn post_json(&self, url: &str, body: &Value) -> Result<reqwest::Response, String> {
+        let (client, parsed) = self.client_for(url).await?;
+        client
+            .post(parsed)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("OAuth request failed: {e}"))
+    }
+
+    async fn post_form(&self, url: &str, body: String) -> Result<reqwest::Response, String> {
+        let (client, parsed) = self.client_for(url).await?;
+        client
+            .post(parsed)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| format!("OAuth request failed: {e}"))
+    }
+}
+
+fn canonicalize_request_host(url: &mut Url, origin: &Origin) -> Result<(), String> {
+    if url.host_str().is_some_and(|host| host.ends_with('.')) {
+        // reqwest resolver overrides are keyed by hostname. Ensure the URL
+        // uses the same normalized key that was validated and pinned.
+        url.set_host(Some(&origin.host))
+            .map_err(|_| "OAuth endpoint host is invalid".to_string())?;
+    }
+    Ok(())
+}
+
+async fn resolve_host(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    tokio::net::lookup_host((host, port))
+        .await
+        .map(|iter| iter.collect())
+        .map_err(|_| "OAuth endpoint host could not be resolved".to_string())
+}
+
+fn host_is_literal_loopback(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_public_ipv4(ip),
+        IpAddr::V6(ip) => is_public_ipv6(ip),
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 224)
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_public_ipv4(v4);
+    }
+    !(ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_multicast()
+        || (segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 0) // NAT64 64:ff9b::/96
+        || (segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 1) // NAT64 local-use /48
+        || segments[0] == 0x2002 // 6to4 2002::/16
+        || (segments[0] == 0x2001 && segments[1] == 0) // Teredo 2001::/32
+        || (segments[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
+        || (segments[0] & 0xffc0) == 0xfe80 // link local fe80::/10
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8)) // documentation
 }
 
 impl Pkce {
@@ -125,19 +322,17 @@ fn as_metadata_candidates(as_url: &Url) -> Vec<String> {
 
 /// GET a JSON document, treating any non-success status or parse failure as
 /// a soft error (the caller tries the next candidate URL).
-async fn fetch_json(client: &reqwest::Client, url: &str) -> Result<Value, String> {
-    let resp = client
-        .get(url)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .await
-        .map_err(|e| format!("request to {url} failed: {e}"))?;
+async fn fetch_json(client: &OAuthHttpClient, url: &str) -> Result<Value, String> {
+    let resp = client.get(url).await?;
     if !resp.status().is_success() {
-        return Err(format!("{url} returned HTTP {}", resp.status().as_u16()));
+        return Err(format!(
+            "OAuth endpoint returned HTTP {}",
+            resp.status().as_u16()
+        ));
     }
     resp.json::<Value>()
         .await
-        .map_err(|e| format!("{url} returned invalid JSON: {e}"))
+        .map_err(|_| "OAuth endpoint returned invalid JSON".to_string())
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
@@ -164,7 +359,7 @@ fn string_array(value: &Value, key: &str) -> Vec<String> {
 /// any; when it names a `resource_metadata` URL the extra 401-eliciting
 /// request is skipped.
 pub async fn discover(
-    client: &reqwest::Client,
+    client: &OAuthHttpClient,
     mcp_url: &str,
     www_authenticate_hint: Option<&str>,
 ) -> Result<AuthServerMetadata, String> {
@@ -175,7 +370,7 @@ pub async fn discover(
     let mut prm_candidates: Vec<String> = Vec::new();
     if let Some(url) = www_authenticate_hint.and_then(parse_resource_metadata_url) {
         prm_candidates.push(url);
-    } else if let Ok(resp) = client.get(mcp_url).send().await
+    } else if let Ok(resp) = client.get(mcp_url).await
         && let Some(header) = resp
             .headers()
             .get(WWW_AUTHENTICATE)
@@ -236,6 +431,7 @@ pub async fn discover(
                 if let (Some(authorization_endpoint), Some(token_endpoint)) =
                     (authorization_endpoint, token_endpoint)
                 {
+                    validate_server_metadata(&as_url, &meta)?;
                     return Ok(AuthServerMetadata {
                         authorization_endpoint,
                         token_endpoint,
@@ -260,6 +456,45 @@ pub async fn discover(
     ))
 }
 
+fn same_origin(left: &Url, right: &Url) -> bool {
+    Origin::from_url(left).ok() == Origin::from_url(right).ok()
+}
+
+fn validate_server_metadata(expected_issuer: &Url, metadata: &Value) -> Result<(), String> {
+    let expected_origin = Origin::from_url(expected_issuer)?;
+    let loopback_dev =
+        expected_origin.scheme == "http" && host_is_literal_loopback(&expected_origin.host);
+    if expected_issuer.scheme() != "https" && !loopback_dev {
+        return Err("authorization server issuer must use HTTPS".to_string());
+    }
+    if let Some(issuer) = string_field(metadata, "issuer") {
+        let issuer = Url::parse(&issuer)
+            .map_err(|_| "authorization server metadata has an invalid issuer".to_string())?;
+        if !same_origin(expected_issuer, &issuer) {
+            return Err("authorization server metadata issuer has a different origin".to_string());
+        }
+    }
+    for field in [
+        "authorization_endpoint",
+        "token_endpoint",
+        "registration_endpoint",
+    ] {
+        let Some(raw) = string_field(metadata, field) else {
+            continue;
+        };
+        let endpoint =
+            Url::parse(&raw).map_err(|_| format!("authorization server {field} is invalid"))?;
+        if (endpoint.scheme() != "https" && !loopback_dev)
+            || !same_origin(expected_issuer, &endpoint)
+        {
+            return Err(format!(
+                "authorization server {field} must use HTTPS and the issuer origin"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Canonical resource URI: the server URL without query or fragment.
 fn canonical_resource(url: &Url) -> String {
     let mut canonical = url.clone();
@@ -271,7 +506,7 @@ fn canonical_resource(url: &Url) -> String {
 /// Dynamic client registration (RFC 7591) as a public client. Returns the
 /// issued `client_id`.
 pub async fn register_client(
-    client: &reqwest::Client,
+    client: &OAuthHttpClient,
     registration_endpoint: &str,
     redirect_uri: &str,
 ) -> Result<String, String> {
@@ -282,24 +517,16 @@ pub async fn register_client(
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
     });
-    let resp = client
-        .post(registration_endpoint)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("client registration request failed: {e}"))?;
+    let resp = client.post_json(registration_endpoint, &body).await?;
     let status = resp.status();
     let value: Value = resp
         .json()
         .await
-        .map_err(|e| format!("client registration returned invalid JSON: {e}"))?;
+        .map_err(|_| "client registration returned invalid JSON".to_string())?;
     if !status.is_success() {
         return Err(format!(
-            "client registration failed (HTTP {}): {}",
-            status.as_u16(),
-            string_field(&value, "error_description")
-                .or_else(|| string_field(&value, "error"))
-                .unwrap_or_else(|| "unknown error".to_string())
+            "client registration failed (HTTP {})",
+            status.as_u16()
         ));
     }
     string_field(&value, "client_id")
@@ -338,7 +565,7 @@ pub fn build_authorize_url(
 /// Exchange an authorization code for an access token. Returns only the
 /// access token string so the secret spreads no further than necessary.
 pub async fn exchange_code(
-    client: &reqwest::Client,
+    client: &OAuthHttpClient,
     token_endpoint: &str,
     client_id: &str,
     code: &str,
@@ -359,31 +586,14 @@ pub async fn exchange_code(
     let mut encoder = Url::parse("http://encode.invalid/").expect("static url parses");
     encoder.query_pairs_mut().extend_pairs(params);
     let body = encoder.query().unwrap_or_default().to_string();
-    let resp = client
-        .post(token_endpoint)
-        .header(
-            reqwest::header::CONTENT_TYPE,
-            "application/x-www-form-urlencoded",
-        )
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| format!("token request failed: {e}"))?;
+    let resp = client.post_form(token_endpoint, body).await?;
     let status = resp.status();
     let value: Value = resp
         .json()
         .await
-        .map_err(|e| format!("token endpoint returned invalid JSON: {e}"))?;
+        .map_err(|_| "token endpoint returned invalid JSON".to_string())?;
     if !status.is_success() {
-        // Error bodies (RFC 6749 §5.2) contain no secrets; token bodies do,
-        // so only the error branch echoes response content.
-        return Err(format!(
-            "token exchange failed (HTTP {}): {}",
-            status.as_u16(),
-            string_field(&value, "error_description")
-                .or_else(|| string_field(&value, "error"))
-                .unwrap_or_else(|| "unknown error".to_string())
-        ));
+        return Err(format!("token exchange failed (HTTP {})", status.as_u16()));
     }
     string_field(&value, "access_token")
         .ok_or_else(|| "token response lacks access_token".to_string())
@@ -544,7 +754,7 @@ mod tests {
             r#"{"client_id":"abc123","token_endpoint_auth_method":"none"}"#,
         )])
         .await;
-        let client = reqwest::Client::new();
+        let client = OAuthHttpClient::new(Duration::from_secs(2), &base).unwrap();
         let client_id = register_client(&client, &base, "http://127.0.0.1:1/cb")
             .await
             .unwrap();
@@ -552,17 +762,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_client_surfaces_error_description() {
+    async fn register_client_does_not_surface_remote_error_body() {
         let base = one_shot_server(vec![http_json(
             "400 Bad Request",
             r#"{"error":"invalid_redirect_uri","error_description":"loopback not allowed"}"#,
         )])
         .await;
-        let client = reqwest::Client::new();
+        let client = OAuthHttpClient::new(Duration::from_secs(2), &base).unwrap();
         let err = register_client(&client, &base, "http://127.0.0.1:1/cb")
             .await
             .unwrap_err();
-        assert!(err.contains("loopback not allowed"), "got: {err}");
+        assert!(!err.contains("loopback not allowed"), "got: {err}");
+        assert!(err.contains("HTTP 400"), "got: {err}");
     }
 
     #[tokio::test]
@@ -575,7 +786,7 @@ mod tests {
             http_json("400 Bad Request", r#"{"error":"invalid_grant"}"#),
         ])
         .await;
-        let client = reqwest::Client::new();
+        let client = OAuthHttpClient::new(Duration::from_secs(2), &base).unwrap();
         let token = exchange_code(&client, &base, "c", "code", "v", "http://cb", "res")
             .await
             .unwrap();
@@ -583,7 +794,8 @@ mod tests {
         let err = exchange_code(&client, &base, "c", "code", "v", "http://cb", "res")
             .await
             .unwrap_err();
-        assert!(err.contains("invalid_grant"), "got: {err}");
+        assert!(!err.contains("invalid_grant"), "got: {err}");
+        assert!(err.contains("HTTP 400"), "got: {err}");
     }
 
     #[tokio::test]
@@ -620,7 +832,7 @@ mod tests {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = OAuthHttpClient::new(Duration::from_secs(2), &origin).unwrap();
         let meta = discover(&client, &format!("{origin}/mcp"), None)
             .await
             .unwrap();
@@ -659,13 +871,106 @@ mod tests {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = OAuthHttpClient::new(Duration::from_secs(2), &origin).unwrap();
         let hint = format!(r#"Bearer resource_metadata="{origin}/prm""#);
-        let meta = discover(&client, "https://unreachable.invalid/mcp", Some(&hint))
+        let meta = discover(&client, &format!("{origin}/mcp"), Some(&hint))
             .await
             .unwrap();
         assert_eq!(meta.authorization_endpoint, format!("{origin}/a"));
         // No PRM `resource` field -> canonical MCP URL is used.
-        assert_eq!(meta.resource, "https://unreachable.invalid/mcp");
+        assert_eq!(meta.resource, format!("{origin}/mcp"));
+    }
+
+    #[test]
+    fn rejects_non_public_ip_ranges() {
+        for address in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "::1",
+            "fe80::1",
+            "fd00::1",
+            "::ffff:169.254.169.254",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b:1::a9fe:a9fe",
+            "2002:a9fe:a9fe::1",
+            "2001:0000:a9fe:a9fe::1",
+        ] {
+            let ip: IpAddr = address.parse().unwrap();
+            assert!(!is_public_ip(ip), "unexpectedly allowed {address}");
+        }
+        assert!(is_public_ip("8.8.8.8".parse().unwrap()));
+        assert!(is_public_ip("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn canonicalizes_trailing_dot_before_dns_pinning() {
+        let mut url = Url::parse("https://as.example.com./metadata").unwrap();
+        let origin = Origin::from_url(&url).unwrap();
+        canonicalize_request_host(&mut url, &origin).unwrap();
+        assert_eq!(url.host_str(), Some("as.example.com"));
+        assert_eq!(origin.host, "as.example.com");
+    }
+
+    #[test]
+    fn validates_endpoint_origin_and_scheme() {
+        let issuer = Url::parse("https://as.example.com/tenant").unwrap();
+        let valid = json!({
+            "issuer": "https://as.example.com/tenant",
+            "authorization_endpoint": "https://as.example.com/authorize",
+            "token_endpoint": "https://as.example.com/token",
+            "registration_endpoint": "https://as.example.com/register"
+        });
+        assert!(validate_server_metadata(&issuer, &valid).is_ok());
+        for (field, endpoint) in [
+            ("authorization_endpoint", "https://evil.example/authorize"),
+            ("token_endpoint", "http://as.example.com/token"),
+            ("registration_endpoint", "https://evil.example/register"),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = Value::String(endpoint.to_string());
+            assert!(
+                validate_server_metadata(&issuer, &invalid).is_err(),
+                "unexpectedly accepted {field}={endpoint}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn redirect_is_not_followed() {
+        let response = "HTTP/1.1 302 Found\r\nlocation: http://169.254.169.254/latest/meta-data/\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string();
+        let base = one_shot_server(vec![response]).await;
+        let client = OAuthHttpClient::new(Duration::from_secs(2), &base).unwrap();
+        let err = fetch_json(&client, &base).await.unwrap_err();
+        assert!(err.contains("HTTP 302"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn rejects_http_and_internal_https_destinations() {
+        let public_policy =
+            OAuthHttpClient::new(Duration::from_secs(2), "https://mcp.example.com/mcp").unwrap();
+        assert!(
+            public_policy
+                .client_for("http://example.com/meta")
+                .await
+                .is_err()
+        );
+        assert!(
+            public_policy
+                .client_for("https://169.254.169.254/meta")
+                .await
+                .is_err()
+        );
+        assert!(
+            public_policy
+                .client_for("https://127.0.0.1/meta")
+                .await
+                .is_err()
+        );
     }
 }

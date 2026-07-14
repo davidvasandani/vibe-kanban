@@ -17,6 +17,7 @@
 
 use std::{
     collections::HashMap,
+    env,
     sync::LazyLock,
     time::{Duration, Instant},
 };
@@ -24,7 +25,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode, header::HOST},
+    http::StatusCode,
     response::{Json as ResponseJson, Response},
     routing::{get, post},
 };
@@ -35,7 +36,6 @@ use executors::{
     mcp_oauth,
     profile::{ExecutorConfigs, ExecutorProfileId},
 };
-use relay_client::RELAY_HEADER;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
@@ -54,20 +54,12 @@ use crate::{
 
 /// Abandoned flows are unusable after this long (pruned on access).
 const FLOW_TTL: Duration = Duration::from_secs(600);
+const MAX_FLOWS: usize = 256;
 
 /// Per-request bound for every outbound OAuth call (discovery, DCR, code
 /// exchange) so a stalled endpoint can't hang `start` or `callback` — the
 /// same discipline as the probe's `MCP_TEST_TIMEOUT`.
 const OAUTH_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
-
-fn oauth_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(OAUTH_HTTP_TIMEOUT)
-        .build()
-        // Builder failure here means TLS init failed; a client without the
-        // timeout still beats returning 500 for every Connect attempt.
-        .unwrap_or_default()
-}
 
 /// Enrich a dynamic-client-registration failure with actionable guidance.
 ///
@@ -80,7 +72,12 @@ fn oauth_http_client() -> reqwest::Client {
 fn connect_error(raw: String, redirect_uri: &str) -> String {
     let looks_like_redirect_rejection = {
         let lower = raw.to_ascii_lowercase();
-        lower.contains("redirect_uri") || lower.contains("redirect uri")
+        lower.contains("redirect_uri")
+            || lower.contains("redirect uri")
+            // Remote bodies are intentionally redacted. A public DCR HTTP 400
+            // can no longer be classified from its description, so retain the
+            // safe loopback/manual-token guidance for that common case.
+            || (lower.contains("client registration failed") && lower.contains("http 400"))
     };
     let is_loopback = redirect_uri.contains("://localhost")
         || redirect_uri.contains("://127.0.0.1")
@@ -119,7 +116,7 @@ pub struct McpAuthStartRequest {
     /// (Claude/ChatGPT/Codex/Cursor/localhost) reject a public callback; a
     /// loopback one is accepted. When the browser can reach that loopback
     /// (same machine or an SSH port-forward) the callback completes
-    /// automatically; otherwise the user pastes the redirected URL/code back
+    /// automatically; otherwise the user pastes the full redirected URL back
     /// via `/mcp-auth/complete`.
     #[serde(default)]
     pub loopback: bool,
@@ -130,16 +127,15 @@ pub struct McpAuthStartResponse {
     pub flow_id: Uuid,
     pub authorize_url: String,
     /// True when this flow used a loopback callback, so the frontend knows to
-    /// offer manual code entry if the popup can't reach it.
+    /// offer manual callback-URL entry if the popup can't reach it.
     pub loopback: bool,
 }
 
 #[derive(TS, Debug, Deserialize)]
 pub struct McpAuthCompleteRequest {
     pub flow_id: Uuid,
-    /// Either the bare authorization `code`, or the full redirect URL the
-    /// browser landed on (`http://localhost:…/callback?code=…&state=…`) — the
-    /// user copies whichever is easier.
+    /// Full redirect URL the browser landed on, including both `code` and
+    /// `state` (`http://localhost:…/callback?code=…&state=…`).
     pub code: String,
 }
 
@@ -162,6 +158,7 @@ pub struct McpAuthStatusResponse {
 /// can only be exchanged once.
 #[derive(Debug)]
 struct ExchangeInputs {
+    oauth_client: mcp_oauth::OAuthHttpClient,
     pkce_verifier: String,
     client_id: String,
     token_endpoint: String,
@@ -216,7 +213,6 @@ fn agent_config_path(
 async fn start(
     State(deployment): State<DeploymentImpl>,
     Query(query): Query<McpAuthQuery>,
-    headers: HeaderMap,
     Json(payload): Json<McpAuthStartRequest>,
 ) -> Result<ResponseJson<ApiResponse<McpAuthStartResponse>>, ApiError> {
     let (config_path, mcpc) = match agent_config_path(query.executor) {
@@ -242,7 +238,21 @@ async fn start(
         )));
     };
 
-    let redirect_uri = if payload.loopback {
+    {
+        let mut flows = FLOWS.write().await;
+        if !prune_flows_and_has_capacity(&mut flows) {
+            return Ok(ResponseJson(ApiResponse::error(
+                "Too many OAuth flows are already pending; wait for one to finish or expire",
+            )));
+        }
+    }
+
+    let public_base_url = env::var("MCP_OAUTH_PUBLIC_BASE_URL").ok();
+    // Local installations should remain one-click: when no canonical public
+    // origin is configured, choose the safe loopback flow automatically. An
+    // explicitly configured value is still validated and fails closed.
+    let use_loopback = payload.loopback || public_base_url.is_none();
+    let redirect_uri = if use_loopback {
         // Loopback mode: register a localhost callback so a strict-allowlist
         // authorization server accepts it. This works from anywhere because the
         // flow can be finished by pasting the redirected URL back via
@@ -259,54 +269,16 @@ async fn start(
         };
         format!("http://localhost:{port}/api/mcp-auth/callback")
     } else {
-        // Relay-proxied requests reach us with a loopback Host the user's
-        // browser cannot be redirected back to, so an auto-callback flow could
-        // never complete — fail loudly instead of handing out a broken
-        // authorize URL. (Loopback mode above is the escape hatch.)
-        if headers
-            .get(RELAY_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.trim() == "1")
-        {
-            return Ok(ResponseJson(ApiResponse::error(
-                "Connect is only available when accessing Vibe Kanban directly \
-                 (not through a relayed host). Retry with the localhost-callback \
-                 option, open this machine's own UI, or paste a token into the \
-                 server's headers in the edit dialog.",
-            )));
+        match public_callback_uri(public_base_url.as_deref()) {
+            Ok(uri) => uri,
+            Err(error) => return Ok(ResponseJson(ApiResponse::error(&error))),
         }
-
-        // The browser reached us through this host, so it can be redirected
-        // back to it. Behind an HTTPS reverse proxy (e.g. the
-        // Caddyfile.example setup) the browser-facing scheme/host arrive in
-        // X-Forwarded-* headers — using plain `http://{Host}` there would
-        // register a redirect URI the AS may reject and the browser can't load.
-        let forwarded_header = |name: &str| {
-            headers
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.split(',').next())
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-        };
-        let scheme = forwarded_header("x-forwarded-proto")
-            .filter(|v| v == "https" || v == "http")
-            .unwrap_or_else(|| "http".to_string());
-        let host = forwarded_header("x-forwarded-host").or_else(|| {
-            headers
-                .get(HOST)
-                .and_then(|v| v.to_str().ok())
-                .map(String::from)
-        });
-        let Some(host) = host else {
-            return Ok(ResponseJson(ApiResponse::error(
-                "Missing Host header; cannot build a redirect URI",
-            )));
-        };
-        format!("{scheme}://{host}/api/mcp-auth/callback")
     };
 
-    let client = oauth_http_client();
+    let client = match mcp_oauth::OAuthHttpClient::new(OAUTH_HTTP_TIMEOUT, url) {
+        Ok(client) => client,
+        Err(error) => return Ok(ResponseJson(ApiResponse::error(&error))),
+    };
     let meta = match mcp_oauth::discover(&client, url, payload.www_authenticate.as_deref()).await {
         Ok(meta) => meta,
         Err(e) => return Ok(ResponseJson(ApiResponse::error(&e))),
@@ -349,6 +321,7 @@ async fn start(
     let flow = PendingFlow {
         state,
         exchange: Some(ExchangeInputs {
+            oauth_client: client,
             pkce_verifier: pkce.verifier,
             client_id,
             token_endpoint: meta.token_endpoint,
@@ -362,15 +335,46 @@ async fn start(
     };
     {
         let mut flows = FLOWS.write().await;
-        flows.retain(|_, f| f.created_at.elapsed() < FLOW_TTL);
+        if !prune_flows_and_has_capacity(&mut flows) {
+            return Ok(ResponseJson(ApiResponse::error(
+                "Too many OAuth flows are already pending; wait for one to finish or expire",
+            )));
+        }
         flows.insert(flow_id, flow);
     }
 
     Ok(ResponseJson(ApiResponse::success(McpAuthStartResponse {
         flow_id,
         authorize_url,
-        loopback: payload.loopback,
+        loopback: use_loopback,
     })))
+}
+
+fn prune_flows_and_has_capacity(flows: &mut HashMap<Uuid, PendingFlow>) -> bool {
+    flows.retain(|_, flow| flow.created_at.elapsed() < FLOW_TTL);
+    flows.len() < MAX_FLOWS
+}
+
+fn public_callback_uri(value: Option<&str>) -> Result<String, String> {
+    let raw = value.ok_or_else(|| {
+        "Set MCP_OAUTH_PUBLIC_BASE_URL to an HTTPS public URL for automatic callbacks, or use the localhost callback option".to_string()
+    })?;
+    let mut url = reqwest::Url::parse(raw)
+        .map_err(|_| "MCP_OAUTH_PUBLIC_BASE_URL is not a valid URL".to_string())?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(
+            "MCP_OAUTH_PUBLIC_BASE_URL must be an HTTPS URL without credentials, query, or fragment"
+                .to_string(),
+        );
+    }
+    url.set_path("/api/mcp-auth/callback");
+    Ok(url.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,7 +401,7 @@ async fn callback(Query(query): Query<CallbackQuery>) -> Result<Response<String>
     // atomically; whatever happens next, this state can't be redeemed again.
     let (flow_id, exchange, executor, server_name) = {
         let mut flows = FLOWS.write().await;
-        flows.retain(|_, f| f.created_at.elapsed() < FLOW_TTL);
+        prune_flows_and_has_capacity(&mut flows);
         let Some((id, flow)) = flows.iter_mut().find(|(_, f)| f.state == state) else {
             return Ok(simple_html_response(
                 StatusCode::BAD_REQUEST,
@@ -464,9 +468,8 @@ async fn exchange_and_store(
     server_name: &str,
     code: &str,
 ) -> Result<(), String> {
-    let client = oauth_http_client();
     let access_token = mcp_oauth::exchange_code(
-        &client,
+        &exchange.oauth_client,
         &exchange.token_endpoint,
         &exchange.client_id,
         code,
@@ -478,18 +481,11 @@ async fn exchange_and_store(
     persist_token(executor, server_name, &access_token).await
 }
 
-/// Extract the authorization `code` from a manual paste that is either the
-/// bare code or the full redirect URL the browser landed on. When a URL
-/// carries `error`/`state`, honor them (surface the error, enforce the CSRF
-/// binding). Returns `(code, state_if_present)`.
-fn parse_pasted_code(input: &str) -> Result<(String, Option<String>), String> {
+/// Extract the authorization code and state from a pasted callback URL.
+fn parse_pasted_code(input: &str) -> Result<(String, String), String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err("Paste the redirected URL or the authorization code".to_string());
-    }
-    // A bare code (no URL structure) is used as-is.
-    if !trimmed.contains("://") && !trimmed.contains("code=") && !trimmed.contains('?') {
-        return Ok((trimmed.to_string(), None));
+        return Err("Paste the full redirected URL".to_string());
     }
     let url = reqwest::Url::parse(trimmed)
         .map_err(|_| "Could not read that as a URL or a code".to_string())?;
@@ -507,9 +503,10 @@ fn parse_pasted_code(input: &str) -> Result<(String, Option<String>), String> {
     if let Some(err) = oauth_error {
         return Err(format!("Authorization failed: {err}"));
     }
-    match code {
-        Some(code) => Ok((code, state)),
-        None => Err("That URL has no `code` parameter".to_string()),
+    match (code, state) {
+        (Some(code), Some(state)) => Ok((code, state)),
+        (None, _) => Err("That URL has no `code` parameter".to_string()),
+        (_, None) => Err("That URL has no `state` parameter".to_string()),
     }
 }
 
@@ -527,15 +524,13 @@ async fn complete(
     // the paste carried a `state`, it must match the flow's (CSRF binding).
     let (exchange, executor, server_name) = {
         let mut flows = FLOWS.write().await;
-        flows.retain(|_, f| f.created_at.elapsed() < FLOW_TTL);
+        prune_flows_and_has_capacity(&mut flows);
         let Some(flow) = flows.get_mut(&payload.flow_id) else {
             return Ok(ResponseJson(ApiResponse::error(
                 "Authorization flow not found or expired",
             )));
         };
-        if let Some(state) = &pasted_state
-            && state != &flow.state
-        {
+        if pasted_state != flow.state {
             return Ok(ResponseJson(ApiResponse::error(
                 "The pasted URL's state does not match this authorization flow",
             )));
@@ -609,8 +604,21 @@ async fn persist_token(
 
     update_mcp_servers_in_config(&config_path, &mcpc, servers)
         .await
-        .map(|_| ())
-        .map_err(|e| format!("failed to write agent config: {e}"))
+        .map_err(|e| format!("failed to write agent config: {e}"))?;
+    secure_token_file(&config_path).await
+}
+
+#[cfg(unix)]
+async fn secure_token_file(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .await
+        .map_err(|e| format!("failed to secure agent config: {e}"))
+}
+
+#[cfg(not(unix))]
+async fn secure_token_file(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -670,6 +678,14 @@ mod tests {
     }
 
     #[test]
+    fn connect_error_guides_public_registration_400_without_remote_body() {
+        let raw = "client registration failed (HTTP 400)".to_string();
+        let enriched = connect_error(raw.clone(), "https://vk.example.com/api/mcp-auth/callback");
+        assert!(enriched.starts_with(&raw));
+        assert!(enriched.contains("localhost"));
+    }
+
+    #[test]
     fn connect_error_untouched_for_unrelated_failures() {
         let raw = "client registration failed (HTTP 500): internal error".to_string();
         let enriched = connect_error(raw.clone(), "https://vk.example.com/api/mcp-auth/callback");
@@ -677,11 +693,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_pasted_code_accepts_bare_code() {
-        assert_eq!(
-            parse_pasted_code("  abc123 ").unwrap(),
-            ("abc123".to_string(), None)
-        );
+    fn parse_pasted_code_rejects_bare_code() {
+        assert!(parse_pasted_code("  abc123 ").is_err());
     }
 
     #[test]
@@ -690,7 +703,7 @@ mod tests {
             parse_pasted_code("http://localhost:8080/api/mcp-auth/callback?code=xyz789&state=st-1")
                 .unwrap();
         assert_eq!(code, "xyz789");
-        assert_eq!(state.as_deref(), Some("st-1"));
+        assert_eq!(state, "st-1");
     }
 
     #[test]
@@ -706,5 +719,68 @@ mod tests {
     fn parse_pasted_code_rejects_empty_and_codeless() {
         assert!(parse_pasted_code("   ").is_err());
         assert!(parse_pasted_code("http://localhost:8080/cb?state=only").is_err());
+        assert!(parse_pasted_code("http://localhost:8080/cb?code=only").is_err());
+    }
+
+    #[test]
+    fn public_callback_uses_only_valid_configured_https_base() {
+        assert_eq!(
+            public_callback_uri(Some("https://vk.example.com/base/")).unwrap(),
+            "https://vk.example.com/api/mcp-auth/callback"
+        );
+        for invalid in [
+            None,
+            Some("http://vk.example.com"),
+            Some("https://user@vk.example.com"),
+            Some("https://vk.example.com?next=https://evil.example"),
+        ] {
+            assert!(public_callback_uri(invalid).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn token_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.json");
+        tokio::fs::write(&path, "secret").await.unwrap();
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .await
+            .unwrap();
+        secure_token_file(&path).await.unwrap();
+        assert_eq!(
+            tokio::fs::metadata(path)
+                .await
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn flow_capacity_prunes_expired_entries_before_rejecting() {
+        let flow = |created_at| PendingFlow {
+            state: "state".to_string(),
+            exchange: None,
+            executor: BaseCodingAgent::ClaudeCode,
+            server_name: "server".to_string(),
+            created_at,
+            outcome: FlowOutcome::Pending,
+        };
+        let mut flows = HashMap::new();
+        for index in 0..MAX_FLOWS {
+            flows.insert(Uuid::from_u128(index as u128), flow(Instant::now()));
+        }
+        assert!(!prune_flows_and_has_capacity(&mut flows));
+        flows.insert(
+            Uuid::from_u128(0),
+            flow(Instant::now() - FLOW_TTL - Duration::from_secs(1)),
+        );
+        assert!(prune_flows_and_has_capacity(&mut flows));
+        assert_eq!(flows.len(), MAX_FLOWS - 1);
     }
 }
