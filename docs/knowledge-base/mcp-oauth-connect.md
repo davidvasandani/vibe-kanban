@@ -1,6 +1,6 @@
 # MCP OAuth Connect flow
 
-Tags: `0c92-mcp-test-connect`
+Tags: `0c92-mcp-test-connect`, `205d-harden-mcp-oauth`
 
 ## What it is
 
@@ -46,11 +46,11 @@ user would paste one by hand. No new secret store, no DB change.
   insertion forms **and the OIDC issuer-suffix form** — path-based issuers
   (Keycloak `…/realms/x`) publish only
   `{issuer}/.well-known/openid-configuration`, which insertion misses.
-- **Redirect URI** is derived server-side from the request's `Host` **and
-  `X-Forwarded-Proto`/`X-Forwarded-Host`** (HTTPS reverse-proxy setups à la
-  `Caddyfile.example` would otherwise register an `http://` URI the AS
-  rejects). Relay-proxied requests get a loud error instead — their Host is
-  a loopback the user's browser can never reach.
+- **Redirect URI authority is configuration, never a request header.** Public
+  automatic callbacks require `MCP_OAUTH_PUBLIC_BASE_URL` containing an HTTPS
+  base URL. `Host` and `X-Forwarded-*` are attacker-controlled on direct
+  requests and are deliberately ignored. Without the variable, Connect
+  automatically uses the localhost callback mode.
 - **Strict-allowlist servers + the loopback escape hatch.** Some
   authorization servers (e.g. `sgsc-mcp`) only accept redirect URIs belonging
   to known MCP clients (Claude/ChatGPT/Codex/Cursor) or `localhost` — a
@@ -60,9 +60,9 @@ user would paste one by hand. No new secret store, no DB change.
   instead (port from `deployment.client_info().get_server_addr()`) and skips
   the relay guard. When the browser can reach that loopback (same machine /
   SSH port-forward) the callback auto-completes; otherwise the user pastes the
-  redirected URL — or the bare code — into `/mcp-auth/complete`, which
-  `parse_pasted_code`s it, enforces the `state` CSRF binding when the paste
-  carried one, consumes the flow's exchange inputs once, and runs
+  full redirected URL into `/mcp-auth/complete`, which `parse_pasted_code`s it,
+  requires and enforces the `state` CSRF binding, consumes the flow's exchange
+  inputs once, and runs
   `exchange_and_store`. The frontend reveals the paste field for loopback
   flows **and** background-polls `status` so the reachable case still
   finalizes (refresh snapshot + re-test) rather than getting stuck in manual
@@ -84,7 +84,15 @@ user would paste one by hand. No new secret store, no DB change.
 - **This reqwest build has no `.form()`** — encode
   `application/x-www-form-urlencoded` bodies with `Url::query_pairs_mut()`.
 - **Bound every outbound call**: a 10s per-request client timeout
-  (`oauth_http_client`), same discipline as `MCP_TEST_TIMEOUT`.
+  (`OAuthHttpClient`), same discipline as `MCP_TEST_TIMEOUT`.
+- **Discovery URLs are hostile input.** The shared OAuth client requires HTTPS
+  (except the exact configured HTTP loopback development origin), resolves and
+  rejects non-public IPs, pins validated DNS answers against rebinding, and
+  never follows redirects. AS endpoints must remain on the issuer origin, and
+  remote response bodies never appear in errors.
+- **Pending state and token files are bounded.** At most 256 unexpired flows
+  are retained. On Unix, a successful OAuth token write changes the containing
+  agent config file to owner-only mode (`0600`).
 
 ## Testing pattern
 
