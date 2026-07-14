@@ -369,7 +369,7 @@
     },
     "mcp": {
       "title": "MCP Server Configuration",
-      "description": "Configure Model Context Protocol servers to extend coding agent capabilities with custom tools and resources.",
+      "description": "Define Model Context Protocol servers once and assign them to compatible coding agents.",
       "loading": "Loading MCP configuration...",
       "applying": "Applying configuration...",
       "labels": {
@@ -377,17 +377,24 @@
         "agentPlaceholder": "Select executor",
         "agentHelper": "Choose which agent to configure MCP servers for.",
         "serverConfig": "Server Configuration (JSON)",
-        "servers": "Servers",
+        "servers": "Logical servers",
         "popularServers": "Popular servers",
         "serverHelper": "Click a card to insert that MCP Server into the JSON above.",
         "serverHelperForm": "Click a card to add that MCP server to the list.",
-        "saveLocation": "Changes will be saved to:"
+        "saveLocation": "Changes will be saved to:",
+        "assignments": "assignments",
+        "assignmentsHelper": "Each server is written to the native config file for every selected compatible agent."
       },
       "list": {
-        "empty": "No MCP servers configured yet. Add one below.",
+        "empty": "No shared MCP servers configured yet.",
         "addServer": "Add server",
         "customBadge": "custom"
       },
+      "conflicts": {
+        "title": "Native configuration conflicts"
+      },
+      "delete": "Delete server",
+      "deleteConfirm": "Delete this shared MCP server from all assigned agent configurations?",
       "dialog": {
         "addTitle": "Add MCP server",
         "editTitle": "Edit MCP server",
@@ -438,7 +445,8 @@
         "addServerFailed": "Failed to add preconfigured server",
         "mcpError": "MCP Configuration Error: {{error}}",
         "notSupported": "MCP Not Supported",
-        "supportMessage": "To use MCP servers, please select a different executor that supports MCP (Claude, Amp, Gemini, Codex, or Opencode) above."
+        "supportMessage": "To use MCP servers, assign the logical server to an agent that supports MCP.",
+        "incompatibleCodex": "Codex supports stdio MCP servers only."
       },
       "save": {
         "button": "Save MCP Configuration",

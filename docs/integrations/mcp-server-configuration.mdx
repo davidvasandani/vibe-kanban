@@ -10,21 +10,22 @@ This page covers configuring MCP servers **within** Vibe Kanban for your coding 
 
 ## Overview
 
-MCP servers provide additional functionality to coding agents through standardized protocols. You can configure different MCP servers for each coding agent in Vibe Kanban, giving them access to specialized tools like browser automation, access to remote logs, error tracking via Sentry, or documentation from Notion.
+MCP servers provide additional functionality to coding agents through standardized protocols. You can define a logical MCP server once in Vibe Kanban and assign it to one or more compatible coding agents.
 
 ## Accessing MCP Server Configuration
 
 1. Navigate to **Settings** in the Vibe Kanban interface
 2. Click on **MCP Servers** in the settings sidebar
-3. Select the coding agent you want to configure MCP servers for from the **Agent** dropdown
+3. Add or edit a logical MCP server
+4. Select the compatible coding agents that should receive that server
 
 <Frame>
-<img src="/images/vk-mcp-server-config.png" alt="MCP Server configuration page showing agent selection, JSON configuration, and popular servers" />
+<img src="/images/vk-mcp-server-config.png" alt="MCP Server configuration page showing logical servers and agent assignments" />
 </Frame>
 
 ## Popular MCP Servers
 
-Vibe Kanban provides one-click installation for popular MCP servers. Click a card to insert a pre-configured MCP server into the JSON configuration.
+Vibe Kanban provides popular MCP server templates. Add a template, then choose the compatible agents that should receive it.
 
 <Frame>
 <img src="/images/settings-popular-mcp-servers.png" alt="Popular MCP servers including Vibe Kanban, Context7, Playwright, Exa, Chrome DevTools, and Dev Manager" />
@@ -35,26 +36,18 @@ Vibe Kanban provides one-click installation for popular MCP servers. Click a car
 You can also add your own MCP servers by configuring them manually:
 
 <Steps>
-<Step title="Select Coding Agent">
-Choose the coding agent you want to configure MCP servers for from the **Agent** dropdown.
+<Step title="Create the logical server">
+Click **Add server**, enter the server name, and choose the transport configuration.
 </Step>
 
-<Step title="Update Server Configuration JSON">
-In the **Server Configuration (JSON)** editor, add your custom MCP server configuration. The JSON will show the current configuration for the selected agent, and you can modify it to include additional servers.
+<Step title="Choose assignments">
+Select one or more compatible agents. Vibe Kanban writes the server into each selected agent's native MCP configuration file.
 
-Example addition:
+Example stdio server:
 ```json
 {
-  "mcpServers": {
-    "existing_server": {
-      "command": "npx",
-      "args": ["-y", "some-existing-server"]
-    },
-    "my_custom_server": {
-      "command": "node",
-      "args": ["/path/to/my-server.js"]
-    }
-  }
+  "command": "node",
+  "args": ["/path/to/my-server.js"]
 }
 ```
 </Step>
@@ -63,14 +56,23 @@ Example addition:
 After updating the JSON configuration:
 
 1. Click **Save** to apply changes
-2. Test the configuration by using the agent with MCP functionality
-3. Check agent logs for any connection issues
+2. Click **Test connection** to test saved native entries
+3. Review test results per server and per assigned agent
 
 <Check>
-These changes update the global configuration file of the coding agent and will persist even if you stop using Vibe Kanban.
+These changes update the global configuration file for each assigned coding agent and persist even if you stop using Vibe Kanban.
 </Check>
 </Step>
 </Steps>
+
+## Conflicts and compatibility
+
+If Vibe Kanban finds same-name native entries with different definitions, it shows
+a conflict instead of choosing one silently. Rename or delete one of the entries
+before saving shared changes.
+
+Some agents support fewer MCP transports than others. For example, Codex supports
+stdio MCP servers only, so URL-based servers cannot be assigned to Codex.
 
 ## Best Practices
 

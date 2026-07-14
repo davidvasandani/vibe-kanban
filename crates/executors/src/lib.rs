@@ -10,4 +10,5 @@ pub mod mcp_oauth;
 pub mod mcp_test;
 pub mod model_selector;
 pub mod profile;
+pub mod shared_mcp_config;
 pub mod stdout_dup;
