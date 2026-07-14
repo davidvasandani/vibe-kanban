@@ -384,7 +384,7 @@ export type SharedMcpServerInput = { name: string, definition: McpServerDefiniti
 
 export type SharedMcpConflictResolution = { name: string, };
 
-export type SharedMcpWriteRequest = { servers: Array<SharedMcpServerInput>, resolved_conflicts: Array<SharedMcpConflictResolution>, };
+export type SharedMcpWriteRequest = { servers: Array<SharedMcpServerInput>, removed_servers: Array<string>, resolved_conflicts: Array<SharedMcpConflictResolution>, };
 
 export type SharedMcpWriteStatus = "success" | "partial_failure" | "failed";
 
