@@ -1,11 +1,16 @@
-use std::{net::IpAddr, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    sync::{Arc, LazyLock, OnceLock},
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
-    extract::{Path, Request, State},
+    extract::{ConnectInfo, Path, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{any, get},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use db::models::mcp_gateway::McpGatewayConnection;
@@ -24,14 +29,18 @@ use crate::DeploymentImpl;
 mod proxy;
 
 static SECRETS: OnceLock<Result<McpGatewaySecretStore, String>> = OnceLock::new();
+static REFRESH_LOCKS: LazyLock<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct StoredCredentials {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub token_endpoint: Option<String>,
+    pub revocation_endpoint: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
+    pub resource: String,
     pub cf_access_client_id: Option<String>,
     pub cf_access_client_secret: Option<String>,
 }
@@ -51,25 +60,21 @@ pub fn gateway_router() -> Router<DeploymentImpl> {
 }
 
 pub fn management_router() -> Router<DeploymentImpl> {
-    Router::new()
-        .route("/mcp-gateway/connections", post(upsert_connection))
-        .route("/mcp-gateway/connections/{id}", get(status).delete(disconnect))
+    Router::new().route(
+        "/mcp-gateway/connections/{id}",
+        get(status).delete(disconnect),
+    )
 }
 
 async fn proxy_request(
     State(deployment): State<DeploymentImpl>,
     Path(id): Path<String>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     request: Request,
 ) -> Response {
     // The capability is defense-in-depth for local process isolation; never
     // expose this route to a non-loopback peer even if the main UI listener is.
-    if !request
-        .headers()
-        .get(axum::http::header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|host| host.split(':').next())
-        .is_some_and(|host| host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()))
-    {
+    if !peer.ip().is_loopback() {
         return StatusCode::NOT_FOUND.into_response();
     }
     let Some(token) = bearer(request.headers()) else {
@@ -83,25 +88,149 @@ async fn proxy_request(
     )
     .await
     .ok()
-    .flatten()
-    else {
+    .flatten() else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let digest = Sha256::digest(token.as_bytes());
-    if digest.as_slice().ct_eq(&connection.gateway_token_hash).unwrap_u8() != 1 {
+    if digest
+        .as_slice()
+        .ct_eq(&connection.gateway_token_hash)
+        .unwrap_u8()
+        != 1
+    {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let Some(envelope) = connection.encrypted_credentials.as_deref() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "Shared MCP server is disconnected").into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Shared MCP server is disconnected",
+        )
+            .into_response();
     };
     let binding = binding(&connection);
     let credentials = secret_store()
-        .and_then(|store| store.decrypt(envelope, binding.as_bytes()).map_err(|_| StatusCode::SERVICE_UNAVAILABLE))
-        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|_| StatusCode::SERVICE_UNAVAILABLE));
-    match credentials {
-        Ok(credentials) => proxy::forward(request, &connection, credentials).await,
-        Err(status) => status.into_response(),
+        .and_then(|store| {
+            store
+                .decrypt(envelope, binding.as_bytes())
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+        })
+        .and_then(|bytes| {
+            serde_json::from_slice(&bytes).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+        });
+    let mut credentials: StoredCredentials = match credentials {
+        Ok(credentials) => credentials,
+        Err(status) => return status.into_response(),
+    };
+    let prepared = match proxy::prepare(request).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    let first = proxy::forward(&prepared, &connection, &credentials).await;
+    if !matches!(
+        first.status(),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ) {
+        return first;
     }
+    match refresh_credentials(&deployment, &connection, &credentials).await {
+        Ok(refreshed) => {
+            credentials = refreshed;
+            proxy::forward(&prepared, &connection, &credentials).await
+        }
+        Err(_) => first,
+    }
+}
+
+async fn refresh_credentials(
+    deployment: &DeploymentImpl,
+    original: &McpGatewayConnection,
+    stale: &StoredCredentials,
+) -> Result<StoredCredentials, String> {
+    let lock = {
+        let mut locks = REFRESH_LOCKS.lock().await;
+        locks
+            .entry(original.id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _guard = lock.lock().await;
+    let current = McpGatewayConnection::find_bound(
+        &deployment.db().pool,
+        &original.id,
+        deployment.user_id(),
+        deployment.user_id(),
+    )
+    .await
+    .map_err(|_| "refresh state unavailable".to_string())?
+    .ok_or_else(|| "shared connection no longer exists".to_string())?;
+    let envelope = current
+        .encrypted_credentials
+        .as_deref()
+        .ok_or_else(|| "shared connection is disconnected".to_string())?;
+    let raw = secret_store()
+        .map_err(|_| "secret storage unavailable".to_string())?
+        .decrypt(envelope, binding(&current).as_bytes())
+        .map_err(|_| "stored credential unavailable".to_string())?;
+    let mut credentials: StoredCredentials =
+        serde_json::from_slice(&raw).map_err(|_| "stored credential unavailable".to_string())?;
+    if credentials.access_token != stale.access_token {
+        return Ok(credentials);
+    }
+    let refresh_token = credentials
+        .refresh_token
+        .as_deref()
+        .ok_or_else(|| "no refresh token is available".to_string())?;
+    let token_endpoint = credentials
+        .token_endpoint
+        .as_deref()
+        .ok_or_else(|| "no token endpoint is available".to_string())?;
+    let client_id = credentials
+        .client_id
+        .as_deref()
+        .ok_or_else(|| "no OAuth client id is available".to_string())?;
+    let client =
+        executors::mcp_oauth::OAuthHttpClient::new(Duration::from_secs(15), &current.upstream_url)?;
+    let client = match (
+        credentials.cf_access_client_id.clone(),
+        credentials.cf_access_client_secret.clone(),
+    ) {
+        (Some(id), Some(secret)) => client.with_cloudflare_access(id, secret),
+        _ => client,
+    };
+    let tokens = executors::mcp_oauth::refresh_access_token(
+        &client,
+        token_endpoint,
+        client_id,
+        credentials.client_secret.as_deref(),
+        refresh_token,
+        &credentials.resource,
+    )
+    .await?;
+    credentials.access_token = tokens.access_token;
+    credentials.refresh_token = tokens.refresh_token;
+    let raw =
+        serde_json::to_vec(&credentials).map_err(|_| "credential update failed".to_string())?;
+    let encrypted = secret_store()
+        .map_err(|_| "secret storage unavailable".to_string())?
+        .encrypt(&raw, binding(&current).as_bytes())
+        .map_err(|_| "credential update failed".to_string())?;
+    let updated = sqlx::query(
+        r#"UPDATE mcp_gateway_connections
+           SET encrypted_credentials = ?, credential_version = credential_version + 1,
+               status = 'connected', last_error_code = NULL,
+               updated_at = datetime('now', 'subsec')
+           WHERE id = ? AND credential_version = ? AND status != 'disconnected'"#,
+    )
+    .bind(encrypted)
+    .bind(&current.id)
+    .bind(current.credential_version)
+    .execute(&deployment.db().pool)
+    .await
+    .map_err(|_| "credential update failed".to_string())?;
+    if updated.rows_affected() != 1 {
+        return Err("credential changed concurrently".to_string());
+    }
+    Ok(credentials)
 }
 
 fn bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
@@ -120,79 +249,94 @@ fn binding(connection: &McpGatewayConnection) -> String {
     )
 }
 
-#[derive(Debug, Deserialize)]
-pub struct UpsertConnectionRequest {
-    pub id: Option<Uuid>,
-    pub server_name: String,
-    pub upstream_url: String,
-    pub transport: String,
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub token_endpoint: Option<String>,
-    pub client_id: Option<String>,
-    pub client_secret: Option<String>,
+/// Persist a completed OAuth exchange and return the local capability only to
+/// the caller that immediately writes agent-native gateway entries.
+pub(crate) struct NewOAuthConnection<'a> {
+    pub id: Uuid,
+    pub server_name: &'a str,
+    pub upstream_url: &'a str,
+    pub transport: &'a str,
+    pub tokens: executors::mcp_oauth::OAuthTokenSet,
+    pub token_endpoint: String,
+    pub revocation_endpoint: Option<String>,
+    pub client_id: String,
+    pub resource: String,
     pub cf_access_client_id: Option<String>,
     pub cf_access_client_secret: Option<String>,
+    pub existing_gateway_token: Option<String>,
 }
 
-#[derive(Debug, Serialize, TS)]
-pub struct GatewayConnectionResponse {
-    pub id: Uuid,
-    pub endpoint: String,
-    pub gateway_token: Option<String>,
-    pub status: String,
-    pub has_refresh_token: bool,
-}
-
-async fn upsert_connection(
-    State(deployment): State<DeploymentImpl>,
-    Json(payload): Json<UpsertConnectionRequest>,
-) -> Json<ApiResponse<GatewayConnectionResponse>> {
-    let parsed = match reqwest::Url::parse(&payload.upstream_url) {
-        Ok(url) if acceptable_upstream(&url) => url,
-        _ => return Json(ApiResponse::error("Upstream MCP URL must be HTTPS (or loopback HTTP)")),
-    };
-    if !matches!(payload.transport.as_str(), "http" | "sse") {
-        return Json(ApiResponse::error("Gateway transport must be http or sse"));
-    }
-    let id = payload.id.unwrap_or_else(Uuid::new_v4);
-    let mut gateway_token = [0_u8; 32];
-    OsRng.fill_bytes(&mut gateway_token);
-    let gateway_token = URL_SAFE_NO_PAD.encode(gateway_token);
-    let token_hash = Sha256::digest(gateway_token.as_bytes());
-    let auth_kind = if payload.cf_access_client_id.is_some() {
-        "cloudflare_service_token_oauth"
+pub(crate) async fn store_oauth_connection(
+    deployment: &DeploymentImpl,
+    connection: NewOAuthConnection<'_>,
+) -> Result<(String, String), String> {
+    let NewOAuthConnection {
+        id,
+        server_name,
+        upstream_url,
+        transport,
+        tokens,
+        token_endpoint,
+        revocation_endpoint,
+        client_id,
+        resource,
+        cf_access_client_id,
+        cf_access_client_secret,
+        existing_gateway_token,
+    } = connection;
+    let parsed = reqwest::Url::parse(upstream_url)
+        .ok()
+        .filter(acceptable_upstream)
+        .ok_or_else(|| "Upstream MCP URL must be HTTPS (or loopback HTTP)".to_string())?;
+    let server_addr = deployment
+        .client_info()
+        .get_server_addr()
+        .ok_or_else(|| "Could not determine the local MCP gateway port".to_string())?;
+    let port = server_addr.port();
+    let gateway_host = if server_addr.is_ipv6() {
+        "[::1]"
     } else {
-        "oauth"
+        "127.0.0.1"
     };
+    let gateway_token = existing_gateway_token.unwrap_or_else(|| {
+        let mut random = [0_u8; 32];
+        OsRng.fill_bytes(&mut random);
+        URL_SAFE_NO_PAD.encode(random)
+    });
+    let token_hash = Sha256::digest(gateway_token.as_bytes());
     let credentials = StoredCredentials {
-        access_token: payload.access_token,
-        refresh_token: payload.refresh_token,
-        token_endpoint: payload.token_endpoint,
-        client_id: payload.client_id,
-        client_secret: payload.client_secret,
-        cf_access_client_id: payload.cf_access_client_id,
-        cf_access_client_secret: payload.cf_access_client_secret,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        token_endpoint: Some(token_endpoint),
+        revocation_endpoint,
+        client_id: Some(client_id),
+        client_secret: None,
+        resource,
+        cf_access_client_id,
+        cf_access_client_secret,
     };
     let upstream_url = parsed.to_string();
-    let binding = format!("{}|{}|{}|{}", deployment.user_id(), deployment.user_id(), id, upstream_url);
-    let encrypted = match secret_store().and_then(|store| {
-        serde_json::to_vec(&credentials)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-            .and_then(|raw| store.encrypt(&raw, binding.as_bytes()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR))
-    }) {
-        Ok(value) => value,
-        Err(_) => return Json(ApiResponse::error("MCP gateway secret storage is unavailable")),
-    };
-    let result = sqlx::query(
+    let binding = format!(
+        "{}|{}|{}|{}",
+        deployment.user_id(),
+        deployment.user_id(),
+        id,
+        upstream_url
+    );
+    let raw = serde_json::to_vec(&credentials)
+        .map_err(|_| "Failed to encode shared MCP credentials".to_string())?;
+    let encrypted = secret_store()
+        .map_err(|_| "MCP gateway secret storage is unavailable".to_string())?
+        .encrypt(&raw, binding.as_bytes())
+        .map_err(|_| "Failed to encrypt shared MCP credentials".to_string())?;
+    sqlx::query(
         r#"INSERT INTO mcp_gateway_connections
            (id, owner_user_id, machine_id, server_name, upstream_url, transport,
             auth_kind, gateway_token_hash, encrypted_credentials, status, connected_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'connected', datetime('now', 'subsec'))
+           VALUES (?, ?, ?, ?, ?, ?, 'oauth', ?, ?, 'connected', datetime('now', 'subsec'))
            ON CONFLICT(id) DO UPDATE SET
              server_name=excluded.server_name, upstream_url=excluded.upstream_url,
-             transport=excluded.transport, auth_kind=excluded.auth_kind,
-             gateway_token_hash=excluded.gateway_token_hash,
+             transport=excluded.transport, gateway_token_hash=excluded.gateway_token_hash,
              encrypted_credentials=excluded.encrypted_credentials,
              credential_version=mcp_gateway_connections.credential_version+1,
              status='connected', last_error_code=NULL,
@@ -202,38 +346,67 @@ async fn upsert_connection(
     .bind(id.to_string())
     .bind(deployment.user_id())
     .bind(deployment.user_id())
-    .bind(&payload.server_name)
+    .bind(server_name)
     .bind(&upstream_url)
-    .bind(&payload.transport)
-    .bind(auth_kind)
+    .bind(transport)
     .bind(token_hash.as_slice())
     .bind(encrypted)
     .execute(&deployment.db().pool)
-    .await;
-    if result.is_err() {
-        return Json(ApiResponse::error("Failed to store shared MCP connection"));
-    }
-    Json(ApiResponse::success(GatewayConnectionResponse {
-        id,
-        endpoint: format!("http://127.0.0.1/mcp-gateway/{id}"),
-        gateway_token: Some(gateway_token),
-        status: "connected".to_string(),
-        has_refresh_token: credentials.refresh_token.is_some(),
-    }))
+    .await
+    .map_err(|_| "Failed to store shared MCP connection".to_string())?;
+    Ok((
+        format!("http://{gateway_host}:{port}/mcp-gateway/{id}"),
+        gateway_token,
+    ))
+}
+
+#[derive(Debug, Serialize, TS)]
+pub struct GatewayConnectionResponse {
+    pub id: Uuid,
+    pub endpoint: String,
+    pub status: String,
+    pub has_refresh_token: bool,
 }
 
 async fn status(
     State(deployment): State<DeploymentImpl>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<GatewayConnectionResponse>> {
-    match McpGatewayConnection::find_bound(&deployment.db().pool, &id, deployment.user_id(), deployment.user_id()).await {
-        Ok(Some(row)) => Json(ApiResponse::success(GatewayConnectionResponse {
-            id: Uuid::parse_str(&row.id).unwrap_or_else(|_| Uuid::nil()),
-            endpoint: format!("http://127.0.0.1/mcp-gateway/{}", row.id),
-            gateway_token: None,
-            status: row.status,
-            has_refresh_token: false,
-        })),
+    match McpGatewayConnection::find_bound(
+        &deployment.db().pool,
+        &id,
+        deployment.user_id(),
+        deployment.user_id(),
+    )
+    .await
+    {
+        Ok(Some(row)) => {
+            let has_refresh_token = row
+                .encrypted_credentials
+                .as_deref()
+                .and_then(|envelope| {
+                    secret_store()
+                        .ok()?
+                        .decrypt(envelope, binding(&row).as_bytes())
+                        .ok()
+                })
+                .and_then(|raw| serde_json::from_slice::<StoredCredentials>(&raw).ok())
+                .and_then(|credentials| credentials.refresh_token)
+                .is_some();
+            Json(ApiResponse::success(GatewayConnectionResponse {
+                id: Uuid::parse_str(&row.id).unwrap_or_else(|_| Uuid::nil()),
+                endpoint: deployment
+                    .client_info()
+                    .get_server_addr()
+                    .map(|addr| {
+                        let host = if addr.is_ipv6() { "[::1]" } else { "127.0.0.1" };
+                        format!("http://{host}:{}/mcp-gateway/{}", addr.port(), row.id)
+                    })
+                    .unwrap_or_default(),
+                status: row.status,
+                has_refresh_token,
+            }))
+        }
         _ => Json(ApiResponse::error("Shared MCP connection not found")),
     }
 }
@@ -242,9 +415,66 @@ async fn disconnect(
     State(deployment): State<DeploymentImpl>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<bool>> {
-    match McpGatewayConnection::disconnect(&deployment.db().pool, &id).await {
+    if let Ok(Some(row)) = McpGatewayConnection::find_bound(
+        &deployment.db().pool,
+        &id,
+        deployment.user_id(),
+        deployment.user_id(),
+    )
+    .await
+        && let Some(envelope) = row.encrypted_credentials.as_deref()
+        && let Ok(raw) = secret_store().and_then(|store| {
+            store
+                .decrypt(envelope, binding(&row).as_bytes())
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+        })
+        && let Ok(credentials) = serde_json::from_slice::<StoredCredentials>(&raw)
+        && let Some(endpoint) = credentials.revocation_endpoint.as_deref()
+        && let Ok(client) =
+            executors::mcp_oauth::OAuthHttpClient::new(Duration::from_secs(15), &row.upstream_url)
+    {
+        let client = match (
+            credentials.cf_access_client_id.clone(),
+            credentials.cf_access_client_secret.clone(),
+        ) {
+            (Some(id), Some(secret)) => client.with_cloudflare_access(id, secret),
+            _ => client,
+        };
+        // Best effort by design: local deletion below always wins. Never log
+        // provider bodies or token values when remote revocation fails.
+        if let Some(refresh_token) = credentials.refresh_token.as_deref() {
+            let _ = executors::mcp_oauth::revoke_token(
+                &client,
+                endpoint,
+                credentials.client_id.as_deref(),
+                credentials.client_secret.as_deref(),
+                refresh_token,
+                "refresh_token",
+            )
+            .await;
+        }
+        let _ = executors::mcp_oauth::revoke_token(
+            &client,
+            endpoint,
+            credentials.client_id.as_deref(),
+            credentials.client_secret.as_deref(),
+            &credentials.access_token,
+            "access_token",
+        )
+        .await;
+    }
+    match McpGatewayConnection::disconnect(
+        &deployment.db().pool,
+        &id,
+        deployment.user_id(),
+        deployment.user_id(),
+    )
+    .await
+    {
         Ok(value) => Json(ApiResponse::success(value)),
-        Err(_) => Json(ApiResponse::error("Failed to disconnect shared MCP connection")),
+        Err(_) => Json(ApiResponse::error(
+            "Failed to disconnect shared MCP connection",
+        )),
     }
 }
 
@@ -255,5 +485,8 @@ fn acceptable_upstream(url: &reqwest::Url) -> bool {
     url.scheme() == "http"
         && url.username().is_empty()
         && url.password().is_none()
-        && url.host_str().and_then(|h| h.parse::<IpAddr>().ok()).is_some_and(|ip| ip.is_loopback())
+        && url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+        })
 }

@@ -38,15 +38,22 @@ impl McpGatewayConnection {
         .await
     }
 
-    pub async fn disconnect(pool: &SqlitePool, id: &str) -> Result<bool, sqlx::Error> {
+    pub async fn disconnect(
+        pool: &SqlitePool,
+        id: &str,
+        user_id: &str,
+        machine_id: &str,
+    ) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
             r#"UPDATE mcp_gateway_connections
                SET encrypted_credentials = NULL, status = 'disconnected',
                    gateway_token_hash = randomblob(32), disconnected_at = datetime('now', 'subsec'),
                    updated_at = datetime('now', 'subsec')
-               WHERE id = ?"#,
+               WHERE id = ? AND owner_user_id = ? AND machine_id = ?"#,
         )
         .bind(id)
+        .bind(user_id)
+        .bind(machine_id)
         .execute(pool)
         .await?;
         Ok(result.rows_affected() == 1)

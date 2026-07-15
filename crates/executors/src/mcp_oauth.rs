@@ -33,6 +33,7 @@ pub struct AuthServerMetadata {
     pub authorization_endpoint: String,
     pub token_endpoint: String,
     pub registration_endpoint: Option<String>,
+    pub revocation_endpoint: Option<String>,
     pub scopes_supported: Vec<String>,
     /// Canonical resource URI to bind tokens to (RFC 8707): the protected
     /// resource metadata's `resource` when present, else the MCP server URL.
@@ -51,10 +52,25 @@ pub struct Pkce {
 /// Every request resolves and validates its destination, then pins those DNS
 /// answers into the reqwest client that makes the connection. Redirects are
 /// disabled so a validated public URL cannot bounce to an internal address.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OAuthHttpClient {
     timeout: Duration,
     loopback_dev_origin: Option<Origin>,
+    mcp_origin: Origin,
+    cloudflare_access: Option<(Origin, String, String)>,
+}
+
+impl std::fmt::Debug for OAuthHttpClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthHttpClient")
+            .field("timeout", &self.timeout)
+            .field("loopback_dev_origin", &self.loopback_dev_origin)
+            .field(
+                "cloudflare_access",
+                &self.cloudflare_access.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,12 +101,20 @@ impl OAuthHttpClient {
         let mcp_url = Url::parse(mcp_server_url)
             .map_err(|_| "configured MCP server URL is invalid".to_string())?;
         let origin = Origin::from_url(&mcp_url)?;
-        let loopback_dev_origin =
-            (origin.scheme == "http" && host_is_literal_loopback(&origin.host)).then_some(origin);
+        let loopback_dev_origin = (origin.scheme == "http"
+            && host_is_literal_loopback(&origin.host))
+        .then_some(origin.clone());
         Ok(Self {
             timeout,
             loopback_dev_origin,
+            mcp_origin: origin,
+            cloudflare_access: None,
         })
+    }
+
+    pub fn with_cloudflare_access(mut self, client_id: String, client_secret: String) -> Self {
+        self.cloudflare_access = Some((self.mcp_origin.clone(), client_id, client_secret));
+        self
     }
 
     async fn client_for(&self, raw_url: &str) -> Result<(reqwest::Client, Url), String> {
@@ -137,8 +161,15 @@ impl OAuthHttpClient {
 
     async fn get(&self, url: &str) -> Result<reqwest::Response, String> {
         let (client, parsed) = self.client_for(url).await?;
-        client
-            .get(parsed)
+        let mut request = client.get(parsed.clone());
+        if let Some((access_origin, id, secret)) = &self.cloudflare_access
+            && Origin::from_url(&parsed).ok().as_ref() == Some(access_origin)
+        {
+            request = request
+                .header("CF-Access-Client-Id", id)
+                .header("CF-Access-Client-Secret", secret);
+        }
+        request
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await
@@ -147,8 +178,15 @@ impl OAuthHttpClient {
 
     async fn post_json(&self, url: &str, body: &Value) -> Result<reqwest::Response, String> {
         let (client, parsed) = self.client_for(url).await?;
-        client
-            .post(parsed)
+        let mut request = client.post(parsed.clone());
+        if let Some((access_origin, id, secret)) = &self.cloudflare_access
+            && Origin::from_url(&parsed).ok().as_ref() == Some(access_origin)
+        {
+            request = request
+                .header("CF-Access-Client-Id", id)
+                .header("CF-Access-Client-Secret", secret);
+        }
+        request
             .json(body)
             .send()
             .await
@@ -157,8 +195,15 @@ impl OAuthHttpClient {
 
     async fn post_form(&self, url: &str, body: String) -> Result<reqwest::Response, String> {
         let (client, parsed) = self.client_for(url).await?;
-        client
-            .post(parsed)
+        let mut request = client.post(parsed.clone());
+        if let Some((access_origin, id, secret)) = &self.cloudflare_access
+            && Origin::from_url(&parsed).ok().as_ref() == Some(access_origin)
+        {
+            request = request
+                .header("CF-Access-Client-Id", id)
+                .header("CF-Access-Client-Secret", secret);
+        }
+        request
             .header(
                 reqwest::header::CONTENT_TYPE,
                 "application/x-www-form-urlencoded",
@@ -443,6 +488,7 @@ pub async fn discover(
                         authorization_endpoint,
                         token_endpoint,
                         registration_endpoint: string_field(&meta, "registration_endpoint"),
+                        revocation_endpoint: string_field(&meta, "revocation_endpoint"),
                         scopes_supported,
                         resource,
                     });
@@ -582,7 +628,10 @@ impl std::fmt::Debug for OAuthTokenSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OAuthTokenSet")
             .field("access_token", &"[REDACTED]")
-            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("token_type", &self.token_type)
             .field("expires_in", &self.expires_in)
             .field("scope", &self.scope)
@@ -643,9 +692,94 @@ pub async fn exchange_code(
     redirect_uri: &str,
     resource: &str,
 ) -> Result<String, String> {
-    exchange_token_set(client, token_endpoint, client_id, code, pkce_verifier, redirect_uri, resource)
+    exchange_token_set(
+        client,
+        token_endpoint,
+        client_id,
+        code,
+        pkce_verifier,
+        redirect_uri,
+        resource,
+    )
+    .await
+    .map(|tokens| tokens.access_token)
+}
+
+pub async fn refresh_access_token(
+    client: &OAuthHttpClient,
+    token_endpoint: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    refresh_token: &str,
+    resource: &str,
+) -> Result<OAuthTokenSet, String> {
+    let mut params = vec![
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+        ("resource", resource),
+    ];
+    if let Some(secret) = client_secret {
+        params.push(("client_secret", secret));
+    }
+    let mut encoder = Url::parse("http://encode.invalid/").expect("static url parses");
+    encoder.query_pairs_mut().extend_pairs(params);
+    let response = client
+        .post_form(
+            token_endpoint,
+            encoder.query().unwrap_or_default().to_string(),
+        )
+        .await?;
+    let status = response.status();
+    let value: Value = response
+        .json()
         .await
-        .map(|tokens| tokens.access_token)
+        .map_err(|_| "token endpoint returned invalid JSON".to_string())?;
+    if !status.is_success() {
+        return Err(format!("token refresh failed (HTTP {})", status.as_u16()));
+    }
+    Ok(OAuthTokenSet {
+        access_token: string_field(&value, "access_token")
+            .ok_or_else(|| "token response lacks access_token".to_string())?,
+        refresh_token: string_field(&value, "refresh_token")
+            .or_else(|| Some(refresh_token.to_string())),
+        token_type: string_field(&value, "token_type"),
+        expires_in: value.get("expires_in").and_then(Value::as_u64),
+        scope: string_field(&value, "scope"),
+    })
+}
+
+pub async fn revoke_token(
+    client: &OAuthHttpClient,
+    revocation_endpoint: &str,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
+    token: &str,
+    token_type_hint: &str,
+) -> Result<(), String> {
+    let mut params = vec![("token", token), ("token_type_hint", token_type_hint)];
+    if let Some(client_id) = client_id {
+        params.push(("client_id", client_id));
+    }
+    if let Some(client_secret) = client_secret {
+        params.push(("client_secret", client_secret));
+    }
+    let mut encoder = Url::parse("http://encode.invalid/").expect("static url parses");
+    encoder.query_pairs_mut().extend_pairs(params);
+    let response = client
+        .post_form(
+            revocation_endpoint,
+            encoder.query().unwrap_or_default().to_string(),
+        )
+        .await?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "token revocation failed (HTTP {})",
+            response.status().as_u16()
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -1008,7 +1142,8 @@ mod tests {
         let base = one_shot_server(vec![response]).await;
         let client = OAuthHttpClient::new(Duration::from_secs(2), &base).unwrap();
         let err = fetch_json(&client, &base).await.unwrap_err();
-        assert!(err.contains("HTTP 302"), "got: {err}");
+        assert!(err.contains("HTTP 3xx"), "got: {err}");
+        assert!(err.contains("Cloudflare Access"), "got: {err}");
     }
 
     #[tokio::test]

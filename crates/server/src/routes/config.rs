@@ -20,7 +20,7 @@ use executors::{
     shared_mcp_config::{
         SharedMcpProfileWriteOutcome, SharedMcpProfileWriteStatus, SharedMcpReadResponse,
         SharedMcpTestRequest, SharedMcpTestTarget, SharedMcpWriteRequest, SharedMcpWriteResponse,
-        SharedMcpWriteStatus, load_native_snapshots, load_shared_mcp_config,
+        SharedMcpWriteStatus, canonical_definition, load_native_snapshots, load_shared_mcp_config,
         plan_servers_for_executor, reconcile_snapshots, validate_write_request,
     },
 };
@@ -325,6 +325,8 @@ pub struct TestMcpServersBody {
 pub struct SharedMcpAssignmentTestResult {
     pub server_name: String,
     pub executor: BaseCodingAgent,
+    pub gateway_status: Option<String>,
+    pub upstream_status: Option<String>,
     pub result: McpServerTestResult,
 }
 
@@ -368,22 +370,50 @@ async fn get_mcp_servers(
 }
 
 async fn get_shared_mcp_servers(
-    State(_deployment): State<DeploymentImpl>,
+    State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<SharedMcpReadResponse>>, ApiError> {
-    Ok(ResponseJson(ApiResponse::success(
-        load_shared_mcp_config().await,
-    )))
+    let mut response = load_shared_mcp_config().await;
+    attach_gateway_status(&deployment, &mut response).await;
+    Ok(ResponseJson(ApiResponse::success(response)))
+}
+
+async fn attach_gateway_status(deployment: &DeploymentImpl, response: &mut SharedMcpReadResponse) {
+    for server in &mut response.servers {
+        let Some(url) = server.definition.value.get("url").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(id) = url
+            .split("/mcp-gateway/")
+            .nth(1)
+            .and_then(|tail| tail.split(['/', '?']).next())
+        else {
+            continue;
+        };
+        server.gateway_status = db::models::mcp_gateway::McpGatewayConnection::find_bound(
+            &deployment.db().pool,
+            id,
+            deployment.user_id(),
+            deployment.user_id(),
+        )
+        .await
+        .ok()
+        .flatten()
+        .map(|connection| connection.status);
+    }
 }
 
 async fn update_shared_mcp_servers(
     State(_deployment): State<DeploymentImpl>,
-    Json(payload): Json<SharedMcpWriteRequest>,
+    Json(mut payload): Json<SharedMcpWriteRequest>,
 ) -> Result<ResponseJson<ApiResponse<SharedMcpWriteResponse>>, ApiError> {
+    let snapshots = load_native_snapshots().await;
+    if let Err(message) = hydrate_gateway_capabilities(&mut payload, &snapshots) {
+        return Ok(ResponseJson(ApiResponse::error(&message)));
+    }
     if let Err(message) = validate_write_request(&payload) {
         return Ok(ResponseJson(ApiResponse::error(&message)));
     }
 
-    let snapshots = load_native_snapshots().await;
     let mut outcomes = Vec::new();
     let mut any_success = false;
     let mut any_failed = false;
@@ -448,7 +478,8 @@ async fn update_shared_mcp_servers(
         }
     }
 
-    let fresh = reconcile_snapshots(load_native_snapshots().await);
+    let mut fresh = reconcile_snapshots(load_native_snapshots().await);
+    attach_gateway_status(&_deployment, &mut fresh).await;
     let status = if any_failed && any_success {
         SharedMcpWriteStatus::PartialFailure
     } else if any_failed {
@@ -463,6 +494,74 @@ async fn update_shared_mcp_servers(
         servers: fresh.servers,
         conflicts: fresh.conflicts,
     })))
+}
+
+fn hydrate_gateway_capabilities(
+    payload: &mut SharedMcpWriteRequest,
+    snapshots: &[executors::shared_mcp_config::NativeProfileSnapshot],
+) -> Result<(), String> {
+    for server in &mut payload.servers {
+        let placeholder = server
+            .definition
+            .value
+            .get("headers")
+            .and_then(Value::as_object)
+            .and_then(|headers| {
+                headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            })
+            .is_some_and(|(_, value)| value.as_str() == Some("Bearer [REDACTED]"));
+        if !placeholder {
+            continue;
+        }
+        let Some(url) = server.definition.value.get("url").and_then(Value::as_str) else {
+            return Err(
+                "Redacted gateway credentials cannot be saved without a gateway URL".into(),
+            );
+        };
+        if !url.contains("/mcp-gateway/") {
+            return Err(
+                "Redacted gateway credentials cannot be reused for a direct MCP server; remove the Authorization header or reconnect"
+                    .into(),
+            );
+        }
+        let capability = snapshots
+            .iter()
+            .flat_map(|snapshot| snapshot.servers.values())
+            .find_map(|entry| {
+                let definition = canonical_definition(entry);
+                (definition.value.get("url").and_then(Value::as_str) == Some(url))
+                    .then(|| {
+                        definition
+                            .value
+                            .get("headers")
+                            .and_then(Value::as_object)
+                            .and_then(|headers| {
+                                headers
+                                    .iter()
+                                    .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                            })
+                            .map(|(_, value)| value.clone())
+                    })
+                    .flatten()
+            });
+        let Some(capability) = capability else {
+            return Err("Shared gateway capability is unavailable; reconnect the server".into());
+        };
+        if let Some(headers) = server
+            .definition
+            .value
+            .get_mut("headers")
+            .and_then(Value::as_object_mut)
+            && let Some((_, value)) = headers
+                .iter_mut()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        {
+            *value = capability;
+        }
+    }
+    Ok(())
 }
 
 async fn update_mcp_servers(
@@ -621,11 +720,39 @@ async fn test_shared_mcp_servers_route(
         let raw_config = read_agent_config(&config_path, &mcpc).await?;
         let mut servers = get_mcp_servers_from_config_path(&raw_config, &mcpc.servers_path);
         servers.retain(|name, _| server_names.contains(name));
+        let gateway_servers = servers
+            .iter()
+            .filter_map(|(name, entry)| {
+                entry
+                    .get("url")
+                    .or_else(|| entry.get("httpUrl"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|url| url.contains("/mcp-gateway/"))
+                    .then_some(name.clone())
+            })
+            .collect::<std::collections::HashSet<_>>();
 
         for result in test_mcp_servers(servers, MCP_TEST_TIMEOUT).await {
+            let gateway_managed = gateway_servers.contains(&result.name);
+            let disconnected = result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("disconnected"));
             all_results.push(SharedMcpAssignmentTestResult {
                 server_name: result.name.clone(),
                 executor,
+                gateway_status: gateway_managed
+                    .then(|| if disconnected { "disconnected" } else { "ok" }.to_string()),
+                upstream_status: gateway_managed.then(|| match &result.status {
+                    executors::mcp_test::McpServerTestStatus::Ok => "ok".to_string(),
+                    executors::mcp_test::McpServerTestStatus::AuthRequired => {
+                        "auth_required".to_string()
+                    }
+                    executors::mcp_test::McpServerTestStatus::Unsupported => {
+                        "unsupported".to_string()
+                    }
+                    executors::mcp_test::McpServerTestStatus::Failed => "failed".to_string(),
+                }),
                 result,
             });
         }

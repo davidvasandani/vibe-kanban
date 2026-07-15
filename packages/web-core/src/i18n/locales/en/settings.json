@@ -395,6 +395,17 @@
       },
       "delete": "Delete server",
       "deleteConfirm": "Delete this shared MCP server from all assigned agent configurations?",
+      "auth": {
+        "sharedGateway": "Shared gateway auth",
+        "explicitHeader": "Explicit header auth",
+        "agentNative": "Agent-native auth",
+        "none": "No authentication",
+        "disconnect": "Disconnect",
+        "reconnect": "Reconnect",
+        "disconnectConfirm": "Disconnect this shared credential for every assigned agent?",
+        "cloudflareClientId": "Cloudflare Access service-token client ID (write-only)",
+        "cloudflareClientSecret": "Cloudflare Access service-token client secret (write-only)"
+      },
       "dialog": {
         "addTitle": "Add MCP server",
         "editTitle": "Edit MCP server",

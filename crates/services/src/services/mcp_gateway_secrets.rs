@@ -65,7 +65,13 @@ impl McpGatewaySecretStore {
         OsRng.fill_bytes(&mut nonce);
         let ciphertext = self
             .cipher
-            .encrypt((&nonce).into(), Payload { msg: plaintext, aad: binding })
+            .encrypt(
+                (&nonce).into(),
+                Payload {
+                    msg: plaintext,
+                    aad: binding,
+                },
+            )
             .map_err(|_| SecretStoreError::Encode)?;
         serde_json::to_string(&Envelope {
             v: VERSION,
@@ -91,7 +97,13 @@ impl McpGatewaySecretStore {
             return Err(SecretStoreError::Decrypt);
         }
         self.cipher
-            .decrypt(nonce.as_slice().into(), Payload { msg: &ciphertext, aad: binding })
+            .decrypt(
+                nonce.as_slice().into(),
+                Payload {
+                    msg: &ciphertext,
+                    aad: binding,
+                },
+            )
             .map_err(|_| SecretStoreError::Decrypt)
     }
 }
@@ -132,7 +144,10 @@ mod tests {
         let store = McpGatewaySecretStore::load_or_generate(&dir.path().join("key")).unwrap();
         let envelope = store.encrypt(b"access-token", b"user|host|server").unwrap();
         assert!(!envelope.contains("access-token"));
-        assert_eq!(store.decrypt(&envelope, b"user|host|server").unwrap(), b"access-token");
+        assert_eq!(
+            store.decrypt(&envelope, b"user|host|server").unwrap(),
+            b"access-token"
+        );
         assert!(store.decrypt(&envelope, b"other").is_err());
         assert!(!format!("{:?}", store).contains("access-token"));
     }
