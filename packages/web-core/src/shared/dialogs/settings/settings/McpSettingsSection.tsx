@@ -32,6 +32,8 @@ import {
   indexAssignmentTests,
   inputsFromDraft,
   mergeOAuthRefresh,
+  removedServerNames,
+  resolveConflictVariant,
   sharedMcpSnapshot,
   testKey,
   testTargetsForDraft,
@@ -130,23 +132,19 @@ function TestResultDetails({
   return (
     <div
       className={cn(
-        'mt-2 rounded-sm border p-2 text-xs',
+        'mt-2 rounded-sm border px-2 py-1.5 text-xs',
         authRequired
           ? 'border-warning/50 bg-warning/10 text-warning'
           : 'border-error/50 bg-error/10 text-error'
       )}
     >
-      <div className="flex items-start gap-2">
-        <div className="min-w-0 flex-1">
-          {authRequired && (
-            <div className="font-medium">
-              {t('settings.mcp.test.authRequired')}
-            </div>
-          )}
-          {result.error && (
-            <div className="line-clamp-3 font-mono break-words">
-              {result.error}
-            </div>
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1 truncate" title={result.error ?? ''}>
+          <span className="font-medium">
+            {authRequired ? t('settings.mcp.test.authRequired') : result.error}
+          </span>
+          {authRequired && result.error && (
+            <span className="ml-2 font-mono text-low">{result.error}</span>
           )}
         </div>
         {authRequired && (
@@ -172,20 +170,25 @@ function TestResultDetails({
         )}
       </div>
       {connectError && (
-        <div className="mt-2 whitespace-pre-wrap rounded-sm border border-error/50 bg-error/10 p-2 text-error">
+        <div className="mt-1 line-clamp-2 break-words text-error">
           {connectError}
         </div>
       )}
       {authRequired && (
-        <label className="mt-2 flex items-center gap-2 text-low">
-          <input
-            type="checkbox"
-            checked={loopback}
-            onChange={onToggleLoopback}
-            disabled={connecting || manualActive}
-          />
-          {t('settings.mcp.test.useLocalhostCallback')}
-        </label>
+        <details className="mt-1 text-low">
+          <summary className="cursor-pointer select-none">
+            {t('settings.mcp.test.connectionOptions')}
+          </summary>
+          <label className="mt-1 flex items-center gap-2 pl-3">
+            <input
+              type="checkbox"
+              checked={loopback}
+              onChange={onToggleLoopback}
+              disabled={connecting || manualActive}
+            />
+            {t('settings.mcp.test.useLocalhostCallback')}
+          </label>
+        </details>
       )}
       {manualActive && (
         <div className="mt-2 space-y-2 border-t border-current/20 pt-2">
@@ -308,15 +311,13 @@ export function McpSettingsSection() {
     try {
       const response = await machineClient.saveSharedMcpServers({
         servers: inputsFromDraft(draft),
-        removed_servers: (readModel?.servers ?? [])
+        removed_servers: removedServerNames(readModel, draft),
+        resolved_conflicts: (readModel?.conflicts ?? [])
           .filter(
-            (server) =>
-              !draft.servers.some(
-                (draftServer) => draftServer.name === server.name
-              )
+            (conflict) =>
+              !draft.conflicts.some((item) => item.name === conflict.name)
           )
-          .map((server) => server.name),
-        resolved_conflicts: [],
+          .map((conflict) => ({ name: conflict.name })),
       });
       const fresh = await machineClient.loadSharedMcpServers();
       const next = draftFromSharedRead(fresh);
@@ -362,6 +363,23 @@ export function McpSettingsSection() {
       ].sort((a, b) => a.name.localeCompare(b.name)),
     }));
   }, []);
+
+  const resolveConflict = useCallback(
+    (conflictName: string, variantId: string) => {
+      setDraft((prev) => {
+        const conflict = prev.conflicts.find(
+          (item) => item.name === conflictName
+        );
+        const variant = conflict?.variants.find(
+          (item) => item.variant_id === variantId
+        );
+        return conflict && variant
+          ? resolveConflictVariant(prev, conflict, variant)
+          : prev;
+      });
+    },
+    []
+  );
 
   const openDialog = useCallback(
     async (server?: SharedMcpDraftServer) => {
@@ -784,15 +802,50 @@ export function McpSettingsSection() {
         ) : (
           <div className="space-y-3">
             {draft.conflicts.length > 0 && (
-              <div className="rounded-sm border border-warning/50 bg-warning/10 p-3 text-sm text-warning">
+              <div className="space-y-3 rounded-sm border border-warning/50 bg-warning/10 p-3 text-sm text-warning">
                 <div className="font-medium">
                   {t('settings.mcp.conflicts.title')}
                 </div>
-                <div className="mt-1 space-y-1">
-                  {draft.conflicts.map((conflict) => (
-                    <div key={conflict.name}>{conflict.message}</div>
-                  ))}
-                </div>
+                {draft.conflicts.map((conflict) => (
+                  <div key={conflict.name} className="space-y-2">
+                    <div>{conflict.message}</div>
+                    <div className="flex flex-wrap gap-2">
+                      {conflict.variants.map((variant) => {
+                        const agents = variant.assignments
+                          .map((assignment) =>
+                            toPrettyCase(assignment.executor)
+                          )
+                          .join(', ');
+                        return (
+                          <Button
+                            key={variant.variant_id}
+                            variant="outline"
+                            size="sm"
+                            type="button"
+                            disabled={
+                              variant.definition.transport === 'unknown'
+                            }
+                            title={
+                              variant.definition.transport === 'unknown'
+                                ? t('settings.mcp.conflicts.customUnsupported')
+                                : undefined
+                            }
+                            onClick={() =>
+                              resolveConflict(conflict.name, variant.variant_id)
+                            }
+                          >
+                            {t('settings.mcp.conflicts.useDefinition', {
+                              agents,
+                            })}
+                          </Button>
+                        );
+                      })}
+                    </div>
+                    <div className="text-xs text-low">
+                      {t('settings.mcp.conflicts.helper')}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
 
@@ -803,6 +856,21 @@ export function McpSettingsSection() {
             ) : (
               draft.servers.map((server) => {
                 const source = serverByName.get(server.name);
+                const serverResults = server.assignments
+                  .map((executor) => ({
+                    executor,
+                    key: testKey(server.name, executor),
+                    test: testResults[testKey(server.name, executor)],
+                  }))
+                  .filter(
+                    (item) => item.test && item.test.result.status !== 'ok'
+                  );
+                const attentionResult =
+                  serverResults.find(
+                    (item) => item.test?.result.status === 'auth_required'
+                  ) ?? serverResults[0];
+                const attentionKey = attentionResult?.key;
+                const attentionTest = attentionResult?.test;
                 return (
                   <div
                     key={server.name}
@@ -901,7 +969,55 @@ export function McpSettingsSection() {
                       </div>
                     </div>
 
-                    <div className="mt-3 grid gap-2 md:grid-cols-2">
+                    {attentionResult && attentionKey && attentionTest && (
+                      <TestResultDetails
+                        result={attentionTest.result}
+                        connecting={connectingKey === attentionKey}
+                        connectError={connectErrors[attentionKey]}
+                        onConnect={() =>
+                          void connectAssignment(
+                            server.name,
+                            attentionResult.executor,
+                            attentionTest.result
+                          )
+                        }
+                        loopback={!!loopbackEnabled[attentionKey]}
+                        onToggleLoopback={() =>
+                          setLoopbackEnabled((prev) => ({
+                            ...prev,
+                            [attentionKey]: !prev[attentionKey],
+                          }))
+                        }
+                        manualActive={manualFlow?.key === attentionKey}
+                        manualCode={manualCode}
+                        onManualCodeChange={setManualCode}
+                        onManualComplete={() => void completeManualAuth()}
+                        completing={completing}
+                      />
+                    )}
+                    {serverResults.length > 1 && (
+                      <div className="mt-1 space-y-0.5 px-2 text-xs text-low">
+                        {serverResults
+                          .filter((item) => item.key !== attentionKey)
+                          .map((item) => (
+                            <div
+                              key={item.key}
+                              className="flex min-w-0 gap-1"
+                              title={item.test?.result.error ?? ''}
+                            >
+                              <span className="shrink-0 font-medium">
+                                {toPrettyCase(item.executor)}:
+                              </span>
+                              <span className="truncate font-mono">
+                                {item.test?.result.error ??
+                                  item.test?.result.status}
+                              </span>
+                            </div>
+                          ))}
+                      </div>
+                    )}
+
+                    <div className="mt-2 grid gap-1 sm:grid-cols-2 lg:grid-cols-3">
                       {profiles.map((profile) => {
                         const compatibility = source?.compatibility.find(
                           (item) => item.executor === profile.executor
@@ -916,7 +1032,7 @@ export function McpSettingsSection() {
                         return (
                           <div
                             key={profile.executor}
-                            className="rounded-sm border border-border bg-primary p-2"
+                            className="rounded-sm border border-border bg-primary px-2 py-1.5"
                           >
                             <label className="flex items-center gap-2 text-sm">
                               <input
@@ -944,34 +1060,6 @@ export function McpSettingsSection() {
                                 Gateway: {testResults[key].gateway_status} ·
                                 Upstream: {testResults[key].upstream_status}
                               </div>
-                            )}
-                            {assigned && (
-                              <TestResultDetails
-                                result={result}
-                                connecting={connectingKey === key}
-                                connectError={connectErrors[key]}
-                                onConnect={() =>
-                                  void connectAssignment(
-                                    server.name,
-                                    profile.executor,
-                                    result
-                                  )
-                                }
-                                loopback={!!loopbackEnabled[key]}
-                                onToggleLoopback={() =>
-                                  setLoopbackEnabled((prev) => ({
-                                    ...prev,
-                                    [key]: !prev[key],
-                                  }))
-                                }
-                                manualActive={manualFlow?.key === key}
-                                manualCode={manualCode}
-                                onManualCodeChange={setManualCode}
-                                onManualComplete={() =>
-                                  void completeManualAuth()
-                                }
-                                completing={completing}
-                              />
                             )}
                           </div>
                         );
