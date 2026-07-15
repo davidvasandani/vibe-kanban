@@ -33,6 +33,7 @@ pub struct AcpAgentHarness {
     session_namespace: String,
     model: Option<String>,
     mode: Option<String>,
+    auth_method_preference: Vec<String>,
 }
 
 impl Default for AcpAgentHarness {
@@ -49,6 +50,7 @@ impl AcpAgentHarness {
             session_namespace: "gemini_sessions".to_string(),
             model: None,
             mode: None,
+            auth_method_preference: vec![],
         }
     }
 
@@ -58,6 +60,7 @@ impl AcpAgentHarness {
             session_namespace: namespace.into(),
             model: None,
             mode: None,
+            auth_method_preference: vec![],
         }
     }
 
@@ -68,6 +71,18 @@ impl AcpAgentHarness {
 
     pub fn with_mode(mut self, mode: impl Into<String>) -> Self {
         self.mode = Some(mode.into());
+        self
+    }
+
+    /// Authenticate after ACP initialization using the first advertised method
+    /// in this preference list. Agents that authenticate outside ACP leave this
+    /// empty and retain the existing behavior.
+    pub fn with_auth_methods<I, S>(mut self, methods: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.auth_method_preference = methods.into_iter().map(Into::into).collect();
         self
     }
 
@@ -120,6 +135,7 @@ impl AcpAgentHarness {
             self.session_namespace.clone(),
             self.model.clone(),
             self.mode.clone(),
+            self.auth_method_preference.clone(),
             approvals,
             cancel.clone(),
         )
@@ -178,6 +194,7 @@ impl AcpAgentHarness {
             self.session_namespace.clone(),
             self.model.clone(),
             self.mode.clone(),
+            self.auth_method_preference.clone(),
             approvals,
             cancel.clone(),
         )
@@ -205,6 +222,7 @@ impl AcpAgentHarness {
         session_namespace: String,
         model: Option<String>,
         mode: Option<String>,
+        auth_method_preference: Vec<String>,
         approvals: Option<std::sync::Arc<dyn ExecutorApprovalService>>,
         cancel: CancellationToken,
     ) -> Result<(), ExecutorError> {
@@ -341,9 +359,69 @@ impl AcpAgentHarness {
                         });
 
                         // Initialize
-                        let _ = conn
+                        let initialize = conn
                             .initialize(proto::InitializeRequest::new(proto::ProtocolVersion::V1))
                             .await;
+
+                        let initialize = match initialize {
+                            Ok(response) => response,
+                            Err(e) => {
+                                let _ = log_tx.send(
+                                    AcpEvent::Error(format!("ACP initialization failed: {e}"))
+                                        .to_string(),
+                                );
+                                if let Some(tx) = exit_signal_tx.take() {
+                                    let _ = tx.send(ExecutorExitResult::Failure);
+                                }
+                                let _ = shutdown_tx.send(true);
+                                return;
+                            }
+                        };
+
+                        if !auth_method_preference.is_empty() {
+                            let selected = auth_method_preference.iter().find(|preferred| {
+                                initialize
+                                    .auth_methods
+                                    .iter()
+                                    .any(|method| method.id.0.as_ref() == preferred.as_str())
+                            });
+                            let Some(selected) = selected else {
+                                let advertised = initialize
+                                    .auth_methods
+                                    .iter()
+                                    .map(|method| method.id.0.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                let _ = log_tx.send(
+                                    AcpEvent::Error(format!(
+                                        "Grok authentication required. Run `grok login` or set XAI_API_KEY (advertised ACP methods: {advertised})"
+                                    ))
+                                    .to_string(),
+                                );
+                                if let Some(tx) = exit_signal_tx.take() {
+                                    let _ = tx.send(ExecutorExitResult::Failure);
+                                }
+                                let _ = shutdown_tx.send(true);
+                                return;
+                            };
+
+                            if let Err(e) = conn
+                                .authenticate(proto::AuthenticateRequest::new(selected.as_str()))
+                                .await
+                            {
+                                let _ = log_tx.send(
+                                    AcpEvent::Error(format!(
+                                        "Grok authentication failed; run `grok login` or verify XAI_API_KEY: {e}"
+                                    ))
+                                    .to_string(),
+                                );
+                                if let Some(tx) = exit_signal_tx.take() {
+                                    let _ = tx.send(ExecutorExitResult::Failure);
+                                }
+                                let _ = shutdown_tx.send(true);
+                                return;
+                            }
+                        }
 
                         // Handle session creation/forking
                         let (acp_session_id, display_session_id, prompt_to_send) =
