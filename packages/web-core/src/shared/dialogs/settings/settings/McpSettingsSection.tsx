@@ -672,8 +672,8 @@ export function McpSettingsSection() {
         title={t('settings.mcp.title')}
         description={t('settings.mcp.description')}
       >
-        <div className="flex items-start justify-between gap-2">
-          <div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
             <label className="text-sm font-medium text-normal">
               {t('settings.mcp.labels.servers')}
             </label>
@@ -681,7 +681,7 @@ export function McpSettingsSection() {
               {t('settings.mcp.labels.assignmentsHelper')}
             </p>
           </div>
-          <div className="flex shrink-0 items-center gap-1">
+          <div className="flex flex-wrap items-center gap-1 sm:shrink-0 sm:justify-end">
             <Button
               variant="ghost"
               size="sm"

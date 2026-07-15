@@ -378,11 +378,13 @@ export function SettingsSaveBar({
   }
 
   return (
-    <div className="sticky bottom-0 z-10 bg-panel/80 backdrop-blur-sm border-t border-border/50 py-4 -mx-6 px-6 -mb-6">
+    <div className="sticky bottom-0 z-10 -mx-4 -mb-6 border-t border-border/50 bg-panel/80 px-4 py-4 backdrop-blur-sm sm:-mx-6 sm:px-6">
       <div
         className={cn(
-          'flex items-center',
-          onDiscard ? 'justify-between' : 'justify-end'
+          'flex gap-3 max-sm:flex-col',
+          onDiscard
+            ? 'sm:items-center sm:justify-between'
+            : 'sm:items-center sm:justify-end'
         )}
       >
         {onDiscard && (
@@ -390,7 +392,7 @@ export function SettingsSaveBar({
             {t('settings.common.unsavedChanges')}
           </span>
         )}
-        <div className="flex gap-2">
+        <div className="flex shrink-0 justify-end gap-2">
           {onDiscard && (
             <PrimaryButton
               variant="tertiary"

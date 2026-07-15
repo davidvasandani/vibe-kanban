@@ -22,7 +22,7 @@ export function SettingsSection({
   const { t } = useTranslation('settings');
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex min-w-0 h-full flex-col">
       <div className="p-4 border-b border-border bg-panel/95 backdrop-blur-sm hidden sm:flex items-center justify-between">
         <h2 className="text-lg font-semibold text-high">
           {t(`settings.layout.nav.${type}`)}
@@ -40,7 +40,7 @@ export function SettingsSection({
         )}
       </div>
 
-      <div className="space-y-6 px-6 pt-4 overflow-y-auto">
+      <div className="min-w-0 space-y-6 overflow-y-auto px-4 pt-4 sm:px-6">
         {renderSettingsSection(type, initialState, onClose)}
       </div>
     </div>

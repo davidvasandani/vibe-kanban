@@ -303,7 +303,7 @@ function SettingsDialogContent({
           {/* Content - hidden on mobile when showing nav */}
           <div
             className={cn(
-              'flex-1 flex flex-col relative overflow-hidden',
+              'min-w-0 w-full flex-1 flex flex-col relative overflow-hidden',
               // Mobile: full width, hidden when showing nav
               !mobileShowContent && 'hidden',
               // Desktop: always visible
