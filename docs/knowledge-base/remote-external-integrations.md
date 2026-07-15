@@ -1,7 +1,8 @@
 # Building external integrations on the remote server
 
 Contributing tasks: `fec4-vk-slack-shortcu` (Slack message shortcut; built on
-patterns from the Jira sync task `d2aa-sync-vk-and-jira`).
+patterns from the Jira sync task `d2aa-sync-vk-and-jira`),
+`c02f-jira-sync-format` (Jira/VK description format boundary).
 
 The board the user sees is backed by `crates/remote` (Axum + Postgres +
 Electric), **not** the local SQLite server — the local server binds loopback
@@ -93,3 +94,29 @@ Any integration that talks to an outside service lives in `crates/remote`
 - A message permalink can be constructed without an API call:
   `https://{team_domain}.slack.com/archives/{channel_id}/p{ts_without_dot}`
   (all fields present in the `message_action` payload).
+
+## Canonical formats at sync boundaries
+
+When two systems use different text formats, convert at the external client
+boundary and keep one canonical representation through reconciliation and
+snapshots. Jira REST API v2 exposes descriptions as Jira wiki markup, while VK
+issues and the rich-text editor use Markdown. `jira/client.rs` therefore
+converts raw Jira wiki text to Markdown when it creates `JiraIssueData`, and
+converts Markdown back to Jira wiki markup only while building an update
+payload.
+
+This boundary keeps `jira/sync.rs` format-agnostic: Jira values, VK values, and
+`jira_issue_links.last_synced_description` are all compared as Markdown. It
+also makes the write-then-read snapshot path converge instead of detecting
+representation-only changes on every pass.
+
+For bounded markup converters:
+
+- parse block structures before inline delimiters so code blocks and tables do
+  not receive accidental emphasis or link conversion;
+- preserve unknown or malformed constructs literally rather than dropping
+  content;
+- treat backslashes and escaped table pipes as user data unless they escape the
+  exact delimiter currently being parsed;
+- test both directions and the supported round trip, including Windows paths,
+  literal pipes, null/empty descriptions, and trailing newlines.
