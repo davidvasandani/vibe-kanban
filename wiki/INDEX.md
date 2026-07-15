@@ -104,3 +104,8 @@ contributed to it.
   persisted expand state (`useOrgRailStore`), and two component gotchas
   (optional-controlled state needs an internal fallback; don't render a
   no-op `<button>` — use a non-interactive tile).
+- [workspace-navbar-breadcrumbs.md](workspace-navbar-breadcrumbs.md) — How
+  workspace breadcrumbs preserve linked issue identity across asynchronous
+  shape states: relationship truth vs loaded rows, `simple_id` vs UUID, the
+  none/loading/resolved/unavailable state model, and the pure-builder testing
+  seam.
