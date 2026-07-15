@@ -1,9 +1,10 @@
+import { BaseCodingAgent } from 'shared/types';
 import type {
-  BaseCodingAgent,
   JsonValue,
   McpServerDefinition,
   SharedMcpAssignmentTestResult,
   SharedMcpConflict,
+  SharedMcpConflictVariant,
   SharedMcpReadResponse,
   SharedMcpServer,
   SharedMcpServerInput,
@@ -57,6 +58,58 @@ export function inputsFromDraft(
       assignments: server.assignments,
       native_overrides: {},
     }));
+}
+
+export function removedServerNames(
+  read: SharedMcpReadResponse | null,
+  draft: SharedMcpDraftState
+): string[] {
+  const draftNames = new Set(draft.servers.map((server) => server.name));
+  return Array.from(
+    new Set([
+      ...(read?.servers ?? [])
+        .filter((server) => !draftNames.has(server.name))
+        .map((server) => server.name),
+      ...(read?.conflicts ?? [])
+        .filter(
+          (conflict) =>
+            !draft.conflicts.some((item) => item.name === conflict.name) &&
+            !draftNames.has(conflict.name)
+        )
+        .map((conflict) => conflict.name),
+    ])
+  );
+}
+
+export function resolveConflictVariant(
+  state: SharedMcpDraftState,
+  conflict: SharedMcpConflict,
+  variant: SharedMcpConflictVariant
+): SharedMcpDraftState {
+  if (variant.definition.transport === 'unknown') return state;
+  const supportsSelectedDefinition = (executor: BaseCodingAgent) =>
+    !(
+      variant.definition.transport === 'sse' &&
+      executor === BaseCodingAgent.CODEX
+    );
+  const server: SharedMcpDraftServer = {
+    name: conflict.name,
+    definition: variant.definition,
+    assignments: Array.from(
+      new Set(
+        conflict.variants.flatMap((item) =>
+          item.assignments.map((assignment) => assignment.executor)
+        )
+      )
+    ).filter(supportsSelectedDefinition),
+  };
+  return {
+    servers: [
+      ...state.servers.filter((item) => item.name !== conflict.name),
+      server,
+    ].sort((a, b) => a.name.localeCompare(b.name)),
+    conflicts: state.conflicts.filter((item) => item.name !== conflict.name),
+  };
 }
 
 export function testKey(serverName: string, executor: BaseCodingAgent): string {
