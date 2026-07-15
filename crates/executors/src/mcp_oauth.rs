@@ -537,11 +537,18 @@ fn validate_server_metadata(expected_issuer: &Url, metadata: &Value) -> Result<(
         };
         let endpoint =
             Url::parse(&raw).map_err(|_| format!("authorization server {field} is invalid"))?;
-        if (endpoint.scheme() != "https" && !loopback_dev)
-            || !same_origin(expected_issuer, &endpoint)
+        let requires_issuer_origin = field != "authorization_endpoint";
+        let secure_endpoint = endpoint.scheme() == "https"
+            || (loopback_dev && same_origin(expected_issuer, &endpoint));
+        if !secure_endpoint || (requires_issuer_origin && !same_origin(expected_issuer, &endpoint))
         {
             return Err(format!(
-                "authorization server {field} must use HTTPS and the issuer origin"
+                "authorization server {field} must use HTTPS{}",
+                if requires_issuer_origin {
+                    " and the issuer origin"
+                } else {
+                    ""
+                }
             ));
         }
     }
@@ -901,6 +908,49 @@ mod tests {
         assert_eq!(canonical_resource(&url), "https://x.dev/mcp");
     }
 
+    #[test]
+    fn metadata_allows_https_authorization_endpoint_on_another_origin() {
+        let issuer = Url::parse("https://issuer.example.com").unwrap();
+        let metadata = serde_json::json!({
+            "issuer": "https://issuer.example.com",
+            "authorization_endpoint": "https://login.example.com/authorize",
+            "token_endpoint": "https://issuer.example.com/token",
+            "registration_endpoint": "https://issuer.example.com/register"
+        });
+
+        validate_server_metadata(&issuer, &metadata).unwrap();
+    }
+
+    #[test]
+    fn metadata_rejects_cross_origin_credential_endpoints() {
+        let issuer = Url::parse("https://issuer.example.com").unwrap();
+        for field in ["token_endpoint", "registration_endpoint"] {
+            let mut metadata = serde_json::json!({
+                "issuer": "https://issuer.example.com",
+                "authorization_endpoint": "https://login.example.com/authorize",
+                "token_endpoint": "https://issuer.example.com/token",
+                "registration_endpoint": "https://issuer.example.com/register"
+            });
+            metadata[field] = serde_json::json!(format!("https://evil.example/{field}"));
+
+            let error = validate_server_metadata(&issuer, &metadata).unwrap_err();
+            assert!(error.contains("issuer origin"), "got: {error}");
+        }
+    }
+
+    #[test]
+    fn loopback_issuer_does_not_allow_external_http_authorization_endpoint() {
+        let issuer = Url::parse("http://127.0.0.1:8080").unwrap();
+        let metadata = serde_json::json!({
+            "issuer": "http://127.0.0.1:8080",
+            "authorization_endpoint": "http://login.example.com/authorize",
+            "token_endpoint": "http://127.0.0.1:8080/token",
+            "registration_endpoint": "http://127.0.0.1:8080/register"
+        });
+
+        assert!(validate_server_metadata(&issuer, &metadata).is_err());
+    }
+
     /// Serve `responses` (raw HTTP/1.1 bytes) to sequential connections on a
     /// loopback listener; returns the base URL.
     async fn one_shot_server(responses: Vec<String>) -> String {
@@ -1123,7 +1173,7 @@ mod tests {
         });
         assert!(validate_server_metadata(&issuer, &valid).is_ok());
         for (field, endpoint) in [
-            ("authorization_endpoint", "https://evil.example/authorize"),
+            ("authorization_endpoint", "http://login.example/authorize"),
             ("token_endpoint", "http://as.example.com/token"),
             ("registration_endpoint", "https://evil.example/register"),
         ] {
