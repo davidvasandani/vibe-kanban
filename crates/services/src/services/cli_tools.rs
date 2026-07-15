@@ -1,7 +1,7 @@
 //! App-managed CLI tool installer.
 //!
 //! Installs a curated, version-pinned catalog of vendor CLI tools (aws, az,
-//! op, gam, mgc-beta) into the single app-owned directory
+//! op, gam, mgc-beta, acli) into the single app-owned directory
 //! `assets::cli_tools_dir()`. Only `cli-tools/bin` is ever exposed on spawned
 //! agents' PATH, and it is appended after host paths so a host-provided copy
 //! (e.g. from nix) always wins over an app-installed one.
@@ -41,6 +41,8 @@ const OP_CLI_VERSION: &str = "2.34.1";
 const GAM_VERSION: &str = "7.46.08";
 // renovate: datasource=github-releases depName=microsoftgraph/msgraph-beta-cli
 const MGC_BETA_VERSION: &str = "0.2.3";
+// Atlassian CLI currently publishes stable channel archives at a stable URL path.
+const ACLI_VERSION: &str = "1.3.22-stable";
 
 /// How long a `<tool> --version` probe of a host-provided copy may run.
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -75,15 +77,17 @@ pub enum CliToolId {
     Op,
     Gam,
     MgcBeta,
+    Acli,
 }
 
 impl CliToolId {
-    pub const ALL: [CliToolId; 5] = [
+    pub const ALL: [CliToolId; 6] = [
         CliToolId::Aws,
         CliToolId::Az,
         CliToolId::Op,
         CliToolId::Gam,
         CliToolId::MgcBeta,
+        CliToolId::Acli,
     ];
 
     /// Directory name under `cli-tools/` (also the serde wire id).
@@ -94,6 +98,7 @@ impl CliToolId {
             CliToolId::Op => "op",
             CliToolId::Gam => "gam",
             CliToolId::MgcBeta => "mgc-beta",
+            CliToolId::Acli => "acli",
         }
     }
 }
@@ -109,11 +114,7 @@ pub enum ArchiveKind {
 pub enum InstallStrategy {
     /// Download an archive, extract it in staging, expose one binary via the
     /// `bin/` symlink.
-    ArchiveBinary {
-        archive: ArchiveKind,
-        /// Path of the executable inside the extracted archive.
-        binary_path_in_archive: &'static str,
-    },
+    ArchiveBinary { archive: ArchiveKind },
     /// `python3 -m venv` + `pip install <package>==<version>`; expose the
     /// venv's entry-point script. Requires a host python3.
     PythonVenv { package: &'static str },
@@ -127,6 +128,8 @@ pub struct PlatformSource {
     pub url: &'static str,
     /// Pinned sha256 of the artifact at the pinned version (hex, lowercase).
     pub sha256: &'static str,
+    /// Path of the executable inside the extracted archive for this platform.
+    pub binary_path_in_archive: &'static str,
 }
 
 pub struct CliToolCatalogEntry {
@@ -159,18 +162,19 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                     arch: "x86_64",
                     url: "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-{version}.zip",
                     sha256: "a4aa00212a97e6a5abd38cde5524719f7f5f122a6dcfdbc974eefdf741de1be6",
+                    binary_path_in_archive: "aws/dist/aws",
                 },
                 PlatformSource {
                     os: "linux",
                     arch: "aarch64",
                     url: "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-{version}.zip",
                     sha256: "58799ce9276d4e8815fd19e4dc35649626c6b4fbd4d0e3df7433af9cfde41882",
+                    binary_path_in_archive: "aws/dist/aws",
                 },
                 // macOS ships only a .pkg installer; no app-owned extraction.
             ],
             strategy: InstallStrategy::ArchiveBinary {
                 archive: ArchiveKind::Zip,
-                binary_path_in_archive: "aws/dist/aws",
             },
             docs_url: "https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html",
         },
@@ -200,23 +204,25 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                     arch: "x86_64",
                     url: "https://cache.agilebits.com/dist/1P/op2/pkg/v{version}/op_linux_amd64_v{version}.zip",
                     sha256: "b13ed106335419ea0fb0ebd7ebbb3b48cf26a2f214eb4b2fd8d950548e7980ed",
+                    binary_path_in_archive: "op",
                 },
                 PlatformSource {
                     os: "linux",
                     arch: "aarch64",
                     url: "https://cache.agilebits.com/dist/1P/op2/pkg/v{version}/op_linux_arm64_v{version}.zip",
                     sha256: "fd730a28ffa68376ac62b563d30e20e30ef59d3e2f142d9c6a959cfac5b50f60",
+                    binary_path_in_archive: "op",
                 },
                 PlatformSource {
                     os: "macos",
                     arch: "aarch64",
                     url: "https://cache.agilebits.com/dist/1P/op2/pkg/v{version}/op_darwin_arm64_v{version}.zip",
                     sha256: "101b54dd194fbb6c63276b84f5eee1968be3558e2212519d9f5e26ab24a4ad05",
+                    binary_path_in_archive: "op",
                 },
             ],
             strategy: InstallStrategy::ArchiveBinary {
                 archive: ArchiveKind::Zip,
-                binary_path_in_archive: "op",
             },
             docs_url: "https://developer.1password.com/docs/cli/get-started/",
         },
@@ -233,23 +239,25 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                     arch: "x86_64",
                     url: "https://github.com/GAM-team/GAM/releases/download/v{version}/gam-{version}-linux-x86_64-glibc2.35.tar.xz",
                     sha256: "7b5219ef0d4c797cb7016439d4a7e335bf23eef7d439df5c6878f69cacd1f36b",
+                    binary_path_in_archive: "gam7/gam",
                 },
                 PlatformSource {
                     os: "linux",
                     arch: "aarch64",
                     url: "https://github.com/GAM-team/GAM/releases/download/v{version}/gam-{version}-linux-arm64-glibc2.35.tar.xz",
                     sha256: "edaff168b0a4e35aaacc8c85aa15c048e4a78d1e09dc19e100e45194eb3d54d1",
+                    binary_path_in_archive: "gam7/gam",
                 },
                 PlatformSource {
                     os: "macos",
                     arch: "aarch64",
                     url: "https://github.com/GAM-team/GAM/releases/download/v{version}/gam-{version}-macos14.8-arm64.tar.xz",
                     sha256: "7995b64f96351fac9b45c19e28c349806a37f6f5efdcebeeb9d090057f888516",
+                    binary_path_in_archive: "gam7/gam",
                 },
             ],
             strategy: InstallStrategy::ArchiveBinary {
                 archive: ArchiveKind::TarXz,
-                binary_path_in_archive: "gam7/gam",
             },
             docs_url: "https://github.com/GAM-team/GAM/wiki",
         },
@@ -266,19 +274,48 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                     arch: "x86_64",
                     url: "https://github.com/microsoftgraph/msgraph-beta-cli/releases/download/v{version}/msgraph-beta-cli-linux-x64-{version}.tar.gz",
                     sha256: "d03394d1a7c3c9f23c0fc1429ee2bd9dca2ba5d36f996a68d4b58f06e18f3e9d",
+                    binary_path_in_archive: "mgc-beta",
                 },
                 PlatformSource {
                     os: "macos",
                     arch: "aarch64",
                     url: "https://github.com/microsoftgraph/msgraph-beta-cli/releases/download/v{version}/msgraph-beta-cli-osx-arm64-{version}.tar.gz",
                     sha256: "5ba2ad2750c7d745b129a1cde5ec348f811440df66138de293d85f9e64c75570",
+                    binary_path_in_archive: "mgc-beta",
                 },
             ],
             strategy: InstallStrategy::ArchiveBinary {
                 archive: ArchiveKind::TarGz,
-                binary_path_in_archive: "mgc-beta",
             },
             docs_url: "https://learn.microsoft.com/en-us/graph/cli/overview",
+        },
+        CliToolCatalogEntry {
+            id: CliToolId::Acli,
+            binary_name: "acli",
+            display_name: "Atlassian CLI",
+            description: "Atlassian Cloud command line interface",
+            version: ACLI_VERSION,
+            version_args: &["--version"],
+            sources: &[
+                PlatformSource {
+                    os: "linux",
+                    arch: "x86_64",
+                    url: "https://acli.atlassian.com/linux/{version}/acli_{version}_linux_amd64.tar.gz",
+                    sha256: "de9e0a60a556e4119428b9072f6ca787e75b9f9a538aa71ebcc8084deb8ca1a6",
+                    binary_path_in_archive: "acli_1.3.22-stable_linux_amd64/acli",
+                },
+                PlatformSource {
+                    os: "linux",
+                    arch: "aarch64",
+                    url: "https://acli.atlassian.com/linux/{version}/acli_{version}_linux_arm64.tar.gz",
+                    sha256: "1a9e86d0b46a62a8f1992c1ef98b3af7e9a9ee3f76d0efa215fe1f2d1b2fd139",
+                    binary_path_in_archive: "acli_1.3.22-stable_linux_arm64/acli",
+                },
+            ],
+            strategy: InstallStrategy::ArchiveBinary {
+                archive: ArchiveKind::TarGz,
+            },
+            docs_url: "https://developer.atlassian.com/cloud/acli/guides/install-acli/",
         },
     ];
     CATALOG
@@ -345,9 +382,15 @@ fn lock_for(id: CliToolId) -> &'static Mutex<()> {
 }
 
 fn platform_source(e: &CliToolCatalogEntry) -> Option<&'static PlatformSource> {
-    e.sources
-        .iter()
-        .find(|s| s.os == std::env::consts::OS && s.arch == std::env::consts::ARCH)
+    platform_source_for(e, std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn platform_source_for(
+    e: &CliToolCatalogEntry,
+    os: &str,
+    arch: &str,
+) -> Option<&'static PlatformSource> {
+    e.sources.iter().find(|s| s.os == os && s.arch == arch)
 }
 
 /// Why this tool can't be installed here, if it can't.
@@ -491,10 +534,7 @@ pub async fn install(id: CliToolId) -> Result<CliToolStatus, CliToolError> {
 
     clean_staging(id).await;
     let verification = match e.strategy {
-        InstallStrategy::ArchiveBinary {
-            archive,
-            binary_path_in_archive,
-        } => install_archive(e, archive, binary_path_in_archive).await?,
+        InstallStrategy::ArchiveBinary { archive } => install_archive(e, archive).await?,
         InstallStrategy::PythonVenv { package } => install_python_venv(e, package).await?,
     };
 
@@ -547,10 +587,10 @@ pub async fn remove(id: CliToolId) -> Result<CliToolStatus, CliToolError> {
 fn installed_binary_path(e: &CliToolCatalogEntry) -> PathBuf {
     let version_dir = tool_dir(e.id).join(e.version);
     match e.strategy {
-        InstallStrategy::ArchiveBinary {
-            binary_path_in_archive,
-            ..
-        } => version_dir.join(binary_path_in_archive),
+        InstallStrategy::ArchiveBinary { .. } => {
+            let source = platform_source(e).expect("checked by unsupported_reason");
+            version_dir.join(source.binary_path_in_archive)
+        }
         InstallStrategy::PythonVenv { .. } => version_dir.join("venv/bin").join(e.binary_name),
     }
 }
@@ -632,7 +672,6 @@ fn promote_staged_version(e: &CliToolCatalogEntry, staged: &Path) -> Result<(), 
 async fn install_archive(
     e: &'static CliToolCatalogEntry,
     archive: ArchiveKind,
-    binary_path_in_archive: &'static str,
 ) -> Result<String, CliToolError> {
     let source = platform_source(e).expect("checked by unsupported_reason");
     let url = source.url.replace("{version}", e.version);
@@ -657,10 +696,11 @@ async fn install_archive(
             .await
             .map_err(|e| CliToolError::Extract(format!("extraction task panicked: {e}")))??;
 
-        let binary = extract_dir.join(binary_path_in_archive);
+        let binary = extract_dir.join(source.binary_path_in_archive);
         if !binary.is_file() {
             return Err(CliToolError::Extract(format!(
-                "expected binary {binary_path_in_archive} not found in archive"
+                "expected binary {} not found in archive",
+                source.binary_path_in_archive
             )));
         }
         promote_staged_version(e, &extract_dir)?;
@@ -836,6 +876,102 @@ mod tests {
     }
 
     #[test]
+    fn acli_catalog_entry_is_pinned_and_linux_only() {
+        let e = entry(CliToolId::Acli);
+        assert_eq!(e.id.dir_name(), "acli");
+        assert_eq!(
+            serde_json::to_string(&CliToolId::Acli).unwrap(),
+            r#""acli""#
+        );
+        assert_eq!(
+            serde_json::from_str::<CliToolId>(r#""acli""#).unwrap(),
+            CliToolId::Acli
+        );
+        assert_eq!(e.binary_name, "acli");
+        assert_eq!(e.display_name, "Atlassian CLI");
+        assert_eq!(e.description, "Atlassian Cloud command line interface");
+        assert_eq!(e.version, "1.3.22-stable");
+        assert_eq!(
+            e.docs_url,
+            "https://developer.atlassian.com/cloud/acli/guides/install-acli/"
+        );
+        assert_eq!(e.version_args, &["--version"]);
+        assert!(matches!(
+            e.strategy,
+            InstallStrategy::ArchiveBinary {
+                archive: ArchiveKind::TarGz
+            }
+        ));
+
+        assert_eq!(e.sources.len(), 2);
+        let amd64 = platform_source_for(e, "linux", "x86_64").unwrap();
+        assert_eq!(
+            amd64.url,
+            "https://acli.atlassian.com/linux/{version}/acli_{version}_linux_amd64.tar.gz"
+        );
+        assert_eq!(
+            amd64.sha256,
+            "de9e0a60a556e4119428b9072f6ca787e75b9f9a538aa71ebcc8084deb8ca1a6"
+        );
+        assert_eq!(
+            amd64.binary_path_in_archive,
+            "acli_1.3.22-stable_linux_amd64/acli"
+        );
+
+        let arm64 = platform_source_for(e, "linux", "aarch64").unwrap();
+        assert_eq!(
+            arm64.url,
+            "https://acli.atlassian.com/linux/{version}/acli_{version}_linux_arm64.tar.gz"
+        );
+        assert_eq!(
+            arm64.sha256,
+            "1a9e86d0b46a62a8f1992c1ef98b3af7e9a9ee3f76d0efa215fe1f2d1b2fd139"
+        );
+        assert_eq!(
+            arm64.binary_path_in_archive,
+            "acli_1.3.22-stable_linux_arm64/acli"
+        );
+        assert!(e.sources.iter().all(|s| s.os == "linux"));
+    }
+
+    #[test]
+    fn archive_sources_preserve_existing_binary_paths() {
+        let expected = [
+            (CliToolId::Aws, "aws/dist/aws"),
+            (CliToolId::Op, "op"),
+            (CliToolId::Gam, "gam7/gam"),
+            (CliToolId::MgcBeta, "mgc-beta"),
+        ];
+
+        for (id, binary_path) in expected {
+            let e = entry(id);
+            assert!(matches!(e.strategy, InstallStrategy::ArchiveBinary { .. }));
+            assert!(
+                !e.sources.is_empty(),
+                "{} should keep explicit archive sources",
+                e.binary_name
+            );
+            for source in e.sources {
+                assert_eq!(
+                    source.binary_path_in_archive, binary_path,
+                    "{} {}/{} archive binary path changed",
+                    e.binary_name, source.os, source.arch
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn acli_uses_existing_unsupported_platform_matrix() {
+        let e = entry(CliToolId::Acli);
+        assert!(platform_source_for(e, "linux", "x86_64").is_some());
+        assert!(platform_source_for(e, "linux", "aarch64").is_some());
+        assert!(platform_source_for(e, "linux", "arm").is_none());
+        assert!(platform_source_for(e, "macos", "aarch64").is_none());
+        assert!(platform_source_for(e, "windows", "x86_64").is_none());
+    }
+
+    #[test]
     fn manifest_round_trips() {
         let m = InstalledManifest {
             version: "1.2.3".into(),
@@ -856,8 +992,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     #[ignore]
-    async fn install_and_remove_op_and_aws_end_to_end() {
-        for id in [CliToolId::Op, CliToolId::Aws] {
+    async fn install_and_remove_archive_tools_end_to_end() {
+        for id in [CliToolId::Op, CliToolId::Aws, CliToolId::Acli] {
             let e = entry(id);
             let installed = install(id).await.expect("install should succeed");
             let app = installed.app.expect("app copy should be reported");

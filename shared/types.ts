@@ -464,7 +464,7 @@ export type McpAuthFlowState = "pending" | "completed" | "failed";
 
 export type McpAuthStatusResponse = { status: McpAuthFlowState, error: string | null, };
 
-export type CliToolId = "aws" | "az" | "op" | "gam" | "mgc-beta";
+export type CliToolId = "aws" | "az" | "op" | "gam" | "mgc-beta" | "acli";
 
 export type HostCopy = { path: string, version: string | null, };
 
