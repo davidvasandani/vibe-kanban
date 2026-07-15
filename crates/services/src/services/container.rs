@@ -69,6 +69,14 @@ pub type ContainerRef = String;
 /// once (see [`executor_config_for_auto_resume`]).
 pub const RESUME_INTERRUPTED_PROMPT: &str = "The previous run was interrupted by a vibe-kanban restart before it could finish. Review the current state of the working tree and continue the task from where it left off.";
 
+fn reset_would_discard_uncommitted_work(
+    perform_git_reset: bool,
+    is_dirty: bool,
+    force_when_dirty: bool,
+) -> bool {
+    perform_git_reset && is_dirty && !force_when_dirty
+}
+
 /// Decide whether an interrupted coding-agent action is eligible for
 /// auto-resume, and with which executor config. Returns `None` when the
 /// action is not a coding-agent request, or when it is itself a resume
@@ -336,7 +344,34 @@ pub trait ContainerService {
                     );
                 }
             }
-            // Update the execution process status first
+            // Snapshot before recording HEAD or offering the process for
+            // auto-resume. If capture fails after the orphan was killed, mark
+            // the dead row interrupted so it cannot remain a phantom running
+            // process, but do not record an after-state or return it as a
+            // successfully recovered process.
+            if let Err(e) = self.commit_interrupted_wip(&process).await {
+                tracing::error!(
+                    "Failed to preserve work for orphaned execution process {}: {}",
+                    process.id,
+                    e
+                );
+                if let Err(update_error) = ExecutionProcess::update_completion(
+                    &self.db().pool,
+                    process.id,
+                    ExecutionProcessStatus::Interrupted,
+                    None,
+                )
+                .await
+                {
+                    tracing::error!(
+                        "Failed to mark unpreserved orphaned execution process {} interrupted: {}",
+                        process.id,
+                        update_error
+                    );
+                }
+                continue;
+            }
+
             if let Err(e) = ExecutionProcess::update_completion(
                 &self.db().pool,
                 process.id,
@@ -352,12 +387,6 @@ pub trait ContainerService {
                 );
                 continue;
             }
-            // Snapshot any uncommitted work left behind by the unclean exit so
-            // it survives the restart, mirroring the clean-shutdown path. Must
-            // run before capturing after_head_commit below so the recorded
-            // after-state reflects the snapshot commit rather than the
-            // pre-change base.
-            self.commit_interrupted_wip(&process).await;
             // Capture after-head commit OID per repository
             if let Ok(ctx) = ExecutionProcess::load_context(&self.db().pool, process.id).await
                 && let Some(ref container_ref) = ctx.workspace.container_ref
@@ -905,6 +934,16 @@ pub trait ContainerService {
             .map(|is_clean| !is_clean)
             .unwrap_or(false);
 
+        if reset_would_discard_uncommitted_work(
+            perform_git_reset,
+            is_dirty,
+            force_when_dirty,
+        ) {
+            return Err(ContainerError::Other(anyhow!(
+                "Worktree has uncommitted changes; reset was refused to avoid data loss. Preserve the changes or retry with force_when_dirty=true to discard them."
+            )));
+        }
+
         for repo in &repos {
             let repo_state = repo_states.iter().find(|s| s.repo_id == repo.id);
             let target_oid = match repo_state.and_then(|s| s.before_head_commit.clone()) {
@@ -1016,7 +1055,10 @@ pub trait ContainerService {
     /// into a commit on the workspace branch, so they survive a restart. This
     /// mirrors the auto-commit that happens after a successful run and is a
     /// no-op for run reasons that don't produce worktree changes.
-    async fn commit_interrupted_wip(&self, process: &ExecutionProcess);
+    async fn commit_interrupted_wip(
+        &self,
+        process: &ExecutionProcess,
+    ) -> Result<(), ContainerError>;
 
     async fn copy_project_files(
         &self,
@@ -1725,7 +1767,15 @@ mod tests {
     use db::models::repo::Repo;
     use uuid::Uuid;
 
-    use super::scope_initial_prompt_to_working_dir;
+    use super::{reset_would_discard_uncommitted_work, scope_initial_prompt_to_working_dir};
+
+    #[test]
+    fn dirty_git_reset_requires_explicit_force() {
+        assert!(reset_would_discard_uncommitted_work(true, true, false));
+        assert!(!reset_would_discard_uncommitted_work(true, true, true));
+        assert!(!reset_would_discard_uncommitted_work(true, false, false));
+        assert!(!reset_would_discard_uncommitted_work(false, true, false));
+    }
 
     fn repo_with_working_dir(display_name: &str, working_dir: Option<&str>) -> Repo {
         Repo {

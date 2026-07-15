@@ -2396,40 +2396,52 @@ impl ContainerService for LocalContainerService {
         Ok(self.commit_repos(repos_with_changes, &message))
     }
 
-    async fn commit_interrupted_wip(&self, process: &ExecutionProcess) {
+    async fn commit_interrupted_wip(
+        &self,
+        process: &ExecutionProcess,
+    ) -> Result<(), ContainerError> {
         if !matches!(
             process.run_reason,
             ExecutionProcessRunReason::CodingAgent | ExecutionProcessRunReason::CleanupScript
         ) {
-            return;
+            return Ok(());
         }
 
-        let Ok(ctx) = ExecutionProcess::load_context(&self.db.pool, process.id).await else {
-            return;
-        };
-        let Some(container_ref) = ctx.workspace.container_ref.as_ref() else {
-            return;
-        };
+        let ctx = ExecutionProcess::load_context(&self.db.pool, process.id).await?;
+        let container_ref = ctx.workspace.container_ref.as_ref().ok_or_else(|| {
+            ContainerError::Other(anyhow!(
+                "Container reference missing for interrupted process {}",
+                process.id
+            ))
+        })?;
 
         let workspace_root = PathBuf::from(container_ref);
-        match self.check_repos_for_changes(&workspace_root, &ctx.repos) {
-            Ok(repos_with_changes) if !repos_with_changes.is_empty() => {
-                let message = "WIP: run interrupted by vibe-kanban shutdown";
-                if self.commit_repos(repos_with_changes, message) {
-                    // Re-record HEAD so the snapshot commit is part of this
-                    // process's recorded after-state.
-                    self.update_after_head_commits(process.id).await;
+        let repos_with_changes = self.check_repos_for_changes(&workspace_root, &ctx.repos)?;
+        for (repo, worktree_path) in repos_with_changes {
+            match self.git().commit(
+                &worktree_path,
+                "WIP: run interrupted by vibe-kanban shutdown",
+            ) {
+                Ok(true) => tracing::info!("Committed interrupted WIP in repo '{}'", repo.name),
+                Ok(false) => {
+                    return Err(ContainerError::Other(anyhow!(
+                        "Interrupted WIP snapshot produced no commit for repo '{}'",
+                        repo.name
+                    )));
+                }
+                Err(e) => {
+                    return Err(ContainerError::Other(anyhow!(
+                        "Failed to commit interrupted WIP in repo '{}': {}",
+                        repo.name,
+                        e
+                    )));
                 }
             }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to check for uncommitted changes on interrupted process {}: {}",
-                    process.id,
-                    e
-                );
-            }
         }
+
+        // Re-record HEAD so snapshot commits become this process's after-state.
+        self.update_after_head_commits(process.id).await;
+        Ok(())
     }
 
     /// Copy files from the original project directory to the worktree.
@@ -2545,7 +2557,13 @@ impl ContainerService for LocalContainerService {
                 );
             } else {
                 tracing::info!("Successfully killed process: id={}", process.id);
-                self.commit_interrupted_wip(&process).await;
+                if let Err(error) = self.commit_interrupted_wip(&process).await {
+                    tracing::error!(
+                        "Failed to preserve interrupted process {} work: {}",
+                        process.id,
+                        error
+                    );
+                }
             }
         }
 
