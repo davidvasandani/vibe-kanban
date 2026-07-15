@@ -290,7 +290,7 @@ fn normalize(value: &Value) -> McpProbeTarget {
         .and_then(Value::as_str)
         .or_else(|| obj.get("httpUrl").and_then(Value::as_str))
     {
-        let headers = string_map(obj, &["headers"]);
+        let headers = string_map(obj, &["headers", "http_headers"]);
         if type_str == Some("sse") || url_is_sse(url) {
             return McpProbeTarget::Sse {
                 url: url.to_string(),
@@ -832,6 +832,21 @@ mod tests {
             McpProbeTarget::Http {
                 url: "https://example.com/mcp".into(),
                 headers: HashMap::from([("Accept".into(), "x".into())]),
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_codex_http_headers() {
+        let v = json!({
+            "url": "https://example.com/mcp",
+            "http_headers": { "Authorization": "Bearer token" }
+        });
+        assert_eq!(
+            normalize(&v),
+            McpProbeTarget::Http {
+                url: "https://example.com/mcp".into(),
+                headers: HashMap::from([("Authorization".into(), "Bearer token".into())]),
             }
         );
     }
