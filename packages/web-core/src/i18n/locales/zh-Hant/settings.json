@@ -380,6 +380,17 @@
       "conflicts": { "title": "原生設定衝突" },
       "delete": "刪除伺服器",
       "deleteConfirm": "要從所有已指派的代理設定中刪除此共用 MCP 伺服器嗎？",
+      "auth": {
+        "sharedGateway": "共用閘道驗證",
+        "explicitHeader": "明確標頭驗證",
+        "agentNative": "代理原生驗證",
+        "none": "無驗證",
+        "disconnect": "中斷連線",
+        "reconnect": "重新連線",
+        "disconnectConfirm": "要為所有已指派的代理中斷此共用憑證嗎？",
+        "cloudflareClientId": "Cloudflare Access 服務權杖用戶端 ID（僅限寫入）",
+        "cloudflareClientSecret": "Cloudflare Access 服務權杖用戶端密鑰（僅限寫入）"
+      },
       "list": {
         "empty": "尚未設定 MCP 伺服器。請在下方新增一個。",
         "addServer": "新增伺服器",

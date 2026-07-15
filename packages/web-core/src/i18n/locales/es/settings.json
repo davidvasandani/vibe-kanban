@@ -384,6 +384,17 @@
       "conflicts": { "title": "Conflictos de configuración nativa" },
       "delete": "Eliminar servidor",
       "deleteConfirm": "¿Eliminar este servidor MCP compartido de todas las configuraciones de agentes asignadas?",
+      "auth": {
+        "sharedGateway": "Autenticación mediante puerta de enlace compartida",
+        "explicitHeader": "Autenticación mediante encabezado explícito",
+        "agentNative": "Autenticación nativa del agente",
+        "none": "Sin autenticación",
+        "disconnect": "Desconectar",
+        "reconnect": "Volver a conectar",
+        "disconnectConfirm": "¿Desconectar esta credencial compartida para todos los agentes asignados?",
+        "cloudflareClientId": "ID de cliente del token de servicio de Cloudflare Access (solo escritura)",
+        "cloudflareClientSecret": "Secreto de cliente del token de servicio de Cloudflare Access (solo escritura)"
+      },
       "list": {
         "empty": "Aún no hay servidores MCP configurados. Agrega uno abajo.",
         "addServer": "Agregar servidor",
