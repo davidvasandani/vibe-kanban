@@ -13,7 +13,10 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::types::JiraAuthMode;
+use super::{
+    format::{jira_to_markdown, markdown_to_jira},
+    types::JiraAuthMode,
+};
 
 const SEARCH_PAGE_SIZE: u32 = 100;
 /// Hard cap on pages per pass so a pathological JQL can't wedge the
@@ -141,7 +144,10 @@ impl From<RawIssue> for JiraIssueData {
             id: raw.id,
             key: raw.key,
             summary: raw.fields.summary.unwrap_or_default(),
-            description: raw.fields.description,
+            description: raw
+                .fields
+                .description
+                .map(|description| jira_to_markdown(&description)),
             status_name: raw
                 .fields
                 .status
@@ -364,7 +370,10 @@ impl JiraClient {
             fields.insert("summary".into(), json!(summary));
         }
         if let Some(description) = description {
-            fields.insert("description".into(), json!(description));
+            fields.insert(
+                "description".into(),
+                json!(description.map(markdown_to_jira)),
+            );
         }
         if fields.is_empty() {
             return Ok(());
@@ -468,5 +477,25 @@ mod tests {
         let body = r#"{"errorMessages":["Field 'foo' does not exist."],"errors":{}}"#;
         assert_eq!(extract_jira_error(body), "Field 'foo' does not exist.");
         assert_eq!(extract_jira_error(""), "no error detail provided");
+    }
+
+    #[test]
+    fn raw_issue_descriptions_cross_the_format_boundary() {
+        let raw = RawIssue {
+            id: "10000".to_string(),
+            key: "TEST-1".to_string(),
+            fields: RawFields {
+                summary: Some("Test".to_string()),
+                description: Some("h3. Target\nUse {{User.Read}}".to_string()),
+                ..RawFields::default()
+            },
+        };
+
+        let issue = JiraIssueData::from(raw);
+
+        assert_eq!(
+            issue.description.as_deref(),
+            Some("### Target\nUse `User.Read`")
+        );
     }
 }
