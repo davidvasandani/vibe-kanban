@@ -9060,6 +9060,7 @@ dependencies = [
  "spake2",
  "sqlx",
  "strip-ansi-escapes",
+ "subtle",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -9082,10 +9083,12 @@ dependencies = [
 name = "services"
 version = "0.1.43"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "api-types",
  "async-trait",
  "backon",
+ "base64 0.22.1",
  "chrono",
  "dashmap",
  "db",
@@ -9107,6 +9110,7 @@ dependencies = [
  "notify-rust",
  "once_cell",
  "os_info",
+ "rand 0.8.5",
  "regex",
  "relay-types",
  "reqwest 0.13.2",

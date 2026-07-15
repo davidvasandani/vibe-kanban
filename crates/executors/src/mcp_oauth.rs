@@ -23,6 +23,7 @@ use std::{
 use base64::Engine;
 use rand::{Rng, distributions::Alphanumeric};
 use reqwest::{Url, header::WWW_AUTHENTICATE, redirect::Policy};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -324,6 +325,12 @@ fn as_metadata_candidates(as_url: &Url) -> Vec<String> {
 /// a soft error (the caller tries the next candidate URL).
 async fn fetch_json(client: &OAuthHttpClient, url: &str) -> Result<Value, String> {
     let resp = client.get(url).await?;
+    if resp.status().is_redirection() {
+        return Err(
+            "OAuth metadata was redirected to an interactive login (HTTP 3xx). If this server is protected by Cloudflare Access, configure a Cloudflare Access service token for shared gateway authentication or adjust the Access policy"
+                .to_string(),
+        );
+    }
     if !resp.status().is_success() {
         return Err(format!(
             "OAuth endpoint returned HTTP {}",
@@ -562,9 +569,30 @@ pub fn build_authorize_url(
     Ok(url.to_string())
 }
 
-/// Exchange an authorization code for an access token. Returns only the
-/// access token string so the secret spreads no further than necessary.
-pub async fn exchange_code(
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OAuthTokenSet {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub token_type: Option<String>,
+    pub expires_in: Option<u64>,
+    pub scope: Option<String>,
+}
+
+impl std::fmt::Debug for OAuthTokenSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokenSet")
+            .field("access_token", &"[REDACTED]")
+            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[REDACTED]"))
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+/// Exchange an authorization code while retaining refresh/expiry metadata for
+/// the shared gateway. The token set's Debug implementation is redacted.
+pub async fn exchange_token_set(
     client: &OAuthHttpClient,
     token_endpoint: &str,
     client_id: &str,
@@ -572,7 +600,7 @@ pub async fn exchange_code(
     pkce_verifier: &str,
     redirect_uri: &str,
     resource: &str,
-) -> Result<String, String> {
+) -> Result<OAuthTokenSet, String> {
     let params = [
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -595,8 +623,29 @@ pub async fn exchange_code(
     if !status.is_success() {
         return Err(format!("token exchange failed (HTTP {})", status.as_u16()));
     }
-    string_field(&value, "access_token")
-        .ok_or_else(|| "token response lacks access_token".to_string())
+    let access_token = string_field(&value, "access_token")
+        .ok_or_else(|| "token response lacks access_token".to_string())?;
+    Ok(OAuthTokenSet {
+        access_token,
+        refresh_token: string_field(&value, "refresh_token"),
+        token_type: string_field(&value, "token_type"),
+        expires_in: value.get("expires_in").and_then(Value::as_u64),
+        scope: string_field(&value, "scope"),
+    })
+}
+
+pub async fn exchange_code(
+    client: &OAuthHttpClient,
+    token_endpoint: &str,
+    client_id: &str,
+    code: &str,
+    pkce_verifier: &str,
+    redirect_uri: &str,
+    resource: &str,
+) -> Result<String, String> {
+    exchange_token_set(client, token_endpoint, client_id, code, pkce_verifier, redirect_uri, resource)
+        .await
+        .map(|tokens| tokens.access_token)
 }
 
 #[cfg(test)]
@@ -774,6 +823,18 @@ mod tests {
             .unwrap_err();
         assert!(!err.contains("loopback not allowed"), "got: {err}");
         assert!(err.contains("HTTP 400"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn metadata_redirect_has_cloudflare_guidance_without_location() {
+        let base = one_shot_server(vec![
+            "HTTP/1.1 302 Found\r\nlocation: https://access.example/cdn-cgi/access/login?secret=value\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string(),
+        ])
+        .await;
+        let client = OAuthHttpClient::new(Duration::from_secs(2), &base).unwrap();
+        let err = fetch_json(&client, &base).await.unwrap_err();
+        assert!(err.contains("Cloudflare Access service token"));
+        assert!(!err.contains("secret=value"));
     }
 
     #[tokio::test]

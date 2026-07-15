@@ -5,6 +5,7 @@ use axum::{
 use tower_http::{compression::CompressionLayer, validate_request::ValidateRequestHeaderLayer};
 
 use crate::{DeploymentImpl, middleware};
+use crate::mcp_gateway;
 
 pub mod approvals;
 pub mod cli_tools;
@@ -43,6 +44,7 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
         .merge(cli_tools::router())
         .merge(config::router())
         .merge(mcp_auth::router())
+        .merge(mcp_gateway::management_router())
         .merge(pipelines::router())
         .merge(speckit::router())
         .merge(containers::router(&deployment))
@@ -83,9 +85,10 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
             middleware::validate_origin,
         ))
         .layer(axum::middleware::from_fn(middleware::log_server_errors))
-        .with_state(deployment);
+        .with_state(deployment.clone());
 
     Router::new()
+        .merge(mcp_gateway::gateway_router().with_state(deployment.clone()))
         .route("/", get(frontend::serve_frontend_root))
         .route("/{*path}", get(frontend::serve_frontend))
         .nest("/api", api_routes)
