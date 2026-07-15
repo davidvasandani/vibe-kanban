@@ -16,6 +16,10 @@ import { useAllOrganizationProjects } from '@/shared/hooks/useAllOrganizationPro
 import { useShape } from '@/shared/integrations/electric/hooks';
 import { PROJECT_ISSUES_SHAPE } from 'shared/remote-types';
 import { RemoteIssueLink } from './RemoteIssueLink';
+import {
+  buildWorkspaceBreadcrumbs,
+  type WorkspaceBreadcrumbIssueState,
+} from './navbarBreadcrumbs';
 import { AppBarUserPopoverContainer } from './AppBarUserPopoverContainer';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { NavbarActionGroups } from '@/shared/actions';
@@ -225,57 +229,66 @@ export function NavbarContainer({
     { enabled: shouldResolveIssueBreadcrumb }
   );
   const linkedProject = allProjects.find((p) => p.id === linkedProjectId);
+  const linkedIssue = useMemo(() => {
+    if (!linkedIssueId) return undefined;
+    return projectIssues.find((issue) => issue.id === linkedIssueId);
+  }, [linkedIssueId, projectIssues]);
   const isWaitingForProjectBreadcrumb =
     shouldResolveBreadcrumbData && !linkedProject && isProjectsLoading;
   const isWaitingForIssueBreadcrumb =
     shouldResolveIssueBreadcrumb && isProjectIssuesLoading;
   const isWaitingForBreadcrumbData =
     isWaitingForProjectBreadcrumb || isWaitingForIssueBreadcrumb;
-
-  const breadcrumbs = useMemo((): NavbarBreadcrumbItem[] | undefined => {
-    if (
-      !shouldResolveBreadcrumbData ||
-      !linkedProjectId ||
-      isWaitingForBreadcrumbData
-    ) {
-      return undefined;
+  const issueBreadcrumbState = useMemo((): WorkspaceBreadcrumbIssueState => {
+    if (!shouldResolveIssueBreadcrumb || !linkedIssueId || !linkedProjectId) {
+      return { kind: 'none' };
     }
 
-    const project = linkedProject;
-    if (!project) return undefined;
+    if (isProjectIssuesLoading) {
+      return { kind: 'loading' };
+    }
 
-    const items: NavbarBreadcrumbItem[] = [
-      {
-        label: project.name,
-        onClick: () => appNavigation.goToProject(linkedProjectId),
-      },
-    ];
+    if (linkedIssue?.simple_id) {
+      return {
+        kind: 'resolved',
+        label: linkedIssue.simple_id,
+        onClick: () =>
+          appNavigation.goToProjectIssue(linkedProjectId, linkedIssueId),
+      };
+    }
 
-    if (linkedIssueId) {
-      const issue = projectIssues.find((i) => i.id === linkedIssueId);
-      if (issue) {
-        items.push({
-          label: issue.simple_id,
-          onClick: () =>
-            appNavigation.goToProjectIssue(linkedProjectId, linkedIssueId),
-        });
-      }
+    return { kind: 'unavailable' };
+  }, [
+    shouldResolveIssueBreadcrumb,
+    linkedIssueId,
+    linkedProjectId,
+    isProjectIssuesLoading,
+    linkedIssue?.simple_id,
+    appNavigation,
+  ]);
+
+  const breadcrumbs = useMemo((): NavbarBreadcrumbItem[] | undefined => {
+    if (!linkedProjectId) {
+      return undefined;
     }
 
     const workspaceLabel =
       selectedWorkspace?.name || selectedWorkspace?.branch || '';
-    if (workspaceLabel) {
-      items.push({ label: workspaceLabel });
-    }
 
-    return items.length > 1 ? items : undefined;
+    return buildWorkspaceBreadcrumbs({
+      shouldResolve:
+        shouldResolveBreadcrumbData && !isWaitingForProjectBreadcrumb,
+      project: linkedProject,
+      workspaceLabel,
+      issueState: issueBreadcrumbState,
+      onProjectClick: () => appNavigation.goToProject(linkedProjectId),
+    });
   }, [
     shouldResolveBreadcrumbData,
     linkedProjectId,
-    linkedIssueId,
     linkedProject,
-    isWaitingForBreadcrumbData,
-    projectIssues,
+    isWaitingForProjectBreadcrumb,
+    issueBreadcrumbState,
     selectedWorkspace?.name,
     selectedWorkspace?.branch,
     appNavigation,
