@@ -5,6 +5,7 @@
 //! (title, description, status) flow both ways via a periodic reconciler.
 
 pub mod client;
+mod format;
 pub mod mapping;
 pub mod merge;
 pub mod sync;
