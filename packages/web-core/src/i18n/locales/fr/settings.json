@@ -23,6 +23,8 @@
         "agentsDesc": "Configurations des agents de codage",
         "mcp": "Serveurs MCP",
         "mcpDesc": "Serveurs Model Context Protocol",
+        "cli-tools": "Outils CLI",
+        "cli-toolsDesc": "Outils en ligne de commande gérés par l’application pour les agents",
         "organizations": "Paramètres de l'organisation",
         "organizationsDesc": "Gérer les membres et les permissions de l'organisation",
         "remote-projects": "Projets",
@@ -371,8 +373,13 @@
         "serverHelper": "Cliquez sur une carte pour insérer ce serveur MCP dans le JSON ci-dessus.",
         "saveLocation": "Les modifications seront enregistrées dans :",
         "servers": "Serveurs",
-        "serverHelperForm": "Cliquez sur une carte pour ajouter ce serveur MCP à la liste."
+        "serverHelperForm": "Cliquez sur une carte pour ajouter ce serveur MCP à la liste.",
+        "assignments": "affectations",
+        "assignmentsHelper": "Chaque serveur est écrit dans le fichier de configuration natif de chaque agent compatible sélectionné."
       },
+      "conflicts": { "title": "Conflits de configuration native" },
+      "delete": "Supprimer le serveur",
+      "deleteConfirm": "Supprimer ce serveur MCP partagé de toutes les configurations d’agents affectées ?",
       "list": {
         "empty": "Aucun serveur MCP configuré pour l'instant. Ajoutez-en un ci-dessous.",
         "addServer": "Ajouter un serveur",
@@ -694,6 +701,25 @@
         "azureAccount": "AZURE_STORAGE_ACCOUNT_NAME (requis)",
         "azureKey": "AZURE_STORAGE_ACCOUNT_KEY (requis)",
         "azureContainer": "AZURE_STORAGE_CONTAINER_NAME (optionnel, par défaut 'attachments')"
+      }
+    },
+    "cliTools": {
+      "title": "Outils CLI",
+      "description": "Installe des versions épinglées d’outils CLI dans un répertoire géré par l’application. Les outils sont ajoutés au PATH des agents, mais une copie présente sur cette machine reste prioritaire. L’application ne stocke jamais les identifiants.",
+      "loading": "Vérification de la disponibilité des outils…",
+      "docs": "Documentation du fournisseur",
+      "actions": {
+        "install": "Installer",
+        "update": "Mettre à jour vers {{version}}",
+        "remove": "Supprimer"
+      },
+      "status": {
+        "host": "Fourni par cette machine : {{path}}",
+        "app": "Installé par Vibe Kanban ({{version}})",
+        "outdated": "le catalogue épingle désormais {{version}}",
+        "shadowed": "la copie de la machine est prioritaire dans le PATH",
+        "notAvailable": "Non installé. Version du catalogue : {{version}}",
+        "unsupported": "Installation impossible ici"
       }
     }
   },

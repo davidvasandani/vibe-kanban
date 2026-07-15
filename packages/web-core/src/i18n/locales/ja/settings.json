@@ -23,6 +23,8 @@
         "agentsDesc": "コーディングエージェントの設定",
         "mcp": "MCPサーバー",
         "mcpDesc": "モデルコンテキストプロトコルサーバー",
+        "cli-tools": "CLI ツール",
+        "cli-toolsDesc": "エージェント向けのアプリ管理コマンドラインツール",
         "organizations": "Organization Settings",
         "organizationsDesc": "Manage organization members and permissions",
         "remote-projects": "プロジェクト",
@@ -371,8 +373,13 @@
         "serverHelper": "カードをクリックして、そのMCPサーバーを上記のJSONに挿入します。",
         "saveLocation": "変更は次の場所に保存されます：",
         "servers": "サーバー",
-        "serverHelperForm": "カードをクリックすると、その MCP サーバーがリストに追加されます。"
+        "serverHelperForm": "カードをクリックすると、その MCP サーバーがリストに追加されます。",
+        "assignments": "割り当て",
+        "assignmentsHelper": "各サーバーは、選択した互換性のある各エージェントのネイティブ設定ファイルに書き込まれます。"
       },
+      "conflicts": { "title": "ネイティブ設定の競合" },
+      "delete": "サーバーを削除",
+      "deleteConfirm": "この共有 MCP サーバーを割り当て済みのすべてのエージェント設定から削除しますか？",
       "list": {
         "empty": "MCP サーバーはまだ設定されていません。下から追加してください。",
         "addServer": "サーバーを追加",
@@ -694,6 +701,25 @@
         "azureAccount": "AZURE_STORAGE_ACCOUNT_NAME (必須)",
         "azureKey": "AZURE_STORAGE_ACCOUNT_KEY (必須)",
         "azureContainer": "AZURE_STORAGE_CONTAINER_NAME (任意、デフォルトは 'attachments')"
+      }
+    },
+    "cliTools": {
+      "title": "CLI ツール",
+      "description": "ベンダー CLI ツールの固定バージョンをアプリ管理ディレクトリにインストールします。ツールはエージェントの PATH に追加されますが、このマシンに既にあるコピーが優先されます。認証情報は保存されません。",
+      "loading": "ツールの利用可否を確認中…",
+      "docs": "ベンダーのドキュメント",
+      "actions": {
+        "install": "インストール",
+        "update": "{{version}} に更新",
+        "remove": "削除"
+      },
+      "status": {
+        "host": "このマシンが提供: {{path}}",
+        "app": "Vibe Kanban がインストール ({{version}})",
+        "outdated": "カタログの固定バージョンは {{version}} です",
+        "shadowed": "マシン側のコピーが PATH で優先されます",
+        "notAvailable": "未インストール。カタログバージョン: {{version}}",
+        "unsupported": "ここにはインストールできません"
       }
     }
   },

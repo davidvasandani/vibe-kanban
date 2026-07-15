@@ -23,6 +23,8 @@
         "agentsDesc": "编码代理配置",
         "mcp": "MCP 服务器",
         "mcpDesc": "模型上下文协议服务器",
+        "cli-tools": "CLI 工具",
+        "cli-toolsDesc": "由应用管理的代理命令行工具",
         "organizations": "组织设置",
         "organizationsDesc": "管理组织成员和权限",
         "remote-projects": "项目",
@@ -371,8 +373,13 @@
         "serverHelper": "点击卡片将该 MCP 服务器插入到上面的 JSON 中。",
         "saveLocation": "更改将保存到：",
         "servers": "服务器",
-        "serverHelperForm": "点击卡片可将该 MCP 服务器添加到列表。"
+        "serverHelperForm": "点击卡片可将该 MCP 服务器添加到列表。",
+        "assignments": "分配",
+        "assignmentsHelper": "每个服务器都会写入所有已选兼容代理的原生配置文件。"
       },
+      "conflicts": { "title": "原生配置冲突" },
+      "delete": "删除服务器",
+      "deleteConfirm": "要从所有已分配的代理配置中删除此共享 MCP 服务器吗？",
       "list": {
         "empty": "尚未配置 MCP 服务器。在下方添加一个。",
         "addServer": "添加服务器",
@@ -694,6 +701,25 @@
         "azureAccount": "AZURE_STORAGE_ACCOUNT_NAME (必需)",
         "azureKey": "AZURE_STORAGE_ACCOUNT_KEY (必需)",
         "azureContainer": "AZURE_STORAGE_CONTAINER_NAME (可选，默认为 'attachments')"
+      }
+    },
+    "cliTools": {
+      "title": "CLI 工具",
+      "description": "将供应商 CLI 工具的固定版本安装到应用管理的目录中。工具会添加到代理的 PATH，但本机已有的副本始终优先。应用绝不会存储工具凭据。",
+      "loading": "正在检查工具可用性…",
+      "docs": "供应商文档",
+      "actions": {
+        "install": "安装",
+        "update": "更新到 {{version}}",
+        "remove": "移除"
+      },
+      "status": {
+        "host": "由本机提供：{{path}}",
+        "app": "由 Vibe Kanban 安装（{{version}}）",
+        "outdated": "目录当前固定为 {{version}}",
+        "shadowed": "本机副本在 PATH 中优先",
+        "notAvailable": "未安装。目录版本：{{version}}",
+        "unsupported": "无法在此安装"
       }
     }
   },
