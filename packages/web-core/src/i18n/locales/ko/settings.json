@@ -380,6 +380,17 @@
       "conflicts": { "title": "기본 구성 충돌" },
       "delete": "서버 삭제",
       "deleteConfirm": "이 공유 MCP 서버를 할당된 모든 에이전트 구성에서 삭제하시겠습니까?",
+      "auth": {
+        "sharedGateway": "공유 게이트웨이 인증",
+        "explicitHeader": "명시적 헤더 인증",
+        "agentNative": "에이전트 기본 인증",
+        "none": "인증 없음",
+        "disconnect": "연결 해제",
+        "reconnect": "다시 연결",
+        "disconnectConfirm": "할당된 모든 에이전트에서 이 공유 자격 증명의 연결을 해제하시겠습니까?",
+        "cloudflareClientId": "Cloudflare Access 서비스 토큰 클라이언트 ID(쓰기 전용)",
+        "cloudflareClientSecret": "Cloudflare Access 서비스 토큰 클라이언트 암호(쓰기 전용)"
+      },
       "list": {
         "empty": "아직 구성된 MCP 서버가 없습니다. 아래에서 추가하세요.",
         "addServer": "서버 추가",

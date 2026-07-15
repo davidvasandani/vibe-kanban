@@ -380,6 +380,17 @@
       "conflicts": { "title": "Conflits de configuration native" },
       "delete": "Supprimer le serveur",
       "deleteConfirm": "Supprimer ce serveur MCP partagé de toutes les configurations d’agents affectées ?",
+      "auth": {
+        "sharedGateway": "Authentification par passerelle partagée",
+        "explicitHeader": "Authentification par en-tête explicite",
+        "agentNative": "Authentification native de l’agent",
+        "none": "Aucune authentification",
+        "disconnect": "Déconnecter",
+        "reconnect": "Reconnecter",
+        "disconnectConfirm": "Déconnecter cet identifiant partagé pour tous les agents affectés ?",
+        "cloudflareClientId": "ID client du jeton de service Cloudflare Access (écriture seule)",
+        "cloudflareClientSecret": "Secret client du jeton de service Cloudflare Access (écriture seule)"
+      },
       "list": {
         "empty": "Aucun serveur MCP configuré pour l'instant. Ajoutez-en un ci-dessous.",
         "addServer": "Ajouter un serveur",
