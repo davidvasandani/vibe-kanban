@@ -1,4 +1,4 @@
-import { useMemo, useCallback, type ReactNode } from 'react';
+import { useMemo, useCallback, useContext, type ReactNode } from 'react';
 import { useShape } from '@/shared/integrations/electric/hooks';
 import {
   PROJECT_ISSUES_SHAPE,
@@ -28,6 +28,11 @@ import {
   ProjectContext,
   type ProjectContextValue,
 } from '@/shared/hooks/useProjectContext';
+import { WorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
+import {
+  normalizeLocalWorkspaceArchiveState,
+  useRemoteLocalArchiveReconciliation,
+} from '@/shared/providers/remote/useRemoteLocalArchiveReconciliation';
 
 interface ProjectProviderProps {
   projectId: string;
@@ -37,6 +42,9 @@ interface ProjectProviderProps {
 export function ProjectProvider({ projectId, children }: ProjectProviderProps) {
   const params = useMemo(() => ({ project_id: projectId }), [projectId]);
   const enabled = Boolean(projectId);
+  const workspaceContext = useContext(WorkspaceContext);
+  const activeLocalWorkspaces = workspaceContext?.activeWorkspaces;
+  const archivedLocalWorkspaces = workspaceContext?.archivedWorkspaces;
 
   // Shape subscriptions (with mutations where needed)
   const issuesResult = useShape(PROJECT_ISSUES_SHAPE, params, {
@@ -81,6 +89,23 @@ export function ProjectProvider({ projectId, children }: ProjectProviderProps) {
   });
   const jiraLinksResult = useShape(PROJECT_JIRA_LINKS_SHAPE, params, {
     enabled,
+  });
+
+  const localWorkspaceArchiveState = useMemo(
+    () =>
+      activeLocalWorkspaces && archivedLocalWorkspaces
+        ? normalizeLocalWorkspaceArchiveState(
+            activeLocalWorkspaces,
+            archivedLocalWorkspaces
+          )
+        : [],
+    [activeLocalWorkspaces, archivedLocalWorkspaces]
+  );
+
+  useRemoteLocalArchiveReconciliation({
+    remoteWorkspaces: workspacesResult.data,
+    localWorkspaces: localWorkspaceArchiveState,
+    enabled: enabled && Boolean(workspaceContext),
   });
 
   // Board readiness depends on core kanban data only.
