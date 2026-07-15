@@ -153,17 +153,19 @@ export function SettingsCard({
   headerAction?: React.ReactNode;
 }) {
   return (
-    <div className="space-y-4 pb-6 border-b border-border last:border-b-0 last:pb-0">
-      <div className="flex items-start justify-between">
-        <div>
+    <div className="w-full min-w-0 max-w-full space-y-4 border-b border-border pb-6 last:border-b-0 last:pb-0">
+      <div className="flex min-w-0 flex-col items-start gap-2 sm:flex-row sm:justify-between">
+        <div className="min-w-0">
           <h3 className="text-base font-medium text-high">{title}</h3>
           {description && (
             <p className="text-sm text-low mt-1">{description}</p>
           )}
         </div>
-        {headerAction && <div className="shrink-0 ml-2">{headerAction}</div>}
+        {headerAction && (
+          <div className="max-w-full sm:ml-2 sm:shrink-0">{headerAction}</div>
+        )}
       </div>
-      <div className="space-y-4">{children}</div>
+      <div className="min-w-0 max-w-full space-y-4">{children}</div>
     </div>
   );
 }

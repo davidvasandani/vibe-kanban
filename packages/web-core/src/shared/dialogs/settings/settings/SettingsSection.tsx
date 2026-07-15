@@ -40,7 +40,7 @@ export function SettingsSection({
         )}
       </div>
 
-      <div className="min-w-0 space-y-6 overflow-y-auto px-4 pt-4 sm:px-6">
+      <div className="w-full min-w-0 max-w-full space-y-6 overflow-x-hidden overflow-y-auto px-4 pt-4 sm:px-6">
         {renderSettingsSection(type, initialState, onClose)}
       </div>
     </div>

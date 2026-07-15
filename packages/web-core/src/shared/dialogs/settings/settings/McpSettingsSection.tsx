@@ -681,11 +681,12 @@ export function McpSettingsSection() {
               {t('settings.mcp.labels.assignmentsHelper')}
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-1 sm:shrink-0 sm:justify-end">
+          <div className="grid w-full min-w-0 grid-cols-1 gap-1 sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:shrink-0 sm:justify-end">
             <Button
               variant="ghost"
               size="sm"
               type="button"
+              className="w-full justify-start sm:w-auto sm:justify-center"
               onClick={() => void testAssignments()}
               disabled={testing || isDirty || draft.servers.length === 0}
               title={isDirty ? t('settings.mcp.test.dirtyHint') : undefined}
@@ -704,6 +705,7 @@ export function McpSettingsSection() {
               variant="ghost"
               size="sm"
               type="button"
+              className="w-full justify-start sm:w-auto sm:justify-center"
               onClick={jsonMode ? () => setJsonMode(false) : enterJsonMode}
             >
               <CodeIcon className="size-icon-xs mr-1" weight="bold" />
@@ -715,6 +717,7 @@ export function McpSettingsSection() {
               variant="default"
               size="sm"
               type="button"
+              className="w-full justify-start sm:w-auto sm:justify-center"
               onClick={() => void openDialog()}
               disabled={loading || profiles.length === 0}
             >
@@ -762,9 +765,9 @@ export function McpSettingsSection() {
                 return (
                   <div
                     key={server.name}
-                    className="rounded-sm border border-border bg-secondary/30 p-3"
+                    className="w-full min-w-0 max-w-full rounded-sm border border-border bg-secondary/30 p-3"
                   >
-                    <div className="flex items-start justify-between gap-2">
+                    <div className="flex min-w-0 flex-col items-start gap-2 sm:flex-row sm:justify-between">
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="truncate font-medium text-high">
@@ -779,7 +782,7 @@ export function McpSettingsSection() {
                           {t('settings.mcp.labels.assignments')}
                         </div>
                       </div>
-                      <div className="flex shrink-0 items-center gap-1">
+                      <div className="flex max-w-full flex-wrap items-center gap-1 sm:shrink-0">
                         <Button
                           variant="ghost"
                           size="icon"
