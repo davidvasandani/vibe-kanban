@@ -23,6 +23,8 @@
         "agentsDesc": "코딩 에이전트 구성",
         "mcp": "MCP 서버",
         "mcpDesc": "Model Context Protocol 서버",
+        "cli-tools": "CLI 도구",
+        "cli-toolsDesc": "에이전트용 앱 관리 명령줄 도구",
         "organizations": "Organization Settings",
         "organizationsDesc": "Manage organization members and permissions",
         "remote-projects": "프로젝트",
@@ -371,8 +373,13 @@
         "serverHelper": "카드를 클릭하여 위의 JSON에 해당 MCP 서버를 삽입하세요.",
         "saveLocation": "변경 사항이 저장될 위치:",
         "servers": "서버",
-        "serverHelperForm": "카드를 클릭하면 해당 MCP 서버가 목록에 추가됩니다."
+        "serverHelperForm": "카드를 클릭하면 해당 MCP 서버가 목록에 추가됩니다.",
+        "assignments": "할당",
+        "assignmentsHelper": "각 서버는 선택한 호환 에이전트의 기본 구성 파일에 기록됩니다."
       },
+      "conflicts": { "title": "기본 구성 충돌" },
+      "delete": "서버 삭제",
+      "deleteConfirm": "이 공유 MCP 서버를 할당된 모든 에이전트 구성에서 삭제하시겠습니까?",
       "list": {
         "empty": "아직 구성된 MCP 서버가 없습니다. 아래에서 추가하세요.",
         "addServer": "서버 추가",
@@ -694,6 +701,25 @@
         "azureAccount": "AZURE_STORAGE_ACCOUNT_NAME (필수)",
         "azureKey": "AZURE_STORAGE_ACCOUNT_KEY (필수)",
         "azureContainer": "AZURE_STORAGE_CONTAINER_NAME (선택, 기본값 'attachments')"
+      }
+    },
+    "cliTools": {
+      "title": "CLI 도구",
+      "description": "공급업체 CLI 도구의 고정 버전을 앱 관리 디렉터리에 설치합니다. 도구는 에이전트 PATH에 추가되지만 이 머신에 이미 있는 복사본이 우선합니다. 인증 정보는 저장되지 않습니다.",
+      "loading": "도구 사용 가능 여부 확인 중…",
+      "docs": "공급업체 문서",
+      "actions": {
+        "install": "설치",
+        "update": "{{version}}(으)로 업데이트",
+        "remove": "제거"
+      },
+      "status": {
+        "host": "이 머신에서 제공: {{path}}",
+        "app": "Vibe Kanban에서 설치 ({{version}})",
+        "outdated": "카탈로그 고정 버전: {{version}}",
+        "shadowed": "머신의 복사본이 PATH에서 우선합니다",
+        "notAvailable": "설치되지 않음. 카탈로그 버전: {{version}}",
+        "unsupported": "여기에는 설치할 수 없음"
       }
     }
   },

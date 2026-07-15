@@ -23,6 +23,8 @@
         "agentsDesc": "Configuraciones de agentes",
         "mcp": "Servidores MCP",
         "mcpDesc": "Servidores de Protocolo de Contexto de Modelo (MCP)",
+        "cli-tools": "Herramientas de CLI",
+        "cli-toolsDesc": "Herramientas de línea de comandos administradas por la aplicación para agentes",
         "organizations": "Organization Settings",
         "organizationsDesc": "Manage organization members and permissions",
         "remote-projects": "Proyectos",
@@ -375,8 +377,13 @@
         "serverHelper": "Haz clic en una tarjeta para insertar ese Servidor MCP en el JSON de arriba.",
         "saveLocation": "Los cambios se guardarán en:",
         "servers": "Servidores",
-        "serverHelperForm": "Haz clic en una tarjeta para agregar ese servidor MCP a la lista."
+        "serverHelperForm": "Haz clic en una tarjeta para agregar ese servidor MCP a la lista.",
+        "assignments": "asignaciones",
+        "assignmentsHelper": "Cada servidor se escribe en el archivo de configuración nativo de cada agente compatible seleccionado."
       },
+      "conflicts": { "title": "Conflictos de configuración nativa" },
+      "delete": "Eliminar servidor",
+      "deleteConfirm": "¿Eliminar este servidor MCP compartido de todas las configuraciones de agentes asignadas?",
       "list": {
         "empty": "Aún no hay servidores MCP configurados. Agrega uno abajo.",
         "addServer": "Agregar servidor",
@@ -694,6 +701,25 @@
         "azureAccount": "AZURE_STORAGE_ACCOUNT_NAME (obligatorio)",
         "azureKey": "AZURE_STORAGE_ACCOUNT_KEY (obligatorio)",
         "azureContainer": "AZURE_STORAGE_CONTAINER_NAME (opcional, predeterminado: 'attachments')"
+      }
+    },
+    "cliTools": {
+      "title": "Herramientas de CLI",
+      "description": "Instala versiones fijas de herramientas CLI en un directorio administrado por la aplicación. Las herramientas se agregan al PATH de los agentes, pero una copia existente en esta máquina siempre tiene prioridad. La aplicación nunca almacena credenciales.",
+      "loading": "Comprobando disponibilidad de herramientas…",
+      "docs": "Documentación del proveedor",
+      "actions": {
+        "install": "Instalar",
+        "update": "Actualizar a {{version}}",
+        "remove": "Eliminar"
+      },
+      "status": {
+        "host": "Proporcionada por esta máquina: {{path}}",
+        "app": "Instalada por Vibe Kanban ({{version}})",
+        "outdated": "el catálogo ahora fija {{version}}",
+        "shadowed": "la copia de la máquina tiene prioridad en PATH",
+        "notAvailable": "No instalada. Versión del catálogo: {{version}}",
+        "unsupported": "No se puede instalar aquí"
       }
     }
   },

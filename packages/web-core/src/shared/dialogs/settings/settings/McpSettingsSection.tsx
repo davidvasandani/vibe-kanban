@@ -104,11 +104,25 @@ function TestResultDetails({
   connecting,
   connectError,
   onConnect,
+  loopback,
+  onToggleLoopback,
+  manualActive,
+  manualCode,
+  onManualCodeChange,
+  onManualComplete,
+  completing,
 }: {
   result: McpServerTestResult | undefined;
   connecting: boolean;
   connectError: string | undefined;
   onConnect: () => void;
+  loopback: boolean;
+  onToggleLoopback: () => void;
+  manualActive: boolean;
+  manualCode: string;
+  onManualCodeChange: (value: string) => void;
+  onManualComplete: () => void;
+  completing: boolean;
 }) {
   const { t } = useTranslation('settings');
   if (!result || result.status === 'ok') return null;
@@ -162,6 +176,44 @@ function TestResultDetails({
           {connectError}
         </div>
       )}
+      {authRequired && (
+        <label className="mt-2 flex items-center gap-2 text-low">
+          <input
+            type="checkbox"
+            checked={loopback}
+            onChange={onToggleLoopback}
+            disabled={connecting || manualActive}
+          />
+          {t('settings.mcp.test.useLocalhostCallback')}
+        </label>
+      )}
+      {manualActive && (
+        <div className="mt-2 space-y-2 border-t border-current/20 pt-2">
+          <p className="text-low">{t('settings.mcp.test.manualHint')}</p>
+          <input
+            type="text"
+            value={manualCode}
+            onChange={(event) => onManualCodeChange(event.target.value)}
+            placeholder={t('settings.mcp.test.manualPlaceholder')}
+            className="w-full rounded-sm border border-border bg-primary px-2 py-1 font-mono text-high"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            type="button"
+            onClick={onManualComplete}
+            disabled={completing || manualCode.trim().length === 0}
+          >
+            {completing && (
+              <CircleNotchIcon
+                className="size-icon-xs mr-1 animate-spin"
+                weight="bold"
+              />
+            )}
+            {t('settings.mcp.test.finishConnect')}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -195,6 +247,17 @@ export function McpSettingsSection() {
   const [connectErrors, setConnectErrors] = useState<Record<string, string>>(
     {}
   );
+  const [loopbackEnabled, setLoopbackEnabled] = useState<
+    Record<string, boolean>
+  >({});
+  const [manualFlow, setManualFlow] = useState<{
+    key: string;
+    serverName: string;
+    executor: BaseCodingAgent;
+    flowId: string;
+  } | null>(null);
+  const [manualCode, setManualCode] = useState('');
+  const [completing, setCompleting] = useState(false);
 
   const snapshot = useMemo(() => sharedMcpSnapshot(draft), [draft]);
   const isDirty = snapshot !== originalSnapshot;
@@ -416,6 +479,28 @@ export function McpSettingsSection() {
     [machineClient, t]
   );
 
+  const finalizeConnected = useCallback(
+    async (serverName: string, executor: BaseCodingAgent) => {
+      if (!machineClient) return;
+      const refreshed = await machineClient.loadSharedMcpServers();
+      setReadModel(refreshed);
+      setDraft((prev) =>
+        mergeOAuthRefresh(prev, refreshed, serverName, executor)
+      );
+      setOriginalSnapshot((prev) => {
+        const merged = mergeOAuthRefresh(
+          JSON.parse(prev) as SharedMcpDraftState,
+          refreshed,
+          serverName,
+          executor
+        );
+        return sharedMcpSnapshot(merged);
+      });
+      await testAssignments(serverName);
+    },
+    [machineClient, testAssignments]
+  );
+
   const connectAssignment = useCallback(
     async (
       serverName: string,
@@ -443,14 +528,51 @@ export function McpSettingsSection() {
         setConnectingKey(null);
         return;
       }
+      const useLoopback = !!loopbackEnabled[key];
+      setManualFlow(null);
+      setManualCode('');
       try {
         const started = await machineClient.startMcpAuth(
           { executor },
           serverName,
           result?.www_authenticate,
-          false
+          useLoopback
         );
         popup.location.href = started.authorize_url;
+        if (started.loopback) {
+          const { flow_id: flowId } = started;
+          setManualFlow({ key, serverName, executor, flowId });
+          void (async () => {
+            for (;;) {
+              await new Promise((resolve) => setTimeout(resolve, 1000));
+              let status: McpAuthStatusResponse | null = null;
+              try {
+                status = await machineClient.getMcpAuthStatus(flowId);
+              } catch {
+                // Transient polling error; manual completion remains available.
+              }
+              if (status?.status === 'completed') {
+                await finalizeConnected(serverName, executor);
+                setManualFlow((current) =>
+                  current?.flowId === flowId ? null : current
+                );
+                return;
+              }
+              if (status?.status === 'failed') {
+                setConnectErrors((prev) => ({
+                  ...prev,
+                  [key]: status.error ?? t('settings.mcp.test.connectFailed'),
+                }));
+                setManualFlow((current) =>
+                  current?.flowId === flowId ? null : current
+                );
+                return;
+              }
+              if (popup.closed) return;
+            }
+          })();
+          return;
+        }
         const outcome = await waitForAuthFlow(started.flow_id, popup);
         if (outcome.status !== 'completed') {
           setConnectErrors((prev) => ({
@@ -459,21 +581,7 @@ export function McpSettingsSection() {
           }));
           return;
         }
-        const refreshed = await machineClient.loadSharedMcpServers();
-        setReadModel(refreshed);
-        setDraft((prev) =>
-          mergeOAuthRefresh(prev, refreshed, serverName, executor)
-        );
-        setOriginalSnapshot((prev) => {
-          const merged = mergeOAuthRefresh(
-            JSON.parse(prev) as SharedMcpDraftState,
-            refreshed,
-            serverName,
-            executor
-          );
-          return sharedMcpSnapshot(merged);
-        });
-        await testAssignments(serverName);
+        await finalizeConnected(serverName, executor);
       } catch (err) {
         if (!popup.closed) popup.close();
         setConnectErrors((prev) => ({
@@ -487,8 +595,37 @@ export function McpSettingsSection() {
         setConnectingKey(null);
       }
     },
-    [machineClient, t, testAssignments, waitForAuthFlow]
+    [finalizeConnected, loopbackEnabled, machineClient, t, waitForAuthFlow]
   );
+
+  const completeManualAuth = useCallback(async () => {
+    if (!machineClient || !manualFlow) return;
+    const code = manualCode.trim();
+    if (!code) return;
+    const { key, serverName, executor, flowId } = manualFlow;
+    setCompleting(true);
+    setConnectErrors((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    try {
+      await machineClient.completeMcpAuth({ executor }, flowId, code);
+      await finalizeConnected(serverName, executor);
+      setManualFlow(null);
+      setManualCode('');
+    } catch (err) {
+      setConnectErrors((prev) => ({
+        ...prev,
+        [key]:
+          err instanceof Error
+            ? err.message
+            : t('settings.mcp.test.connectFailed'),
+      }));
+    } finally {
+      setCompleting(false);
+    }
+  }, [finalizeConnected, machineClient, manualCode, manualFlow, t]);
 
   const enterJsonMode = useCallback(() => {
     setJsonText(JSON.stringify(inputsFromDraft(draft), null, 2));
@@ -728,6 +865,20 @@ export function McpSettingsSection() {
                                     result
                                   )
                                 }
+                                loopback={!!loopbackEnabled[key]}
+                                onToggleLoopback={() =>
+                                  setLoopbackEnabled((prev) => ({
+                                    ...prev,
+                                    [key]: !prev[key],
+                                  }))
+                                }
+                                manualActive={manualFlow?.key === key}
+                                manualCode={manualCode}
+                                onManualCodeChange={setManualCode}
+                                onManualComplete={() =>
+                                  void completeManualAuth()
+                                }
+                                completing={completing}
                               />
                             )}
                           </div>
