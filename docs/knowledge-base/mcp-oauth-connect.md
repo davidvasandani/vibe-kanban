@@ -1,6 +1,6 @@
 # MCP OAuth Connect flow
 
-Tags: `0c92-mcp-test-connect`, `205d-harden-mcp-oauth`
+Tags: `0c92-mcp-test-connect`, `205d-harden-mcp-oauth`, `4ae2-add-a-shared-mcp`
 
 ## What it is
 
@@ -8,8 +8,9 @@ When the MCP probe (see [mcp-connectivity-testing](mcp-connectivity-testing.md))
 classifies a server as `auth_required` (HTTP 401/403), the settings screen
 offers a **Connect** button that runs the full MCP authorization flow
 (2025-06-18 spec) from the local backend and writes the obtained access token
-into the agent's own config file as `headers.Authorization` — the same place a
-user would paste one by hand. No new secret store, no DB change.
+into either the agent's own config file (the legacy/native path) or the shared
+local gateway's encrypted credential store. Gateway-backed agent configs contain
+only a loopback endpoint and a local capability, never the upstream token.
 
 ## Architecture
 
@@ -93,6 +94,13 @@ user would paste one by hand. No new secret store, no DB change.
 - **Pending state and token files are bounded.** At most 256 unexpired flows
   are retained. On Unix, a successful OAuth token write changes the containing
   agent config file to owner-only mode (`0600`).
+- **Cloudflare credentials must not follow OAuth topology.** A service token is
+  for the protected MCP origin, not necessarily its authorization server. Attach
+  `CF-Access-*` only when the outbound origin equals the configured MCP origin.
+  Preserve discovery-time 302 guidance in UI state so retry can prompt for it.
+- **Canonicalize before deriving shared identity.** The deterministic gateway
+  ID and assignment matching use the same parsed URL form. Otherwise origin-only
+  URLs (`https://host` versus `https://host/`) break connect or reconnect.
 
 ## Testing pattern
 

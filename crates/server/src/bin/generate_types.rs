@@ -111,6 +111,7 @@ fn generate_types_content() -> String {
         executors::shared_mcp_config::NativeMcpSource::decl(),
         executors::shared_mcp_config::SharedMcpAssignment::decl(),
         executors::shared_mcp_config::SharedMcpSourceKind::decl(),
+        executors::shared_mcp_config::SharedMcpAuthMode::decl(),
         executors::shared_mcp_config::SharedMcpCompatibility::decl(),
         executors::shared_mcp_config::SharedMcpServer::decl(),
         executors::shared_mcp_config::SharedMcpConflictVariant::decl(),

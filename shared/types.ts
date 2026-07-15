@@ -368,9 +368,11 @@ export type SharedMcpAssignment = { executor: BaseCodingAgent, native_name: stri
 
 export type SharedMcpSourceKind = "reconciled" | "single_profile" | "new" | "custom";
 
+export type SharedMcpAuthMode = "shared_gateway" | "agent_native" | "explicit_header" | "none";
+
 export type SharedMcpCompatibility = { executor: BaseCodingAgent, compatible: boolean, reason: string | null, };
 
-export type SharedMcpServer = { name: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, source_kind: SharedMcpSourceKind, native_sources: Array<NativeMcpSource>, compatibility: Array<SharedMcpCompatibility>, };
+export type SharedMcpServer = { name: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, source_kind: SharedMcpSourceKind, native_sources: Array<NativeMcpSource>, compatibility: Array<SharedMcpCompatibility>, auth_mode: SharedMcpAuthMode, gateway_status: string | null, };
 
 export type SharedMcpConflictVariant = { variant_id: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, native_sources: Array<NativeMcpSource>, };
 
@@ -398,7 +400,7 @@ export type SharedMcpTestTarget = { server_name: string, executor: BaseCodingAge
 
 export type SharedMcpTestRequest = { targets: Array<SharedMcpTestTarget>, };
 
-export type SharedMcpAssignmentTestResult = { server_name: string, executor: BaseCodingAgent, result: McpServerTestResult, };
+export type SharedMcpAssignmentTestResult = { server_name: string, executor: BaseCodingAgent, gateway_status: string | null, upstream_status: string | null, result: McpServerTestResult, };
 
 export type McpServerTestResult = { name: string, 
 /**
@@ -429,23 +431,32 @@ www_authenticate: string | null,
  * (Claude/ChatGPT/Codex/Cursor/localhost) reject a public callback; a
  * loopback one is accepted. When the browser can reach that loopback
  * (same machine or an SSH port-forward) the callback completes
- * automatically; otherwise the user pastes the redirected URL/code back
+ * automatically; otherwise the user pastes the full redirected URL back
  * via `/mcp-auth/complete`.
  */
-loopback: boolean, };
+loopback: boolean, 
+/**
+ * Store this connection once in the shared local gateway and replace all
+ * matching native assignments with the protected loopback endpoint.
+ */
+shared_gateway: boolean, 
+/**
+ * Write-only Cloudflare Access service-token values used for discovery
+ * and upstream gateway requests. Never returned by a read API.
+ */
+cf_access_client_id?: string, cf_access_client_secret?: string, };
 
 export type McpAuthStartResponse = { flow_id: string, authorize_url: string, 
 /**
  * True when this flow used a loopback callback, so the frontend knows to
- * offer manual code entry if the popup can't reach it.
+ * offer manual callback-URL entry if the popup can't reach it.
  */
 loopback: boolean, };
 
 export type McpAuthCompleteRequest = { flow_id: string, 
 /**
- * Either the bare authorization `code`, or the full redirect URL the
- * browser landed on (`http://localhost:…/callback?code=…&state=…`) — the
- * user copies whichever is easier.
+ * Full redirect URL the browser landed on, including both `code` and
+ * `state` (`http://localhost:…/callback?code=…&state=…`).
  */
 code: string, };
 

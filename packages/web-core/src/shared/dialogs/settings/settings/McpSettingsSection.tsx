@@ -411,6 +411,20 @@ export function McpSettingsSection() {
     }));
   }, []);
 
+  const disconnectGateway = useCallback(
+    async (server: SharedMcpServer) => {
+      if (!machineClient) return;
+      const value = server.definition.value as Record<string, JsonValue>;
+      const url = typeof value.url === 'string' ? value.url : null;
+      const connectionId = url?.split('/mcp-gateway/')[1]?.split(/[/?#]/)[0];
+      if (!connectionId) return;
+      if (!window.confirm(t('settings.mcp.auth.disconnectConfirm'))) return;
+      await machineClient.disconnectSharedMcp(connectionId);
+      await loadShared();
+    },
+    [loadShared, machineClient, t]
+  );
+
   const toggleAssignment = useCallback(
     (serverName: string, profile: SharedMcpProfile) => {
       setDraft((prev) => ({
@@ -509,6 +523,7 @@ export function McpSettingsSection() {
     ) => {
       if (!machineClient) return;
       const key = testKey(serverName, executor);
+      const priorConnectError = connectErrors[key];
       setConnectingKey(key);
       setConnectErrors((prev) => {
         const next = { ...prev };
@@ -532,11 +547,30 @@ export function McpSettingsSection() {
       setManualFlow(null);
       setManualCode('');
       try {
+        let cloudflareAccess:
+          | { clientId: string; clientSecret: string }
+          | undefined;
+        if (
+          /cloudflare|http 302|interactive login/i.test(
+            `${result?.error ?? ''} ${priorConnectError ?? ''}`
+          )
+        ) {
+          const clientId = window.prompt(
+            t('settings.mcp.auth.cloudflareClientId')
+          );
+          const clientSecret = clientId
+            ? window.prompt(t('settings.mcp.auth.cloudflareClientSecret'))
+            : null;
+          if (clientId && clientSecret) {
+            cloudflareAccess = { clientId, clientSecret };
+          }
+        }
         const started = await machineClient.startMcpAuth(
           { executor },
           serverName,
           result?.www_authenticate,
-          useLoopback
+          useLoopback,
+          cloudflareAccess
         );
         popup.location.href = started.authorize_url;
         if (started.loopback) {
@@ -595,7 +629,14 @@ export function McpSettingsSection() {
         setConnectingKey(null);
       }
     },
-    [finalizeConnected, loopbackEnabled, machineClient, t, waitForAuthFlow]
+    [
+      connectErrors,
+      finalizeConnected,
+      loopbackEnabled,
+      machineClient,
+      t,
+      waitForAuthFlow,
+    ]
   );
 
   const completeManualAuth = useCallback(async () => {
@@ -776,6 +817,20 @@ export function McpSettingsSection() {
                           <span className="rounded-sm bg-primary px-1.5 py-0.5 font-mono text-xs text-low">
                             {transportBadge(server.definition)}
                           </span>
+                          {source && (
+                            <span className="rounded-sm border border-border px-1.5 py-0.5 text-xs text-low">
+                              {source.auth_mode === 'shared_gateway'
+                                ? t('settings.mcp.auth.sharedGateway')
+                                : source.auth_mode === 'explicit_header'
+                                  ? t('settings.mcp.auth.explicitHeader')
+                                  : source.auth_mode === 'agent_native'
+                                    ? t('settings.mcp.auth.agentNative')
+                                    : t('settings.mcp.auth.none')}
+                              {source.gateway_status
+                                ? ` · ${source.gateway_status}`
+                                : ''}
+                            </span>
+                          )}
                         </div>
                         <div className="mt-1 text-xs text-low">
                           {server.assignments.length}{' '}
@@ -793,6 +848,34 @@ export function McpSettingsSection() {
                         >
                           <CheckCircleIcon className="size-icon-sm" />
                         </Button>
+                        {source?.auth_mode === 'shared_gateway' && (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              type="button"
+                              onClick={() => {
+                                const executor = server.assignments[0];
+                                if (executor)
+                                  void connectAssignment(
+                                    server.name,
+                                    executor,
+                                    undefined
+                                  );
+                              }}
+                            >
+                              {t('settings.mcp.auth.reconnect')}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              type="button"
+                              onClick={() => void disconnectGateway(source)}
+                            >
+                              {t('settings.mcp.auth.disconnect')}
+                            </Button>
+                          </>
+                        )}
                         <Button
                           variant="ghost"
                           size="icon"
@@ -854,6 +937,12 @@ export function McpSettingsSection() {
                             {incompatible && (
                               <div className="mt-1 text-xs text-error">
                                 {compatibility?.reason}
+                              </div>
+                            )}
+                            {assigned && testResults[key]?.gateway_status && (
+                              <div className="mt-1 text-xs text-low">
+                                Gateway: {testResults[key].gateway_status} ·
+                                Upstream: {testResults[key].upstream_status}
                               </div>
                             )}
                             {assigned && (

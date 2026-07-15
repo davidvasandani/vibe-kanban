@@ -54,6 +54,11 @@ pub fn server_signing_key_path() -> std::path::PathBuf {
     asset_dir().join("server_ed25519_signing_key")
 }
 
+/// Host-local key used to encrypt shared MCP credentials stored in SQLite.
+pub fn mcp_gateway_key_path() -> std::path::PathBuf {
+    asset_dir().join("mcp_gateway_aead_key")
+}
+
 pub fn relay_host_credentials_path() -> std::path::PathBuf {
     asset_dir().join("relay_host_credentials.json")
 }

@@ -35,6 +35,9 @@ use executors::{
     mcp_config::read_agent_config,
     mcp_oauth,
     profile::{ExecutorConfigs, ExecutorProfileId},
+    shared_mcp_config::{
+        McpTransportKind, canonical_definition, load_native_snapshots, materialize_definition,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -120,6 +123,22 @@ pub struct McpAuthStartRequest {
     /// via `/mcp-auth/complete`.
     #[serde(default)]
     pub loopback: bool,
+    /// Store this connection once in the shared local gateway and replace all
+    /// matching native assignments with the protected loopback endpoint.
+    #[serde(default = "default_shared_gateway")]
+    pub shared_gateway: bool,
+    /// Write-only Cloudflare Access service-token values used for discovery
+    /// and upstream gateway requests. Never returned by a read API.
+    #[serde(default)]
+    #[ts(optional)]
+    pub cf_access_client_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub cf_access_client_secret: Option<String>,
+}
+
+fn default_shared_gateway() -> bool {
+    true
 }
 
 #[derive(TS, Debug, Serialize)]
@@ -162,6 +181,7 @@ struct ExchangeInputs {
     pkce_verifier: String,
     client_id: String,
     token_endpoint: String,
+    revocation_endpoint: Option<String>,
     resource: String,
     redirect_uri: String,
 }
@@ -179,8 +199,24 @@ struct PendingFlow {
     exchange: Option<ExchangeInputs>,
     executor: BaseCodingAgent,
     server_name: String,
+    upstream_url: String,
+    shared_gateway: bool,
+    cf_access_client_id: Option<String>,
+    cf_access_client_secret: Option<String>,
+    existing_gateway_token: Option<String>,
     created_at: Instant,
     outcome: FlowOutcome,
+}
+
+struct ExchangeContext {
+    exchange: ExchangeInputs,
+    executor: BaseCodingAgent,
+    server_name: String,
+    upstream_url: String,
+    shared_gateway: bool,
+    cf_access_client_id: Option<String>,
+    cf_access_client_secret: Option<String>,
+    existing_gateway_token: Option<String>,
 }
 
 static FLOWS: LazyLock<RwLock<HashMap<Uuid, PendingFlow>>> =
@@ -228,7 +264,7 @@ async fn start(
             payload.server_name
         ))));
     };
-    let Some(url) = entry
+    let Some(configured_url) = entry
         .get("url")
         .and_then(serde_json::Value::as_str)
         .or_else(|| entry.get("httpUrl").and_then(serde_json::Value::as_str))
@@ -237,6 +273,39 @@ async fn start(
             "Only URL-based (http/sse) MCP servers can be authenticated with OAuth",
         )));
     };
+    let configured_transport = canonical_definition(entry).transport;
+    let existing_gateway_token = configured_url
+        .contains("/mcp-gateway/")
+        .then(|| {
+            canonical_definition(entry)
+                .value
+                .get("headers")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|headers| {
+                    headers
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                })
+                .and_then(|(_, value)| value.as_str())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(str::to_string)
+        })
+        .flatten();
+    let mut url = configured_url.to_string();
+    if let Some(id) = configured_url
+        .split("/mcp-gateway/")
+        .nth(1)
+        .and_then(|tail| tail.split(['/', '?']).next())
+        && let Ok(Some(connection)) = db::models::mcp_gateway::McpGatewayConnection::find_bound(
+            &deployment.db().pool,
+            id,
+            deployment.user_id(),
+            deployment.user_id(),
+        )
+        .await
+    {
+        url = connection.upstream_url;
+    }
 
     {
         let mut flows = FLOWS.write().await;
@@ -275,11 +344,20 @@ async fn start(
         }
     };
 
-    let client = match mcp_oauth::OAuthHttpClient::new(OAUTH_HTTP_TIMEOUT, url) {
-        Ok(client) => client,
-        Err(error) => return Ok(ResponseJson(ApiResponse::error(&error))),
-    };
-    let meta = match mcp_oauth::discover(&client, url, payload.www_authenticate.as_deref()).await {
+    let client =
+        match mcp_oauth::OAuthHttpClient::new(OAUTH_HTTP_TIMEOUT, &url).map(|client| {
+            match (
+                payload.cf_access_client_id.clone(),
+                payload.cf_access_client_secret.clone(),
+            ) {
+                (Some(id), Some(secret)) => client.with_cloudflare_access(id, secret),
+                _ => client,
+            }
+        }) {
+            Ok(client) => client,
+            Err(error) => return Ok(ResponseJson(ApiResponse::error(&error))),
+        };
+    let meta = match mcp_oauth::discover(&client, &url, payload.www_authenticate.as_deref()).await {
         Ok(meta) => meta,
         Err(e) => return Ok(ResponseJson(ApiResponse::error(&e))),
     };
@@ -325,11 +403,20 @@ async fn start(
             pkce_verifier: pkce.verifier,
             client_id,
             token_endpoint: meta.token_endpoint,
+            revocation_endpoint: meta.revocation_endpoint,
             resource: meta.resource,
             redirect_uri,
         }),
         executor: query.executor,
         server_name: payload.server_name,
+        upstream_url: url,
+        // A legacy SSE assignment has a second message endpoint announced in
+        // the event stream. This forwarding gateway does not translate that
+        // protocol, so retain the established agent-native OAuth path.
+        shared_gateway: payload.shared_gateway && configured_transport != McpTransportKind::Sse,
+        cf_access_client_id: payload.cf_access_client_id,
+        cf_access_client_secret: payload.cf_access_client_secret,
+        existing_gateway_token,
         created_at: Instant::now(),
         outcome: FlowOutcome::Pending,
     };
@@ -389,7 +476,10 @@ struct CallbackQuery {
     error_description: Option<String>,
 }
 
-async fn callback(Query(query): Query<CallbackQuery>) -> Result<Response<String>, ApiError> {
+async fn callback(
+    State(deployment): State<DeploymentImpl>,
+    Query(query): Query<CallbackQuery>,
+) -> Result<Response<String>, ApiError> {
     let Some(state) = query.state.as_deref() else {
         return Ok(simple_html_response(
             StatusCode::BAD_REQUEST,
@@ -399,7 +489,17 @@ async fn callback(Query(query): Query<CallbackQuery>) -> Result<Response<String>
 
     // Find the flow bound to this state and consume its exchange inputs
     // atomically; whatever happens next, this state can't be redeemed again.
-    let (flow_id, exchange, executor, server_name) = {
+    let (
+        flow_id,
+        exchange,
+        executor,
+        server_name,
+        upstream_url,
+        shared_gateway,
+        cf_id,
+        cf_secret,
+        existing_gateway_token,
+    ) = {
         let mut flows = FLOWS.write().await;
         prune_flows_and_has_capacity(&mut flows);
         let Some((id, flow)) = flows.iter_mut().find(|(_, f)| f.state == state) else {
@@ -414,7 +514,17 @@ async fn callback(Query(query): Query<CallbackQuery>) -> Result<Response<String>
                 "This authorization flow was already completed".to_string(),
             ));
         };
-        (*id, exchange, flow.executor, flow.server_name.clone())
+        (
+            *id,
+            exchange,
+            flow.executor,
+            flow.server_name.clone(),
+            flow.upstream_url.clone(),
+            flow.shared_gateway,
+            flow.cf_access_client_id.clone(),
+            flow.cf_access_client_secret.clone(),
+            flow.existing_gateway_token.clone(),
+        )
     };
 
     // The failure text can carry attacker-influenced content (OAuth `error` /
@@ -441,7 +551,22 @@ async fn callback(Query(query): Query<CallbackQuery>) -> Result<Response<String>
         return Ok(fail("Missing authorization code in callback".to_string()).await);
     };
 
-    match exchange_and_store(exchange, executor, &server_name, &code).await {
+    match exchange_and_store(
+        &deployment,
+        ExchangeContext {
+            exchange,
+            executor,
+            server_name: server_name.clone(),
+            upstream_url,
+            shared_gateway,
+            cf_access_client_id: cf_id,
+            cf_access_client_secret: cf_secret,
+            existing_gateway_token,
+        },
+        &code,
+    )
+    .await
+    {
         Ok(()) => {
             if let Some(flow) = FLOWS.write().await.get_mut(&flow_id) {
                 flow.outcome = FlowOutcome::Completed;
@@ -463,12 +588,21 @@ async fn callback(Query(query): Query<CallbackQuery>) -> Result<Response<String>
 /// `complete` endpoint. The access token never leaves this function except
 /// into the agent config file.
 async fn exchange_and_store(
-    exchange: ExchangeInputs,
-    executor: BaseCodingAgent,
-    server_name: &str,
+    deployment: &DeploymentImpl,
+    context: ExchangeContext,
     code: &str,
 ) -> Result<(), String> {
-    let access_token = mcp_oauth::exchange_code(
+    let ExchangeContext {
+        exchange,
+        executor,
+        server_name,
+        upstream_url,
+        shared_gateway,
+        cf_access_client_id,
+        cf_access_client_secret,
+        existing_gateway_token,
+    } = context;
+    let tokens = mcp_oauth::exchange_token_set(
         &exchange.oauth_client,
         &exchange.token_endpoint,
         &exchange.client_id,
@@ -478,7 +612,90 @@ async fn exchange_and_store(
         &exchange.resource,
     )
     .await?;
-    persist_token(executor, server_name, &access_token).await
+    if !shared_gateway {
+        return persist_token(executor, &server_name, &tokens.access_token).await;
+    }
+    let upstream_url = reqwest::Url::parse(&upstream_url)
+        .map_err(|_| "Configured MCP server URL is invalid".to_string())?
+        .to_string();
+    let connection_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!(
+            "{}|{}|{server_name}|{upstream_url}",
+            deployment.user_id(),
+            deployment.user_id()
+        )
+        .as_bytes(),
+    );
+    let (gateway_url, gateway_token) = crate::mcp_gateway::store_oauth_connection(
+        deployment,
+        crate::mcp_gateway::NewOAuthConnection {
+            id: connection_id,
+            server_name: &server_name,
+            upstream_url: &upstream_url,
+            transport: "http",
+            tokens,
+            token_endpoint: exchange.token_endpoint,
+            revocation_endpoint: exchange.revocation_endpoint,
+            client_id: exchange.client_id,
+            resource: exchange.resource,
+            cf_access_client_id,
+            cf_access_client_secret,
+            existing_gateway_token,
+        },
+    )
+    .await?;
+    persist_gateway_assignments(&server_name, &upstream_url, &gateway_url, &gateway_token).await
+}
+
+async fn persist_gateway_assignments(
+    server_name: &str,
+    upstream_url: &str,
+    gateway_url: &str,
+    gateway_token: &str,
+) -> Result<(), String> {
+    let snapshots = load_native_snapshots().await;
+    let gateway_definition = canonical_definition(&json!({
+        "type": "http",
+        "url": gateway_url,
+        "headers": { "Authorization": format!("Bearer {gateway_token}") }
+    }));
+    let gateway_path = reqwest::Url::parse(gateway_url)
+        .map(|url| url.path().to_string())
+        .map_err(|_| "Generated gateway URL is invalid".to_string())?;
+    let mut updated = 0_u32;
+    for snapshot in snapshots {
+        let Some(existing) = snapshot.servers.get(server_name) else {
+            continue;
+        };
+        let existing_url = existing
+            .get("url")
+            .or_else(|| existing.get("httpUrl"))
+            .and_then(serde_json::Value::as_str);
+        let same_gateway = existing_url
+            .and_then(|url| reqwest::Url::parse(url).ok())
+            .is_some_and(|url| url.path() == gateway_path);
+        let same_upstream = existing_url
+            .and_then(|url| reqwest::Url::parse(url).ok())
+            .is_some_and(|url| url.as_str() == upstream_url);
+        if !same_upstream && !same_gateway {
+            continue;
+        }
+        let Some(config_path) = snapshot.config_path.as_ref() else {
+            continue;
+        };
+        let mut servers = snapshot.servers.clone();
+        let entry = materialize_definition(snapshot.profile.executor, &gateway_definition, None)?;
+        servers.insert(server_name.to_string(), entry);
+        update_mcp_servers_in_config(config_path, &snapshot.mcp_config, servers)
+            .await
+            .map_err(|_| "Failed to write a gateway assignment".to_string())?;
+        updated += 1;
+    }
+    if updated == 0 {
+        return Err("No matching MCP assignments remained after OAuth completed".to_string());
+    }
+    Ok(())
 }
 
 /// Extract the authorization code and state from a pasted callback URL.
@@ -511,6 +728,7 @@ fn parse_pasted_code(input: &str) -> Result<(String, String), String> {
 }
 
 async fn complete(
+    State(deployment): State<DeploymentImpl>,
     Query(_query): Query<McpAuthQuery>,
     Json(payload): Json<McpAuthCompleteRequest>,
 ) -> Result<ResponseJson<ApiResponse<McpAuthStatusResponse>>, ApiError> {
@@ -522,7 +740,16 @@ async fn complete(
     // Look up the flow by id and consume its exchange inputs atomically, so a
     // pasted code — like a browser callback — can only be redeemed once. If
     // the paste carried a `state`, it must match the flow's (CSRF binding).
-    let (exchange, executor, server_name) = {
+    let (
+        exchange,
+        executor,
+        server_name,
+        upstream_url,
+        shared_gateway,
+        cf_id,
+        cf_secret,
+        existing_gateway_token,
+    ) = {
         let mut flows = FLOWS.write().await;
         prune_flows_and_has_capacity(&mut flows);
         let Some(flow) = flows.get_mut(&payload.flow_id) else {
@@ -540,10 +767,34 @@ async fn complete(
                 "This authorization flow was already completed",
             )));
         };
-        (exchange, flow.executor, flow.server_name.clone())
+        (
+            exchange,
+            flow.executor,
+            flow.server_name.clone(),
+            flow.upstream_url.clone(),
+            flow.shared_gateway,
+            flow.cf_access_client_id.clone(),
+            flow.cf_access_client_secret.clone(),
+            flow.existing_gateway_token.clone(),
+        )
     };
 
-    match exchange_and_store(exchange, executor, &server_name, &code).await {
+    match exchange_and_store(
+        &deployment,
+        ExchangeContext {
+            exchange,
+            executor,
+            server_name,
+            upstream_url,
+            shared_gateway,
+            cf_access_client_id: cf_id,
+            cf_access_client_secret: cf_secret,
+            existing_gateway_token,
+        },
+        &code,
+    )
+    .await
+    {
         Ok(()) => {
             if let Some(flow) = FLOWS.write().await.get_mut(&payload.flow_id) {
                 flow.outcome = FlowOutcome::Completed;
@@ -773,6 +1024,11 @@ mod tests {
             exchange: None,
             executor: BaseCodingAgent::ClaudeCode,
             server_name: "server".to_string(),
+            upstream_url: "https://mcp.example/mcp".to_string(),
+            shared_gateway: true,
+            cf_access_client_id: None,
+            cf_access_client_secret: None,
+            existing_gateway_token: None,
             created_at,
             outcome: FlowOutcome::Pending,
         };
