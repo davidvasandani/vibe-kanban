@@ -91,27 +91,25 @@ pub(crate) fn markdown_to_jira(input: &str) -> String {
             continue;
         }
 
-        if index + 1 < lines.len() {
-            if let (Some(headers), Some(delimiters)) = (
+        if index + 1 < lines.len()
+            && let (Some(headers), Some(delimiters)) = (
                 split_markdown_row(line),
                 split_markdown_row(lines[index + 1]),
-            ) {
-                if headers.len() == delimiters.len()
-                    && !headers.is_empty()
-                    && delimiters.iter().all(|cell| is_table_delimiter(cell))
-                {
-                    output.push(jira_table_row(&headers, true));
-                    index += 2;
-                    while index < lines.len() {
-                        let Some(cells) = split_markdown_row(lines[index]) else {
-                            break;
-                        };
-                        output.push(jira_table_row(&cells, false));
-                        index += 1;
-                    }
-                    continue;
-                }
+            )
+            && headers.len() == delimiters.len()
+            && !headers.is_empty()
+            && delimiters.iter().all(|cell| is_table_delimiter(cell))
+        {
+            output.push(jira_table_row(&headers, true));
+            index += 2;
+            while index < lines.len() {
+                let Some(cells) = split_markdown_row(lines[index]) else {
+                    break;
+                };
+                output.push(jira_table_row(&cells, false));
+                index += 1;
             }
+            continue;
         }
 
         output.push(convert_markdown_line(line));
@@ -223,34 +221,34 @@ fn jira_inline_to_markdown(input: &str) -> String {
 
     while index < input.len() {
         let rest = &input[index..];
-        if let Some(escaped) = rest.strip_prefix('\\') {
-            if let Some(ch) = escaped.chars().next() {
-                output.push('\\');
-                output.push(ch);
-                index += 1 + ch.len_utf8();
-                continue;
-            }
+        if let Some(escaped) = rest.strip_prefix('\\')
+            && let Some(ch) = escaped.chars().next()
+        {
+            output.push('\\');
+            output.push(ch);
+            index += 1 + ch.len_utf8();
+            continue;
         }
-        if let Some(after) = rest.strip_prefix("{{") {
-            if let Some(end) = after.find("}}") {
-                output.push_str(&markdown_code_span(&after[..end]));
-                index += 2 + end + 2;
-                continue;
-            }
+        if let Some(after) = rest.strip_prefix("{{")
+            && let Some(end) = after.find("}}")
+        {
+            output.push_str(&markdown_code_span(&after[..end]));
+            index += 2 + end + 2;
+            continue;
         }
-        if rest.starts_with('[') {
-            if let Some(end) = find_unescaped(rest, ']', 1) {
-                let content = &rest[1..end];
-                let (label, url) = content.split_once('|').unwrap_or((content, content));
-                if looks_like_url(url) {
-                    output.push('[');
-                    output.push_str(label);
-                    output.push_str("](");
-                    output.push_str(url);
-                    output.push(')');
-                    index += end + 1;
-                    continue;
-                }
+        if rest.starts_with('[')
+            && let Some(end) = find_unescaped(rest, ']', 1)
+        {
+            let content = &rest[1..end];
+            let (label, url) = content.split_once('|').unwrap_or((content, content));
+            if looks_like_url(url) {
+                output.push('[');
+                output.push_str(label);
+                output.push_str("](");
+                output.push_str(url);
+                output.push(')');
+                index += end + 1;
+                continue;
             }
         }
         if let Some((replacement, consumed)) = jira_emphasis(rest) {
@@ -284,43 +282,42 @@ fn markdown_inline_to_jira(input: &str) -> String {
                 continue;
             }
         }
-        if rest.starts_with('[') {
-            if let Some(label_end) = find_unescaped(rest, ']', 1) {
-                let after_label = &rest[label_end + 1..];
-                if let Some(url_part) = after_label.strip_prefix('(') {
-                    if let Some(url_end) = find_unescaped(url_part, ')', 0) {
-                        output.push('[');
-                        output.push_str(&rest[1..label_end]);
-                        output.push('|');
-                        output.push_str(&url_part[..url_end]);
-                        output.push(']');
-                        index += label_end + 2 + url_end + 1;
-                        continue;
-                    }
-                }
-            }
-        }
-        if let Some(after) = rest.strip_prefix("**") {
-            if let Some(end) = after.find("**").filter(|end| *end > 0) {
-                output.push('*');
-                output.push_str(&markdown_inline_to_jira(&after[..end]));
-                output.push('*');
-                index += 2 + end + 2;
+        if rest.starts_with('[')
+            && let Some(label_end) = find_unescaped(rest, ']', 1)
+        {
+            let after_label = &rest[label_end + 1..];
+            if let Some(url_part) = after_label.strip_prefix('(')
+                && let Some(url_end) = find_unescaped(url_part, ')', 0)
+            {
+                output.push('[');
+                output.push_str(&rest[1..label_end]);
+                output.push('|');
+                output.push_str(&url_part[..url_end]);
+                output.push(']');
+                index += label_end + 2 + url_end + 1;
                 continue;
             }
         }
-        if let Some(after) = rest.strip_prefix('*') {
-            if let Some(end) = after.find('*').filter(|end| *end > 0) {
-                let content = &after[..end];
-                if !content.starts_with(char::is_whitespace)
-                    && !content.ends_with(char::is_whitespace)
-                {
-                    output.push('_');
-                    output.push_str(&markdown_inline_to_jira(content));
-                    output.push('_');
-                    index += 1 + end + 1;
-                    continue;
-                }
+        if let Some(after) = rest.strip_prefix("**")
+            && let Some(end) = after.find("**").filter(|end| *end > 0)
+        {
+            output.push('*');
+            output.push_str(&markdown_inline_to_jira(&after[..end]));
+            output.push('*');
+            index += 2 + end + 2;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('*')
+            && let Some(end) = after.find('*').filter(|end| *end > 0)
+        {
+            let content = &after[..end];
+            if !content.starts_with(char::is_whitespace) && !content.ends_with(char::is_whitespace)
+            {
+                output.push('_');
+                output.push_str(&markdown_inline_to_jira(content));
+                output.push('_');
+                index += 1 + end + 1;
+                continue;
             }
         }
         let ch = rest.chars().next().expect("non-empty remainder");

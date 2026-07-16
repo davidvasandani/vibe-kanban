@@ -136,6 +136,7 @@ fn generate_types_content() -> String {
         server::routes::mcp_auth::McpAuthFlowState::decl(),
         server::routes::mcp_auth::McpAuthStatusResponse::decl(),
         services::services::cli_tools::CliToolId::decl(),
+        services::services::cli_tools::CliToolAuthState::decl(),
         services::services::cli_tools::HostCopy::decl(),
         services::services::cli_tools::AppCopy::decl(),
         services::services::cli_tools::CliToolStatus::decl(),

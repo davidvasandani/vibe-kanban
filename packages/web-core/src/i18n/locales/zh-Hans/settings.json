@@ -377,7 +377,12 @@
         "assignments": "分配",
         "assignmentsHelper": "每个服务器都会写入所有已选兼容代理的原生配置文件。"
       },
-      "conflicts": { "title": "原生配置冲突" },
+      "conflicts": {
+        "title": "原生配置冲突",
+        "useDefinition": "使用 {{agents}} 定义",
+        "helper": "选择一个定义应用于所有已分配的代理。保存前可以编辑。",
+        "customUnsupported": "必须先在代理的原生配置中编辑此自定义定义。"
+      },
       "delete": "删除服务器",
       "deleteConfirm": "要从所有已分配的代理配置中删除此共享 MCP 服务器吗？",
       "auth": {
@@ -465,6 +470,7 @@
         "connectFailed": "授权失败",
         "popupClosed": "授权窗口在完成前已关闭。",
         "popupBlocked": "弹出窗口被拦截 — 请允许此网站的弹出窗口后重试。",
+        "connectionOptions": "连接选项",
         "useLocalhostCallback": "使用 localhost 回调（适用于严格的服务器或手动批准）",
         "manualHint": "在弹出窗口中批准，然后将跳转页面的网址（或代码）粘贴到此处。",
         "manualPlaceholder": "粘贴重定向的网址或代码",
@@ -722,7 +728,22 @@
       "actions": {
         "install": "安装",
         "update": "更新到 {{version}}",
-        "remove": "移除"
+        "remove": "移除",
+        "login": "登录",
+        "reauthenticate": "重新认证"
+      },
+      "auth": {
+        "authenticated": "已认证",
+        "unauthenticated": "未认证",
+        "unknown": "认证状态未知",
+        "unsupported": "无法在应用内登录"
+      },
+      "login": {
+        "running": "请在终端中完成提示",
+        "connectionFailed": "无法打开登录连接",
+        "connectionClosed": "登录连接在完成前已关闭",
+        "cancel": "取消",
+        "retry": "重试"
       },
       "status": {
         "host": "由本机提供：{{path}}",

@@ -466,11 +466,13 @@ export type McpAuthStatusResponse = { status: McpAuthFlowState, error: string | 
 
 export type CliToolId = "aws" | "az" | "op" | "gam" | "mgc-beta" | "acli";
 
+export type CliToolAuthState = "authenticated" | "unauthenticated" | "unknown" | "unsupported";
+
 export type HostCopy = { path: string, version: string | null, };
 
 export type AppCopy = { version: string, outdated: boolean, installed_at: string, };
 
-export type CliToolStatus = { id: CliToolId, binary_name: string, display_name: string, description: string, catalog_version: string, supported: boolean, unsupported_reason: string | null, host: HostCopy | null, app: AppCopy | null, docs_url: string, };
+export type CliToolStatus = { id: CliToolId, binary_name: string, display_name: string, description: string, catalog_version: string, supported: boolean, unsupported_reason: string | null, host: HostCopy | null, app: AppCopy | null, docs_url: string, login_supported: boolean, auth_state: CliToolAuthState, auth_message: string | null, };
 
 export type CheckEditorAvailabilityQuery = { editor_type: EditorType, };
 

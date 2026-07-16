@@ -377,7 +377,12 @@
         "assignments": "指派",
         "assignmentsHelper": "每個伺服器都會寫入所有已選相容代理的原生設定檔。"
       },
-      "conflicts": { "title": "原生設定衝突" },
+      "conflicts": {
+        "title": "原生設定衝突",
+        "useDefinition": "使用 {{agents}} 定義",
+        "helper": "選擇一個定義套用至所有已指派的代理程式。儲存前可以編輯。",
+        "customUnsupported": "必須先在代理程式的原生設定中編輯此自訂定義。"
+      },
       "delete": "刪除伺服器",
       "deleteConfirm": "要從所有已指派的代理設定中刪除此共用 MCP 伺服器嗎？",
       "auth": {
@@ -465,6 +470,7 @@
         "connectFailed": "授權失敗",
         "popupClosed": "授權視窗在完成前已關閉。",
         "popupBlocked": "彈出視窗被封鎖 — 請允許此網站的彈出視窗後重試。",
+        "connectionOptions": "連線選項",
         "useLocalhostCallback": "使用 localhost 回呼（適用於嚴格的伺服器或手動核准）",
         "manualHint": "在彈出視窗中核准，然後將導向頁面的網址（或代碼）貼在此處。",
         "manualPlaceholder": "貼上重新導向的網址或代碼",
@@ -722,7 +728,22 @@
       "actions": {
         "install": "安裝",
         "update": "更新至 {{version}}",
-        "remove": "移除"
+        "remove": "移除",
+        "login": "登入",
+        "reauthenticate": "重新驗證"
+      },
+      "auth": {
+        "authenticated": "已驗證",
+        "unauthenticated": "未驗證",
+        "unknown": "驗證狀態未知",
+        "unsupported": "無法在應用程式內登入"
+      },
+      "login": {
+        "running": "請在終端機中完成提示",
+        "connectionFailed": "無法開啟登入連線",
+        "connectionClosed": "登入連線在完成前已關閉",
+        "cancel": "取消",
+        "retry": "重試"
       },
       "status": {
         "host": "由本機提供：{{path}}",

@@ -381,7 +381,12 @@
         "assignments": "asignaciones",
         "assignmentsHelper": "Cada servidor se escribe en el archivo de configuración nativo de cada agente compatible seleccionado."
       },
-      "conflicts": { "title": "Conflictos de configuración nativa" },
+      "conflicts": {
+        "title": "Conflictos de configuración nativa",
+        "useDefinition": "Usar la definición de {{agents}}",
+        "helper": "Elige una definición para aplicarla a todos los agentes asignados. Puedes editarla antes de guardar.",
+        "customUnsupported": "Esta definición personalizada debe editarse primero en la configuración nativa del agente."
+      },
       "delete": "Eliminar servidor",
       "deleteConfirm": "¿Eliminar este servidor MCP compartido de todas las configuraciones de agentes asignadas?",
       "auth": {
@@ -465,6 +470,7 @@
         "connectFailed": "Falló la autorización",
         "popupClosed": "La ventana de autorización se cerró antes de completar.",
         "popupBlocked": "Ventana emergente bloqueada: permite las ventanas emergentes para este sitio y vuelve a intentarlo.",
+        "connectionOptions": "Opciones de conexión",
         "useLocalhostCallback": "Usar callback de localhost (para servidores estrictos o aprobación manual)",
         "manualHint": "Aprueba en la ventana emergente y pega aquí la URL de la página final (o el código).",
         "manualPlaceholder": "Pega la URL redirigida o el código",
@@ -722,7 +728,22 @@
       "actions": {
         "install": "Instalar",
         "update": "Actualizar a {{version}}",
-        "remove": "Eliminar"
+        "remove": "Eliminar",
+        "login": "Iniciar sesión",
+        "reauthenticate": "Volver a autenticar"
+      },
+      "auth": {
+        "authenticated": "Autenticado",
+        "unauthenticated": "No autenticado",
+        "unknown": "Estado de autenticación desconocido",
+        "unsupported": "Inicio de sesión no disponible en la aplicación"
+      },
+      "login": {
+        "running": "Completa las indicaciones en la terminal",
+        "connectionFailed": "No se pudo abrir la conexión de inicio de sesión",
+        "connectionClosed": "La conexión se cerró antes de finalizar",
+        "cancel": "Cancelar",
+        "retry": "Reintentar"
       },
       "status": {
         "host": "Proporcionada por esta máquina: {{path}}",

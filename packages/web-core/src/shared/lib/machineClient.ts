@@ -23,6 +23,7 @@ import type { AppRuntime } from '@/shared/hooks/useAppRuntime';
 import { handleApiResponse } from './api';
 import {
   makeLocalApiRequest,
+  openLocalApiWebSocket,
   type LocalApiRequestOptions,
 } from './localApiTransport';
 
@@ -89,6 +90,7 @@ export interface MachineClient {
   installCliTool: (id: CliToolId) => Promise<CliToolStatus>;
   updateCliTool: (id: CliToolId) => Promise<CliToolStatus>;
   removeCliTool: (id: CliToolId) => Promise<CliToolStatus>;
+  openCliToolLogin: (id: CliToolId) => Promise<WebSocket>;
 }
 
 function getMachineRequestOptions(
@@ -351,6 +353,11 @@ export function createMachineClient(
           `/api/cli-tools/${encodeURIComponent(id)}`,
           { method: 'DELETE' }
         )
+      ),
+    openCliToolLogin: async (id) =>
+      openLocalApiWebSocket(
+        `/api/cli-tools/${encodeURIComponent(id)}/login/ws`,
+        getMachineRequestOptions(runtime, target)
       ),
   };
 }

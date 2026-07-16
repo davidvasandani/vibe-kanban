@@ -377,7 +377,12 @@
         "assignments": "affectations",
         "assignmentsHelper": "Chaque serveur est écrit dans le fichier de configuration natif de chaque agent compatible sélectionné."
       },
-      "conflicts": { "title": "Conflits de configuration native" },
+      "conflicts": {
+        "title": "Conflits de configuration native",
+        "useDefinition": "Utiliser la définition de {{agents}}",
+        "helper": "Choisissez une définition à appliquer à chaque agent affecté. Vous pouvez la modifier avant d’enregistrer.",
+        "customUnsupported": "Cette définition personnalisée doit d’abord être modifiée dans la configuration native de l’agent."
+      },
       "delete": "Supprimer le serveur",
       "deleteConfirm": "Supprimer ce serveur MCP partagé de toutes les configurations d’agents affectées ?",
       "auth": {
@@ -465,6 +470,7 @@
         "connectFailed": "Échec de l'autorisation",
         "popupClosed": "La fenêtre d'autorisation a été fermée avant la fin.",
         "popupBlocked": "Fenêtre contextuelle bloquée — autorisez les fenêtres contextuelles pour ce site et réessayez.",
+        "connectionOptions": "Options de connexion",
         "useLocalhostCallback": "Utiliser un callback localhost (pour serveurs stricts ou validation manuelle)",
         "manualHint": "Validez dans la fenêtre, puis collez ici l'URL de la page d'arrivée (ou le code).",
         "manualPlaceholder": "Collez l'URL redirigée ou le code",
@@ -722,7 +728,22 @@
       "actions": {
         "install": "Installer",
         "update": "Mettre à jour vers {{version}}",
-        "remove": "Supprimer"
+        "remove": "Supprimer",
+        "login": "Se connecter",
+        "reauthenticate": "Se réauthentifier"
+      },
+      "auth": {
+        "authenticated": "Authentifié",
+        "unauthenticated": "Non authentifié",
+        "unknown": "État d’authentification inconnu",
+        "unsupported": "Connexion indisponible dans l’application"
+      },
+      "login": {
+        "running": "Suivez les instructions dans le terminal",
+        "connectionFailed": "Impossible d’ouvrir la connexion",
+        "connectionClosed": "La connexion s’est fermée avant la fin",
+        "cancel": "Annuler",
+        "retry": "Réessayer"
       },
       "status": {
         "host": "Fourni par cette machine : {{path}}",
