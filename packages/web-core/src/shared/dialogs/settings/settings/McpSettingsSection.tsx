@@ -606,10 +606,10 @@ export function McpSettingsSection() {
                 // Transient polling error; manual completion remains available.
               }
               if (status?.status === 'completed') {
-                await finalizeConnected(serverName, executor);
                 setManualFlow((current) =>
                   current?.flowId === flowId ? null : current
                 );
+                await finalizeConnected(serverName, executor);
                 return;
               }
               if (status?.status === 'failed') {
@@ -672,9 +672,9 @@ export function McpSettingsSection() {
     });
     try {
       await machineClient.completeMcpAuth({ executor }, flowId, code);
-      await finalizeConnected(serverName, executor);
       setManualFlow(null);
       setManualCode('');
+      await finalizeConnected(serverName, executor);
     } catch (err) {
       setConnectErrors((prev) => ({
         ...prev,

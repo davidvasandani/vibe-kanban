@@ -47,7 +47,13 @@ Extend existing machinery instead of forking it. Before adding a code path,
 search for one that already does the job (git history, the knowledge base, the
 crate's `AGENTS.md`) and build on it.
 
-### VII. Managed tools are pinned, verified, and user-owned
+### VII. Workspace breadcrumbs preserve issue identity
+Any workspace breadcrumb that represents or links through an issue MUST display
+the issue ID. The ID is the stable cross-view reference for task identity, so it
+must remain visible even when the workspace title, issue title, or responsive
+layout is shortened.
+
+### VIII. Managed tools are pinned, verified, and user-owned
 Managed CLI catalog entries are a supply-chain boundary. Each tool must have a
 stable wire identifier, deterministic install location, pinned version, official
 source link, platform-specific artifact mapping, exact SHA-256 verification, and
@@ -57,7 +63,7 @@ errors never leave partial executables on an agent's PATH. Tool credentials and
 configuration remain user/host managed unless a spec explicitly and safely
 defines otherwise.
 
-### VIII. External agent protocols are defensive contracts
+### IX. External agent protocols are defensive contracts
 Coding-agent integrations use the vendor's documented noninteractive protocol,
 preserve stable serialized executor identifiers, and parse structured output
 without assuming the event schema is closed. Unknown events must degrade safely;
@@ -82,4 +88,4 @@ abstractions before introducing agent-specific parallel machinery.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.5.0 (adds defensive external-agent protocol contracts)
+**Version**: 0.6.0 (combines workspace identity, managed CLI supply-chain, and defensive external-agent protocol principles)

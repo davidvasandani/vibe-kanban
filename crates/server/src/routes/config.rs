@@ -332,6 +332,10 @@ pub struct SharedMcpAssignmentTestResult {
 
 /// Per-server connectivity timeout for the MCP test endpoint.
 const MCP_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Shared gateways can add an upstream hop, and large MCP servers may take
+/// longer to return their tool catalog. Keep native probes responsive while
+/// giving the full shared-gateway handshake a realistic budget.
+const SHARED_MCP_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 async fn get_mcp_servers(
     State(_deployment): State<DeploymentImpl>,
@@ -720,20 +724,25 @@ async fn test_shared_mcp_servers_route(
         let raw_config = read_agent_config(&config_path, &mcpc).await?;
         let mut servers = get_mcp_servers_from_config_path(&raw_config, &mcpc.servers_path);
         servers.retain(|name, _| server_names.contains(name));
-        let gateway_servers = servers
-            .iter()
-            .filter_map(|(name, entry)| {
+        let (gateway_servers, native_servers): (HashMap<_, _>, HashMap<_, _>) =
+            servers.into_iter().partition(|(_, entry)| {
                 entry
                     .get("url")
                     .or_else(|| entry.get("httpUrl"))
                     .and_then(Value::as_str)
                     .is_some_and(|url| url.contains("/mcp-gateway/"))
-                    .then_some(name.clone())
-            })
+            });
+        let gateway_names = gateway_servers
+            .keys()
+            .cloned()
             .collect::<std::collections::HashSet<_>>();
+        let (gateway_results, native_results) = tokio::join!(
+            test_mcp_servers(gateway_servers, SHARED_MCP_TEST_TIMEOUT),
+            test_mcp_servers(native_servers, MCP_TEST_TIMEOUT)
+        );
 
-        for result in test_mcp_servers(servers, MCP_TEST_TIMEOUT).await {
-            let gateway_managed = gateway_servers.contains(&result.name);
+        for result in gateway_results.into_iter().chain(native_results) {
+            let gateway_managed = gateway_names.contains(&result.name);
             let disconnected = result
                 .error
                 .as_deref()

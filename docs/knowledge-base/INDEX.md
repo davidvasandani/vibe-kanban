@@ -6,6 +6,7 @@ update pages (and this index) when a task ships something reusable.
 
 | Page | Summary | Contributing tasks |
 | --- | --- | --- |
+| [interrupted-worktree-recovery](interrupted-worktree-recovery.md) | Restart-safe WIP capture, truthful multi-repo partial-failure metadata, killed-orphan terminal state, and dirty reset/retry guards before process/history cleanup | `959a-restart-rewinds` |
 | [claude-log-normalization](claude-log-normalization.md) | How `ClaudeLogProcessor` turns stream-JSON into `/entries/{i}` patches; `EntryIndexProvider` idioms; the AmpResume index-reset gotcha | `4095-thinking-tokens` |
 | [collapsing-repeated-log-entries](collapsing-repeated-log-entries.md) | Server-side pattern for collapsing uninterrupted repeated log events into one entry with a `✓` per repeat | `4095-thinking-tokens` |
 | [grok-executor-integration](grok-executor-integration.md) | Grok Build's ACP launch/auth and approval contract, native TOML MCP shape, and the cross-product executor integration checklist | `43bc-add-grok-to-vk` |
