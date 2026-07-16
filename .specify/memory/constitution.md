@@ -47,7 +47,13 @@ Extend existing machinery instead of forking it. Before adding a code path,
 search for one that already does the job (git history, the knowledge base, the
 crate's `AGENTS.md`) and build on it.
 
-### VII. Managed tools are pinned, verified, and user-owned
+### VII. Workspace breadcrumbs preserve issue identity
+Any workspace breadcrumb that represents or links through an issue MUST display
+the issue ID. The ID is the stable cross-view reference for task identity, so it
+must remain visible even when the workspace title, issue title, or responsive
+layout is shortened.
+
+### VIII. Managed tools are pinned, verified, and user-owned
 Managed CLI catalog entries are a supply-chain boundary. Each tool must have a
 stable wire identifier, deterministic install location, pinned version, official
 source link, platform-specific artifact mapping, exact SHA-256 verification, and
@@ -72,4 +78,4 @@ defines otherwise.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.4.0 (adds managed CLI supply-chain and host-ownership principle)
+**Version**: 0.5.0 (combines workspace issue identity and managed CLI supply-chain principles)
