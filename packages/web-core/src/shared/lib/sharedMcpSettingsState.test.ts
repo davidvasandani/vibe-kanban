@@ -249,7 +249,10 @@ describe('shared MCP settings state', () => {
             value: { url: 'https://example.test/mcp' },
             representable_in_form: true,
           },
-          assignments: [assignment(BaseCodingAgent.CODEX)],
+          assignments: [
+            assignment(BaseCodingAgent.CODEX),
+            assignment(BaseCodingAgent.GROK),
+          ],
           native_sources: [],
         },
       ],

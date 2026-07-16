@@ -28,15 +28,16 @@ use crate::{
     executors::{ExecutorError, ExecutorExitResult, SpawnedChild, acp::AcpEvent},
 };
 
-fn select_auth_method(preferred: &[String], advertised: &[proto::AuthMethod]) -> Option<String> {
+fn select_auth_methods(preferred: &[String], advertised: &[proto::AuthMethod]) -> Vec<String> {
     preferred
         .iter()
-        .find(|candidate| {
+        .filter(|candidate| {
             advertised
                 .iter()
                 .any(|method| method.id.0.as_ref() == candidate.as_str())
         })
         .cloned()
+        .collect()
 }
 
 /// Reusable harness for ACP-based conns (Gemini, Qwen, etc.)
@@ -390,11 +391,11 @@ impl AcpAgentHarness {
                         };
 
                         if !auth_method_preference.is_empty() {
-                            let selected = select_auth_method(
+                            let selected = select_auth_methods(
                                 &auth_method_preference,
                                 &initialize.auth_methods,
                             );
-                            let Some(selected) = selected else {
+                            if selected.is_empty() {
                                 let advertised = initialize
                                     .auth_methods
                                     .iter()
@@ -412,12 +413,22 @@ impl AcpAgentHarness {
                                 }
                                 let _ = shutdown_tx.send(true);
                                 return;
-                            };
+                            }
 
-                            if let Err(e) = conn
-                                .authenticate(proto::AuthenticateRequest::new(selected))
-                                .await
-                            {
+                            let mut auth_error = None;
+                            for method in selected {
+                                match conn
+                                    .authenticate(proto::AuthenticateRequest::new(method))
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        auth_error = None;
+                                        break;
+                                    }
+                                    Err(error) => auth_error = Some(error),
+                                }
+                            }
+                            if let Some(e) = auth_error {
                                 let _ = log_tx.send(
                                     AcpEvent::Error(format!(
                                         "Grok authentication failed; run `grok login` or verify XAI_API_KEY: {e}"
@@ -659,11 +670,11 @@ mod tests {
             proto::AuthMethod::new("cached_token", "Cached login"),
         ];
         assert_eq!(
-            select_auth_method(
+            select_auth_methods(
                 &["cached_token".to_string(), "xai.api_key".to_string()],
                 &advertised
             ),
-            Some("cached_token".to_string())
+            vec!["cached_token".to_string(), "xai.api_key".to_string()]
         );
     }
 
@@ -671,8 +682,8 @@ mod tests {
     fn auth_selection_rejects_unadvertised_methods() {
         let advertised = vec![proto::AuthMethod::new("other", "Other")];
         assert_eq!(
-            select_auth_method(&["cached_token".to_string()], &advertised),
-            None
+            select_auth_methods(&["cached_token".to_string()], &advertised),
+            Vec::<String>::new()
         );
     }
 }

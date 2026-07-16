@@ -401,8 +401,10 @@ export function McpSettingsSection() {
             .filter(
               (profile) =>
                 !(
-                  profile.executor === BaseCodingAgentValue.CODEX &&
-                  definition.transport !== 'stdio'
+                  (profile.executor === BaseCodingAgentValue.CODEX &&
+                    definition.transport !== 'stdio') ||
+                  (profile.executor === BaseCodingAgentValue.GROK &&
+                    definition.transport === 'sse')
                 )
             )
             .slice(0, 1)
