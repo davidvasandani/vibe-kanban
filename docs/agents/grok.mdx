@@ -1,0 +1,59 @@
+---
+title: "Grok Build"
+description: "Set up xAI's official Grok coding agent"
+icon: https://x.ai/favicon.ico
+---
+
+Vibe Kanban uses xAI's official Grok Build CLI. It does not support the
+community `grok-dev` package with a similar name.
+
+<Steps>
+<Step title="Install Grok Build">
+  Follow the [official Grok Build installation instructions](https://docs.x.ai/build/overview).
+
+  Verify that the `grok` executable is available:
+
+  ```bash
+  grok version
+  ```
+</Step>
+
+<Step title="Authenticate with xAI">
+  Sign in once on your machine:
+
+  ```bash
+  grok login
+  ```
+
+  On a remote or headless host, use device authentication:
+
+  ```bash
+  grok login --device-auth
+  ```
+
+  You can alternatively set `XAI_API_KEY` in the environment that launches Vibe
+  Kanban. Vibe Kanban inherits this variable for Grok processes and does not
+  store it in your agent profile.
+</Step>
+
+<Step title="Select Grok in Vibe Kanban">
+  Start Vibe Kanban, create or open an agent configuration, and select **Grok**.
+  You can optionally specify a model and choose supervised or automatic tool
+  approvals.
+</Step>
+</Steps>
+
+## Configuration options
+
+- **Model**: Passes your model identifier to Grok. Leave it empty to use Grok's
+  configured default.
+- **Permissions**: Supervised mode sends tool requests to Vibe Kanban for
+  approval. Auto mode lets Grok approve tool executions automatically.
+- **Additional parameters and environment variables**: Extend the CLI command
+  through the standard agent configuration controls.
+
+## Troubleshooting
+
+If a turn reports that authentication is required, run `grok login` as the same
+operating-system user that runs Vibe Kanban, or verify that `XAI_API_KEY` is
+available to the Vibe Kanban process.

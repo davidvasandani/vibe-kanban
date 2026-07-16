@@ -440,6 +440,9 @@ export function codecForAgent(agent: BaseCodingAgent): McpServerCodec {
     case BaseCodingAgent.CLAUDE_CODE:
     case BaseCodingAgent.AMP:
     case BaseCodingAgent.DROID:
+      return claudeStyleCodec({ transports: ['stdio', 'http', 'sse'] });
+    case BaseCodingAgent.GROK:
+      return cursorCodec;
     default:
       return claudeStyleCodec({ transports: ['stdio', 'http', 'sse'] });
   }

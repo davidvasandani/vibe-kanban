@@ -90,7 +90,7 @@ export function resolveConflictVariant(
   const supportsSelectedDefinition = (executor: BaseCodingAgent) =>
     !(
       variant.definition.transport === 'sse' &&
-      executor === BaseCodingAgent.CODEX
+      (executor === BaseCodingAgent.CODEX || executor === BaseCodingAgent.GROK)
     );
   const server: SharedMcpDraftServer = {
     name: conflict.name,

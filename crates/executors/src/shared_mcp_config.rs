@@ -629,12 +629,12 @@ pub fn incompatibility_reason(
     executor: BaseCodingAgent,
     definition: &McpServerDefinition,
 ) -> Option<String> {
-    if matches!(executor, BaseCodingAgent::Codex)
+    if matches!(executor, BaseCodingAgent::Codex | BaseCodingAgent::Grok)
         && matches!(definition.transport, McpTransportKind::Sse)
     {
-        return Some(
-            "Codex supports stdio and streamable HTTP MCP servers, not legacy SSE".to_string(),
-        );
+        return Some(format!(
+            "{executor} supports stdio and streamable HTTP MCP servers, not legacy SSE"
+        ));
     }
     if matches!(definition.transport, McpTransportKind::Unknown) {
         return Some("This server shape cannot be shared safely".to_string());
@@ -728,7 +728,7 @@ pub fn materialize_definition(
                     out.insert("enabled".to_string(), Value::Bool(true));
                 } else if !matches!(
                     executor,
-                    BaseCodingAgent::CursorAgent | BaseCodingAgent::Codex
+                    BaseCodingAgent::CursorAgent | BaseCodingAgent::Codex | BaseCodingAgent::Grok
                 ) {
                     out.insert(
                         "type".to_string(),
@@ -966,6 +966,28 @@ mod tests {
                 "http_headers":{"Authorization":"Bearer token"}
             })
         );
+    }
+
+    #[test]
+    fn maps_grok_http_to_native_toml_shape_and_rejects_sse() {
+        let http = canonical_definition(&json!({
+            "type":"http",
+            "url":"https://example.test/mcp",
+            "headers":{"Authorization":"Bearer token"}
+        }));
+        assert_eq!(
+            materialize_definition(BaseCodingAgent::Grok, &http, None).unwrap(),
+            json!({
+                "url":"https://example.test/mcp",
+                "headers":{"Authorization":"Bearer token"}
+            })
+        );
+
+        let sse = canonical_definition(&json!({
+            "type":"sse",
+            "url":"https://example.test/sse"
+        }));
+        assert!(incompatibility_reason(BaseCodingAgent::Grok, &sse).is_some());
     }
 
     #[test]

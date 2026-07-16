@@ -28,11 +28,24 @@ use crate::{
     executors::{ExecutorError, ExecutorExitResult, SpawnedChild, acp::AcpEvent},
 };
 
+fn select_auth_methods(preferred: &[String], advertised: &[proto::AuthMethod]) -> Vec<String> {
+    preferred
+        .iter()
+        .filter(|candidate| {
+            advertised
+                .iter()
+                .any(|method| method.id.0.as_ref() == candidate.as_str())
+        })
+        .cloned()
+        .collect()
+}
+
 /// Reusable harness for ACP-based conns (Gemini, Qwen, etc.)
 pub struct AcpAgentHarness {
     session_namespace: String,
     model: Option<String>,
     mode: Option<String>,
+    auth_method_preference: Vec<String>,
 }
 
 impl Default for AcpAgentHarness {
@@ -49,6 +62,7 @@ impl AcpAgentHarness {
             session_namespace: "gemini_sessions".to_string(),
             model: None,
             mode: None,
+            auth_method_preference: vec![],
         }
     }
 
@@ -58,6 +72,7 @@ impl AcpAgentHarness {
             session_namespace: namespace.into(),
             model: None,
             mode: None,
+            auth_method_preference: vec![],
         }
     }
 
@@ -68,6 +83,18 @@ impl AcpAgentHarness {
 
     pub fn with_mode(mut self, mode: impl Into<String>) -> Self {
         self.mode = Some(mode.into());
+        self
+    }
+
+    /// Authenticate after ACP initialization using the first advertised method
+    /// in this preference list. Agents that authenticate outside ACP leave this
+    /// empty and retain the existing behavior.
+    pub fn with_auth_methods<I, S>(mut self, methods: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.auth_method_preference = methods.into_iter().map(Into::into).collect();
         self
     }
 
@@ -120,6 +147,7 @@ impl AcpAgentHarness {
             self.session_namespace.clone(),
             self.model.clone(),
             self.mode.clone(),
+            self.auth_method_preference.clone(),
             approvals,
             cancel.clone(),
         )
@@ -178,6 +206,7 @@ impl AcpAgentHarness {
             self.session_namespace.clone(),
             self.model.clone(),
             self.mode.clone(),
+            self.auth_method_preference.clone(),
             approvals,
             cancel.clone(),
         )
@@ -205,6 +234,7 @@ impl AcpAgentHarness {
         session_namespace: String,
         model: Option<String>,
         mode: Option<String>,
+        auth_method_preference: Vec<String>,
         approvals: Option<std::sync::Arc<dyn ExecutorApprovalService>>,
         cancel: CancellationToken,
     ) -> Result<(), ExecutorError> {
@@ -341,9 +371,77 @@ impl AcpAgentHarness {
                         });
 
                         // Initialize
-                        let _ = conn
+                        let initialize = conn
                             .initialize(proto::InitializeRequest::new(proto::ProtocolVersion::V1))
                             .await;
+
+                        let initialize = match initialize {
+                            Ok(response) => response,
+                            Err(e) => {
+                                let _ = log_tx.send(
+                                    AcpEvent::Error(format!("ACP initialization failed: {e}"))
+                                        .to_string(),
+                                );
+                                if let Some(tx) = exit_signal_tx.take() {
+                                    let _ = tx.send(ExecutorExitResult::Failure);
+                                }
+                                let _ = shutdown_tx.send(true);
+                                return;
+                            }
+                        };
+
+                        if !auth_method_preference.is_empty() {
+                            let selected = select_auth_methods(
+                                &auth_method_preference,
+                                &initialize.auth_methods,
+                            );
+                            if selected.is_empty() {
+                                let advertised = initialize
+                                    .auth_methods
+                                    .iter()
+                                    .map(|method| method.id.0.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                let _ = log_tx.send(
+                                    AcpEvent::Error(format!(
+                                        "Grok authentication required. Run `grok login` or set XAI_API_KEY (advertised ACP methods: {advertised})"
+                                    ))
+                                    .to_string(),
+                                );
+                                if let Some(tx) = exit_signal_tx.take() {
+                                    let _ = tx.send(ExecutorExitResult::Failure);
+                                }
+                                let _ = shutdown_tx.send(true);
+                                return;
+                            }
+
+                            let mut auth_error = None;
+                            for method in selected {
+                                match conn
+                                    .authenticate(proto::AuthenticateRequest::new(method))
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        auth_error = None;
+                                        break;
+                                    }
+                                    Err(error) => auth_error = Some(error),
+                                }
+                            }
+                            if let Some(e) = auth_error {
+                                let _ = log_tx.send(
+                                    AcpEvent::Error(format!(
+                                        "Grok authentication failed; run `grok login` or verify XAI_API_KEY: {e}"
+                                    ))
+                                    .to_string(),
+                                );
+                                if let Some(tx) = exit_signal_tx.take() {
+                                    let _ = tx.send(ExecutorExitResult::Failure);
+                                }
+                                let _ = shutdown_tx.send(true);
+                                return;
+                            }
+                        }
 
                         // Handle session creation/forking
                         let (acp_session_id, display_session_id, prompt_to_send) =
@@ -468,6 +566,7 @@ impl AcpAgentHarness {
                         );
 
                         let mut current_req = Some(initial_req);
+                        let mut turn_failed = false;
 
                         while let Some(req) = current_req.take() {
                             if cancel.is_cancelled() {
@@ -493,6 +592,7 @@ impl AcpAgentHarness {
                                     let _ = log_tx.send(AcpEvent::Done(stop_reason).to_string());
                                 }
                                 Err(e) => {
+                                    turn_failed = true;
                                     tracing::debug!("error {} {e} {:?}", e.code, e.data);
                                     if e.code
                                         == agent_client_protocol::ErrorCode::INTERNAL_ERROR.code
@@ -530,7 +630,12 @@ impl AcpAgentHarness {
 
                         // Notify container of completion
                         if let Some(tx) = exit_signal_tx.take() {
-                            let _ = tx.send(ExecutorExitResult::Success);
+                            let result = if turn_failed {
+                                ExecutorExitResult::Failure
+                            } else {
+                                ExecutorExitResult::Success
+                            };
+                            let _ = tx.send(result);
                         }
 
                         // Cancel session work
@@ -551,5 +656,34 @@ impl AcpAgentHarness {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_selection_uses_preference_order() {
+        let advertised = vec![
+            proto::AuthMethod::new("xai.api_key", "API key"),
+            proto::AuthMethod::new("cached_token", "Cached login"),
+        ];
+        assert_eq!(
+            select_auth_methods(
+                &["cached_token".to_string(), "xai.api_key".to_string()],
+                &advertised
+            ),
+            vec!["cached_token".to_string(), "xai.api_key".to_string()]
+        );
+    }
+
+    #[test]
+    fn auth_selection_rejects_unadvertised_methods() {
+        let advertised = vec![proto::AuthMethod::new("other", "Other")];
+        assert_eq!(
+            select_auth_methods(&["cached_token".to_string()], &advertised),
+            Vec::<String>::new()
+        );
     }
 }

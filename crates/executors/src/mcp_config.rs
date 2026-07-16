@@ -533,6 +533,7 @@ impl CodingAgent {
 
         let adapter = match self {
             CodingAgent::ClaudeCode(_) | CodingAgent::Amp(_) | CodingAgent::Droid(_) => Passthrough,
+            CodingAgent::Grok(_) => Cursor,
             CodingAgent::QwenCode(_) | CodingAgent::Gemini(_) => Gemini,
             CodingAgent::CursorAgent(_) => Cursor,
             CodingAgent::Codex(_) => Codex,
@@ -606,6 +607,19 @@ mod tests {
             vk["args"],
             serde_json::json!(["-y", "@ourscope/vibe-kanban@1.2.3", "--mcp"])
         );
+    }
+
+    #[test]
+    fn grok_preconfigured_http_servers_use_the_typeless_native_shape() {
+        let grok = CodingAgent::Grok(serde_json::from_value(serde_json::json!({})).unwrap());
+        let context7 = grok.preconfigured_mcp()["context7"].clone();
+
+        assert_eq!(
+            context7["url"],
+            serde_json::json!("https://mcp.context7.com/mcp")
+        );
+        assert!(context7.get("type").is_none());
+        assert!(context7.get("headers").is_some());
     }
 
     #[tokio::test]

@@ -63,6 +63,14 @@ errors never leave partial executables on an agent's PATH. Tool credentials and
 configuration remain user/host managed unless a spec explicitly and safely
 defines otherwise.
 
+### IX. External agent protocols are defensive contracts
+Coding-agent integrations use the vendor's documented noninteractive protocol,
+preserve stable serialized executor identifiers, and parse structured output
+without assuming the event schema is closed. Unknown events must degrade safely;
+session identity, cancellation, failures, and credential redaction must remain
+correct. Extend the shared executor, log-normalization, profile, and MCP
+abstractions before introducing agent-specific parallel machinery.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -72,10 +80,12 @@ defines otherwise.
 - Managed CLI catalog additions must preserve existing wire identifiers,
   host-copy precedence, removal/update behavior, and spawned-agent PATH
   semantics.
+- Executor additions must include generated-contract regeneration, exhaustive
+  backend/frontend mapping checks, and fixture-based protocol tests.
 - Run `pnpm run format` before completing a task.
 
 ## Governance
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.5.0 (combines workspace issue identity and managed CLI supply-chain principles)
+**Version**: 0.6.0 (combines workspace identity, managed CLI supply-chain, and defensive external-agent protocol principles)
