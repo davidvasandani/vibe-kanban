@@ -934,11 +934,7 @@ pub trait ContainerService {
             .map(|is_clean| !is_clean)
             .unwrap_or(false);
 
-        if reset_would_discard_uncommitted_work(
-            perform_git_reset,
-            is_dirty,
-            force_when_dirty,
-        ) {
+        if reset_would_discard_uncommitted_work(perform_git_reset, is_dirty, force_when_dirty) {
             return Err(ContainerError::Other(anyhow!(
                 "Worktree has uncommitted changes; reset was refused to avoid data loss. Preserve the changes or retry with force_when_dirty=true to discard them."
             )));

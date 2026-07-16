@@ -2417,6 +2417,7 @@ impl ContainerService for LocalContainerService {
 
         let workspace_root = PathBuf::from(container_ref);
         let repos_with_changes = self.check_repos_for_changes(&workspace_root, &ctx.repos)?;
+        let mut failures = Vec::new();
         for (repo, worktree_path) in repos_with_changes {
             match self.git().commit(
                 &worktree_path,
@@ -2424,19 +2425,22 @@ impl ContainerService for LocalContainerService {
             ) {
                 Ok(true) => tracing::info!("Committed interrupted WIP in repo '{}'", repo.name),
                 Ok(false) => {
-                    return Err(ContainerError::Other(anyhow!(
-                        "Interrupted WIP snapshot produced no commit for repo '{}'",
+                    failures.push(format!(
+                        "repo '{}': interrupted WIP snapshot produced no commit",
                         repo.name
-                    )));
+                    ));
                 }
                 Err(e) => {
-                    return Err(ContainerError::Other(anyhow!(
-                        "Failed to commit interrupted WIP in repo '{}': {}",
-                        repo.name,
-                        e
-                    )));
+                    failures.push(format!("repo '{}': {}", repo.name, e));
                 }
             }
+        }
+
+        if !failures.is_empty() {
+            return Err(ContainerError::Other(anyhow!(
+                "Failed to capture interrupted WIP: {}",
+                failures.join("; ")
+            )));
         }
 
         // Re-record HEAD so snapshot commits become this process's after-state.
