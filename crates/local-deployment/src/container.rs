@@ -2436,6 +2436,11 @@ impl ContainerService for LocalContainerService {
             }
         }
 
+        // Always record the resulting HEADs, including partial success in a
+        // multi-repo workspace, so durable WIP commits are never omitted from
+        // this process's repository state.
+        self.update_after_head_commits(process.id).await;
+
         if !failures.is_empty() {
             return Err(ContainerError::Other(anyhow!(
                 "Failed to capture interrupted WIP: {}",
@@ -2443,8 +2448,6 @@ impl ContainerService for LocalContainerService {
             )));
         }
 
-        // Re-record HEAD so snapshot commits become this process's after-state.
-        self.update_after_head_commits(process.id).await;
         Ok(())
     }
 
