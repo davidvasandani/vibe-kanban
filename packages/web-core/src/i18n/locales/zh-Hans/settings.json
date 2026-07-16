@@ -380,6 +380,17 @@
       "conflicts": { "title": "原生配置冲突" },
       "delete": "删除服务器",
       "deleteConfirm": "要从所有已分配的代理配置中删除此共享 MCP 服务器吗？",
+      "auth": {
+        "sharedGateway": "共享网关身份验证",
+        "explicitHeader": "显式请求头身份验证",
+        "agentNative": "代理原生身份验证",
+        "none": "无身份验证",
+        "disconnect": "断开连接",
+        "reconnect": "重新连接",
+        "disconnectConfirm": "要为所有已分配的代理断开此共享凭据吗？",
+        "cloudflareClientId": "Cloudflare Access 服务令牌客户端 ID（仅写入）",
+        "cloudflareClientSecret": "Cloudflare Access 服务令牌客户端密钥（仅写入）"
+      },
       "list": {
         "empty": "尚未配置 MCP 服务器。在下方添加一个。",
         "addServer": "添加服务器",

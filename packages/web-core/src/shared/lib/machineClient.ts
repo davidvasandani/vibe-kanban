@@ -71,11 +71,13 @@ export interface MachineClient {
   testSharedMcpAssignments: (
     body?: SharedMcpTestRequest
   ) => Promise<SharedMcpAssignmentTestResult[]>;
+  disconnectSharedMcp: (connectionId: string) => Promise<boolean>;
   startMcpAuth: (
     query: McpServerQuery,
     serverName: string,
     wwwAuthenticate?: string | null,
-    loopback?: boolean
+    loopback?: boolean,
+    cloudflareAccess?: { clientId: string; clientSecret: string }
   ) => Promise<McpAuthStartResponse>;
   getMcpAuthStatus: (flowId: string) => Promise<McpAuthStatusResponse>;
   completeMcpAuth: (
@@ -259,7 +261,22 @@ export function createMachineClient(
           }
         )
       ),
-    startMcpAuth: async (query, serverName, wwwAuthenticate, loopback) => {
+    disconnectSharedMcp: async (connectionId) =>
+      handleApiResponse<boolean>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/mcp-gateway/connections/${encodeURIComponent(connectionId)}`,
+          { method: 'DELETE' }
+        )
+      ),
+    startMcpAuth: async (
+      query,
+      serverName,
+      wwwAuthenticate,
+      loopback,
+      cloudflareAccess
+    ) => {
       const params = new URLSearchParams(query);
       return handleApiResponse<McpAuthStartResponse>(
         await makeMachineRequest(
@@ -272,6 +289,9 @@ export function createMachineClient(
               server_name: serverName,
               www_authenticate: wwwAuthenticate ?? null,
               loopback: loopback ?? false,
+              shared_gateway: true,
+              cf_access_client_id: cloudflareAccess?.clientId,
+              cf_access_client_secret: cloudflareAccess?.clientSecret,
             }),
           }
         )

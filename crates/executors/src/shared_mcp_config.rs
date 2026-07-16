@@ -67,6 +67,15 @@ pub enum SharedMcpSourceKind {
     Custom,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedMcpAuthMode {
+    SharedGateway,
+    AgentNative,
+    ExplicitHeader,
+    None,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SharedMcpCompatibility {
     pub executor: BaseCodingAgent,
@@ -82,6 +91,8 @@ pub struct SharedMcpServer {
     pub source_kind: SharedMcpSourceKind,
     pub native_sources: Vec<NativeMcpSource>,
     pub compatibility: Vec<SharedMcpCompatibility>,
+    pub auth_mode: SharedMcpAuthMode,
+    pub gateway_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -306,10 +317,10 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
 
         if variants.len() == 1 {
             let (_, group) = variants.into_iter().next().expect("variant exists");
-            let definition = group[0].1.clone();
+            let definition = redact_gateway_definition(group[0].1.clone());
             let native_sources = group
                 .iter()
-                .map(|(source, _)| source.clone())
+                .map(|(source, _)| redact_gateway_source(source.clone()))
                 .collect::<Vec<_>>();
             let assignments = native_sources
                 .iter()
@@ -328,16 +339,18 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
                 },
                 native_sources,
                 compatibility: compatibility_for_profiles(&profiles, &definition),
+                auth_mode: auth_mode(&definition),
+                gateway_status: None,
             });
         } else {
             let variants = variants
                 .into_iter()
                 .enumerate()
                 .map(|(idx, (_, group))| {
-                    let definition = group[0].1.clone();
+                    let definition = redact_gateway_definition(group[0].1.clone());
                     let native_sources = group
                         .iter()
-                        .map(|(source, _)| source.clone())
+                        .map(|(source, _)| redact_gateway_source(source.clone()))
                         .collect::<Vec<_>>();
                     let assignments = native_sources
                         .iter()
@@ -368,6 +381,71 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
         preconfigured: PRECONFIGURED_MCP_SERVERS.clone(),
         read_errors,
     }
+}
+
+fn gateway_url(definition: &McpServerDefinition) -> Option<&str> {
+    definition
+        .value
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|url| url.contains("/mcp-gateway/"))
+}
+
+fn auth_mode(definition: &McpServerDefinition) -> SharedMcpAuthMode {
+    if gateway_url(definition).is_some() {
+        return SharedMcpAuthMode::SharedGateway;
+    }
+    let has_auth = definition
+        .value
+        .get("headers")
+        .and_then(Value::as_object)
+        .is_some_and(|headers| {
+            headers
+                .keys()
+                .any(|key| key.eq_ignore_ascii_case("authorization"))
+        });
+    if has_auth {
+        SharedMcpAuthMode::ExplicitHeader
+    } else if matches!(
+        definition.transport,
+        McpTransportKind::Http | McpTransportKind::Sse
+    ) {
+        SharedMcpAuthMode::AgentNative
+    } else {
+        SharedMcpAuthMode::None
+    }
+}
+
+fn redact_gateway_definition(mut definition: McpServerDefinition) -> McpServerDefinition {
+    if gateway_url(&definition).is_some()
+        && let Some(headers) = definition
+            .value
+            .get_mut("headers")
+            .and_then(Value::as_object_mut)
+    {
+        for (name, value) in headers {
+            if name.eq_ignore_ascii_case("authorization") {
+                *value = Value::String("Bearer [REDACTED]".to_string());
+            }
+        }
+    }
+    definition
+}
+
+fn redact_gateway_source(mut source: NativeMcpSource) -> NativeMcpSource {
+    let definition = canonical_definition(&source.entry);
+    if gateway_url(&definition).is_some() {
+        for key in ["headers", "http_headers"] {
+            if let Some(headers) = source.entry.get_mut(key).and_then(Value::as_object_mut) {
+                for (name, value) in headers {
+                    if name.eq_ignore_ascii_case("authorization") {
+                        *value = Value::String("Bearer [REDACTED]".to_string());
+                    }
+                }
+            }
+        }
+    }
+    source
 }
 
 fn assignment_from_source(
@@ -695,11 +773,12 @@ pub fn plan_servers_for_executor(
     let mut affected = Vec::new();
     for server in &request.servers {
         if server.assignments.contains(&executor) {
-            let entry = materialize_definition(
+            let mut entry = materialize_definition(
                 executor,
                 &server.definition,
                 server.native_overrides.get(&executor),
             )?;
+            preserve_gateway_capability(current, &server.name, &mut entry);
             next.insert(server.name.clone(), entry);
             affected.push(server.name.clone());
         } else if next.remove(&server.name).is_some() {
@@ -712,6 +791,46 @@ pub fn plan_servers_for_executor(
         }
     }
     Ok((next, affected))
+}
+
+fn preserve_gateway_capability(
+    current_servers: &HashMap<String, Value>,
+    current_name: &str,
+    next: &mut Value,
+) {
+    let next_definition = canonical_definition(next);
+    let Some(next_gateway_url) = gateway_url(&next_definition) else {
+        return;
+    };
+    let current = current_servers.get(current_name).or_else(|| {
+        current_servers
+            .values()
+            .find(|entry| gateway_url(&canonical_definition(entry)) == Some(next_gateway_url))
+    });
+    let Some(current) = current else { return };
+    let current_definition = canonical_definition(current);
+    let current_auth = current_definition
+        .value
+        .get("headers")
+        .and_then(Value::as_object)
+        .and_then(|headers| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("authorization"))
+        })
+        .map(|(_, value)| value.clone());
+    for key in ["headers", "http_headers"] {
+        if let Some(headers) = next.get_mut(key).and_then(Value::as_object_mut) {
+            for (name, value) in headers {
+                if name.eq_ignore_ascii_case("authorization")
+                    && value.as_str() == Some("Bearer [REDACTED]")
+                    && let Some(current_auth) = &current_auth
+                {
+                    *value = current_auth.clone();
+                }
+            }
+        }
+    }
 }
 
 pub fn validate_write_request(request: &SharedMcpWriteRequest) -> Result<(), String> {
@@ -893,5 +1012,63 @@ mod tests {
         assert_eq!(next.get("shared"), None);
         assert_eq!(next["other"], json!({"command":"keep"}));
         assert_eq!(affected, vec!["shared"]);
+    }
+
+    #[test]
+    fn gateway_capability_is_redacted_on_read_and_preserved_on_save() {
+        let entry = json!({
+            "url":"http://127.0.0.1:3334/mcp-gateway/00000000-0000-0000-0000-000000000001",
+            "headers":{"Authorization":"Bearer local-secret"}
+        });
+        let response = reconcile_snapshots(vec![snapshot(
+            BaseCodingAgent::ClaudeCode,
+            HashMap::from([("tools".to_string(), entry.clone())]),
+        )]);
+        assert_eq!(
+            response.servers[0].auth_mode,
+            SharedMcpAuthMode::SharedGateway
+        );
+        assert_eq!(
+            response.servers[0].definition.value["headers"]["Authorization"],
+            "Bearer [REDACTED]"
+        );
+        assert_eq!(
+            response.servers[0].native_sources[0].entry["headers"]["Authorization"],
+            "Bearer [REDACTED]"
+        );
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "tools".to_string(),
+                definition: response.servers[0].definition.clone(),
+                assignments: vec![BaseCodingAgent::ClaudeCode],
+                native_overrides: HashMap::new(),
+            }],
+            resolved_conflicts: Vec::new(),
+            removed_servers: Vec::new(),
+        };
+        let (next, _) = plan_servers_for_executor(
+            BaseCodingAgent::ClaudeCode,
+            &HashMap::from([("tools".to_string(), entry.clone())]),
+            &request,
+        )
+        .unwrap();
+        assert_eq!(
+            next["tools"]["headers"]["Authorization"],
+            "Bearer local-secret"
+        );
+
+        let mut renamed = request;
+        renamed.servers[0].name = "renamed-tools".to_string();
+        renamed.removed_servers.push("tools".to_string());
+        let (next, _) = plan_servers_for_executor(
+            BaseCodingAgent::ClaudeCode,
+            &HashMap::from([("tools".to_string(), entry)]),
+            &renamed,
+        )
+        .unwrap();
+        assert_eq!(
+            next["renamed-tools"]["headers"]["Authorization"],
+            "Bearer local-secret"
+        );
     }
 }

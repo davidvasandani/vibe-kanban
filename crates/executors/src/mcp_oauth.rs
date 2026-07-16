@@ -23,6 +23,7 @@ use std::{
 use base64::Engine;
 use rand::{Rng, distributions::Alphanumeric};
 use reqwest::{Url, header::WWW_AUTHENTICATE, redirect::Policy};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -32,6 +33,7 @@ pub struct AuthServerMetadata {
     pub authorization_endpoint: String,
     pub token_endpoint: String,
     pub registration_endpoint: Option<String>,
+    pub revocation_endpoint: Option<String>,
     pub scopes_supported: Vec<String>,
     /// Canonical resource URI to bind tokens to (RFC 8707): the protected
     /// resource metadata's `resource` when present, else the MCP server URL.
@@ -50,10 +52,25 @@ pub struct Pkce {
 /// Every request resolves and validates its destination, then pins those DNS
 /// answers into the reqwest client that makes the connection. Redirects are
 /// disabled so a validated public URL cannot bounce to an internal address.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OAuthHttpClient {
     timeout: Duration,
     loopback_dev_origin: Option<Origin>,
+    mcp_origin: Origin,
+    cloudflare_access: Option<(Origin, String, String)>,
+}
+
+impl std::fmt::Debug for OAuthHttpClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthHttpClient")
+            .field("timeout", &self.timeout)
+            .field("loopback_dev_origin", &self.loopback_dev_origin)
+            .field(
+                "cloudflare_access",
+                &self.cloudflare_access.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,12 +101,20 @@ impl OAuthHttpClient {
         let mcp_url = Url::parse(mcp_server_url)
             .map_err(|_| "configured MCP server URL is invalid".to_string())?;
         let origin = Origin::from_url(&mcp_url)?;
-        let loopback_dev_origin =
-            (origin.scheme == "http" && host_is_literal_loopback(&origin.host)).then_some(origin);
+        let loopback_dev_origin = (origin.scheme == "http"
+            && host_is_literal_loopback(&origin.host))
+        .then_some(origin.clone());
         Ok(Self {
             timeout,
             loopback_dev_origin,
+            mcp_origin: origin,
+            cloudflare_access: None,
         })
+    }
+
+    pub fn with_cloudflare_access(mut self, client_id: String, client_secret: String) -> Self {
+        self.cloudflare_access = Some((self.mcp_origin.clone(), client_id, client_secret));
+        self
     }
 
     async fn client_for(&self, raw_url: &str) -> Result<(reqwest::Client, Url), String> {
@@ -136,8 +161,15 @@ impl OAuthHttpClient {
 
     async fn get(&self, url: &str) -> Result<reqwest::Response, String> {
         let (client, parsed) = self.client_for(url).await?;
-        client
-            .get(parsed)
+        let mut request = client.get(parsed.clone());
+        if let Some((access_origin, id, secret)) = &self.cloudflare_access
+            && Origin::from_url(&parsed).ok().as_ref() == Some(access_origin)
+        {
+            request = request
+                .header("CF-Access-Client-Id", id)
+                .header("CF-Access-Client-Secret", secret);
+        }
+        request
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await
@@ -146,8 +178,15 @@ impl OAuthHttpClient {
 
     async fn post_json(&self, url: &str, body: &Value) -> Result<reqwest::Response, String> {
         let (client, parsed) = self.client_for(url).await?;
-        client
-            .post(parsed)
+        let mut request = client.post(parsed.clone());
+        if let Some((access_origin, id, secret)) = &self.cloudflare_access
+            && Origin::from_url(&parsed).ok().as_ref() == Some(access_origin)
+        {
+            request = request
+                .header("CF-Access-Client-Id", id)
+                .header("CF-Access-Client-Secret", secret);
+        }
+        request
             .json(body)
             .send()
             .await
@@ -156,8 +195,15 @@ impl OAuthHttpClient {
 
     async fn post_form(&self, url: &str, body: String) -> Result<reqwest::Response, String> {
         let (client, parsed) = self.client_for(url).await?;
-        client
-            .post(parsed)
+        let mut request = client.post(parsed.clone());
+        if let Some((access_origin, id, secret)) = &self.cloudflare_access
+            && Origin::from_url(&parsed).ok().as_ref() == Some(access_origin)
+        {
+            request = request
+                .header("CF-Access-Client-Id", id)
+                .header("CF-Access-Client-Secret", secret);
+        }
+        request
             .header(
                 reqwest::header::CONTENT_TYPE,
                 "application/x-www-form-urlencoded",
@@ -324,6 +370,12 @@ fn as_metadata_candidates(as_url: &Url) -> Vec<String> {
 /// a soft error (the caller tries the next candidate URL).
 async fn fetch_json(client: &OAuthHttpClient, url: &str) -> Result<Value, String> {
     let resp = client.get(url).await?;
+    if resp.status().is_redirection() {
+        return Err(
+            "OAuth metadata was redirected to an interactive login (HTTP 3xx). If this server is protected by Cloudflare Access, configure a Cloudflare Access service token for shared gateway authentication or adjust the Access policy"
+                .to_string(),
+        );
+    }
     if !resp.status().is_success() {
         return Err(format!(
             "OAuth endpoint returned HTTP {}",
@@ -436,6 +488,7 @@ pub async fn discover(
                         authorization_endpoint,
                         token_endpoint,
                         registration_endpoint: string_field(&meta, "registration_endpoint"),
+                        revocation_endpoint: string_field(&meta, "revocation_endpoint"),
                         scopes_supported,
                         resource,
                     });
@@ -484,11 +537,18 @@ fn validate_server_metadata(expected_issuer: &Url, metadata: &Value) -> Result<(
         };
         let endpoint =
             Url::parse(&raw).map_err(|_| format!("authorization server {field} is invalid"))?;
-        if (endpoint.scheme() != "https" && !loopback_dev)
-            || !same_origin(expected_issuer, &endpoint)
+        let requires_issuer_origin = field != "authorization_endpoint";
+        let secure_endpoint = endpoint.scheme() == "https"
+            || (loopback_dev && same_origin(expected_issuer, &endpoint));
+        if !secure_endpoint || (requires_issuer_origin && !same_origin(expected_issuer, &endpoint))
         {
             return Err(format!(
-                "authorization server {field} must use HTTPS and the issuer origin"
+                "authorization server {field} must use HTTPS{}",
+                if requires_issuer_origin {
+                    " and the issuer origin"
+                } else {
+                    ""
+                }
             ));
         }
     }
@@ -562,9 +622,33 @@ pub fn build_authorize_url(
     Ok(url.to_string())
 }
 
-/// Exchange an authorization code for an access token. Returns only the
-/// access token string so the secret spreads no further than necessary.
-pub async fn exchange_code(
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OAuthTokenSet {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub token_type: Option<String>,
+    pub expires_in: Option<u64>,
+    pub scope: Option<String>,
+}
+
+impl std::fmt::Debug for OAuthTokenSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokenSet")
+            .field("access_token", &"[REDACTED]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+/// Exchange an authorization code while retaining refresh/expiry metadata for
+/// the shared gateway. The token set's Debug implementation is redacted.
+pub async fn exchange_token_set(
     client: &OAuthHttpClient,
     token_endpoint: &str,
     client_id: &str,
@@ -572,7 +656,7 @@ pub async fn exchange_code(
     pkce_verifier: &str,
     redirect_uri: &str,
     resource: &str,
-) -> Result<String, String> {
+) -> Result<OAuthTokenSet, String> {
     let params = [
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -595,8 +679,114 @@ pub async fn exchange_code(
     if !status.is_success() {
         return Err(format!("token exchange failed (HTTP {})", status.as_u16()));
     }
-    string_field(&value, "access_token")
-        .ok_or_else(|| "token response lacks access_token".to_string())
+    let access_token = string_field(&value, "access_token")
+        .ok_or_else(|| "token response lacks access_token".to_string())?;
+    Ok(OAuthTokenSet {
+        access_token,
+        refresh_token: string_field(&value, "refresh_token"),
+        token_type: string_field(&value, "token_type"),
+        expires_in: value.get("expires_in").and_then(Value::as_u64),
+        scope: string_field(&value, "scope"),
+    })
+}
+
+pub async fn exchange_code(
+    client: &OAuthHttpClient,
+    token_endpoint: &str,
+    client_id: &str,
+    code: &str,
+    pkce_verifier: &str,
+    redirect_uri: &str,
+    resource: &str,
+) -> Result<String, String> {
+    exchange_token_set(
+        client,
+        token_endpoint,
+        client_id,
+        code,
+        pkce_verifier,
+        redirect_uri,
+        resource,
+    )
+    .await
+    .map(|tokens| tokens.access_token)
+}
+
+pub async fn refresh_access_token(
+    client: &OAuthHttpClient,
+    token_endpoint: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    refresh_token: &str,
+    resource: &str,
+) -> Result<OAuthTokenSet, String> {
+    let mut params = vec![
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+        ("resource", resource),
+    ];
+    if let Some(secret) = client_secret {
+        params.push(("client_secret", secret));
+    }
+    let mut encoder = Url::parse("http://encode.invalid/").expect("static url parses");
+    encoder.query_pairs_mut().extend_pairs(params);
+    let response = client
+        .post_form(
+            token_endpoint,
+            encoder.query().unwrap_or_default().to_string(),
+        )
+        .await?;
+    let status = response.status();
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|_| "token endpoint returned invalid JSON".to_string())?;
+    if !status.is_success() {
+        return Err(format!("token refresh failed (HTTP {})", status.as_u16()));
+    }
+    Ok(OAuthTokenSet {
+        access_token: string_field(&value, "access_token")
+            .ok_or_else(|| "token response lacks access_token".to_string())?,
+        refresh_token: string_field(&value, "refresh_token")
+            .or_else(|| Some(refresh_token.to_string())),
+        token_type: string_field(&value, "token_type"),
+        expires_in: value.get("expires_in").and_then(Value::as_u64),
+        scope: string_field(&value, "scope"),
+    })
+}
+
+pub async fn revoke_token(
+    client: &OAuthHttpClient,
+    revocation_endpoint: &str,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
+    token: &str,
+    token_type_hint: &str,
+) -> Result<(), String> {
+    let mut params = vec![("token", token), ("token_type_hint", token_type_hint)];
+    if let Some(client_id) = client_id {
+        params.push(("client_id", client_id));
+    }
+    if let Some(client_secret) = client_secret {
+        params.push(("client_secret", client_secret));
+    }
+    let mut encoder = Url::parse("http://encode.invalid/").expect("static url parses");
+    encoder.query_pairs_mut().extend_pairs(params);
+    let response = client
+        .post_form(
+            revocation_endpoint,
+            encoder.query().unwrap_or_default().to_string(),
+        )
+        .await?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "token revocation failed (HTTP {})",
+            response.status().as_u16()
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -718,6 +908,49 @@ mod tests {
         assert_eq!(canonical_resource(&url), "https://x.dev/mcp");
     }
 
+    #[test]
+    fn metadata_allows_https_authorization_endpoint_on_another_origin() {
+        let issuer = Url::parse("https://issuer.example.com").unwrap();
+        let metadata = serde_json::json!({
+            "issuer": "https://issuer.example.com",
+            "authorization_endpoint": "https://login.example.com/authorize",
+            "token_endpoint": "https://issuer.example.com/token",
+            "registration_endpoint": "https://issuer.example.com/register"
+        });
+
+        validate_server_metadata(&issuer, &metadata).unwrap();
+    }
+
+    #[test]
+    fn metadata_rejects_cross_origin_credential_endpoints() {
+        let issuer = Url::parse("https://issuer.example.com").unwrap();
+        for field in ["token_endpoint", "registration_endpoint"] {
+            let mut metadata = serde_json::json!({
+                "issuer": "https://issuer.example.com",
+                "authorization_endpoint": "https://login.example.com/authorize",
+                "token_endpoint": "https://issuer.example.com/token",
+                "registration_endpoint": "https://issuer.example.com/register"
+            });
+            metadata[field] = serde_json::json!(format!("https://evil.example/{field}"));
+
+            let error = validate_server_metadata(&issuer, &metadata).unwrap_err();
+            assert!(error.contains("issuer origin"), "got: {error}");
+        }
+    }
+
+    #[test]
+    fn loopback_issuer_does_not_allow_external_http_authorization_endpoint() {
+        let issuer = Url::parse("http://127.0.0.1:8080").unwrap();
+        let metadata = serde_json::json!({
+            "issuer": "http://127.0.0.1:8080",
+            "authorization_endpoint": "http://login.example.com/authorize",
+            "token_endpoint": "http://127.0.0.1:8080/token",
+            "registration_endpoint": "http://127.0.0.1:8080/register"
+        });
+
+        assert!(validate_server_metadata(&issuer, &metadata).is_err());
+    }
+
     /// Serve `responses` (raw HTTP/1.1 bytes) to sequential connections on a
     /// loopback listener; returns the base URL.
     async fn one_shot_server(responses: Vec<String>) -> String {
@@ -774,6 +1007,18 @@ mod tests {
             .unwrap_err();
         assert!(!err.contains("loopback not allowed"), "got: {err}");
         assert!(err.contains("HTTP 400"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn metadata_redirect_has_cloudflare_guidance_without_location() {
+        let base = one_shot_server(vec![
+            "HTTP/1.1 302 Found\r\nlocation: https://access.example/cdn-cgi/access/login?secret=value\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string(),
+        ])
+        .await;
+        let client = OAuthHttpClient::new(Duration::from_secs(2), &base).unwrap();
+        let err = fetch_json(&client, &base).await.unwrap_err();
+        assert!(err.contains("Cloudflare Access service token"));
+        assert!(!err.contains("secret=value"));
     }
 
     #[tokio::test]
@@ -928,7 +1173,7 @@ mod tests {
         });
         assert!(validate_server_metadata(&issuer, &valid).is_ok());
         for (field, endpoint) in [
-            ("authorization_endpoint", "https://evil.example/authorize"),
+            ("authorization_endpoint", "http://login.example/authorize"),
             ("token_endpoint", "http://as.example.com/token"),
             ("registration_endpoint", "https://evil.example/register"),
         ] {
@@ -947,7 +1192,8 @@ mod tests {
         let base = one_shot_server(vec![response]).await;
         let client = OAuthHttpClient::new(Duration::from_secs(2), &base).unwrap();
         let err = fetch_json(&client, &base).await.unwrap_err();
-        assert!(err.contains("HTTP 302"), "got: {err}");
+        assert!(err.contains("HTTP 3xx"), "got: {err}");
+        assert!(err.contains("Cloudflare Access"), "got: {err}");
     }
 
     #[tokio::test]

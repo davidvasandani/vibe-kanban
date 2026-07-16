@@ -53,6 +53,7 @@ serde_with = "3"
 async-trait = "0.1"
 aws-lc-sys = "=0.37.0"
 aws-lc-rs = "=1.16.0"
+aes-gcm = "0.10"
 
 [profile.release]
 debug = 1

@@ -7,6 +7,8 @@ import {
   indexAssignmentTests,
   inputsFromDraft,
   mergeOAuthRefresh,
+  removedServerNames,
+  resolveConflictVariant,
   sharedMcpSnapshot,
   testKey,
   testTargetsForDraft,
@@ -144,5 +146,152 @@ describe('shared MCP settings state', () => {
       command: 'npx',
       headers: { Authorization: 'Bearer token' },
     });
+  });
+
+  it('promotes a selected conflict variant into an editable shared server', () => {
+    const definition = {
+      transport: 'http' as const,
+      value: { url: 'https://rovo.example/mcp' },
+      representable_in_form: true,
+    };
+    const assignment = (executor: BaseCodingAgent) => ({
+      executor,
+      native_name: 'Atlassian Rovo',
+      native_entry: { url: 'https://rovo.example/mcp' },
+      has_credentials: false,
+      representable: true,
+      incompatibility_reason: null,
+    });
+    const conflict = {
+      name: 'Atlassian Rovo',
+      message: 'different definitions',
+      variants: [
+        {
+          variant_id: 'variant-1',
+          definition,
+          assignments: [assignment(BaseCodingAgent.CLAUDE_CODE)],
+          native_sources: [],
+        },
+        {
+          variant_id: 'variant-2',
+          definition: { ...definition, value: { url: 'https://other.test' } },
+          assignments: [assignment(BaseCodingAgent.CODEX)],
+          native_sources: [],
+        },
+      ],
+    };
+    const resolved = resolveConflictVariant(
+      { servers: [], conflicts: [conflict] },
+      conflict,
+      conflict.variants[0]
+    );
+
+    expect(resolved.conflicts).toEqual([]);
+    expect(resolved.servers).toEqual([
+      {
+        name: 'Atlassian Rovo',
+        definition,
+        assignments: [BaseCodingAgent.CLAUDE_CODE, BaseCodingAgent.CODEX],
+      },
+    ]);
+  });
+
+  it('keeps custom conflict variants unresolved', () => {
+    const conflict = {
+      name: 'custom',
+      message: 'different definitions',
+      variants: [
+        {
+          variant_id: 'variant-1',
+          definition: {
+            transport: 'unknown' as const,
+            value: { custom: true },
+            representable_in_form: false,
+          },
+          assignments: [],
+          native_sources: [],
+        },
+      ],
+    };
+    const state = { servers: [], conflicts: [conflict] };
+    expect(resolveConflictVariant(state, conflict, conflict.variants[0])).toBe(
+      state
+    );
+  });
+
+  it('does not inherit assignments incompatible with the selected variant', () => {
+    const assignment = (executor: BaseCodingAgent) => ({
+      executor,
+      native_name: 'mixed',
+      native_entry: {},
+      has_credentials: false,
+      representable: true,
+      incompatibility_reason: null,
+    });
+    const conflict = {
+      name: 'mixed',
+      message: 'different definitions',
+      variants: [
+        {
+          variant_id: 'sse',
+          definition: {
+            transport: 'sse' as const,
+            value: { url: 'https://example.test/sse' },
+            representable_in_form: true,
+          },
+          assignments: [assignment(BaseCodingAgent.CLAUDE_CODE)],
+          native_sources: [],
+        },
+        {
+          variant_id: 'http',
+          definition: {
+            transport: 'http' as const,
+            value: { url: 'https://example.test/mcp' },
+            representable_in_form: true,
+          },
+          assignments: [assignment(BaseCodingAgent.CODEX)],
+          native_sources: [],
+        },
+      ],
+    };
+
+    const resolved = resolveConflictVariant(
+      { servers: [], conflicts: [conflict] },
+      conflict,
+      conflict.variants[0]
+    );
+
+    expect(resolved.servers[0].assignments).toEqual([
+      BaseCodingAgent.CLAUDE_CODE,
+    ]);
+  });
+
+  it('removes the original native name when a resolved conflict is renamed', () => {
+    const read = readResponse();
+    read.servers = [];
+    read.conflicts = [
+      {
+        name: 'Atlassian Rovo',
+        message: 'different definitions',
+        variants: [],
+      },
+    ];
+
+    expect(
+      removedServerNames(read, {
+        servers: [
+          {
+            name: 'Rovo',
+            definition: {
+              transport: 'http',
+              value: { url: 'https://rovo.example/mcp' },
+              representable_in_form: true,
+            },
+            assignments: [BaseCodingAgent.CODEX],
+          },
+        ],
+        conflicts: [],
+      })
+    ).toEqual(['Atlassian Rovo']);
   });
 });

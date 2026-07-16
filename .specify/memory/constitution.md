@@ -53,16 +53,29 @@ the issue ID. The ID is the stable cross-view reference for task identity, so it
 must remain visible even when the workspace title, issue title, or responsive
 layout is shortened.
 
+### VIII. Managed tools are pinned, verified, and user-owned
+Managed CLI catalog entries are a supply-chain boundary. Each tool must have a
+stable wire identifier, deterministic install location, pinned version, official
+source link, platform-specific artifact mapping, exact SHA-256 verification, and
+clear unsupported-host behavior. Installs and updates must use the existing
+staged atomic workflow so failed downloads, checksum mismatches, or extraction
+errors never leave partial executables on an agent's PATH. Tool credentials and
+configuration remain user/host managed unless a spec explicitly and safely
+defines otherwise.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
   the plan's research notes.
 - Generated files (`shared/types.ts`, `shared/remote-types.ts`) are never edited
   by hand; regenerate via the `generate-types` scripts.
+- Managed CLI catalog additions must preserve existing wire identifiers,
+  host-copy precedence, removal/update behavior, and spawned-agent PATH
+  semantics.
 - Run `pnpm run format` before completing a task.
 
 ## Governance
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.4.0 (adds the workspace breadcrumb issue-ID principle)
+**Version**: 0.5.0 (combines workspace issue identity and managed CLI supply-chain principles)

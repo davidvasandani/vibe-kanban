@@ -1,6 +1,6 @@
 # Shared MCP configuration
 
-Contributing tasks: `a898-allow-mcp-server`
+Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`
 
 Vibe Kanban derives shared MCP settings from each base executor's native config
 file. There is no separate registry: the native files remain the source consumed
@@ -29,12 +29,33 @@ with a `.bak` suffix for independent recovery.
 
 Assignments target base executor types only. Named variants and per-task
 executor overrides are not separate MCP assignment targets. Compatibility is
-checked before writing; Codex is stdio-only, so URL-based definitions are blocked
-for Codex instead of being dropped by its native adapter.
+checked before writing. Codex accepts stdio and streamable HTTP; legacy SSE
+remains agent-native because Codex cannot consume that transport.
 
-## OAuth
+## Shared gateway authentication
 
-OAuth remains assignment-scoped. The existing `/api/mcp-auth/*` routes receive a
-specific `executor` and `server_name`; completion writes credentials only to that
-native entry. The frontend reloads the shared model after OAuth completion so a
-later ordinary save does not overwrite the freshly written credential.
+OAuth-capable streamable HTTP assignments can use the local Vibe MCP gateway.
+OAuth is completed once per user, host, server name, and canonical upstream URL;
+all assigned agents receive the same loopback `/mcp-gateway/{connection_id}` URL
+and an unguessable local bearer capability. Upstream access and refresh tokens
+are encrypted in SQLite with a host-local AES-GCM key and never enter agent
+configuration files, API responses, or logs.
+
+The gateway validates the real socket peer through Axum `ConnectInfo` (not the
+spoofable `Host` header), compares capability hashes in constant time, and binds
+on the existing local server address. It forwards only MCP-relevant headers,
+replaces Authorization with the upstream token, streams responses, refreshes
+tokens centrally, and rejects unsafe upstream destinations and redirects.
+
+Read models redact the local capability as `Bearer [REDACTED]`. Saves hydrate
+that placeholder from native snapshots only while the gateway URL still
+matches; changing to a direct URL with the placeholder fails closed. Reconnects
+reuse the capability and deterministic connection ID, compare canonical URLs,
+and match the gateway path across changing local ports. Removing one assignment
+only edits that agent's native config. Disconnecting revokes refresh and access
+tokens where supported and disables every remaining assignment.
+
+Cloudflare Access service-token headers are encrypted with the OAuth token set
+and sent only to the configured MCP origin, never to a different authorization
+server origin. Interactive discovery redirects produce actionable guidance; the
+UI retains that error so the next Connect attempt can request the service token.

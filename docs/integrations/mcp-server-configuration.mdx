@@ -67,12 +67,31 @@ These changes update the global configuration file for each assigned coding agen
 
 ## Conflicts and compatibility
 
+## Shared authentication gateway
+
+For an OAuth-protected HTTP MCP server, run **Test connection** and choose
+**Connect** when authentication is required. Vibe Kanban completes OAuth once,
+encrypts the upstream access and refresh tokens locally, and writes a protected
+loopback gateway URL to every matching assigned agent. Upstream credentials are
+never copied into agent-native configuration.
+
+Use the authentication badge to distinguish shared gateway, agent-native,
+explicit-header, and unauthenticated modes. **Reconnect** rotates the shared
+connection; **Disconnect** makes it unavailable to all assignments. Removing a
+single assignment leaves remaining assignments connected. Test results report
+the gateway and upstream boundaries separately.
+
+For a server behind Cloudflare Access, an interactive HTTP redirect during OAuth
+discovery produces service-token guidance. The optional Access client ID and
+secret are write-only and centrally encrypted.
+
 If Vibe Kanban finds same-name native entries with different definitions, it shows
 a conflict instead of choosing one silently. Rename or delete one of the entries
 before saving shared changes.
 
-Some agents support fewer MCP transports than others. For example, Codex supports
-stdio MCP servers only, so URL-based servers cannot be assigned to Codex.
+Some agents support fewer MCP transports than others. Vibe Kanban blocks an
+assignment when the transport cannot be represented safely in that agent's
+native configuration.
 
 ## Best Practices
 

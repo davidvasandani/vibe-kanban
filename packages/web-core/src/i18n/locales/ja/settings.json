@@ -380,6 +380,17 @@
       "conflicts": { "title": "ネイティブ設定の競合" },
       "delete": "サーバーを削除",
       "deleteConfirm": "この共有 MCP サーバーを割り当て済みのすべてのエージェント設定から削除しますか？",
+      "auth": {
+        "sharedGateway": "共有ゲートウェイ認証",
+        "explicitHeader": "明示的なヘッダー認証",
+        "agentNative": "エージェントネイティブ認証",
+        "none": "認証なし",
+        "disconnect": "切断",
+        "reconnect": "再接続",
+        "disconnectConfirm": "割り当て済みのすべてのエージェントでこの共有認証情報を切断しますか？",
+        "cloudflareClientId": "Cloudflare Access サービストークンのクライアント ID（書き込み専用）",
+        "cloudflareClientSecret": "Cloudflare Access サービストークンのクライアントシークレット（書き込み専用）"
+      },
       "list": {
         "empty": "MCP サーバーはまだ設定されていません。下から追加してください。",
         "addServer": "サーバーを追加",

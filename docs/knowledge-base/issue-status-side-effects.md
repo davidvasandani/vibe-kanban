@@ -1,6 +1,6 @@
 # Terminal-status side effects on the remote issue-update path
 
-**Contributing tasks:** `2f63-auto-archive-wor`
+**Contributing tasks:** `2f63-auto-archive-wor`, `f464-vk-workspace-mgm`
 
 How the remote/cloud server reacts to an issue changing status — specifically the
 "archive an issue's workspaces when it reaches a terminal status" behaviour — and
@@ -51,15 +51,39 @@ missed update. Keep it on the caller's connection.
   reliably to individual workspaces (`pull_requests.workspace_id` isn't populated
   on creation), so the merge check is issue-level.
 
-## Frontend
+## Remote-to-local reconciliation
 
-None needed. Clients render `workspaces.archived` from the ElectricSQL workspace
-shape; there is no client-side archive logic. Server flips the flag, client
-reflects it. Archived workspaces also enter the accelerated (1h) worktree-cleanup
-window vs. the standard 72h — see `crates/db` cleanup queries.
+The remote transaction only archives the cloud `workspaces` row. A linked local
+workspace lives in the host's SQLite database and must be reconciled separately.
+`ProjectProvider` combines its remote workspace shape snapshot with the active and
+archived workspace streams exposed by `WorkspaceContext`, then
+`useRemoteLocalArchiveReconciliation` archives each local workspace that is still
+active while its linked remote row is archived.
+
+This is deliberately **level-triggered**, not tied to the status-change event. The
+same comparison runs after Electric updates, fallback snapshots, reconnects, and
+provider remounts, so temporary disconnection does not lose the side effect. It
+uses the existing `workspacesApi.update(id, { archived: true })` path rather than a
+second local mutation mechanism. The reconciliation helper:
+
+- selects unique `local_workspace_id` values from archived remote rows that still
+  appear in the local active set;
+- ignores unlinked or remote-only rows and local workspaces already archived;
+- deduplicates requests while each local archive is in flight;
+- isolates failures per workspace and allows a later snapshot to retry; and
+- never auto-unarchives when a remote issue or workspace is reopened.
+
+`ProjectProvider` can also be mounted by dialogs outside `WorkspaceProvider`, so it
+must read `WorkspaceContext` as optional and skip reconciliation when local
+workspace streams are unavailable. Do not replace that with the throwing
+`useWorkspaceContext` hook unless every provider composition is changed first.
+
+Archived local workspaces enter the accelerated (1h) worktree-cleanup window vs.
+the standard 72h — see `crates/db` cleanup queries.
 
 ## Not covered
 
-- Un-archiving on reopen (terminal → non-terminal) — not implemented either side.
+- Un-archiving on reopen (terminal → non-terminal) — not implemented either side;
+  reconciliation is intentionally archive-only.
 - The local SQLite `Task` path (`crates/db`) has no equivalent hook; this
   behaviour is remote-only.

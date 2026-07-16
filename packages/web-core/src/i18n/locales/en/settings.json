@@ -391,10 +391,24 @@
         "customBadge": "custom"
       },
       "conflicts": {
-        "title": "Native configuration conflicts"
+        "title": "Native configuration conflicts",
+        "useDefinition": "Use {{agents}} definition",
+        "helper": "Choose one definition to apply to every assigned agent. You can edit it before saving.",
+        "customUnsupported": "This custom definition must be edited in the agent's native configuration first."
       },
       "delete": "Delete server",
       "deleteConfirm": "Delete this shared MCP server from all assigned agent configurations?",
+      "auth": {
+        "sharedGateway": "Shared gateway auth",
+        "explicitHeader": "Explicit header auth",
+        "agentNative": "Agent-native auth",
+        "none": "No authentication",
+        "disconnect": "Disconnect",
+        "reconnect": "Reconnect",
+        "disconnectConfirm": "Disconnect this shared credential for every assigned agent?",
+        "cloudflareClientId": "Cloudflare Access service-token client ID (write-only)",
+        "cloudflareClientSecret": "Cloudflare Access service-token client secret (write-only)"
+      },
       "dialog": {
         "addTitle": "Add MCP server",
         "editTitle": "Edit MCP server",
@@ -464,6 +478,7 @@
         "connectFailed": "Authorization failed",
         "popupClosed": "The authorization window was closed before completing.",
         "popupBlocked": "Popup blocked — allow popups for this site and try again.",
+        "connectionOptions": "Connection options",
         "useLocalhostCallback": "Use localhost callback (for strict servers or manual approval)",
         "manualHint": "Approve in the popup, then paste the full page URL it lands on here.",
         "manualPlaceholder": "Paste the full redirected URL",
