@@ -406,7 +406,7 @@ impl AcpAgentHarness {
                             };
 
                             if let Err(e) = conn
-                                .authenticate(proto::AuthenticateRequest::new(selected.as_str()))
+                                .authenticate(proto::AuthenticateRequest::new(selected.clone()))
                                 .await
                             {
                                 let _ = log_tx.send(

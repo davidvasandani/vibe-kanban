@@ -161,6 +161,14 @@ impl CodingAgent {
                 self.preconfigured_mcp(),
                 false,
             ),
+            Self::Grok(_) => McpConfig::new(
+                vec!["mcp_servers".to_string()],
+                serde_json::json!({
+                    "mcp_servers": {}
+                }),
+                self.preconfigured_mcp(),
+                true,
+            ),
             _ => McpConfig::new(
                 vec!["mcpServers".to_string()],
                 serde_json::json!({
