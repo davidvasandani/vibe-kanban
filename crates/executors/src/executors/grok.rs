@@ -19,7 +19,7 @@ use crate::{
     profile::ExecutorConfig,
 };
 
-const AUTH_METHODS: [&str; 2] = ["xai.api_key", "cached_token"];
+const AUTH_METHODS: [&str; 2] = ["cached_token", "xai.api_key"];
 
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
@@ -52,8 +52,7 @@ impl Grok {
     }
 
     fn harness(&self) -> AcpAgentHarness {
-        AcpAgentHarness::with_session_namespace("grok_sessions")
-            .with_auth_methods(AUTH_METHODS)
+        AcpAgentHarness::with_session_namespace("grok_sessions").with_auth_methods(AUTH_METHODS)
     }
 }
 
@@ -183,3 +182,52 @@ impl StandardCodingAgentExecutor for Grok {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grok(model: Option<&str>, yolo: bool) -> Grok {
+        Grok {
+            append_prompt: AppendPrompt::default(),
+            model: model.map(str::to_string),
+            yolo: Some(yolo),
+            cmd: CmdOverrides::default(),
+            approvals: None,
+        }
+    }
+
+    #[test]
+    fn command_uses_official_acp_mode_without_updates() {
+        let builder = grok(Some("grok-4.5"), true)
+            .build_command_builder()
+            .unwrap();
+        assert_eq!(builder.base, "grok");
+        assert_eq!(
+            builder.params.unwrap(),
+            [
+                "--no-auto-update",
+                "--model",
+                "grok-4.5",
+                "--always-approve",
+                "agent",
+                "stdio"
+            ]
+        );
+    }
+
+    #[test]
+    fn supervised_mode_does_not_force_approval() {
+        let builder = grok(None, false).build_command_builder().unwrap();
+        assert_eq!(
+            builder.params.unwrap(),
+            ["--no-auto-update", "agent", "stdio"]
+        );
+    }
+
+    #[test]
+    fn serialized_profile_does_not_include_runtime_approvals() {
+        let value = serde_json::to_value(grok(Some("grok-4.5"), false)).unwrap();
+        assert_eq!(value["model"], "grok-4.5");
+        assert!(value.get("approvals").is_none());
+    }
+}

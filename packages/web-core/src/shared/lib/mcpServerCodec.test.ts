@@ -169,6 +169,27 @@ describe('cursor codec (typeless remote url)', () => {
   });
 });
 
+describe('grok codec (native TOML shape)', () => {
+  it('round-trips stdio and typeless http entries', () => {
+    expectRoundTrip(BaseCodingAgent.GROK, {
+      command: 'npx',
+      args: ['-y', 'server'],
+      env: { TOKEN: '${TOKEN}' },
+    });
+    expectRoundTrip(BaseCodingAgent.GROK, {
+      url: 'https://mcp.example.com/mcp',
+      headers: { Authorization: 'Bearer ${TOKEN}' },
+    });
+  });
+
+  it('offers only the transports documented by Grok Build', () => {
+    expect(codecForAgent(BaseCodingAgent.GROK).transports).toEqual([
+      'stdio',
+      'http',
+    ]);
+  });
+});
+
 describe('gemini codec (httpUrl)', () => {
   it('round-trips an httpUrl server', () => {
     expectRoundTrip(BaseCodingAgent.GEMINI, {

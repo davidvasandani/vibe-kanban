@@ -66,9 +66,7 @@
     },
     "GROK": {
       "DEFAULT": {
-        "GROK": {
-          "yolo": true
-        }
+        "GROK": {}
       }
     }
   }

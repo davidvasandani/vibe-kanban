@@ -28,6 +28,17 @@ use crate::{
     executors::{ExecutorError, ExecutorExitResult, SpawnedChild, acp::AcpEvent},
 };
 
+fn select_auth_method(preferred: &[String], advertised: &[proto::AuthMethod]) -> Option<String> {
+    preferred
+        .iter()
+        .find(|candidate| {
+            advertised
+                .iter()
+                .any(|method| method.id.0.as_ref() == candidate.as_str())
+        })
+        .cloned()
+}
+
 /// Reusable harness for ACP-based conns (Gemini, Qwen, etc.)
 pub struct AcpAgentHarness {
     session_namespace: String,
@@ -379,12 +390,10 @@ impl AcpAgentHarness {
                         };
 
                         if !auth_method_preference.is_empty() {
-                            let selected = auth_method_preference.iter().find(|preferred| {
-                                initialize
-                                    .auth_methods
-                                    .iter()
-                                    .any(|method| method.id.0.as_ref() == preferred.as_str())
-                            });
+                            let selected = select_auth_method(
+                                &auth_method_preference,
+                                &initialize.auth_methods,
+                            );
                             let Some(selected) = selected else {
                                 let advertised = initialize
                                     .auth_methods
@@ -406,7 +415,7 @@ impl AcpAgentHarness {
                             };
 
                             if let Err(e) = conn
-                                .authenticate(proto::AuthenticateRequest::new(selected.clone()))
+                                .authenticate(proto::AuthenticateRequest::new(selected))
                                 .await
                             {
                                 let _ = log_tx.send(
@@ -546,6 +555,7 @@ impl AcpAgentHarness {
                         );
 
                         let mut current_req = Some(initial_req);
+                        let mut turn_failed = false;
 
                         while let Some(req) = current_req.take() {
                             if cancel.is_cancelled() {
@@ -571,6 +581,7 @@ impl AcpAgentHarness {
                                     let _ = log_tx.send(AcpEvent::Done(stop_reason).to_string());
                                 }
                                 Err(e) => {
+                                    turn_failed = true;
                                     tracing::debug!("error {} {e} {:?}", e.code, e.data);
                                     if e.code
                                         == agent_client_protocol::ErrorCode::INTERNAL_ERROR.code
@@ -608,7 +619,12 @@ impl AcpAgentHarness {
 
                         // Notify container of completion
                         if let Some(tx) = exit_signal_tx.take() {
-                            let _ = tx.send(ExecutorExitResult::Success);
+                            let result = if turn_failed {
+                                ExecutorExitResult::Failure
+                            } else {
+                                ExecutorExitResult::Success
+                            };
+                            let _ = tx.send(result);
                         }
 
                         // Cancel session work
@@ -629,5 +645,34 @@ impl AcpAgentHarness {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_selection_uses_preference_order() {
+        let advertised = vec![
+            proto::AuthMethod::new("xai.api_key", "API key"),
+            proto::AuthMethod::new("cached_token", "Cached login"),
+        ];
+        assert_eq!(
+            select_auth_method(
+                &["cached_token".to_string(), "xai.api_key".to_string()],
+                &advertised
+            ),
+            Some("cached_token".to_string())
+        );
+    }
+
+    #[test]
+    fn auth_selection_rejects_unadvertised_methods() {
+        let advertised = vec![proto::AuthMethod::new("other", "Other")];
+        assert_eq!(
+            select_auth_method(&["cached_token".to_string()], &advertised),
+            None
+        );
     }
 }

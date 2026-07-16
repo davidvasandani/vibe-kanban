@@ -442,7 +442,7 @@ export function codecForAgent(agent: BaseCodingAgent): McpServerCodec {
     case BaseCodingAgent.DROID:
       return claudeStyleCodec({ transports: ['stdio', 'http', 'sse'] });
     case BaseCodingAgent.GROK:
-      return claudeStyleCodec({ transports: ['stdio', 'http'] });
+      return cursorCodec;
     default:
       return claudeStyleCodec({ transports: ['stdio', 'http', 'sse'] });
   }
