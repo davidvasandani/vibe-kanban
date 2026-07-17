@@ -54,13 +54,22 @@ impl PtyService {
     pub async fn create_session(
         &self,
         working_dir: PathBuf,
+        environment: HashMap<String, String>,
         cols: u16,
         rows: u16,
     ) -> Result<(Uuid, mpsc::UnboundedReceiver<Vec<u8>>), PtyError> {
         let shell = get_interactive_shell().await;
 
         let (session_id, output_rx, _exit_rx) = self
-            .create_command_session(shell, Vec::new(), working_dir, cols, rows, true)
+            .create_command_session(
+                shell,
+                Vec::new(),
+                working_dir,
+                environment,
+                cols,
+                rows,
+                true,
+            )
             .await?;
         Ok((session_id, output_rx))
     }
@@ -70,6 +79,7 @@ impl PtyService {
         executable: PathBuf,
         args: Vec<String>,
         working_dir: PathBuf,
+        environment: HashMap<String, String>,
         cols: u16,
         rows: u16,
         interactive_shell: bool,
@@ -133,6 +143,12 @@ impl PtyService {
                         cmd.env(key, value);
                     }
                 }
+            }
+
+            // Apply workspace-scoped values before the PTY's own contract so
+            // terminal/runtime-owned values below always take precedence.
+            for (key, value) in environment {
+                cmd.env(key, value);
             }
 
             // Configure shell-specific options
@@ -319,6 +335,7 @@ mod tests {
                 PathBuf::from("/bin/sh"),
                 vec!["-c".into(), "printf login-ok".into()],
                 std::env::temp_dir(),
+                HashMap::new(),
                 80,
                 24,
                 false,
@@ -337,6 +354,43 @@ mod tests {
             .unwrap();
         assert_eq!(status.code, 0);
         assert!(String::from_utf8_lossy(&bytes).contains("login-ok"));
+        service.close_session(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn command_session_receives_environment_without_overriding_terminal_contract() {
+        let service = PtyService::new();
+        let environment = HashMap::from([
+            ("ORG_TEST_VALUE".to_string(), "available".to_string()),
+            ("TERM".to_string(), "org-value".to_string()),
+        ]);
+        let (id, mut output, mut exit) = service
+            .create_command_session(
+                PathBuf::from("/bin/sh"),
+                vec![
+                    "-c".into(),
+                    "printf '%s|%s' \"$ORG_TEST_VALUE\" \"$TERM\"".into(),
+                ],
+                std::env::temp_dir(),
+                environment,
+                80,
+                24,
+                false,
+            )
+            .await
+            .unwrap();
+        let mut bytes = Vec::new();
+        while let Ok(Some(chunk)) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), output.recv()).await
+        {
+            bytes.extend(chunk);
+        }
+        let status = tokio::time::timeout(std::time::Duration::from_secs(2), exit.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.code, 0);
+        assert!(String::from_utf8_lossy(&bytes).contains("available|xterm-256color"));
         service.close_session(id).await.unwrap();
     }
 }

@@ -112,6 +112,7 @@ async fn handle_login(
             command.executable,
             command.args,
             working_dir,
+            std::collections::HashMap::new(),
             query.cols,
             query.rows,
             false,
