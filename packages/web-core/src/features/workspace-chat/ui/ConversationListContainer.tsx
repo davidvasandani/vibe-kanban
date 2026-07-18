@@ -762,7 +762,10 @@ export const ConversationList = forwardRef<
         )}
         <div
           ref={tanstackScrollRef}
-          className="h-full overflow-y-auto scrollbar-none"
+          // overflow-x-hidden: overflow-y:auto alone computes overflow-x to
+          // auto, which would make this a competing horizontal scroller
+          // inside horizontally-scrolling layouts (workspace carousel).
+          className="h-full overflow-y-auto overflow-x-hidden scrollbar-none"
           style={{ overflowAnchor: 'none', contain: 'strict' }}
           onClickCapture={handleConversationClickCapture}
         >

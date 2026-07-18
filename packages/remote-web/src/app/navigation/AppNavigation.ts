@@ -135,6 +135,9 @@ function destinationToRemoteTarget(
         } as const;
       }
       return { to: "/" } as const;
+    // The carousel view is local-only; remote falls back to home.
+    case "workspaces-carousel":
+      return { to: "/" } as const;
     case "workspaces-create":
       if (effectiveHostId) {
         return {

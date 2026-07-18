@@ -154,7 +154,30 @@
       "cannotDeleteOpenPr": "Impossible de supprimer la branche tant que la PR est ouverte",
       "unlinkFromIssueLabel": "Également dissocier du ticket"
     },
-    "linkError": "Failed to link workspace"
+    "linkError": "Failed to link workspace",
+    "carousel": {
+      "title": "Carrousel",
+      "empty": "Aucun espace de travail actif",
+      "backToWorkspaces": "Vue standard",
+      "openFullView": "Ouvrir la vue complète",
+      "columnPlaceholder": "Faites défiler ici pour charger cette conversation",
+      "needsFeedbackCount_one": "{{count}} attend une réponse",
+      "needsFeedbackCount_other": "{{count}} attendent une réponse",
+      "status": {
+        "needsFeedback": "Attend une réponse",
+        "failed": "Échoué",
+        "running": "En cours",
+        "idle": "Inactif",
+        "interrupted": "Interrompu"
+      },
+      "sort": {
+        "needs_feedback": "Attend une réponse",
+        "updated_at": "Mis à jour récemment",
+        "created_at": "Créés récemment",
+        "name": "Nom"
+      },
+      "columnError": "Impossible d'afficher cette conversation. Ouvrez la vue complète."
+    }
   },
   "fileTree": {
     "searchPlaceholder": "Rechercher des fichiers...",

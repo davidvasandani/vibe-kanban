@@ -22,6 +22,7 @@ import { RetryUiProvider } from '@/features/workspace-chat/model/contexts/RetryU
 import { ApprovalFeedbackProvider } from '@/features/workspace-chat/model/contexts/ApprovalFeedbackContext';
 import { forwardWheelToScroller } from '@/features/workspace-chat/ui/forwardWheelToScroller';
 import { useDiffStats } from '@/shared/stores/useWorkspaceDiffStore';
+import type { DiffStats } from 'shared/types';
 
 /**
  * Isolated component that reads diffStats from WorkspaceContext.
@@ -41,6 +42,7 @@ function ChatBoxWithDiffStats({
   onClearContextAndAcceptPlan,
   onScrollToUserMessage,
   getActiveTurnPatchKey,
+  diffStatsOverride,
 }: {
   session: Session | undefined;
   workspaceId: string | undefined;
@@ -53,8 +55,10 @@ function ChatBoxWithDiffStats({
   onClearContextAndAcceptPlan?: (planText: string) => Promise<void>;
   onScrollToUserMessage: (patchKey: string) => void;
   getActiveTurnPatchKey: () => string | null;
+  diffStatsOverride?: DiffStats;
 }) {
-  const diffStats = useDiffStats();
+  const storeDiffStats = useDiffStats();
+  const diffStats = diffStatsOverride ?? storeDiffStats;
 
   return (
     <SessionChatBoxContainer
@@ -106,6 +110,18 @@ interface WorkspacesMainContainerProps {
   onStartNewSession: () => void;
   /** Called when user clicks "Clear Context and Accept" on a plan approval */
   onClearContextAndAcceptPlan?: (planText: string) => Promise<void>;
+  /**
+   * Diff stats to show in the chat box instead of the global diff store.
+   * Used when this container is mounted outside the single-workspace view
+   * (e.g. carousel columns), where no diff stream feeds the store.
+   */
+  diffStatsOverride?: DiffStats;
+  /**
+   * Hide the floating context bar. Its actions resolve against the
+   * route-level workspace context, which is empty outside the
+   * single-workspace view (e.g. carousel columns).
+   */
+  hideContextBar?: boolean;
 }
 
 export const WorkspacesMainContainer = forwardRef<
@@ -124,6 +140,8 @@ export const WorkspacesMainContainer = forwardRef<
     isNewSessionMode,
     onStartNewSession,
     onClearContextAndAcceptPlan,
+    diffStatsOverride,
+    hideContextBar = false,
   },
   ref
 ) {
@@ -239,12 +257,14 @@ export const WorkspacesMainContainer = forwardRef<
       onClearContextAndAcceptPlan={onClearContextAndAcceptPlan}
       onScrollToUserMessage={handleScrollToUserMessage}
       getActiveTurnPatchKey={handleGetActiveTurnPatchKey}
+      diffStatsOverride={diffStatsOverride}
     />
   );
 
-  const contextBarContent = workspaceWithSession ? (
-    <ContextBarContainer containerRef={containerRef} />
-  ) : null;
+  const contextBarContent =
+    workspaceWithSession && !hideContextBar ? (
+      <ContextBarContainer containerRef={containerRef} />
+    ) : null;
 
   useImperativeHandle(
     ref,

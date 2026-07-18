@@ -154,7 +154,30 @@
       "cannotDeleteOpenPr": "No se puede eliminar la rama mientras el PR está abierto",
       "unlinkFromIssueLabel": "También desvincular del issue"
     },
-    "linkError": "Failed to link workspace"
+    "linkError": "Failed to link workspace",
+    "carousel": {
+      "title": "Carrusel",
+      "empty": "No hay espacios de trabajo activos",
+      "backToWorkspaces": "Vista estándar",
+      "openFullView": "Abrir vista completa",
+      "columnPlaceholder": "Desplázate aquí para cargar este chat",
+      "needsFeedbackCount_one": "{{count}} necesita respuesta",
+      "needsFeedbackCount_other": "{{count}} necesitan respuesta",
+      "status": {
+        "needsFeedback": "Necesita respuesta",
+        "failed": "Fallido",
+        "running": "En ejecución",
+        "idle": "Inactivo",
+        "interrupted": "Interrumpido"
+      },
+      "sort": {
+        "needs_feedback": "Necesita respuesta",
+        "updated_at": "Actualizados recientemente",
+        "created_at": "Creados recientemente",
+        "name": "Nombre"
+      },
+      "columnError": "No se pudo mostrar este chat. Abre la vista completa."
+    }
   },
   "fileTree": {
     "searchPlaceholder": "Buscar archivos...",

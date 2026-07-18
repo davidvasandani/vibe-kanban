@@ -154,7 +154,29 @@
       "cannotDeleteOpenPr": "PR이 열려 있는 동안에는 브랜치를 삭제할 수 없습니다",
       "unlinkFromIssueLabel": "이슈에서도 연결 해제"
     },
-    "linkError": "Failed to link workspace"
+    "linkError": "Failed to link workspace",
+    "carousel": {
+      "title": "캐러셀",
+      "empty": "활성 워크스페이스가 없습니다",
+      "backToWorkspaces": "기본 보기",
+      "openFullView": "전체 보기 열기",
+      "columnPlaceholder": "여기로 스크롤하면 채팅이 로드됩니다",
+      "needsFeedbackCount_other": "{{count}}개 응답 필요",
+      "status": {
+        "needsFeedback": "응답 필요",
+        "failed": "실패",
+        "running": "실행 중",
+        "idle": "대기 중",
+        "interrupted": "중단됨"
+      },
+      "sort": {
+        "needs_feedback": "응답 필요",
+        "updated_at": "최근 업데이트순",
+        "created_at": "최근 생성순",
+        "name": "이름순"
+      },
+      "columnError": "이 채팅을 표시하지 못했습니다. 전체 보기로 여세요."
+    }
   },
   "fileTree": {
     "searchPlaceholder": "파일 검색...",

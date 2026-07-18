@@ -19,6 +19,7 @@ import { Route as AppExportRouteImport } from './routes/_app.export'
 import { Route as WorkspacesWorkspaceIdVscodeRouteImport } from './routes/workspaces.$workspaceId.vscode'
 import { Route as AppWorkspacesElectricTestRouteImport } from './routes/_app.workspaces_.electric-test'
 import { Route as AppWorkspacesCreateRouteImport } from './routes/_app.workspaces_.create'
+import { Route as AppWorkspacesCarouselRouteImport } from './routes/_app.workspaces_.carousel'
 import { Route as AppWorkspacesWorkspaceIdRouteImport } from './routes/_app.workspaces_.$workspaceId'
 import { Route as AppProjectsProjectIdRouteImport } from './routes/_app.projects.$projectId'
 import { Route as AppHostsHostIdWorkspacesRouteImport } from './routes/_app.hosts.$hostId.workspaces'
@@ -82,6 +83,11 @@ const AppWorkspacesElectricTestRoute =
 const AppWorkspacesCreateRoute = AppWorkspacesCreateRouteImport.update({
   id: '/workspaces_/create',
   path: '/workspaces/create',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppWorkspacesCarouselRoute = AppWorkspacesCarouselRouteImport.update({
+  id: '/workspaces_/carousel',
+  path: '/workspaces/carousel',
   getParentRoute: () => AppRoute,
 } as any)
 const AppWorkspacesWorkspaceIdRoute =
@@ -175,6 +181,7 @@ export interface FileRoutesByFullPath {
   '/onboarding/sign-in': typeof OnboardingSignInRoute
   '/projects/$projectId': typeof AppProjectsProjectIdRoute
   '/workspaces/$workspaceId': typeof AppWorkspacesWorkspaceIdRoute
+  '/workspaces/carousel': typeof AppWorkspacesCarouselRoute
   '/workspaces/create': typeof AppWorkspacesCreateRoute
   '/workspaces/electric-test': typeof AppWorkspacesElectricTestRoute
   '/workspaces/$workspaceId/vscode': typeof WorkspacesWorkspaceIdVscodeRoute
@@ -199,6 +206,7 @@ export interface FileRoutesByTo {
   '/onboarding/sign-in': typeof OnboardingSignInRoute
   '/projects/$projectId': typeof AppProjectsProjectIdRoute
   '/workspaces/$workspaceId': typeof AppWorkspacesWorkspaceIdRoute
+  '/workspaces/carousel': typeof AppWorkspacesCarouselRoute
   '/workspaces/create': typeof AppWorkspacesCreateRoute
   '/workspaces/electric-test': typeof AppWorkspacesElectricTestRoute
   '/workspaces/$workspaceId/vscode': typeof WorkspacesWorkspaceIdVscodeRoute
@@ -225,6 +233,7 @@ export interface FileRoutesById {
   '/onboarding_/sign-in': typeof OnboardingSignInRoute
   '/_app/projects/$projectId': typeof AppProjectsProjectIdRoute
   '/_app/workspaces_/$workspaceId': typeof AppWorkspacesWorkspaceIdRoute
+  '/_app/workspaces_/carousel': typeof AppWorkspacesCarouselRoute
   '/_app/workspaces_/create': typeof AppWorkspacesCreateRoute
   '/_app/workspaces_/electric-test': typeof AppWorkspacesElectricTestRoute
   '/workspaces/$workspaceId/vscode': typeof WorkspacesWorkspaceIdVscodeRoute
@@ -251,6 +260,7 @@ export interface FileRouteTypes {
     | '/onboarding/sign-in'
     | '/projects/$projectId'
     | '/workspaces/$workspaceId'
+    | '/workspaces/carousel'
     | '/workspaces/create'
     | '/workspaces/electric-test'
     | '/workspaces/$workspaceId/vscode'
@@ -275,6 +285,7 @@ export interface FileRouteTypes {
     | '/onboarding/sign-in'
     | '/projects/$projectId'
     | '/workspaces/$workspaceId'
+    | '/workspaces/carousel'
     | '/workspaces/create'
     | '/workspaces/electric-test'
     | '/workspaces/$workspaceId/vscode'
@@ -300,6 +311,7 @@ export interface FileRouteTypes {
     | '/onboarding_/sign-in'
     | '/_app/projects/$projectId'
     | '/_app/workspaces_/$workspaceId'
+    | '/_app/workspaces_/carousel'
     | '/_app/workspaces_/create'
     | '/_app/workspaces_/electric-test'
     | '/workspaces/$workspaceId/vscode'
@@ -395,6 +407,13 @@ declare module '@tanstack/react-router' {
       path: '/workspaces/create'
       fullPath: '/workspaces/create'
       preLoaderRoute: typeof AppWorkspacesCreateRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/workspaces_/carousel': {
+      id: '/_app/workspaces_/carousel'
+      path: '/workspaces/carousel'
+      fullPath: '/workspaces/carousel'
+      preLoaderRoute: typeof AppWorkspacesCarouselRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/workspaces_/$workspaceId': {
@@ -497,6 +516,7 @@ interface AppRouteChildren {
   AppWorkspacesRoute: typeof AppWorkspacesRoute
   AppProjectsProjectIdRoute: typeof AppProjectsProjectIdRoute
   AppWorkspacesWorkspaceIdRoute: typeof AppWorkspacesWorkspaceIdRoute
+  AppWorkspacesCarouselRoute: typeof AppWorkspacesCarouselRoute
   AppWorkspacesCreateRoute: typeof AppWorkspacesCreateRoute
   AppWorkspacesElectricTestRoute: typeof AppWorkspacesElectricTestRoute
   AppHostsHostIdWorkspacesRoute: typeof AppHostsHostIdWorkspacesRoute
@@ -517,6 +537,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppWorkspacesRoute: AppWorkspacesRoute,
   AppProjectsProjectIdRoute: AppProjectsProjectIdRoute,
   AppWorkspacesWorkspaceIdRoute: AppWorkspacesWorkspaceIdRoute,
+  AppWorkspacesCarouselRoute: AppWorkspacesCarouselRoute,
   AppWorkspacesCreateRoute: AppWorkspacesCreateRoute,
   AppWorkspacesElectricTestRoute: AppWorkspacesElectricTestRoute,
   AppHostsHostIdWorkspacesRoute: AppHostsHostIdWorkspacesRoute,

@@ -4,6 +4,7 @@ import {
   PlusIcon,
   ArrowLeftIcon,
   ArchiveIcon,
+  ColumnsIcon,
   StackIcon,
   SpinnerIcon,
 } from '@phosphor-icons/react';
@@ -76,6 +77,8 @@ export interface WorkspacesSidebarProps {
   layoutMode?: WorkspaceLayoutMode;
   /** Handler for toggling layout mode */
   onToggleLayoutMode?: () => void;
+  /** Handler for opening the carousel view (button hidden when absent) */
+  onOpenCarousel?: () => void;
   /** Handler to load more workspaces on scroll */
   onLoadMore?: () => void;
   /** Whether there are more workspaces to load */
@@ -188,6 +191,7 @@ export function WorkspacesSidebar({
   onShowArchiveChange,
   layoutMode = 'flat',
   onToggleLayoutMode,
+  onOpenCarousel,
   onLoadMore,
   hasMoreWorkspaces = false,
   searchControls,
@@ -238,6 +242,14 @@ export function WorkspacesSidebar({
     }, [workspaces]);
 
   const headerActions: SectionAction[] = [
+    ...(onOpenCarousel
+      ? [
+          {
+            icon: ColumnsIcon,
+            onClick: () => onOpenCarousel(),
+          },
+        ]
+      : []),
     {
       icon: StackIcon,
       onClick: () => onToggleLayoutMode?.(),
