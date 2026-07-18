@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback, useEffect } from 'react';
 import { useParams } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
+import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useUserContext } from '@/shared/hooks/useUserContext';
 import { useScratch } from '@/shared/hooks/useScratch';
 import { useAllOrganizationProjects } from '@/shared/hooks/useAllOrganizationProjects';
@@ -263,6 +264,7 @@ export function WorkspacesSidebarContainer({
     selectWorkspace,
     navigateToCreate,
   } = useWorkspaceContext();
+  const appNavigation = useAppNavigation();
 
   const isMobile = useIsMobile();
   const { hosts: remoteCloudHosts } = useRemoteCloudHostsAppBarModel();
@@ -603,6 +605,12 @@ export function WorkspacesSidebarContainer({
     });
   }, []);
 
+  const handleOpenCarousel = useMemo(() => {
+    const goToWorkspacesCarousel = appNavigation.goToWorkspacesCarousel;
+    if (!goToWorkspacesCarousel) return undefined;
+    return () => goToWorkspacesCarousel();
+  }, [appNavigation]);
+
   const sidebarPersistKeys: WorkspacesSidebarPersistKeys = {
     raisedHand: PERSIST_KEYS.workspacesSidebarRaisedHand,
     notRunning: PERSIST_KEYS.workspacesSidebarNotRunning,
@@ -695,6 +703,7 @@ export function WorkspacesSidebarContainer({
       onShowArchiveChange={setShowArchive}
       layoutMode={layoutMode}
       onToggleLayoutMode={toggleLayoutMode}
+      onOpenCarousel={handleOpenCarousel}
       onLoadMore={handleLoadMore}
       hasMoreWorkspaces={hasMoreWorkspaces && !isSearching}
       searchControls={searchControls}

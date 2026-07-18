@@ -154,7 +154,29 @@
       "cannotDeleteOpenPr": "PR 開啟時無法刪除分支",
       "unlinkFromIssueLabel": "同時取消與議題的關聯"
     },
-    "linkError": "Failed to link workspace"
+    "linkError": "Failed to link workspace",
+    "carousel": {
+      "title": "輪播檢視",
+      "empty": "沒有活躍的工作區",
+      "backToWorkspaces": "標準檢視",
+      "openFullView": "開啟完整檢視",
+      "columnPlaceholder": "捲動到此處以載入此對話",
+      "needsFeedbackCount_other": "{{count}} 個需要回饋",
+      "status": {
+        "needsFeedback": "需要回饋",
+        "failed": "失敗",
+        "running": "執行中",
+        "idle": "閒置",
+        "interrupted": "已中斷"
+      },
+      "sort": {
+        "needs_feedback": "需要回饋",
+        "updated_at": "最近更新",
+        "created_at": "最近建立",
+        "name": "名稱"
+      },
+      "columnError": "無法顯示此對話。請開啟完整檢視。"
+    }
   },
   "fileTree": {
     "searchPlaceholder": "搜尋檔案...",

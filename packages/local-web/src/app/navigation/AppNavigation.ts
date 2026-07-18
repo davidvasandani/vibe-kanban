@@ -48,6 +48,8 @@ function resolveLocalDestinationFromPath(path: string): AppDestination | null {
       const hostId = getPathParam(routeParams, 'hostId');
       return hostId ? { kind: 'workspaces', hostId } : null;
     }
+    case '/_app/workspaces_/carousel':
+      return { kind: 'workspaces-carousel' };
     case '/_app/workspaces_/create':
       return { kind: 'workspaces-create' };
     case '/_app/hosts/$hostId/workspaces_/create': {
@@ -195,6 +197,8 @@ function destinationToLocalTarget(
         } as const;
       }
       return { to: '/workspaces' } as const;
+    case 'workspaces-carousel':
+      return { to: '/workspaces/carousel' } as const;
     case 'workspaces-create':
       if (effectiveHostId) {
         return {
@@ -334,6 +338,8 @@ export function createLocalAppNavigation(): AppNavigation {
       navigateTo({ kind: 'onboarding-sign-in' }, transition),
     goToWorkspaces: (transition) =>
       navigateTo({ kind: 'workspaces' }, transition),
+    goToWorkspacesCarousel: (transition) =>
+      navigateTo({ kind: 'workspaces-carousel' }, transition),
     goToWorkspacesCreate: (transition) =>
       navigateTo({ kind: 'workspaces-create' }, transition),
     goToWorkspace: (workspaceId, transition) =>

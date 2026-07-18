@@ -114,3 +114,11 @@ contributed to it.
   shape states: relationship truth vs loaded rows, `simple_id` vs UUID, the
   none/loading/resolved/unavailable state model, and the pure-builder testing
   seam.
+- [workspace-carousel-view.md](workspace-carousel-view.md) — Rendering N
+  live workspace chats at once (the carousel view): the prop-driven chat
+  stack (`ExecutionProcessesProvider` + `WorkspacesMainContainer`, no
+  per-instance `WorkspaceProvider` — markSeen-on-mount / global diff-store /
+  websocket hazards), the chat-editor-autofocus gotcha (focus is not a user
+  signal; key markSeen and order-freeze off pointer/keydown), the
+  starvation-safe debounced re-sort, needs-feedback tiering incl.
+  `interrupted`, and per-column error boundaries.

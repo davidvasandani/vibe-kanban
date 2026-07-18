@@ -154,7 +154,29 @@
       "cannotDeleteOpenPr": "PR 开启时无法删除分支",
       "unlinkFromIssueLabel": "同时取消与议题的关联"
     },
-    "linkError": "Failed to link workspace"
+    "linkError": "Failed to link workspace",
+    "carousel": {
+      "title": "轮播视图",
+      "empty": "没有活跃的工作区",
+      "backToWorkspaces": "标准视图",
+      "openFullView": "打开完整视图",
+      "columnPlaceholder": "滚动到此处以加载此对话",
+      "needsFeedbackCount_other": "{{count}} 个需要反馈",
+      "status": {
+        "needsFeedback": "需要反馈",
+        "failed": "失败",
+        "running": "运行中",
+        "idle": "空闲",
+        "interrupted": "已中断"
+      },
+      "sort": {
+        "needs_feedback": "需要反馈",
+        "updated_at": "最近更新",
+        "created_at": "最近创建",
+        "name": "名称"
+      },
+      "columnError": "无法渲染此对话。请打开完整视图。"
+    }
   },
   "fileTree": {
     "searchPlaceholder": "搜索文件...",
