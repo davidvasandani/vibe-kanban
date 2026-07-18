@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT remote_project_id as \"remote_project_id: Uuid\"\n               FROM workspaces WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "name": "remote_project_id: Uuid",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "da961b6d285d590826cd17355816e1eff5932dcc7da90497711a2061ca655029"
+}

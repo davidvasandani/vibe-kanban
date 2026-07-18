@@ -53,7 +53,7 @@ use services::services::{
     file::FileService,
     notification::NotificationService,
     queued_message::QueuedMessageService,
-    remote_client::RemoteClient,
+    remote_client::{RemoteClient, RemoteClientError},
     remote_sync,
 };
 use tokio::{sync::RwLock, task::JoinHandle};
@@ -1673,56 +1673,107 @@ impl LocalContainerService {
         .await
     }
 
-    /// Resolve organization-level env vars for a workspace by mapping it to its
-    /// remote project (workspace → task → local project → `remote_project_id`)
-    /// and fetching the decrypted values from the remote server. Returns an
-    /// empty map when the workspace isn't linked to a remote project, no remote
-    /// client is configured, or the fetch fails — org env vars are best-effort
-    /// and must never block a workspace from starting.
+    /// Resolve organization-level env vars for a workspace by mapping it to
+    /// its remote project and fetching the decrypted values from the remote
+    /// server. The mapping is tried in order of cost: the `remote_project_id`
+    /// persisted on the workspace row (set at creation for issue-linked
+    /// workspaces and on link/unlink), the legacy workspace → task → local
+    /// project chain, and finally the remote server's own workspace record
+    /// (persisted back onto the row once found). Returns an empty map when the
+    /// workspace isn't linked to a remote project, no remote client is
+    /// configured, or the fetch fails — org env vars are best-effort and must
+    /// never block a workspace from starting.
     async fn resolve_org_env_vars(&self, workspace: &Workspace) -> HashMap<String, String> {
         let Some(remote_client) = self.remote_client.as_ref() else {
             return HashMap::new();
         };
-        let Some(task_id) = workspace.task_id else {
-            return HashMap::new();
-        };
 
-        let remote_project_id = match Task::find_by_id(&self.db.pool, task_id).await {
-            Ok(Some(task)) => match Project::find_by_id(&self.db.pool, task.project_id).await {
-                Ok(Some(project)) => project.remote_project_id,
-                Ok(None) => None,
+        let mut remote_project_id =
+            match Workspace::get_remote_project_id(&self.db.pool, workspace.id).await {
+                Ok(id) => id,
                 Err(e) => {
-                    tracing::warn!(?e, "Failed to load project while resolving org env vars");
+                    tracing::warn!(
+                        ?e,
+                        "Failed to load workspace remote project while resolving org env vars"
+                    );
                     None
                 }
-            },
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!(?e, "Failed to load task while resolving org env vars");
-                None
-            }
-        };
+            };
 
-        let Some(remote_project_id) = remote_project_id else {
-            return HashMap::new();
+        if remote_project_id.is_none()
+            && let Some(task_id) = workspace.task_id
+        {
+            remote_project_id = match Task::find_by_id(&self.db.pool, task_id).await {
+                Ok(Some(task)) => match Project::find_by_id(&self.db.pool, task.project_id).await {
+                    Ok(Some(project)) => project.remote_project_id,
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(?e, "Failed to load project while resolving org env vars");
+                        None
+                    }
+                },
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(?e, "Failed to load task while resolving org env vars");
+                    None
+                }
+            };
+        }
+
+        let fetch = async {
+            let remote_project_id = match remote_project_id {
+                Some(id) => id,
+                None => {
+                    // Workspace-anchored flows link workspaces to remote
+                    // projects without a local task/project record; ask the
+                    // remote for the mapping and persist it so later spawns
+                    // skip this round-trip.
+                    match remote_client.get_workspace_by_local_id(workspace.id).await {
+                        Ok(remote_ws) => {
+                            if let Err(e) = Workspace::set_remote_project_id(
+                                &self.db.pool,
+                                workspace.id,
+                                Some(remote_ws.project_id),
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    ?e,
+                                    "Failed to persist remote project id on workspace"
+                                );
+                            }
+                            remote_ws.project_id
+                        }
+                        // Not linked to a remote workspace — local-only.
+                        Err(RemoteClientError::Http { status: 404, .. }) => return None,
+                        Err(e) => {
+                            tracing::warn!(
+                                ?e,
+                                "Failed to resolve remote workspace while resolving org env vars"
+                            );
+                            return None;
+                        }
+                    }
+                }
+            };
+
+            match remote_client.get_project_env_vars(remote_project_id).await {
+                Ok(resp) => Some(resp),
+                Err(e) => {
+                    tracing::warn!(?e, %remote_project_id, "Failed to fetch org env vars from remote");
+                    None
+                }
+            }
         };
 
         // Cap the wait: this runs on the spawn path for every execution, and the
         // remote client itself retries with a 30s per-request timeout. A short
         // outer timeout keeps a degraded remote from stalling workspace starts.
-        let resp = match tokio::time::timeout(
-            ORG_ENV_FETCH_TIMEOUT,
-            remote_client.get_project_env_vars(remote_project_id),
-        )
-        .await
-        {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(e)) => {
-                tracing::warn!(?e, %remote_project_id, "Failed to fetch org env vars from remote");
-                return HashMap::new();
-            }
+        let resp = match tokio::time::timeout(ORG_ENV_FETCH_TIMEOUT, fetch).await {
+            Ok(Some(resp)) => resp,
+            Ok(None) => return HashMap::new(),
             Err(_) => {
-                tracing::warn!(%remote_project_id, "Timed out fetching org env vars from remote");
+                tracing::warn!("Timed out fetching org env vars from remote");
                 return HashMap::new();
             }
         };

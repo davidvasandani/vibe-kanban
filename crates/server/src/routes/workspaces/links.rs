@@ -44,6 +44,23 @@ pub async fn link_workspace(
         })
         .await?;
 
+    // Mirror the link locally so org env var resolution on the spawn path can
+    // find the remote project without a remote round-trip.
+    if let Err(e) = Workspace::set_remote_project_id(
+        &deployment.db().pool,
+        workspace.id,
+        Some(payload.project_id),
+    )
+    .await
+    {
+        tracing::warn!(
+            "Failed to record remote project {} on workspace {}: {}",
+            payload.project_id,
+            workspace.id,
+            e
+        );
+    }
+
     {
         let pool = deployment.db().pool.clone();
         let ws_id = workspace.id;
@@ -93,13 +110,26 @@ pub async fn unlink_workspace(
 ) -> Result<ResponseJson<ApiResponse<()>>, ApiError> {
     let client = deployment.remote_client()?;
 
-    match client.delete_workspace(workspace_id).await {
+    let result = match client.delete_workspace(workspace_id).await {
         Ok(()) => Ok(ResponseJson(ApiResponse::success(()))),
         Err(RemoteClientError::Http { status: 404, .. }) => {
             Ok(ResponseJson(ApiResponse::success(())))
         }
         Err(e) => Err(e.into()),
+    };
+
+    if result.is_ok()
+        && let Err(e) =
+            Workspace::set_remote_project_id(&deployment.db().pool, workspace_id, None).await
+    {
+        tracing::warn!(
+            "Failed to clear remote project on workspace {}: {}",
+            workspace_id,
+            e
+        );
     }
+
+    result
 }
 
 pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
