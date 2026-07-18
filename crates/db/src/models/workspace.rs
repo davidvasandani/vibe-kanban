@@ -458,6 +458,40 @@ impl Workspace {
         Ok(())
     }
 
+    /// Remote project this workspace is linked to, if any. Kept out of the
+    /// `Workspace` struct (and its generated TS type) on purpose: only the
+    /// org-env-var resolution on the spawn path needs it.
+    pub async fn get_remote_project_id(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<Option<Uuid>, sqlx::Error> {
+        sqlx::query_scalar!(
+            r#"SELECT remote_project_id as "remote_project_id: Uuid"
+               FROM workspaces WHERE id = $1"#,
+            workspace_id
+        )
+        .fetch_optional(pool)
+        .await
+        .map(Option::flatten)
+    }
+
+    /// Record (or clear, with `None`) the remote project a workspace is
+    /// linked to.
+    pub async fn set_remote_project_id(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        remote_project_id: Option<Uuid>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            "UPDATE workspaces SET remote_project_id = $1, updated_at = datetime('now', 'subsec') WHERE id = $2",
+            remote_project_id,
+            workspace_id
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     /// Persist the workspace's currently-reported pipeline stage (1-based,
     /// `None` = not yet reported / reset for a new coding-agent run).
     /// Single source of truth for `VK-PIPELINE-STAGE` marker detection.
@@ -787,7 +821,70 @@ impl Workspace {
 mod tests {
     use uuid::Uuid;
 
-    use super::Workspace;
+    use super::{CreateWorkspace, Workspace};
+
+    async fn test_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn remote_project_id_round_trips_and_clears() {
+        let pool = test_pool().await;
+        let ws = Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "vk/remote-project-id-test".to_string(),
+                name: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+
+        // New workspaces start unlinked.
+        assert_eq!(
+            Workspace::get_remote_project_id(&pool, ws.id)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let remote_project_id = Uuid::new_v4();
+        Workspace::set_remote_project_id(&pool, ws.id, Some(remote_project_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            Workspace::get_remote_project_id(&pool, ws.id)
+                .await
+                .unwrap(),
+            Some(remote_project_id)
+        );
+
+        // Unlinking clears the stored id.
+        Workspace::set_remote_project_id(&pool, ws.id, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            Workspace::get_remote_project_id(&pool, ws.id)
+                .await
+                .unwrap(),
+            None
+        );
+
+        // Unknown workspaces resolve to None rather than erroring.
+        assert_eq!(
+            Workspace::get_remote_project_id(&pool, Uuid::new_v4())
+                .await
+                .unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn best_matching_container_ref_prefers_deepest_match() {
