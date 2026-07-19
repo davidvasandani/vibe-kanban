@@ -1,6 +1,6 @@
 # Shared MCP configuration
 
-Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`
+Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`, `76d1-vk-mcp-ux`
 
 Vibe Kanban derives shared MCP settings from each base executor's native config
 file. There is no separate registry: the native files remain the source consumed
@@ -31,6 +31,29 @@ Assignments target base executor types only. Named variants and per-task
 executor overrides are not separate MCP assignment targets. Compatibility is
 checked before writing. Codex accepts stdio and streamable HTTP; legacy SSE
 remains agent-native because Codex cannot consume that transport.
+
+Frontend assignment compatibility is not always identical to the native-entry
+form codec's transport list. The Codex form codec only parses and serializes its
+stdio editor shape, while shared materialization also adapts canonical HTTP
+definitions to Codex's `url`/`http_headers` shape. Assignment pickers must follow
+the shared materialization contract (including Codex HTTP and excluding Codex /
+Grok legacy SSE), not assume that an editor codec's narrower surface is the full
+backend capability set.
+
+## Management UI state boundary
+
+The MCP server inventory is a read-oriented management surface: cards show the
+logical server, transport, assigned agents, connection/auth state, and explicit
+Test/Edit/Delete actions. Agent assignment controls belong in the add/edit
+dialog with the server definition fields.
+
+The dialog owns provisional definition and assignment state. NiceModal reuses
+mounted components, so every open must re-seed all editable fields and
+assignments. Cancel/close resolves without a result and leaves the outer draft
+untouched; submit returns the complete `{ name, entry, assignments }` result.
+Transport changes remove assignments that are no longer compatible, and submit
+requires at least one assignment. The settings-level Save/Discard boundary
+continues to persist or roll back the confirmed outer draft.
 
 ## Shared gateway authentication
 
