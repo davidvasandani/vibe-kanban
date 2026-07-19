@@ -375,7 +375,8 @@
         "servers": "伺服器",
         "serverHelperForm": "點擊卡片即可將該 MCP 伺服器新增至清單。",
         "assignments": "指派",
-        "assignmentsHelper": "每個伺服器都會寫入所有已選相容代理的原生設定檔。"
+        "assignmentsHelper": "每個伺服器都會寫入所有已選相容代理的原生設定檔。",
+        "noAssignments": "No agents assigned"
       },
       "conflicts": {
         "title": "原生設定衝突",
@@ -383,6 +384,7 @@
         "helper": "選擇一個定義套用至所有已指派的代理程式。儲存前可以編輯。",
         "customUnsupported": "必須先在代理程式的原生設定中編輯此自訂定義。"
       },
+      "edit": "編輯",
       "delete": "刪除伺服器",
       "deleteConfirm": "要從所有已指派的代理設定中刪除此共用 MCP 伺服器嗎？",
       "auth": {
@@ -404,7 +406,7 @@
       "dialog": {
         "addTitle": "新增 MCP 伺服器",
         "editTitle": "編輯 MCP 伺服器",
-        "description": "設定此 MCP 伺服器的啟動方式。",
+        "description": "Configure this MCP server and assign it to agents.",
         "name": "名稱",
         "namePlaceholder": "例如 my_server",
         "transport": "傳輸方式",
@@ -420,7 +422,14 @@
         "customJsonHelper": "此伺服器使用表單無法顯示的格式；請直接編輯其 JSON。",
         "cancel": "取消",
         "add": "新增伺服器",
-        "saveEdit": "儲存變更"
+        "saveEdit": "儲存變更",
+        "agentsTitle": "Assign to agents",
+        "agentsHelper": "Choose which coding agents should use this MCP server.",
+        "incompatible": {
+          "noSse": "This agent does not support SSE transport.",
+          "noHttp": "This agent only supports stdio (command) transport.",
+          "generic": "This agent does not support {{transport}} transport."
+        }
       },
       "validation": {
         "nameRequired": "名稱為必填項。",
@@ -431,6 +440,7 @@
         "urlInvalid": "請輸入有效的 URL。",
         "urlScheme": "URL 必須以 http:// 或 https:// 開頭。",
         "duplicateKey": "不允許重複的鍵。",
+        "assignmentRequired": "At least one agent must be assigned.",
         "invalidJson": "JSON 格式無效。",
         "customNotObject": "伺服器 JSON 必須是一個物件。"
       },

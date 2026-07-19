@@ -375,7 +375,8 @@
         "servers": "Serveurs",
         "serverHelperForm": "Cliquez sur une carte pour ajouter ce serveur MCP à la liste.",
         "assignments": "affectations",
-        "assignmentsHelper": "Chaque serveur est écrit dans le fichier de configuration natif de chaque agent compatible sélectionné."
+        "assignmentsHelper": "Chaque serveur est écrit dans le fichier de configuration natif de chaque agent compatible sélectionné.",
+        "noAssignments": "No agents assigned"
       },
       "conflicts": {
         "title": "Conflits de configuration native",
@@ -383,6 +384,7 @@
         "helper": "Choisissez une définition à appliquer à chaque agent affecté. Vous pouvez la modifier avant d’enregistrer.",
         "customUnsupported": "Cette définition personnalisée doit d’abord être modifiée dans la configuration native de l’agent."
       },
+      "edit": "Modifier",
       "delete": "Supprimer le serveur",
       "deleteConfirm": "Supprimer ce serveur MCP partagé de toutes les configurations d’agents affectées ?",
       "auth": {
@@ -404,7 +406,7 @@
       "dialog": {
         "addTitle": "Ajouter un serveur MCP",
         "editTitle": "Modifier le serveur MCP",
-        "description": "Configurez la façon dont ce serveur MCP est lancé.",
+        "description": "Configure this MCP server and assign it to agents.",
         "name": "Nom",
         "namePlaceholder": "p. ex. mon_serveur",
         "transport": "Transport",
@@ -420,7 +422,14 @@
         "customJsonHelper": "Ce serveur utilise un format que le formulaire ne peut pas afficher ; modifiez son JSON directement.",
         "cancel": "Annuler",
         "add": "Ajouter un serveur",
-        "saveEdit": "Enregistrer les modifications"
+        "saveEdit": "Enregistrer les modifications",
+        "agentsTitle": "Assign to agents",
+        "agentsHelper": "Choose which coding agents should use this MCP server.",
+        "incompatible": {
+          "noSse": "This agent does not support SSE transport.",
+          "noHttp": "This agent only supports stdio (command) transport.",
+          "generic": "This agent does not support {{transport}} transport."
+        }
       },
       "validation": {
         "nameRequired": "Le nom est requis.",
@@ -432,7 +441,8 @@
         "urlScheme": "L'URL doit commencer par http:// ou https://.",
         "duplicateKey": "Les clés en double ne sont pas autorisées.",
         "invalidJson": "Format JSON invalide.",
-        "customNotObject": "Le JSON du serveur doit être un objet."
+        "customNotObject": "Le JSON du serveur doit être un objet.",
+        "assignmentRequired": "At least one agent must be assigned."
       },
       "json": {
         "editAsJson": "Modifier en JSON",

@@ -4,6 +4,7 @@ import type { JsonValue } from 'shared/types';
 import {
   argsFromLines,
   codecForAgent,
+  isTransportCompatible,
   pairsToRecord,
   transportOf,
 } from './mcpServerCodec';
@@ -298,6 +299,23 @@ describe('transportOf', () => {
   it('returns null for unparseable (custom) entries', () => {
     const codec = codecForAgent(BaseCodingAgent.CLAUDE_CODE);
     expect(transportOf(codec, { weird: true })).toBeNull();
+  });
+});
+
+describe('isTransportCompatible', () => {
+  it('allows CODEX streamable HTTP assignments', () => {
+    expect(isTransportCompatible(BaseCodingAgent.CODEX, 'http')).toBe(true);
+  });
+  it('reports incompatibility for CODEX with legacy SSE', () => {
+    expect(isTransportCompatible(BaseCodingAgent.CODEX, 'sse')).toBe(false);
+  });
+  it('reports compatibility for CLAUDE_CODE with sse', () => {
+    expect(isTransportCompatible(BaseCodingAgent.CLAUDE_CODE, 'sse')).toBe(
+      true
+    );
+  });
+  it('reports incompatibility for GROK with sse', () => {
+    expect(isTransportCompatible(BaseCodingAgent.GROK, 'sse')).toBe(false);
   });
 });
 

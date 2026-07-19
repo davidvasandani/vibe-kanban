@@ -19,7 +19,6 @@ import type {
   McpServerDefinition,
   McpServerTestResult,
   SharedMcpAssignmentTestResult,
-  SharedMcpProfile,
   SharedMcpReadResponse,
   SharedMcpServer,
 } from 'shared/types';
@@ -386,39 +385,29 @@ export function McpSettingsSection() {
       const codec = codecForAgent(BaseCodingAgentValue.CLAUDE_CODE);
       const result = await McpServerDialog.show({
         codec,
+        profiles,
         existingNames: draft.servers
-          .map((item) => item.name)
-          .filter((name) => name !== server?.name),
+          .map((s) => s.name)
+          .filter((n) => n !== server?.name),
         initial: server
-          ? { name: server.name, entry: entryForDialog(server.definition) }
+          ? {
+              name: server.name,
+              entry: entryForDialog(server.definition),
+              assignments: server.assignments,
+            }
           : undefined,
       });
       if (!result) return;
-      const definition = definitionFromEntry(result.entry);
-      const assignments = server?.assignments.length
-        ? server.assignments
-        : profiles
-            .filter(
-              (profile) =>
-                !(
-                  (profile.executor === BaseCodingAgentValue.CODEX &&
-                    definition.transport !== 'stdio') ||
-                  (profile.executor === BaseCodingAgentValue.GROK &&
-                    definition.transport === 'sse')
-                )
-            )
-            .slice(0, 1)
-            .map((profile) => profile.executor);
       if (server && server.name !== result.name) {
         setDraft((prev) => ({
           ...prev,
-          servers: prev.servers.filter((item) => item.name !== server.name),
+          servers: prev.servers.filter((s) => s.name !== server.name),
         }));
       }
       setServer({
         name: result.name,
-        definition,
-        assignments,
+        definition: definitionFromEntry(result.entry),
+        assignments: result.assignments,
       });
     },
     [draft.servers, profiles, setServer]
@@ -443,27 +432,6 @@ export function McpSettingsSection() {
       await loadShared();
     },
     [loadShared, machineClient, t]
-  );
-
-  const toggleAssignment = useCallback(
-    (serverName: string, profile: SharedMcpProfile) => {
-      setDraft((prev) => ({
-        ...prev,
-        servers: prev.servers.map((server) => {
-          if (server.name !== serverName) return server;
-          const assigned = server.assignments.includes(profile.executor);
-          return {
-            ...server,
-            assignments: assigned
-              ? server.assignments.filter(
-                  (executor) => executor !== profile.executor
-                )
-              : [...server.assignments, profile.executor],
-          };
-        }),
-      }));
-    },
-    []
   );
 
   const testAssignments = useCallback(
@@ -735,9 +703,14 @@ export function McpSettingsSection() {
       >
         <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
-            <label className="text-sm font-medium text-normal">
-              {t('settings.mcp.labels.servers')}
-            </label>
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium text-normal">
+                {t('settings.mcp.labels.servers')}
+              </label>
+              <span className="rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-low">
+                {draft.servers.length}
+              </span>
+            </div>
             <p className="text-sm text-low">
               {t('settings.mcp.labels.assignmentsHelper')}
             </p>
@@ -902,21 +875,40 @@ export function McpSettingsSection() {
                             </span>
                           )}
                         </div>
-                        <div className="mt-1 text-xs text-low">
-                          {server.assignments.length}{' '}
-                          {t('settings.mcp.labels.assignments')}
-                        </div>
+                        {server.assignments.length === 0 ? (
+                          <span className="text-xs text-low italic">
+                            {t('settings.mcp.labels.noAssignments')}
+                          </span>
+                        ) : (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {server.assignments.map((executor) => {
+                              const result =
+                                testResults[testKey(server.name, executor)]
+                                  ?.result;
+                              return (
+                                <span
+                                  key={executor}
+                                  className="inline-flex items-center gap-1 rounded-sm bg-primary border border-border px-1.5 py-0.5 text-xs text-low"
+                                >
+                                  {toPrettyCase(executor)}
+                                  <McpTestStatusIcon result={result} />
+                                </span>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                       <div className="flex max-w-full flex-wrap items-center gap-1 sm:shrink-0">
                         <Button
                           variant="ghost"
-                          size="icon"
+                          size="sm"
                           type="button"
                           onClick={() => void testAssignments(server.name)}
                           disabled={testing || isDirty}
                           title={t('settings.mcp.test.button')}
                         >
-                          <CheckCircleIcon className="size-icon-sm" />
+                          <CheckCircleIcon className="mr-1 size-icon-sm" />
+                          {t('settings.mcp.test.button')}
                         </Button>
                         {source?.auth_mode === 'shared_gateway' && (
                           <>
@@ -948,16 +940,17 @@ export function McpSettingsSection() {
                         )}
                         <Button
                           variant="ghost"
-                          size="icon"
+                          size="sm"
                           type="button"
                           onClick={() => void openDialog(server)}
                           title={t('settings.mcp.dialog.editTitle')}
                         >
-                          <PencilSimpleIcon className="size-icon-sm" />
+                          <PencilSimpleIcon className="mr-1 size-icon-sm" />
+                          {t('settings.mcp.edit')}
                         </Button>
                         <Button
                           variant="ghost"
-                          size="icon"
+                          size="sm"
                           type="button"
                           className="text-error"
                           onClick={() => {
@@ -966,7 +959,8 @@ export function McpSettingsSection() {
                           }}
                           title={t('settings.mcp.delete')}
                         >
-                          <TrashIcon className="size-icon-sm" />
+                          <TrashIcon className="mr-1 size-icon-sm" />
+                          {t('settings.mcp.delete')}
                         </Button>
                       </div>
                     </div>
@@ -1018,55 +1012,6 @@ export function McpSettingsSection() {
                           ))}
                       </div>
                     )}
-
-                    <div className="mt-2 grid gap-1 sm:grid-cols-2 lg:grid-cols-3">
-                      {profiles.map((profile) => {
-                        const compatibility = source?.compatibility.find(
-                          (item) => item.executor === profile.executor
-                        );
-                        const incompatible =
-                          compatibility?.compatible === false;
-                        const assigned = server.assignments.includes(
-                          profile.executor
-                        );
-                        const key = testKey(server.name, profile.executor);
-                        const result = testResults[key]?.result;
-                        return (
-                          <div
-                            key={profile.executor}
-                            className="rounded-sm border border-border bg-primary px-2 py-1.5"
-                          >
-                            <label className="flex items-center gap-2 text-sm">
-                              <input
-                                type="checkbox"
-                                checked={assigned}
-                                disabled={incompatible}
-                                onChange={() =>
-                                  toggleAssignment(server.name, profile)
-                                }
-                              />
-                              <span className="min-w-0 flex-1 truncate">
-                                {toPrettyCase(profile.executor)}
-                              </span>
-                              {assigned && (
-                                <McpTestStatusIcon result={result} />
-                              )}
-                            </label>
-                            {incompatible && (
-                              <div className="mt-1 text-xs text-error">
-                                {compatibility?.reason}
-                              </div>
-                            )}
-                            {assigned && testResults[key]?.gateway_status && (
-                              <div className="mt-1 text-xs text-low">
-                                Gateway: {testResults[key].gateway_status} ·
-                                Upstream: {testResults[key].upstream_status}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
                   </div>
                 );
               })

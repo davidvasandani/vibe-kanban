@@ -375,7 +375,8 @@
         "servers": "服务器",
         "serverHelperForm": "点击卡片可将该 MCP 服务器添加到列表。",
         "assignments": "分配",
-        "assignmentsHelper": "每个服务器都会写入所有已选兼容代理的原生配置文件。"
+        "assignmentsHelper": "每个服务器都会写入所有已选兼容代理的原生配置文件。",
+        "noAssignments": "No agents assigned"
       },
       "conflicts": {
         "title": "原生配置冲突",
@@ -383,6 +384,7 @@
         "helper": "选择一个定义应用于所有已分配的代理。保存前可以编辑。",
         "customUnsupported": "必须先在代理的原生配置中编辑此自定义定义。"
       },
+      "edit": "编辑",
       "delete": "删除服务器",
       "deleteConfirm": "要从所有已分配的代理配置中删除此共享 MCP 服务器吗？",
       "auth": {
@@ -404,7 +406,7 @@
       "dialog": {
         "addTitle": "添加 MCP 服务器",
         "editTitle": "编辑 MCP 服务器",
-        "description": "配置此 MCP 服务器的启动方式。",
+        "description": "Configure this MCP server and assign it to agents.",
         "name": "名称",
         "namePlaceholder": "例如 my_server",
         "transport": "传输方式",
@@ -420,7 +422,14 @@
         "customJsonHelper": "此服务器使用了表单无法显示的格式；请直接编辑其 JSON。",
         "cancel": "取消",
         "add": "添加服务器",
-        "saveEdit": "保存更改"
+        "saveEdit": "保存更改",
+        "agentsTitle": "Assign to agents",
+        "agentsHelper": "Choose which coding agents should use this MCP server.",
+        "incompatible": {
+          "noSse": "This agent does not support SSE transport.",
+          "noHttp": "This agent only supports stdio (command) transport.",
+          "generic": "This agent does not support {{transport}} transport."
+        }
       },
       "validation": {
         "nameRequired": "名称为必填项。",
@@ -431,6 +440,7 @@
         "urlInvalid": "请输入有效的 URL。",
         "urlScheme": "URL 必须以 http:// 或 https:// 开头。",
         "duplicateKey": "不允许重复的键。",
+        "assignmentRequired": "At least one agent must be assigned.",
         "invalidJson": "JSON 格式无效。",
         "customNotObject": "服务器 JSON 必须是一个对象。"
       },
