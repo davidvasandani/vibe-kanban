@@ -1,73 +1,49 @@
-# Prior Knowledge: Workspace Carousel View
+# Prior Knowledge: VK MCP Management UX
 
-Searched both project knowledge indexes (`wiki/INDEX.md` and
-`docs/knowledge-base/INDEX.md`) for pages relevant to a horizontally-scrolling
-multi-column workspace chat view sorted by "needs feedback". Two pages are
-directly relevant, one is background.
+Task: `76d1-vk-mcp-ux`
 
-## Directly relevant: "waiting for feedback" semantics already exist
+The Vibe Kanban project knowledge base was searched via `docs/knowledge-base/INDEX.md` and topic-page text for MCP, settings, assignment, modal, and frontend guidance. Four pages directly inform this change.
 
-`wiki/kanban-items-state-and-activity-grouping.md` (task
-`vk/d4db-in-progress-acti`) defines the project's established
-active-vs-waiting semantics for agent workspaces, used by the kanban
-"In progress" Active/Waiting split:
+## Shared MCP configuration
 
-- **Active** = linked non-archived workspace with `isRunning === true` **and**
-  `hasPendingApproval !== true`. A run paused on tool approval counts as
-  *waiting for feedback* even though a process is technically running — same
-  semantics as the `IssueWorkspaceCard` hand icon.
-- Anything without a live local workspace signal defaults to *waiting*.
-- Helpers live in
-  `packages/web-core/src/features/kanban/model/activityGrouping.ts` with unit
-  tests alongside — reuse/extend rather than invent a parallel predicate.
-- **Gotcha**: `workspacesByIssueId` is display-preference-gated (empty map when
-  the `showWorkspaces` preference is off) — never reuse it for semantic
-  logic; compute activity from the workspace context directly.
-- Derived orderings must be applied in state-building code, not at render
-  time, when they coexist with drag-and-drop index contracts. The carousel has
-  no DnD, so a render-time `useMemo` sort is fine, but keep the lesson in mind
-  if reordering interacts with any indexed structure.
+Source: `docs/knowledge-base/shared-mcp-configuration.md`
 
-Implication: the carousel's "needs feedback" tiering should be consistent with
-this: pending-approval ⇒ needs feedback (leftmost) even if `isRunning` is
-true; running-without-approval ⇒ does not need feedback.
+- The UI edits a logical shared server list, but native agent config files remain the actual source and write targets.
+- Assignments target base executor types, not named variants or task overrides.
+- Compatibility must be enforced in the frontend as well as the backend. Codex and Grok, for example, accept stdio and streamable HTTP but not legacy SSE.
+- Saves materialize a complete logical server list across independent native profiles and can partially succeed, so the existing save/error reporting contract must remain intact.
+- Gateway-backed authentication depends on assignment-level behavior. Removing assignments and disconnecting a gateway are not interchangeable operations.
+- Redacted capabilities and refreshed gateway entries need the existing snapshot/hydration flow; a UI-only reorganization must not rewrite or reconstruct secret-bearing definitions.
 
-## Directly relevant: horizontal multi-column scrolling gotchas
+## MCP connectivity testing
 
-`wiki/mobile-kanban-scrolling.md` (task `vk/de6e-improve-column-s`) documents
-the nested single-axis scroller architecture for a horizontally scrolling
-column strip with vertically scrolling columns — exactly the carousel shape:
+Source: `docs/knowledge-base/mcp-connectivity-testing.md`
 
-- Make each container scrollable on **exactly one axis**: outer strip
-  `overflow-x-auto` (+ optionally `snap-x`) with `overflow-y-hidden`; each
-  column's content `overflow-y-auto overflow-x-hidden overscroll-y-contain
-  min-h-0`.
-- **CSS spec gotcha**: `overflow-y: auto` with `overflow-x: visible` computes
-  `overflow-x: auto` — a vertical scroller missing `overflow-x-hidden`
-  silently becomes a competing horizontal scroller (iOS rubber-banding, stolen
-  swipes). Any vertical scroller nested in the carousel must carry
-  `overflow-x-hidden`.
-- Even 1–2px of accidental horizontal overflow (negative-margin border
-  tricks) turns a list into a real horizontal scroll container.
-- Don't fix stolen swipes with `touch-action: pan-y` — it blocks horizontal
-  gestures from reaching the outer strip entirely. Constrain `overflow-*`.
-- Column headers belong inside the column but outside its vertical scroller,
-  so they travel with the column horizontally.
-- No touch engine exists in the task environment; mobile verification is
-  manual (`mobile-testing.md` at repo root, phone-over-Tailscale).
+- Vibe Kanban is primarily a config writer; connectivity checks are explicit, on-demand probes of saved native entries.
+- Test results are keyed by both logical server and executor in the current shared flow. Moving assignment controls must preserve per-assignment status and testing behavior.
+- Status must distinguish connected, failed, authentication-required, and unsupported cases rather than flattening them into a binary indicator.
+- Existing results are invalidated by edits/saves so stale operational state is not presented as current.
 
-## Background: how an agent turn "stops"
+## MCP OAuth Connect flow
 
-`wiki/agent-process-lifecycle.md` covers the backend one-turn-one-
-`ExecutionProcess` model. For this task only the surface matters: the frontend
-receives per-workspace `latest_process_status`
-(`running|completed|failed|killed|interrupted`) and `is_running` via workspace
-summaries/streams — no new backend work is needed to know an agent stopped.
+Source: `docs/knowledge-base/mcp-oauth-connect.md`
 
-## Not relevant (checked, skipped)
+- An `auth_required` test result drives the Connect flow; the frontend opens OAuth synchronously enough to avoid popup blocking, polls status, refreshes the disk snapshot, and re-tests the server.
+- OAuth completion writes behind the UI. The refreshed on-disk entry must be merged into both the editable draft and original snapshot so later Save does not erase credentials.
+- Loopback/manual completion and Cloudflare Access retry guidance are part of the existing card-level result UI and should remain reachable after the redesign.
+- Connection identity depends on canonical server name/URL/assignment matching; modal editing must continue to pass complete existing definitions through the established helpers.
 
-`docs/knowledge-base/` pages are executor/MCP/remote-integration focused;
-`wiki/` pages on Electric fallback, task pipeline blocks, AppBar rail,
-breadcrumbs, and repo-branch defaulting don't bear on this view. No page
-covers the workspaces sidebar or chat-view provider stack — that knowledge
-was gathered fresh by code exploration (see `SPEC.md`).
+## Grok executor integration
+
+Source: `docs/knowledge-base/grok-executor-integration.md`
+
+- Agent transports differ, and frontend assignment filters must mirror backend compatibility checks.
+- The current codecs are the authoritative frontend mechanism for deciding whether a server definition can be assigned to a profile.
+
+## Implications for specification and planning
+
+1. Treat this as a frontend information-architecture change, not a new MCP storage model.
+2. Move assignment editing into modal-local state and commit it only with the rest of the modal form.
+3. Keep tests, auth controls, and detailed per-executor failure information on or reachable from each compact server card.
+4. Reuse `codecForAgent` compatibility checks and existing save/snapshot/auth functions; do not duplicate transport policy.
+5. Test cancellation carefully because the current inline checkboxes mutate the draft immediately, while the requested modal must provide transactional editing.

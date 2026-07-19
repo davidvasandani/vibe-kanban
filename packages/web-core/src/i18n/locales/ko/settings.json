@@ -375,7 +375,8 @@
         "servers": "서버",
         "serverHelperForm": "카드를 클릭하면 해당 MCP 서버가 목록에 추가됩니다.",
         "assignments": "할당",
-        "assignmentsHelper": "각 서버는 선택한 호환 에이전트의 기본 구성 파일에 기록됩니다."
+        "assignmentsHelper": "각 서버는 선택한 호환 에이전트의 기본 구성 파일에 기록됩니다.",
+        "noAssignments": "No agents assigned"
       },
       "conflicts": {
         "title": "기본 구성 충돌",
@@ -383,6 +384,7 @@
         "helper": "할당된 모든 에이전트에 적용할 정의를 선택하세요. 저장하기 전에 편집할 수 있습니다.",
         "customUnsupported": "이 사용자 지정 정의는 먼저 에이전트의 기본 구성에서 편집해야 합니다."
       },
+      "edit": "편집",
       "delete": "서버 삭제",
       "deleteConfirm": "이 공유 MCP 서버를 할당된 모든 에이전트 구성에서 삭제하시겠습니까?",
       "auth": {
@@ -404,7 +406,7 @@
       "dialog": {
         "addTitle": "MCP 서버 추가",
         "editTitle": "MCP 서버 편집",
-        "description": "이 MCP 서버가 실행되는 방식을 구성합니다.",
+        "description": "Configure this MCP server and assign it to agents.",
         "name": "이름",
         "namePlaceholder": "예: my_server",
         "transport": "전송 방식",
@@ -420,7 +422,14 @@
         "customJsonHelper": "이 서버는 양식으로 표시할 수 없는 형식을 사용합니다. JSON을 직접 편집하세요.",
         "cancel": "취소",
         "add": "서버 추가",
-        "saveEdit": "변경 사항 저장"
+        "saveEdit": "변경 사항 저장",
+        "agentsTitle": "Assign to agents",
+        "agentsHelper": "Choose which coding agents should use this MCP server.",
+        "incompatible": {
+          "noSse": "This agent does not support SSE transport.",
+          "noHttp": "This agent only supports stdio (command) transport.",
+          "generic": "This agent does not support {{transport}} transport."
+        }
       },
       "validation": {
         "nameRequired": "이름은 필수입니다.",
@@ -431,6 +440,7 @@
         "urlInvalid": "유효한 URL을 입력하세요.",
         "urlScheme": "URL은 http:// 또는 https://로 시작해야 합니다.",
         "duplicateKey": "중복된 키는 허용되지 않습니다.",
+        "assignmentRequired": "At least one agent must be assigned.",
         "invalidJson": "잘못된 JSON 형식입니다.",
         "customNotObject": "서버 JSON은 객체여야 합니다."
       },

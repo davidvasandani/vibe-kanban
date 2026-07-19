@@ -161,6 +161,7 @@
       "backToWorkspaces": "標準ビュー",
       "openFullView": "フルビューで開く",
       "columnPlaceholder": "ここまでスクロールするとチャットが読み込まれます",
+      "needsFeedbackCount_one": "{{count}}件が応答待ち",
       "needsFeedbackCount_other": "{{count}}件が応答待ち",
       "status": {
         "needsFeedback": "応答待ち",

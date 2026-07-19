@@ -161,6 +161,7 @@
       "backToWorkspaces": "標準檢視",
       "openFullView": "開啟完整檢視",
       "columnPlaceholder": "捲動到此處以載入此對話",
+      "needsFeedbackCount_one": "{{count}} 個需要回饋",
       "needsFeedbackCount_other": "{{count}} 個需要回饋",
       "status": {
         "needsFeedback": "需要回饋",
