@@ -161,6 +161,7 @@
       "backToWorkspaces": "기본 보기",
       "openFullView": "전체 보기 열기",
       "columnPlaceholder": "여기로 스크롤하면 채팅이 로드됩니다",
+      "needsFeedbackCount_one": "{{count}}개 응답 필요",
       "needsFeedbackCount_other": "{{count}}개 응답 필요",
       "status": {
         "needsFeedback": "응답 필요",

@@ -161,6 +161,7 @@
       "backToWorkspaces": "标准视图",
       "openFullView": "打开完整视图",
       "columnPlaceholder": "滚动到此处以加载此对话",
+      "needsFeedbackCount_one": "{{count}} 个需要反馈",
       "needsFeedbackCount_other": "{{count}} 个需要反馈",
       "status": {
         "needsFeedback": "需要反馈",
