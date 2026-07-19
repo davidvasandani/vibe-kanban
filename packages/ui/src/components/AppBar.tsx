@@ -617,7 +617,7 @@ export function AppBar({
           ) : (
             <Tooltip content={`View commit ${appVersion}`} side="right">
               <a
-                href={`https://github.com/BloopAI/vibe-kanban/commit/${appVersion}`}
+                href={`https://github.com/davidvasandani/vibe-kanban/commit/${appVersion}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-[9px] font-ibm-plex-mono text-low hover:text-normal leading-none truncate max-w-10 text-center transition-colors cursor-pointer"
