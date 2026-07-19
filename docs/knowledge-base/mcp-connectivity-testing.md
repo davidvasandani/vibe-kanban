@@ -1,6 +1,6 @@
 # MCP connectivity testing
 
-Tags: `6286-mcp-status-and-t`, `0c92-mcp-test-connect`
+Tags: `6286-mcp-status-and-t`, `0c92-mcp-test-connect`, `9453-vk-mcp-auto-debu`
 
 ## The key architectural fact
 
@@ -81,3 +81,31 @@ Extract the stdio handshake into `mcp_handshake_over_io(writer, reader)` generic
 over the IO so it can be driven against an in-memory `tokio::io::duplex` mock
 server — deterministic, no external process. Unit-test `normalize()` for each
 agent shape and the response parsers; test the bogus-command path for `Failed`.
+
+## Failed-diagnostic UI and Debug issue creation
+
+Task `9453-vk-mcp-auto-debu` established the frontend contract for failed saved
+assignment tests:
+
+- Treat the backend diagnostic as opaque text. Render it with preserved line
+  breaks and long-word wrapping, and pass the exact same string to clipboard
+  and issue creation. Use localized fallback text only when the diagnostic is
+  absent or empty.
+- Embed diagnostics in generated Markdown with a backtick fence longer than
+  any backtick run in the diagnostic. This keeps arbitrary logs intact without
+  allowing their own fence markers to escape the diagnostic block.
+- Settings dialogs are rendered by `NiceModalProvider` as siblings of route
+  content, so they do not inherit a `ProjectProvider` mounted inside the active
+  project route. A project-aware settings section must read the active
+  `projectId` from router params and establish its own route-scoped
+  `ProjectProvider`; otherwise optional project context is always absent in the
+  modal even on a project page.
+- Issue creation uses the existing optimistic `insertIssue` mutation, the first
+  status by `sort_order`, and `min(existing sort_order) - 1` for top-of-column
+  placement. Await `persisted` before showing success or enabling the explicit
+  Open Issue action.
+- A React state flag alone is not a sufficient duplicate-submit guard. Retests,
+  saves, reloads, and modal unmount/reopen can reset component state while the
+  persistence promise is pending. Keep an in-flight guard outside component
+  instances, keyed by project plus assignment, acquire it synchronously before
+  insertion, and release it only in the persistence path's `finally` block.
