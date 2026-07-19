@@ -1,6 +1,7 @@
 # Shared MCP configuration
 
-Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`, `76d1-vk-mcp-ux`
+Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`,
+`c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`
 
 Vibe Kanban derives shared MCP settings from each base executor's native config
 file. There is no separate registry: the native files remain the source consumed
@@ -54,6 +55,19 @@ untouched; submit returns the complete `{ name, entry, assignments }` result.
 Transport changes remove assignments that are no longer compatible, and submit
 requires at least one assignment. The settings-level Save/Discard boundary
 continues to persist or roll back the confirmed outer draft.
+
+## Preconfigured server catalog
+
+`crates/executors/default_mcp.json` is the canonical catalog for suggested MCP
+servers. Keep entries transport-neutral in that file (`command`, `args`, and
+`env` for stdio), use credential placeholders rather than secrets, and let
+`mcp_config.rs` adapt the entry to each executor's native schema. In particular,
+Opencode calls the stdio environment field `environment`; dropping or leaving it
+as `env` makes credential-dependent catalog entries unusable after adaptation.
+
+The backend exposes this catalog through `/api/mcp-config/default`, but the
+current shared MCP settings UI does not render catalog suggestions. Treat catalog
+availability and UI discoverability as separate capabilities when scoping work.
 
 ## Shared gateway authentication
 

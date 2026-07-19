@@ -44,6 +44,18 @@
       "stdio"
     ]
   },
+  "slack": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "slack-mcp-server@latest",
+      "--transport",
+      "stdio"
+    ],
+    "env": {
+      "SLACK_MCP_XOXP_TOKEN": "YOUR_TOKEN"
+    }
+  },
   "meta": {
     "vibe_kanban": {
       "name": "Vibe Kanban",
@@ -80,7 +92,11 @@
       "description": "Launch and manage multiple dev servers in parallel with automatic port allocation",
       "url": "https://github.com/BloopAI/dev-manager-mcp",
       "icon": "mcp/dev_manager_logo.svg"
+    },
+    "slack": {
+      "name": "Slack",
+      "description": "Search and read Slack workspace conversations",
+      "url": "https://github.com/davidvasandani/slack-mcp-server/"
     }
   }
 }
-
