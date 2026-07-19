@@ -1,49 +1,79 @@
-# Prior Knowledge: VK MCP Management UX
+# Prior Knowledge: VK MCP Auto Debug
 
-Task: `76d1-vk-mcp-ux`
+Task: `9453-vk-mcp-auto-debu`
 
-The Vibe Kanban project knowledge base was searched via `docs/knowledge-base/INDEX.md` and topic-page text for MCP, settings, assignment, modal, and frontend guidance. Four pages directly inform this change.
-
-## Shared MCP configuration
-
-Source: `docs/knowledge-base/shared-mcp-configuration.md`
-
-- The UI edits a logical shared server list, but native agent config files remain the actual source and write targets.
-- Assignments target base executor types, not named variants or task overrides.
-- Compatibility must be enforced in the frontend as well as the backend. Codex and Grok, for example, accept stdio and streamable HTTP but not legacy SSE.
-- Saves materialize a complete logical server list across independent native profiles and can partially succeed, so the existing save/error reporting contract must remain intact.
-- Gateway-backed authentication depends on assignment-level behavior. Removing assignments and disconnecting a gateway are not interchangeable operations.
-- Redacted capabilities and refreshed gateway entries need the existing snapshot/hydration flow; a UI-only reorganization must not rewrite or reconstruct secret-bearing definitions.
+The Vibe Kanban project knowledge base was searched through
+`docs/knowledge-base/INDEX.md` and its topic pages for MCP testing, settings,
+diagnostics, issue creation, project context, and clipboard behavior.
 
 ## MCP connectivity testing
 
 Source: `docs/knowledge-base/mcp-connectivity-testing.md`
 
-- Vibe Kanban is primarily a config writer; connectivity checks are explicit, on-demand probes of saved native entries.
-- Test results are keyed by both logical server and executor in the current shared flow. Moving assignment controls must preserve per-assignment status and testing behavior.
-- Status must distinguish connected, failed, authentication-required, and unsupported cases rather than flattening them into a binary indicator.
-- Existing results are invalidated by edits/saves so stale operational state is not presented as current.
+- Vibe Kanban normally writes agent-native MCP configuration; the explicit test
+  flow is the exceptional client path that probes saved entries on demand.
+- Probe results deliberately distinguish `ok`, `failed`, `auth_required`, and
+  `unsupported`. Auto-debug UI must attach only to genuine failures and must not
+  collapse authentication or unsupported results into the same workflow.
+- `McpServerTestResult.error` carries actionable transport/process diagnostics.
+  The frontend currently indexes results by server/executor and clears stale
+  state after configuration changes; the enhancement must retain those rules.
+- The probe may include multiline stderr and transport errors. Preserving the
+  exact string is important because stdio stderr is intentionally attached to
+  failures and timeouts are bounded at the probe layer.
+
+## Shared MCP configuration
+
+Source: `docs/knowledge-base/shared-mcp-configuration.md`
+
+- Shared tests read saved native entries and return assignment-level results
+  keyed by logical server name and base executor.
+- The MCP inventory is a read-oriented management surface with explicit testing
+  and detailed per-assignment state. Debug actions should not mutate the MCP
+  draft, assignment list, redacted credential snapshot, or save/discard state.
+- Assignment compatibility and secret hydration are established contracts. This
+  task should remain a diagnostic/issue-creation UI path rather than modifying
+  materialization or connection behavior.
 
 ## MCP OAuth Connect flow
 
 Source: `docs/knowledge-base/mcp-oauth-connect.md`
 
-- An `auth_required` test result drives the Connect flow; the frontend opens OAuth synchronously enough to avoid popup blocking, polls status, refreshes the disk snapshot, and re-tests the server.
-- OAuth completion writes behind the UI. The refreshed on-disk entry must be merged into both the editable draft and original snapshot so later Save does not erase credentials.
-- Loopback/manual completion and Cloudflare Access retry guidance are part of the existing card-level result UI and should remain reachable after the redesign.
-- Connection identity depends on canonical server name/URL/assignment matching; modal editing must continue to pass complete existing definitions through the established helpers.
+- `auth_required` results drive a specialized Connect workflow with popup,
+  polling, snapshot refresh, and re-test behavior.
+- Auto-debug must leave that workflow intact and avoid showing Debug as a
+  substitute for Connect on authentication challenges.
+- Error text can contain remote or process-controlled content. Existing OAuth
+  guidance treats it as untrusted display data; issue descriptions should pass
+  it as inert text/Markdown content, not interpolate it into HTML.
 
-## Grok executor integration
+## External integration issue creation
 
-Source: `docs/knowledge-base/grok-executor-integration.md`
+Source: `docs/knowledge-base/remote-external-integrations.md`
 
-- Agent transports differ, and frontend assignment filters must mirror backend compatibility checks.
-- The current codecs are the authoritative frontend mechanism for deciding whether a server definition can be assigned to a profile.
+- The knowledge base documents server-side issue creation for remote external
+  integrations, including explicit project mapping and the shared issue
+  repository, but it does not document a reusable local-settings frontend
+  mutation for creating an issue.
+- This is a useful boundary warning: the implementation must inspect and reuse
+  current local project/issue infrastructure rather than copying the remote
+  integration path or inventing an arbitrary project selection rule.
+
+## Knowledge gaps to resolve during planning
+
+- No topic page currently records how a global settings screen obtains the
+  active local VK project or navigates to a newly created issue.
+- No topic page records a standard copy-to-clipboard feedback component.
+- The implementation plan must therefore verify provider availability, mutation
+  semantics, and existing UI primitives directly in the codebase.
 
 ## Implications for specification and planning
 
-1. Treat this as a frontend information-architecture change, not a new MCP storage model.
-2. Move assignment editing into modal-local state and commit it only with the rest of the modal form.
-3. Keep tests, auth controls, and detailed per-executor failure information on or reachable from each compact server card.
-4. Reuse `codecForAgent` compatibility checks and existing save/snapshot/auth functions; do not duplicate transport policy.
-5. Test cancellation carefully because the current inline checkboxes mutate the draft immediately, while the requested modal must provide transactional editing.
+1. Enhance only `failed` assignment results; preserve all other status flows.
+2. Treat the backend-provided diagnostic as an opaque exact string for display,
+   copy, and issue context.
+3. Keep the debug mutation orthogonal to MCP configuration and OAuth state.
+4. Resolve project identity explicitly from existing local app context; never
+   default to an arbitrary project.
+5. Escape/fence diagnostic Markdown robustly and add focused tests for multiline
+   content and mutation failure states.
