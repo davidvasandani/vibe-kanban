@@ -1,34 +1,49 @@
-# Technical Spec: Dispatch Queued Messages When Cleanup Is Skipped
+# Technical Specification: Organization Environment Variables in Workspaces
+
+Task: `vk/6d24-org-env-vars-are`
 
 ## Problem
 
-When a successful coding-agent run makes no repository changes, the exit monitor
-skips the configured cleanup action, manually finalizes the task, and sets
-`already_finalized`. That flag bypasses the later finalization block containing
-the only normal queued-message consumer. A message submitted during the run
-therefore remains in the in-memory queue indefinitely. The screenshot's "0 files
-changed" state matches this branch exactly.
+Organization environment variables are stored and injected into managed coding
+agent, setup, and development-server processes, but the interactive terminal in
+a workspace is spawned through a separate PTY service. As a result, opening the
+workspace terminal does not expose the organization variables shown in
+Organization Settings.
 
-## Required Change
+## Required Behavior
 
-- Before manually finalizing the no-changes branch, claim any queued follow-up.
-- Delete its draft scratch and start it through the existing queued follow-up
-  execution helper.
-- Finalize normally when no message exists or follow-up start fails.
-- Preserve the existing cleanup-skip behavior and all other queue consumers.
-- Add focused regression coverage that fixes the decision contract: skipped
-  cleanup dispatches a queued follow-up, while the empty case finalizes.
+- Resolve organization variables using the workspace's task, local project, and
+  remote project association.
+- Make the resolved variables available to newly opened workspace terminals.
+- Keep the existing best-effort behavior: local-only workspaces and remote
+  lookup failures still open a terminal without organization variables.
+- Bound remote resolution with the existing timeout.
+- Reject application-reserved keys (`VK_*`, `PATH`, `HOME`, `LD_PRELOAD`,
+  `LD_LIBRARY_PATH`, and `OPENCODE_SERVER_PASSWORD`).
+- Apply terminal-owned values after organization values so `TERM`, `COLORTERM`,
+  prompt setup, and `VIBE_KANBAN_TERMINAL` retain their runtime meanings.
+- Never log environment values.
 
-## Non-goals
+## Design
 
-- Changing queue persistence, API types, frontend behavior, or replacement and
-  cancellation semantics.
-- Redesigning general completion/submission concurrency.
+Expose organization environment resolution through the existing
+`ContainerService` interface and keep its implementation in
+`LocalContainerService`, which already owns workspace-to-project mapping,
+authenticated remote access, timeout behavior, filtering, and warnings.
 
-## Acceptance Criteria
+The terminal WebSocket route resolves the map for the authenticated workspace
+and passes it by value into `PtyService`. PTY command creation applies the map to
+the child command before applying terminal-owned values. Managed CLI login PTYs
+continue to pass an empty explicit map and retain their cleared, allowlisted host
+environment.
 
-- A queued message present when a successful coding run produces no changes is
-  consumed and started without cancellation/resubmission.
-- A no-change run with no queued message still finalizes and skips cleanup.
-- Failure to start the claimed follow-up falls back to task finalization.
-- Existing finalization and queued-message tests remain green.
+No schema, remote API, generated type, or frontend change is required.
+
+## Verification
+
+- A PTY child test confirms an organization-style value is visible to the child.
+- The same test confirms an attempted `TERM` override loses to the PTY contract.
+- A resolver test confirms reserved keys are rejected and ordinary credential
+  names are accepted.
+- `cargo check -p server` validates the terminal route and service integration.
+- `cargo fmt --all` and `git diff --check` validate formatting.

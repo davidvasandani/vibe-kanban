@@ -10,6 +10,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use db::models::{workspace::Workspace, workspace_repo::WorkspaceRepo};
 use deployment::Deployment;
 use serde::{Deserialize, Serialize};
+use services::services::container::ContainerService;
 use uuid::Uuid;
 
 use crate::{
@@ -60,6 +61,7 @@ async fn terminal_ws(
 
     let container_ref = attempt
         .container_ref
+        .as_deref()
         .ok_or_else(|| ApiError::BadRequest("Attempt has no workspace directory".to_string()))?;
 
     let base_dir = PathBuf::from(&container_ref);
@@ -87,8 +89,17 @@ async fn terminal_ws(
         }
     }
 
+    let environment = deployment.container().resolve_org_env_vars(&attempt).await;
+
     Ok(ws.on_upgrade(move |socket| {
-        handle_terminal_ws(socket, deployment, working_dir, query.cols, query.rows)
+        handle_terminal_ws(
+            socket,
+            deployment,
+            working_dir,
+            environment,
+            query.cols,
+            query.rows,
+        )
     }))
 }
 
@@ -96,12 +107,13 @@ async fn handle_terminal_ws(
     mut socket: MaybeSignedWebSocket,
     deployment: DeploymentImpl,
     working_dir: PathBuf,
+    environment: std::collections::HashMap<String, String>,
     cols: u16,
     rows: u16,
 ) {
     let (session_id, mut output_rx) = match deployment
         .pty()
-        .create_session(working_dir, cols, rows)
+        .create_session(working_dir, environment, cols, rows)
         .await
     {
         Ok(result) => result,

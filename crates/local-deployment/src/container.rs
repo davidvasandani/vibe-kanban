@@ -1727,7 +1727,7 @@ impl LocalContainerService {
     /// workspace isn't linked to a remote project, no remote client is
     /// configured, or the fetch fails — org env vars are best-effort and must
     /// never block a workspace from starting.
-    async fn resolve_org_env_vars(&self, workspace: &Workspace) -> HashMap<String, String> {
+    async fn resolve_org_env_vars_inner(&self, workspace: &Workspace) -> HashMap<String, String> {
         let Some(remote_client) = self.remote_client.as_ref() else {
             return HashMap::new();
         };
@@ -1908,6 +1908,10 @@ impl ContainerService for LocalContainerService {
 
     fn notification_service(&self) -> &NotificationService {
         &self.notification_service
+    }
+
+    async fn resolve_org_env_vars(&self, workspace: &Workspace) -> HashMap<String, String> {
+        self.resolve_org_env_vars_inner(workspace).await
     }
 
     async fn touch(&self, workspace: &Workspace) -> Result<(), ContainerError> {
@@ -2716,10 +2720,28 @@ mod warm_tests {
     use uuid::Uuid;
 
     use super::{
-        WARM_IDLE_TIMEOUT, WarmAppServer, WarmRegistry, WarmReuseHandle, parse_keep_warm,
-        reap_all_warm_entries, reap_warm_entry, reap_warm_entry_if_unchanged, register_warm_entry,
-        should_keep_warm, sweep_idle_warm_entries, take_live_warm_entry, warm_entry_is_idle,
+        WARM_IDLE_TIMEOUT, WarmAppServer, WarmRegistry, WarmReuseHandle, is_reserved_env_name,
+        parse_keep_warm, reap_all_warm_entries, reap_warm_entry, reap_warm_entry_if_unchanged,
+        register_warm_entry, should_keep_warm, sweep_idle_warm_entries, take_live_warm_entry,
+        warm_entry_is_idle,
     };
+
+    #[test]
+    fn organization_environment_cannot_replace_runtime_contract() {
+        for name in [
+            "VK_WORKSPACE_ID",
+            "VK_WORKSPACE_BRANCH",
+            "PATH",
+            "HOME",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "OPENCODE_SERVER_PASSWORD",
+        ] {
+            assert!(is_reserved_env_name(name), "{name} must stay reserved");
+        }
+        assert!(!is_reserved_env_name("GITHUB_TOKEN"));
+        assert!(!is_reserved_env_name("AZURE_CLIENT_ID"));
+    }
 
     // The exit-monitor keeps a persistent app-server warm only on a clean turn
     // end: warm executor + success + not explicitly stopped. Every other cell of

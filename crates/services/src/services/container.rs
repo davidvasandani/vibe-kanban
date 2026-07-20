@@ -130,6 +130,11 @@ pub trait ContainerService {
 
     fn notification_service(&self) -> &NotificationService;
 
+    /// Resolve the owning organization's environment variables for a
+    /// workspace. Implementations must degrade to an empty map when the
+    /// workspace is local-only or the remote configuration is unavailable.
+    async fn resolve_org_env_vars(&self, workspace: &Workspace) -> HashMap<String, String>;
+
     async fn touch(&self, workspace: &Workspace) -> Result<(), ContainerError>;
 
     fn workspace_to_current_dir(&self, workspace: &Workspace) -> PathBuf;
