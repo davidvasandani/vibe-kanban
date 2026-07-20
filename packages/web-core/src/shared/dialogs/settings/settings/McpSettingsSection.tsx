@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import {
   ArrowSquareOutIcon,
   CheckCircleIcon,
+  CheckIcon,
   CircleNotchIcon,
   CodeIcon,
   CopyIcon,
@@ -44,6 +45,7 @@ import {
   indexAssignmentTests,
   inputsFromDraft,
   mergeOAuthRefresh,
+  preconfiguredMcpServers,
   removedServerNames,
   resolveConflictVariant,
   sharedMcpSnapshot,
@@ -452,6 +454,10 @@ export function McpSettingsSection() {
     for (const server of readModel?.servers ?? []) map.set(server.name, server);
     return map;
   }, [readModel]);
+  const catalogServers = useMemo(
+    () => preconfiguredMcpServers(readModel?.preconfigured ?? {}),
+    [readModel]
+  );
 
   const save = useCallback(async () => {
     if (!machineClient) return;
@@ -571,6 +577,26 @@ export function McpSettingsSection() {
       servers: prev.servers.filter((server) => server.name !== name),
     }));
   }, []);
+
+  const addPreconfigured = useCallback(
+    (key: string, entry: JsonValue) => {
+      const definition = definitionFromEntry(entry);
+      const assignments = profiles
+        .filter(
+          (profile) =>
+            !(
+              (profile.executor === BaseCodingAgentValue.CODEX &&
+                definition.transport !== 'stdio') ||
+              (profile.executor === BaseCodingAgentValue.GROK &&
+                definition.transport === 'sse')
+            )
+        )
+        .slice(0, 1)
+        .map((profile) => profile.executor);
+      setServer({ name: key, definition, assignments });
+    },
+    [profiles, setServer]
+  );
 
   const disconnectGateway = useCallback(
     async (server: SharedMcpServer) => {
@@ -1026,6 +1052,76 @@ export function McpSettingsSection() {
           </SettingsField>
         ) : (
           <div className="space-y-3">
+            {catalogServers.length > 0 && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-normal">
+                  {t('settings.mcp.labels.popularServers')}
+                </label>
+                <p className="text-sm text-low">
+                  {t('settings.mcp.labels.serverHelperForm')}
+                </p>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {catalogServers.map((server) => {
+                    const added = draft.servers.some(
+                      (draftServer) => draftServer.name === server.key
+                    );
+                    const icon = server.icon ? `/${server.icon}` : null;
+                    return (
+                      <button
+                        key={server.key}
+                        type="button"
+                        onClick={() =>
+                          addPreconfigured(server.key, server.entry)
+                        }
+                        disabled={added}
+                        className={cn(
+                          'flex items-start gap-3 rounded-sm border border-border/50 bg-secondary/30 p-3 text-left transition-colors',
+                          added
+                            ? 'cursor-default opacity-60'
+                            : 'hover:border-border hover:bg-secondary'
+                        )}
+                      >
+                        <div className="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-sm border border-border bg-secondary">
+                          {icon ? (
+                            <img
+                              src={icon}
+                              alt=""
+                              className="size-full object-cover"
+                            />
+                          ) : (
+                            <span className="text-xs font-semibold text-normal">
+                              {server.name.slice(0, 1).toUpperCase()}
+                            </span>
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-medium text-normal">
+                            {server.name}
+                          </div>
+                          {server.description && (
+                            <div className="line-clamp-2 text-xs text-low">
+                              {server.description}
+                            </div>
+                          )}
+                        </div>
+                        {added ? (
+                          <CheckIcon
+                            className="size-icon-xs shrink-0 text-success"
+                            weight="bold"
+                          />
+                        ) : (
+                          <PlusIcon
+                            className="size-icon-xs shrink-0 text-low"
+                            weight="bold"
+                          />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {draft.conflicts.length > 0 && (
               <div className="space-y-3 rounded-sm border border-warning/50 bg-warning/10 p-3 text-sm text-warning">
                 <div className="font-medium">

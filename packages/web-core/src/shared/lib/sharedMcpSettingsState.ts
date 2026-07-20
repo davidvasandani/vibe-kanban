@@ -22,6 +22,49 @@ export type SharedMcpDraftState = {
   conflicts: SharedMcpConflict[];
 };
 
+export type PreconfiguredMcpServer = {
+  key: string;
+  entry: JsonValue;
+  name: string;
+  description: string;
+  icon?: string;
+};
+
+export function preconfiguredMcpServers(
+  value: JsonValue
+): PreconfiguredMcpServer[] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return [];
+  }
+  const catalog = value as Record<string, JsonValue>;
+  const metadata =
+    typeof catalog.meta === 'object' &&
+    catalog.meta !== null &&
+    !Array.isArray(catalog.meta)
+      ? (catalog.meta as Record<string, JsonValue>)
+      : {};
+
+  return Object.entries(catalog)
+    .filter(([key, entry]) => key !== 'meta' && entry !== undefined)
+    .map(([key, entry]) => {
+      const rawMeta = metadata[key];
+      const meta =
+        typeof rawMeta === 'object' &&
+        rawMeta !== null &&
+        !Array.isArray(rawMeta)
+          ? (rawMeta as Record<string, JsonValue>)
+          : {};
+      return {
+        key,
+        entry,
+        name: typeof meta.name === 'string' ? meta.name : key,
+        description:
+          typeof meta.description === 'string' ? meta.description : '',
+        icon: typeof meta.icon === 'string' ? meta.icon : undefined,
+      };
+    });
+}
+
 export function sharedMcpSnapshot(state: SharedMcpDraftState): string {
   return JSON.stringify({
     servers: [...state.servers]
