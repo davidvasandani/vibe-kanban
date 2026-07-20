@@ -7,6 +7,7 @@ import {
   indexAssignmentTests,
   inputsFromDraft,
   mergeOAuthRefresh,
+  preconfiguredMcpServers,
   removedServerNames,
   resolveConflictVariant,
   sharedMcpSnapshot,
@@ -45,6 +46,28 @@ const readResponse = (): SharedMcpReadResponse => ({
 });
 
 describe('shared MCP settings state', () => {
+  it('extracts catalog servers and metadata without exposing the meta entry', () => {
+    expect(
+      preconfiguredMcpServers({
+        slack: { command: 'npx', args: ['slack-mcp-server'] },
+        meta: {
+          slack: {
+            name: 'Slack',
+            description: 'Search workspace conversations',
+          },
+        },
+      })
+    ).toEqual([
+      {
+        key: 'slack',
+        entry: { command: 'npx', args: ['slack-mcp-server'] },
+        name: 'Slack',
+        description: 'Search workspace conversations',
+        icon: undefined,
+      },
+    ]);
+  });
+
   it('creates stable snapshots independent of assignment order', () => {
     const a = {
       servers: [
