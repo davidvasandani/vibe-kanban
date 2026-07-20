@@ -53,7 +53,7 @@ use services::services::{
     file::FileService,
     notification::NotificationService,
     queued_message::QueuedMessageService,
-    remote_client::RemoteClient,
+    remote_client::{RemoteClient, RemoteClientError},
     remote_sync,
 };
 use tokio::{sync::RwLock, task::JoinHandle};
@@ -80,6 +80,20 @@ const KEEP_WARM_ENV: &str = "VK_KEEP_WARM_AGENTS";
 /// reaped so an abandoned-but-not-closed attempt cannot pin a process forever
 /// (spec FR-5). The periodic workspace-cleanup sweep enforces it.
 const WARM_IDLE_TIMEOUT: Duration = Duration::from_mins(30);
+
+#[derive(Debug, PartialEq, Eq)]
+enum SkippedCleanupAction {
+    StartQueuedFollowUp,
+    Finalize,
+}
+
+fn skipped_cleanup_action(has_queued_message: bool) -> SkippedCleanupAction {
+    if has_queued_message {
+        SkippedCleanupAction::StartQueuedFollowUp
+    } else {
+        SkippedCleanupAction::Finalize
+    }
+}
 
 /// A persistent app-server (e.g. OpenCode) kept alive between turns for reuse.
 /// Owned by the container's `warm_app_servers` registry, which is the single
@@ -1079,8 +1093,35 @@ impl LocalContainerService {
                             ctx.workspace.id
                         );
 
-                        // Manually finalize task since we're bypassing normal execution flow
-                        container.finalize_task(&ctx).await;
+                        // The cleanup action is being bypassed, so it cannot reach
+                        // the normal finalization block below. Consume a queued
+                        // follow-up here before finalizing; otherwise the message
+                        // remains in memory forever while the UI promises it will
+                        // run when this execution finishes.
+                        let started_queued_follow_up = match skipped_cleanup_action(
+                            container.queued_message_service.has_queued(ctx.session.id),
+                        ) {
+                            SkippedCleanupAction::StartQueuedFollowUp => {
+                                match container.queued_message_service.take_queued(ctx.session.id) {
+                                    Some(queued_msg) => {
+                                        container
+                                            .start_queued_follow_up_message(&ctx, &queued_msg)
+                                            .await
+                                    }
+                                    // Cancellation can win between the status
+                                    // check and the take; finalization is then
+                                    // the correct fallback.
+                                    None => false,
+                                }
+                            }
+                            SkippedCleanupAction::Finalize => false,
+                        };
+
+                        if !started_queued_follow_up {
+                            // Manually finalize since we're bypassing the cleanup
+                            // action and did not replace it with a follow-up.
+                            container.finalize_task(&ctx).await;
+                        }
                         already_finalized = true;
                     }
                 }
@@ -1112,30 +1153,13 @@ impl LocalContainerService {
                                 ctx.session.id
                             );
 
-                            // Delete the scratch since we're consuming the queued message
-                            if let Err(e) = Scratch::delete(
-                                &db.pool,
-                                ctx.session.id,
-                                &ScratchType::DraftFollowUp,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    "Failed to delete scratch after consuming queued message: {}",
-                                    e
-                                );
-                            }
-
-                            // Execute the queued follow-up
-                            if let Err(e) = container
-                                .start_queued_follow_up(&ctx, &queued_msg.data)
+                            if container
+                                .start_queued_follow_up_message(&ctx, &queued_msg)
                                 .await
                             {
-                                tracing::error!("Failed to start queued follow-up: {}", e);
-                                // Fall back to finalization if follow-up fails
-                                container.finalize_task(&ctx).await;
-                            } else {
                                 started_queued_follow_up = true;
+                            } else {
+                                container.finalize_task(&ctx).await;
                             }
                         } else {
                             // Execution failed or was killed - discard the queued message and finalize
@@ -1601,6 +1625,26 @@ impl LocalContainerService {
     }
 
     /// Start a follow-up execution from a queued message
+    async fn start_queued_follow_up_message(
+        &self,
+        ctx: &ExecutionContext,
+        queued_msg: &services::services::queued_message::QueuedMessage,
+    ) -> bool {
+        if let Err(e) =
+            Scratch::delete(&self.db.pool, ctx.session.id, &ScratchType::DraftFollowUp).await
+        {
+            tracing::warn!("Failed to delete scratch after consuming queued message: {e}");
+        }
+
+        if let Err(e) = self.start_queued_follow_up(ctx, &queued_msg.data).await {
+            tracing::error!("Failed to start queued follow-up: {e}");
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Start a follow-up execution from queued message data.
     async fn start_queued_follow_up(
         &self,
         ctx: &ExecutionContext,
@@ -1673,56 +1717,107 @@ impl LocalContainerService {
         .await
     }
 
-    /// Resolve organization-level env vars for a workspace by mapping it to its
-    /// remote project (workspace → task → local project → `remote_project_id`)
-    /// and fetching the decrypted values from the remote server. Returns an
-    /// empty map when the workspace isn't linked to a remote project, no remote
-    /// client is configured, or the fetch fails — org env vars are best-effort
-    /// and must never block a workspace from starting.
+    /// Resolve organization-level env vars for a workspace by mapping it to
+    /// its remote project and fetching the decrypted values from the remote
+    /// server. The mapping is tried in order of cost: the `remote_project_id`
+    /// persisted on the workspace row (set at creation for issue-linked
+    /// workspaces and on link/unlink), the legacy workspace → task → local
+    /// project chain, and finally the remote server's own workspace record
+    /// (persisted back onto the row once found). Returns an empty map when the
+    /// workspace isn't linked to a remote project, no remote client is
+    /// configured, or the fetch fails — org env vars are best-effort and must
+    /// never block a workspace from starting.
     async fn resolve_org_env_vars_inner(&self, workspace: &Workspace) -> HashMap<String, String> {
         let Some(remote_client) = self.remote_client.as_ref() else {
             return HashMap::new();
         };
-        let Some(task_id) = workspace.task_id else {
-            return HashMap::new();
-        };
 
-        let remote_project_id = match Task::find_by_id(&self.db.pool, task_id).await {
-            Ok(Some(task)) => match Project::find_by_id(&self.db.pool, task.project_id).await {
-                Ok(Some(project)) => project.remote_project_id,
-                Ok(None) => None,
+        let mut remote_project_id =
+            match Workspace::get_remote_project_id(&self.db.pool, workspace.id).await {
+                Ok(id) => id,
                 Err(e) => {
-                    tracing::warn!(?e, "Failed to load project while resolving org env vars");
+                    tracing::warn!(
+                        ?e,
+                        "Failed to load workspace remote project while resolving org env vars"
+                    );
                     None
                 }
-            },
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!(?e, "Failed to load task while resolving org env vars");
-                None
-            }
-        };
+            };
 
-        let Some(remote_project_id) = remote_project_id else {
-            return HashMap::new();
+        if remote_project_id.is_none()
+            && let Some(task_id) = workspace.task_id
+        {
+            remote_project_id = match Task::find_by_id(&self.db.pool, task_id).await {
+                Ok(Some(task)) => match Project::find_by_id(&self.db.pool, task.project_id).await {
+                    Ok(Some(project)) => project.remote_project_id,
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(?e, "Failed to load project while resolving org env vars");
+                        None
+                    }
+                },
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(?e, "Failed to load task while resolving org env vars");
+                    None
+                }
+            };
+        }
+
+        let fetch = async {
+            let remote_project_id = match remote_project_id {
+                Some(id) => id,
+                None => {
+                    // Workspace-anchored flows link workspaces to remote
+                    // projects without a local task/project record; ask the
+                    // remote for the mapping and persist it so later spawns
+                    // skip this round-trip.
+                    match remote_client.get_workspace_by_local_id(workspace.id).await {
+                        Ok(remote_ws) => {
+                            if let Err(e) = Workspace::set_remote_project_id(
+                                &self.db.pool,
+                                workspace.id,
+                                Some(remote_ws.project_id),
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    ?e,
+                                    "Failed to persist remote project id on workspace"
+                                );
+                            }
+                            remote_ws.project_id
+                        }
+                        // Not linked to a remote workspace — local-only.
+                        Err(RemoteClientError::Http { status: 404, .. }) => return None,
+                        Err(e) => {
+                            tracing::warn!(
+                                ?e,
+                                "Failed to resolve remote workspace while resolving org env vars"
+                            );
+                            return None;
+                        }
+                    }
+                }
+            };
+
+            match remote_client.get_project_env_vars(remote_project_id).await {
+                Ok(resp) => Some(resp),
+                Err(e) => {
+                    tracing::warn!(?e, %remote_project_id, "Failed to fetch org env vars from remote");
+                    None
+                }
+            }
         };
 
         // Cap the wait: this runs on the spawn path for every execution, and the
         // remote client itself retries with a 30s per-request timeout. A short
         // outer timeout keeps a degraded remote from stalling workspace starts.
-        let resp = match tokio::time::timeout(
-            ORG_ENV_FETCH_TIMEOUT,
-            remote_client.get_project_env_vars(remote_project_id),
-        )
-        .await
-        {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(e)) => {
-                tracing::warn!(?e, %remote_project_id, "Failed to fetch org env vars from remote");
-                return HashMap::new();
-            }
+        let resp = match tokio::time::timeout(ORG_ENV_FETCH_TIMEOUT, fetch).await {
+            Ok(Some(resp)) => resp,
+            Ok(None) => return HashMap::new(),
             Err(_) => {
-                tracing::warn!(%remote_project_id, "Timed out fetching org env vars from remote");
+                tracing::warn!("Timed out fetching org env vars from remote");
                 return HashMap::new();
             }
         };
@@ -2592,6 +2687,27 @@ fn success_exit_status() -> std::process::ExitStatus {
     {
         use std::os::windows::process::ExitStatusExt;
         ExitStatusExt::from_raw(0)
+    }
+}
+
+#[cfg(test)]
+mod queued_follow_up_tests {
+    use super::{SkippedCleanupAction, skipped_cleanup_action};
+
+    #[test]
+    fn skipped_cleanup_dispatches_a_queued_follow_up() {
+        assert_eq!(
+            skipped_cleanup_action(true),
+            SkippedCleanupAction::StartQueuedFollowUp
+        );
+    }
+
+    #[test]
+    fn skipped_cleanup_finalizes_without_a_queued_follow_up() {
+        assert_eq!(
+            skipped_cleanup_action(false),
+            SkippedCleanupAction::Finalize
+        );
     }
 }
 

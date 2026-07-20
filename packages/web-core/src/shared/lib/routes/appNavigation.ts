@@ -3,6 +3,7 @@ export type AppDestination =
   | { kind: 'onboarding' }
   | { kind: 'onboarding-sign-in' }
   | { kind: 'workspaces'; hostId?: string }
+  | { kind: 'workspaces-carousel' }
   | { kind: 'workspaces-create'; hostId?: string }
   | { kind: 'workspace'; workspaceId: string; hostId?: string }
   | { kind: 'workspace-vscode'; workspaceId: string; hostId?: string }
@@ -44,6 +45,8 @@ export interface AppNavigation {
   goToOnboarding(transition?: NavigationTransition): void;
   goToOnboardingSignIn(transition?: NavigationTransition): void;
   goToWorkspaces(transition?: NavigationTransition): void;
+  /** Local-only alternative workspaces view; absent on remote navigation. */
+  goToWorkspacesCarousel?(transition?: NavigationTransition): void;
   goToWorkspacesCreate(transition?: NavigationTransition): void;
   goToWorkspace(workspaceId: string, transition?: NavigationTransition): void;
   goToWorkspaceVsCode(
@@ -85,6 +88,7 @@ type ProjectDestinationKind =
 
 type WorkspaceDestinationKind =
   | 'workspaces'
+  | 'workspaces-carousel'
   | 'workspaces-create'
   | 'workspace'
   | 'workspace-vscode';
@@ -156,6 +160,7 @@ export function isWorkspacesDestination(
 
   switch (destination.kind) {
     case 'workspaces':
+    case 'workspaces-carousel':
     case 'workspaces-create':
     case 'workspace':
     case 'workspace-vscode':

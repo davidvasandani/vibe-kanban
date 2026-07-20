@@ -25,10 +25,14 @@ already exists for one case, generalise it rather than duplicating it. Avoid
 speculative generality.
 
 ### IV. Shared-component boundaries are law
-`packages/ui` presentational components own their own layout and section order;
-containers in `web-core` only supply data via render props. A change to a shared
-`packages/ui` component affects both local-web and remote-web — treat both
-frontends as the blast radius.
+The frontend has two shared tiers: `packages/ui` (`@vibe/ui`) owns primitive
+presentational components (Button, Dialog, Badge, etc.) and their own internal
+layout; `packages/web-core` owns shared feature containers and data-fetching
+logic used by both local-web and remote-web. Containers in `web-core` supply
+data to `packages/ui` primitives; they do not reimplement presentation.
+A change to either shared package affects both `local-web` and `remote-web` —
+treat both frontends as the blast radius. Styling guidance lives in
+`packages/local-web/AGENTS.md`.
 
 ### V. Remote mutations are transactional and txid-covered
 On the `crates/remote` server the read path is ElectricSQL shapes; the write
@@ -71,6 +75,33 @@ session identity, cancellation, failures, and credential redaction must remain
 correct. Extend the shared executor, log-normalization, profile, and MCP
 abstractions before introducing agent-specific parallel machinery.
 
+### X. Dialogs hold provisional state; containers hold confirmed state
+Settings dialogs and edit modals own a private snapshot of the data they mutate.
+On open, the dialog is seeded from the current saved state (or blank for "add").
+The dialog may freely mutate its own local copy. Only an explicit submit action
+writes the complete, validated result back to the persistent draft or store.
+Close and cancel must discard all modal-local changes without touching the outer
+state. Inline mutations of shared draft state from inside an open form are
+disallowed. This applies to MCP server definitions, agent assignments, and any
+other compound form that edits a named object inside a larger collection.
+
+### XI. Diagnostics are evidence, not decoration
+Tool, executor, integration, and MCP diagnostics are user-facing evidence for
+debugging. UIs that surface diagnostics MUST preserve the exact backend-provided
+text for display, copy, and issue/task seeding, including line breaks and long
+unbroken content, while treating that text as inert and untrusted. Diagnostic
+actions may add surrounding context, but they must not truncate, reinterpret,
+auto-remediate, or silently discard the original diagnostic.
+
+### XII. Asynchronous handoffs have one authoritative owner
+State handed from a request to an asynchronous lifecycle consumer (queued work,
+follow-up execution, cleanup, or similar) MUST have an explicit claim boundary.
+The producer and consumer must coordinate against authoritative backend state so
+a stale client observation cannot strand work, and concurrent paths cannot both
+perform it. Avoid holding coordination locks across awaited external or process
+operations; claim under synchronization, then perform the work after releasing
+it. Regression tests cover both orderings at the handoff boundary.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -82,10 +113,12 @@ abstractions before introducing agent-specific parallel machinery.
   semantics.
 - Executor additions must include generated-contract regeneration, exhaustive
   backend/frontend mapping checks, and fixture-based protocol tests.
+- Diagnostic issue/task creation must use an explicit current project or
+  workspace context; never choose an arbitrary project when context is missing.
 - Run `pnpm run format` before completing a task.
 
 ## Governance
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.6.0 (combines workspace identity, managed CLI supply-chain, and defensive external-agent protocol principles)
+**Version**: 0.9.0 (adds asynchronous handoff ownership principle XII)

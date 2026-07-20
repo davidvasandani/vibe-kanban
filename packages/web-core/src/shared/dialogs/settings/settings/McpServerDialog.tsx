@@ -15,9 +15,14 @@ import {
   DialogTitle,
 } from '@vibe/ui/components/KeyboardDialog';
 import { Alert, AlertDescription } from '@vibe/ui/components/Alert';
-import type { JsonValue } from 'shared/types';
+import type {
+  BaseCodingAgent,
+  JsonValue,
+  SharedMcpProfile,
+} from 'shared/types';
 import {
   argsFromLines,
+  isTransportCompatible,
   type KeyValue,
   type McpServerCodec,
   type McpServerFormValues,
@@ -25,18 +30,22 @@ import {
 } from '@/shared/lib/mcpServerCodec';
 import { cn } from '@/shared/lib/utils';
 import { defineModal } from '@/shared/lib/modals';
+import { toPrettyCase } from '@/shared/lib/string';
 import { SettingsSelect } from './SettingsComponents';
 
 export interface McpServerDialogProps {
   codec: McpServerCodec;
-  /** Names already used by other servers (for uniqueness validation). */
   existingNames: string[];
-  /** Present when editing an existing server. */
-  initial?: { name: string; entry: JsonValue };
+  profiles: SharedMcpProfile[];
+  initial?: {
+    name: string;
+    entry: JsonValue;
+    assignments: BaseCodingAgent[];
+  };
 }
 
 export type McpServerDialogResult =
-  | { name: string; entry: JsonValue }
+  | { name: string; entry: JsonValue; assignments: BaseCodingAgent[] }
   | undefined;
 
 const TRANSPORT_LABEL: Record<McpTransport, string> = {
@@ -115,7 +124,7 @@ function KeyValueRows({
 }
 
 const McpServerDialogImpl = create<McpServerDialogProps>(
-  ({ codec, existingNames, initial }) => {
+  ({ codec, existingNames, profiles, initial }) => {
     const modal = useModal();
     const { t } = useTranslation('settings');
 
@@ -138,6 +147,9 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
       isCustom ? JSON.stringify(initial!.entry, null, 2) : ''
     );
     const [error, setError] = useState<string | null>(null);
+    const [assignments, setAssignments] = useState<BaseCodingAgent[]>(
+      initial?.assignments ?? []
+    );
 
     // NiceModal keeps this component mounted and reuses it across opens, so
     // useState initializers don't re-run. Re-seed all editable state whenever
@@ -145,18 +157,55 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
     useEffect(() => {
       if (!modal.visible) return;
       setName(initial?.name ?? '');
-      setForm(initialForm ?? emptyForm(codec.transports[0]));
+      const resetForm = initialForm ?? emptyForm(codec.transports[0]);
+      setForm(resetForm);
       setArgsText((initialForm?.args ?? []).join('\n'));
       setCustomJson(isCustom ? JSON.stringify(initial!.entry, null, 2) : '');
       setError(null);
+      // For Edit, restore saved assignments.
+      // For Add, seed ONE compatible default — the first profile that supports
+      // the current transport. Do not pre-select every compatible profile.
+      setAssignments(
+        initial?.assignments ??
+          profiles
+            .filter((p) =>
+              isTransportCompatible(p.executor, resetForm.transport)
+            )
+            .slice(0, 1)
+            .map((p) => p.executor)
+      );
       // initialForm/isCustom derive from codec + initial.
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [modal.visible, codec, initial]);
 
+    // Derive current transport for compatibility checks. For custom JSON entries
+    // the transport is unknown, so all agents are selectable.
+    const currentTransport: McpTransport | null = isCustom
+      ? null
+      : form.transport;
+
+    const getIncompatibilityReason = (
+      executor: BaseCodingAgent
+    ): string | null => {
+      if (currentTransport === null) return null;
+      if (isTransportCompatible(executor, currentTransport)) return null;
+      if (currentTransport === 'sse')
+        return t('settings.mcp.dialog.incompatible.noSse');
+      if (currentTransport === 'http')
+        return t('settings.mcp.dialog.incompatible.noHttp');
+      return t('settings.mcp.dialog.incompatible.generic', {
+        transport: currentTransport,
+      });
+    };
+
     const patch = (p: Partial<McpServerFormValues>) =>
       setForm((f) => ({ ...f, ...p }));
 
-    const validate = (): { name: string; entry: JsonValue } | null => {
+    const validate = (): {
+      name: string;
+      entry: JsonValue;
+      assignments: BaseCodingAgent[];
+    } | null => {
       const trimmedName = name.trim();
       if (!trimmedName) {
         setError(t('settings.mcp.validation.nameRequired'));
@@ -185,7 +234,15 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
             setError(t('settings.mcp.validation.customNotObject'));
             return null;
           }
-          return { name: trimmedName, entry: parsed as JsonValue };
+          if (assignments.length === 0) {
+            setError(t('settings.mcp.validation.assignmentRequired'));
+            return null;
+          }
+          return {
+            name: trimmedName,
+            entry: parsed as JsonValue,
+            assignments,
+          };
         } catch {
           setError(t('settings.mcp.validation.invalidJson'));
           return null;
@@ -233,8 +290,13 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
         return null;
       }
 
+      if (assignments.length === 0) {
+        setError(t('settings.mcp.validation.assignmentRequired'));
+        return null;
+      }
+
       const entry = codec.serialize({ ...form, args }, initial?.entry);
-      return { name: trimmedName, entry };
+      return { name: trimmedName, entry, assignments };
     };
 
     const handleSave = () => {
@@ -319,6 +381,11 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
                       options={transportOptions}
                       onChange={(value) => {
                         patch({ transport: value });
+                        setAssignments((current) =>
+                          current.filter((executor) =>
+                            isTransportCompatible(executor, value)
+                          )
+                        );
                         setError(null);
                       }}
                     />
@@ -410,6 +477,58 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
                   </>
                 )}
               </>
+            )}
+
+            {profiles.length > 0 && (
+              <div className="space-y-2">
+                <Label>{t('settings.mcp.dialog.agentsTitle')}</Label>
+                <p className="text-xs text-low">
+                  {t('settings.mcp.dialog.agentsHelper')}
+                </p>
+                <div className="space-y-1">
+                  {profiles.map((profile) => {
+                    const reason = getIncompatibilityReason(profile.executor);
+                    const incompatible = reason !== null;
+                    const checked = assignments.includes(profile.executor);
+                    return (
+                      <label
+                        key={profile.executor}
+                        className={cn(
+                          'flex items-start gap-2 rounded-sm px-2 py-1.5 text-sm',
+                          incompatible
+                            ? 'opacity-50 cursor-not-allowed'
+                            : 'cursor-pointer'
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={incompatible}
+                          onChange={() => {
+                            setAssignments((prev) =>
+                              checked
+                                ? prev.filter((e) => e !== profile.executor)
+                                : [...prev, profile.executor]
+                            );
+                            setError(null);
+                          }}
+                          className="mt-0.5 shrink-0"
+                        />
+                        <span className="min-w-0">
+                          <span className="font-medium">
+                            {toPrettyCase(profile.executor)}
+                          </span>
+                          {incompatible && (
+                            <span className="block text-xs text-error">
+                              {reason}
+                            </span>
+                          )}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
             )}
 
             {error && (

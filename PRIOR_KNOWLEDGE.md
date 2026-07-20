@@ -1,58 +1,48 @@
-# Prior Knowledge: Remote/Local Workspace Archive Consistency
+# Prior Knowledge: VK Queued Messages Hang
 
-Searched both project knowledge indexes (`docs/knowledge-base/INDEX.md` and
-`wiki/INDEX.md`) and their relevant topic pages for workspace archival,
-terminal issue side effects, remote/local synchronization, and Electric data.
+Task: `9f36-vk-queued-messag`
 
-## Directly relevant: terminal-status side effects
+The project knowledge base was searched through `wiki/INDEX.md`,
+`docs/knowledge-base/INDEX.md`, and their topic pages for queued messages,
+follow-ups, execution lifecycle, finalization, session state, scratch drafts,
+and concurrency races.
 
-`docs/knowledge-base/issue-status-side-effects.md` (task
-`2f63-auto-archive-wor`) documents the existing remote behavior:
+## Agent process lifecycle
 
-- `archive_workspaces_for_terminal_issue` is called by both single and bulk
-  issue-update paths in `crates/remote/src/routes/issues.rs`.
-- It archives remote PostgreSQL workspace rows on the issue mutation's existing
-  transaction, preserving atomicity and the Electric txid handshake.
-- Terminal matching is name-based (`Done`, `Cancelled`, and `Canceled`, case
-  insensitive), guarded on an actual status change.
-- The page explicitly records the current boundary: the behavior is remote-only
-  and the local SQLite workspace path has no equivalent hook.
-- Reopening does not automatically unarchive workspaces.
+Source: `wiki/agent-process-lifecycle.md`
 
-Implication for this task: preserve the transaction and terminal-status logic;
-the defect is the documented remote/local boundary, not a failure to archive the
-remote row. The new behavior should add convergence after the remote row becomes
-visible rather than moving the existing side effect out of its transaction.
+- One coding-agent turn maps to one `ExecutionProcess`; process tracking and
+  exit-monitor facilities are keyed by execution id, while queued follow-up
+  dispatch occurs during the exit monitor's finalization work.
+- Finalization may commit changes, select a next action, dispatch a queued
+  follow-up, update the database, and only later finish process cleanup. Code
+  must not equate frontend-visible output completion with a still-available
+  finalization consumer.
+- The documented warm-process flow requires "park before finalization" because
+  queued-follow-up dispatch can immediately start another turn. This establishes
+  that finalization ordering is a concurrency-sensitive contract and that the
+  follow-up path should reuse existing execution dispatch rather than create a
+  separate frontend-only mechanism.
+- Lifecycle ownership changes must avoid invisibility gaps and must not hold
+  shared registry locks across awaited process operations. The same principles
+  apply when coordinating queue insertion with completion consumption.
+- A completed coding-agent row can coexist with a still-live warm OS process.
+  Queue eligibility must therefore use the execution lifecycle contract, not
+  merely process existence or a frontend running indicator.
 
-## Relevant: Electric shape delivery
+## Knowledge not currently recorded
 
-`wiki/electric-sync-fallback.md` (task `vk/a96d-electric-sync-er`) documents
-that shared web providers consume remote rows Electric-first with a REST polling
-fallback. A shape can update live, and fallback snapshots can replace the full
-collection. Collection configuration is cached and callbacks must be stable.
+No existing knowledge page documents the in-memory `QueuedMessageService`, its
+one-message-per-session replacement rule, the queue HTTP contract, or how the
+frontend queue cache converges after backend consumption. Those details must be
+derived from the current code and tests during planning.
 
-Implication for this task: reconciliation should be derived idempotently from
-the current remote workspace snapshot, not rely on receiving exactly one
-Electric event. That works for live Electric updates, fallback snapshots,
-provider remounts, and reconnects.
+## Implications for specification and planning
 
-## Supporting UI architecture
-
-`wiki/kanban-issue-panel-sections.md` confirms the kanban issue panel is shared
-between local and remote frontends and that data is supplied by web-core
-containers/providers. The visual issue panel does not own synchronization
-behavior.
-
-Implication for this task: implement reconciliation in shared provider/hook
-logic, not in the presentational workspace card or a single click/drag handler.
-This also covers single and bulk issue mutations and updates initiated by other
-clients once the remote workspace shape changes.
-
-## Constraints carried into planning
-
-1. Keep the remote issue mutation and workspace archive atomic and txid-covered.
-2. Treat remote workspace snapshots as level-triggered state; reconciliation
-   must be idempotent and safe after reconnect/remount.
-3. Use the existing local workspace update endpoint so all established local
-   archive lifecycle behavior remains centralized.
-4. Preserve the existing no-auto-unarchive policy.
+1. Reuse the existing queued-follow-up dispatcher and respect finalization,
+   chained-action, setup-script, and warm-process ordering.
+2. Audit every early-finalization branch for work normally performed by the
+   bypassed finalization block; "already finalized" must not also mean "skip
+   pending handoffs."
+3. The report's `0 files changed` state points directly to cleanup-skip behavior,
+   which should be tested before broadening the change to a speculative race fix.

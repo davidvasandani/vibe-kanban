@@ -33,7 +33,9 @@ contributed to it.
   the Phase-2 warm registry** — the async `base_url` surfacing over a oneshot,
   park-before-finalization + insert-before-remove, `Arc::try_unwrap` ownership
   (and why the idle sweep must not clone child handles), generation-conditional
-  reap, the env gate, and the Codex/ACP Phase-3 decisions.
+  reap, the env gate, the Codex/ACP Phase-3 decisions, and why cleanup-skip early
+  finalization must dispatch queued follow-ups before setting its finalized
+  guard.
 - [slack-shortcut-ai-summarization.md](slack-shortcut-ai-summarization.md) —
   Optional AI thread summarization for the Slack "Create issue from message"
   shortcut: the ack-fast/enrich-later shape (all slow work in the post-ack
@@ -114,3 +116,11 @@ contributed to it.
   shape states: relationship truth vs loaded rows, `simple_id` vs UUID, the
   none/loading/resolved/unavailable state model, and the pure-builder testing
   seam.
+- [workspace-carousel-view.md](workspace-carousel-view.md) — Rendering N
+  live workspace chats at once (the carousel view): the prop-driven chat
+  stack (`ExecutionProcessesProvider` + `WorkspacesMainContainer`, no
+  per-instance `WorkspaceProvider` — markSeen-on-mount / global diff-store /
+  websocket hazards), the chat-editor-autofocus gotcha (focus is not a user
+  signal; key markSeen and order-freeze off pointer/keydown), the
+  starvation-safe debounced re-sort, needs-feedback tiering incl.
+  `interrupted`, and per-column error boundaries.

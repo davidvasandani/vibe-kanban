@@ -375,7 +375,8 @@
         "servers": "サーバー",
         "serverHelperForm": "カードをクリックすると、その MCP サーバーがリストに追加されます。",
         "assignments": "割り当て",
-        "assignmentsHelper": "各サーバーは、選択した互換性のある各エージェントのネイティブ設定ファイルに書き込まれます。"
+        "assignmentsHelper": "各サーバーは、選択した互換性のある各エージェントのネイティブ設定ファイルに書き込まれます。",
+        "noAssignments": "No agents assigned"
       },
       "conflicts": {
         "title": "ネイティブ設定の競合",
@@ -383,6 +384,7 @@
         "helper": "割り当てられたすべてのエージェントに適用する定義を選択します。保存前に編集できます。",
         "customUnsupported": "このカスタム定義は、まずエージェントのネイティブ設定で編集する必要があります。"
       },
+      "edit": "編集",
       "delete": "サーバーを削除",
       "deleteConfirm": "この共有 MCP サーバーを割り当て済みのすべてのエージェント設定から削除しますか？",
       "auth": {
@@ -404,7 +406,7 @@
       "dialog": {
         "addTitle": "MCP サーバーを追加",
         "editTitle": "MCP サーバーを編集",
-        "description": "この MCP サーバーの起動方法を設定します。",
+        "description": "Configure this MCP server and assign it to agents.",
         "name": "名前",
         "namePlaceholder": "例: my_server",
         "transport": "トランスポート",
@@ -420,7 +422,14 @@
         "customJsonHelper": "このサーバーはフォームで表示できない形式を使用しています。JSON を直接編集してください。",
         "cancel": "キャンセル",
         "add": "サーバーを追加",
-        "saveEdit": "変更を保存"
+        "saveEdit": "変更を保存",
+        "agentsTitle": "Assign to agents",
+        "agentsHelper": "Choose which coding agents should use this MCP server.",
+        "incompatible": {
+          "noSse": "This agent does not support SSE transport.",
+          "noHttp": "This agent only supports stdio (command) transport.",
+          "generic": "This agent does not support {{transport}} transport."
+        }
       },
       "validation": {
         "nameRequired": "名前は必須です。",
@@ -431,6 +440,7 @@
         "urlInvalid": "有効な URL を入力してください。",
         "urlScheme": "URL は http:// または https:// で始まる必要があります。",
         "duplicateKey": "重複したキーは使用できません。",
+        "assignmentRequired": "At least one agent must be assigned.",
         "invalidJson": "JSON の形式が無効です。",
         "customNotObject": "サーバー JSON はオブジェクトである必要があります。"
       },
@@ -464,6 +474,20 @@
         "button": "接続をテスト",
         "dirtyHint": "テストする前に変更を保存してください。",
         "failed": "MCP サーバーのテストに失敗しました",
+        "failedFor": "{{executor}} MCP test failed",
+        "missingDiagnostic": "No diagnostic was returned by the MCP test.",
+        "copyDiagnostic": "Copy",
+        "copySuccess": "Diagnostic copied.",
+        "copyFailure": "Failed to copy diagnostic: {{error}}",
+        "copyFailureUnknown": "Clipboard access failed.",
+        "debugIssue": "Debug",
+        "debugCreating": "Creating...",
+        "debugUnavailableProject": "Debug issue creation is available only when Settings is opened from a project.",
+        "debugUnavailableStatus": "Debug issue creation is unavailable because this project has no status column.",
+        "issueCreated": "Debug issue created.",
+        "openIssue": "Open issue",
+        "debugFailure": "Failed to create debug issue: {{error}}",
+        "debugFailureUnknown": "Issue creation failed.",
         "authRequired": "認証が必要です",
         "connect": "接続",
         "connecting": "接続中…",

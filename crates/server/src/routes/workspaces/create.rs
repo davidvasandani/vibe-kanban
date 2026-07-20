@@ -262,6 +262,26 @@ pub async fn create_and_start_workspace(
         managed_workspace.associate_attachments(ids).await?;
     }
 
+    // Record the remote project link before the first execution spawns: the
+    // remote workspace row is only created by the frontend's follow-up link
+    // call, so org env var resolution for the initial session depends on this
+    // local record.
+    if let Some(linked_issue) = &linked_issue
+        && let Err(e) = Workspace::set_remote_project_id(
+            &deployment.db().pool,
+            managed_workspace.workspace.id,
+            Some(linked_issue.remote_project_id),
+        )
+        .await
+    {
+        tracing::warn!(
+            "Failed to record remote project {} on workspace {}: {}",
+            linked_issue.remote_project_id,
+            managed_workspace.workspace.id,
+            e
+        );
+    }
+
     if let Some(linked_issue) = &linked_issue
         && let Ok(client) = deployment.remote_client()
     {

@@ -477,10 +477,15 @@ fn adapt_opencode(servers: ServerMap, meta: Option<Value>) -> Value {
                 }
             }
 
+            let environment = s.remove("env");
+
             let mut new_map = Map::new();
             new_map.insert("type".to_string(), Value::String("local".to_string()));
             new_map.insert("command".to_string(), Value::Array(cmd_vec));
             new_map.insert("enabled".to_string(), Value::Bool(true));
+            if let Some(environment) = environment {
+                new_map.insert("environment".to_string(), environment);
+            }
             *s = new_map;
         }
     }
@@ -606,6 +611,54 @@ mod tests {
         assert_eq!(
             vk["args"],
             serde_json::json!(["-y", "@ourscope/vibe-kanban@1.2.3", "--mcp"])
+        );
+    }
+
+    #[test]
+    fn slack_preconfigured_server_matches_the_documented_stdio_contract() {
+        let value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+
+        assert_eq!(value["slack"]["command"], serde_json::json!("npx"));
+        assert_eq!(
+            value["slack"]["args"],
+            serde_json::json!(["-y", "slack-mcp-server@latest", "--transport", "stdio"])
+        );
+        assert_eq!(
+            value["slack"]["env"],
+            serde_json::json!({ "SLACK_MCP_XOXP_TOKEN": "YOUR_TOKEN" })
+        );
+        assert_eq!(value["meta"]["slack"]["name"], serde_json::json!("Slack"));
+        assert_eq!(
+            value["meta"]["slack"]["url"],
+            serde_json::json!("https://github.com/davidvasandani/slack-mcp-server/")
+        );
+    }
+
+    #[test]
+    fn slack_preconfigured_server_adapts_for_codex_and_opencode() {
+        let canonical = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        let codex = apply_adapter(Adapter::Codex, canonical.clone());
+        let opencode = apply_adapter(Adapter::Opencode, canonical);
+
+        assert_eq!(codex["slack"]["command"], serde_json::json!("npx"));
+        assert_eq!(
+            codex["slack"]["env"],
+            serde_json::json!({ "SLACK_MCP_XOXP_TOKEN": "YOUR_TOKEN" })
+        );
+        assert_eq!(opencode["slack"]["type"], serde_json::json!("local"));
+        assert_eq!(
+            opencode["slack"]["command"],
+            serde_json::json!([
+                "npx",
+                "-y",
+                "slack-mcp-server@latest",
+                "--transport",
+                "stdio"
+            ])
+        );
+        assert_eq!(
+            opencode["slack"]["environment"],
+            serde_json::json!({ "SLACK_MCP_XOXP_TOKEN": "YOUR_TOKEN" })
         );
     }
 

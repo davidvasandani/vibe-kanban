@@ -1,7 +1,7 @@
 //! App-managed CLI tool installer.
 //!
 //! Installs a curated, version-pinned catalog of vendor CLI tools (aws, az,
-//! op, gam, mgc-beta, acli) into the single app-owned directory
+//! op, gam, mgc-beta, acli, gws) into the single app-owned directory
 //! `assets::cli_tools_dir()`. Only `cli-tools/bin` is ever exposed on spawned
 //! agents' PATH, and it is appended after host paths so a host-provided copy
 //! (e.g. from nix) always wins over an app-installed one.
@@ -43,6 +43,8 @@ const GAM_VERSION: &str = "7.46.08";
 const MGC_BETA_VERSION: &str = "0.2.3";
 // Atlassian CLI currently publishes stable channel archives at a stable URL path.
 const ACLI_VERSION: &str = "1.3.22-stable";
+// renovate: datasource=github-releases depName=googleworkspace/cli
+const GWS_VERSION: &str = "0.22.5";
 
 /// How long a `<tool> --version` probe of a host-provided copy may run.
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -78,16 +80,18 @@ pub enum CliToolId {
     Gam,
     MgcBeta,
     Acli,
+    Gws,
 }
 
 impl CliToolId {
-    pub const ALL: [CliToolId; 6] = [
+    pub const ALL: [CliToolId; 7] = [
         CliToolId::Aws,
         CliToolId::Az,
         CliToolId::Op,
         CliToolId::Gam,
         CliToolId::MgcBeta,
         CliToolId::Acli,
+        CliToolId::Gws,
     ];
 
     /// Directory name under `cli-tools/` (also the serde wire id).
@@ -99,6 +103,7 @@ impl CliToolId {
             CliToolId::Gam => "gam",
             CliToolId::MgcBeta => "mgc-beta",
             CliToolId::Acli => "acli",
+            CliToolId::Gws => "gws",
         }
     }
 }
@@ -345,6 +350,51 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
             docs_url: "https://developer.atlassian.com/cloud/acli/guides/install-acli/",
             auth: CliToolAuthStrategy::Unsupported(
                 "Atlassian CLI authentication is site and account specific; use the vendor setup guide",
+            ),
+        },
+        CliToolCatalogEntry {
+            id: CliToolId::Gws,
+            binary_name: "gws",
+            display_name: "Google Workspace CLI",
+            description: "Google Workspace command line interface for Drive, Gmail, Calendar, and more",
+            version: GWS_VERSION,
+            version_args: &["--version"],
+            sources: &[
+                PlatformSource {
+                    os: "linux",
+                    arch: "x86_64",
+                    url: "https://github.com/googleworkspace/cli/releases/download/v{version}/google-workspace-cli-x86_64-unknown-linux-gnu.tar.gz",
+                    sha256: "de78ecdbd2f1a84cca0063a7ecbc440240fc14b6ebccbb17f4646b792a8c5c1f",
+                    binary_path_in_archive: "gws",
+                },
+                PlatformSource {
+                    os: "linux",
+                    arch: "aarch64",
+                    url: "https://github.com/googleworkspace/cli/releases/download/v{version}/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz",
+                    sha256: "94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0",
+                    binary_path_in_archive: "gws",
+                },
+                PlatformSource {
+                    os: "macos",
+                    arch: "x86_64",
+                    url: "https://github.com/googleworkspace/cli/releases/download/v{version}/google-workspace-cli-x86_64-apple-darwin.tar.gz",
+                    sha256: "51f9bd731404d4bba26c36e2e30dd68c56dccd1f834c01252cb0b14d6a6544b2",
+                    binary_path_in_archive: "gws",
+                },
+                PlatformSource {
+                    os: "macos",
+                    arch: "aarch64",
+                    url: "https://github.com/googleworkspace/cli/releases/download/v{version}/google-workspace-cli-aarch64-apple-darwin.tar.gz",
+                    sha256: "1d2a9ffd5bc9b2c2c4b48630daf082fad13d9e57d741988a2c248eed562f7dac",
+                    binary_path_in_archive: "gws",
+                },
+            ],
+            strategy: InstallStrategy::ArchiveBinary {
+                archive: ArchiveKind::TarGz,
+            },
+            docs_url: "https://github.com/googleworkspace/cli#authentication",
+            auth: CliToolAuthStrategy::Unsupported(
+                "gws auth status exits successfully even when unauthenticated; run gws auth login externally",
             ),
         },
     ];
@@ -1094,6 +1144,7 @@ mod tests {
             (CliToolId::Op, "op"),
             (CliToolId::Gam, "gam7/gam"),
             (CliToolId::MgcBeta, "mgc-beta"),
+            (CliToolId::Gws, "gws"),
         ];
 
         for (id, binary_path) in expected {
@@ -1127,6 +1178,7 @@ mod tests {
             CliToolId::Op,
             CliToolId::MgcBeta,
             CliToolId::Acli,
+            CliToolId::Gws,
         ] {
             assert!(matches!(
                 entry(id).auth,
@@ -1175,7 +1227,12 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn install_and_remove_archive_tools_end_to_end() {
-        for id in [CliToolId::Op, CliToolId::Aws, CliToolId::Acli] {
+        for id in [
+            CliToolId::Op,
+            CliToolId::Aws,
+            CliToolId::Acli,
+            CliToolId::Gws,
+        ] {
             let e = entry(id);
             let installed = install(id).await.expect("install should succeed");
             let app = installed.app.expect("app copy should be reported");

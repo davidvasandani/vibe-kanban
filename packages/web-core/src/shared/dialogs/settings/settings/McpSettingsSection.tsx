@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  ArrowSquareOutIcon,
   CheckCircleIcon,
   CircleNotchIcon,
   CodeIcon,
+  CopyIcon,
   LockKeyIcon,
   MinusCircleIcon,
   PencilSimpleIcon,
@@ -19,13 +21,23 @@ import type {
   McpServerDefinition,
   McpServerTestResult,
   SharedMcpAssignmentTestResult,
-  SharedMcpProfile,
   SharedMcpReadResponse,
   SharedMcpServer,
 } from 'shared/types';
 import { BaseCodingAgent as BaseCodingAgentValue } from 'shared/types';
+import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
+import { useProjectContextOptional } from '@/shared/hooks/useProjectContext';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { codecForAgent, transportOf } from '@/shared/lib/mcpServerCodec';
+import {
+  acquireMcpDebugCreation,
+  buildMcpDebugIssueRequest,
+  mcpDebugAvailability,
+  mcpDebugCreationKey,
+  mcpDiagnosticText,
+  resettableMcpDebugKeys,
+  releaseMcpDebugCreation,
+} from '@/shared/lib/mcpDebugIssue';
 import {
   definitionFromEntry,
   draftFromSharedRead,
@@ -51,6 +63,20 @@ import {
 import { McpServerDialog } from './McpServerDialog';
 import { useSettingsDirty } from './SettingsDirtyContext';
 import { useSettingsMachineClient } from './SettingsHostContext';
+
+type CopyStatus = 'idle' | 'success' | 'error';
+type DebugStatus = 'idle' | 'creating' | 'success' | 'error';
+
+type McpCopyState = {
+  status: CopyStatus;
+  error?: string;
+};
+
+type McpDebugState = {
+  status: DebugStatus;
+  issueId?: string;
+  error?: string;
+};
 
 function entryForDialog(definition: McpServerDefinition): JsonValue {
   if (definition.transport === 'http' || definition.transport === 'sse') {
@@ -103,6 +129,8 @@ function McpTestStatusIcon({
 
 function TestResultDetails({
   result,
+  diagnostic,
+  executor,
   connecting,
   connectError,
   onConnect,
@@ -113,8 +141,16 @@ function TestResultDetails({
   onManualCodeChange,
   onManualComplete,
   completing,
+  copyState,
+  onCopy,
+  debugState,
+  debugUnavailableReason,
+  onCreateDebugIssue,
+  onOpenDebugIssue,
 }: {
   result: McpServerTestResult | undefined;
+  diagnostic: string;
+  executor: BaseCodingAgent;
   connecting: boolean;
   connectError: string | undefined;
   onConnect: () => void;
@@ -125,10 +161,112 @@ function TestResultDetails({
   onManualCodeChange: (value: string) => void;
   onManualComplete: () => void;
   completing: boolean;
+  copyState: McpCopyState | undefined;
+  onCopy: () => void;
+  debugState: McpDebugState | undefined;
+  debugUnavailableReason: 'no-project' | 'no-status' | null;
+  onCreateDebugIssue: () => void;
+  onOpenDebugIssue: () => void;
 }) {
   const { t } = useTranslation('settings');
   if (!result || result.status === 'ok') return null;
   const authRequired = result.status === 'auth_required';
+  const failed = result.status === 'failed';
+  const copyStatus = copyState?.status ?? 'idle';
+  const debugStatus = debugState?.status ?? 'idle';
+
+  if (failed) {
+    const debugUnavailable =
+      debugUnavailableReason === 'no-project'
+        ? t('settings.mcp.test.debugUnavailableProject')
+        : debugUnavailableReason === 'no-status'
+          ? t('settings.mcp.test.debugUnavailableStatus')
+          : null;
+    return (
+      <div className="mt-2 rounded-sm border border-error/50 bg-error/10 px-2 py-1.5 text-xs text-error">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0 font-medium">
+            {t('settings.mcp.test.failedFor', {
+              executor: toPrettyCase(executor),
+            })}
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-1">
+            <Button variant="outline" size="sm" type="button" onClick={onCopy}>
+              <CopyIcon className="size-icon-xs mr-1" weight="bold" />
+              {t('settings.mcp.test.copyDiagnostic')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              type="button"
+              onClick={onCreateDebugIssue}
+              disabled={
+                debugStatus === 'creating' || debugUnavailableReason !== null
+              }
+              title={debugUnavailable ?? undefined}
+            >
+              {debugStatus === 'creating' ? (
+                <CircleNotchIcon
+                  className="size-icon-xs mr-1 animate-spin"
+                  weight="bold"
+                />
+              ) : (
+                <XCircleIcon className="size-icon-xs mr-1" weight="bold" />
+              )}
+              {debugStatus === 'creating'
+                ? t('settings.mcp.test.debugCreating')
+                : t('settings.mcp.test.debugIssue')}
+            </Button>
+          </div>
+        </div>
+        <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-sm border border-current/20 bg-primary/80 p-2 font-mono text-xs text-high">
+          {diagnostic}
+        </pre>
+        <div className="mt-2 space-y-1" aria-live="polite">
+          {copyStatus === 'success' && (
+            <div className="text-success">
+              {t('settings.mcp.test.copySuccess')}
+            </div>
+          )}
+          {copyStatus === 'error' && (
+            <div className="text-error">
+              {t('settings.mcp.test.copyFailure', {
+                error: copyState?.error,
+              })}
+            </div>
+          )}
+          {debugUnavailable && (
+            <div className="text-low">{debugUnavailable}</div>
+          )}
+          {debugStatus === 'error' && (
+            <div className="text-error">
+              {t('settings.mcp.test.debugFailure', {
+                error: debugState?.error,
+              })}
+            </div>
+          )}
+          {debugStatus === 'success' && debugState?.issueId && (
+            <div className="flex flex-wrap items-center gap-2 text-success">
+              <span>{t('settings.mcp.test.issueCreated')}</span>
+              <Button
+                variant="outline"
+                size="sm"
+                type="button"
+                onClick={onOpenDebugIssue}
+              >
+                <ArrowSquareOutIcon
+                  className="size-icon-xs mr-1"
+                  weight="bold"
+                />
+                {t('settings.mcp.test.openIssue')}
+              </Button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       className={cn(
@@ -226,6 +364,8 @@ export function McpSettingsSection() {
   const { config } = useUserSystem();
   const machineClient = useSettingsMachineClient();
   const { setDirty: setContextDirty } = useSettingsDirty();
+  const projectContext = useProjectContextOptional();
+  const appNavigation = useAppNavigation();
 
   const [readModel, setReadModel] = useState<SharedMcpReadResponse | null>(
     null
@@ -246,6 +386,13 @@ export function McpSettingsSection() {
   const [testResults, setTestResults] = useState<
     Record<string, SharedMcpAssignmentTestResult>
   >({});
+  const [copyStates, setCopyStates] = useState<Record<string, McpCopyState>>(
+    {}
+  );
+  const [debugStates, setDebugStates] = useState<Record<string, McpDebugState>>(
+    {}
+  );
+  const creatingDebugKeysRef = useRef(new Set<string>());
   const [connectingKey, setConnectingKey] = useState<string | null>(null);
   const [connectErrors, setConnectErrors] = useState<Record<string, string>>(
     {}
@@ -282,6 +429,8 @@ export function McpSettingsSection() {
       setOriginalSnapshot(sharedMcpSnapshot(next));
       setJsonText(JSON.stringify(inputsFromDraft(next), null, 2));
       setTestResults({});
+      setCopyStates({});
+      setDebugStates({});
       setConnectErrors({});
     } catch (err) {
       setError(
@@ -325,6 +474,8 @@ export function McpSettingsSection() {
       setDraft(next);
       setOriginalSnapshot(sharedMcpSnapshot(next));
       setTestResults({});
+      setCopyStates({});
+      setDebugStates({});
       setConnectErrors({});
       setSuccess(response.status === 'success');
       if (response.status !== 'success') {
@@ -386,39 +537,29 @@ export function McpSettingsSection() {
       const codec = codecForAgent(BaseCodingAgentValue.CLAUDE_CODE);
       const result = await McpServerDialog.show({
         codec,
+        profiles,
         existingNames: draft.servers
-          .map((item) => item.name)
-          .filter((name) => name !== server?.name),
+          .map((s) => s.name)
+          .filter((n) => n !== server?.name),
         initial: server
-          ? { name: server.name, entry: entryForDialog(server.definition) }
+          ? {
+              name: server.name,
+              entry: entryForDialog(server.definition),
+              assignments: server.assignments,
+            }
           : undefined,
       });
       if (!result) return;
-      const definition = definitionFromEntry(result.entry);
-      const assignments = server?.assignments.length
-        ? server.assignments
-        : profiles
-            .filter(
-              (profile) =>
-                !(
-                  (profile.executor === BaseCodingAgentValue.CODEX &&
-                    definition.transport !== 'stdio') ||
-                  (profile.executor === BaseCodingAgentValue.GROK &&
-                    definition.transport === 'sse')
-                )
-            )
-            .slice(0, 1)
-            .map((profile) => profile.executor);
       if (server && server.name !== result.name) {
         setDraft((prev) => ({
           ...prev,
-          servers: prev.servers.filter((item) => item.name !== server.name),
+          servers: prev.servers.filter((s) => s.name !== server.name),
         }));
       }
       setServer({
         name: result.name,
-        definition,
-        assignments,
+        definition: definitionFromEntry(result.entry),
+        assignments: result.assignments,
       });
     },
     [draft.servers, profiles, setServer]
@@ -445,27 +586,6 @@ export function McpSettingsSection() {
     [loadShared, machineClient, t]
   );
 
-  const toggleAssignment = useCallback(
-    (serverName: string, profile: SharedMcpProfile) => {
-      setDraft((prev) => ({
-        ...prev,
-        servers: prev.servers.map((server) => {
-          if (server.name !== serverName) return server;
-          const assigned = server.assignments.includes(profile.executor);
-          return {
-            ...server,
-            assignments: assigned
-              ? server.assignments.filter(
-                  (executor) => executor !== profile.executor
-                )
-              : [...server.assignments, profile.executor],
-          };
-        }),
-      }));
-    },
-    []
-  );
-
   const testAssignments = useCallback(
     async (serverName?: string) => {
       if (!machineClient) return;
@@ -475,10 +595,28 @@ export function McpSettingsSection() {
         const results = await machineClient.testSharedMcpAssignments({
           targets: testTargetsForDraft(draft, serverName),
         });
+        const resultKeys = new Set(
+          results.map((result) => testKey(result.server_name, result.executor))
+        );
         setTestResults((prev) => ({
           ...prev,
           ...indexAssignmentTests(results),
         }));
+        setCopyStates((prev) => {
+          const next = { ...prev };
+          for (const key of resultKeys) delete next[key];
+          return next;
+        });
+        setDebugStates((prev) => {
+          const next = { ...prev };
+          for (const key of resettableMcpDebugKeys(
+            resultKeys,
+            creatingDebugKeysRef.current
+          )) {
+            delete next[key];
+          }
+          return next;
+        });
       } catch (err) {
         setError(
           err instanceof Error ? err.message : t('settings.mcp.test.failed')
@@ -488,6 +626,86 @@ export function McpSettingsSection() {
       }
     },
     [draft, machineClient, t]
+  );
+
+  const copyDiagnostic = useCallback(
+    async (key: string, diagnostic: string) => {
+      try {
+        await navigator.clipboard.writeText(diagnostic);
+        setCopyStates((prev) => ({
+          ...prev,
+          [key]: { status: 'success' },
+        }));
+      } catch (err) {
+        setCopyStates((prev) => ({
+          ...prev,
+          [key]: {
+            status: 'error',
+            error:
+              err instanceof Error
+                ? err.message
+                : t('settings.mcp.test.copyFailureUnknown'),
+          },
+        }));
+      }
+    },
+    [t]
+  );
+
+  const createDebugIssue = useCallback(
+    async (
+      key: string,
+      serverName: string,
+      executor: BaseCodingAgent,
+      diagnostic: string
+    ) => {
+      const availability = mcpDebugAvailability(
+        projectContext !== null,
+        projectContext?.statuses ?? []
+      );
+      if (!projectContext || !availability.available) return;
+
+      const creationKey = mcpDebugCreationKey(projectContext.projectId, key);
+      if (!acquireMcpDebugCreation(creationKey)) return;
+      creatingDebugKeysRef.current.add(key);
+      setDebugStates((prev) => ({
+        ...prev,
+        [key]: { status: 'creating' },
+      }));
+
+      try {
+        const { persisted } = projectContext.insertIssue(
+          buildMcpDebugIssueRequest({
+            projectId: projectContext.projectId,
+            status: availability.status,
+            issues: projectContext.issues,
+            serverName,
+            executor,
+            diagnostic,
+          })
+        );
+        const issue = await persisted;
+        setDebugStates((prev) => ({
+          ...prev,
+          [key]: { status: 'success', issueId: issue.id },
+        }));
+      } catch (err) {
+        setDebugStates((prev) => ({
+          ...prev,
+          [key]: {
+            status: 'error',
+            error:
+              err instanceof Error
+                ? err.message
+                : t('settings.mcp.test.debugFailureUnknown'),
+          },
+        }));
+      } finally {
+        creatingDebugKeysRef.current.delete(key);
+        releaseMcpDebugCreation(creationKey);
+      }
+    },
+    [projectContext, t]
   );
 
   const waitForAuthFlow = useCallback(
@@ -735,9 +953,14 @@ export function McpSettingsSection() {
       >
         <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
-            <label className="text-sm font-medium text-normal">
-              {t('settings.mcp.labels.servers')}
-            </label>
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium text-normal">
+                {t('settings.mcp.labels.servers')}
+              </label>
+              <span className="rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-low">
+                {draft.servers.length}
+              </span>
+            </div>
             <p className="text-sm text-low">
               {t('settings.mcp.labels.assignmentsHelper')}
             </p>
@@ -902,21 +1125,40 @@ export function McpSettingsSection() {
                             </span>
                           )}
                         </div>
-                        <div className="mt-1 text-xs text-low">
-                          {server.assignments.length}{' '}
-                          {t('settings.mcp.labels.assignments')}
-                        </div>
+                        {server.assignments.length === 0 ? (
+                          <span className="text-xs text-low italic">
+                            {t('settings.mcp.labels.noAssignments')}
+                          </span>
+                        ) : (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {server.assignments.map((executor) => {
+                              const result =
+                                testResults[testKey(server.name, executor)]
+                                  ?.result;
+                              return (
+                                <span
+                                  key={executor}
+                                  className="inline-flex items-center gap-1 rounded-sm bg-primary border border-border px-1.5 py-0.5 text-xs text-low"
+                                >
+                                  {toPrettyCase(executor)}
+                                  <McpTestStatusIcon result={result} />
+                                </span>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                       <div className="flex max-w-full flex-wrap items-center gap-1 sm:shrink-0">
                         <Button
                           variant="ghost"
-                          size="icon"
+                          size="sm"
                           type="button"
                           onClick={() => void testAssignments(server.name)}
                           disabled={testing || isDirty}
                           title={t('settings.mcp.test.button')}
                         >
-                          <CheckCircleIcon className="size-icon-sm" />
+                          <CheckCircleIcon className="mr-1 size-icon-sm" />
+                          {t('settings.mcp.test.button')}
                         </Button>
                         {source?.auth_mode === 'shared_gateway' && (
                           <>
@@ -948,16 +1190,17 @@ export function McpSettingsSection() {
                         )}
                         <Button
                           variant="ghost"
-                          size="icon"
+                          size="sm"
                           type="button"
                           onClick={() => void openDialog(server)}
                           title={t('settings.mcp.dialog.editTitle')}
                         >
-                          <PencilSimpleIcon className="size-icon-sm" />
+                          <PencilSimpleIcon className="mr-1 size-icon-sm" />
+                          {t('settings.mcp.edit')}
                         </Button>
                         <Button
                           variant="ghost"
-                          size="icon"
+                          size="sm"
                           type="button"
                           className="text-error"
                           onClick={() => {
@@ -966,7 +1209,8 @@ export function McpSettingsSection() {
                           }}
                           title={t('settings.mcp.delete')}
                         >
-                          <TrashIcon className="size-icon-sm" />
+                          <TrashIcon className="mr-1 size-icon-sm" />
+                          {t('settings.mcp.delete')}
                         </Button>
                       </div>
                     </div>
@@ -974,6 +1218,11 @@ export function McpSettingsSection() {
                     {attentionResult && attentionKey && attentionTest && (
                       <TestResultDetails
                         result={attentionTest.result}
+                        diagnostic={mcpDiagnosticText(
+                          attentionTest.result.error,
+                          t('settings.mcp.test.missingDiagnostic')
+                        )}
+                        executor={attentionResult.executor}
                         connecting={connectingKey === attentionKey}
                         connectError={connectErrors[attentionKey]}
                         onConnect={() =>
@@ -995,78 +1244,120 @@ export function McpSettingsSection() {
                         onManualCodeChange={setManualCode}
                         onManualComplete={() => void completeManualAuth()}
                         completing={completing}
+                        copyState={copyStates[attentionKey]}
+                        onCopy={() =>
+                          void copyDiagnostic(
+                            attentionKey,
+                            mcpDiagnosticText(
+                              attentionTest.result.error,
+                              t('settings.mcp.test.missingDiagnostic')
+                            )
+                          )
+                        }
+                        debugState={debugStates[attentionKey]}
+                        debugUnavailableReason={
+                          projectContext === null
+                            ? 'no-project'
+                            : projectContext.statuses.length === 0
+                              ? 'no-status'
+                              : null
+                        }
+                        onCreateDebugIssue={() =>
+                          void createDebugIssue(
+                            attentionKey,
+                            server.name,
+                            attentionResult.executor,
+                            mcpDiagnosticText(
+                              attentionTest.result.error,
+                              t('settings.mcp.test.missingDiagnostic')
+                            )
+                          )
+                        }
+                        onOpenDebugIssue={() => {
+                          const issueId = debugStates[attentionKey]?.issueId;
+                          if (projectContext && issueId) {
+                            appNavigation.goToProjectIssue(
+                              projectContext.projectId,
+                              issueId
+                            );
+                          }
+                        }}
                       />
                     )}
                     {serverResults.length > 1 && (
-                      <div className="mt-1 space-y-0.5 px-2 text-xs text-low">
+                      <div className="mt-1 space-y-1">
                         {serverResults
                           .filter((item) => item.key !== attentionKey)
-                          .map((item) => (
-                            <div
-                              key={item.key}
-                              className="flex min-w-0 gap-1"
-                              title={item.test?.result.error ?? ''}
-                            >
-                              <span className="shrink-0 font-medium">
-                                {toPrettyCase(item.executor)}:
-                              </span>
-                              <span className="truncate font-mono">
-                                {item.test?.result.error ??
-                                  item.test?.result.status}
-                              </span>
-                            </div>
-                          ))}
+                          .map((item) => {
+                            if (!item.test) return null;
+                            const diagnostic = mcpDiagnosticText(
+                              item.test.result.error,
+                              t('settings.mcp.test.missingDiagnostic')
+                            );
+                            return (
+                              <TestResultDetails
+                                key={item.key}
+                                result={item.test.result}
+                                diagnostic={diagnostic}
+                                executor={item.executor}
+                                connecting={connectingKey === item.key}
+                                connectError={connectErrors[item.key]}
+                                onConnect={() =>
+                                  void connectAssignment(
+                                    server.name,
+                                    item.executor,
+                                    item.test?.result
+                                  )
+                                }
+                                loopback={!!loopbackEnabled[item.key]}
+                                onToggleLoopback={() =>
+                                  setLoopbackEnabled((prev) => ({
+                                    ...prev,
+                                    [item.key]: !prev[item.key],
+                                  }))
+                                }
+                                manualActive={manualFlow?.key === item.key}
+                                manualCode={manualCode}
+                                onManualCodeChange={setManualCode}
+                                onManualComplete={() =>
+                                  void completeManualAuth()
+                                }
+                                completing={completing}
+                                copyState={copyStates[item.key]}
+                                onCopy={() =>
+                                  void copyDiagnostic(item.key, diagnostic)
+                                }
+                                debugState={debugStates[item.key]}
+                                debugUnavailableReason={
+                                  projectContext === null
+                                    ? 'no-project'
+                                    : projectContext.statuses.length === 0
+                                      ? 'no-status'
+                                      : null
+                                }
+                                onCreateDebugIssue={() =>
+                                  void createDebugIssue(
+                                    item.key,
+                                    server.name,
+                                    item.executor,
+                                    diagnostic
+                                  )
+                                }
+                                onOpenDebugIssue={() => {
+                                  const issueId =
+                                    debugStates[item.key]?.issueId;
+                                  if (projectContext && issueId) {
+                                    appNavigation.goToProjectIssue(
+                                      projectContext.projectId,
+                                      issueId
+                                    );
+                                  }
+                                }}
+                              />
+                            );
+                          })}
                       </div>
                     )}
-
-                    <div className="mt-2 grid gap-1 sm:grid-cols-2 lg:grid-cols-3">
-                      {profiles.map((profile) => {
-                        const compatibility = source?.compatibility.find(
-                          (item) => item.executor === profile.executor
-                        );
-                        const incompatible =
-                          compatibility?.compatible === false;
-                        const assigned = server.assignments.includes(
-                          profile.executor
-                        );
-                        const key = testKey(server.name, profile.executor);
-                        const result = testResults[key]?.result;
-                        return (
-                          <div
-                            key={profile.executor}
-                            className="rounded-sm border border-border bg-primary px-2 py-1.5"
-                          >
-                            <label className="flex items-center gap-2 text-sm">
-                              <input
-                                type="checkbox"
-                                checked={assigned}
-                                disabled={incompatible}
-                                onChange={() =>
-                                  toggleAssignment(server.name, profile)
-                                }
-                              />
-                              <span className="min-w-0 flex-1 truncate">
-                                {toPrettyCase(profile.executor)}
-                              </span>
-                              {assigned && (
-                                <McpTestStatusIcon result={result} />
-                              )}
-                            </label>
-                            {incompatible && (
-                              <div className="mt-1 text-xs text-error">
-                                {compatibility?.reason}
-                              </div>
-                            )}
-                            {assigned && testResults[key]?.gateway_status && (
-                              <div className="mt-1 text-xs text-low">
-                                Gateway: {testResults[key].gateway_status} ·
-                                Upstream: {testResults[key].upstream_status}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
                   </div>
                 );
               })

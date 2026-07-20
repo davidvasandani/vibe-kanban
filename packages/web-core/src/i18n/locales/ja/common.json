@@ -154,7 +154,30 @@
       "cannotDeleteOpenPr": "PRがオープン中はブランチを削除できません",
       "unlinkFromIssueLabel": "イシューからもリンク解除する"
     },
-    "linkError": "Failed to link workspace"
+    "linkError": "Failed to link workspace",
+    "carousel": {
+      "title": "カルーセル",
+      "empty": "アクティブなワークスペースがありません",
+      "backToWorkspaces": "標準ビュー",
+      "openFullView": "フルビューで開く",
+      "columnPlaceholder": "ここまでスクロールするとチャットが読み込まれます",
+      "needsFeedbackCount_one": "{{count}}件が応答待ち",
+      "needsFeedbackCount_other": "{{count}}件が応答待ち",
+      "status": {
+        "needsFeedback": "応答待ち",
+        "failed": "失敗",
+        "running": "実行中",
+        "idle": "待機中",
+        "interrupted": "中断"
+      },
+      "sort": {
+        "needs_feedback": "応答待ち",
+        "updated_at": "最近更新された順",
+        "created_at": "最近作成された順",
+        "name": "名前順"
+      },
+      "columnError": "このチャットを表示できませんでした。フルビューで開いてください。"
+    }
   },
   "fileTree": {
     "searchPlaceholder": "ファイルを検索...",

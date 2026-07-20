@@ -171,6 +171,29 @@
       "deleteBranchLabel": "Delete branch",
       "cannotDeleteOpenPr": "Cannot delete branch while PR is open",
       "unlinkFromIssueLabel": "Also unlink from issue"
+    },
+    "carousel": {
+      "title": "Carousel",
+      "empty": "No active workspaces",
+      "backToWorkspaces": "Standard view",
+      "openFullView": "Open full view",
+      "columnPlaceholder": "Scroll here to load this chat",
+      "needsFeedbackCount_one": "{{count}} needs feedback",
+      "needsFeedbackCount_other": "{{count}} need feedback",
+      "status": {
+        "needsFeedback": "Needs feedback",
+        "failed": "Failed",
+        "running": "Running",
+        "idle": "Idle",
+        "interrupted": "Interrupted"
+      },
+      "sort": {
+        "needs_feedback": "Needs feedback",
+        "updated_at": "Recently updated",
+        "created_at": "Recently created",
+        "name": "Name"
+      },
+      "columnError": "This chat failed to render. Open the full view instead."
     }
   },
   "fileTree": {

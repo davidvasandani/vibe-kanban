@@ -383,7 +383,8 @@
         "serverHelperForm": "Click a card to add that MCP server to the list.",
         "saveLocation": "Changes will be saved to:",
         "assignments": "assignments",
-        "assignmentsHelper": "Each server is written to the native config file for every selected compatible agent."
+        "assignmentsHelper": "Each server is written to the native config file for every selected compatible agent.",
+        "noAssignments": "No agents assigned"
       },
       "list": {
         "empty": "No shared MCP servers configured yet.",
@@ -396,6 +397,7 @@
         "helper": "Choose one definition to apply to every assigned agent. You can edit it before saving.",
         "customUnsupported": "This custom definition must be edited in the agent's native configuration first."
       },
+      "edit": "Edit",
       "delete": "Delete server",
       "deleteConfirm": "Delete this shared MCP server from all assigned agent configurations?",
       "auth": {
@@ -412,7 +414,7 @@
       "dialog": {
         "addTitle": "Add MCP server",
         "editTitle": "Edit MCP server",
-        "description": "Configure how this MCP server is launched.",
+        "description": "Configure this MCP server and assign it to agents.",
         "name": "Name",
         "namePlaceholder": "e.g. my_server",
         "transport": "Transport",
@@ -428,7 +430,14 @@
         "customJsonHelper": "This server uses a format the form can't display; edit its JSON directly.",
         "cancel": "Cancel",
         "add": "Add server",
-        "saveEdit": "Save changes"
+        "saveEdit": "Save changes",
+        "agentsTitle": "Assign to agents",
+        "agentsHelper": "Choose which coding agents should use this MCP server.",
+        "incompatible": {
+          "noSse": "This agent does not support SSE transport.",
+          "noHttp": "This agent only supports stdio (command) transport.",
+          "generic": "This agent does not support {{transport}} transport."
+        }
       },
       "validation": {
         "nameRequired": "Name is required.",
@@ -440,7 +449,8 @@
         "urlScheme": "URL must start with http:// or https://.",
         "duplicateKey": "Duplicate keys are not allowed.",
         "invalidJson": "Invalid JSON format.",
-        "customNotObject": "Server JSON must be an object."
+        "customNotObject": "Server JSON must be an object.",
+        "assignmentRequired": "At least one agent must be assigned."
       },
       "json": {
         "editAsJson": "Edit as JSON",
@@ -472,6 +482,20 @@
         "button": "Test connection",
         "dirtyHint": "Save your changes before testing.",
         "failed": "Failed to test MCP servers",
+        "failedFor": "{{executor}} MCP test failed",
+        "missingDiagnostic": "No diagnostic was returned by the MCP test.",
+        "copyDiagnostic": "Copy",
+        "copySuccess": "Diagnostic copied.",
+        "copyFailure": "Failed to copy diagnostic: {{error}}",
+        "copyFailureUnknown": "Clipboard access failed.",
+        "debugIssue": "Debug",
+        "debugCreating": "Creating...",
+        "debugUnavailableProject": "Debug issue creation is available only when Settings is opened from a project.",
+        "debugUnavailableStatus": "Debug issue creation is unavailable because this project has no status column.",
+        "issueCreated": "Debug issue created.",
+        "openIssue": "Open issue",
+        "debugFailure": "Failed to create debug issue: {{error}}",
+        "debugFailureUnknown": "Issue creation failed.",
         "authRequired": "Authentication required",
         "connect": "Connect",
         "connecting": "Connecting…",

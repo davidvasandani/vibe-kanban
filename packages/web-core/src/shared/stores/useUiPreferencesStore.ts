@@ -39,6 +39,32 @@ const loadMobileFontScale = (): MobileFontScale => {
 
 export type KanbanViewMode = 'kanban' | 'list' | 'slim';
 
+// Workspace carousel view sort mode
+export type CarouselSortMode =
+  | 'needs_feedback'
+  | 'updated_at'
+  | 'created_at'
+  | 'name';
+
+const CAROUSEL_SORT_KEY = 'vk-carousel-sort';
+const DEFAULT_CAROUSEL_SORT: CarouselSortMode = 'needs_feedback';
+
+const loadCarouselSort = (): CarouselSortMode => {
+  try {
+    const stored = localStorage.getItem(CAROUSEL_SORT_KEY);
+    if (
+      stored === 'updated_at' ||
+      stored === 'created_at' ||
+      stored === 'name'
+    ) {
+      return stored;
+    }
+  } catch {
+    // localStorage may be unavailable
+  }
+  return DEFAULT_CAROUSEL_SORT;
+};
+
 export type ContextBarPosition =
   | 'top-left'
   | 'top-right'
@@ -343,6 +369,9 @@ type State = {
   workspaceFilters: WorkspaceFilterState;
   workspaceSort: WorkspaceSortState;
 
+  // Workspace carousel sort mode (persisted to localStorage)
+  carouselSort: CarouselSortMode;
+
   // Kanban view mode state
   kanbanViewMode: KanbanViewMode;
   // Selected hidden-status tab, stored by name (not id) since status ids are
@@ -433,6 +462,9 @@ type State = {
   setWorkspaceSortBy: (sortBy: WorkspaceSortBy) => void;
   setWorkspaceSortOrder: (sortOrder: WorkspaceSortOrder) => void;
 
+  // Workspace carousel sort actions
+  setCarouselSort: (mode: CarouselSortMode) => void;
+
   // Kanban view mode actions
   setKanbanViewMode: (mode: KanbanViewMode) => void;
   setListViewStatusFilterName: (name: string | null) => void;
@@ -476,6 +508,9 @@ export const useUiPreferencesStore = create<State>()((set, get) => ({
   // Workspace sidebar filter state
   workspaceFilters: DEFAULT_WORKSPACE_FILTER_STATE,
   workspaceSort: DEFAULT_WORKSPACE_SORT_STATE,
+
+  // Workspace carousel sort mode
+  carouselSort: loadCarouselSort(),
 
   // Kanban view mode state
   kanbanViewMode: 'kanban' as KanbanViewMode,
@@ -817,6 +852,20 @@ export const useUiPreferencesStore = create<State>()((set, get) => ({
     set((s) => ({
       workspaceSort: { ...s.workspaceSort, sortOrder },
     })),
+
+  // Workspace carousel sort actions
+  setCarouselSort: (mode) => {
+    try {
+      if (mode === DEFAULT_CAROUSEL_SORT) {
+        localStorage.removeItem(CAROUSEL_SORT_KEY);
+      } else {
+        localStorage.setItem(CAROUSEL_SORT_KEY, mode);
+      }
+    } catch {
+      // localStorage may be unavailable
+    }
+    set({ carouselSort: mode });
+  },
 
   // Kanban view mode actions
   setKanbanViewMode: (mode) => set({ kanbanViewMode: mode }),

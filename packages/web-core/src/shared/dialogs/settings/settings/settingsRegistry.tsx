@@ -12,6 +12,8 @@ import {
   WrenchIcon,
 } from '@phosphor-icons/react';
 import type { Icon } from '@phosphor-icons/react';
+import { useParams } from '@tanstack/react-router';
+import { ProjectProvider } from '@/shared/providers/remote/ProjectProvider';
 import { GeneralSettingsSection } from './GeneralSettingsSection';
 import { ReposSettingsSection } from './ReposSettingsSection';
 import { OrganizationsSettingsSection } from './OrganizationsSettingsSection';
@@ -75,6 +77,18 @@ export const SETTINGS_SECTION_DEFINITIONS: SettingsSectionDefinition[] = [
   { id: 'slack', icon: SlackLogoIcon, group: 'universal' },
 ];
 
+function RouteScopedMcpSettingsSection() {
+  const { projectId } = useParams({ strict: false });
+
+  return projectId ? (
+    <ProjectProvider projectId={projectId}>
+      <McpSettingsSection />
+    </ProjectProvider>
+  ) : (
+    <McpSettingsSection />
+  );
+}
+
 export function isHostSpecificSettingsSection(
   type: SettingsSectionType
 ): boolean {
@@ -111,7 +125,7 @@ export function renderSettingsSection(
     case 'agents':
       return <AgentsSettingsSection />;
     case 'mcp':
-      return <McpSettingsSection />;
+      return <RouteScopedMcpSettingsSection />;
     case 'cli-tools':
       return <CliToolsSettingsSection />;
     case 'relay':

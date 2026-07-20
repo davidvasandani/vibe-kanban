@@ -448,6 +448,18 @@ export function codecForAgent(agent: BaseCodingAgent): McpServerCodec {
   }
 }
 
+export function isTransportCompatible(
+  executor: BaseCodingAgent,
+  transport: McpTransport
+): boolean {
+  // Codex's native-entry editor codec is intentionally stdio-only, while the
+  // shared MCP materializer also adapts streamable HTTP definitions to Codex's
+  // `url`/`http_headers` shape. Assignment compatibility follows the shared
+  // contract rather than the narrower editor codec.
+  if (executor === BaseCodingAgent.CODEX && transport === 'http') return true;
+  return codecForAgent(executor).transports.includes(transport);
+}
+
 /** Transport shown on the list card badge; `null` for custom (unparseable). */
 export function transportOf(
   codec: McpServerCodec,
