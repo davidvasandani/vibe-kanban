@@ -122,6 +122,23 @@ Non-obvious gotchas found building it (several via adversarial Codex review):
   completion signal. ACP is deliberately left one-shot — resume already replays a
   `.jsonl` transcript into a fresh process, so warm reuse buys the least.
 
+## Queued follow-ups must survive early finalization
+
+Queued messages are normally claimed in the exit monitor's general finalization
+block. A coding-agent action may carry a cleanup `next_action`, so
+`should_finalize` is false until that cleanup finishes. When the coding turn
+makes no repository changes, the monitor deliberately skips cleanup and manually
+finalizes instead. Any pending handoff normally performed by the bypassed block
+must happen before that manual finalization.
+
+Concretely, claim and start the queued follow-up before setting the
+`already_finalized` guard. Otherwise the message remains in the in-memory
+`QueuedMessageService` forever even though the task is complete. Share scratch
+deletion and queued execution start logic with the normal consumer, and fall back
+to finalization if the queue is empty/cancelled or execution start fails. The
+general lesson is that an early-finalization shortcut must audit and preserve
+all handoffs owned by the block it bypasses, not only completion notification.
+
 ## What already survives restarts (reuse, don't reinvent)
 
 `ExecutionProcess.pgid` is persisted at spawn; boot-time adoption
@@ -145,3 +162,4 @@ the stored `base_url` + password. Codex (stdio JSON-RPC; turn end currently
 
 - vk/1a64-coding-agent-pro
 - vk/826e-coding-agent-war
+- vk/9f36-vk-queued-messag
