@@ -93,6 +93,15 @@ unbroken content, while treating that text as inert and untrusted. Diagnostic
 actions may add surrounding context, but they must not truncate, reinterpret,
 auto-remediate, or silently discard the original diagnostic.
 
+### XII. Asynchronous handoffs have one authoritative owner
+State handed from a request to an asynchronous lifecycle consumer (queued work,
+follow-up execution, cleanup, or similar) MUST have an explicit claim boundary.
+The producer and consumer must coordinate against authoritative backend state so
+a stale client observation cannot strand work, and concurrent paths cannot both
+perform it. Avoid holding coordination locks across awaited external or process
+operations; claim under synchronization, then perform the work after releasing
+it. Regression tests cover both orderings at the handoff boundary.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -112,5 +121,4 @@ auto-remediate, or silently discard the original diagnostic.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.8.0 (adds diagnostic fidelity principle XI and explicit-context
-constraint for diagnostic issue/task creation)
+**Version**: 0.9.0 (adds asynchronous handoff ownership principle XII)
