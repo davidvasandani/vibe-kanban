@@ -33,7 +33,9 @@ contributed to it.
   the Phase-2 warm registry** — the async `base_url` surfacing over a oneshot,
   park-before-finalization + insert-before-remove, `Arc::try_unwrap` ownership
   (and why the idle sweep must not clone child handles), generation-conditional
-  reap, the env gate, and the Codex/ACP Phase-3 decisions.
+  reap, the env gate, the Codex/ACP Phase-3 decisions, and why cleanup-skip early
+  finalization must dispatch queued follow-ups before setting its finalized
+  guard.
 - [slack-shortcut-ai-summarization.md](slack-shortcut-ai-summarization.md) —
   Optional AI thread summarization for the Slack "Create issue from message"
   shortcut: the ack-fast/enrich-later shape (all slow work in the post-ack

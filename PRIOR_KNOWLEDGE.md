@@ -1,79 +1,48 @@
-# Prior Knowledge: VK MCP Auto Debug
+# Prior Knowledge: VK Queued Messages Hang
 
-Task: `9453-vk-mcp-auto-debu`
+Task: `9f36-vk-queued-messag`
 
-The Vibe Kanban project knowledge base was searched through
-`docs/knowledge-base/INDEX.md` and its topic pages for MCP testing, settings,
-diagnostics, issue creation, project context, and clipboard behavior.
+The project knowledge base was searched through `wiki/INDEX.md`,
+`docs/knowledge-base/INDEX.md`, and their topic pages for queued messages,
+follow-ups, execution lifecycle, finalization, session state, scratch drafts,
+and concurrency races.
 
-## MCP connectivity testing
+## Agent process lifecycle
 
-Source: `docs/knowledge-base/mcp-connectivity-testing.md`
+Source: `wiki/agent-process-lifecycle.md`
 
-- Vibe Kanban normally writes agent-native MCP configuration; the explicit test
-  flow is the exceptional client path that probes saved entries on demand.
-- Probe results deliberately distinguish `ok`, `failed`, `auth_required`, and
-  `unsupported`. Auto-debug UI must attach only to genuine failures and must not
-  collapse authentication or unsupported results into the same workflow.
-- `McpServerTestResult.error` carries actionable transport/process diagnostics.
-  The frontend currently indexes results by server/executor and clears stale
-  state after configuration changes; the enhancement must retain those rules.
-- The probe may include multiline stderr and transport errors. Preserving the
-  exact string is important because stdio stderr is intentionally attached to
-  failures and timeouts are bounded at the probe layer.
+- One coding-agent turn maps to one `ExecutionProcess`; process tracking and
+  exit-monitor facilities are keyed by execution id, while queued follow-up
+  dispatch occurs during the exit monitor's finalization work.
+- Finalization may commit changes, select a next action, dispatch a queued
+  follow-up, update the database, and only later finish process cleanup. Code
+  must not equate frontend-visible output completion with a still-available
+  finalization consumer.
+- The documented warm-process flow requires "park before finalization" because
+  queued-follow-up dispatch can immediately start another turn. This establishes
+  that finalization ordering is a concurrency-sensitive contract and that the
+  follow-up path should reuse existing execution dispatch rather than create a
+  separate frontend-only mechanism.
+- Lifecycle ownership changes must avoid invisibility gaps and must not hold
+  shared registry locks across awaited process operations. The same principles
+  apply when coordinating queue insertion with completion consumption.
+- A completed coding-agent row can coexist with a still-live warm OS process.
+  Queue eligibility must therefore use the execution lifecycle contract, not
+  merely process existence or a frontend running indicator.
 
-## Shared MCP configuration
+## Knowledge not currently recorded
 
-Source: `docs/knowledge-base/shared-mcp-configuration.md`
-
-- Shared tests read saved native entries and return assignment-level results
-  keyed by logical server name and base executor.
-- The MCP inventory is a read-oriented management surface with explicit testing
-  and detailed per-assignment state. Debug actions should not mutate the MCP
-  draft, assignment list, redacted credential snapshot, or save/discard state.
-- Assignment compatibility and secret hydration are established contracts. This
-  task should remain a diagnostic/issue-creation UI path rather than modifying
-  materialization or connection behavior.
-
-## MCP OAuth Connect flow
-
-Source: `docs/knowledge-base/mcp-oauth-connect.md`
-
-- `auth_required` results drive a specialized Connect workflow with popup,
-  polling, snapshot refresh, and re-test behavior.
-- Auto-debug must leave that workflow intact and avoid showing Debug as a
-  substitute for Connect on authentication challenges.
-- Error text can contain remote or process-controlled content. Existing OAuth
-  guidance treats it as untrusted display data; issue descriptions should pass
-  it as inert text/Markdown content, not interpolate it into HTML.
-
-## External integration issue creation
-
-Source: `docs/knowledge-base/remote-external-integrations.md`
-
-- The knowledge base documents server-side issue creation for remote external
-  integrations, including explicit project mapping and the shared issue
-  repository, but it does not document a reusable local-settings frontend
-  mutation for creating an issue.
-- This is a useful boundary warning: the implementation must inspect and reuse
-  current local project/issue infrastructure rather than copying the remote
-  integration path or inventing an arbitrary project selection rule.
-
-## Knowledge gaps to resolve during planning
-
-- No topic page currently records how a global settings screen obtains the
-  active local VK project or navigates to a newly created issue.
-- No topic page records a standard copy-to-clipboard feedback component.
-- The implementation plan must therefore verify provider availability, mutation
-  semantics, and existing UI primitives directly in the codebase.
+No existing knowledge page documents the in-memory `QueuedMessageService`, its
+one-message-per-session replacement rule, the queue HTTP contract, or how the
+frontend queue cache converges after backend consumption. Those details must be
+derived from the current code and tests during planning.
 
 ## Implications for specification and planning
 
-1. Enhance only `failed` assignment results; preserve all other status flows.
-2. Treat the backend-provided diagnostic as an opaque exact string for display,
-   copy, and issue context.
-3. Keep the debug mutation orthogonal to MCP configuration and OAuth state.
-4. Resolve project identity explicitly from existing local app context; never
-   default to an arbitrary project.
-5. Escape/fence diagnostic Markdown robustly and add focused tests for multiline
-   content and mutation failure states.
+1. Reuse the existing queued-follow-up dispatcher and respect finalization,
+   chained-action, setup-script, and warm-process ordering.
+2. Audit every early-finalization branch for work normally performed by the
+   bypassed finalization block; "already finalized" must not also mean "skip
+   pending handoffs."
+3. The report's `0 files changed` state points directly to cleanup-skip behavior,
+   which should be tested before broadening the change to a speculative race fix.
