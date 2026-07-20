@@ -1099,11 +1099,11 @@ export function McpSettingsSection() {
                 return (
                   <div
                     key={server.name}
-                    className="w-full min-w-0 max-w-full rounded-sm border border-border bg-secondary/30 p-3"
+                    className="w-full min-w-0 max-w-full space-y-3 rounded-sm border border-border bg-secondary/30 p-3"
                   >
-                    <div className="flex min-w-0 flex-col items-start gap-2 sm:flex-row sm:justify-between">
+                    <div className="min-w-0">
                       <div className="min-w-0">
-                        <div className="flex items-center gap-2">
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
                           <span className="truncate font-medium text-high">
                             {server.name}
                           </span>
@@ -1148,7 +1148,7 @@ export function McpSettingsSection() {
                           </div>
                         )}
                       </div>
-                      <div className="flex max-w-full flex-wrap items-center gap-1 sm:shrink-0">
+                      <div className="mt-3 flex max-w-full flex-wrap items-center gap-1">
                         <Button
                           variant="ghost"
                           size="sm"
