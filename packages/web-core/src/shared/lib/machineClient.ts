@@ -1,4 +1,6 @@
 import type {
+  AwsSsoProfile,
+  AwsSsoProfileStatus,
   CliToolId,
   CliToolStatus,
   Config,
@@ -91,6 +93,10 @@ export interface MachineClient {
   updateCliTool: (id: CliToolId) => Promise<CliToolStatus>;
   removeCliTool: (id: CliToolId) => Promise<CliToolStatus>;
   openCliToolLogin: (id: CliToolId) => Promise<WebSocket>;
+  listAwsProfiles: () => Promise<AwsSsoProfileStatus[]>;
+  saveAwsProfile: (profile: AwsSsoProfile) => Promise<AwsSsoProfile>;
+  deleteAwsProfile: (name: string) => Promise<void>;
+  openAwsProfileLogin: (name: string) => Promise<WebSocket>;
 }
 
 function getMachineRequestOptions(
@@ -357,6 +363,35 @@ export function createMachineClient(
     openCliToolLogin: async (id) =>
       openLocalApiWebSocket(
         `/api/cli-tools/${encodeURIComponent(id)}/login/ws`,
+        getMachineRequestOptions(runtime, target)
+      ),
+    listAwsProfiles: async () =>
+      handleApiResponse<AwsSsoProfileStatus[]>(
+        await makeMachineRequest(runtime, target, '/api/aws/profiles', {
+          cache: 'no-store',
+        })
+      ),
+    saveAwsProfile: async (profile) =>
+      handleApiResponse<AwsSsoProfile>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/aws/profiles/${encodeURIComponent(profile.name)}`,
+          { method: 'PUT', body: JSON.stringify(profile) }
+        )
+      ),
+    deleteAwsProfile: async (name) =>
+      handleApiResponse<void>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/aws/profiles/${encodeURIComponent(name)}`,
+          { method: 'DELETE' }
+        )
+      ),
+    openAwsProfileLogin: async (name) =>
+      openLocalApiWebSocket(
+        `/api/aws/profiles/${encodeURIComponent(name)}/login/ws`,
         getMachineRequestOptions(runtime, target)
       ),
   };

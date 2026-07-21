@@ -74,6 +74,7 @@ impl PtyService {
         Ok((session_id, output_rx))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_command_session(
         &self,
         executable: PathBuf,

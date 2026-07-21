@@ -29,6 +29,8 @@
         "mcpDesc": "Model Context Protocol servers",
         "cli-tools": "CLI Tools",
         "cli-toolsDesc": "App-managed command line tools for agents",
+        "aws": "AWS",
+        "awsDesc": "AWS SSO profiles and sign-in",
         "organizations": "Organization Settings",
         "organizationsDesc": "Manage organization members and permissions",
         "remote-projects": "Projects",
@@ -677,6 +679,59 @@
         "shadowed": "the machine's copy takes precedence on PATH",
         "notAvailable": "Not installed. Catalog version: {{version}}",
         "unsupported": "Not installable here"
+      }
+    },
+    "aws": {
+      "title": "AWS",
+      "description": "Manage AWS SSO profiles in this machine's ~/.aws/config and sign in with the AWS CLI. Vibe Kanban writes profile configuration only; credentials and tokens stay in the AWS CLI's own storage.",
+      "loading": "Loading AWS profiles…",
+      "empty": "No SSO profiles configured yet. Add one to enable AWS access on this machine.",
+      "cliMissing": "The AWS CLI is not available on this machine. Install it from the CLI Tools section to check status and sign in.",
+      "readOnly": "default profile · read-only",
+      "actions": {
+        "add": "Add Profile",
+        "refresh": "Refresh statuses",
+        "signIn": "Sign in",
+        "reauthenticate": "Re-authenticate",
+        "edit": "Edit profile",
+        "delete": "Delete profile"
+      },
+      "auth": {
+        "authenticated": "Authenticated",
+        "unauthenticated": "Not signed in",
+        "unknown": "Status unknown",
+        "cliMissing": "AWS CLI not available"
+      },
+      "delete": {
+        "confirm": "Delete the SSO profile \"{{name}}\" from ~/.aws/config?"
+      },
+      "form": {
+        "name": "Profile name",
+        "startUrl": "SSO start URL",
+        "ssoRegion": "SSO region",
+        "accountId": "Account ID",
+        "roleName": "Role name",
+        "region": "Default region (optional)",
+        "output": "Output format (optional)",
+        "save": "Save Profile",
+        "cancel": "Cancel",
+        "errors": {
+          "name": "Profile name must be 1-128 characters using letters, digits, or _.@- (and not \"default\")",
+          "duplicate": "A profile with this name already exists",
+          "startUrl": "SSO start URL must begin with https://",
+          "ssoRegion": "SSO region must look like us-east-1",
+          "accountId": "Account ID must be exactly 12 digits",
+          "roleName": "Role name must be 1-64 characters using letters, digits, or +=,.@_-",
+          "region": "Region must look like us-east-1",
+          "output": "Output must be one of json, yaml, text, table"
+        }
+      },
+      "login": {
+        "running": "Complete the prompts in the terminal",
+        "connectionFailed": "Could not open the sign-in connection",
+        "connectionClosed": "The sign-in connection closed before completion",
+        "cancel": "Cancel",
+        "retry": "Retry"
       }
     },
     "attachments": {

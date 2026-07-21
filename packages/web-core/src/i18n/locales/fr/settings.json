@@ -25,6 +25,8 @@
         "mcpDesc": "Serveurs Model Context Protocol",
         "cli-tools": "Outils CLI",
         "cli-toolsDesc": "Outils en ligne de commande gérés par l’application pour les agents",
+        "aws": "AWS",
+        "awsDesc": "Profils SSO AWS et connexion",
         "organizations": "Paramètres de l'organisation",
         "organizationsDesc": "Gérer les membres et les permissions de l'organisation",
         "remote-projects": "Projets",
@@ -776,6 +778,59 @@
         "shadowed": "la copie de la machine est prioritaire dans le PATH",
         "notAvailable": "Non installé. Version du catalogue : {{version}}",
         "unsupported": "Installation impossible ici"
+      }
+    },
+    "aws": {
+      "title": "AWS",
+      "description": "Gérez les profils SSO AWS dans le ~/.aws/config de cette machine et connectez-vous avec la CLI AWS. Vibe Kanban n'écrit que la configuration du profil ; les identifiants et jetons restent dans le stockage propre de la CLI AWS.",
+      "loading": "Chargement des profils AWS…",
+      "empty": "Aucun profil SSO configuré pour l'instant. Ajoutez-en un pour activer l'accès AWS sur cette machine.",
+      "cliMissing": "La CLI AWS n'est pas disponible sur cette machine. Installez-la depuis la section Outils CLI pour vérifier l'état et vous connecter.",
+      "readOnly": "profil default · lecture seule",
+      "actions": {
+        "add": "Ajouter un profil",
+        "refresh": "Actualiser les états",
+        "signIn": "Se connecter",
+        "reauthenticate": "Se réauthentifier",
+        "edit": "Modifier le profil",
+        "delete": "Supprimer le profil"
+      },
+      "auth": {
+        "authenticated": "Authentifié",
+        "unauthenticated": "Non connecté",
+        "unknown": "État inconnu",
+        "cliMissing": "CLI AWS indisponible"
+      },
+      "delete": {
+        "confirm": "Supprimer le profil SSO « {{name}} » de ~/.aws/config ?"
+      },
+      "form": {
+        "name": "Nom du profil",
+        "startUrl": "URL de démarrage SSO",
+        "ssoRegion": "Région SSO",
+        "accountId": "ID de compte",
+        "roleName": "Nom du rôle",
+        "region": "Région par défaut (facultatif)",
+        "output": "Format de sortie (facultatif)",
+        "save": "Enregistrer le profil",
+        "cancel": "Annuler",
+        "errors": {
+          "name": "Le nom du profil doit comporter 1 à 128 caractères parmi lettres, chiffres ou _.@- (et différent de \"default\")",
+          "duplicate": "Un profil portant ce nom existe déjà",
+          "startUrl": "L'URL de démarrage SSO doit commencer par https://",
+          "ssoRegion": "La région SSO doit ressembler à us-east-1",
+          "accountId": "L'ID de compte doit comporter exactement 12 chiffres",
+          "roleName": "Le nom du rôle doit comporter 1 à 64 caractères parmi lettres, chiffres ou +=,.@_-",
+          "region": "La région doit ressembler à us-east-1",
+          "output": "La sortie doit être json, yaml, text ou table"
+        }
+      },
+      "login": {
+        "running": "Suivez les instructions dans le terminal",
+        "connectionFailed": "Impossible d'ouvrir la connexion de connexion",
+        "connectionClosed": "La connexion s'est fermée avant la fin",
+        "cancel": "Annuler",
+        "retry": "Réessayer"
       }
     }
   },

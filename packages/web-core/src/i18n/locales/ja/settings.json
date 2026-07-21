@@ -25,6 +25,8 @@
         "mcpDesc": "モデルコンテキストプロトコルサーバー",
         "cli-tools": "CLI ツール",
         "cli-toolsDesc": "エージェント向けのアプリ管理コマンドラインツール",
+        "aws": "AWS",
+        "awsDesc": "AWS SSO プロファイルとサインイン",
         "organizations": "Organization Settings",
         "organizationsDesc": "Manage organization members and permissions",
         "remote-projects": "プロジェクト",
@@ -776,6 +778,59 @@
         "shadowed": "マシン側のコピーが PATH で優先されます",
         "notAvailable": "未インストール。カタログバージョン: {{version}}",
         "unsupported": "ここにはインストールできません"
+      }
+    },
+    "aws": {
+      "title": "AWS",
+      "description": "このマシンの ~/.aws/config にある AWS SSO プロファイルを管理し、AWS CLI でサインインします。Vibe Kanban が書き込むのはプロファイル設定のみで、認証情報とトークンは AWS CLI 自身のストレージに保存されます。",
+      "loading": "AWS プロファイルを読み込み中…",
+      "empty": "SSO プロファイルはまだ設定されていません。追加すると、このマシンで AWS にアクセスできるようになります。",
+      "cliMissing": "このマシンでは AWS CLI を利用できません。CLI ツールセクションからインストールすると、状態確認とサインインができます。",
+      "readOnly": "default プロファイル · 読み取り専用",
+      "actions": {
+        "add": "プロファイルを追加",
+        "refresh": "状態を更新",
+        "signIn": "サインイン",
+        "reauthenticate": "再認証",
+        "edit": "プロファイルを編集",
+        "delete": "プロファイルを削除"
+      },
+      "auth": {
+        "authenticated": "認証済み",
+        "unauthenticated": "未サインイン",
+        "unknown": "状態不明",
+        "cliMissing": "AWS CLI が利用不可"
+      },
+      "delete": {
+        "confirm": "SSO プロファイル「{{name}}」を ~/.aws/config から削除しますか？"
+      },
+      "form": {
+        "name": "プロファイル名",
+        "startUrl": "SSO スタート URL",
+        "ssoRegion": "SSO リージョン",
+        "accountId": "アカウント ID",
+        "roleName": "ロール名",
+        "region": "デフォルトリージョン（任意）",
+        "output": "出力形式（任意）",
+        "save": "プロファイルを保存",
+        "cancel": "キャンセル",
+        "errors": {
+          "name": "プロファイル名は英数字と _.@- の 1〜128 文字で、\"default\" 以外にしてください",
+          "duplicate": "同名のプロファイルが既に存在します",
+          "startUrl": "SSO スタート URL は https:// で始まる必要があります",
+          "ssoRegion": "SSO リージョンは us-east-1 の形式にしてください",
+          "accountId": "アカウント ID はちょうど 12 桁の数字にしてください",
+          "roleName": "ロール名は英数字と +=,.@_- の 1〜64 文字にしてください",
+          "region": "リージョンは us-east-1 の形式にしてください",
+          "output": "出力は json、yaml、text、table のいずれかにしてください"
+        }
+      },
+      "login": {
+        "running": "ターミナルの指示に従って完了してください",
+        "connectionFailed": "サインイン接続を開けませんでした",
+        "connectionClosed": "サインイン接続が完了前に閉じられました",
+        "cancel": "キャンセル",
+        "retry": "再試行"
       }
     }
   },

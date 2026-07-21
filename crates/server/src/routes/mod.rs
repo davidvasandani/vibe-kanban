@@ -4,6 +4,7 @@ use tower_http::{compression::CompressionLayer, validate_request::ValidateReques
 use crate::{DeploymentImpl, mcp_gateway, middleware};
 
 pub mod approvals;
+pub mod aws;
 pub mod cli_tools;
 pub mod config;
 pub mod containers;
@@ -39,6 +40,7 @@ pub fn router(
 ) -> IntoMakeServiceWithConnectInfo<Router, std::net::SocketAddr> {
     let relay_signed_routes = Router::new()
         .route("/health", get(health::health_check))
+        .merge(aws::router())
         .merge(cli_tools::router())
         .merge(config::router())
         .merge(mcp_auth::router())

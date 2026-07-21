@@ -25,6 +25,8 @@
         "mcpDesc": "Model Context Protocol 서버",
         "cli-tools": "CLI 도구",
         "cli-toolsDesc": "에이전트용 앱 관리 명령줄 도구",
+        "aws": "AWS",
+        "awsDesc": "AWS SSO 프로필 및 로그인",
         "organizations": "Organization Settings",
         "organizationsDesc": "Manage organization members and permissions",
         "remote-projects": "프로젝트",
@@ -776,6 +778,59 @@
         "shadowed": "머신의 복사본이 PATH에서 우선합니다",
         "notAvailable": "설치되지 않음. 카탈로그 버전: {{version}}",
         "unsupported": "여기에는 설치할 수 없음"
+      }
+    },
+    "aws": {
+      "title": "AWS",
+      "description": "이 머신의 ~/.aws/config에 있는 AWS SSO 프로필을 관리하고 AWS CLI로 로그인합니다. Vibe Kanban은 프로필 구성만 기록하며, 자격 증명과 토큰은 AWS CLI 자체 저장소에 유지됩니다.",
+      "loading": "AWS 프로필 불러오는 중…",
+      "empty": "아직 구성된 SSO 프로필이 없습니다. 프로필을 추가하면 이 머신에서 AWS를 사용할 수 있습니다.",
+      "cliMissing": "이 머신에서는 AWS CLI를 사용할 수 없습니다. CLI 도구 섹션에서 설치하면 상태 확인과 로그인이 가능합니다.",
+      "readOnly": "default 프로필 · 읽기 전용",
+      "actions": {
+        "add": "프로필 추가",
+        "refresh": "상태 새로 고침",
+        "signIn": "로그인",
+        "reauthenticate": "재인증",
+        "edit": "프로필 편집",
+        "delete": "프로필 삭제"
+      },
+      "auth": {
+        "authenticated": "인증됨",
+        "unauthenticated": "로그인되지 않음",
+        "unknown": "상태 알 수 없음",
+        "cliMissing": "AWS CLI 사용 불가"
+      },
+      "delete": {
+        "confirm": "SSO 프로필 \"{{name}}\"을(를) ~/.aws/config에서 삭제할까요?"
+      },
+      "form": {
+        "name": "프로필 이름",
+        "startUrl": "SSO 시작 URL",
+        "ssoRegion": "SSO 리전",
+        "accountId": "계정 ID",
+        "roleName": "역할 이름",
+        "region": "기본 리전 (선택)",
+        "output": "출력 형식 (선택)",
+        "save": "프로필 저장",
+        "cancel": "취소",
+        "errors": {
+          "name": "프로필 이름은 문자, 숫자, _.@- 로 이루어진 1~128자여야 하며 \"default\"일 수 없습니다",
+          "duplicate": "같은 이름의 프로필이 이미 있습니다",
+          "startUrl": "SSO 시작 URL은 https:// 로 시작해야 합니다",
+          "ssoRegion": "SSO 리전은 us-east-1 형식이어야 합니다",
+          "accountId": "계정 ID는 정확히 12자리 숫자여야 합니다",
+          "roleName": "역할 이름은 문자, 숫자, +=,.@_- 로 이루어진 1~64자여야 합니다",
+          "region": "리전은 us-east-1 형식이어야 합니다",
+          "output": "출력은 json, yaml, text, table 중 하나여야 합니다"
+        }
+      },
+      "login": {
+        "running": "터미널의 안내에 따라 완료하세요",
+        "connectionFailed": "로그인 연결을 열 수 없습니다",
+        "connectionClosed": "로그인 연결이 완료 전에 닫혔습니다",
+        "cancel": "취소",
+        "retry": "다시 시도"
       }
     }
   },
