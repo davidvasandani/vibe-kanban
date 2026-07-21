@@ -474,6 +474,16 @@ export type AppCopy = { version: string, outdated: boolean, installed_at: string
 
 export type CliToolStatus = { id: CliToolId, binary_name: string, display_name: string, description: string, catalog_version: string, supported: boolean, unsupported_reason: string | null, host: HostCopy | null, app: AppCopy | null, docs_url: string, login_supported: boolean, auth_state: CliToolAuthState, auth_message: string | null, };
 
+export type AwsSsoProfile = { name: string, sso_start_url: string, sso_region: string, sso_account_id: string, sso_role_name: string, region: string | null, output: string | null, };
+
+export type AwsAuthStatus = { "status": "authenticated", identity: string, } | { "status": "unauthenticated" } | { "status": "unknown", message: string, } | { "status": "cli_missing" };
+
+export type AwsSsoProfileStatus = { profile: AwsSsoProfile, auth: AwsAuthStatus, 
+/**
+ * False for `[default]` (list/sign-in only): VK never rewrites it.
+ */
+editable: boolean, };
+
 export type CheckEditorAvailabilityQuery = { editor_type: EditorType, };
 
 export type CheckEditorAvailabilityResponse = { available: boolean, };

@@ -10,6 +10,7 @@ import {
   KanbanIcon,
   SlackLogoIcon,
   WrenchIcon,
+  KeyIcon,
 } from '@phosphor-icons/react';
 import type { Icon } from '@phosphor-icons/react';
 import { useParams } from '@tanstack/react-router';
@@ -23,6 +24,7 @@ import { McpSettingsSection } from './McpSettingsSection';
 import { RelaySettingsSectionContent } from './RelaySettingsSection';
 import { AttachmentsSettingsSection } from './AttachmentsSettingsSection';
 import { CliToolsSettingsSection } from './CliToolsSettingsSection';
+import { AwsSettingsSection } from './AwsSettingsSection';
 import { JiraSyncSettingsSection } from './JiraSyncSettingsSection';
 import { SlackSettingsSection } from './SlackSettingsSection';
 
@@ -34,6 +36,7 @@ export type SettingsSectionType =
   | 'agents'
   | 'mcp'
   | 'cli-tools'
+  | 'aws'
   | 'relay'
   | 'attachments'
   | 'jira-sync'
@@ -51,6 +54,7 @@ export type SettingsSectionInitialState = {
   agents: { executor?: string; variant?: string } | undefined;
   mcp: undefined;
   'cli-tools': undefined;
+  aws: undefined;
   relay: { hostId?: string } | undefined;
   attachments: undefined;
   'jira-sync': { organizationId?: string; projectId?: string } | undefined;
@@ -69,6 +73,7 @@ export const SETTINGS_SECTION_DEFINITIONS: SettingsSectionDefinition[] = [
   { id: 'agents', icon: CpuIcon, group: 'host' },
   { id: 'mcp', icon: PlugIcon, group: 'host' },
   { id: 'cli-tools', icon: WrenchIcon, group: 'host' },
+  { id: 'aws', icon: KeyIcon, group: 'host' },
   { id: 'organizations', icon: BuildingsIcon, group: 'universal' },
   { id: 'remote-projects', icon: CloudIcon, group: 'universal' },
   { id: 'relay', icon: BroadcastIcon, group: 'universal' },
@@ -128,6 +133,8 @@ export function renderSettingsSection(
       return <RouteScopedMcpSettingsSection />;
     case 'cli-tools':
       return <CliToolsSettingsSection />;
+    case 'aws':
+      return <AwsSettingsSection />;
     case 'relay':
       return (
         <RelaySettingsSectionContent

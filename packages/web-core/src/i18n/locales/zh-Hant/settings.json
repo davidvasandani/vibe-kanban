@@ -25,6 +25,8 @@
         "mcpDesc": "模型上下文協議伺服器",
         "cli-tools": "CLI 工具",
         "cli-toolsDesc": "由應用程式管理的代理命令列工具",
+        "aws": "AWS",
+        "awsDesc": "AWS SSO 設定檔與登入",
         "organizations": "組織設定",
         "organizationsDesc": "管理組織成員與權限",
         "remote-projects": "專案",
@@ -776,6 +778,59 @@
         "shadowed": "本機副本在 PATH 中優先",
         "notAvailable": "未安裝。目錄版本：{{version}}",
         "unsupported": "無法在此安裝"
+      }
+    },
+    "aws": {
+      "title": "AWS",
+      "description": "管理此機器 ~/.aws/config 中的 AWS SSO 設定檔，並使用 AWS CLI 登入。Vibe Kanban 只寫入設定檔設定；憑證與權杖保留在 AWS CLI 自身的儲存空間中。",
+      "loading": "正在載入 AWS 設定檔…",
+      "empty": "尚未設定 SSO 設定檔。新增一個即可在此機器上啟用 AWS 存取。",
+      "cliMissing": "此機器上沒有可用的 AWS CLI。請從 CLI 工具區段安裝，以便檢查狀態並登入。",
+      "readOnly": "default 設定檔 · 唯讀",
+      "actions": {
+        "add": "新增設定檔",
+        "refresh": "重新整理狀態",
+        "signIn": "登入",
+        "reauthenticate": "重新驗證",
+        "edit": "編輯設定檔",
+        "delete": "刪除設定檔"
+      },
+      "auth": {
+        "authenticated": "已驗證",
+        "unauthenticated": "未登入",
+        "unknown": "狀態不明",
+        "cliMissing": "AWS CLI 無法使用"
+      },
+      "delete": {
+        "confirm": "要從 ~/.aws/config 刪除 SSO 設定檔「{{name}}」嗎？"
+      },
+      "form": {
+        "name": "設定檔名稱",
+        "startUrl": "SSO 起始 URL",
+        "ssoRegion": "SSO 區域",
+        "accountId": "帳戶 ID",
+        "roleName": "角色名稱",
+        "region": "預設區域（選填）",
+        "output": "輸出格式（選填）",
+        "save": "儲存設定檔",
+        "cancel": "取消",
+        "errors": {
+          "name": "設定檔名稱必須為 1-128 個字元，僅含字母、數字或 _.@-（且不能為 \"default\"）",
+          "duplicate": "同名設定檔已存在",
+          "startUrl": "SSO 起始 URL 必須以 https:// 開頭",
+          "ssoRegion": "SSO 區域格式應類似 us-east-1",
+          "accountId": "帳戶 ID 必須是恰好 12 位數字",
+          "roleName": "角色名稱必須為 1-64 個字元，僅含字母、數字或 +=,.@_-",
+          "region": "區域格式應類似 us-east-1",
+          "output": "輸出必須是 json、yaml、text 或 table 之一"
+        }
+      },
+      "login": {
+        "running": "請在終端機中完成提示",
+        "connectionFailed": "無法開啟登入連線",
+        "connectionClosed": "登入連線在完成前已關閉",
+        "cancel": "取消",
+        "retry": "重試"
       }
     }
   },

@@ -1,6 +1,6 @@
 # Managed CLI tool OAuth login
 
-Tags: `5a2a-vk-cli-tool-logi`
+Tags: `5a2a-vk-cli-tool-logi`, `6777-aws-sso-config-i`
 
 ## Boundary: orchestrate the vendor CLI
 
@@ -16,7 +16,11 @@ That permits Azure CLI (`az login --use-device-code`, then `az account show
 --output none`) and GAM (`gam oauth create`, then `gam oauth verify`). It rules
 out generic AWS SSO because it is profile-specific, 1Password because sessions
 may be shell-scoped, and the pinned Graph beta CLI because it has no independent
-status command.
+status command. AWS SSO later gained a profile-scoped flow outside the generic
+catalog — a parallel `/api/aws/*` route set that keeps the same PTY/probe/lock
+discipline with a runtime-chosen `--profile` (see
+[aws-sso-profile-management](aws-sso-profile-management.md)); the generic
+catalog contract stayed untouched.
 
 ## Backend pattern
 

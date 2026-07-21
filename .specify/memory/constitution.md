@@ -102,6 +102,20 @@ perform it. Avoid holding coordination locks across awaited external or process
 operations; claim under synchronization, then perform the work after releasing
 it. Regression tests cover both orderings at the handoff boundary.
 
+### XIII. Vendor config files are edited, never owned
+When a feature manages entries in a config file that belongs to an external
+tool in the user's home directory (e.g. AWS SSO profiles in `~/.aws/config`),
+Vibe Kanban is a guest editor, not the file's owner. Writes touch only the
+managed sections and preserve everything else byte-for-byte (unknown sections,
+keys, comments, ordering); writes are atomic (temp file + rename) with
+restrictive permissions on create; a file the editor cannot parse is never
+rewritten. Only non-secret configuration is written — credentials and tokens
+are acquired by launching the vendor CLI's own login flow in a signed,
+machine-scoped PTY (the established managed-CLI login boundary) and live only
+in the vendor's storage. Every field is validated server-side before any
+write; the browser never supplies command strings or raw file content, and
+command exit is never equated with verified authentication.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -121,4 +135,5 @@ it. Regression tests cover both orderings at the handoff boundary.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.9.0 (adds asynchronous handoff ownership principle XII)
+**Version**: 0.10.0 (adds vendor-config guest-editor principle XIII; previous
+0.9.0 added asynchronous handoff ownership principle XII)

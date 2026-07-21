@@ -193,7 +193,7 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
             },
             docs_url: "https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html",
             auth: CliToolAuthStrategy::Unsupported(
-                "AWS SSO login requires choosing and configuring a profile; use the vendor setup guide",
+                "AWS SSO login is profile-specific; manage SSO profiles and sign in from the AWS section in Settings",
             ),
         },
         CliToolCatalogEntry {
@@ -571,6 +571,14 @@ async fn effective_binary(e: &CliToolCatalogEntry) -> Option<PathBuf> {
         return Some(PathBuf::from(host.path));
     }
     detect_app_copy(e).map(|_| installed_binary_path(e))
+}
+
+/// Effective binary for a catalog tool (host copy wins over the app-managed
+/// copy, exactly as agent execution resolves it). For features that build
+/// runtime-parameterized commands on top of a managed tool, e.g. AWS SSO
+/// profile login.
+pub async fn effective_binary_for(id: CliToolId) -> Option<PathBuf> {
+    effective_binary(entry(id)).await
 }
 
 pub async fn login_command(id: CliToolId) -> Result<CliToolLoginCommand, CliToolError> {

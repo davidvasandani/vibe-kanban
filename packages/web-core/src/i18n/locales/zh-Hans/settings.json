@@ -25,6 +25,8 @@
         "mcpDesc": "模型上下文协议服务器",
         "cli-tools": "CLI 工具",
         "cli-toolsDesc": "由应用管理的代理命令行工具",
+        "aws": "AWS",
+        "awsDesc": "AWS SSO 配置文件与登录",
         "organizations": "组织设置",
         "organizationsDesc": "管理组织成员和权限",
         "remote-projects": "项目",
@@ -776,6 +778,59 @@
         "shadowed": "本机副本在 PATH 中优先",
         "notAvailable": "未安装。目录版本：{{version}}",
         "unsupported": "无法在此安装"
+      }
+    },
+    "aws": {
+      "title": "AWS",
+      "description": "管理此机器 ~/.aws/config 中的 AWS SSO 配置文件，并使用 AWS CLI 登录。Vibe Kanban 只写入配置文件设置；凭证和令牌保留在 AWS CLI 自身的存储中。",
+      "loading": "正在加载 AWS 配置文件…",
+      "empty": "尚未配置 SSO 配置文件。添加一个即可在此机器上启用 AWS 访问。",
+      "cliMissing": "此机器上没有可用的 AWS CLI。请从 CLI 工具部分安装，以便检查状态并登录。",
+      "readOnly": "default 配置文件 · 只读",
+      "actions": {
+        "add": "添加配置文件",
+        "refresh": "刷新状态",
+        "signIn": "登录",
+        "reauthenticate": "重新认证",
+        "edit": "编辑配置文件",
+        "delete": "删除配置文件"
+      },
+      "auth": {
+        "authenticated": "已认证",
+        "unauthenticated": "未登录",
+        "unknown": "状态未知",
+        "cliMissing": "AWS CLI 不可用"
+      },
+      "delete": {
+        "confirm": "从 ~/.aws/config 中删除 SSO 配置文件“{{name}}”？"
+      },
+      "form": {
+        "name": "配置文件名称",
+        "startUrl": "SSO 起始 URL",
+        "ssoRegion": "SSO 区域",
+        "accountId": "账户 ID",
+        "roleName": "角色名称",
+        "region": "默认区域（可选）",
+        "output": "输出格式（可选）",
+        "save": "保存配置文件",
+        "cancel": "取消",
+        "errors": {
+          "name": "配置文件名称必须为 1-128 个字符，仅含字母、数字或 _.@-（且不能为 \"default\"）",
+          "duplicate": "同名配置文件已存在",
+          "startUrl": "SSO 起始 URL 必须以 https:// 开头",
+          "ssoRegion": "SSO 区域格式应类似 us-east-1",
+          "accountId": "账户 ID 必须是恰好 12 位数字",
+          "roleName": "角色名称必须为 1-64 个字符，仅含字母、数字或 +=,.@_-",
+          "region": "区域格式应类似 us-east-1",
+          "output": "输出必须是 json、yaml、text 或 table 之一"
+        }
+      },
+      "login": {
+        "running": "请在终端中完成提示",
+        "connectionFailed": "无法打开登录连接",
+        "connectionClosed": "登录连接在完成前已关闭",
+        "cancel": "取消",
+        "retry": "重试"
       }
     }
   },
