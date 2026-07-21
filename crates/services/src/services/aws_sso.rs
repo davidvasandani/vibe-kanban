@@ -861,11 +861,21 @@ pub async fn login_command_for_profile(name: &str) -> Result<AwsLoginCommand, Aw
     }
     Ok(AwsLoginCommand {
         executable,
+        // --use-device-code: the default Authorization Code flow expects a
+        // browser on the same machine as the CLI (it opens one and waits on
+        // a local loopback callback), which fails on a headless/remote VK
+        // server with "If you are unable to open the URL on this device,
+        // run this command again with the '--use-device-code' option."
+        // Device Code always prints a URL + code the user completes on any
+        // device, so it works identically whether VK is local or remote —
+        // the same reasoning behind this codebase's `az login
+        // --use-device-code`.
         args: vec![
             "sso".to_string(),
             "login".to_string(),
             "--profile".to_string(),
             name.to_string(),
+            "--use-device-code".to_string(),
         ],
         lock_key: login_lock_key_in(&content, name)?,
         env,
