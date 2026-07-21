@@ -33,6 +33,22 @@ user's home directory (`~/.aws/config` here), it acts as a guest editor
   own storage (`~/.aws/sso/cache`). Sign-in is the vendor's own command in a
   PTY, per [cli-tool-oauth-login](cli-tool-oauth-login.md).
 
+## VK servers are often headless: always use `--use-device-code`
+
+`aws sso login --profile <name>` runs on the machine hosting the VK server,
+not the browser the user is looking at. Its default Authorization Code flow
+assumes both are the same machine (it tries to open a local browser and
+receive a loopback callback); on a remote/headless server it instead prints
+`If you are unable to open the URL on this device, run this command again
+with the '--use-device-code' option.` and stalls. The login command always
+passes `--use-device-code` (`login_command_for_profile` in
+`crates/services/src/services/aws_sso.rs`) so the flow is always "print a URL
++ code, poll for completion" — identical whether VK is local or remote, and
+the same reasoning as this codebase's existing `az login --use-device-code`.
+Don't make this conditional on detecting a display/browser; unconditional is
+simpler and correct in both cases (a local browser can still open the printed
+URL manually).
+
 ## AWS-specific shape
 
 - **Write the modern sso-session form; read both.** `[sso-session <s>]`
