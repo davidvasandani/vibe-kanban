@@ -21,7 +21,10 @@ use std::{
 
 use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderName, HeaderValue, WWW_AUTHENTICATE};
+use reqwest::{
+    header::{ACCEPT, CONTENT_TYPE, HeaderName, HeaderValue, LOCATION, WWW_AUTHENTICATE},
+    redirect::Policy,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
@@ -46,8 +49,8 @@ pub enum McpServerTestStatus {
     Ok,
     /// A recognized transport that failed to connect / handshake / list tools.
     Failed,
-    /// An HTTP/SSE probe was rejected with 401/403: the server is up but wants
-    /// credentials Vibe Kanban doesn't have.
+    /// An HTTP/SSE probe was rejected with 401/403 or a challenged redirect:
+    /// the server is up but wants credentials Vibe Kanban doesn't have.
     AuthRequired,
     /// The config shape was not recognized as any known transport (no probe run).
     Unsupported,
@@ -65,7 +68,7 @@ pub struct McpServerTestResult {
     pub server_name: Option<String>,
     pub server_version: Option<String>,
     pub error: Option<String>,
-    /// Raw `WWW-Authenticate` header from a 401/403 probe response, when the
+    /// Raw `WWW-Authenticate` header from an authentication response, when the
     /// server sent one (per RFC 9728 it points at the protected-resource
     /// metadata needed to start OAuth).
     pub www_authenticate: Option<String>,
@@ -74,7 +77,7 @@ pub struct McpServerTestResult {
 /// Probe failure, split so auth rejections can be surfaced distinctly.
 #[derive(Debug)]
 enum ProbeError {
-    /// HTTP 401/403 from an http/sse transport.
+    /// HTTP 401/403 or a challenged redirect from an http/sse transport.
     AuthRequired {
         www_authenticate: Option<String>,
         message: String,
@@ -134,7 +137,44 @@ pub async fn test_mcp_servers(
     servers: HashMap<String, Value>,
     per_server_timeout: Duration,
 ) -> Vec<McpServerTestResult> {
-    let client = reqwest::Client::new();
+    let client = match reqwest::Client::builder().redirect(Policy::none()).build() {
+        Ok(client) => client,
+        Err(error) => {
+            let mut results = servers
+                .into_iter()
+                .map(|(name, value)| {
+                    let target = normalize(&value);
+                    let transport = target.transport_label().to_string();
+                    match target {
+                        McpProbeTarget::Unsupported { reason } => McpServerTestResult {
+                            name,
+                            transport,
+                            status: McpServerTestStatus::Unsupported,
+                            latency_ms: None,
+                            tool_count: None,
+                            server_name: None,
+                            server_version: None,
+                            error: Some(reason),
+                            www_authenticate: None,
+                        },
+                        _ => McpServerTestResult {
+                            name,
+                            transport,
+                            status: McpServerTestStatus::Failed,
+                            latency_ms: None,
+                            tool_count: None,
+                            server_name: None,
+                            server_version: None,
+                            error: Some(format!("failed to build HTTP probe client: {error}")),
+                            www_authenticate: None,
+                        },
+                    }
+                })
+                .collect::<Vec<_>>();
+            results.sort_by(|a, b| a.name.cmp(&b.name));
+            return results;
+        }
+    };
     let futures = servers.into_iter().map(|(name, value)| {
         let client = client.clone();
         async move { test_one(&client, name, &value, per_server_timeout).await }
@@ -416,10 +456,50 @@ fn find_by_id(body: &Value, id: i64) -> Option<Value> {
 fn snippet(s: &str) -> String {
     let s = s.trim();
     if s.chars().count() > 200 {
-        format!("{}…", s.chars().take(200).collect::<String>())
+        format!("{}…", s.chars().take(199).collect::<String>())
     } else {
         s.to_string()
     }
+}
+
+fn redacted_snippet(s: &str, headers: &HashMap<String, String>) -> String {
+    let mut values = headers
+        .values()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+    let redacted = values.into_iter().fold(s.to_string(), |text, value| {
+        text.replace(value, "[REDACTED]")
+    });
+    snippet(&redacted)
+}
+
+fn diagnostic_body_preview(
+    body: &str,
+    content_type: &str,
+    headers: &HashMap<String, String>,
+) -> String {
+    if is_html_like(body, content_type) {
+        // Browser-oriented auth pages commonly embed CSRF/state values that
+        // are unrelated to configured request headers and cannot be redacted
+        // reliably. Status + Content-Type provide the actionable evidence.
+        return "<HTML body omitted>".to_string();
+    }
+
+    let preview = redacted_snippet(body, headers);
+    if preview.is_empty() {
+        "<empty>".to_string()
+    } else {
+        preview
+    }
+}
+
+fn is_html_like(body: &str, content_type: &str) -> bool {
+    let trimmed = body.trim_start().to_ascii_lowercase();
+    content_type.to_ascii_lowercase().contains("html")
+        || trimmed.starts_with("<!doctype html")
+        || trimmed.starts_with("<html")
+        || trimmed.starts_with("<head")
 }
 
 // --- stdio probe ------------------------------------------------------------
@@ -541,18 +621,57 @@ async fn read_result_for_id<R: AsyncBufRead + Unpin>(
 
 // --- streamable HTTP probe --------------------------------------------------
 
+/// Return a diagnostic-safe redirect destination. Login redirects frequently
+/// carry signed state in their query/fragment, so retain only the URL authority
+/// and path and strip userinfo.
+fn sanitized_redirect_location(resp: &reqwest::Response) -> Option<String> {
+    let location = resp.headers().get(LOCATION)?.to_str().ok()?;
+    let mut url = resp.url().join(location).ok()?;
+    url.set_query(None);
+    url.set_fragment(None);
+    url.set_username("").ok()?;
+    url.set_password(None).ok()?;
+    Some(url.to_string())
+}
+
 /// Turn a non-success HTTP response into a `ProbeError`, classifying 401/403
-/// as `AuthRequired` and capturing the `WWW-Authenticate` header.
-async fn http_status_error(resp: reqwest::Response) -> ProbeError {
+/// and challenged redirects as `AuthRequired` and capturing the
+/// `WWW-Authenticate` header.
+async fn http_status_error(
+    resp: reqwest::Response,
+    request_headers: &HashMap<String, String>,
+) -> ProbeError {
     let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let has_location = resp.headers().contains_key(LOCATION);
+    let redirect_location = status
+        .is_redirection()
+        .then(|| sanitized_redirect_location(&resp));
     let www_authenticate = resp
         .headers()
         .get(WWW_AUTHENTICATE)
         .and_then(|v| v.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
         .map(String::from);
     let text = resp.text().await.unwrap_or_default();
-    let message = format!("HTTP {}: {}", status.as_u16(), snippet(&text));
-    if matches!(status.as_u16(), 401 | 403) {
+    let location_context = match redirect_location {
+        Some(Some(location)) => format!(" (redirect location: {location})"),
+        Some(None) if has_location => " (redirect location omitted)".to_string(),
+        _ => String::new(),
+    };
+    let message = format!(
+        "HTTP {}{location_context}: {}",
+        status.as_u16(),
+        diagnostic_body_preview(&text, &content_type, request_headers)
+    );
+    if matches!(status.as_u16(), 401 | 403)
+        || (status.is_redirection() && www_authenticate.is_some())
+    {
         ProbeError::AuthRequired {
             www_authenticate,
             message,
@@ -642,7 +761,7 @@ async fn http_send(
         .map(String::from);
 
     if !status.is_success() {
-        return Err(http_status_error(resp).await);
+        return Err(http_status_error(resp, headers).await);
     }
 
     let Some(want) = want_id else {
@@ -656,7 +775,7 @@ async fn http_send(
         .unwrap_or("")
         .to_string();
 
-    if content_type.contains("text/event-stream") {
+    if is_event_stream_content_type(&content_type) {
         let mut stream = resp.bytes_stream().eventsource();
         let result = read_event_result(&mut stream, want).await?;
         Ok((Some(result), new_session))
@@ -665,10 +784,32 @@ async fn http_send(
             .text()
             .await
             .map_err(|e| format!("failed to read response: {e}"))?;
-        let value: Value =
-            serde_json::from_str(&text).map_err(|e| format!("invalid JSON response: {e}"))?;
-        let msg = find_by_id(&value, want)
-            .ok_or_else(|| "response did not contain a matching id".to_string())?;
+        let value: Value = serde_json::from_str(&text).map_err(|e| {
+            let content_type = if content_type.is_empty() {
+                "unknown"
+            } else {
+                &content_type
+            };
+            let preview = diagnostic_body_preview(&text, content_type, headers);
+            format!(
+                "HTTP {} returned a non-MCP response (Content-Type: {content_type}): \
+                 invalid JSON response: {e}; body preview: {preview}",
+                status.as_u16()
+            )
+        })?;
+        let msg = find_by_id(&value, want).ok_or_else(|| {
+            let content_type = if content_type.is_empty() {
+                "unknown"
+            } else {
+                &content_type
+            };
+            let preview = diagnostic_body_preview(&text, content_type, headers);
+            format!(
+                "HTTP {} returned JSON without a matching MCP response id; \
+                 Content-Type: {content_type}; body preview: {preview}",
+                status.as_u16()
+            )
+        })?;
         Ok((Some(extract_result(&msg)?), new_session))
     }
 }
@@ -685,8 +826,28 @@ async fn probe_sse(
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(http_status_error(resp).await);
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(http_status_error(resp, headers).await);
+    }
+
+    let content_type = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if !content_type.is_empty() && !is_event_stream_content_type(&content_type) {
+        let text = resp
+            .text()
+            .await
+            .map_err(|error| format!("failed to read response: {error}"))?;
+        let preview = diagnostic_body_preview(&text, &content_type, headers);
+        return Err(ProbeError::Other(format!(
+            "HTTP {} returned a non-SSE response (Content-Type: {content_type}); \
+             body preview: {preview}",
+            status.as_u16()
+        )));
     }
 
     let mut stream = resp.bytes_stream().eventsource();
@@ -721,6 +882,24 @@ async fn probe_sse(
     })
 }
 
+fn is_event_stream_content_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("text/event-stream"))
+}
+
+fn is_json_content_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .is_some_and(|media_type| {
+            media_type.eq_ignore_ascii_case("application/json")
+                || media_type.to_ascii_lowercase().ends_with("+json")
+        })
+}
+
 async fn sse_post(
     client: &reqwest::Client,
     message_url: &reqwest::Url,
@@ -739,8 +918,33 @@ async fn sse_post(
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(http_status_error(resp).await);
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(http_status_error(resp, headers).await);
+    }
+    let content_type = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if !content_type.is_empty()
+        && !is_json_content_type(&content_type)
+        && !is_event_stream_content_type(&content_type)
+    {
+        let text = resp
+            .text()
+            .await
+            .map_err(|error| format!("failed to read response: {error}"))?;
+        if !is_html_like(&text, &content_type) {
+            return Ok(());
+        }
+        let preview = diagnostic_body_preview(&text, &content_type, headers);
+        return Err(ProbeError::Other(format!(
+            "HTTP {} returned a non-MCP response to an SSE message POST \
+             (Content-Type: {content_type}); body preview: {preview}",
+            status.as_u16()
+        )));
     }
     Ok(())
 }
@@ -785,6 +989,26 @@ fn apply_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_stream_content_type_is_case_insensitive() {
+        assert!(is_event_stream_content_type(
+            "Text/Event-Stream; Charset=UTF-8"
+        ));
+        assert!(!is_event_stream_content_type("text/html"));
+    }
+
+    #[test]
+    fn diagnostic_snippet_redacts_overlapping_values_and_caps_length() {
+        let headers = HashMap::from([
+            ("X-Short".to_string(), "abc".to_string()),
+            ("Authorization".to_string(), "Bearer abc.def".to_string()),
+        ]);
+        let preview = redacted_snippet(&format!("Bearer abc.def {}", "x".repeat(300)), &headers);
+        assert!(preview.starts_with("[REDACTED]"), "got: {preview}");
+        assert!(!preview.contains("abc.def"), "got: {preview}");
+        assert!(preview.chars().count() <= 200, "got: {preview}");
+    }
 
     #[test]
     fn normalize_stdio_command_string() {
@@ -982,7 +1206,8 @@ mod tests {
 
     /// Serve one canned HTTP/1.1 response on a loopback listener, returning
     /// the URL to hit. Enough for probes that fail on their first request.
-    async fn one_shot_http_server(response: &'static str) -> String {
+    async fn one_shot_http_server(response: impl AsRef<[u8]>) -> String {
+        let response = response.as_ref().to_vec();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -991,10 +1216,296 @@ mod tests {
             };
             let mut buf = [0u8; 4096];
             let _ = sock.read(&mut buf).await;
-            let _ = sock.write_all(response.as_bytes()).await;
+            let _ = sock.write_all(&response).await;
             let _ = sock.shutdown().await;
         });
         format!("http://{addr}")
+    }
+
+    async fn read_http_request(sock: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0u8; 4096];
+            let read = sock.read(&mut chunk).await.unwrap_or(0);
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
+    /// Serve the three requests in an MCP Streamable HTTP handshake. Responses
+    /// can be plain JSON or SSE while carrying the same JSON-RPC messages.
+    async fn mcp_http_server(use_sse: bool) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for _ in 0..3 {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let request = read_http_request(&mut sock).await;
+                let message = if request.contains("notifications/initialized") {
+                    None
+                } else if request.contains("tools/list") {
+                    Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": TOOLS_ID,
+                        "result": { "tools": [{ "name": "one" }, { "name": "two" }] }
+                    }))
+                } else {
+                    Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": INIT_ID,
+                        "result": {
+                            "serverInfo": { "name": "http-mock", "version": "1.0" }
+                        }
+                    }))
+                };
+
+                let (status, content_type, body) = match message {
+                    None => ("202 Accepted", "application/json", String::new()),
+                    Some(message) if use_sse => (
+                        "200 OK",
+                        "text/event-stream",
+                        format!("data: {message}\n\n"),
+                    ),
+                    Some(message) => ("200 OK", "application/json", message.to_string()),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    async fn redirect_target() -> (
+        String,
+        Arc<std::sync::atomic::AtomicBool>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let contacted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let contacted_in_task = contacted.clone();
+        let task = tokio::spawn(async move {
+            if listener.accept().await.is_ok() {
+                contacted_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        (format!("http://{addr}"), contacted, task)
+    }
+
+    #[tokio::test]
+    async fn http_json_handshake_reports_tools_and_info() {
+        let url = mcp_http_server(false).await;
+        let servers = HashMap::from([("s".to_string(), json!({ "type": "http", "url": url }))]);
+        let results = test_mcp_servers(servers, Duration::from_secs(5)).await;
+        assert_eq!(results[0].status, McpServerTestStatus::Ok);
+        assert_eq!(results[0].tool_count, Some(2));
+        assert_eq!(results[0].server_name.as_deref(), Some("http-mock"));
+    }
+
+    #[tokio::test]
+    async fn http_sse_handshake_reports_tools_and_info() {
+        let url = mcp_http_server(true).await;
+        let servers = HashMap::from([("s".to_string(), json!({ "type": "http", "url": url }))]);
+        let results = test_mcp_servers(servers, Duration::from_secs(5)).await;
+        assert_eq!(results[0].status, McpServerTestStatus::Ok);
+        assert_eq!(results[0].tool_count, Some(2));
+        assert_eq!(results[0].server_name.as_deref(), Some("http-mock"));
+    }
+
+    #[tokio::test]
+    async fn http_challenged_redirect_is_auth_required_without_following() {
+        let (target, contacted, target_task) = redirect_target().await;
+        let response = format!(
+            "HTTP/1.1 302 Found\r\n\
+             Location: {target}/login?secret=signed#fragment\r\n\
+             WWW-Authenticate: Cloudflare-Access resource_metadata=\"https://x.dev/prm\"\r\n\
+             content-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        let url = one_shot_http_server(response).await;
+        let servers = HashMap::from([("s".to_string(), json!({ "type": "http", "url": url }))]);
+        let results = test_mcp_servers(servers, Duration::from_secs(5)).await;
+        target_task.abort();
+
+        assert_eq!(results[0].status, McpServerTestStatus::AuthRequired);
+        assert_eq!(
+            results[0].www_authenticate.as_deref(),
+            Some("Cloudflare-Access resource_metadata=\"https://x.dev/prm\"")
+        );
+        assert!(results[0].error.as_deref().unwrap().contains("HTTP 302"));
+        assert!(!contacted.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn http_unchallenged_redirect_is_sanitized_failure() {
+        let (target, _contacted, target_task) = redirect_target().await;
+        let target = target.replacen("http://", "http://user:password@", 1);
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {target}/login?secret=signed#fragment\r\n\
+             content-length: 5\r\nconnection: close\r\n\r\nlogin"
+        );
+        let url = one_shot_http_server(response).await;
+        let servers = HashMap::from([("s".to_string(), json!({ "type": "http", "url": url }))]);
+        let results = test_mcp_servers(servers, Duration::from_secs(5)).await;
+        target_task.abort();
+
+        assert_eq!(results[0].status, McpServerTestStatus::Failed);
+        assert_eq!(results[0].www_authenticate, None);
+        let error = results[0].error.as_deref().unwrap();
+        assert!(error.contains("HTTP 302"), "got: {error}");
+        assert!(error.contains("/login"), "got: {error}");
+        for secret in ["user", "password", "secret=signed", "fragment"] {
+            assert!(!error.contains(secret), "leaked {secret}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn http_html_success_has_actionable_bounded_diagnostic() {
+        let body = format!(
+            "<html><title>Access login</title>Bearer test-secret-token{}</html>",
+            "x".repeat(300)
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=UTF-8\r\n\
+             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let url = one_shot_http_server(response).await;
+        let servers = HashMap::from([(
+            "s".to_string(),
+            json!({
+                "type": "http",
+                "url": url,
+                "headers": { "Authorization": "Bearer test-secret-token" }
+            }),
+        )]);
+        let results = test_mcp_servers(servers, Duration::from_secs(5)).await;
+
+        assert_eq!(results[0].status, McpServerTestStatus::Failed);
+        let error = results[0].error.as_deref().unwrap();
+        assert!(error.contains("HTTP 200"), "got: {error}");
+        assert!(error.contains("text/html; charset=UTF-8"), "got: {error}");
+        assert!(error.contains("<HTML body omitted>"), "got: {error}");
+        assert!(!error.contains("Access login"), "got: {error}");
+        assert!(!error.contains("test-secret-token"), "got: {error}");
+        assert!(
+            error.len() < 500,
+            "diagnostic was not bounded: {}",
+            error.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_challenged_redirect_is_auth_required_without_following() {
+        let (target, contacted, target_task) = redirect_target().await;
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {target}/login\r\n\
+             WWW-Authenticate: Cloudflare-Access realm=\"mcp\"\r\n\
+             content-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        let base = one_shot_http_server(response).await;
+        let servers = HashMap::from([("s".to_string(), json!({ "url": format!("{base}/sse") }))]);
+        let results = test_mcp_servers(servers, Duration::from_secs(5)).await;
+        target_task.abort();
+
+        assert_eq!(results[0].status, McpServerTestStatus::AuthRequired);
+        assert_eq!(
+            results[0].www_authenticate.as_deref(),
+            Some("Cloudflare-Access realm=\"mcp\"")
+        );
+        assert!(!contacted.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn sse_html_success_has_actionable_omitted_body_diagnostic() {
+        let body = "<html><input type=hidden value=server-generated-state></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\n\
+             connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let base = one_shot_http_server(response).await;
+        let servers = HashMap::from([("s".to_string(), json!({ "url": format!("{base}/sse") }))]);
+        let results = test_mcp_servers(servers, Duration::from_secs(5)).await;
+
+        assert_eq!(results[0].transport, "sse");
+        assert_eq!(results[0].status, McpServerTestStatus::Failed);
+        let error = results[0].error.as_deref().unwrap();
+        assert!(error.contains("HTTP 200"), "got: {error}");
+        assert!(error.contains("text/html"), "got: {error}");
+        assert!(error.contains("<HTML body omitted>"), "got: {error}");
+        assert!(!error.contains("server-generated-state"), "got: {error}");
+        assert!(!error.contains("SSE stream closed"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn sse_message_post_rejects_html_success_immediately() {
+        let body = "<html>server-generated-login-state</html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\n\
+             connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let url = reqwest::Url::parse(&one_shot_http_server(response).await).unwrap();
+        let client = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .build()
+            .unwrap();
+        let error = sse_post(&client, &url, &HashMap::new(), &initialize_request(INIT_ID))
+            .await
+            .unwrap_err();
+        let error = match error {
+            ProbeError::Other(message) | ProbeError::AuthRequired { message, .. } => message,
+        };
+
+        assert!(error.contains("HTTP 200"), "got: {error}");
+        assert!(error.contains("SSE message POST"), "got: {error}");
+        assert!(error.contains("<HTML body omitted>"), "got: {error}");
+        assert!(
+            !error.contains("server-generated-login-state"),
+            "got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_message_post_accepts_plain_text_acknowledgement() {
+        let response = "HTTP/1.1 202 Accepted\r\ncontent-type: text/plain\r\n\
+                        content-length: 2\r\nconnection: close\r\n\r\nOK";
+        let url = reqwest::Url::parse(&one_shot_http_server(response).await).unwrap();
+        let client = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .build()
+            .unwrap();
+
+        sse_post(&client, &url, &HashMap::new(), &initialize_request(INIT_ID))
+            .await
+            .expect("successful plain-text acknowledgement should be accepted");
     }
 
     #[tokio::test]
