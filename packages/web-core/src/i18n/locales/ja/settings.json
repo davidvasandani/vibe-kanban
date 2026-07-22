@@ -804,6 +804,24 @@
       "delete": {
         "confirm": "SSO プロファイル「{{name}}」を ~/.aws/config から削除しますか？"
       },
+      "import": {
+        "action": "SSO からインポート",
+        "title": "IAM Identity Center からプロファイルをインポート",
+        "existingSession": "既存の SSO セッション",
+        "newSession": "新しいセッションを作成",
+        "sessionName": "SSO セッション名",
+        "prepare": "準備してサインイン",
+        "discover": "アカウントを検出",
+        "found": "{{count}} 件の組み合わせが見つかりました",
+        "selectAll": "すべて選択",
+        "clearAll": "すべて解除",
+        "profileName": "{{account}} {{role}} のプロファイル名",
+        "confirmOverwrite": "既存の {{name}} を置換",
+        "protectedConflict": "{{name}} は保護されたプロファイルと競合します。",
+        "importSelected": "{{count}} 件をインポート",
+        "success": "完了: {{created}} 件作成、{{updated}} 件更新。",
+        "done": "完了"
+      },
       "form": {
         "name": "プロファイル名",
         "startUrl": "SSO スタート URL",

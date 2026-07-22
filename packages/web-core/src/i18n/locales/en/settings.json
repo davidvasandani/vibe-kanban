@@ -705,6 +705,24 @@
       "delete": {
         "confirm": "Delete the SSO profile \"{{name}}\" from ~/.aws/config?"
       },
+      "import": {
+        "action": "Import from SSO",
+        "title": "Import profiles from IAM Identity Center",
+        "existingSession": "Existing SSO session",
+        "newSession": "Create a new session",
+        "sessionName": "SSO session name",
+        "prepare": "Prepare and sign in",
+        "discover": "Discover accounts",
+        "found": "{{count}} account and role combinations found",
+        "selectAll": "Select all",
+        "clearAll": "Clear all",
+        "profileName": "Profile name for {{account}} {{role}}",
+        "confirmOverwrite": "Replace existing profile {{name}}",
+        "protectedConflict": "{{name}} conflicts with a protected profile; choose another name.",
+        "importSelected": "Import {{count}} profiles",
+        "success": "Import complete: {{created}} created, {{updated}} updated.",
+        "done": "Done"
+      },
       "form": {
         "name": "Profile name",
         "startUrl": "SSO start URL",

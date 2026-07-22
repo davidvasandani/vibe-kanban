@@ -10,11 +10,14 @@ use axum::{
     Router,
     extract::{Path, Query, State, ws::Message},
     response::{IntoResponse, Json as ResponseJson},
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
-use services::services::aws_sso::{self, AwsAuthStatus, AwsSsoProfile, AwsSsoProfileStatus};
+use services::services::aws_sso::{
+    self, AwsAuthStatus, AwsProfileImportRequest, AwsProfileImportResult, AwsSsoAccount,
+    AwsSsoProfile, AwsSsoProfileStatus, AwsSsoSession,
+};
 use utils::response::ApiResponse;
 
 use crate::{
@@ -75,6 +78,54 @@ pub fn router() -> Router<DeploymentImpl> {
             put(save_aws_profile).delete(delete_aws_profile),
         )
         .route("/aws/profiles/{name}/login/ws", get(login_aws_profile))
+        .route("/aws/profiles/import", post(import_aws_profiles))
+        .route("/aws/sso/sessions", get(list_aws_sessions))
+        .route("/aws/sso/sessions/{name}", put(prepare_aws_session))
+        .route(
+            "/aws/sso/sessions/{name}/catalog",
+            get(discover_aws_catalog),
+        )
+        .route("/aws/sso/sessions/{name}/login/ws", get(login_aws_session))
+}
+
+async fn list_aws_sessions() -> ResponseJson<ApiResponse<Vec<AwsSsoSession>>> {
+    match aws_sso::list_sessions() {
+        Ok(value) => ResponseJson(ApiResponse::success(value)),
+        Err(e) => ResponseJson(ApiResponse::error(&e.to_string())),
+    }
+}
+
+async fn prepare_aws_session(
+    Path(name): Path<String>,
+    axum::Json(session): axum::Json<AwsSsoSession>,
+) -> ResponseJson<ApiResponse<AwsSsoSession>> {
+    if name != session.name {
+        return ResponseJson(ApiResponse::error(
+            "session name in path does not match body",
+        ));
+    }
+    match aws_sso::prepare_session(&session).await {
+        Ok(value) => ResponseJson(ApiResponse::success(value)),
+        Err(e) => ResponseJson(ApiResponse::error(&e.to_string())),
+    }
+}
+
+async fn discover_aws_catalog(
+    Path(name): Path<String>,
+) -> ResponseJson<ApiResponse<Vec<AwsSsoAccount>>> {
+    match aws_sso::discover_catalog(&name).await {
+        Ok(value) => ResponseJson(ApiResponse::success(value)),
+        Err(e) => ResponseJson(ApiResponse::error(&e.to_string())),
+    }
+}
+
+async fn import_aws_profiles(
+    axum::Json(request): axum::Json<AwsProfileImportRequest>,
+) -> ResponseJson<ApiResponse<AwsProfileImportResult>> {
+    match aws_sso::import_profiles(&request).await {
+        Ok(value) => ResponseJson(ApiResponse::success(value)),
+        Err(e) => ResponseJson(ApiResponse::error(&e.to_string())),
+    }
 }
 
 async fn list_aws_profiles() -> ResponseJson<ApiResponse<Vec<AwsSsoProfileStatus>>> {
@@ -134,13 +185,25 @@ async fn login_aws_profile(
     let command = aws_sso::login_command_for_profile(&name)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(ws.on_upgrade(move |socket| handle_login(socket, deployment, name, command, query)))
+    Ok(ws.on_upgrade(move |socket| handle_login(socket, deployment, Some(name), command, query)))
+}
+
+async fn login_aws_session(
+    ws: SignedWsUpgrade,
+    State(deployment): State<DeploymentImpl>,
+    Path(name): Path<String>,
+    Query(query): Query<LoginQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let command = aws_sso::login_command_for_session(&name)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(ws.on_upgrade(move |socket| handle_login(socket, deployment, None, command, query)))
 }
 
 async fn handle_login(
     mut socket: MaybeSignedWebSocket,
     deployment: DeploymentImpl,
-    name: String,
+    profile_name: Option<String>,
     command: aws_sso::AwsLoginCommand,
     query: LoginQuery,
 ) {
@@ -234,8 +297,12 @@ async fn handle_login(
     }
     // Command exit and verified authentication are distinct facts: a zero
     // exit only becomes success once the independent probe confirms it.
-    let status = aws_sso::profile_status(&name).await.ok();
-    if outcome == "succeeded"
+    let status = match &profile_name {
+        Some(name) => aws_sso::profile_status(name).await.ok(),
+        None => None,
+    };
+    if profile_name.is_some()
+        && outcome == "succeeded"
         && !matches!(
             status.as_ref().map(|s| &s.auth),
             Some(AwsAuthStatus::Authenticated { .. })
