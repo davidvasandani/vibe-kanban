@@ -1,6 +1,6 @@
 # MCP connectivity testing
 
-Tags: `6286-mcp-status-and-t`, `0c92-mcp-test-connect`, `9453-vk-mcp-auto-debu`
+Tags: `6286-mcp-status-and-t`, `0c92-mcp-test-connect`, `9453-vk-mcp-auto-debu`, `044f-debug-vk-mcp-err`
 
 ## The key architectural fact
 
@@ -23,8 +23,9 @@ probe client. Public surface:
   each probe wrapped in `tokio::time::timeout`, results sorted by name.
 - Types `McpServerTestResult` / `McpServerTestStatus { Ok, Failed, AuthRequired, Unsupported }`
   are ts-rs-exported (registered in `crates/server/src/bin/generate_types.rs`).
-  HTTP/SSE probes rejected with 401/403 classify as `auth_required` (not
-  `failed`) and carry the raw `WWW-Authenticate` header in
+  HTTP/SSE probes rejected with 401/403, or with a challenged 3xx redirect,
+  classify as `auth_required` (not `failed`) and carry the raw
+  `WWW-Authenticate` header in
   `McpServerTestResult.www_authenticate` — the UI's Connect flow feeds it to
   OAuth discovery (see [mcp-oauth-connect](mcp-oauth-connect.md)). The
   classification lives in one choke point, `http_status_error()`; stdio and
@@ -68,10 +69,24 @@ transports. The handshake is just `initialize` → `notifications/initialized` �
   `Accept: application/json, text/event-stream`. The response is *either* a JSON
   body *or* an SSE stream (`eventsource-stream`); branch on `Content-Type`. Echo
   any `Mcp-Session-Id` response header on the follow-up requests.
+- **Do not follow redirects in connectivity probes.** Authentication proxies
+  commonly redirect an MCP request to an interactive HTML login page. Observe
+  the 3xx directly: a non-empty `WWW-Authenticate` challenge means
+  `auth_required`; an unchallenged redirect remains `failed`. A displayed
+  `Location` must be reduced to scheme/host/port/path, omitting userinfo, query,
+  fragment, and unparseable values.
+- **Treat diagnostic bodies as untrusted secret-bearing data.** Cap non-HTML
+  previews at 200 displayed characters and redact configured header values
+  longest-first so overlapping secrets cannot leak suffixes. Omit HTML-like
+  bodies completely because login pages can contain server-generated state or
+  CSRF values that cannot be derived from request headers.
 - **Legacy SSE** = two channels: `GET` the SSE endpoint, read the `endpoint`
   event to learn the message-POST URL (resolve it with `reqwest::Url::join`),
   then `POST` requests there and read their responses back off the *open GET
-  stream*, correlating by JSON-RPC id.
+  stream*, correlating by JSON-RPC id. Validate the initial GET's media type
+  case-insensitively. For message POST acknowledgements, preserve compatibility
+  with empty or non-empty plain-text 2xx acknowledgements; reject only clearly
+  HTML-like successful bodies with an immediate safe diagnostic.
 - The probe spawns the exact command the agent would run — no new security
   surface (user's own machine + config), but do bound everything by a timeout.
 
