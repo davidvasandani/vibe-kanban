@@ -1,91 +1,42 @@
-# Implementation Plan: AWS SSO Profile Management in Vibe Kanban
+# Implementation Plan: MCP Tool Count and Last-Checked Time
 
-Task: `6777-aws-sso-config-i` — see `SPEC.md` for the full design and
-`PRIOR_KNOWLEDGE.md` for the constraints inherited from the knowledge base.
+1. Inspect the constitution and current shared MCP test/card contracts; confirm
+   that the existing `tool_count` response is sufficient and that timestamps
+   should remain frontend-only.
+2. Define a pure MCP check-summary model/helper that:
+   - selects successful results with known tool counts,
+   - returns one count for equal results or a min/max range for divergent ones,
+   - associates the summary with the per-server response completion timestamp,
+   - exposes locale-aware checked-time formatting inputs.
+3. Add focused unit tests for no results, failed/missing counts, a single count,
+   identical multi-executor counts, divergent counts, and timestamp formatting.
+4. Extend `McpSettingsSection` state with per-server checked timestamps. When a
+   test response lands, update returned assignment results and stamp each
+   returned logical server using one captured completion time.
+5. Clear checked timestamps at the same configuration-invalidating boundaries
+   as test results (initial load/reload and save refresh), while leaving
+   unaffected servers intact after a targeted retest.
+6. Render the aggregate tool count and localized checked time in each server
+   card, matching existing compact responsive styles and preserving current
+   assignment status/failure/OAuth rendering.
+7. Add the required settings strings to all supported locales with matching key
+   shapes and correct singular/plural/range interpolation.
+8. Run focused unit tests, TypeScript checks, formatting, and relevant repository
+   validation. Inspect the final diff for generated-file or unrelated changes.
+9. Run an independent Codex review, fix confirmed significant findings, and
+   repeat verification/review until clean.
+10. Update the MCP connectivity-testing knowledge page and index with reusable
+    aggregation/timestamp lifecycle guidance tagged `dcf7-vk-mcp-add-tool`, then
+    commit the knowledge-base update as required by the pipeline.
 
-## Backend
+## Expected file scope
 
-1. **`crates/services/src/services/aws_sso.rs` (new):**
-   a. Conservative line-based AWS config INI editor: parse sections
-      (`[profile x]`, `[sso-session x]`, `[default]`, unknown), preserve
-      untouched lines byte-for-byte, atomic temp-file + rename writes,
-      `0700`/`0600` permissions on create, honor `AWS_CONFIG_FILE`.
-   b. `AwsSsoProfile` / `AwsAuthStatus` / `AwsSsoProfileStatus` types with
-      `#[derive(TS)]`.
-   c. `list_profiles()` reading modern (`sso_session`) and legacy inline SSO
-      profiles; `upsert_profile()` writing sso-session form with shared
-      session derivation (prefix before first `.`) and session conflict
-      rejection; `delete_profile()` with reference-counted session cleanup.
-   d. Field validation (name charset/length, https start URL, region regex,
-      12-digit account id, role-name charset, output enum).
-   e. Auth probe: `aws sts get-caller-identity --profile <name> --output
-      json` with effective-binary resolution reused from `cli_tools`
-      (host `aws` first, then managed copy → else `CliMissing`), probe
-      timeout, `kill_on_drop`, minimal whitelisted env; classify exit/output
-      into `Authenticated{identity}` / `Unauthenticated` / `Unknown`.
-   f. Unit tests: parser round-trips (modern/legacy/mixed/comments), upsert
-      into missing file, session sharing + conflict, delete cleanup,
-      validation matrix, probe-output classification from canned data.
+- `packages/web-core/src/shared/lib/` — pure summary helper and tests.
+- `packages/web-core/src/shared/dialogs/settings/settings/McpSettingsSection.tsx`
+  — state ingestion, lifecycle, and card rendering.
+- `packages/web-core/src/i18n/locales/*/settings.json` — user-facing strings.
+- `specs/vk/dcf7-vk-mcp-add-tool/` — SpecKit artifacts.
+- `docs/knowledge-base/` — reusable shipped knowledge and index refresh.
 
-2. **`crates/server/src/routes/aws.rs` (new):**
-   a. `GET /api/aws/profiles` — list + concurrent probes →
-      `Vec<AwsSsoProfileStatus>`.
-   b. `PUT /api/aws/profiles/{name}` — validate, path/body name equality,
-      upsert.
-   c. `DELETE /api/aws/profiles/{name}` — 404 when absent.
-   d. `GET /api/aws/profiles/{name}/login/ws` — `SignedWsUpgrade`; per-profile
-      login lock, 15-min timeout, PTY `aws sso login --profile <name>` with
-      `$HOME` working dir via `deployment.pty().create_command_session(...)`;
-      on child exit run the auth probe and emit distinct
-      success / exit-without-auth outcomes; cancel/timeout/disconnect kill via
-      cloned killer, no signalling after normal reap (mirror
-      `cli_tools.rs::handle_login`).
-   e. Register `pub mod aws;` and `.merge(aws::router())` in
-      `crates/server/src/routes/mod.rs`.
-   f. Route tests: invalid-name rejection, name mismatch, login-lock
-      exclusivity without spawning a real login.
-
-3. **Catalog touch-up:** update the `CliToolId::Aws`
-   `CliToolAuthStrategy::Unsupported` message in
-   `crates/services/src/services/cli_tools.rs` to point at the new AWS
-   settings section.
-
-4. **Generated types:** add the three AWS type decls to
-   `crates/server/src/bin/generate_types.rs`; run
-   `pnpm run generate-types`.
-
-## Frontend (`packages/web-core`)
-
-5. **`machineClient.ts`:** add `listAwsProfiles`, `saveAwsProfile`,
-   `deleteAwsProfile`, `openAwsProfileLogin` (WS) to the `MachineClient`
-   interface + implementation using the generated types.
-
-6. **Settings registry:** add the `'aws'` section type, initial-state entry,
-   `SETTINGS_SECTION_DEFINITIONS` row (group `'host'`), and
-   `renderSettingsSection` case.
-
-7. **`AwsSettingsSection.tsx` (new):**
-   a. Profile list with auth badges and Sign in / Reauthenticate / Edit /
-      Delete actions; `CliMissing` install hint pointing at CLI Tools.
-   b. Add/Edit form following `OrganizationEnvVarsCard.tsx`, mirroring
-      server validation and surfacing server errors.
-   c. Embedded xterm.js login terminal cloned from
-      `CliToolsSettingsSection.tsx` (FitAddon, WebLinksAddon, `error` +
-      premature-`close` handling); refresh list on terminal outcome.
-   d. Pure state-mapping helper (status → available action) with a
-      lightweight test, following the `cliToolLogin.ts` pattern.
-
-## Verification
-
-8. `cargo test -p services -p server` (new suites), `pnpm run
-   generate-types:check`, `pnpm run check`, `pnpm run lint`,
-   `pnpm run format`, `git diff --check`.
-9. Manual smoke: with a scratch `AWS_CONFIG_FILE`, create
-   `ai-foundry.AdministratorAccess`, verify the written INI, confirm the AWS
-   CLI accepts `aws configure list-profiles`, and exercise the login WS
-   opening path (real SSO completion requires interactive browser access).
-10. Independent Codex diff review; address confirmed findings and re-verify
-    until it reports no significant findings.
-11. Distill reusable knowledge (AWS config round-trip editing, profile-scoped
-    login-lock pattern) into the project knowledge base, refresh indexes, and
-    commit.
+No backend, database, API contract, or generated shared-type changes are
+expected.

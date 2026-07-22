@@ -1,94 +1,57 @@
-# Prior Knowledge: AWS SSO Profile Management in VK
+# Prior Knowledge: MCP Tool Count and Last-Checked Time
 
-Task: `6777-aws-sso-config-i`
+The project knowledge base is populated. The most relevant pages are
+`docs/knowledge-base/mcp-connectivity-testing.md` and
+`docs/knowledge-base/shared-mcp-configuration.md`.
 
-The project knowledge base was searched via `docs/knowledge-base/INDEX.md` and
-`wiki/INDEX.md` (plus a grep for AWS/SSO across `docs/`, `wiki/`, and
-`specs/`) for pages about CLI tool management, vendor login flows, settings
-UI, environment handling at process boundaries, and anything AWS-specific.
-Four pages are directly relevant; the rest of the KB covers unrelated
-subsystems (kanban UI, Electric sync, Slack/Jira connectors, agent process
-lifecycle).
+## MCP connectivity testing
 
-## CLI tool OAuth login (`docs/knowledge-base/cli-tool-oauth-login.md`)
+- Vibe Kanban normally writes agent-native MCP configuration; the explicit test
+  path is its bounded, on-demand MCP client.
+- `crates/executors/src/mcp_test.rs` performs `initialize`,
+  `notifications/initialized`, and `tools/list`. Its exported
+  `McpServerTestResult` already includes `tool_count`, so this feature does not
+  need a protocol, route, schema, or generated-type change.
+- Shared tests read saved native config and return one
+  `SharedMcpAssignmentTestResult` per logical-server/executor assignment.
+- Frontend test results are transient and are deliberately cleared after config
+  reload/save so status cannot contradict the saved native configuration.
+- Probe diagnostics and authentication classifications are security-sensitive;
+  this feature should consume successful metadata without changing probe or
+  error behavior.
 
-The design bible for this feature — it documents the prior decision that
-**directly created this task's gap**:
+## Shared MCP configuration
 
-- Boundary rule: VK must orchestrate the vendor CLI, never become an OAuth
-  client or credential store. Launch the durable login command in a PTY;
-  tokens stay in the CLI's own host-side storage. In-app login is offered
-  only when (1) credentials survive the login child process and (2) a
-  separate non-secret command independently verifies auth. AWS SSO satisfies
-  both — `aws sso login` persists tokens in `~/.aws/sso/cache`, and
-  `aws sts get-caller-identity --profile <name>` verifies — but was excluded
-  from the generic flow "because it is profile-specific." This feature adds
-  the missing profile-selection layer.
-- Backend rules to inherit: executable and args live in compiled server code
-  (never accept a command string from the browser); resolve the effective
-  binary the same way agent execution does (host binary beats app-managed
-  copy); probes run concurrently with short timeout, `kill_on_drop`, minimal
-  env, and typed authenticated/unauthenticated/unknown/unsupported results;
-  use the signed WebSocket + machine-aware routing (a path alone can target
-  the UI machine by mistake); one active login per target per server process
-  with a maximum session duration; stream PTY bytes only, no transcripts;
-  command exit and verified auth are distinct facts — zero exit becomes
-  success only after the independent probe confirms.
-- PTY lifecycle lesson: direct command sessions need an exit channel and a
-  cloned child killer; cancel/timeout/disconnect kill and remove the child,
-  but after normal reap remove the session **without** signalling the cloned
-  PID (rapid PID reuse hazard). Browser side must handle `error` and
-  premature `close` — a WebSocket constructor can succeed before its HTTP
-  upgrade is rejected, which otherwise leaves the terminal stuck "running."
-- Validation pattern: test catalog eligibility and concurrent locks without
-  real logins; test a harmless direct PTY command; test frontend action
-  visibility as a pure state mapping.
+- The shared settings inventory is a read-oriented card surface. A card
+  represents one logical server, while test results are keyed by both server
+  name and executor.
+- Native agent files remain the source of truth and saves may rematerialize a
+  logical definition into different executor-native shapes.
+- The settings dialog owns provisional state and the outer settings save/discard
+  boundary owns persistence. Ephemeral health metadata must not escape or alter
+  those boundaries.
+- Existing cards already show transport, assignments, connection/auth state,
+  and test/edit/delete actions. Tool count and checked time belong in that card
+  summary rather than in configuration forms.
 
-## Managed CLI tool catalog (`wiki/managed-cli-tool-catalog.md`)
+## Relevant implementation precedent
 
-- The catalog in `crates/services/src/services/cli_tools.rs` already ships
-  AWS CLI v2 (`CliToolId::Aws`, wire id `"aws"`, Linux x86_64/aarch64 pinned
-  sources, macOS intentionally unsupported) with
-  `auth: Unsupported("AWS SSO login requires choosing and configuring a
-  profile...")`. This feature builds beside the catalog rather than extending
-  `CliToolAuthStrategy` — the static `&'static [&'static str]` args have no
-  slot for a runtime profile name.
-- Routes and settings UI consume the catalog generically; keep them generic
-  and put AWS-profile-specific behavior in new modules.
-- Never hand-edit `shared/types.ts`; add decls to
-  `crates/server/src/bin/generate_types.rs` and run
-  `pnpm run generate-types` (`generate-types:check` is enforced in CI).
-- Validation sequence precedent: `cargo test -p services cli_tools`,
-  `pnpm run generate-types:check`, repo checks, `pnpm run format`.
+- `McpSettingsSection.tsx` owns the shared result map, so a frontend-only
+  checked-time map can be updated beside test result ingestion and cleared at
+  the same stale-state boundaries.
+- Since a logical server can have multiple successful assignment results,
+  aggregation must be explicit. A single equal count can be shown directly;
+  differing counts should be represented as a range.
+- The repository's prior MCP UI work adds settings translations to all seven
+  locale files and puts pure, edge-case-heavy presentation logic in a small
+  tested helper module.
 
-## Workspace environment inheritance (`docs/knowledge-base/workspace-environment-inheritance.md`)
+## Planning constraints distilled from the knowledge base
 
-- Environment must be an explicit choice at every child-process boundary.
-  Managed CLI login PTYs deliberately pass an empty workspace map and keep a
-  minimal allowlisted host environment — the AWS login PTY and the auth
-  probe should follow the same discipline (whitelisted env for probes so
-  ambient `AWS_*` vars can't spoof status).
-- Never mutate the long-lived server environment or write secret files as a
-  side channel.
-
-## Prior speckit feature precedent (`specs/003-cli-tool-oauth-login/`)
-
-The CLI-tool login feature that this task extends was itself developed
-through speckit (spec/research/contracts under
-`specs/003-cli-tool-oauth-login/`), and
-`specs/vk/fc47-atlassian-cli-to/contracts/cli-tools.md` documents the
-CLI-tools HTTP contract shape to mirror for new `/api/aws/*` endpoints.
-Existing feature directories use both `NNN-slug` and `vk/<task-id>` naming;
-the highest numbered prefix in use is `003`.
-
-## Non-KB repo facts confirmed during recall
-
-- No `~/.aws/config` parser/writer exists anywhere in the repo — greenfield.
-- Settings sections are table-driven in
-  `packages/web-core/src/shared/dialogs/settings/settings/settingsRegistry.tsx`;
-  machine-scoped calls go through `MachineClient`
-  (`packages/web-core/src/shared/lib/machineClient.ts`) obtained via
-  `useSettingsMachineClient()` from `SettingsHostContext.tsx`.
-- `CliToolsSettingsSection.tsx` contains the reusable xterm.js login-terminal
-  wiring; `OrganizationEnvVarsCard.tsx` is the closest add/edit/delete list
-  form precedent.
+1. Reuse `McpServerTestResult.tool_count`; do not extend the backend.
+2. Keep timestamps session-local and attach them only when a response lands.
+3. Key timestamps by logical server name and clear them wherever corresponding
+   test results are cleared due to configuration changes.
+4. Preserve existing failed/auth-required details, OAuth, save/discard, and
+   transport behavior.
+5. Unit-test the multi-assignment aggregation independently of the settings UI.
