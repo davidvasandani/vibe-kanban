@@ -1,6 +1,6 @@
 # MCP connectivity testing
 
-Tags: `6286-mcp-status-and-t`, `0c92-mcp-test-connect`, `9453-vk-mcp-auto-debu`, `044f-debug-vk-mcp-err`
+Tags: `6286-mcp-status-and-t`, `0c92-mcp-test-connect`, `9453-vk-mcp-auto-debu`, `044f-debug-vk-mcp-err`, `dcf7-vk-mcp-add-tool`
 
 ## The key architectural fact
 
@@ -42,6 +42,24 @@ count, latency, and server name/version. Results are indexed by server name (the
 `servers` map key) and cleared on profile switch and after save so a stale status
 never contradicts the on-disk config. An in-flight test is discarded if the user
 switches agents before it resolves (a `useRef` guard).
+
+## Tool-count and checked-time presentation
+
+The probe already returns `tool_count` from `tools/list`; presentation features
+should consume that field rather than add another MCP request or backend DTO.
+Shared settings can receive several assignment results for one logical server:
+aggregate only successful, non-null counts. Equal counts display once; differing
+counts display as a min/max range. Do not sum counts or treat missing values as
+zero.
+
+“Last checked” is ephemeral client-observed state. Capture one timestamp after a
+test response resolves, assign it only to logical server names returned in that
+response, and preserve unrelated timestamps during targeted retests. Clear both
+results and timestamps when configuration is loaded/saved, and invalidate the
+affected logical server immediately when its draft definition, name, or
+assignments change so metadata never describes an untested draft. Match
+invalidation by the result's exact `server_name`, not a serialized-key prefix,
+because user-controlled names may contain the key delimiter.
 
 ## Why hand-rolled instead of rmcp
 

@@ -29,6 +29,10 @@ import { BaseCodingAgent as BaseCodingAgentValue } from 'shared/types';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useProjectContextOptional } from '@/shared/hooks/useProjectContext';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
+import {
+  formatMcpCheckedAt,
+  summarizeMcpToolCounts,
+} from '@/shared/lib/mcpCheckSummary';
 import { codecForAgent, transportOf } from '@/shared/lib/mcpServerCodec';
 import {
   acquireMcpDebugCreation,
@@ -362,7 +366,7 @@ function TestResultDetails({
 }
 
 export function McpSettingsSection() {
-  const { t } = useTranslation('settings');
+  const { t, i18n } = useTranslation('settings');
   const { config } = useUserSystem();
   const machineClient = useSettingsMachineClient();
   const { setDirty: setContextDirty } = useSettingsDirty();
@@ -387,6 +391,9 @@ export function McpSettingsSection() {
   const [testing, setTesting] = useState(false);
   const [testResults, setTestResults] = useState<
     Record<string, SharedMcpAssignmentTestResult>
+  >({});
+  const [checkedAtByServer, setCheckedAtByServer] = useState<
+    Record<string, number>
   >({});
   const [copyStates, setCopyStates] = useState<Record<string, McpCopyState>>(
     {}
@@ -431,6 +438,7 @@ export function McpSettingsSection() {
       setOriginalSnapshot(sharedMcpSnapshot(next));
       setJsonText(JSON.stringify(inputsFromDraft(next), null, 2));
       setTestResults({});
+      setCheckedAtByServer({});
       setCopyStates({});
       setDebugStates({});
       setConnectErrors({});
@@ -480,6 +488,7 @@ export function McpSettingsSection() {
       setDraft(next);
       setOriginalSnapshot(sharedMcpSnapshot(next));
       setTestResults({});
+      setCheckedAtByServer({});
       setCopyStates({});
       setDebugStates({});
       setConnectErrors({});
@@ -511,18 +520,36 @@ export function McpSettingsSection() {
     setError(null);
   }, [readModel]);
 
-  const setServer = useCallback((server: SharedMcpDraftServer) => {
-    setDraft((prev) => ({
-      ...prev,
-      servers: [
-        ...prev.servers.filter((item) => item.name !== server.name),
-        server,
-      ].sort((a, b) => a.name.localeCompare(b.name)),
-    }));
+  const invalidateServerCheck = useCallback((name: string) => {
+    setTestResults((prev) =>
+      Object.fromEntries(
+        Object.entries(prev).filter(([, test]) => test.server_name !== name)
+      )
+    );
+    setCheckedAtByServer((prev) => {
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
   }, []);
+
+  const setServer = useCallback(
+    (server: SharedMcpDraftServer) => {
+      invalidateServerCheck(server.name);
+      setDraft((prev) => ({
+        ...prev,
+        servers: [
+          ...prev.servers.filter((item) => item.name !== server.name),
+          server,
+        ].sort((a, b) => a.name.localeCompare(b.name)),
+      }));
+    },
+    [invalidateServerCheck]
+  );
 
   const resolveConflict = useCallback(
     (conflictName: string, variantId: string) => {
+      invalidateServerCheck(conflictName);
       setDraft((prev) => {
         const conflict = prev.conflicts.find(
           (item) => item.name === conflictName
@@ -535,7 +562,7 @@ export function McpSettingsSection() {
           : prev;
       });
     },
-    []
+    [invalidateServerCheck]
   );
 
   const openDialog = useCallback(
@@ -557,6 +584,7 @@ export function McpSettingsSection() {
       });
       if (!result) return;
       if (server && server.name !== result.name) {
+        invalidateServerCheck(server.name);
         setDraft((prev) => ({
           ...prev,
           servers: prev.servers.filter((s) => s.name !== server.name),
@@ -568,7 +596,7 @@ export function McpSettingsSection() {
         assignments: result.assignments,
       });
     },
-    [draft.servers, profiles, setServer]
+    [draft.servers, invalidateServerCheck, profiles, setServer]
   );
 
   const removeServer = useCallback((name: string) => {
@@ -621,6 +649,10 @@ export function McpSettingsSection() {
         const results = await machineClient.testSharedMcpAssignments({
           targets: testTargetsForDraft(draft, serverName),
         });
+        const checkedAt = Date.now();
+        const checkedServers = new Set(
+          results.map((result) => result.server_name)
+        );
         const resultKeys = new Set(
           results.map((result) => testKey(result.server_name, result.executor))
         );
@@ -628,6 +660,11 @@ export function McpSettingsSection() {
           ...prev,
           ...indexAssignmentTests(results),
         }));
+        setCheckedAtByServer((prev) => {
+          const next = { ...prev };
+          for (const name of checkedServers) next[name] = checkedAt;
+          return next;
+        });
         setCopyStates((prev) => {
           const next = { ...prev };
           for (const key of resultKeys) delete next[key];
@@ -944,6 +981,8 @@ export function McpSettingsSection() {
       try {
         const parsed = JSON.parse(text) as SharedMcpDraftServer[];
         setDraft({ servers: parsed, conflicts: draft.conflicts });
+        setTestResults({});
+        setCheckedAtByServer({});
         setJsonError(null);
       } catch {
         setJsonError(t('settings.mcp.errors.invalidJson'));
@@ -1192,6 +1231,31 @@ export function McpSettingsSection() {
                   ) ?? serverResults[0];
                 const attentionKey = attentionResult?.key;
                 const attentionTest = attentionResult?.test;
+                const toolCount = summarizeMcpToolCounts(
+                  server.assignments.map(
+                    (executor) =>
+                      testResults[testKey(server.name, executor)]?.result
+                  )
+                );
+                const checkedAt = checkedAtByServer[server.name];
+                const toolCountText = toolCount
+                  ? toolCount.minimum === toolCount.maximum
+                    ? t('settings.mcp.test.toolCount', {
+                        count: toolCount.minimum,
+                      })
+                    : t('settings.mcp.test.toolCountRange', {
+                        minimum: toolCount.minimum,
+                        maximum: toolCount.maximum,
+                      })
+                  : null;
+                const checkedAtText = checkedAt
+                  ? t('settings.mcp.test.checkedAt', {
+                      time: formatMcpCheckedAt(
+                        checkedAt,
+                        i18n.resolvedLanguage ?? i18n.language
+                      ),
+                    })
+                  : null;
                 return (
                   <div
                     key={server.name}
@@ -1241,6 +1305,15 @@ export function McpSettingsSection() {
                                 </span>
                               );
                             })}
+                          </div>
+                        )}
+                        {(toolCountText || checkedAtText) && (
+                          <div className="mt-2 flex flex-wrap items-center gap-x-1 text-xs text-low">
+                            {toolCountText && <span>{toolCountText}</span>}
+                            {toolCountText && checkedAtText && (
+                              <span aria-hidden="true">·</span>
+                            )}
+                            {checkedAtText && <span>{checkedAtText}</span>}
                           </div>
                         )}
                       </div>
