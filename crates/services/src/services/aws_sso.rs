@@ -8,12 +8,13 @@
 //! tokens stay in the AWS CLI's own storage (`~/.aws/sso/cache`).
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex as StdMutex, OnceLock},
     time::Duration,
 };
 
+use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use ts_rs::TS;
@@ -87,6 +88,14 @@ pub enum AwsSsoError {
     SessionConflict { session: String, profiles: String },
     #[error("no SSO profile named \"{0}\"")]
     NotFound(String),
+    #[error("no SSO session named \"{0}\"")]
+    SessionNotFound(String),
+    #[error("AWS SSO authentication is required for session \"{0}\"")]
+    AuthenticationRequired(String),
+    #[error("AWS SSO discovery failed: {0}")]
+    Discovery(String),
+    #[error("profile \"{0}\" already exists; confirm overwrite to replace it")]
+    ProfileConflict(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -123,6 +132,42 @@ pub struct AwsSsoProfileStatus {
     pub auth: AwsAuthStatus,
     /// False for `[default]` (list/sign-in only): VK never rewrites it.
     pub editable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AwsSsoSession {
+    pub name: String,
+    pub sso_start_url: String,
+    pub sso_region: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AwsSsoAccount {
+    pub account_id: String,
+    pub account_name: String,
+    pub roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AwsProfileImportCandidate {
+    pub name: String,
+    pub sso_account_id: String,
+    pub sso_role_name: String,
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AwsProfileImportRequest {
+    pub session_name: String,
+    pub region: String,
+    pub output: Option<String>,
+    pub profiles: Vec<AwsProfileImportCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AwsProfileImportResult {
+    pub created: Vec<String>,
+    pub updated: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -526,6 +571,29 @@ pub fn validate_profile_name(name: &str, allow_default: bool) -> Result<(), AwsS
     Ok(())
 }
 
+fn validate_session(session: &AwsSsoSession) -> Result<(), AwsSsoError> {
+    validate_charset("session name", &session.name, 128, "_.@-")?;
+    if session.name == "default" {
+        return Err(AwsSsoError::Validation {
+            field: "session name",
+            message: "default is reserved".to_string(),
+        });
+    }
+    if !session.sso_start_url.starts_with("https://")
+        || session.sso_start_url.len() > 2048
+        || session
+            .sso_start_url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(AwsSsoError::Validation {
+            field: "sso_start_url",
+            message: "must be an https:// URL without whitespace".to_string(),
+        });
+    }
+    validate_region("sso_region", &session.sso_region)
+}
+
 fn validate_region(field: &'static str, value: &str) -> Result<(), AwsSsoError> {
     let parts: Vec<&str> = value.split('-').collect();
     let valid = parts.len() >= 3
@@ -665,6 +733,158 @@ fn upsert_in(content: &str, profile: &AwsSsoProfile) -> Result<String, AwsSsoErr
     }
 
     Ok(serialize_doc(&doc))
+}
+
+fn list_sessions_in(content: &str) -> Result<Vec<AwsSsoSession>, AwsSsoError> {
+    let doc = parse_doc(content)?;
+    let mut sessions: Vec<_> = doc
+        .sections
+        .iter()
+        .filter_map(|section| {
+            let SectionKind::SsoSession(name) = &section.kind else {
+                return None;
+            };
+            Some(AwsSsoSession {
+                name: name.clone(),
+                sso_start_url: section_value(section, "sso_start_url")?,
+                sso_region: section_value(section, "sso_region")?,
+            })
+        })
+        .collect();
+    sessions.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(sessions)
+}
+
+fn upsert_session_in(content: &str, session: &AwsSsoSession) -> Result<String, AwsSsoError> {
+    let mut doc = parse_doc(content)?;
+    if let Some(index) = doc
+        .sections
+        .iter()
+        .position(|s| s.kind == SectionKind::SsoSession(session.name.clone()))
+    {
+        let current_url = section_value(&doc.sections[index], "sso_start_url");
+        let current_region = section_value(&doc.sections[index], "sso_region");
+        if (current_url.as_deref() != Some(session.sso_start_url.as_str())
+            || current_region.as_deref() != Some(session.sso_region.as_str()))
+            && !profiles_referencing_session(&doc, &session.name).is_empty()
+        {
+            return Err(AwsSsoError::SessionConflict {
+                session: session.name.clone(),
+                profiles: profiles_referencing_session(&doc, &session.name).join(", "),
+            });
+        }
+        let scopes = section_value(&doc.sections[index], "sso_registration_scopes")
+            .unwrap_or_else(|| DEFAULT_REGISTRATION_SCOPES.to_string());
+        let preserved = preserved_lines(&doc.sections[index], MANAGED_SESSION_KEYS);
+        doc.sections[index] = render_session_section(
+            &session.name,
+            &session.sso_start_url,
+            &session.sso_region,
+            &scopes,
+            preserved,
+        );
+    } else {
+        append_section(
+            &mut doc,
+            render_session_section(
+                &session.name,
+                &session.sso_start_url,
+                &session.sso_region,
+                DEFAULT_REGISTRATION_SCOPES,
+                Vec::new(),
+            ),
+        );
+    }
+    Ok(serialize_doc(&doc))
+}
+
+fn bulk_import_in(
+    content: &str,
+    request: &AwsProfileImportRequest,
+) -> Result<(String, AwsProfileImportResult), AwsSsoError> {
+    validate_charset("session name", &request.session_name, 128, "_.@-")?;
+    validate_region("region", &request.region)?;
+    if request.profiles.is_empty() {
+        return Err(AwsSsoError::Validation {
+            field: "profiles",
+            message: "select at least one profile".to_string(),
+        });
+    }
+    let doc = parse_doc(content)?;
+    let session = doc
+        .sections
+        .iter()
+        .find(|s| s.kind == SectionKind::SsoSession(request.session_name.clone()))
+        .ok_or_else(|| AwsSsoError::SessionNotFound(request.session_name.clone()))?;
+    let start_url = section_value(session, "sso_start_url")
+        .ok_or_else(|| AwsSsoError::SessionNotFound(request.session_name.clone()))?;
+    let sso_region = section_value(session, "sso_region")
+        .ok_or_else(|| AwsSsoError::SessionNotFound(request.session_name.clone()))?;
+    let existing_profiles: HashMap<String, bool> = doc
+        .sections
+        .iter()
+        .filter_map(|s| match &s.kind {
+            SectionKind::Profile(name) => Some((
+                name.clone(),
+                section_value(s, "sso_session").is_some()
+                    || section_value(s, "sso_start_url").is_some(),
+            )),
+            SectionKind::DefaultProfile => Some(("default".to_string(), false)),
+            _ => None,
+        })
+        .collect();
+    let mut names = HashSet::new();
+    let mut created = Vec::new();
+    let mut updated = Vec::new();
+    let mut profiles = Vec::new();
+    for candidate in &request.profiles {
+        if !names.insert(candidate.name.clone()) {
+            return Err(AwsSsoError::Validation {
+                field: "profiles",
+                message: format!("duplicate profile name \"{}\"", candidate.name),
+            });
+        }
+        let profile = AwsSsoProfile {
+            name: candidate.name.clone(),
+            sso_start_url: start_url.clone(),
+            sso_region: sso_region.clone(),
+            sso_account_id: candidate.sso_account_id.clone(),
+            sso_role_name: candidate.sso_role_name.clone(),
+            region: Some(request.region.clone()),
+            output: request.output.clone(),
+        };
+        validate_profile(&profile)?;
+        match existing_profiles.get(&candidate.name) {
+            Some(true) if candidate.overwrite => updated.push(candidate.name.clone()),
+            Some(_) => return Err(AwsSsoError::ProfileConflict(candidate.name.clone())),
+            None => created.push(candidate.name.clone()),
+        }
+        profiles.push(profile);
+    }
+    let mut updated_content = content.to_string();
+    for profile in &profiles {
+        // Use an explicit session independent of the profile's edited name.
+        let mut next = parse_doc(&updated_content)?;
+        let existing = next
+            .sections
+            .iter()
+            .position(|s| s.kind == SectionKind::Profile(profile.name.clone()));
+        match existing {
+            Some(index) => {
+                let preserved = preserved_lines(&next.sections[index], MANAGED_PROFILE_KEYS);
+                next.sections[index] =
+                    render_profile_section(profile, &request.session_name, preserved);
+            }
+            None => append_section(
+                &mut next,
+                render_profile_section(profile, &request.session_name, Vec::new()),
+            ),
+        }
+        updated_content = serialize_doc(&next);
+    }
+    created.sort();
+    updated.sort();
+    Ok((updated_content, AwsProfileImportResult { created, updated }))
 }
 
 fn delete_in(content: &str, name: &str) -> Result<String, AwsSsoError> {
@@ -882,6 +1102,262 @@ pub async fn login_command_for_profile(name: &str) -> Result<AwsLoginCommand, Aw
     })
 }
 
+fn login_environment() -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    for key in [
+        "AWS_CONFIG_FILE",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+    ] {
+        if let Some(value) = std::env::var(key).ok().filter(|v| !v.is_empty()) {
+            env.insert(key.to_string(), value);
+        }
+    }
+    env
+}
+
+pub async fn login_command_for_session(name: &str) -> Result<AwsLoginCommand, AwsSsoError> {
+    validate_charset("session name", name, 128, "_.@-")?;
+    let content = read_config(&aws_config_path())?;
+    if !list_sessions_in(&content)?.iter().any(|s| s.name == name) {
+        return Err(AwsSsoError::SessionNotFound(name.to_string()));
+    }
+    let executable = cli_tools::effective_binary_for(CliToolId::Aws)
+        .await
+        .ok_or_else(|| AwsSsoError::Validation {
+            field: "aws",
+            message: "the AWS CLI is not available on this machine; install it from CLI Tools"
+                .to_string(),
+        })?;
+    Ok(AwsLoginCommand {
+        executable,
+        args: vec![
+            "sso".to_string(),
+            "login".to_string(),
+            "--sso-session".to_string(),
+            name.to_string(),
+            "--use-device-code".to_string(),
+        ],
+        lock_key: name.to_string(),
+        env: login_environment(),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedSsoToken {
+    start_url: String,
+    region: String,
+    access_token: String,
+    expires_at: String,
+}
+
+struct SecretToken(String);
+
+impl std::fmt::Debug for SecretToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretToken([REDACTED])")
+    }
+}
+
+fn aws_sso_cache_path() -> PathBuf {
+    let home = if cfg!(windows) {
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    } else {
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+    };
+    home.map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".aws")
+        .join("sso")
+        .join("cache")
+}
+
+fn cached_token_for(session: &AwsSsoSession) -> Result<SecretToken, AwsSsoError> {
+    let entries = match std::fs::read_dir(aws_sso_cache_path()) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AwsSsoError::AuthenticationRequired(session.name.clone()));
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let now = chrono::Utc::now();
+    let mut matches = Vec::new();
+    for entry in entries.flatten().take(1024) {
+        if entry.path().extension().and_then(|v| v.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.len() > 1024 * 1024 {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(entry.path()) else {
+            continue;
+        };
+        let Ok(cached) = serde_json::from_slice::<CachedSsoToken>(&bytes) else {
+            continue;
+        };
+        let Ok(expires) = chrono::DateTime::parse_from_rfc3339(&cached.expires_at) else {
+            continue;
+        };
+        if cached.start_url == session.sso_start_url
+            && cached.region == session.sso_region
+            && expires.with_timezone(&chrono::Utc) > now
+            && !cached.access_token.is_empty()
+        {
+            matches.push((expires, cached.access_token));
+        }
+    }
+    matches.sort_by_key(|(expires, _)| *expires);
+    matches
+        .pop()
+        .map(|(_, token)| SecretToken(token))
+        .ok_or_else(|| AwsSsoError::AuthenticationRequired(session.name.clone()))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountsPage {
+    #[serde(default)]
+    account_list: Vec<AccountInfo>,
+    next_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountInfo {
+    account_id: String,
+    account_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RolesPage {
+    #[serde(default)]
+    role_list: Vec<RoleInfo>,
+    next_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RoleInfo {
+    role_name: String,
+}
+
+async fn get_portal_page<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+    token: &SecretToken,
+    query: &[(&str, String)],
+) -> Result<T, AwsSsoError> {
+    let response = client
+        .get(url)
+        .header("x-amz-sso_bearer_token", &token.0)
+        .query(query)
+        .send()
+        .await
+        .map_err(|_| AwsSsoError::Discovery("AWS could not be reached".to_string()))?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(AwsSsoError::AuthenticationRequired(
+            "selected session".to_string(),
+        ));
+    }
+    if !response.status().is_success() {
+        return Err(AwsSsoError::Discovery(format!(
+            "AWS returned status {}",
+            response.status().as_u16()
+        )));
+    }
+    response
+        .json::<T>()
+        .await
+        .map_err(|_| AwsSsoError::Discovery("AWS returned an invalid response".to_string()))
+}
+
+async fn discover_with(
+    base_url: &str,
+    session: &AwsSsoSession,
+    token: SecretToken,
+) -> Result<Vec<AwsSsoAccount>, AwsSsoError> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|_| AwsSsoError::Discovery("could not initialize AWS client".to_string()))?;
+    let mut accounts = Vec::new();
+    let mut next = None;
+    loop {
+        let mut query = vec![("max_result", "100".to_string())];
+        if let Some(value) = next.take() {
+            query.push(("next_token", value));
+        }
+        let page: AccountsPage = get_portal_page(
+            &client,
+            &format!("{base_url}/assignment/accounts"),
+            &token,
+            &query,
+        )
+        .await?;
+        accounts.extend(page.account_list);
+        next = page.next_token;
+        if next.is_none() {
+            break;
+        }
+    }
+    let results = stream::iter(accounts.into_iter().map(|account| {
+        let client = client.clone();
+        let token = SecretToken(token.0.clone());
+        let base_url = base_url.to_string();
+        async move {
+            let mut roles = Vec::new();
+            let mut next = None;
+            loop {
+                let mut query = vec![
+                    ("account_id", account.account_id.clone()),
+                    ("max_result", "100".to_string()),
+                ];
+                if let Some(value) = next.take() {
+                    query.push(("next_token", value));
+                }
+                let page: RolesPage = get_portal_page(
+                    &client,
+                    &format!("{base_url}/assignment/roles"),
+                    &token,
+                    &query,
+                )
+                .await?;
+                roles.extend(page.role_list.into_iter().map(|r| r.role_name));
+                next = page.next_token;
+                if next.is_none() {
+                    break;
+                }
+            }
+            roles.sort_by_key(|r| r.to_lowercase());
+            Ok::<_, AwsSsoError>(AwsSsoAccount {
+                account_id: account.account_id,
+                account_name: account.account_name,
+                roles,
+            })
+        }
+    }))
+    .buffer_unordered(8)
+    .collect::<Vec<_>>()
+    .await;
+    let mut catalog: Vec<_> = results.into_iter().collect::<Result<_, _>>()?;
+    catalog.sort_by(|a, b| {
+        a.account_name
+            .to_lowercase()
+            .cmp(&b.account_name.to_lowercase())
+            .then_with(|| a.account_id.cmp(&b.account_id))
+    });
+    let _ = session;
+    Ok(catalog)
+}
+
 // ---------------------------------------------------------------------------
 // Public file-backed API
 // ---------------------------------------------------------------------------
@@ -904,6 +1380,41 @@ pub async fn list_profile_statuses() -> Result<Vec<AwsSsoProfileStatus>, AwsSsoE
             editable,
         })
         .collect())
+}
+
+pub fn list_sessions() -> Result<Vec<AwsSsoSession>, AwsSsoError> {
+    list_sessions_in(&read_config(&aws_config_path())?)
+}
+
+pub async fn prepare_session(session: &AwsSsoSession) -> Result<AwsSsoSession, AwsSsoError> {
+    validate_session(session)?;
+    let _guard = config_write_lock().lock().await;
+    let path = aws_config_path();
+    let content = read_config(&path)?;
+    let updated = upsert_session_in(&content, session)?;
+    write_config_atomic(&path, &updated)?;
+    Ok(session.clone())
+}
+
+pub async fn discover_catalog(name: &str) -> Result<Vec<AwsSsoAccount>, AwsSsoError> {
+    let session = list_sessions()?
+        .into_iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| AwsSsoError::SessionNotFound(name.to_string()))?;
+    let token = cached_token_for(&session)?;
+    let base_url = format!("https://portal.sso.{}.amazonaws.com", session.sso_region);
+    discover_with(&base_url, &session, token).await
+}
+
+pub async fn import_profiles(
+    request: &AwsProfileImportRequest,
+) -> Result<AwsProfileImportResult, AwsSsoError> {
+    let _guard = config_write_lock().lock().await;
+    let path = aws_config_path();
+    let content = read_config(&path)?;
+    let (updated, result) = bulk_import_in(&content, request)?;
+    write_config_atomic(&path, &updated)?;
+    Ok(result)
 }
 
 /// Probe one profile's auth state (used after a login attempt).
@@ -1346,6 +1857,109 @@ sso_registration_scopes = sso:account:access codewhisperer:analysis
         assert!(try_begin_profile_login("lock-test.Other").is_some());
         drop(first);
         assert!(try_begin_profile_login("lock-test.Admin").is_some());
+    }
+
+    #[test]
+    fn session_prepare_preserves_unrelated_content() {
+        let session = AwsSsoSession {
+            name: "work".into(),
+            sso_start_url: "https://work.awsapps.com/start".into(),
+            sso_region: "us-east-1".into(),
+        };
+        let original = "# keep me\n[custom]\nfoo = bar\n";
+        let updated = upsert_session_in(original, &session).unwrap();
+        assert!(updated.starts_with(original));
+        assert!(updated.contains("[sso-session work]"));
+        assert_eq!(list_sessions_in(&updated).unwrap(), vec![session]);
+    }
+
+    #[test]
+    fn bulk_import_is_explicit_session_and_all_or_nothing() {
+        let session = AwsSsoSession {
+            name: "company".into(),
+            sso_start_url: "https://company.awsapps.com/start".into(),
+            sso_region: "us-east-1".into(),
+        };
+        let content = upsert_session_in("# original\n", &session).unwrap();
+        let request = AwsProfileImportRequest {
+            session_name: session.name,
+            region: "us-west-2".into(),
+            output: Some("json".into()),
+            profiles: vec![
+                AwsProfileImportCandidate {
+                    name: "dev.Admin".into(),
+                    sso_account_id: "123456789012".into(),
+                    sso_role_name: "Admin".into(),
+                    overwrite: false,
+                },
+                AwsProfileImportCandidate {
+                    name: "prod.ReadOnly".into(),
+                    sso_account_id: "210987654321".into(),
+                    sso_role_name: "ReadOnly".into(),
+                    overwrite: false,
+                },
+            ],
+        };
+        let (updated, result) = bulk_import_in(&content, &request).unwrap();
+        assert_eq!(result.created, vec!["dev.Admin", "prod.ReadOnly"]);
+        assert_eq!(updated.matches("sso_session = company").count(), 2);
+        assert!(updated.starts_with("# original\n"));
+
+        let mut duplicate = request;
+        duplicate.profiles[1].name = "dev.Admin".into();
+        assert!(bulk_import_in(&content, &duplicate).is_err());
+        assert_eq!(content.matches("[profile ").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn discovery_paginates_accounts_and_roles_and_sorts_complete_result() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = vec![0; 8192];
+                let read = socket.read(&mut bytes).await.unwrap();
+                let request = String::from_utf8_lossy(&bytes[..read]);
+                assert!(request.contains("x-amz-sso_bearer_token: fake-token"));
+                let body = if request.starts_with("GET /assignment/accounts?") {
+                    if request.contains("next_token=more") {
+                        r#"{"accountList":[{"accountId":"111111111111","accountName":"Alpha"}]}"#
+                    } else {
+                        r#"{"accountList":[{"accountId":"222222222222","accountName":"Zulu"}],"nextToken":"more"}"#
+                    }
+                } else if request.contains("account_id=111111111111") {
+                    r#"{"roleList":[{"roleName":"ReadOnly"}]}"#
+                } else {
+                    r#"{"roleList":[{"roleName":"Admin"}]}"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let session = AwsSsoSession {
+            name: "test".into(),
+            sso_start_url: "https://test.awsapps.com/start".into(),
+            sso_region: "us-east-1".into(),
+        };
+        let catalog = discover_with(
+            &format!("http://{address}"),
+            &session,
+            SecretToken("fake-token".into()),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(catalog[0].account_name, "Alpha");
+        assert_eq!(catalog[0].roles, vec!["ReadOnly"]);
+        assert_eq!(catalog[1].account_name, "Zulu");
+        assert_eq!(catalog[1].roles, vec!["Admin"]);
     }
 
     // -- file IO -------------------------------------------------------------

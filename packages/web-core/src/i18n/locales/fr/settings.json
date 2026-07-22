@@ -804,6 +804,24 @@
       "delete": {
         "confirm": "Supprimer le profil SSO « {{name}} » de ~/.aws/config ?"
       },
+      "import": {
+        "action": "Importer depuis SSO",
+        "title": "Importer des profils IAM Identity Center",
+        "existingSession": "Session SSO existante",
+        "newSession": "Créer une session",
+        "sessionName": "Nom de session SSO",
+        "prepare": "Préparer et se connecter",
+        "discover": "Découvrir les comptes",
+        "found": "{{count}} combinaisons trouvées",
+        "selectAll": "Tout sélectionner",
+        "clearAll": "Tout effacer",
+        "profileName": "Nom du profil pour {{account}} {{role}}",
+        "confirmOverwrite": "Remplacer le profil {{name}}",
+        "protectedConflict": "{{name}} est protégé ; choisissez un autre nom.",
+        "importSelected": "Importer {{count}} profils",
+        "success": "Import terminé : {{created}} créés, {{updated}} mis à jour.",
+        "done": "Terminé"
+      },
       "form": {
         "name": "Nom du profil",
         "startUrl": "URL de démarrage SSO",

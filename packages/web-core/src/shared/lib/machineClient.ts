@@ -1,6 +1,10 @@
 import type {
+  AwsProfileImportRequest,
+  AwsProfileImportResult,
+  AwsSsoAccount,
   AwsSsoProfile,
   AwsSsoProfileStatus,
+  AwsSsoSession,
   CliToolId,
   CliToolStatus,
   Config,
@@ -97,6 +101,13 @@ export interface MachineClient {
   saveAwsProfile: (profile: AwsSsoProfile) => Promise<AwsSsoProfile>;
   deleteAwsProfile: (name: string) => Promise<void>;
   openAwsProfileLogin: (name: string) => Promise<WebSocket>;
+  listAwsSsoSessions: () => Promise<AwsSsoSession[]>;
+  prepareAwsSsoSession: (session: AwsSsoSession) => Promise<AwsSsoSession>;
+  discoverAwsSsoCatalog: (name: string) => Promise<AwsSsoAccount[]>;
+  importAwsProfiles: (
+    request: AwsProfileImportRequest
+  ) => Promise<AwsProfileImportResult>;
+  openAwsSsoSessionLogin: (name: string) => Promise<WebSocket>;
 }
 
 function getMachineRequestOptions(
@@ -392,6 +403,42 @@ export function createMachineClient(
     openAwsProfileLogin: async (name) =>
       openLocalApiWebSocket(
         `/api/aws/profiles/${encodeURIComponent(name)}/login/ws`,
+        getMachineRequestOptions(runtime, target)
+      ),
+    listAwsSsoSessions: async () =>
+      handleApiResponse<AwsSsoSession[]>(
+        await makeMachineRequest(runtime, target, '/api/aws/sso/sessions', {
+          cache: 'no-store',
+        })
+      ),
+    prepareAwsSsoSession: async (session) =>
+      handleApiResponse<AwsSsoSession>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/aws/sso/sessions/${encodeURIComponent(session.name)}`,
+          { method: 'PUT', body: JSON.stringify(session) }
+        )
+      ),
+    discoverAwsSsoCatalog: async (name) =>
+      handleApiResponse<AwsSsoAccount[]>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/aws/sso/sessions/${encodeURIComponent(name)}/catalog`,
+          { cache: 'no-store' }
+        )
+      ),
+    importAwsProfiles: async (request) =>
+      handleApiResponse<AwsProfileImportResult>(
+        await makeMachineRequest(runtime, target, '/api/aws/profiles/import', {
+          method: 'POST',
+          body: JSON.stringify(request),
+        })
+      ),
+    openAwsSsoSessionLogin: async (name) =>
+      openLocalApiWebSocket(
+        `/api/aws/sso/sessions/${encodeURIComponent(name)}/login/ws`,
         getMachineRequestOptions(runtime, target)
       ),
   };

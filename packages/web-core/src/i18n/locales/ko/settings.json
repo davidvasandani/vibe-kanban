@@ -804,6 +804,24 @@
       "delete": {
         "confirm": "SSO 프로필 \"{{name}}\"을(를) ~/.aws/config에서 삭제할까요?"
       },
+      "import": {
+        "action": "SSO에서 가져오기",
+        "title": "IAM Identity Center 프로필 가져오기",
+        "existingSession": "기존 SSO 세션",
+        "newSession": "새 세션 만들기",
+        "sessionName": "SSO 세션 이름",
+        "prepare": "준비 및 로그인",
+        "discover": "계정 검색",
+        "found": "{{count}}개 조합을 찾았습니다",
+        "selectAll": "모두 선택",
+        "clearAll": "모두 해제",
+        "profileName": "{{account}} {{role}} 프로필 이름",
+        "confirmOverwrite": "기존 {{name}} 프로필 교체",
+        "protectedConflict": "{{name}}은(는) 보호된 프로필과 충돌합니다.",
+        "importSelected": "{{count}}개 프로필 가져오기",
+        "success": "완료: {{created}}개 생성, {{updated}}개 업데이트.",
+        "done": "완료"
+      },
       "form": {
         "name": "프로필 이름",
         "startUrl": "SSO 시작 URL",

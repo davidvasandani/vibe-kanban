@@ -1,6 +1,6 @@
 # AWS SSO profile management
 
-Tags: `6777-aws-sso-config-i`
+Tags: `6777-aws-sso-config-i`, `b5fe-improve-vk-aws-p`
 
 ## Vendor config files are edited, never owned
 
@@ -30,8 +30,35 @@ user's home directory (`~/.aws/config` here), it acts as a guest editor
   by review, not by tests — concurrent mutation of a shared file needs an
   explicit lock even when each individual write is atomic.
 - Only non-secret configuration is written; tokens stay in the vendor CLI's
-  own storage (`~/.aws/sso/cache`). Sign-in is the vendor's own command in a
+  own storage (`~/.aws/sso/cache`). Account discovery may read the matching
+  access token transiently in the backend, but must bound cache files by count
+  and size, wrap the token in a redacted type, and never return, log, persist,
+  or place it on a command line. Sign-in remains the vendor's own command in a
   PTY, per [cli-tool-oauth-login](cli-tool-oauth-login.md).
+
+## Bulk account and role discovery
+
+The reusable shape from `aws-sso-util configure populate` is session-first:
+prepare a named `[sso-session]`, sign in once, enumerate every accessible
+account and role, then let the user review generated profiles before writing.
+This avoids requiring a complete profile merely to authenticate and discover
+what profiles can exist.
+
+- Derive the AWS Portal endpoint solely from the validated session region,
+  disable redirects, apply request timeouts, paginate both account and role
+  APIs to completion, and cap concurrent role requests. Never derive a request
+  host from token-cache contents or user-supplied URLs.
+- Treat discovery as provisional data. Stable-sort the complete catalog and
+  generate editable names from normalized `account_name.role_name` parts;
+  disambiguate duplicate defaults deterministically.
+- Bulk import is one transaction over one explicit session. Under the same
+  config write lock, parse the latest file, validate the entire candidate set,
+  reject duplicate names and protected/non-SSO collisions, require per-row
+  overwrite consent for managed collisions, then perform one atomic write.
+  An edited profile name must never implicitly select or rename its session.
+- Keep selection, names, and overwrite consent client-side until import. The
+  backend revalidates every invariant because the file can change between
+  discovery and commit.
 
 ## VK servers are often headless: always use `--use-device-code`
 
@@ -97,3 +124,4 @@ URL manually).
 ## Contributed by
 
 - vk/6777-aws-sso-config-i
+- vk/b5fe-improve-vk-aws-p

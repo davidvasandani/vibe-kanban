@@ -484,6 +484,16 @@ export type AwsSsoProfileStatus = { profile: AwsSsoProfile, auth: AwsAuthStatus,
  */
 editable: boolean, };
 
+export type AwsSsoSession = { name: string, sso_start_url: string, sso_region: string, };
+
+export type AwsSsoAccount = { account_id: string, account_name: string, roles: Array<string>, };
+
+export type AwsProfileImportCandidate = { name: string, sso_account_id: string, sso_role_name: string, overwrite: boolean, };
+
+export type AwsProfileImportRequest = { session_name: string, region: string, output: string | null, profiles: Array<AwsProfileImportCandidate>, };
+
+export type AwsProfileImportResult = { created: Array<string>, updated: Array<string>, };
+
 export type CheckEditorAvailabilityQuery = { editor_type: EditorType, };
 
 export type CheckEditorAvailabilityResponse = { available: boolean, };

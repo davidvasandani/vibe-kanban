@@ -804,6 +804,24 @@
       "delete": {
         "confirm": "从 ~/.aws/config 中删除 SSO 配置文件“{{name}}”？"
       },
+      "import": {
+        "action": "从 SSO 导入",
+        "title": "从 IAM Identity Center 导入配置文件",
+        "existingSession": "现有 SSO 会话",
+        "newSession": "创建新会话",
+        "sessionName": "SSO 会话名称",
+        "prepare": "准备并登录",
+        "discover": "发现账户",
+        "found": "找到 {{count}} 个账户和角色组合",
+        "selectAll": "全选",
+        "clearAll": "全部清除",
+        "profileName": "{{account}} {{role}} 的配置文件名称",
+        "confirmOverwrite": "替换现有配置文件 {{name}}",
+        "protectedConflict": "{{name}} 与受保护的配置文件冲突，请选择其他名称。",
+        "importSelected": "导入 {{count}} 个配置文件",
+        "success": "导入完成：已创建 {{created}} 个，已更新 {{updated}} 个。",
+        "done": "完成"
+      },
       "form": {
         "name": "配置文件名称",
         "startUrl": "SSO 起始 URL",

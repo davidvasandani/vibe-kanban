@@ -804,6 +804,24 @@
       "delete": {
         "confirm": "要從 ~/.aws/config 刪除 SSO 設定檔「{{name}}」嗎？"
       },
+      "import": {
+        "action": "從 SSO 匯入",
+        "title": "從 IAM Identity Center 匯入設定檔",
+        "existingSession": "現有 SSO 工作階段",
+        "newSession": "建立新工作階段",
+        "sessionName": "SSO 工作階段名稱",
+        "prepare": "準備並登入",
+        "discover": "探索帳戶",
+        "found": "找到 {{count}} 個帳戶和角色組合",
+        "selectAll": "全選",
+        "clearAll": "全部清除",
+        "profileName": "{{account}} {{role}} 的設定檔名稱",
+        "confirmOverwrite": "取代現有設定檔 {{name}}",
+        "protectedConflict": "{{name}} 與受保護的設定檔衝突，請選擇其他名稱。",
+        "importSelected": "匯入 {{count}} 個設定檔",
+        "success": "匯入完成：已建立 {{created}} 個，已更新 {{updated}} 個。",
+        "done": "完成"
+      },
       "form": {
         "name": "設定檔名稱",
         "startUrl": "SSO 起始 URL",
