@@ -1,42 +1,57 @@
-# Implementation Plan: MCP Tool Count and Last-Checked Time
+# Implementation Plan: Microsoft Graph PowerShell (v1.0) CLI capability
 
-1. Inspect the constitution and current shared MCP test/card contracts; confirm
-   that the existing `tool_count` response is sufficient and that timestamps
-   should remain frontend-only.
-2. Define a pure MCP check-summary model/helper that:
-   - selects successful results with known tool counts,
-   - returns one count for equal results or a min/max range for divergent ones,
-   - associates the summary with the per-server response completion timestamp,
-   - exposes locale-aware checked-time formatting inputs.
-3. Add focused unit tests for no results, failed/missing counts, a single count,
-   identical multi-executor counts, divergent counts, and timestamp formatting.
-4. Extend `McpSettingsSection` state with per-server checked timestamps. When a
-   test response lands, update returned assignment results and stamp each
-   returned logical server using one captured completion time.
-5. Clear checked timestamps at the same configuration-invalidating boundaries
-   as test results (initial load/reload and save refresh), while leaving
-   unaffected servers intact after a targeted retest.
-6. Render the aggregate tool count and localized checked time in each server
-   card, matching existing compact responsive styles and preserving current
-   assignment status/failure/OAuth rendering.
-7. Add the required settings strings to all supported locales with matching key
-   shapes and correct singular/plural/range interpolation.
-8. Run focused unit tests, TypeScript checks, formatting, and relevant repository
-   validation. Inspect the final diff for generated-file or unrelated changes.
-9. Run an independent Codex review, fix confirmed significant findings, and
-   repeat verification/review until clean.
-10. Update the MCP connectivity-testing knowledge page and index with reusable
-    aggregation/timestamp lifecycle guidance tagged `dcf7-vk-mcp-add-tool`, then
-    commit the knowledge-base update as required by the pipeline.
+1. Pin `Microsoft.Graph` 2.38.1 (latest stable on PSGallery, verified) as
+   `MICROSOFT_GRAPH_PS_VERSION` in
+   `crates/services/src/services/cli_tools.rs`, with a Renovate marker using
+   the `nuget` datasource and an explicit
+   `registryUrl=https://www.powershellgallery.com/api/v2` (PSGallery has no
+   v3 feed).
+2. Add `CliToolId::GraphPowershell10` with an explicit
+   `#[serde(rename = "graph-powershell-1.0")]` (kebab-case autorename would
+   drop the dot), extend `ALL`, `dir_name()`, and add the catalog entry:
+   display name `Microsoft Graph PowerShell (v1.0)`, Microsoft installation
+   guide as docs URL, empty `sources`, auth `Unsupported` (externally managed
+   token cache).
+3. Add `InstallStrategy::PowerShellModule { module }`:
+   - `unsupported_reason`: Windows unsupported; requires host `pwsh`.
+   - `install_powershell_module`: stage via `Save-PSResource` (exact
+     version, PSGallery, `-TrustRepository`, `-Path <stage>/modules`),
+     verify `modules/<module>/<version>/` exists and the dependency closure
+     is non-empty (rollup nupkg alone is only a manifest), generate the
+     `graph-powershell-1.0` wrapper (prepend final module root to
+     `PSModulePath`, `exec pwsh "$@"`, mode 0755), promote atomically with
+     `promote_staged_version`, return an honest verification string (no
+     artifact-hash claim).
+   - `installed_binary_path`: wrapper at the version dir root, so the
+     existing symlink/manifest/remove logic applies unchanged.
+4. Tests: catalog-entry pinning test (mirroring acli's), wrapper content
+   tests (prepend-not-clobber, exec + `"$@"`), a stub-pwsh execution test for
+   argument/env forwarding, extend the login-eligibility invariant test, and
+   an `#[ignore]`d end-to-end PSGallery install/remove test (exact version,
+   `Get-Command Get-MgUser` via the wrapper, exit-code forwarding, untouched
+   user-global module dir, idempotent re-install, clean staging, full
+   removal).
+5. Regenerate `shared/types.ts` (`pnpm run generate-types`); no
+   `generate_types.rs` change needed (`CliToolId` already declared).
+6. Frontend: typed `graph-powershell-1.0` fixture in
+   `packages/web-core/src/shared/lib/cliToolLogin.test.ts` asserting login is
+   never offered; the settings section itself is data-driven and needs no
+   code change.
+7. `renovate.json`: optional `registryUrl=` capture in the cli_tools custom
+   manager; new `nuget` package rule — never auto-merge, `needs-review`,
+   PR note explaining there is no sha256 twin and dependencies resolve at
+   install time.
+8. Docs: new `docs/settings/cli-tools.mdx` (catalogue overview + Graph
+   PowerShell section: stable v1.0 vs beta, wrapper invocation, externally
+   managed authentication, service-user credential boundary), wired into
+   `docs/docs.json` navigation.
+9. Homelab: add `powershell` to `environment.systemPackages` in
+   `homelab/hosts/think/think2.nix` (immutable pwsh for service + agents;
+   SDK payload stays catalog-owned). Post-merge check: `pwsh --version` as
+   the service user.
+10. Validate: services unit tests, real e2e install with nix-provided pwsh,
+    `generate-types:check`, web-core vitest, `pnpm run format`, `pnpm run
+    check`, `pnpm run lint`; then independent Codex review and knowledge-base
+    distillation.
 
-## Expected file scope
-
-- `packages/web-core/src/shared/lib/` — pure summary helper and tests.
-- `packages/web-core/src/shared/dialogs/settings/settings/McpSettingsSection.tsx`
-  — state ingestion, lifecycle, and card rendering.
-- `packages/web-core/src/i18n/locales/*/settings.json` — user-facing strings.
-- `specs/vk/dcf7-vk-mcp-add-tool/` — SpecKit artifacts.
-- `docs/knowledge-base/` — reusable shipped knowledge and index refresh.
-
-No backend, database, API contract, or generated shared-type changes are
-expected.
+SpecKit artifacts: `homelab/specs/vk/4942-add-graph-powers/`.

@@ -1,0 +1,64 @@
+---
+title: "CLI Tools"
+description: "Install app-managed, version-pinned vendor CLI tools that Vibe Kanban exposes to your coding agents, including Microsoft Graph PowerShell."
+---
+
+## Overview
+
+The **CLI Tools** section in Settings installs a curated catalogue of vendor
+command-line tools into an app-owned directory. Only the catalogue's `bin`
+directory is added to spawned agents' PATH, and it is appended *after* host
+paths — a host-provided copy (for example from Nix) always wins over an
+app-installed one. Installs are atomic: an interrupted install leaves either
+the previous version fully working or nothing on PATH.
+
+Each tool card shows the pinned catalogue version, any host-provided copy,
+install/update/remove actions, and its authentication state. Vibe Kanban never
+manages credentials for these tools; each card links to the vendor's own
+authentication guide.
+
+## Microsoft Graph PowerShell (v1.0)
+
+The `graph-powershell-1.0` tool installs the stable
+[Microsoft Graph PowerShell SDK](https://learn.microsoft.com/en-us/powershell/microsoftgraph/installation?view=graph-powershell-1.0)
+(`Microsoft.Graph` module) at a pinned version. The `1.0` refers to the stable
+Graph API channel — Microsoft recommends it for production — not the SDK
+package version, which is 2.x. The beta channel is a separate module and is
+not installed; for the beta Graph *CLI*, see the `mgc-beta` catalogue entry.
+
+### Prerequisites
+
+The host must provide PowerShell 7 (`pwsh`). If it is absent, the card shows
+the tool as unsupported instead of offering an install. The SDK module tree
+itself is always owned by Vibe Kanban's catalogue — it is never installed into
+the service user's global PowerShell module directories.
+
+### How agents invoke it
+
+Installation creates a `graph-powershell-1.0` wrapper on the agent PATH. The
+wrapper prepends the app-owned module tree to `PSModulePath` and runs `pwsh`,
+forwarding all arguments, so agents need no shell profile or module setup:
+
+```bash
+graph-powershell-1.0 -NoLogo -NoProfile -Command \
+  'Connect-MgGraph -Scopes User.Read.All -UseDeviceAuthentication; Get-MgUser -Top 10'
+```
+
+### Authentication
+
+Sign-in is owned entirely by the Microsoft Graph PowerShell SDK and its
+user-scoped token cache — Vibe Kanban does not run logins, store secrets, or
+choose tenants and permission scopes for you. Authenticate as the OS user that
+runs your agents (for a headless host, `Connect-MgGraph
+-UseDeviceAuthentication`), and note that persisted delegated credentials are
+shared by every process running as that user. Request only the scopes you
+need; `Get-MgContext` reports the current context without calling the Graph
+API. See the
+[authentication commands guide](https://learn.microsoft.com/en-us/powershell/microsoftgraph/authentication-commands?view=graph-powershell-1.0).
+
+### Version pinning
+
+The catalogue installs an exact, reviewed SDK version from PowerShell Gallery.
+Unlike the archive-based tools, the module's dependency closure is resolved at
+install time rather than verified against pinned artifact hashes; the install
+manifest records exactly what was verified.

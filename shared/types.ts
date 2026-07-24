@@ -408,7 +408,7 @@ export type McpServerTestResult = { name: string,
  */
 transport: string, status: McpServerTestStatus, latency_ms: bigint | null, tool_count: number | null, server_name: string | null, server_version: string | null, error: string | null, 
 /**
- * Raw `WWW-Authenticate` header from a 401/403 probe response, when the
+ * Raw `WWW-Authenticate` header from an authentication response, when the
  * server sent one (per RFC 9728 it points at the protected-resource
  * metadata needed to start OAuth).
  */
@@ -464,7 +464,7 @@ export type McpAuthFlowState = "pending" | "completed" | "failed";
 
 export type McpAuthStatusResponse = { status: McpAuthFlowState, error: string | null, };
 
-export type CliToolId = "aws" | "az" | "op" | "gam" | "mgc-beta" | "acli" | "gws";
+export type CliToolId = "aws" | "az" | "op" | "gam" | "mgc-beta" | "acli" | "gws" | "graph-powershell-1.0";
 
 export type CliToolAuthState = "authenticated" | "unauthenticated" | "unknown" | "unsupported";
 

@@ -35,4 +35,32 @@ describe('getCliToolLoginAction', () => {
       getCliToolLoginAction({ ...base, login_supported: false })
     ).toBeNull();
   });
+
+  it('never offers login for graph-powershell-1.0 (externally managed auth)', () => {
+    // Typed fixture also pins the generated CliToolId union member.
+    const graph: CliToolStatus = {
+      ...base,
+      id: 'graph-powershell-1.0',
+      binary_name: 'graph-powershell-1.0',
+      display_name: 'Microsoft Graph PowerShell (v1.0)',
+      catalog_version: '2.38.1',
+      host: null,
+      app: null,
+      login_supported: false,
+      auth_state: 'unsupported',
+      auth_message:
+        "Microsoft Graph sign-in is owned by the SDK's user-scoped token cache",
+    };
+    expect(getCliToolLoginAction(graph)).toBeNull();
+    expect(
+      getCliToolLoginAction({
+        ...graph,
+        app: {
+          version: '2.38.1',
+          outdated: false,
+          installed_at: '2026-07-24T00:00:00Z',
+        },
+      })
+    ).toBeNull();
+  });
 });

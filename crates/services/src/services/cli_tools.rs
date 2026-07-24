@@ -1,10 +1,11 @@
 //! App-managed CLI tool installer.
 //!
 //! Installs a curated, version-pinned catalog of vendor CLI tools (aws, az,
-//! op, gam, mgc-beta, acli, gws) into the single app-owned directory
-//! `assets::cli_tools_dir()`. Only `cli-tools/bin` is ever exposed on spawned
-//! agents' PATH, and it is appended after host paths so a host-provided copy
-//! (e.g. from nix) always wins over an app-installed one.
+//! op, gam, mgc-beta, acli, gws, graph-powershell-1.0) into the single
+//! app-owned directory `assets::cli_tools_dir()`. Only `cli-tools/bin` is
+//! ever exposed on spawned agents' PATH, and it is appended after host paths
+//! so a host-provided copy (e.g. from nix) always wins over an app-installed
+//! one.
 //!
 //! Install is atomic with respect to agents: download + extraction happen
 //! under `.staging/`, the version directory is renamed into place, and the
@@ -45,6 +46,11 @@ const MGC_BETA_VERSION: &str = "0.2.3";
 const ACLI_VERSION: &str = "1.3.22-stable";
 // renovate: datasource=github-releases depName=googleworkspace/cli
 const GWS_VERSION: &str = "0.22.5";
+// PSGallery only serves a NuGet v2 feed; the registryUrl routes renovate's
+// nuget datasource there. No sha256 twin exists for this pin — the gallery
+// dependency closure is resolved at install time (see install_powershell_module).
+// renovate: datasource=nuget depName=Microsoft.Graph registryUrl=https://www.powershellgallery.com/api/v2
+const MICROSOFT_GRAPH_PS_VERSION: &str = "2.38.1";
 
 /// How long a `<tool> --version` probe of a host-provided copy may run.
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -81,10 +87,15 @@ pub enum CliToolId {
     MgcBeta,
     Acli,
     Gws,
+    /// `1.0` is the stable Graph API channel, not the SDK package major
+    /// (packages are 2.x). Renamed explicitly: kebab-case autorename would
+    /// yield `graph-powershell10`.
+    #[serde(rename = "graph-powershell-1.0")]
+    GraphPowershell10,
 }
 
 impl CliToolId {
-    pub const ALL: [CliToolId; 7] = [
+    pub const ALL: [CliToolId; 8] = [
         CliToolId::Aws,
         CliToolId::Az,
         CliToolId::Op,
@@ -92,6 +103,7 @@ impl CliToolId {
         CliToolId::MgcBeta,
         CliToolId::Acli,
         CliToolId::Gws,
+        CliToolId::GraphPowershell10,
     ];
 
     /// Directory name under `cli-tools/` (also the serde wire id).
@@ -104,6 +116,7 @@ impl CliToolId {
             CliToolId::MgcBeta => "mgc-beta",
             CliToolId::Acli => "acli",
             CliToolId::Gws => "gws",
+            CliToolId::GraphPowershell10 => "graph-powershell-1.0",
         }
     }
 }
@@ -123,6 +136,11 @@ pub enum InstallStrategy {
     /// `python3 -m venv` + `pip install <package>==<version>`; expose the
     /// venv's entry-point script. Requires a host python3.
     PythonVenv { package: &'static str },
+    /// `Save-PSResource` the pinned module (plus its dependency closure) from
+    /// PSGallery into an app-owned module tree; expose a generated wrapper
+    /// that prepends the tree to `PSModulePath` and execs `pwsh`. Requires a
+    /// host PowerShell 7.
+    PowerShellModule { module: &'static str },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -397,6 +415,22 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 "gws auth status exits successfully even when unauthenticated; run gws auth login externally",
             ),
         },
+        CliToolCatalogEntry {
+            id: CliToolId::GraphPowershell10,
+            binary_name: "graph-powershell-1.0",
+            display_name: "Microsoft Graph PowerShell (v1.0)",
+            description: "Microsoft Graph PowerShell SDK, stable v1.0 API channel, run through PowerShell 7 (pwsh)",
+            version: MICROSOFT_GRAPH_PS_VERSION,
+            version_args: &["--version"],
+            sources: &[], // PSGallery via Save-PSResource; no direct artifact URL
+            strategy: InstallStrategy::PowerShellModule {
+                module: "Microsoft.Graph",
+            },
+            docs_url: "https://learn.microsoft.com/en-us/powershell/microsoftgraph/installation?view=graph-powershell-1.0",
+            auth: CliToolAuthStrategy::Unsupported(
+                "Microsoft Graph sign-in is owned by the SDK's user-scoped token cache; run Connect-MgGraph (e.g. -UseDeviceAuthentication) externally",
+            ),
+        },
     ];
     CATALOG
 }
@@ -531,6 +565,15 @@ async fn unsupported_reason(e: &CliToolCatalogEntry) -> Option<String> {
             }
             if resolve_executable_path("python3").await.is_none() {
                 return Some("requires python3 (>=3.8) on the host".to_string());
+            }
+            None
+        }
+        InstallStrategy::PowerShellModule { .. } => {
+            if cfg!(windows) {
+                return Some("not supported on Windows".to_string());
+            }
+            if resolve_executable_path("pwsh").await.is_none() {
+                return Some("requires PowerShell 7 (pwsh) on the host".to_string());
             }
             None
         }
@@ -747,6 +790,9 @@ pub async fn install(id: CliToolId) -> Result<CliToolStatus, CliToolError> {
     let verification = match e.strategy {
         InstallStrategy::ArchiveBinary { archive } => install_archive(e, archive).await?,
         InstallStrategy::PythonVenv { package } => install_python_venv(e, package).await?,
+        InstallStrategy::PowerShellModule { module } => {
+            install_powershell_module(e, module).await?
+        }
     };
 
     let manifest = InstalledManifest {
@@ -803,6 +849,8 @@ fn installed_binary_path(e: &CliToolCatalogEntry) -> PathBuf {
             version_dir.join(source.binary_path_in_archive)
         }
         InstallStrategy::PythonVenv { .. } => version_dir.join("venv/bin").join(e.binary_name),
+        // The generated pwsh wrapper sits at the version dir's root.
+        InstallStrategy::PowerShellModule { .. } => version_dir.join(e.binary_name),
     }
 }
 
@@ -1011,6 +1059,98 @@ async fn install_python_venv(
     result
 }
 
+/// POSIX wrapper exposing the app-installed module tree to `pwsh`. The app
+/// module root is *prepended* to any inherited `PSModulePath` so the pinned
+/// SDK wins over user/global copies while `$PSHOME` built-in modules stay
+/// available (pwsh always keeps its own module dir reachable). `pwsh` itself
+/// is resolved from PATH at run time, so a host-provided copy keeps winning.
+fn powershell_wrapper_script(modules_dir: &Path) -> String {
+    format!(
+        "#!/bin/sh\n\
+         # Generated by vibe-kanban; do not edit.\n\
+         PSModulePath=\"{}${{PSModulePath:+:$PSModulePath}}\"\n\
+         export PSModulePath\n\
+         exec pwsh \"$@\"\n",
+        modules_dir.display()
+    )
+}
+
+/// graph-powershell-1.0: `Save-PSResource` the pinned rollup module and its
+/// dependency closure from PSGallery into staging, generate the pwsh wrapper,
+/// then promote atomically. Never touches user/global PowerShell module
+/// scopes.
+///
+/// Supply-chain caveat (recorded in the manifest verification string): the
+/// rollup version is pinned and fetched from PSGallery over HTTPS, but the
+/// workload-module dependency closure is resolved at install time and no
+/// per-artifact hashes are pinned — weaker than the archive strategy.
+async fn install_powershell_module(
+    e: &'static CliToolCatalogEntry,
+    module: &'static str,
+) -> Result<String, CliToolError> {
+    let pwsh = resolve_executable_path("pwsh")
+        .await
+        .expect("checked by unsupported_reason");
+
+    let stage = staging_dir(e.id).join(uuid::Uuid::new_v4().to_string());
+    let modules_stage = stage.join("modules");
+    std::fs::create_dir_all(&modules_stage)?;
+
+    let result = async {
+        // PSResourceGet ships in-box with pwsh 7.4+; if it's missing,
+        // run_checked surfaces pwsh's own error.
+        run_checked(
+            tokio::process::Command::new(&pwsh)
+                .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+                .arg(format!(
+                    "Save-PSResource -Name '{module}' -Version '{version}' -Repository PSGallery -Path '{path}' -TrustRepository -ErrorAction Stop",
+                    version = e.version,
+                    path = modules_stage.display(),
+                )),
+            "pwsh Save-PSResource",
+        )
+        .await?;
+
+        if !modules_stage.join(module).join(e.version).is_dir() {
+            return Err(CliToolError::Install(format!(
+                "Save-PSResource did not produce {module}/{}",
+                e.version
+            )));
+        }
+        // The rollup nupkg alone is just a manifest declaring its workload
+        // modules as dependencies; an empty closure means nothing usable was
+        // installed.
+        let has_dependency = std::fs::read_dir(&modules_stage)?
+            .flatten()
+            .any(|d| d.path().is_dir() && d.file_name() != std::ffi::OsStr::new(module));
+        if !has_dependency {
+            return Err(CliToolError::Install(format!(
+                "Save-PSResource saved {module} without its dependency modules"
+            )));
+        }
+
+        // The wrapper points at the post-promotion module root.
+        let final_modules = tool_dir(e.id).join(e.version).join("modules");
+        let wrapper = stage.join(e.binary_name);
+        std::fs::write(&wrapper, powershell_wrapper_script(&final_modules))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
+        }
+
+        promote_staged_version(e, &stage)?;
+        Ok(format!(
+            "psgallery (pinned {module}=={}; dependency closure resolved at install time; no per-artifact hash pinning)",
+            e.version
+        ))
+    }
+    .await;
+
+    let _ = std::fs::remove_dir_all(&stage);
+    result
+}
+
 async fn run_checked(
     command: &mut tokio::process::Command,
     label: &str,
@@ -1187,12 +1327,99 @@ mod tests {
             CliToolId::MgcBeta,
             CliToolId::Acli,
             CliToolId::Gws,
+            CliToolId::GraphPowershell10,
         ] {
             assert!(matches!(
                 entry(id).auth,
                 CliToolAuthStrategy::Unsupported(_)
             ));
         }
+    }
+
+    #[test]
+    fn graph_powershell_catalog_entry_is_pinned_and_stable() {
+        let e = entry(CliToolId::GraphPowershell10);
+        assert_eq!(e.id.dir_name(), "graph-powershell-1.0");
+        // The explicit serde rename must survive: kebab-case autorename
+        // would produce "graph-powershell10".
+        assert_eq!(
+            serde_json::to_string(&CliToolId::GraphPowershell10).unwrap(),
+            r#""graph-powershell-1.0""#
+        );
+        assert_eq!(
+            serde_json::from_str::<CliToolId>(r#""graph-powershell-1.0""#).unwrap(),
+            CliToolId::GraphPowershell10
+        );
+        assert_eq!(e.binary_name, "graph-powershell-1.0");
+        assert_eq!(e.display_name, "Microsoft Graph PowerShell (v1.0)");
+        assert_eq!(e.version, "2.38.1");
+        assert_eq!(e.version_args, &["--version"]);
+        assert_eq!(
+            e.docs_url,
+            "https://learn.microsoft.com/en-us/powershell/microsoftgraph/installation?view=graph-powershell-1.0"
+        );
+        assert!(
+            e.sources.is_empty(),
+            "gallery installs have no direct artifact source"
+        );
+        assert!(matches!(
+            e.strategy,
+            InstallStrategy::PowerShellModule {
+                module: "Microsoft.Graph"
+            }
+        ));
+        assert!(matches!(e.auth, CliToolAuthStrategy::Unsupported(_)));
+    }
+
+    #[test]
+    fn powershell_wrapper_prepends_module_path_and_forwards_args() {
+        let script = powershell_wrapper_script(Path::new("/opt/vk/graph/2.38.1/modules"));
+        assert!(script.starts_with("#!/bin/sh\n"));
+        // Prepend, never clobber: an inherited PSModulePath must survive
+        // behind the app module root.
+        assert!(script.contains(
+            "PSModulePath=\"/opt/vk/graph/2.38.1/modules${PSModulePath:+:$PSModulePath}\""
+        ));
+        assert!(script.contains("export PSModulePath"));
+        assert!(script.ends_with("exec pwsh \"$@\"\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn powershell_wrapper_executes_and_forwards_args() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let modules = dir.path().join("modules");
+        // Stand-in `pwsh` that proves exec + arg forwarding + env without
+        // needing a real PowerShell on the test host.
+        let fake_pwsh = dir.path().join("pwsh");
+        std::fs::write(
+            &fake_pwsh,
+            "#!/bin/sh\nprintf '%s|%s' \"$PSModulePath\" \"$*\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_pwsh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let wrapper = dir.path().join("graph-powershell-1.0");
+        std::fs::write(&wrapper, powershell_wrapper_script(&modules)).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let out = std::process::Command::new(&wrapper)
+            .args(["-NoLogo", "-Command", "Get-MgContext"])
+            .env("PATH", dir.path())
+            .env("PSModulePath", "/inherited")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            stdout,
+            format!(
+                "{}:/inherited|-NoLogo -Command Get-MgContext",
+                modules.display()
+            )
+        );
     }
 
     #[test]
@@ -1278,6 +1505,99 @@ mod tests {
             assert!(link.symlink_metadata().is_err(), "symlink must be gone");
             assert!(!tool_dir(id).exists(), "tool dir must be gone");
         }
+    }
+
+    /// Real end-to-end Graph PowerShell install/remove against PSGallery.
+    /// Ignored by default (network + host pwsh + large rollup download);
+    /// run explicitly: `cargo test -p services -- --ignored graph_powershell`.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore]
+    async fn install_and_remove_graph_powershell_end_to_end() {
+        let id = CliToolId::GraphPowershell10;
+        let e = entry(id);
+        assert!(
+            resolve_executable_path("pwsh").await.is_some(),
+            "host pwsh required for this test"
+        );
+
+        // Snapshot the user-global module dir: the install must not add to it.
+        let user_modules = dirs::home_dir()
+            .expect("home dir")
+            .join(".local/share/powershell/Modules");
+        let snapshot = |p: &Path| -> Vec<String> {
+            std::fs::read_dir(p)
+                .map(|entries| {
+                    let mut names: Vec<String> = entries
+                        .flatten()
+                        .map(|d| d.file_name().to_string_lossy().into_owned())
+                        .collect();
+                    names.sort();
+                    names
+                })
+                .unwrap_or_default()
+        };
+        let user_modules_before = snapshot(&user_modules);
+
+        let installed = install(id).await.expect("install should succeed");
+        let app = installed.app.expect("app copy should be reported");
+        assert_eq!(app.version, e.version);
+        assert_eq!(
+            snapshot(&user_modules),
+            user_modules_before,
+            "install must not write to the user-global module dir"
+        );
+
+        let version_dir = tool_dir(id).join(e.version);
+        assert!(
+            version_dir
+                .join("modules/Microsoft.Graph")
+                .join(e.version)
+                .is_dir()
+        );
+        assert!(
+            version_dir.join("modules/Microsoft.Graph.Users").exists(),
+            "workload modules must be pulled in as dependencies"
+        );
+
+        let link = bin_link_path(id);
+        let target = std::fs::read_link(&link).expect("bin symlink exists");
+        assert!(target.starts_with(cli_tools_dir()));
+
+        // Wrapper forwards args to pwsh under the app module path.
+        let out = std::process::Command::new(&link)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Import-Module Microsoft.Graph.Users; (Get-Command Get-MgUser).Name",
+            ])
+            .output()
+            .expect("wrapper runs");
+        assert!(
+            out.status.success(),
+            "wrapper failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("Get-MgUser"));
+        // Exit-code forwarding.
+        let status = std::process::Command::new(&link)
+            .args(["-NoLogo", "-NoProfile", "-Command", "exit 42"])
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(42));
+
+        install(id).await.expect("re-install is idempotent");
+        assert!(
+            !staging_dir(id).exists()
+                || std::fs::read_dir(staging_dir(id)).unwrap().next().is_none()
+        );
+
+        let removed = remove(id).await.expect("remove should succeed");
+        assert!(removed.app.is_none());
+        assert!(link.symlink_metadata().is_err());
+        assert!(!tool_dir(id).exists());
     }
 
     #[cfg(unix)]

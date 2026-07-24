@@ -1,57 +1,53 @@
-# Prior Knowledge: MCP Tool Count and Last-Checked Time
+# Prior Knowledge: Microsoft Graph PowerShell (v1.0) CLI capability
 
 The project knowledge base is populated. The most relevant pages are
-`docs/knowledge-base/mcp-connectivity-testing.md` and
-`docs/knowledge-base/shared-mcp-configuration.md`.
+`docs/knowledge-base/cli-tool-oauth-login.md` and, secondarily,
+`docs/knowledge-base/workspace-environment-inheritance.md` and
+`docs/knowledge-base/aws-sso-profile-management.md`.
 
-## MCP connectivity testing
+## Managed CLI tool login boundary (`cli-tool-oauth-login`)
 
-- Vibe Kanban normally writes agent-native MCP configuration; the explicit test
-  path is its bounded, on-demand MCP client.
-- `crates/executors/src/mcp_test.rs` performs `initialize`,
-  `notifications/initialized`, and `tools/list`. Its exported
-  `McpServerTestResult` already includes `tool_count`, so this feature does not
-  need a protocol, route, schema, or generated-type change.
-- Shared tests read saved native config and return one
-  `SharedMcpAssignmentTestResult` per logical-server/executor assignment.
-- Frontend test results are transient and are deliberately cleared after config
-  reload/save so status cannot contradict the saved native configuration.
-- Probe diagnostics and authentication classifications are security-sensitive;
-  this feature should consume successful metadata without changing probe or
-  error behavior.
+- VK orchestrates vendor CLIs; it must not become an OAuth client or
+  credential store. Tokens live in the CLI's normal host-side storage.
+- In-app login is offered only when two invariants both hold: (1) credentials
+  survive the login child process and are usable by later agents, and (2) a
+  separate non-secret command independently verifies authentication. The
+  existing catalog already rules out the pinned Graph **beta** CLI
+  (`mgc-beta`) on invariant 2 — so shipping `graph-powershell-1.0` with
+  `CliToolAuthStrategy::Unsupported` and vendor-doc links matches
+  established policy. `Connect-MgGraph -UseDeviceAuthentication` +
+  `Get-MgContext` may satisfy both invariants later, but that is a follow-up
+  acceptance test, not an assumption.
+- Login commands are compiled into the server catalog; nothing command-like
+  is accepted from the browser. Auth probes run with a short timeout,
+  `kill_on_drop`, and a minimal allowlisted environment.
 
-## Shared MCP configuration
+## CLI tools catalog mechanics (from the catalog source itself)
 
-- The shared settings inventory is a read-oriented card surface. A card
-  represents one logical server, while test results are keyed by both server
-  name and executor.
-- Native agent files remain the source of truth and saves may rematerialize a
-  logical definition into different executor-native shapes.
-- The settings dialog owns provisional state and the outer settings save/discard
-  boundary owns persistence. Ephemeral health metadata must not escape or alter
-  those boundaries.
-- Existing cards already show transport, assignments, connection/auth state,
-  and test/edit/delete actions. Tool count and checked time belong in that card
-  summary rather than in configuration forms.
+- One app-owned directory (`assets::cli_tools_dir()`); only `cli-tools/bin`
+  is exposed on spawned-agent PATH, appended after host paths so
+  host-provided copies win.
+- Installs are atomic: staging → version-directory rename → `bin/` symlink
+  swapped last. Removal deletes the symlink then the tool dir. A manifest
+  without a working symlink reads as "not installed" so the UI offers a
+  clean re-install.
+- The venv strategy (az) already established the precedent for
+  weaker-than-archive verification being recorded honestly in the manifest
+  verification string — the PowerShell module strategy follows it.
+- Renovate custom regex manager tracks `// renovate: datasource=... depName=...`
+  comments above `*_VERSION` consts; catalog pins are never auto-merged.
 
-## Relevant implementation precedent
+## Environment boundaries (`workspace-environment-inheritance`)
 
-- `McpSettingsSection.tsx` owns the shared result map, so a frontend-only
-  checked-time map can be updated beside test result ingestion and cleared at
-  the same stale-state boundaries.
-- Since a logical server can have multiple successful assignment results,
-  aggregation must be explicit. A single equal count can be shown directly;
-  differing counts should be represented as a range.
-- The repository's prior MCP UI work adds settings translations to all seven
-  locale files and puts pure, edge-case-heavy presentation logic in a small
-  tested helper module.
+- Agent PATH assembly happens in `crates/local-deployment/src/container.rs`
+  (merge of inherited PATH + `cli_tools_bin_dir()`); a new tool needs no
+  wiring there — landing a wrapper in `cli-tools/bin` is sufficient.
+- Never mutate the long-lived server environment or write env files as a
+  side channel; the wrapper script carries its own `PSModulePath` setup.
 
-## Planning constraints distilled from the knowledge base
+## Host provisioning precedent (`aws-sso-profile-management`, think2.nix)
 
-1. Reuse `McpServerTestResult.tool_count`; do not extend the backend.
-2. Keep timestamps session-local and attach them only when a response lands.
-3. Key timestamps by logical server name and clear them wherever corresponding
-   test results are cleared due to configuration changes.
-4. Preserve existing failed/auth-required details, OAuth, save/discard, and
-   transport behavior.
-5. Unit-test the multi-assignment aggregation independently of the settings UI.
+- Host runtimes for agent tooling (e.g. `gws`, `claude-code`) are provided
+  by think2's `environment.systemPackages` and reach the service via
+  `/run/current-system/sw`; the same route serves `pwsh`. App-managed
+  payloads stay out of Nix.

@@ -29,7 +29,7 @@
       "description": "CLI tool catalog pins in services/cli_tools.rs (// renovate: datasource=... depName=... above each *_VERSION const)",
       "managerFilePatterns": ["/crates/services/src/services/cli_tools\\.rs$/"],
       "matchStrings": [
-        "//\\s*renovate:\\s*datasource=(?<datasource>[a-z0-9-]+)\\s+depName=(?<depName>\\S+)\\s*\\nconst\\s+[A-Z0-9_]+_VERSION:\\s*&str\\s*=\\s*\"(?<currentValue>[^\"]+)\""
+        "//\\s*renovate:\\s*datasource=(?<datasource>[a-z0-9-]+)\\s+depName=(?<depName>\\S+)(?:\\s+registryUrl=(?<registryUrl>\\S+))?\\s*\\nconst\\s+[A-Z0-9_]+_VERSION:\\s*&str\\s*=\\s*\"(?<currentValue>[^\"]+)\""
       ],
       "extractVersionTemplate": "^v?(?<version>.*)$"
     }
@@ -53,6 +53,16 @@
       "addLabels": ["needs-review"],
       "prBodyNotes": [
         ":warning: **Refresh the sha256 pins:** this version is pinned in `crates/services/src/services/cli_tools.rs` next to per-platform `sha256` hashes. Download the new artifacts, recompute the hashes, and update them in the same PR — a stale hash makes the in-app install fail at verification."
+      ]
+    },
+    {
+      "description": "PowerShell Gallery catalog pins (Microsoft.Graph): never auto-merge — there is no sha256 twin to refresh, and the module's dependency closure is resolved live at install time, so a green CI run says little about the payload. Review the SDK release notes.",
+      "matchManagers": ["custom.regex"],
+      "matchDatasources": ["nuget"],
+      "automerge": false,
+      "addLabels": ["needs-review"],
+      "prBodyNotes": [
+        ":warning: **No hash pin for this one:** this version is pinned in `crates/services/src/services/cli_tools.rs` and installed from PowerShell Gallery via `Save-PSResource`, which resolves the workload-module dependency closure at install time (recorded in the install manifest). Review the Microsoft.Graph PowerShell release notes before merging."
       ]
     },
     {
