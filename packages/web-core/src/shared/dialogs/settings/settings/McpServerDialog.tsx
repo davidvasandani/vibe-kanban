@@ -215,6 +215,17 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
         setError(t('settings.mcp.validation.nameWhitespace'));
         return null;
       }
+      if (!/^[a-zA-Z0-9_-]+$/.test(trimmedName)) {
+        const suggestion =
+          trimmedName
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, '_')
+            .replace(/^_+|_+$/g, '') || 'mcp_server';
+        setError(
+          t('settings.mcp.validation.nameIdentifier', { suggestion })
+        );
+        return null;
+      }
       if (
         trimmedName !== initial?.name &&
         existingNames.includes(trimmedName)

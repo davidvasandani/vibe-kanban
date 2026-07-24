@@ -444,6 +444,7 @@
       "validation": {
         "nameRequired": "Name is required.",
         "nameWhitespace": "Name cannot start or end with whitespace.",
+        "nameIdentifier": "Server identifiers may contain only letters, numbers, underscores, and hyphens. Try “{{suggestion}}”; use a separate display label for human-readable text.",
         "nameTaken": "A server with this name already exists.",
         "commandRequired": "Command is required.",
         "urlRequired": "URL is required.",

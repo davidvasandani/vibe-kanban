@@ -21,7 +21,8 @@ use executors::{
         SharedMcpProfileWriteOutcome, SharedMcpProfileWriteStatus, SharedMcpReadResponse,
         SharedMcpTestRequest, SharedMcpTestTarget, SharedMcpWriteRequest, SharedMcpWriteResponse,
         SharedMcpWriteStatus, canonical_definition, load_native_snapshots, load_shared_mcp_config,
-        plan_servers_for_executor, reconcile_snapshots, validate_write_request,
+        plan_servers_for_executor, reconcile_snapshots, validate_server_identifiers,
+        validate_write_request,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -780,6 +781,8 @@ pub(crate) async fn update_mcp_servers_in_config(
     mcpc: &McpConfig,
     new_servers: HashMap<String, Value>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    validate_server_identifiers(new_servers.keys().map(String::as_str))?;
+
     // Ensure parent directory exists
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).await?;
