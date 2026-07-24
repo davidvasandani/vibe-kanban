@@ -203,6 +203,57 @@ pub struct NativeProfileSnapshot {
     pub servers: HashMap<String, Value>,
 }
 
+/// MCP server names are protocol identifiers, not display labels. Keep this in
+/// sync with the validation performed by MCP clients such as Codex.
+pub fn is_valid_server_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+/// Produce an actionable, protocol-safe suggestion without silently changing
+/// the key that the user supplied.
+pub fn suggested_server_identifier(name: &str) -> String {
+    let mut suggestion = String::new();
+    let mut previous_was_separator = false;
+
+    for character in name.trim().chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+            suggestion.push(character.to_ascii_lowercase());
+            previous_was_separator = false;
+        } else if !previous_was_separator && !suggestion.is_empty() {
+            suggestion.push('_');
+            previous_was_separator = true;
+        }
+    }
+
+    while suggestion.ends_with('_') {
+        suggestion.pop();
+    }
+    if suggestion.is_empty() {
+        "mcp_server".to_string()
+    } else {
+        suggestion
+    }
+}
+
+pub fn validate_server_identifiers<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<(), String> {
+    for name in names {
+        if !is_valid_server_identifier(name) {
+            return Err(format!(
+                "Invalid MCP server identifier `{name}`: identifiers must match \
+                 ^[a-zA-Z0-9_-]+$. Use `{}` as the identifier and keep `{name}` \
+                 as the display label.",
+                suggested_server_identifier(name)
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn agent_for(executor: BaseCodingAgent) -> Option<CodingAgent> {
     ExecutorConfigs::get_cached().get_coding_agent(&ExecutorProfileId::new(executor))
 }
@@ -834,11 +885,10 @@ fn preserve_gateway_capability(
 }
 
 pub fn validate_write_request(request: &SharedMcpWriteRequest) -> Result<(), String> {
+    validate_server_identifiers(request.servers.iter().map(|server| server.name.as_str()))?;
+
     let mut names = HashSet::new();
     for server in &request.servers {
-        if server.name.trim().is_empty() {
-            return Err("MCP server names must not be empty".to_string());
-        }
         if !names.insert(server.name.clone()) {
             return Err(format!("MCP server `{}` is duplicated", server.name));
         }
@@ -1092,5 +1142,54 @@ mod tests {
             next["renamed-tools"]["headers"]["Authorization"],
             "Bearer local-secret"
         );
+    }
+
+    #[test]
+    fn server_identifier_validation_covers_protocol_edge_cases() {
+        for valid in ["vibe_kanban", "Vibe-Kanban", "server123"] {
+            assert!(is_valid_server_identifier(valid), "{valid}");
+        }
+        for invalid in ["Vibe Kanban", "vibe.kanban", "工具", "server!"] {
+            assert!(!is_valid_server_identifier(invalid), "{invalid}");
+        }
+        assert_eq!(suggested_server_identifier("Vibe Kanban"), "vibe_kanban");
+        assert_eq!(suggested_server_identifier("vibe...kanban"), "vibe_kanban");
+        assert_eq!(suggested_server_identifier("工具"), "mcp_server");
+    }
+
+    #[test]
+    fn duplicate_identifiers_are_rejected_after_the_user_repairs_them() {
+        let server = |name: &str| SharedMcpServerInput {
+            name: name.to_string(),
+            definition: canonical_definition(&json!({"command":"npx"})),
+            assignments: vec![BaseCodingAgent::ClaudeCode],
+            native_overrides: HashMap::new(),
+        };
+        let request = SharedMcpWriteRequest {
+            servers: vec![server("vibe_kanban"), server("vibe_kanban")],
+            removed_servers: Vec::new(),
+            resolved_conflicts: Vec::new(),
+        };
+        assert_eq!(
+            validate_write_request(&request).unwrap_err(),
+            "MCP server `vibe_kanban` is duplicated"
+        );
+    }
+
+    #[test]
+    fn invalid_identifier_error_includes_a_repair_action() {
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "Vibe Kanban".to_string(),
+                definition: canonical_definition(&json!({"command":"npx"})),
+                assignments: vec![BaseCodingAgent::ClaudeCode],
+                native_overrides: HashMap::new(),
+            }],
+            removed_servers: Vec::new(),
+            resolved_conflicts: Vec::new(),
+        };
+        let error = validate_write_request(&request).unwrap_err();
+        assert!(error.contains("^[a-zA-Z0-9_-]+$"));
+        assert!(error.contains("Use `vibe_kanban`"));
     }
 }
