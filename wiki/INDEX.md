@@ -18,6 +18,15 @@ contributed to it.
 
 ## Pages
 
+- [browser-session-control-arbiter.md](browser-session-control-arbiter.md) —
+  Workspace browser sessions with shared human/agent control: the
+  three-lock concurrency shape (control mutex / command gate / Arc'd driver
+  handle), lease+generation arbitration with invalidate-never-replay,
+  in-flight idempotency reservation (typed cached errors, owner-drop
+  cleanup), the serde_json `preserve_order` × internally-tagged-f64 gotcha,
+  typed errors through the single-message ApiError channel, event-driven
+  lease cleanup with TTL backstop, and the CDP driver seam
+  (`BROWSER_UNAVAILABLE` degradation, fire-and-forget screencast acks).
 - [managed-cli-tool-catalog.md](managed-cli-tool-catalog.md) — How to extend
   the app-managed CLI catalog: stable wire ids, complete catalog registration,
   immutable artifact URLs and SHA-256 pins, per-platform archive executable
