@@ -69,6 +69,7 @@ fn retarget_request(request: &mut reqwest::Request, base_url: &str) -> Result<()
 }
 
 mod background_helpers;
+mod browser;
 mod context;
 mod issue_assignees;
 mod issue_relationships;
@@ -95,13 +96,15 @@ impl McpServer {
             + Self::issue_relationships_tools_router()
             + Self::task_attempts_tools_router()
             + Self::session_tools_router()
+            + Self::browser_tools_router()
     }
 
     pub fn orchestrator_mode_router() -> rmcp::handler::server::tool::ToolRouter<Self> {
         let mut router = Self::context_tools_router()
             + Self::workspaces_tools_router()
             + Self::background_helpers_tools_router()
-            + Self::session_tools_router();
+            + Self::session_tools_router()
+            + Self::browser_tools_router();
         router.remove_route("list_workspaces");
         router.remove_route("delete_workspace");
         router
@@ -593,6 +596,18 @@ mod tests {
     fn orchestrator_mode_exposes_only_scoped_workflow_tools() {
         let actual = tool_names(McpServer::orchestrator_mode_router());
         let expected = BTreeSet::from([
+            "browser_acquire_control".to_string(),
+            "browser_click".to_string(),
+            "browser_create_session".to_string(),
+            "browser_evaluate".to_string(),
+            "browser_get_control".to_string(),
+            "browser_get_page".to_string(),
+            "browser_key".to_string(),
+            "browser_list_sessions".to_string(),
+            "browser_navigate".to_string(),
+            "browser_release_control".to_string(),
+            "browser_screenshot".to_string(),
+            "browser_type".to_string(),
             "create_session".to_string(),
             "get_context".to_string(),
             "get_execution".to_string(),

@@ -6,6 +6,7 @@ import {
   GitDiff as GitDiffIcon,
   Terminal as TerminalIcon,
   Desktop as DesktopIcon,
+  Globe as GlobeIcon,
   GitFork as GitForkIcon,
   List as ListIcon,
   Gear as GearIcon,
@@ -98,6 +99,7 @@ export type MobileTabId =
   | 'changes'
   | 'logs'
   | 'preview'
+  | 'browser'
   | 'git';
 
 export const MOBILE_TABS: { id: MobileTabId; icon: Icon; label: string }[] = [
@@ -106,6 +108,7 @@ export const MOBILE_TABS: { id: MobileTabId; icon: Icon; label: string }[] = [
   { id: 'changes', icon: GitDiffIcon, label: 'Diff' },
   { id: 'logs', icon: TerminalIcon, label: 'Logs' },
   { id: 'preview', icon: DesktopIcon, label: 'Preview' },
+  { id: 'browser', icon: GlobeIcon, label: 'Browser' },
   { id: 'git', icon: GitForkIcon, label: 'Git' },
 ];
 

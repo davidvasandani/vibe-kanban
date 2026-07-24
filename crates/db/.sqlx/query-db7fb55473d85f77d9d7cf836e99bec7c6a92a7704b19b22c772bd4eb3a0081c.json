@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE browser_sessions\n               SET current_url = $2, expires_at = $3, updated_at = datetime('now', 'subsec')\n               WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "db7fb55473d85f77d9d7cf836e99bec7c6a92a7704b19b22c772bd4eb3a0081c"
+}

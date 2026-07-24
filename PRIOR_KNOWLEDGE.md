@@ -1,57 +1,72 @@
-# Prior Knowledge: MCP Tool Count and Last-Checked Time
+# Prior Knowledge: Shared Human/Agent Browser Session Control
 
-The project knowledge base is populated. The most relevant pages are
-`docs/knowledge-base/mcp-connectivity-testing.md` and
-`docs/knowledge-base/shared-mcp-configuration.md`.
+Task: `vk/57e0-add-shared-human`. The project has two populated knowledge
+bases: `wiki/` (indexed in `wiki/INDEX.md`) and `docs/knowledge-base/`. No
+page covers browser automation (the feature is greenfield — verified by
+repo-wide search), but several pages constrain the subsystems this task
+touches.
 
-## MCP connectivity testing
+## Execution-process lifecycle (`wiki/agent-process-lifecycle.md`) — most relevant
 
-- Vibe Kanban normally writes agent-native MCP configuration; the explicit test
-  path is its bounded, on-demand MCP client.
-- `crates/executors/src/mcp_test.rs` performs `initialize`,
-  `notifications/initialized`, and `tools/list`. Its exported
-  `McpServerTestResult` already includes `tool_count`, so this feature does not
-  need a protocol, route, schema, or generated-type change.
-- Shared tests read saved native config and return one
-  `SharedMcpAssignmentTestResult` per logical-server/executor assignment.
-- Frontend test results are transient and are deliberately cleared after config
-  reload/save so status cannot contradict the saved native configuration.
-- Probe diagnostics and authentication classifications are security-sensitive;
-  this feature should consume successful metadata without changing probe or
-  error behavior.
+- One turn = one `ExecutionProcess` row; every per-execution facility in
+  `LocalContainerService` is a `HashMap<Uuid, …>` keyed by execution id. The
+  exit monitor finalization path is the reliable "execution completed" hook —
+  release browser-control leases there (or via a status watcher), not by
+  polling DB state.
+- The exit monitor kills **twice** (exit-signal branch + monitor tail with
+  `kill_on_drop`). Any long-lived process VK spawns (our Chromium) must NOT
+  ride on the coding-agent child machinery; spawn Chromium as a
+  service-owned process with explicit process-group kill, mirroring the
+  dev-server/pgid substrate (`ExecutionProcess.pgid`, boot re-adoption,
+  `kill_orphan_process_group`) rather than `kill_on_drop` alone, which the
+  codebase treats as unreliable for grandchildren.
+- Registry concurrency traps that transfer directly to a browser-session
+  registry: insert-before-remove (no invisibility gap between owners),
+  generation-conditional reap in idle sweeps (don't kill a re-registered
+  entry), never hold the registry lock across a kill/`try_wait` await, and
+  poll-loop watchers must check `tx.is_closed()` or they spin forever against
+  a deliberately long-lived child.
+- Gate genuinely new runtime behavior behind an env/config flag so default
+  behavior is unchanged when the capability is unobservable in CI (keep-warm
+  used `VK_KEEP_WARM_AGENTS`; browser sessions should degrade typed-and-clean
+  when Chromium is absent).
 
-## Shared MCP configuration
+## Frontend workspace surface (`wiki/workspace-carousel-view.md`)
 
-- The shared settings inventory is a read-oriented card surface. A card
-  represents one logical server, while test results are keyed by both server
-  name and executor.
-- Native agent files remain the source of truth and saves may rematerialize a
-  logical definition into different executor-native shapes.
-- The settings dialog owns provisional state and the outer settings save/discard
-  boundary owns persistence. Ephemeral health metadata must not escape or alter
-  those boundaries.
-- Existing cards already show transport, assignments, connection/auth state,
-  and test/edit/delete actions. Tool count and checked time belong in that card
-  summary rather than in configuration forms.
+- The chat/right-main component stack is prop-driven; per-workspace UI state
+  lives in the `useUiPreferencesStore` zustand store. Singleton stores with N
+  writers clobber each other — a new browser store must be keyed by
+  session/workspace id, not global.
+- Editor autofocus fires on mount: focus is NOT a user-engagement signal.
+  Use real interaction (`onPointerDownCapture`/`onKeyDownCapture`) for
+  anything like "user engaged with the live view"; blur is unreliable for
+  release — our control-release must key on WS disconnect, not blur.
+- Mount-windowing bounds websocket count; debounced effects must compare
+  content before re-arming timers or they starve.
 
-## Relevant implementation precedent
+## Events/activity (`wiki/kanban-items-state-and-activity-grouping.md`, explorer findings)
 
-- `McpSettingsSection.tsx` owns the shared result map, so a frontend-only
-  checked-time map can be updated beside test result ingestion and cleared at
-  the same stale-state boundaries.
-- Since a logical server can have multiple successful assignment results,
-  aggregation must be explicit. A single equal count can be shown directly;
-  differing counts should be represented as a range.
-- The repository's prior MCP UI work adds settings translations to all seven
-  locale files and puts pure, edge-case-heavy presentation logic in a small
-  tested helper module.
+- Realtime updates flow from SQLite preupdate/update hooks
+  (`services/src/services/events.rs`) that push JSON patches into a shared
+  `MsgStore`; per-resource filtered streams live in `events/streams.rs`.
+  DB writes automatically broadcast — so persisting browser-session rows and
+  audit transitions gives the sidebar list stream almost for free; live-only
+  controller state must be pushed explicitly by the service.
 
-## Planning constraints distilled from the knowledge base
+## Process/deploy context (`wiki/self-hosted-deployment.md`)
 
-1. Reuse `McpServerTestResult.tool_count`; do not extend the backend.
-2. Keep timestamps session-local and attach them only when a response lands.
-3. Key timestamps by logical server name and clear them wherever corresponding
-   test results are cleared due to configuration changes.
-4. Preserve existing failed/auth-required details, OAuth, save/discard, and
-   transport behavior.
-5. Unit-test the multi-assignment aggregation independently of the settings UI.
+- This fork deploys as versioned releases of extracted binaries; services on
+  the deploy host run long-lived. Abandoned Chromium processes would survive
+  server restarts — reuse the pgid persistence + boot-adoption substrate for
+  cleanup after unclean shutdown.
+
+## Review/process conventions (multiple pages, e.g. `docs/knowledge-base/mcp-connectivity-testing.md`)
+
+- Prior tasks consistently: keep protocol/schema changes minimal by reusing
+  existing envelopes (`ApiResponse`, in-band MCP error JSON), clear transient
+  frontend state at configuration-invalidating boundaries, and treat
+  security-sensitive diagnostics as redact-by-default — matching this task's
+  URL/profile redaction requirement for activity events.
+- Adversarial (Codex) review has repeatedly caught concurrency-window bugs in
+  exactly the kind of registry/lease logic this task adds — budget for that
+  in stage 11.
