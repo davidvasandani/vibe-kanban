@@ -40,6 +40,21 @@ Microsoft Graph SDK). The pattern:
   `registryUrl=https://www.powershellgallery.com/api/v2` (PSGallery is
   v2-only; the v3 index returns 403), always `needs-review`.
 
+## No paths inside generated shell source
+
+Two injection holes surfaced in review, both from interpolating an
+app-data-derived path into interpreted source:
+
+- A path inside a single-quoted PowerShell `-Command` string breaks out on an
+  embedded quote (think hostile `XDG_DATA_HOME`). Pass dynamic paths to pwsh
+  via an **environment variable** (`$env:VK_PSRESOURCE_PATH`) and keep only
+  compile-time constants in the command text.
+- A path inside a double-quoted POSIX assignment still undergoes `$`/backtick
+  expansion every wrapper launch. Single-quote it with `'\''` escaping and
+  concatenate the dynamic tail (`'<path>'"${VAR:+:$VAR}"`).
+
+Unit tests pin both behaviours with hostile paths (`o'brien $HOME`).
+
 ## Wire-id gotcha
 
 `#[serde(rename_all = "kebab-case")]` renders `GraphPowershell10` as
