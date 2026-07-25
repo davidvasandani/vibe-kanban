@@ -6,6 +6,7 @@ import type {
   ConfirmUploadRequest,
   InitUploadRequest,
   InitUploadResponse,
+  Issue,
   ListRelayHostsResponse,
   RelayHost,
   UpdateIssueRequest,
@@ -183,6 +184,19 @@ export interface BulkUpdateIssueItem {
 export interface BulkUpdateProjectItem {
   id: string;
   changes: Partial<UpdateProjectRequest>;
+}
+
+export async function getIssue(issueId: string): Promise<Issue | null> {
+  const response = await makeRequest(`/v1/issues/${issueId}`, {
+    method: 'GET',
+  });
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw await parseErrorResponse(response, 'Failed to load issue');
+  }
+  return (await response.json()) as Issue;
 }
 
 export async function bulkUpdateProjects(

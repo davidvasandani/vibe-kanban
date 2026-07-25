@@ -6,10 +6,12 @@ update pages (and this index) when a task ships something reusable.
 
 | Page | Summary | Contributing tasks |
 | --- | --- | --- |
+| [worktree-formatting-prerequisites](worktree-formatting-prerequisites.md) | Fail-before-mutation formatter preflights, package-local pnpm executable checks, locked setup guidance, fixture testing, and CI path-filter coverage | `7243-make-frontend-fo` |
 | [interrupted-worktree-recovery](interrupted-worktree-recovery.md) | Restart-safe WIP capture, truthful multi-repo partial-failure metadata, killed-orphan terminal state, and dirty reset/retry guards before process/history cleanup | `959a-restart-rewinds` |
 | [claude-log-normalization](claude-log-normalization.md) | How `ClaudeLogProcessor` turns stream-JSON into `/entries/{i}` patches; `EntryIndexProvider` idioms; the AmpResume index-reset gotcha | `4095-thinking-tokens` |
 | [collapsing-repeated-log-entries](collapsing-repeated-log-entries.md) | Server-side pattern for collapsing uninterrupted repeated log events into one entry with a `✓` per repeat | `4095-thinking-tokens` |
 | [grok-executor-integration](grok-executor-integration.md) | Grok Build's ACP launch/auth and approval contract, native TOML MCP shape, and the cross-product executor integration checklist | `43bc-add-grok-to-vk` |
+| [executor-model-catalog-maintenance](executor-model-catalog-maintenance.md) | Cross-executor model ID, reasoning variant, generated schema, test, and context-window update checklist | `3137-update-vk-for-op` |
 | [cli-tool-oauth-login](cli-tool-oauth-login.md) | Safely orchestrating durable vendor CLI login in a signed, machine-scoped PTY: eligibility gates, independent probes, fixed catalog commands, cleanup without stale-PID signalling, and socket-close handling | `5a2a-vk-cli-tool-logi`, `6777-aws-sso-config-i` |
 | [aws-sso-profile-management](aws-sso-profile-management.md) | Guest-editing `~/.aws/config`; session-first login and paginated account/role discovery; bounded transient token use; deterministic naming; and all-or-nothing, collision-aware bulk profile import | `6777-aws-sso-config-i`, `b5fe-improve-vk-aws-p` |
 | [workspace-environment-inheritance](workspace-environment-inheritance.md) | Audit every workspace child-process boundary; reuse one scoped resolver, inject secrets explicitly, and apply execution-owned environment values last | `6d24-org-env-vars-are` |

@@ -45,6 +45,10 @@ impl SlackClientError {
     }
 }
 
+/// Cheap to clone — `reqwest::Client` is `Arc`-backed and shares the pool; the
+/// bot token is a short `String`. Cloning lets the summarizing animation
+/// fire-and-forget per-frame `views.update` calls off the select loop.
+#[derive(Clone)]
 pub struct SlackClient {
     http: reqwest::Client,
     bot_token: String,

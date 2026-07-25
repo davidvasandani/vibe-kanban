@@ -198,6 +198,7 @@ impl StandardCodingAgentExecutor for Copilot {
             model_selector: ModelSelectorConfig {
                 models: [
                     ("gpt-5.4", "GPT-5.4"),
+                    ("claude-opus-5", "Claude Opus 5"),
                     ("claude-opus-4.8", "Claude Opus 4.8"),
                     ("claude-opus-4.6", "Claude Opus 4.6"),
                     ("claude-opus-4.6-fast", "Claude Opus 4.6 Fast"),
@@ -233,5 +234,33 @@ impl StandardCodingAgentExecutor for Copilot {
         Ok(Box::pin(futures::stream::once(async move {
             patch::executor_discovered_options(options)
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_claude_opus_5_in_discover_options() {
+        let executor = Copilot {
+            append_prompt: AppendPrompt::default(),
+            model: None,
+            allow_all_tools: None,
+            allow_tool: None,
+            deny_tool: None,
+            add_dir: None,
+            disable_mcp_server: None,
+            cmd: Default::default(),
+            approvals: None,
+        };
+        let stream = executor.discover_options(None, None).await.unwrap();
+        use futures::StreamExt;
+        let patches: Vec<_> = stream.collect().await;
+        let json = serde_json::to_string(&patches).unwrap();
+        assert!(
+            json.contains("claude-opus-5"),
+            "discover_options must contain claude-opus-5"
+        );
     }
 }

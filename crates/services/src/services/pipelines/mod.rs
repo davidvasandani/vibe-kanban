@@ -20,7 +20,15 @@
 //! ordered `## Pipeline` block into the task description. Stages are ordered by
 //! their position in the file. Bundled defaults are seeded to disk on first run.
 
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::HashSet,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -47,6 +55,29 @@ const BUNDLED: &[(&str, &str)] = &[
         include_str!("../../../../../assets/pipelines/parallel-subagents.toml"),
     ),
 ];
+
+/// Private bookkeeping for incremental bundled-pipeline seeding. This is not a
+/// TOML file so pipeline discovery ignores it.
+const SEED_MANIFEST: &str = ".bundled-pipelines.json";
+const SEED_MANIFEST_VERSION: u32 = 1;
+
+/// Bundles shipped before seed manifests were introduced. A non-empty legacy
+/// install is considered to have seen these names even when one was deleted.
+/// `parallel-subagents.toml` is intentionally absent: it is the first bundle
+/// that must be added incrementally.
+const LEGACY_BUNDLED: &[&str] = &["basic.toml", "wikillm.toml", "speckit.toml"];
+
+static SEED_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// `load_pipelines` and `load_pipeline_statuses` can run on different request
+/// threads. Serialize their reconciliation transactions so one call never
+/// rolls back a file after another has committed the manifest.
+static SEED_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SeedManifest {
+    version: u32,
+    bundled: Vec<String>,
+}
 
 /// A single per-task pipeline stage. Stages are defined in pipeline files
 /// (`~/.vibe-kanban/pipelines/*.toml`, loaded by `services::services::pipelines`
@@ -380,26 +411,184 @@ fn has_toml(dir: &Path) -> bool {
     std::fs::read_dir(dir)
         .ok()
         .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("toml"))
+            rd.filter_map(|e| e.ok()).any(|e| {
+                let path = e.path();
+                path.is_file() && path.extension().and_then(|x| x.to_str()) == Some("toml")
+            })
         })
         .unwrap_or(false)
 }
 
-/// Seed bundled defaults, but **only when the dir is absent or contains no
-/// `*.toml`**. This means deleting one bundled file does not resurrect it on the
-/// next load (as long as at least one pipeline file remains). If the operator
-/// deletes *every* file, the defaults are re-seeded (documented edge case).
-pub fn ensure_seeded(dir: &Path) -> Result<(), PipelineError> {
-    if dir.exists() && has_toml(dir) {
-        return Ok(());
+fn validate_manifest(manifest: SeedManifest) -> Result<HashSet<String>, PipelineError> {
+    if manifest.version != SEED_MANIFEST_VERSION {
+        return Err(PipelineError::Invalid(format!(
+            "unsupported pipeline seed manifest version: {}",
+            manifest.version
+        )));
     }
-    std::fs::create_dir_all(dir)?;
-    for (name, content) in BUNDLED {
-        let path = dir.join(name);
-        if !path.exists() {
-            std::fs::write(&path, content)?;
+    if manifest.bundled.iter().any(|name| {
+        Path::new(name).file_name().and_then(|part| part.to_str()) != Some(name.as_str())
+            || !name.ends_with(".toml")
+    }) {
+        return Err(PipelineError::Invalid(
+            "pipeline seed manifest contains an invalid filename".to_string(),
+        ));
+    }
+    Ok(manifest.bundled.into_iter().collect())
+}
+
+fn read_seed_manifest(dir: &Path) -> Result<Option<HashSet<String>>, PipelineError> {
+    let path = dir.join(SEED_MANIFEST);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read(&path)?;
+    let manifest: SeedManifest = serde_json::from_slice(&raw).map_err(|e| {
+        PipelineError::Invalid(format!(
+            "invalid pipeline seed manifest {}: {e}",
+            path.display()
+        ))
+    })?;
+    validate_manifest(manifest).map(Some)
+}
+
+fn current_seed_manifest() -> SeedManifest {
+    SeedManifest {
+        version: SEED_MANIFEST_VERSION,
+        bundled: BUNDLED
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect(),
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    std::fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: Both paths are encoded as owned, NUL-terminated UTF-16 buffers
+    // that remain alive for the duration of the call.
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn write_seed_manifest(dir: &Path) -> Result<(), PipelineError> {
+    let manifest = current_seed_manifest();
+    let mut content = serde_json::to_vec_pretty(&manifest).map_err(|e| {
+        PipelineError::Invalid(format!("failed to serialize pipeline seed manifest: {e}"))
+    })?;
+    content.push(b'\n');
+
+    let nonce = SEED_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_path = dir.join(format!(
+        "{SEED_MANIFEST}.tmp-{}-{nonce}",
+        std::process::id()
+    ));
+    let result = (|| -> Result<(), std::io::Error> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        file.write_all(&content)?;
+        file.sync_all()?;
+        replace_file(&temp_path, &dir.join(SEED_MANIFEST))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result.map_err(PipelineError::Io)
+}
+
+fn remove_created(paths: &[PathBuf]) {
+    for path in paths.iter().rev() {
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::warn!(
+                "failed to roll back seeded pipeline {}: {}",
+                path.display(),
+                e
+            );
         }
+    }
+}
+
+/// Reconcile bundled defaults without overwriting existing files or resurrecting
+/// known defaults that the user deleted. A private manifest records the bundle
+/// names seen by the last successful reconciliation. If the operator deletes
+/// every TOML, all defaults are re-seeded (the established empty-dir behavior).
+pub fn ensure_seeded(dir: &Path) -> Result<(), PipelineError> {
+    let _seed_guard = SEED_LOCK
+        .lock()
+        .map_err(|_| PipelineError::Invalid("pipeline seed lock is poisoned".to_string()))?;
+    std::fs::create_dir_all(dir)?;
+
+    // Validate existing bookkeeping even when the last TOML was deleted. A
+    // corrupt manifest must not be guessed through before the empty-dir reseed.
+    let recorded = read_seed_manifest(dir)?;
+    let known: HashSet<String> = if !has_toml(dir) {
+        HashSet::new()
+    } else {
+        recorded.unwrap_or_else(|| {
+            LEGACY_BUNDLED
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect()
+        })
+    };
+
+    let mut created = Vec::new();
+    for (name, content) in BUNDLED {
+        if known.contains(*name) {
+            continue;
+        }
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                created.push(path);
+                if let Err(e) = file.write_all(content.as_bytes()) {
+                    remove_created(&created);
+                    return Err(PipelineError::Io(e));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_file() => {}
+            Err(e) => {
+                remove_created(&created);
+                return Err(PipelineError::Io(e));
+            }
+        }
+    }
+
+    if let Err(e) = write_seed_manifest(dir) {
+        remove_created(&created);
+        return Err(e);
     }
     Ok(())
 }
@@ -620,6 +809,24 @@ mod tests {
             ids,
             vec!["basic", "wikillm", "speckit", "parallel-subagents"]
         );
+        assert!(d.path().join(SEED_MANIFEST).is_file());
+    }
+
+    #[test]
+    fn seeds_new_bundle_into_manifestless_existing_install() {
+        let d = TmpDir::new();
+        for (name, content) in BUNDLED
+            .iter()
+            .filter(|(name, _)| LEGACY_BUNDLED.contains(name))
+        {
+            std::fs::write(d.path().join(name), content).unwrap();
+        }
+
+        assert!(!d.path().join("parallel-subagents.toml").exists());
+        ensure_seeded(d.path()).unwrap();
+
+        assert!(d.path().join("parallel-subagents.toml").is_file());
+        assert!(d.path().join(SEED_MANIFEST).is_file());
     }
 
     #[test]
@@ -630,6 +837,86 @@ mod tests {
         let pipelines = load_pipelines(d.path());
         assert!(!pipelines.iter().any(|p| p.id == "basic"));
         assert!(pipelines.iter().any(|p| p.id == "wikillm"));
+    }
+
+    #[test]
+    fn preserves_local_edits_while_reconciling() {
+        let d = TmpDir::new();
+        ensure_seeded(d.path()).unwrap();
+        let edited = "name = \"My Basic\"\n# keep this local edit\n";
+        std::fs::write(d.path().join("basic.toml"), edited).unwrap();
+
+        ensure_seeded(d.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("basic.toml")).unwrap(),
+            edited
+        );
+    }
+
+    #[test]
+    fn seed_reconciliation_is_idempotent() {
+        let d = TmpDir::new();
+        ensure_seeded(d.path()).unwrap();
+        let before: Vec<_> = BUNDLED
+            .iter()
+            .map(|(name, _)| (*name, std::fs::read(d.path().join(name)).unwrap()))
+            .collect();
+        let manifest_before = std::fs::read(d.path().join(SEED_MANIFEST)).unwrap();
+
+        ensure_seeded(d.path()).unwrap();
+
+        for (name, content) in before {
+            assert_eq!(std::fs::read(d.path().join(name)).unwrap(), content);
+        }
+        assert_eq!(
+            std::fs::read(d.path().join(SEED_MANIFEST)).unwrap(),
+            manifest_before
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_seed_manifest_without_writing() {
+        let d = TmpDir::new();
+        std::fs::write(
+            d.path().join("custom.toml"),
+            "name = \"Custom\"\n[[stage]]\nid=\"a\"\nlabel=\"A\"\nprompt=\"p\"\n",
+        )
+        .unwrap();
+        std::fs::write(d.path().join(SEED_MANIFEST), b"not json").unwrap();
+
+        assert!(ensure_seeded(d.path()).is_err());
+        assert!(!d.path().join("parallel-subagents.toml").exists());
+        assert_eq!(
+            std::fs::read(d.path().join(SEED_MANIFEST)).unwrap(),
+            b"not json"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_seed_manifest_when_no_toml_remains() {
+        let d = TmpDir::new();
+        std::fs::write(d.path().join(SEED_MANIFEST), b"not json").unwrap();
+
+        assert!(ensure_seeded(d.path()).is_err());
+
+        assert!(!d.path().join("basic.toml").exists());
+        assert_eq!(
+            std::fs::read(d.path().join(SEED_MANIFEST)).unwrap(),
+            b"not json"
+        );
+    }
+
+    #[test]
+    fn failed_seed_rolls_back_created_files_and_does_not_commit_manifest() {
+        let d = TmpDir::new();
+        std::fs::create_dir(d.path().join("wikillm.toml")).unwrap();
+
+        assert!(ensure_seeded(d.path()).is_err());
+
+        assert!(!d.path().join("basic.toml").exists());
+        assert!(d.path().join("wikillm.toml").is_dir());
+        assert!(!d.path().join(SEED_MANIFEST).exists());
     }
 
     #[test]

@@ -43,6 +43,17 @@ data is empty while disabled or loading. Keep those two facts separate in the
 container. Collection fallback/recovery belongs to the Electric layer and does
 not need to change for a breadcrumb state-classification fix.
 
+There is a second, subtler race after initial loading: the user-workspaces and
+project-issues shapes can both be ready at different database positions. A
+workspace relationship can therefore name an issue that a ready, cached issue
+shape has not observed yet. Before declaring that issue unavailable, query the
+authoritative issue-detail endpoint by UUID. Treat the detail request as
+loading while it is in flight, use its `simple_id` when it succeeds, and settle
+to the unavailable state only for a confirmed miss or an exhausted request
+error. This keeps independent shape cursors from producing a false unavailable
+breadcrumb without leaving the navbar hidden forever on request failure.
+
 ## Contributed by
 
 - 6c5c-bread-crumbs-sho
+- vk/719f-vk-workspace-iss
