@@ -154,6 +154,25 @@ impl GitCli {
         Ok(())
     }
 
+    /// Run `git -C <repo> worktree repair [<path>...]` to reconnect the two-way
+    /// links between a worktree and its repository (the worktree's `.git` file
+    /// and the repo's `gitdir` pointer). This only rewrites administrative files
+    /// and never touches working-tree content, so it preserves untracked files
+    /// (e.g. `node_modules`) and uncommitted changes.
+    pub fn worktree_repair(
+        &self,
+        repo_path: &Path,
+        worktree_paths: &[&Path],
+    ) -> Result<(), GitCliError> {
+        self.ensure_available()?;
+        let mut args: Vec<OsString> = vec!["worktree".into(), "repair".into()];
+        for p in worktree_paths {
+            args.push(p.as_os_str().into());
+        }
+        self.git(repo_path, args)?;
+        Ok(())
+    }
+
     /// Return true if there are any changes in the working tree (staged or unstaged).
     pub fn has_changes(&self, worktree_path: &Path) -> Result<bool, GitCliError> {
         let out = self.git(

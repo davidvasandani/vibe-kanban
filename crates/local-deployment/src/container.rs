@@ -722,6 +722,30 @@ impl LocalContainerService {
             expired_workspaces.len()
         );
         for workspace in &expired_workspaces {
+            // Never auto-delete a workspace whose worktree still holds pending
+            // work. Archival accelerates expiry to 1h (vs 72h), so an archived
+            // workspace with uncommitted or untracked changes could otherwise be
+            // reclaimed out from under unsaved work. Clean workspaces GC normally.
+            match self.is_container_clean(workspace).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::info!(
+                        "Retaining expired workspace {} from cleanup: worktree has uncommitted or untracked changes",
+                        workspace.id
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    // If cleanliness can't be determined, keep the workspace
+                    // rather than risk destroying unsaved work.
+                    tracing::warn!(
+                        "Skipping cleanup of expired workspace {}: could not determine worktree cleanliness: {}",
+                        workspace.id,
+                        e
+                    );
+                    continue;
+                }
+            }
             self.cleanup_workspace(workspace).await;
         }
         Ok(())

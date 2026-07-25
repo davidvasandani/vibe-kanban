@@ -1015,6 +1015,34 @@ impl GitService {
         Ok(())
     }
 
+    /// Repair a worktree's administrative linkage in place (non-destructive).
+    ///
+    /// Reconnects a worktree whose git admin files drifted out of sync with the
+    /// repository WITHOUT deleting and recreating the working directory, so
+    /// untracked files (e.g. `node_modules`) and uncommitted changes survive.
+    pub fn repair_worktree(
+        &self,
+        repo_path: &Path,
+        worktree_path: &Path,
+    ) -> Result<(), GitServiceError> {
+        let git = GitCli::new();
+        // Attempt both repair directions independently — one can succeed when
+        // the other can't, so neither should short-circuit the other:
+        // - from the main repo, naming the worktree: fixes the repo-side
+        //   `gitdir` pointer (and the worktree's `.git` file) when the repo can
+        //   resolve the worktree.
+        // - from within the worktree: fixes the worktree's `.git` file (and the
+        //   repo-side admin files) when only the worktree side is resolvable.
+        let from_repo = git.worktree_repair(repo_path, &[worktree_path]);
+        let from_worktree = git.worktree_repair(worktree_path, &[]);
+        match (from_repo, from_worktree) {
+            // At least one direction repaired successfully.
+            (Ok(()), _) | (_, Ok(())) => Ok(()),
+            // Both failed — surface the repo-side error (the primary attempt).
+            (Err(e), Err(_)) => Err(GitServiceError::InvalidRepository(e.to_string())),
+        }
+    }
+
     pub fn delete_branch(
         &self,
         repo_path: &Path,
