@@ -1,42 +1,30 @@
-# Prior Knowledge: Workspace Issue Breadcrumbs
+# Prior Knowledge: Claude Opus 5 Model Support
 
-Knowledge-base search terms: `breadcrumb`, `Issue unavailable`, `issue
-identity`, `useShape`, `Electric`.
+The project knowledge base is populated, but it does not yet contain a page
+about maintaining hard-coded executor model catalogs. The closest relevant
+pages are:
 
-## Direct match
+- `docs/knowledge-base/grok-executor-integration.md`: executor changes can span
+  Rust implementation, generated schemas/types, frontend presentation, and
+  tests. Its broad cross-product checklist is useful, although this task extends
+  existing executors rather than introducing a new one.
+- `docs/knowledge-base/claude-log-normalization.md`: the Claude executor and its
+  tests are concentrated in `crates/executors/src/executors/claude.rs`.
+  This task should preserve those log-processing contracts and limit changes to
+  discovery/model metadata unless model context behavior requires otherwise.
+- `wiki/managed-cli-tool-catalog.md`: generated artifacts should be refreshed
+  from their Rust sources with repository generation commands and must not be
+  edited directly. Although this page concerns managed CLIs, the same
+  repository invariant applies to executor JSON schemas and shared TypeScript
+  types.
 
-`wiki/workspace-navbar-breadcrumbs.md` describes the exact asynchronous
-identity boundary involved in this task:
+## Planning constraints distilled from the knowledge base
 
-- `NavbarContainer.tsx` owns entity lookup, loading interpretation, and
-  navigation; `packages/ui` should receive prepared breadcrumb items only.
-- A remote workspace's non-null `issue_id` is relationship truth. A missing
-  row in a not-yet-ready project-issues collection does not mean the workspace
-  is unlinked or the issue is unavailable.
-- The linked UUID is for lookup and routing. The visible label must be the
-  issue's `simple_id`.
-- Breadcrumb resolution should use explicit `none`, `loading`, `resolved`, and
-  `unavailable` states.
-- While loading a linked issue, defer the trail. Once settled, render either
-  the resolved linked issue or the non-interactive `Issue unavailable`
-  placeholder.
-- A pure breadcrumb builder is the preferred test seam. Tests should include
-  negative invariants for raw UUID leakage, partial linked hierarchy, and
-  unavailable-item navigation.
-- `useShape.isLoading` is the relevant initial-query signal; collection
-  emptiness alone is ambiguous.
-
-## Supporting match
-
-`wiki/electric-sync-fallback.md` confirms that Electric-backed collections can
-be temporarily unready and can transition to REST fallback. This task should
-classify the consumer's loading state correctly rather than modify shared
-Electric fallback/recovery behavior.
-
-## Consequence for this task
-
-Implement the correction in web-core's navbar container and its pure helper.
-Do not redesign the navbar, expose UUIDs, or change Electric synchronization.
-The existing knowledge strongly suggests this regression has already been
-solved on another line of development, so the implementation stage should
-compare reachable history and reuse the proven patch where it applies.
+1. Trace each changed Rust model catalog into generated schema/type artifacts
+   before deciding the final file set.
+2. Prefer focused executor tests and generation checks over frontend
+   special-casing when the existing UI consumes discovery metadata generically.
+3. Keep the task additive: preserve existing model entries and executor
+   behavior.
+4. If implementation reveals a reusable cross-executor model-catalog update
+   procedure, record it as a new knowledge-base topic after the change ships.

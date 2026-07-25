@@ -1,65 +1,54 @@
-# Technical Specification: Fresh-Worktree Formatting Preflight
+# Technical Specification: Claude Opus 5 Model Support
 
-## Goal
-Make `pnpm run format` reliable and understandable in a fresh Vibe Kanban
-development worktree while preserving all existing Rust and frontend formatting
-stages.
+## Objective
 
-## Behavior
+Expose the newly released Claude Opus 5 model in Vibe Kanban's hard-coded
+executor model selectors so users can choose it when the backing agent supports
+the model.
 
-### Ready worktree
-After:
+Anthropic's current model documentation identifies the API model ID as
+`claude-opus-5`. Provider-specific model names must follow each executor's
+existing naming convention.
 
-```bash
-pnpm install --frozen-lockfile
-```
+## Scope
 
-`pnpm run format` runs, in order:
+- Add Claude Opus 5 to applicable hard-coded executor model catalogs.
+- Preserve provider-specific identifiers and user-facing naming conventions.
+- Add any executor-specific reasoning/variant resolution needed for selecting
+  the new model.
+- Refresh generated schemas when source schema metadata changes.
+- Add or update focused tests for model-name resolution and catalog discovery.
 
-1. `pnpm run backend:format`
-2. `pnpm run web-core:format`
-3. `pnpm run local-web:format`
-4. `pnpm run remote-web:format`
+## Requirements
 
-### Missing or incomplete dependency installation
-Before any formatting stage begins, `preformat` checks for the package-local
-Prettier executable used by:
-
-- `packages/web-core`
-- `packages/local-web`
-- `packages/remote-web`
-
-If any executable is missing, the command exits non-zero, identifies every
-affected package, and directs the user to run:
-
-```bash
-pnpm install --frozen-lockfile
-```
-
-It must not run Rustfmt, emit `prettier: command not found`, or silently skip a
-frontend package.
-
-## Implementation
-- `scripts/check-format-prerequisites.mjs` owns the preflight and exposes
-  reusable functions for tests.
-- The root `preformat` package lifecycle hook invokes the checker without
-  changing the existing `format` script.
-- `scripts/check-format-prerequisites.test.mjs` uses Node's built-in test runner
-  and temporary fixture workspaces to verify absent, complete, and partial
-  dependency states.
-- The frontend CI job runs the regression test after dependency installation.
-
-## Compatibility and constraints
-- Node.js 20+ and pnpm 8+ remain the system-level prerequisites.
-- The dependency installation is explicit; formatting does not perform network
-  or lockfile mutations.
-- The checker accounts for Windows `.cmd` executable shims.
-- No formatting rule, package dependency, generated source, or formatter stage
-  changes.
+1. Claude Code must offer an explicit `"claude-opus-5"` entry (display label
+   `"Opus 5"`) alongside its existing aliases, following the `"claude-sonnet-5"`
+   precedent. Existing generic aliases (`"opus"`, `"opus[1m]"`) remain unchanged.
+2. Executors whose published integrations support Opus 5 and whose model lists
+   are maintained in Vibe Kanban must expose the provider-correct identifier.
+3. Cursor-specific reasoning selection must resolve Opus 5 to the correct
+   standard and thinking identifiers if Cursor supports the model.
+4. Existing Opus versions must remain selectable.
+5. Generated artifacts must be produced through the repository's documented
+   generation commands, not edited by hand.
 
 ## Verification
-- Run `pnpm run test:format-prerequisites`.
-- In a dependency-free worktree, verify `pnpm run format` exits in `preformat`
-  with the frozen-lockfile setup command and no `backend:format` output.
-- Run `pnpm install --frozen-lockfile`, then `pnpm run format`, and confirm all
-  four existing stages complete.
+
+- Run focused Rust tests for every changed executor.
+- Run schema/type generation checks relevant to changed metadata.
+- Run repository formatting.
+- Run broader compilation or checks in proportion to the final change surface.
+- Complete an independent Codex diff review and resolve all significant
+  findings.
+
+## Non-goals
+
+- Changing default models.
+- Removing or deprecating older Claude models.
+- Bumping agent CLI package versions.
+- Adding unsupported fast-mode variants without provider evidence.
+
+## External Source
+
+- Anthropic Claude Platform model overview:
+  https://platform.claude.com/docs/en/about-claude/models/overview
