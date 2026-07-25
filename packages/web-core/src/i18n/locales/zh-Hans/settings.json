@@ -436,6 +436,7 @@
       "validation": {
         "nameRequired": "名称为必填项。",
         "nameWhitespace": "名称不能以空格开头或结尾。",
+        "nameIdentifier": "服务器标识符只能包含字母、数字、下划线和连字符。请尝试使用“{{suggestion}}”；如需可读性更好的文本，请使用单独的显示标签。",
         "nameTaken": "已存在同名服务器。",
         "commandRequired": "命令为必填项。",
         "urlRequired": "URL 为必填项。",
