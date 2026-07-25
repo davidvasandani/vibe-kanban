@@ -98,7 +98,8 @@
           "settings/organization-settings",
           "settings/remote-projects",
           "settings/agent-configurations",
-          "settings/mcp-servers"
+          "settings/mcp-servers",
+          "settings/cli-tools"
         ]
       },
       {

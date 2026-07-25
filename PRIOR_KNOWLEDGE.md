@@ -1,68 +1,53 @@
-# Prior Knowledge: Settings Pipeline Management
+# Prior Knowledge: Microsoft Graph PowerShell (v1.0) CLI capability
 
-The project knowledge base is populated in both `wiki/` and
-`docs/knowledge-base/`. No existing page documents the pipeline-file management
-API or a Settings pipeline editor, so this feature is new UI territory. The
-following existing guidance constrains the implementation.
+The project knowledge base is populated. The most relevant pages are
+`docs/knowledge-base/cli-tool-oauth-login.md` and, secondarily,
+`docs/knowledge-base/workspace-environment-inheritance.md` and
+`docs/knowledge-base/aws-sso-profile-management.md`.
 
-## Pipeline identity and catalog refresh
+## Managed CLI tool login boundary (`cli-tool-oauth-login`)
 
-Source: `wiki/task-pipeline-block.md` (`vk/77eb-vk-pipeline`).
+- VK orchestrates vendor CLIs; it must not become an OAuth client or
+  credential store. Tokens live in the CLI's normal host-side storage.
+- In-app login is offered only when two invariants both hold: (1) credentials
+  survive the login child process and are usable by later agents, and (2) a
+  separate non-secret command independently verifies authentication. The
+  existing catalog already rules out the pinned Graph **beta** CLI
+  (`mgc-beta`) on invariant 2 — so shipping `graph-powershell-1.0` with
+  `CliToolAuthStrategy::Unsupported` and vendor-doc links matches
+  established policy. `Connect-MgGraph -UseDeviceAuthentication` +
+  `Get-MgContext` may satisfy both invariants later, but that is a follow-up
+  acceptance test, not an assumption.
+- Login commands are compiled into the server catalog; nothing command-like
+  is accepted from the browser. Auth probes run with a short timeout,
+  `kill_on_drop`, and a minimal allowlisted environment.
 
-- Pipeline ids, not display names, are the stable identity. Display names are
-  explicitly non-unique, so the Settings file list and editor selection must
-  key by file id.
-- The task-create `PipelineSection` consumes the React Query-backed pipeline
-  catalog. Every create, write, delete, or reset action must invalidate that
-  catalog as well as the new status/raw queries so task composition does not
-  continue using stale stage definitions.
-- A pipeline edit can change prompt fragments that existing task descriptions
-  use for best-effort reverse parsing. The editor should preserve raw content
-  exactly and avoid implicit rewrites; the server-validated TOML is
-  authoritative.
+## CLI tools catalog mechanics (from the catalog source itself)
 
-## Machine-aware Settings requests
+- One app-owned directory (`assets::cli_tools_dir()`); only `cli-tools/bin`
+  is exposed on spawned-agent PATH, appended after host paths so
+  host-provided copies win.
+- Installs are atomic: staging → version-directory rename → `bin/` symlink
+  swapped last. Removal deletes the symlink then the tool dir. A manifest
+  without a working symlink reads as "not installed" so the UI offers a
+  clean re-install.
+- The venv strategy (az) already established the precedent for
+  weaker-than-archive verification being recorded honestly in the manifest
+  verification string — the PowerShell module strategy follows it.
+- Renovate custom regex manager tracks `// renovate: datasource=... depName=...`
+  comments above `*_VERSION` consts; catalog pins are never auto-merged.
 
-Source: `docs/knowledge-base/cli-tool-oauth-login.md`
-(`5a2a-vk-cli-tool-logi`, `6777-aws-sso-config-i`).
+## Environment boundaries (`workspace-environment-inheritance`)
 
-- Host-specific Settings features must pass the selected host/relay scope
-  explicitly. Calling the right URL without selected-host routing can silently
-  operate on the UI machine instead of the machine selected in Settings.
-- Pipeline query keys therefore need to include host identity, and every
-  pipeline API method used by Settings must go through the host-aware request
-  transport.
+- Agent PATH assembly happens in `crates/local-deployment/src/container.rs`
+  (merge of inherited PATH + `cli_tools_bin_dir()`); a new tool needs no
+  wiring there — landing a wrapper in `cli-tools/bin` is sufficient.
+- Never mutate the long-lived server environment or write env files as a
+  side channel; the wrapper script carries its own `PSModulePath` setup.
 
-## Settings modal lifecycle and draft ownership
+## Host provisioning precedent (`aws-sso-profile-management`, think2.nix)
 
-Sources: `docs/knowledge-base/shared-mcp-configuration.md` and
-`docs/knowledge-base/mcp-connectivity-testing.md`.
-
-- The Settings dialog is mounted outside route content and NiceModal can reuse
-  mounted components. Editable fields must be deliberately seeded when the
-  selected pipeline or host changes; stale drafts must not leak across files,
-  hosts, or modal opens.
-- Management dialogs should own provisional form state and keep server state in
-  the existing query layer. Cancel/close must not persist a draft.
-- React-only state guards can reset across modal lifecycle boundaries. Pipeline
-  mutations should rely on TanStack Query pending state and awaited requests,
-  with controls disabled during mutation, rather than a transient success flag
-  as the only duplicate-action guard.
-
-## Reusable validation pattern
-
-Source: `docs/knowledge-base/cli-tool-oauth-login.md`.
-
-- Prefer focused pure-state tests plus frontend type checking and an independent
-  diff review. For this task, the highest-value pure logic is pipeline-id
-  validation, error location formatting, and list selection after mutations.
-- Preserve structured backend errors instead of flattening them prematurely.
-  `PipelineParseError` already carries an optional 1-based line and column,
-  which the editor and malformed-file list should display directly.
-
-## Knowledge gap to close after shipping
-
-If implementation confirms reusable conventions for file-backed Settings
-editors—especially host-scoped query keys, raw draft validation, mutation
-invalidation, or bundled/default reset discoverability—record them in a focused
-knowledge page and add task id `3a97-no-frontend-for` to its contribution list.
+- Host runtimes for agent tooling (e.g. `gws`, `claude-code`) are provided
+  by think2's `environment.systemPackages` and reach the service via
+  `/run/current-system/sw`; the same route serves `pwsh`. App-managed
+  payloads stay out of Nix.

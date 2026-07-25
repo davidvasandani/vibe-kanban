@@ -1,155 +1,93 @@
-# Settings Pipelines Editor — Technical Specification
+# Technical Specification: Microsoft Graph PowerShell (v1.0) CLI capability
 
 ## Summary
 
-Add a host-scoped **Pipelines** section to the existing Settings dialog so an
-operator can manage the TOML files in `~/.vibe-kanban/pipelines` through the
-already-implemented pipeline HTTP API. The section must list valid and invalid
-files, edit and validate raw TOML, create and delete files, and reset bundled
-pipelines individually or as a group.
+Add the stable Microsoft Graph PowerShell SDK to the app-managed CLI tool
+catalog as `graph-powershell-1.0`. Agents get a version-pinned
+`Microsoft.Graph` module tree invoked through a generated wrapper that runs
+host PowerShell 7 (`pwsh`). This introduces the catalog's third install
+strategy — PowerShell modules — alongside archive binaries and Python venvs.
 
-This is a frontend integration. No backend behavior or route shape should
-change unless implementation proves an existing route cannot satisfy the
-requirements.
+The `1.0` in the identity is the stable Graph API channel (Microsoft's
+production recommendation), not the SDK package major; the SDK publishes 2.x
+versions. `Microsoft.Graph.Beta` is not installed.
 
-## Existing Contract
+## Catalog identity
 
-The implementation must use the routes currently registered by
-`crates/server/src/routes/pipelines.rs`:
+- `CliToolId::GraphPowershell10`, wire id `graph-powershell-1.0` via explicit
+  `#[serde(rename)]` (enum-wide kebab-case would yield `graph-powershell10`).
+- Display name `Microsoft Graph PowerShell (v1.0)`; docs URL is Microsoft's
+  installation guide; pinned version `Microsoft.Graph` **2.38.1** (latest
+  stable on PowerShell Gallery, verified 2026-07-24).
+- Auth is `Unsupported`: sign-in belongs to the SDK's user-scoped token cache
+  (`Connect-MgGraph`, e.g. `-UseDeviceAuthentication`); VK links to vendor
+  docs and never provisions tenants, scopes, or secrets.
 
-| Operation | Route | Result |
-| --- | --- | --- |
-| List selectable pipelines | `GET /api/pipelines` | `Pipeline[]` |
-| List every file and validity | `GET /api/pipelines/status` | `PipelineFileStatus[]` |
-| Read raw TOML | `GET /api/pipelines/{id}/raw` | `string` |
-| Write validated TOML | `PUT /api/pipelines/{id}/raw` | `Pipeline` |
-| Validate a draft | `POST /api/pipelines/validate` | `PipelineValidation` |
-| Reset one bundled file | `POST /api/pipelines/{id}/reset` | `Pipeline` |
-| Reset all bundled files | `POST /api/pipelines/reset-defaults` | `Pipeline[]` |
-| Delete a file | `DELETE /api/pipelines/{id}` | empty success |
+## Install strategy: `InstallStrategy::PowerShellModule`
 
-All endpoints use the standard `ApiResponse` envelope. Pipeline ids are
-server-validated slugs containing ASCII alphanumerics, `-`, or `_`.
+1. Requires host `pwsh` (`unsupported_reason` reports "requires PowerShell 7
+   (pwsh) on the host" when absent; Windows unsupported like the other
+   strategies).
+2. `Save-PSResource -Name Microsoft.Graph -Version <pin> -Repository
+   PSGallery -Path <staging>/modules -TrustRepository` (PSResourceGet is
+   in-box with pwsh 7.4+). Never `Install-Module -Scope CurrentUser`; the
+   service user's global module directories are never written.
+3. Staged-layout verification: `modules/Microsoft.Graph/<pin>/` must exist
+   and the dependency closure must be non-empty (the rollup nupkg alone is
+   only a manifest declaring workload modules as dependencies).
+4. A generated `graph-powershell-1.0` wrapper (POSIX sh) prepends the
+   installed module root to `PSModulePath` and `exec pwsh "$@"`. Prepending
+   keeps the pinned SDK winning over user/global copies while `$PSHOME`
+   built-ins stay available; `pwsh` resolves from PATH at run time so a host
+   copy keeps winning.
+5. Atomic promotion via the existing version-directory + `bin/` symlink-last
+   model; update and removal reuse the existing flows.
+6. `manifest.json` verification string records reality: pinned rollup from
+   PSGallery, dependency closure resolved at install time, **no**
+   per-artifact hash pinning (weaker than the archive strategy; explicitly
+   not claimed).
 
-## User Experience
+## Agent invocation
 
-### Navigation and scope
+`cli-tools/bin` is already appended to spawned-agent PATH (after host paths):
 
-- Add `Pipelines` to the machine/host-specific Settings navigation.
-- Requests follow the Settings dialog's selected-host routing behavior.
-- Opening the section loads file statuses and selects a sensible initial file,
-  preferring the existing selection when it remains available.
+```bash
+graph-powershell-1.0 -NoLogo -NoProfile -Command \
+  'Connect-MgGraph -Scopes User.Read.All -UseDeviceAuthentication; Get-MgUser -Top 10'
+```
 
-### File list
+## Renovate
 
-- Show every `.toml` file returned by the status endpoint, including malformed
-  files omitted by `GET /api/pipelines`.
-- Each item shows its display name/id, validity, and stage count when known.
-- Invalid items show the structured parse/validation message. When supplied,
-  line and column are displayed as 1-based positions.
-- Provide an Add action that asks for a valid pipeline id and opens a new draft
-  based on a minimal valid TOML template. A new file is created only on Save.
+PSGallery serves only a NuGet v2 feed. The cli_tools.rs custom regex manager
+gains an optional `registryUrl=` capture; the pin comment routes the `nuget`
+datasource to `https://www.powershellgallery.com/api/v2`. A dedicated package
+rule keeps these PRs `needs-review` (no sha256 twin; live dependency
+resolution).
 
-### Editor
+## Homelab (think2)
 
-- Read the selected existing file's raw TOML from the raw endpoint.
-- Use a multiline monospace text editor suitable for plain TOML.
-- Validate drafts after a short debounce and on explicit Save.
-- Show valid/invalid state inline. Invalid state includes message and available
-  line/column from `PipelineParseError`.
-- Disable Save while the current validation is pending or invalid, and avoid a
-  write when the editor is unchanged.
-- A successful Save refreshes statuses, the task-create pipeline list, and the
-  current raw query; the saved file remains selected.
-- Protect unsaved editor content when switching files or starting a new file
-  with a confirmation prompt.
+`powershell` added to `environment.systemPackages` — immutable `pwsh` for the
+VK service and agents via `/run/current-system/sw`. The SDK payload stays
+catalog-owned; no Nix activation-script module install. Deployed by comin on
+merge; `pwsh --version` as the service user is the post-merge check.
 
-### Reset and delete
+## Out of scope
 
-- Offer per-file reset for bundled ids (`basic`, `wikillm`, `speckit`,
-  `parallel-subagents`) and require confirmation because it overwrites content.
-- Offer a global Reset all defaults action and require confirmation. This
-  recreates/overwrites all bundled pipeline files, then refreshes list/editor
-  data.
-- Offer Delete for existing files and require confirmation. After deletion,
-  refresh list data and select another file.
-- Explain the existing server edge case: deleting the final pipeline causes
-  bundled defaults to be seeded again on the next list/read cycle.
+Beta module, submodule-only installs, in-app device login (follow-up gated on
+validating login persistence and `Get-MgContext` invariants), app
+registration/secret provisioning, PSGallery mirroring/locking.
 
-### Errors and loading
+## Validation performed
 
-- Loading, empty, and request-failure states must be explicit.
-- Mutating action errors remain visible in the section and do not discard the
-  draft.
-- API errors use the existing frontend request/error handling.
+- 14 unit tests in `services::cli_tools` (wire round-trip, catalog
+  invariants, entry pinning, wrapper content + real exec/arg-forwarding via a
+  stub pwsh).
+- Ignored end-to-end test run against real PSGallery with nix-provided pwsh
+  7.6.2: exact-version install, workload-module dependency presence,
+  `Get-Command Get-MgUser` through the wrapper, exit-code forwarding
+  (`exit 42`), user-global module dir untouched, idempotent re-install, clean
+  staging, complete removal.
+- Generated types, frontend vitest, format, typecheck, lint.
 
-## Frontend Design
-
-### API and hooks
-
-Keep `pipelinesApi.list()` as the unscoped current-backend task-create catalog.
-Add Settings management methods to `MachineClient` and implement them with the
-existing machine-aware `makeMachineRequest` transport:
-
-- `listPipelineStatuses`
-- `readPipelineRaw`
-- `validatePipeline`
-- `writePipelineRaw`
-- `resetPipeline`
-- `resetDefaultPipelines`
-- `deletePipeline`
-
-Extend `usePipelines.ts` with:
-
-- `usePipelineStatuses`
-- `usePipelineRaw`
-- `useValidatePipeline`
-- `useWritePipeline`
-- `useResetPipeline`
-- `useResetDefaults`
-- `useDeletePipeline`
-
-Settings queries and mutations must accept `MachineClient | null`, key data
-with `MachineClient.queryScopeKey`, and use `['machine', 'unselected']` only for
-disabled queries. Successful file mutations must invalidate host-scoped status
-and raw queries plus the legacy `PIPELINES_QUERY_KEY`. The Settings section must
-not route these calls through URL-only host ids or `makeHostAwareRequest`.
-
-### Settings section
-
-Create a focused `PipelinesSettingsSection` component and register it in
-`settingsRegistry.tsx` as a host-specific section. Reuse existing Settings
-cards, buttons, confirmation conventions, colors, and typography. Add English
-translation keys and keep every other locale structurally complete with
-English fallback strings where this repository's translation convention
-requires keys in every locale.
-
-### State
-
-The component owns:
-
-- selected pipeline id and new-draft id;
-- current raw draft and last-loaded/saved raw value;
-- debounced validation result;
-- mutation feedback and pending state.
-
-Server state remains in TanStack Query. Changing the selected Settings host
-must produce host-specific query keys and fresh data rather than showing data
-from another host.
-
-## Verification
-
-- Unit-test any extracted pure helpers (id validation, location formatting, or
-  selection behavior) and query-key behavior where practical.
-- Run frontend type checking and relevant tests.
-- Run repository formatting as required by `AGENTS.md`.
-- Exercise the complete UI/API path where the local development environment
-  permits it, including an invalid draft with line/column, create, save,
-  delete, reset one, and reset all.
-
-## Out of Scope
-
-- Changing pipeline TOML semantics or backend persistence.
-- A structured stage/form editor; raw TOML is authoritative.
-- Editing pipeline files outside the selected host.
-- Solving the separate all-or-nothing seeding behavior tracked by VAS-225.
+Full SpecKit artifacts: `homelab/specs/vk/4942-add-graph-powers/`
+(spec/plan/research/tasks).
