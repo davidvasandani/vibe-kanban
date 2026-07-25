@@ -27,6 +27,11 @@ contributed to it.
   typed errors through the single-message ApiError channel, event-driven
   lease cleanup with TTL backstop, and the CDP driver seam
   (`BROWSER_UNAVAILABLE` degradation, fire-and-forget screencast acks).
+- [bundled-file-seed-manifests.md](bundled-file-seed-manifests.md) —
+  Incrementally delivering new user-editable bundled defaults without
+  resurrecting deletions or overwriting edits: seen-filename manifests, explicit
+  legacy baselines, commit-last reconciliation, cross-platform atomic replace,
+  and failure/concurrency tests.
 - [managed-cli-tool-catalog.md](managed-cli-tool-catalog.md) — How to extend
   the app-managed CLI catalog: stable wire ids, complete catalog registration,
   immutable artifact URLs and SHA-256 pins, per-platform archive executable
