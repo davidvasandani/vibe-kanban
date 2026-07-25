@@ -1,5 +1,6 @@
 import { useMemo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery } from '@tanstack/react-query';
 import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { useUserContext } from '@/shared/hooks/useUserContext';
 import { useActions } from '@/shared/hooks/useActions';
@@ -44,6 +45,7 @@ import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useCurrentAppDestination } from '@/shared/hooks/useCurrentAppDestination';
 import { getRemoteAuthDegradedMessage } from '@/shared/lib/auth/remoteAuthDegraded';
 import { isIPad, isStandaloneWebApp } from '@/shared/lib/platform';
+import { getIssue } from '@/shared/lib/remoteApi';
 
 /**
  * Check if a NavbarItem is a divider
@@ -233,10 +235,24 @@ export function NavbarContainer({
     if (!linkedIssueId) return undefined;
     return projectIssues.find((issue) => issue.id === linkedIssueId);
   }, [linkedIssueId, projectIssues]);
+  const shouldFetchLinkedIssue =
+    shouldResolveIssueBreadcrumb &&
+    !isProjectIssuesLoading &&
+    !linkedIssue &&
+    !!linkedIssueId;
+  const { data: fetchedLinkedIssue, isLoading: isFetchedIssueLoading } =
+    useQuery({
+      queryKey: ['navbar-linked-issue', linkedIssueId],
+      queryFn: () => getIssue(linkedIssueId!),
+      enabled: shouldFetchLinkedIssue,
+    });
+  const resolvedLinkedIssue = linkedIssue ?? fetchedLinkedIssue ?? undefined;
   const isWaitingForProjectBreadcrumb =
     shouldResolveBreadcrumbData && !linkedProject && isProjectsLoading;
   const isWaitingForIssueBreadcrumb =
-    shouldResolveIssueBreadcrumb && isProjectIssuesLoading;
+    shouldResolveIssueBreadcrumb &&
+    (isProjectIssuesLoading ||
+      (shouldFetchLinkedIssue && isFetchedIssueLoading));
   const isWaitingForBreadcrumbData =
     isWaitingForProjectBreadcrumb || isWaitingForIssueBreadcrumb;
   const issueBreadcrumbState = useMemo((): WorkspaceBreadcrumbIssueState => {
@@ -244,14 +260,17 @@ export function NavbarContainer({
       return { kind: 'none' };
     }
 
-    if (isProjectIssuesLoading) {
+    if (
+      isProjectIssuesLoading ||
+      (shouldFetchLinkedIssue && isFetchedIssueLoading)
+    ) {
       return { kind: 'loading' };
     }
 
-    if (linkedIssue?.simple_id) {
+    if (resolvedLinkedIssue?.simple_id) {
       return {
         kind: 'resolved',
-        label: linkedIssue.simple_id,
+        label: resolvedLinkedIssue.simple_id,
         onClick: () =>
           appNavigation.goToProjectIssue(linkedProjectId, linkedIssueId),
       };
@@ -263,7 +282,9 @@ export function NavbarContainer({
     linkedIssueId,
     linkedProjectId,
     isProjectIssuesLoading,
-    linkedIssue?.simple_id,
+    shouldFetchLinkedIssue,
+    isFetchedIssueLoading,
+    resolvedLinkedIssue?.simple_id,
     appNavigation,
   ]);
 

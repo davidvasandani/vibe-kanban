@@ -122,7 +122,8 @@ contributed to it.
   no-op `<button>` — use a non-interactive tile).
 - [workspace-navbar-breadcrumbs.md](workspace-navbar-breadcrumbs.md) — How
   workspace breadcrumbs preserve linked issue identity across asynchronous
-  shape states: relationship truth vs loaded rows, `simple_id` vs UUID, the
+  shape states: relationship truth vs loaded rows, cross-shape cursor races,
+  authoritative issue-detail fallback, `simple_id` vs UUID, the
   none/loading/resolved/unavailable state model, and the pure-builder testing
   seam.
 - [workspace-carousel-view.md](workspace-carousel-view.md) — Rendering N
