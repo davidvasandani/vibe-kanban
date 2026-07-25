@@ -1,6 +1,7 @@
 # Grok executor integration
 
-Contributing tasks: `43bc-add-grok-to-vk`, `ba9f-grok-vk-executor`
+Contributing tasks: `43bc-add-grok-to-vk`, `ba9f-grok-vk-executor`,
+`ffeb-debug-vk-mcp-err`
 
 Grok Build integrates with Vibe Kanban through its ACP stdio mode. The executor
 launches `grok --no-auto-update agent stdio`; model and automatic approval
@@ -43,6 +44,34 @@ Apply those rules consistently in shared materialisation, preconfigured-server
 adaptation, frontend codecs, conflict resolution, and new-server assignment
 filters. Backend-only compatibility checks leave the UI able to construct saves
 that the backend rejects.
+
+## Diagnosing `tool_output_error`
+
+Do not infer an MCP outage from Grok's `tool_output_error` label alone. Grok
+uses that category for ordinary built-in tool failures too. Task
+`ffeb-debug-vk-mcp-err` traced a reported `read_file` error to a parallel
+Grok-native file read of a `SPEC.md` path before the file existed. The tool
+returned a short “does not exist” result, Grok recorded one error beside three
+successful reads, and the agent immediately continued, created the file, and
+completed the task. The call never traversed Vibe Kanban's MCP server or failed
+the ACP session.
+
+Correlate before changing runtime code:
+
+1. Use the logged session ID and timestamp to inspect Grok's retained
+   `events.jsonl`, `chat_history.jsonl`, and `logs/unified.jsonl`.
+2. Match the tool call ID to its arguments and result. Determine whether the
+   name belongs to Grok's built-in tool catalog or an MCP server.
+3. Check the events after the error: another inference loop and later successful
+   calls prove recovery; an execution stop or lost session requires ACP-level
+   investigation.
+4. Keep diagnostics bounded and secret-safe. Tool metadata and a short error are
+   useful; raw file outputs and credentials are not.
+
+Do not blanket-suppress or retry these events. Missing-file results can be
+intentional evidence, and the same category can still describe a real failure.
+Change Vibe Kanban only when evidence shows it corrupted the protocol result or
+promoted a non-fatal vendor event into a fatal execution state.
 
 ## Adding an executor across the product
 
