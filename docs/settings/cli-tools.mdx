@@ -60,5 +60,7 @@ API. See the
 
 The catalogue installs an exact, reviewed SDK version from PowerShell Gallery.
 Unlike the archive-based tools, the module's dependency closure is resolved at
-install time rather than verified against pinned artifact hashes; the install
-manifest records exactly what was verified.
+install time rather than verified against pinned artifact hashes. The install
+manifest records this weaker verification method — pinned rollup version, live
+dependency resolution, no per-artifact hashes — so the guarantee is never
+overstated; it does not inventory the resolved dependency versions.
