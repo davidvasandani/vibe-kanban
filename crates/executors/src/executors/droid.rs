@@ -69,7 +69,7 @@ pub struct Droid {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
         title = "Model",
-        description = "Model to use (e.g., gpt-5-codex, claude-sonnet-4-5-20250929, gpt-5-2025-08-07, claude-opus-4-1-20250805, claude-haiku-4-5-20251001, glm-4.6)"
+        description = "Model to use (e.g., claude-opus-5, gpt-5-codex, claude-sonnet-4-5-20250929, gpt-5-2025-08-07, claude-opus-4-1-20250805, claude-haiku-4-5-20251001, glm-4.6)"
     )]
     pub model: Option<String>,
 
@@ -238,6 +238,7 @@ impl StandardCodingAgentExecutor for Droid {
         let options = ExecutorDiscoveredOptions {
             model_selector: ModelSelectorConfig {
                 models: [
+                    ("claude-opus-5", "Claude Opus 5"),
                     ("claude-opus-4-8", "Claude Opus 4.8"),
                     ("claude-opus-4-6", "Claude Opus 4.6"),
                     ("claude-opus-4-6-fast", "Claude Opus 4.6 Fast Mode"),
@@ -274,5 +275,29 @@ impl StandardCodingAgentExecutor for Droid {
         Ok(Box::pin(futures::stream::once(async move {
             patch::executor_discovered_options(options)
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_claude_opus_5_in_discover_options() {
+        let executor = Droid {
+            append_prompt: AppendPrompt::default(),
+            autonomy: Autonomy::Normal,
+            model: None,
+            reasoning_effort: None,
+            cmd: Default::default(),
+        };
+        let stream = executor.discover_options(None, None).await.unwrap();
+        use futures::StreamExt;
+        let patches: Vec<_> = stream.collect().await;
+        let json = serde_json::to_string(&patches).unwrap();
+        assert!(
+            json.contains("claude-opus-5"),
+            "discover_options must contain claude-opus-5"
+        );
     }
 }

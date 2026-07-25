@@ -47,7 +47,7 @@ pub struct CursorAgent {
     pub force: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
-        description = "auto, opus-4.8, opus-4.6, sonnet-4.6, gpt-5.4, gpt-5.4-fast, gpt-5.3-codex, gpt-5.3-codex-fast, gpt-5.3-codex-spark-preview, gpt-5.2, gpt-5.2-codex, gpt-5.2-codex-fast, gpt-5.1, gpt-5.1-codex-max, gpt-5.1-codex-mini, grok, kimi-k2.5, gemini-3.1-pro, gemini-3-pro, gemini-3-flash, opus-4.5, sonnet-4.5, composer-1.5, composer-1, composer-2, composer-2-fast"
+        description = "auto, opus-5, opus-4.8, opus-4.6, sonnet-4.6, gpt-5.4, gpt-5.4-fast, gpt-5.3-codex, gpt-5.3-codex-fast, gpt-5.3-codex-spark-preview, gpt-5.2, gpt-5.2-codex, gpt-5.2-codex-fast, gpt-5.1, gpt-5.1-codex-max, gpt-5.1-codex-mini, grok, kimi-k2.5, gemini-3.1-pro, gemini-3-pro, gemini-3-flash, opus-4.5, sonnet-4.5, composer-1.5, composer-1, composer-2, composer-2-fast"
     )]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,6 +96,8 @@ fn resolve_cursor_model_name<'a>(base_model: &'a str, reasoning: Option<&'a str>
         ("gpt-5.1", Some("medium")) => "gpt-5.1",
         ("gpt-5.1", Some("high") | None) => "gpt-5.1-high",
 
+        ("opus-5", Some("standard")) => "opus-5",
+        ("opus-5", Some("thinking") | None) => "opus-5-thinking",
         ("opus-4.8", Some("standard")) => "opus-4.8",
         ("opus-4.8", Some("thinking") | None) => "opus-4.8-thinking",
         ("opus-4.6", Some("standard")) => "opus-4.6",
@@ -122,7 +124,7 @@ fn cursor_reasoning_options(base_model: &str) -> Vec<ReasoningOption> {
         "gpt-5.2" | "gpt-5.1-codex-max" | "gpt-5.1" => {
             ReasoningOption::from_names(["medium", "high"].map(String::from))
         }
-        "opus-4.8" | "opus-4.6" | "sonnet-4.6" | "opus-4.5" | "sonnet-4.5" => vec![
+        "opus-5" | "opus-4.8" | "opus-4.6" | "sonnet-4.6" | "opus-4.5" | "sonnet-4.5" => vec![
             ReasoningOption {
                 id: "standard".to_string(),
                 label: "Standard".to_string(),
@@ -653,6 +655,7 @@ impl StandardCodingAgentExecutor for CursorAgent {
             ("gpt-5.4", "GPT-5.4"),
             ("gpt-5.4-fast", "GPT-5.4 Fast"),
             ("gemini-3.1-pro", "Gemini 3.1 Pro"),
+            ("opus-5", "Claude 5 Opus"),
             ("opus-4.8", "Claude 4.8 Opus"),
             ("opus-4.6", "Claude 4.6 Opus"),
             ("sonnet-4.6", "Claude 4.6 Sonnet"),
@@ -1449,6 +1452,49 @@ mod tests {
         assert!(
             patch_count >= 2,
             "Expected at least 2 patches, got {patch_count}"
+        );
+    }
+
+    #[test]
+    fn test_opus_5_resolve_cursor_model_name() {
+        assert_eq!(
+            resolve_cursor_model_name("opus-5", Some("standard")),
+            "opus-5"
+        );
+        assert_eq!(
+            resolve_cursor_model_name("opus-5", Some("thinking")),
+            "opus-5-thinking"
+        );
+        assert_eq!(
+            resolve_cursor_model_name("opus-5", None),
+            "opus-5-thinking"
+        );
+    }
+
+    #[test]
+    fn test_opus_5_reasoning_options() {
+        let options = cursor_reasoning_options("opus-5");
+        assert_eq!(options.len(), 2, "opus-5 should have standard + thinking");
+        assert!(options.iter().any(|o| o.id == "standard"));
+        assert!(options.iter().any(|o| o.id == "thinking"));
+    }
+
+    #[tokio::test]
+    async fn test_opus_5_in_discover_options() {
+        let executor = CursorAgent {
+            append_prompt: AppendPrompt::default(),
+            force: None,
+            model: None,
+            reasoning: None,
+            cmd: Default::default(),
+        };
+        let stream = executor.discover_options(None, None).await.unwrap();
+        use futures::StreamExt;
+        let patches: Vec<_> = stream.collect().await;
+        let json = serde_json::to_string(&patches).unwrap();
+        assert!(
+            json.contains("opus-5"),
+            "discover_options must contain opus-5"
         );
     }
 

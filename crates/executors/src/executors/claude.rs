@@ -281,6 +281,7 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
             models: [
                 ("opus", "Opus"),
                 ("opus[1m]", "Opus (1M context)"),
+                ("claude-opus-5", "Opus 5"),
                 ("claude-sonnet-5", "Sonnet 5"),
                 ("sonnet", "Sonnet"),
                 ("fable", "Fable"),
@@ -3573,6 +3574,23 @@ mod tests {
         assert_eq!(
             processor.main_model_name.as_deref(),
             Some("claude-opus-4-8")
+        );
+    }
+
+    #[test]
+    fn test_claude_opus_5_in_discovered_options() {
+        let options = super::default_discovered_options();
+        let opus5 = options
+            .model_selector
+            .models
+            .iter()
+            .find(|m| m.id == "claude-opus-5");
+        assert!(opus5.is_some(), "claude-opus-5 must be in model catalog");
+        let opus5 = opus5.unwrap();
+        assert_eq!(opus5.name, "Opus 5");
+        assert!(
+            !opus5.reasoning_options.is_empty(),
+            "claude-opus-5 must have reasoning options (supports_effort coverage)"
         );
     }
 }
