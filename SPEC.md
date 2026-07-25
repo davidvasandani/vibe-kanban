@@ -1,93 +1,82 @@
-# Technical Specification: Microsoft Graph PowerShell (v1.0) CLI capability
+# Grok Executor Auto Mode
 
-## Summary
+## Problem
 
-Add the stable Microsoft Graph PowerShell SDK to the app-managed CLI tool
-catalog as `graph-powershell-1.0`. Agents get a version-pinned
-`Microsoft.Graph` module tree invoked through a generated wrapper that runs
-host PowerShell 7 (`pwsh`). This introduces the catalog's third install
-strategy — PowerShell modules — alongside archive binaries and Python venvs.
+When a Grok executor profile is configured with the `Auto` permission policy,
+Vibe Kanban launches Grok with `--always-approve` and omits its interactive
+approval bridge, but the ACP session itself is created in Grok's default
+`Ask` mode. Grok then reports or behaves as though the session is supervised,
+so the user's selected permission policy appears to revert from `Auto` to
+`Ask`.
 
-The `1.0` in the identity is the stable Graph API channel (Microsoft's
-production recommendation), not the SDK package major; the SDK publishes 2.x
-versions. `Microsoft.Graph.Beta` is not installed.
+## Objective
 
-## Catalog identity
+Keep Grok ACP sessions in the permission mode selected by the Vibe Kanban
+executor configuration for both initial prompts and follow-up prompts.
 
-- `CliToolId::GraphPowershell10`, wire id `graph-powershell-1.0` via explicit
-  `#[serde(rename)]` (enum-wide kebab-case would yield `graph-powershell10`).
-- Display name `Microsoft Graph PowerShell (v1.0)`; docs URL is Microsoft's
-  installation guide; pinned version `Microsoft.Graph` **2.38.1** (latest
-  stable on PowerShell Gallery, verified 2026-07-24).
-- Auth is `Unsupported`: sign-in belongs to the SDK's user-scoped token cache
-  (`Connect-MgGraph`, e.g. `-UseDeviceAuthentication`); VK links to vendor
-  docs and never provisions tenants, scopes, or secrets.
+## Technical Requirements
 
-## Install strategy: `InstallStrategy::PowerShellModule`
+1. Map Vibe Kanban's Grok `Auto` permission policy to Grok's ACP `auto` session
+   mode.
+2. Map Vibe Kanban's Grok `Supervised` permission policy to Grok's ACP `ask`
+   session mode.
+3. Apply the mapped ACP mode after every new ACP session is created, including
+   sessions created for follow-up turns.
+4. Preserve the existing command-line behavior:
+   - `Auto` continues to add `--always-approve`.
+   - `Supervised` continues to omit `--always-approve`.
+5. Preserve the approval-service behavior:
+   - `Auto` does not attach interactive approvals.
+   - `Supervised` attaches the configured approval service.
+6. Do not expose Grok ACP modes as a separate agent/persona selector in the UI;
+   permission policy remains the single user-facing control.
+7. Add focused regression tests that prove each permission policy selects the
+   expected ACP mode and that the mode is carried by the Grok harness.
 
-1. Requires host `pwsh` (`unsupported_reason` reports "requires PowerShell 7
-   (pwsh) on the host" when absent; Windows unsupported like the other
-   strategies).
-2. `Save-PSResource -Name Microsoft.Graph -Version <pin> -Repository
-   PSGallery -Path <staging>/modules -TrustRepository` (PSResourceGet is
-   in-box with pwsh 7.4+). Never `Install-Module -Scope CurrentUser`; the
-   service user's global module directories are never written.
-3. Staged-layout verification: `modules/Microsoft.Graph/<pin>/` must exist
-   and the dependency closure must be non-empty (the rollup nupkg alone is
-   only a manifest declaring workload modules as dependencies).
-4. A generated `graph-powershell-1.0` wrapper (POSIX sh) prepends the
-   installed module root to `PSModulePath` and `exec pwsh "$@"`. Prepending
-   keeps the pinned SDK winning over user/global copies while `$PSHOME`
-   built-ins stay available; `pwsh` resolves from PATH at run time so a host
-   copy keeps winning.
-5. Atomic promotion via the existing version-directory + `bin/` symlink-last
-   model; update and removal reuse the existing flows.
-6. `manifest.json` verification string records reality: pinned rollup from
-   PSGallery, dependency closure resolved at install time, **no**
-   per-artifact hash pinning (weaker than the archive strategy; explicitly
-   not claimed).
+## Design
 
-## Agent invocation
+The shared ACP harness already supports an optional session mode and invokes
+ACP `session/set_mode` immediately after session creation. Grok should construct
+its harness with an explicit mode derived from its existing `yolo` field:
 
-`cli-tools/bin` is already appended to spawned-agent PATH (after host paths):
+| Vibe Kanban permission | `yolo` | CLI flag | ACP session mode |
+| --- | --- | --- | --- |
+| Auto | `true` | `--always-approve` | `auto` |
+| Supervised | `false` or unset | none | `ask` |
 
-```bash
-graph-powershell-1.0 -NoLogo -NoProfile -Command \
-  'Connect-MgGraph -Scopes User.Read.All -UseDeviceAuthentication; Get-MgUser -Top 10'
-```
+The mapping belongs in the Grok executor because these mode identifiers are
+Grok-specific, while the ACP harness remains provider-neutral.
 
-## Renovate
+To make the behavior directly testable without broadening public API surface,
+the Grok implementation should centralize the mode mapping in a small helper
+and use it from `harness()`. Tests should validate both values and retain the
+existing command construction assertions.
 
-PSGallery serves only a NuGet v2 feed. The cli_tools.rs custom regex manager
-gains an optional `registryUrl=` capture; the pin comment routes the `nuget`
-datasource to `https://www.powershellgallery.com/api/v2`. A dedicated package
-rule keeps these PRs `needs-review` (no sha256 twin; live dependency
-resolution).
+## Acceptance Criteria
 
-## Homelab (think2)
+- Starting Grok with permission policy `Auto` sends ACP
+  `session/set_mode(..., "auto")` before the prompt and no approval prompt is
+  shown for tool execution.
+- Starting Grok with permission policy `Supervised` sends ACP
+  `session/set_mode(..., "ask")` and tool approval requests remain available.
+- A follow-up Grok execution reapplies the same configured ACP mode to its new
+  ACP session.
+- Existing Grok model selection, authentication, MCP configuration, session
+  transcript replay, and command ordering remain unchanged.
+- Focused Rust tests, formatting, and relevant workspace checks pass.
 
-`powershell` added to `environment.systemPackages` — immutable `pwsh` for the
-VK service and agents via `/run/current-system/sw`. The SDK payload stays
-catalog-owned; no Nix activation-script module install. Deployed by comin on
-merge; `pwsh --version` as the service user is the post-merge check.
+## Non-Goals
 
-## Out of scope
+- Changing Grok CLI defaults outside Vibe Kanban.
+- Adding new permission policies.
+- Changing shared ACP mode discovery or the frontend model selector.
+- Altering approval behavior for Gemini, Qwen, or other executors.
 
-Beta module, submodule-only installs, in-app device login (follow-up gated on
-validating login persistence and `Get-MgContext` invariants), app
-registration/secret provisioning, PSGallery mirroring/locking.
+## Risks and Mitigations
 
-## Validation performed
-
-- 14 unit tests in `services::cli_tools` (wire round-trip, catalog
-  invariants, entry pinning, wrapper content + real exec/arg-forwarding via a
-  stub pwsh).
-- Ignored end-to-end test run against real PSGallery with nix-provided pwsh
-  7.6.2: exact-version install, workload-module dependency presence,
-  `Get-Command Get-MgUser` through the wrapper, exit-code forwarding
-  (`exit 42`), user-global module dir untouched, idempotent re-install, clean
-  staging, complete removal.
-- Generated types, frontend vitest, format, typecheck, lint.
-
-Full SpecKit artifacts: `homelab/specs/vk/4942-add-graph-powers/`
-(spec/plan/research/tasks).
+- **Mode identifier drift:** Keep the Grok-specific `auto` and `ask` constants
+  local and cover them with regression tests.
+- **CLI/ACP disagreement:** Set both the existing CLI flag and ACP mode from the
+  same `yolo` value.
+- **Follow-up regression:** Reuse the same configured harness in both spawn
+  paths so mode application is identical.
