@@ -56,4 +56,3 @@ unsaved work, but host-specific cleanup belongs to the host-scoped subtree.
 Keying that subtree by selected host remounts machine-specific sections after a
 confirmed switch without clearing dirty state owned by universal Settings
 sections. A cancelled switch leaves both the selected host and drafts intact.
-
