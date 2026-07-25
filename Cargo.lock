@@ -9137,6 +9137,7 @@ dependencies = [
  "url",
  "utils",
  "uuid",
+ "windows-sys 0.61.2",
  "worktree-manager",
  "xz2",
  "zip 2.4.2",

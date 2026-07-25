@@ -8,7 +8,9 @@
       "title": "未儲存的變更",
       "message": "您有未儲存的變更。確定要關閉而不儲存嗎？",
       "discard": "放棄變更",
-      "cancel": "繼續編輯"
+      "cancel": "繼續編輯",
+      "hostSwitchTitle": "Switch hosts?",
+      "hostSwitchMessage": "You have unsaved changes for the current host. Switching hosts will discard those drafts."
     },
     "layout": {
       "nav": {
@@ -40,7 +42,9 @@
         "attachments": "附件",
         "attachmentsDesc": "附件儲存狀態",
         "slack": "Slack",
-        "slackDesc": "Slack 工作區連線"
+        "slackDesc": "Slack 工作區連線",
+        "pipelines": "Pipelines",
+        "pipelinesDesc": "Pipeline TOML files and defaults"
       }
     },
     "general": {
@@ -854,6 +858,75 @@
         "connectionClosed": "登入連線在完成前已關閉",
         "cancel": "取消",
         "retry": "重試"
+      }
+    },
+    "pipelines": {
+      "title": "Pipelines",
+      "description": "Manage raw pipeline TOML files for the selected host.",
+      "loading": "Loading pipeline files...",
+      "empty": "No pipeline files were reported by this host.",
+      "list": {
+        "title": "Files",
+        "description": "Valid and invalid pipeline files are shown by id."
+      },
+      "status": {
+        "valid": "Valid",
+        "invalid": "Invalid",
+        "stageCount_one": "{{count}} stage",
+        "stageCount_other": "{{count}} stages",
+        "stageCountUnknown": "Stage count unavailable",
+        "location": "at {{location}}"
+      },
+      "add": {
+        "placeholder": "new-pipeline-id",
+        "helper": "Use letters, numbers, hyphens, or underscores.",
+        "invalidId": "Use only ASCII letters, numbers, hyphens, or underscores.",
+        "conflict": "A pipeline with that id already exists on this host."
+      },
+      "editor": {
+        "noSelection": "No pipeline selected",
+        "newDraft": "New draft",
+        "loadingRaw": "Loading raw TOML...",
+        "empty": "Select a pipeline file or create a new draft.",
+        "placeholder": "Raw pipeline TOML",
+        "dirty": "Unsaved TOML changes",
+        "clean": "No unsaved TOML changes"
+      },
+      "validation": {
+        "pending": "Validating draft...",
+        "valid": "Draft is valid.",
+        "invalid": "Draft is invalid."
+      },
+      "actions": {
+        "save": "Save",
+        "discard": "Discard",
+        "delete": "Delete",
+        "resetOne": "Reset default",
+        "resetAll": "Reset all defaults",
+        "closeDraft": "Close draft",
+        "add": "Add"
+      },
+      "save": {
+        "success": "Pipeline saved."
+      },
+      "confirm": {
+        "cancel": "Cancel",
+        "discardTitle": "Discard draft?",
+        "discardMessage": "This will discard unsaved TOML changes.",
+        "discardConfirm": "Discard Draft",
+        "switchFileMessage": "Switching files will discard unsaved TOML changes.",
+        "addMessage": "Starting a new draft will discard unsaved TOML changes.",
+        "closeNewMessage": "Closing this draft will discard it. No file has been created on the host.",
+        "deleteTitle": "Delete {{id}}?",
+        "deleteMessage": "This removes the pipeline file from the selected host.",
+        "deleteDirtyMessage": "Deleting this file will discard unsaved TOML changes.",
+        "deleteFinalMessage": "This removes the final pipeline file. Bundled defaults may be seeded again on a later list or read.",
+        "resetOneTitle": "Reset {{id}}?",
+        "resetOneMessage": "This overwrites the selected file with the bundled default.",
+        "resetOneDirtyMessage": "This overwrites the selected file with the bundled default and discards unsaved TOML changes.",
+        "resetAllTitle": "Reset all bundled defaults?",
+        "resetAllMessage": "This recreates or overwrites all bundled default pipeline files.",
+        "resetAllDirtyMessage": "This recreates or overwrites all bundled default pipeline files and discards the open draft."
       }
     }
   },
