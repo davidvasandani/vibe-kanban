@@ -430,6 +430,22 @@ pub async fn browser_session_ws(
             return;
         }
 
+        // Replay the most recent frame so the live view paints immediately.
+        // Screencast frames only arrive on repaint, so an observer attaching
+        // to an idle page would otherwise stare at an empty view.
+        if let Ok(Some(frame)) = service.last_frame(session_id) {
+            let meta = BrowserWsServerMessage::Frame {
+                seq: frame.seq,
+                width: frame.width,
+                height: frame.height,
+            };
+            if socket.send(ws_json(&meta)).await.is_err()
+                || socket.send(Message::Binary(frame.data)).await.is_err()
+            {
+                return;
+            }
+        }
+
         loop {
             tokio::select! {
                 changed = state_rx.changed() => {
