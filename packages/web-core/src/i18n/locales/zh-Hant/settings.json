@@ -872,8 +872,8 @@
       "status": {
         "valid": "Valid",
         "invalid": "Invalid",
-        "stageCount": "{{count}} stage",
-        "stageCount_plural": "{{count}} stages",
+        "stageCount_one": "{{count}} stage",
+        "stageCount_other": "{{count}} stages",
         "stageCountUnknown": "Stage count unavailable",
         "location": "at {{location}}"
       },

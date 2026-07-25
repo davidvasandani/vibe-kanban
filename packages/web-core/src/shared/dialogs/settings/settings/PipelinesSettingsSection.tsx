@@ -156,6 +156,8 @@ export function PipelinesSettingsSection() {
   const [validationTuple, setValidationTuple] =
     useState<PipelineValidationTuple | null>(null);
   const latestTupleRef = useRef<PipelineValidationTuple | null>(null);
+  const pendingSavedIdRef = useRef<string | null>(null);
+  const pendingWrittenContentRef = useRef<string | null>(null);
   const seededRawIdentityRef = useRef<string | null>(null);
   const allowRawReseedRef = useRef(false);
 
@@ -192,6 +194,7 @@ export function PipelinesSettingsSection() {
     setLastPersistedContent('');
     setMutationError(null);
     setSaveSuccess(false);
+    pendingWrittenContentRef.current = null;
     resetValidation();
   }, [resetValidation]);
 
@@ -231,6 +234,12 @@ export function PipelinesSettingsSection() {
       if (draftKind === 'new') {
         return current;
       }
+      if (current && pendingSavedIdRef.current === current) {
+        if (statuses.some((status) => status.id === current)) {
+          pendingSavedIdRef.current = null;
+        }
+        return current;
+      }
       const next = selectPipelineAfterRefresh(statuses, current);
       if (!next) {
         setDraftKind(null);
@@ -261,10 +270,17 @@ export function PipelinesSettingsSection() {
     }
 
     const selectionChanged = seededRawIdentityRef.current !== rawIdentity;
+    if (
+      pendingWrittenContentRef.current != null &&
+      rawQuery.data !== pendingWrittenContentRef.current
+    ) {
+      return;
+    }
     if (isDirty && !selectionChanged && !allowRawReseedRef.current) {
       return;
     }
 
+    pendingWrittenContentRef.current = null;
     seededRawIdentityRef.current = rawIdentity;
     allowRawReseedRef.current = false;
     setDraftContent(rawQuery.data);
@@ -390,6 +406,9 @@ export function PipelinesSettingsSection() {
     }
     setSelectedId(id);
     setDraftKind('existing');
+    setDraftContent('');
+    setLastPersistedContent('');
+    pendingWrittenContentRef.current = null;
     setMutationError(null);
     setSaveSuccess(false);
     resetValidation();
@@ -475,6 +494,10 @@ export function PipelinesSettingsSection() {
         id: effectiveId,
         body: { content: draftContent },
       });
+      if (draftKind === 'new') {
+        pendingSavedIdRef.current = effectiveId;
+      }
+      pendingWrittenContentRef.current = draftContent;
       setDraftKind('existing');
       setSelectedId(effectiveId);
       setLastPersistedContent(draftContent);
@@ -580,7 +603,7 @@ export function PipelinesSettingsSection() {
 
     try {
       setMutationError(null);
-      allowRawReseedRef.current = true;
+      allowRawReseedRef.current = overwritesOpen;
       await resetAllMutation.mutateAsync();
       setDraftKind('existing');
       await statusesQuery.refetch();
@@ -686,7 +709,7 @@ export function PipelinesSettingsSection() {
                   setAddError(null);
                 }}
                 placeholder={t('settings.pipelines.add.placeholder')}
-                disabled={mutationPending}
+                disabled={mutationPending || !statusesQuery.isSuccess}
                 error={Boolean(addError)}
               />
               <Button
@@ -694,7 +717,7 @@ export function PipelinesSettingsSection() {
                 size="sm"
                 variant="secondary"
                 onClick={() => void handleStartAdd()}
-                disabled={mutationPending}
+                disabled={mutationPending || !statusesQuery.isSuccess}
                 aria-label={t('settings.pipelines.actions.add')}
                 title={t('settings.pipelines.actions.add')}
               >
@@ -802,13 +825,15 @@ export function PipelinesSettingsSection() {
                   setSaveSuccess(false);
                 }}
                 spellCheck={false}
-                disabled={mutationPending || rawQuery.isLoading}
+                disabled={
+                  mutationPending || rawQuery.isLoading || rawQuery.isError
+                }
                 className={cn(
                   'min-h-[300px] flex-1 resize-y rounded-sm border border-border bg-secondary px-3 py-2',
                   'font-mono text-sm leading-5 text-high placeholder:text-low',
                   'focus:outline-none focus:ring-1 focus:ring-brand',
                   'lg:min-h-0',
-                  (mutationPending || rawQuery.isLoading) &&
+                  (mutationPending || rawQuery.isLoading || rawQuery.isError) &&
                     'cursor-not-allowed opacity-60'
                 )}
                 placeholder={t('settings.pipelines.editor.placeholder')}

@@ -10,6 +10,10 @@ import type {
 import type { MachineClient } from '@/shared/lib/machineClient';
 import { PipelinesSettingsSection } from './PipelinesSettingsSection';
 
+vi.hoisted(() => {
+  process.env.NODE_ENV = 'test';
+});
+
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const mocks = vi.hoisted(() => ({

@@ -164,6 +164,20 @@ pub fn validate_id(id: &str) -> Result<(), PipelineError> {
     }
 }
 
+fn validate_existing_file_id(id: &str) -> Result<(), PipelineError> {
+    if !id.is_empty()
+        && id != "."
+        && id != ".."
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains('\0')
+    {
+        Ok(())
+    } else {
+        Err(PipelineError::InvalidId)
+    }
+}
+
 /// Parse and validate a single pipeline's TOML. `id` is the file stem.
 pub fn parse_pipeline(id: &str, raw: &str) -> Result<Pipeline, PipelineError> {
     validate_id(id)?;
@@ -431,7 +445,7 @@ pub fn load_pipelines(dir: &Path) -> Vec<Pipeline> {
 
 /// Read the raw TOML of a single pipeline (for the Settings editor).
 pub fn read_raw(dir: &Path, id: &str) -> Result<String, PipelineError> {
-    validate_id(id)?;
+    validate_existing_file_id(id)?;
     let path = dir.join(format!("{id}.toml"));
     if !path.exists() {
         return Err(PipelineError::NotFound);
@@ -473,7 +487,7 @@ pub fn reset_all(dir: &Path) -> Result<Vec<Pipeline>, PipelineError> {
 
 /// Delete a pipeline file. Stays deleted while other pipeline files remain.
 pub fn delete_pipeline(dir: &Path, id: &str) -> Result<(), PipelineError> {
-    validate_id(id)?;
+    validate_existing_file_id(id)?;
     let path = dir.join(format!("{id}.toml"));
     if !path.exists() {
         return Err(PipelineError::NotFound);
@@ -577,6 +591,24 @@ mod tests {
         assert!(validate_id("").is_err());
         assert!(validate_id("basic").is_ok());
         assert!(validate_id("my_pipeline-2").is_ok());
+    }
+
+    #[test]
+    fn raw_read_and_delete_allow_safe_non_slug_file_stems() {
+        let d = TmpDir::new();
+        let path = d.path().join("foo.bar.toml");
+        std::fs::write(&path, "not valid toml").unwrap();
+
+        assert_eq!(read_raw(d.path(), "foo.bar").unwrap(), "not valid toml");
+        delete_pipeline(d.path(), "foo.bar").unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn raw_read_and_delete_still_reject_path_traversal() {
+        let d = TmpDir::new();
+        assert!(read_raw(d.path(), "../secret").is_err());
+        assert!(delete_pipeline(d.path(), "../secret").is_err());
     }
 
     #[test]

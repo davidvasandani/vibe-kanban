@@ -5,14 +5,12 @@ export async function confirmSettingsHostSwitch({
   isDirty,
   currentHostId,
   nextHostId,
-  clearAll,
   setSelectedHostId,
   t,
 }: {
   isDirty: boolean;
   currentHostId: SettingsHostTargetId | null;
   nextHostId: SettingsHostTargetId;
-  clearAll: () => void;
   setSelectedHostId: (hostId: SettingsHostTargetId) => void;
   t: (key: string) => string;
 }): Promise<boolean> {
@@ -31,7 +29,6 @@ export async function confirmSettingsHostSwitch({
     if (result !== 'confirmed') {
       return false;
     }
-    clearAll();
   }
 
   setSelectedHostId(nextHostId);

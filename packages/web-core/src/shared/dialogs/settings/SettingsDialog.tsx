@@ -157,7 +157,7 @@ function SettingsDialogContent({
   onClose,
 }: SettingsDialogContentProps) {
   const { t } = useTranslation('settings');
-  const { isDirty, clearAll } = useSettingsDirty();
+  const { isDirty } = useSettingsDirty();
   const {
     availableHosts,
     hostsResolved,
@@ -233,7 +233,6 @@ function SettingsDialogContent({
           isDirty,
           currentHostId: selectedHostId,
           nextHostId: hostId,
-          clearAll,
           setSelectedHostId,
           t,
         });
@@ -241,7 +240,7 @@ function SettingsDialogContent({
         isConfirmingRef.current = false;
       }
     },
-    [clearAll, isDirty, selectedHostId, setSelectedHostId, t]
+    [isDirty, selectedHostId, setSelectedHostId, t]
   );
 
   useEffect(() => {
@@ -361,7 +360,7 @@ function SettingsDialogContent({
             <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
               {isHostSpecificSettingsSection(activeSection) ? (
                 selectedHost ? (
-                  <SettingsMachineUserSystemProvider>
+                  <SettingsMachineUserSystemProvider key={selectedHostId}>
                     <SettingsSection
                       type={activeSection}
                       onClose={handleCloseWithConfirmation}

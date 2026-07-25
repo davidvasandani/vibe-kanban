@@ -166,10 +166,11 @@ sequential.
       switching. Depends on T029.
 - [x] T031 Review the complete diff against
       `specs/vk/3a97-no-frontend-for/spec.md` acceptance criteria, the
-      constitution's Settings host-scope boundary, and the frontend-only
-      constraint; confirm no backend route or generated `shared/types.ts` edits
+      constitution's Settings host-scope boundary, and the existing-route
+      constraint; confirm only the uncovered safe existing-file-id compatibility
+      fix was needed in backend services and no generated `shared/types.ts` edits
       were introduced. Depends on T030.
-- [ ] T032 Update project knowledge after shipping, if implementation confirms
+- [x] T032 Update project knowledge after shipping, if implementation confirms
       reusable file-backed Settings editor conventions, in
       `docs/knowledge-base/` and its index with task id `3a97-no-frontend-for`.
       Depends on T031.
