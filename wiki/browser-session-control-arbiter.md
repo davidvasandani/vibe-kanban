@@ -94,9 +94,33 @@ chromiumoxide dependency) to a Chromium spawned with
 `utils::process::kill_process_group` (never `kill_on_drop` — it misses
 Chromium's helpers). No binary discovered → `UnavailableDriver` → typed
 `BROWSER_UNAVAILABLE`; `VK_BROWSER_MOCK=1` opts into the mock driver. All
-control semantics are tested against the mock (no Chromium exists in CI).
+control semantics are tested against the mock (CI has no Chromium).
 The screencast ack must be sent fire-and-forget from the CDP reader task —
 awaiting a response there deadlocks the reader on itself.
+
+### Real Chromium in the dev/test environment
+
+The VK dev host now has a real Chromium for exercising the CDP path. On this
+NixOS host, FHS chrome/headless-shell downloads (Playwright's, Google's) do
+not run — use a Nix-built chromium. It was provisioned from an
+already-realized store path (no download):
+
+```
+nix-store --add-root ~/.local/share/vibe-kanban/chromium-gc-root \
+  -r /nix/store/<hash>-chromium-<ver>       # pin against GC
+ln -sf /nix/store/<hash>-chromium-<ver>/bin/chromium \
+  ~/.local/share/vibe-kanban/cli-tools/bin/chromium   # already on VK's PATH
+```
+
+`discover_chromium` finds it via PATH, so the server uses the real driver by
+default; `VK_BROWSER_MOCK=1` still forces the mock. Verified live against
+the real driver: session create spawns Chromium (~11 procs), navigate,
+`Input.insertText` into an autofocused field read back via `evaluate`,
+`Page.captureScreenshot` returns a real PNG, screencast delivers real JPEG
+frames (SOI-checked) over the live-view WS, and close reaps the entire
+process group (D-Bus errors on stderr are benign headless noise). Follow-up
+seam: make the install declarative in the homelab host module instead of
+this imperative GC-root + symlink.
 
 ## Trust model (recorded seam)
 
