@@ -48,7 +48,7 @@
     "command": "npx",
     "args": [
       "-y",
-      "slack-mcp-server@latest",
+      "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz",
       "--transport",
       "stdio"
     ],

@@ -31,6 +31,77 @@ Vibe Kanban provides popular MCP server templates. Add a template, then choose t
 <img src="/images/settings-popular-mcp-servers.png" alt="Popular MCP servers including Vibe Kanban, Context7, Playwright, Exa, Chrome DevTools, and Dev Manager" />
 </Frame>
 
+### Slack connector
+
+The Slack template installs a pinned build of the
+[davidvasandani/slack-mcp-server](https://github.com/davidvasandani/slack-mcp-server)
+fork rather than the upstream npm package, because the fork adds attachment
+retrieval:
+
+```json
+{
+  "command": "npx",
+  "args": [
+    "-y",
+    "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz",
+    "--transport",
+    "stdio"
+  ],
+  "env": { "SLACK_MCP_XOXP_TOKEN": "YOUR_TOKEN" }
+}
+```
+
+Release **v1.3.0-vk.2** is based on upstream 1.3.0 and includes fork commit
+`04633fb892dc6dd38c3faffe29ff9b30829560c6`. The tarball is a launcher: it
+downloads the server binary for your platform from that same release, verifies
+it against a SHA-256 recorded at build time, caches it, and runs it. A
+verification failure is fatal — the connector never falls back to a different
+build. Paste your Slack user token (`xoxp-…`) in place of `YOUR_TOKEN`.
+
+Because the version is pinned to a release tag, the connector you configure
+today is the one you get tomorrow. Upgrades arrive as reviewed dependency
+updates, not silently.
+
+<Note>
+The fork exposes `attachment_get_data`, which takes a `file_id` (the ID shown in
+a message's `AttachmentIDs` metadata) and returns that attachment's metadata and
+content, up to 5 MB, using your connected Slack identity — Slack still enforces
+channel and file permissions. It is enabled by default. To turn it off, set
+`SLACK_MCP_ENABLED_TOOLS` to a comma-separated list of the tools you want and
+omit `attachment_get_data`.
+</Note>
+
+Two launcher-specific environment variables are available for constrained
+hosts:
+
+| Variable | Effect |
+| --- | --- |
+| `SLACK_MCP_SERVER_VK_BINARY` | Runs the binary at this path and skips the download and checksum check. Use it on offline or air-gapped machines, or to test a local build. |
+| `SLACK_MCP_SERVER_VK_CACHE_DIR` | Overrides the cache root (default: `%LOCALAPPDATA%` on Windows, otherwise `$XDG_CACHE_HOME` or `~/.cache`). |
+
+#### Updating to a newer fork release
+
+Fork releases are tagged `v<upstream-base>-vk.<n>` and their assets are
+immutable — a correction ships as `-vk.<n+1>`, never as a re-upload. Renovate
+opens a `needs-review` pull request when a new release appears. To adopt one:
+
+<Steps>
+<Step title="Cut the fork release">
+In the fork, tag the revision and run `scripts/build-release.sh`, then publish
+the binaries, the launcher tarball, and `checksums.txt` as release assets.
+</Step>
+<Step title="Update the pin">
+Change the URL in `crates/executors/default_mcp.json` and the
+`SLACK_MCP_FORK_TAG` and `SLACK_MCP_LAUNCHER_SHA256` constants in
+`crates/executors/src/mcp_config.rs`, and the version named on this page — all
+in the same change.
+</Step>
+<Step title="Verify the published artifact">
+Run `cargo test -p executors slack_pinned_launcher_matches_recorded_digest -- --ignored`
+to confirm the published tarball matches the recorded digest.
+</Step>
+</Steps>
+
 ## Adding Custom MCP Servers
 
 You can also add your own MCP servers by configuring them manually:

@@ -1,0 +1,37 @@
+# Audits third-party artifacts that Vibe Kanban pins by URL but does **not**
+# fetch itself. The bundled Slack MCP entry tells each agent to run
+# `npx -y <GitHub release tarball>`, so npm — not VK — does the download, and
+# no digest is checked at install time. GitHub permits a release asset to be
+# replaced under an existing tag, so the recorded SHA-256 is only meaningful if
+# something re-checks it on a schedule. That is this job.
+name: Pinned artifacts
+
+on:
+  schedule:
+    # Mondays 05:00 UTC, before the Renovate window.
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: nightly-2025-12-04
+
+jobs:
+  slack-mcp-launcher-digest:
+    name: Slack MCP launcher digest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/cargo-checks-common-setup
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cache-key: pinned-artifacts-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Verify the pinned Slack MCP launcher matches its recorded digest
+        run: cargo test -p executors slack_pinned_launcher_matches_recorded_digest -- --ignored --nocapture
