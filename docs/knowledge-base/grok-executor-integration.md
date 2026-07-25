@@ -1,6 +1,6 @@
 # Grok executor integration
 
-Contributing tasks: `43bc-add-grok-to-vk`
+Contributing tasks: `43bc-add-grok-to-vk`, `ba9f-grok-vk-executor`
 
 Grok Build integrates with Vibe Kanban through its ACP stdio mode. The executor
 launches `grok --no-auto-update agent stdio`; model and automatic approval
@@ -20,6 +20,15 @@ that passes an `ExecutorApprovalService` to the ACP client must also be included
 in the deployment's `ExecutorApprovalBridge` selection. Otherwise the no-op
 service silently approves every tool request. Automatic mode uses Grok's
 `--always-approve` flag and does not attach interactive approvals.
+
+Grok permission policy must also set the ACP session mode explicitly after
+every `new_session` and before the prompt: Auto maps to `auto`, while
+Supervised (including legacy profiles with no saved permission) maps to `ask`.
+The CLI flag alone is insufficient because Grok's newly created ACP session can
+otherwise report and behave as its default Ask mode. Keep these vendor-specific
+mode IDs in the Grok executor and pass them through the provider-neutral ACP
+harness; using the same configured harness for initial and follow-up turns
+prevents continuation sessions from reverting.
 
 ## Native MCP shape
 
