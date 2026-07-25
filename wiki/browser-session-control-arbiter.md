@@ -107,6 +107,32 @@ boundary. Per-execution caller authentication (threading execution identity
 into MCP launch env) is the documented hardening seam for multi-user
 deployments — see `homelab/specs/vk/57e0-add-shared-human/research.md`.
 
+## Headless runtime verification (repeatable)
+
+The full control lifecycle was verified against the real server binary, not
+just unit tests. The recipe generalizes to any headless VK smoke test:
+
+- Build and run `./target/debug/server` with `VK_BROWSER_MOCK=1`,
+  `BACKEND_PORT=<free>`, **and `PREVIEW_PROXY_PORT=0`** — task worktrees
+  inherit the host VK's `PORT`/`PREVIEW_PROXY_PORT` env vars, so an
+  unoverridden proxy port fails the boot with a bare `AddrInUse` that names
+  no listener. Dev builds use `<repo>/dev_assets/` (gitignored) for the DB,
+  so the run is isolated; delete `dev_assets/` afterwards.
+- Seed FK prerequisites directly with `sqlite3`: UUID keys are 16-byte
+  blobs (`X'<uuid-hex-no-dashes>'`), e.g. a `workspaces` row, and a
+  `sessions` + `execution_processes(status='running',
+  run_reason='codingagent')` pair to stand in for a live agent execution.
+- Drive REST with curl; drive the live-view WS with Node ≥22's **built-in
+  WebSocket** (no deps): `binaryType='arraybuffer'`, JSON `frame` meta is
+  followed by one binary message.
+- Verified end-to-end this way: create → human acquire (gen 1) → navigate →
+  duplicate command_id replay (no re-exec) → NO_RUNNING_EXECUTION →
+  STALE_GENERATION on CAS → transfer to seeded execution (gen 2) → agent
+  auto-resolved action → takeover (gen 3) → stale agent mutation 409 →
+  release → WS acquire bound to connection (gen 5) → WS input + frame
+  broadcast → disconnect auto-release (gen 6, reason `disconnected`) →
+  audit rows with no URL/profile → plain close of uncontrolled session.
+
 ## Contributed by
 
 - vk/57e0-add-shared-human
