@@ -123,6 +123,24 @@ the repository's locked dependency graph or checked before any multi-stage
 verification begins, with an actionable setup command on failure. Verification
 must never silently skip a language or package after reporting overall success.
 
+### XV. Destructive operations fail safe and are loud
+Any code path that can delete, reset, or overwrite a user's working tree treats
+uncommitted work as irreplaceable. Such a path MUST: establish that the target
+holds no unsaved work before acting; **retain** rather than destroy when that
+cannot be determined (an error is never evidence of emptiness); and log the
+target, the reason it was selected, and the action taken at `info!` or above
+*before* acting — a destructive step logged only at `debug!` is invisible in
+production and does not satisfy this. Where destruction is genuinely required,
+move the data aside (e.g. a `.recovered-<epoch>` sibling) or snapshot it to a
+commit rather than deleting it outright.
+
+Work-preservation must not be conditional on an unrelated step succeeding.
+Preservation and teardown are independent concerns: a failure to stop a process,
+to reach a repository, or to clean up metadata must never skip the preservation
+of that unit's uncommitted work. Fail-safe direction must be consistent across
+sibling cleanup paths; two routines that decide the same question must not
+disagree about which way to err.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -142,5 +160,5 @@ must never silently skip a language or package after reporting overall success.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.11.0 (adds worktree-safe verification principle XIV; previous
-0.10.0 added vendor-config guest-editor principle XIII)
+**Version**: 0.12.0 (adds fail-safe destructive-operation principle XV; previous
+0.11.0 added worktree-safe verification principle XIV)

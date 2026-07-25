@@ -17,6 +17,15 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use worktree_manager::{WorktreeCleanup, WorktreeError, WorktreeManager};
 
+/// Git-visible work found in a workspace directory that a delete would destroy.
+/// Names the first repository found to be dirty, for logging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnsavedWork {
+    repo_dir_name: String,
+    uncommitted: usize,
+    untracked: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct RepoWorkspaceInput {
     pub repo: Repo,
@@ -593,7 +602,44 @@ impl WorkspaceManager {
             if let Ok(false) =
                 DbWorkspace::container_ref_exists(&self.db.pool, &workspace_path_str).await
             {
-                info!("Found orphaned workspace: {}", workspace_path_str);
+                // Uncommitted work is irreplaceable, so establish that this
+                // directory holds none before deleting it. Orphan status is
+                // decided by an exact string match on `container_ref`, so any
+                // path drift (a symlinked base dir, a changed workspace_dir
+                // override) can misclassify a live workspace as abandoned;
+                // this check is what stops that from costing a session's work.
+                match Self::workspace_dir_unsaved_work(&path) {
+                    Ok(None) => {}
+                    Ok(Some(work)) => {
+                        info!(
+                            "Retaining workspace {}: no workspace record references it, but it \
+                             holds unsaved work ({} uncommitted, {} untracked in '{}')",
+                            workspace_path_str,
+                            work.uncommitted,
+                            work.untracked,
+                            work.repo_dir_name
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        // An error is not evidence of emptiness. Retain, and
+                        // keep sweeping the remaining candidates: one
+                        // unreadable directory must not disable cleanup of
+                        // every other directory in the base dir.
+                        warn!(
+                            "Retaining workspace {}: no workspace record references it, but its \
+                             cleanliness could not be determined: {}",
+                            workspace_path_str, e
+                        );
+                        continue;
+                    }
+                }
+
+                info!(
+                    "Removing orphaned workspace {}: no workspace record references it and no \
+                     unsaved work was found",
+                    workspace_path_str
+                );
                 if let Err(e) = Self::cleanup_workspace_without_repos(&path).await {
                     error!(
                         "Failed to remove orphaned workspace {}: {}",
@@ -607,6 +653,51 @@ impl WorkspaceManager {
                 }
             }
         }
+    }
+
+    /// Unsaved work found in an orphan-candidate workspace directory.
+    fn workspace_dir_unsaved_work(
+        workspace_dir: &Path,
+    ) -> Result<Option<UnsavedWork>, WorkspaceError> {
+        let entries = std::fs::read_dir(workspace_dir)?;
+        let git = GitService::new();
+
+        for entry in entries {
+            // Propagate instead of skipping. `filter_map(|e| e.ok())` would
+            // silently treat an unreadable entry as absent, and `Path::exists`
+            // returns false both for "not there" and "could not tell" — either
+            // would turn an indeterminate repo into a deletable one.
+            let repo_dir = entry?.path();
+            if !std::fs::metadata(&repo_dir)?.is_dir() {
+                continue;
+            }
+            // Worktrees carry a `.git` file; a plain clone carries a `.git`
+            // directory. Accept either — both hold work worth keeping.
+            // `try_exists` distinguishes a genuine absence from a failed stat.
+            if !repo_dir.join(".git").try_exists()? {
+                continue;
+            }
+
+            // A probe failure is indeterminate, never "clean": propagate so the
+            // caller retains the directory.
+            let (uncommitted, untracked) = git.get_worktree_change_counts(&repo_dir)?;
+            if uncommitted > 0 || untracked > 0 {
+                return Ok(Some(UnsavedWork {
+                    repo_dir_name: repo_dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    uncommitted,
+                    untracked,
+                }));
+            }
+        }
+
+        // Either every repo checked out clean, or the directory contains no git
+        // repositories at all. The latter matters: without it, retain-on-error
+        // would leak every unprobeable directory forever and orphan cleanup
+        // would stop reclaiming anything.
+        Ok(None)
     }
 
     async fn cleanup_workspace_without_repos(workspace_dir: &Path) -> Result<(), WorkspaceError> {
@@ -638,16 +729,153 @@ impl WorkspaceManager {
             }
         }
 
-        if workspace_dir.exists()
-            && let Err(e) = tokio::fs::remove_dir_all(workspace_dir).await
-        {
-            debug!(
-                "Could not remove workspace directory {}: {}",
-                workspace_dir.display(),
-                e
-            );
+        // Propagate rather than swallow: returning Ok(()) here made the caller
+        // log "Successfully removed orphaned workspace" for a directory that is
+        // still on disk.
+        if workspace_dir.exists() {
+            tokio::fs::remove_dir_all(workspace_dir)
+                .await
+                .map_err(WorkspaceError::Io)?;
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod orphan_cleanup_tests {
+    use std::{fs, path::Path, process::Command};
+
+    use super::{UnsavedWork, WorkspaceManager};
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git should be available on PATH");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A repo with one committed file, as a plain clone (a `.git` directory).
+    /// The probe accepts either marker shape, and this keeps fixtures cheap.
+    fn init_repo(parent: &Path, name: &str) -> std::path::PathBuf {
+        let repo = parent.join(name);
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        repo
+    }
+
+    fn unsaved(dir: &Path) -> Option<UnsavedWork> {
+        WorkspaceManager::workspace_dir_unsaved_work(dir).expect("probe should succeed")
+    }
+
+    #[test]
+    fn clean_workspace_reports_no_unsaved_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path(), "repo-a");
+        assert_eq!(unsaved(tmp.path()), None);
+    }
+
+    #[test]
+    fn directory_without_git_repos_reports_no_unsaved_work() {
+        // Bounds the disk leak: retain-on-error must not mean retain-forever
+        // for directories that hold no git work at all.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("not-a-repo")).unwrap();
+        fs::write(tmp.path().join("not-a-repo/file.txt"), "x").unwrap();
+        assert_eq!(unsaved(tmp.path()), None);
+    }
+
+    #[test]
+    fn modified_tracked_file_is_unsaved_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo(tmp.path(), "repo-a");
+        fs::write(repo.join("tracked.txt"), "modified\n").unwrap();
+
+        let work = unsaved(tmp.path()).expect("dirty repo must be retained");
+        assert_eq!(work.repo_dir_name, "repo-a");
+        assert_eq!(work.uncommitted, 1);
+    }
+
+    #[test]
+    fn untracked_file_is_unsaved_work() {
+        // The reported incident lost new files that were never committed.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo(tmp.path(), "repo-a");
+        fs::write(repo.join("brand-new.md"), "new\n").unwrap();
+
+        let work = unsaved(tmp.path()).expect("untracked files must be retained");
+        assert_eq!(work.untracked, 1);
+    }
+
+    #[test]
+    fn staged_but_uncommitted_file_is_unsaved_work() {
+        // Staged changes were lost too, and the codebase's two cleanliness
+        // helpers disagree about them — pin the behaviour we rely on here.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo(tmp.path(), "repo-a");
+        fs::write(repo.join("staged.md"), "staged\n").unwrap();
+        git(&repo, &["add", "staged.md"]);
+
+        let work = unsaved(tmp.path()).expect("staged changes must be retained");
+        assert_eq!(work.uncommitted, 1);
+        assert_eq!(work.untracked, 0);
+    }
+
+    #[test]
+    fn dirty_second_repo_is_found_in_multi_repo_workspace() {
+        // container_ref is the parent of N repos; a clean first repo must not
+        // mask unsaved work in a later one.
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path(), "repo-a");
+        let repo_b = init_repo(tmp.path(), "repo-b");
+        fs::write(repo_b.join("tracked.txt"), "changed in b\n").unwrap();
+
+        let work = unsaved(tmp.path()).expect("dirty second repo must be retained");
+        assert_eq!(work.repo_dir_name, "repo-b");
+        assert_eq!(work.uncommitted, 1);
+    }
+
+    #[test]
+    fn unreadable_workspace_dir_is_indeterminate_not_clean() {
+        // An error must never be reported as "nothing here to lose".
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        assert!(WorkspaceManager::workspace_dir_unsaved_work(&missing).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_repo_subdir_is_indeterminate_not_clean() {
+        // Found by independent review: skipping entries that cannot be stat'ed
+        // would let an otherwise-clean-looking workspace be deleted even though
+        // one of its repos was never actually inspected.
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path(), "repo-a"); // clean, so only the opaque dir decides
+        let opaque = tmp.path().join("repo-b");
+        fs::create_dir_all(opaque.join("inner")).unwrap();
+        fs::set_permissions(&opaque, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = WorkspaceManager::workspace_dir_unsaved_work(tmp.path());
+
+        // Restore before asserting so the tempdir can always be cleaned up.
+        fs::set_permissions(&opaque, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            result.is_err(),
+            "an unreadable repo subdir must be indeterminate, not treated as clean"
+        );
     }
 }
