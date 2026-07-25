@@ -27,7 +27,8 @@ For remote/cloud types, regenerate using `pnpm run remote:generate-types`
 Do not manually edit shared/remote-types.ts, instead edit crates/remote/src/bin/remote-generate-types.rs (see crates/remote/AGENTS.md for details).
 
 ## Build, Test, and Development Commands
-- Install: `pnpm i`
+- Fresh-worktree setup: `pnpm install --frozen-lockfile` (required before
+  development and repository verification commands)
 - Run dev (web app + backend with ports auto-assigned): `pnpm run dev`
 - Backend (watch): `pnpm run backend:dev:watch`
 - Web app (dev): `pnpm run local-web:dev`
@@ -41,6 +42,7 @@ Do not manually edit shared/remote-types.ts, instead edit crates/remote/src/bin/
 - Lint: `pnpm run lint` (runs web/ui ESLint + `cargo clippy` for all backend Rust workspaces)
 
 ## Before Completing a Task
+- In a fresh worktree, run `pnpm install --frozen-lockfile` before verification.
 - Run `pnpm run format` to format all Rust workspaces and web code.
 
 ## Coding Style & Naming Conventions
@@ -60,5 +62,4 @@ Do not manually edit shared/remote-types.ts, instead edit crates/remote/src/bin/
 ## Security & Config Tips
 - Use `.env` for local overrides; never commit secrets. Key envs: `FRONTEND_PORT`, `BACKEND_PORT`, `HOST` 
 - Dev ports and assets are managed by `scripts/setup-dev-environment.js`.
-
 
