@@ -735,12 +735,12 @@ const CLAUDE_1M_CONTEXT_WINDOW: u32 = 1_000_000;
 
 /// Infer a model's max context window from its name or alias.
 ///
-/// Different models have different max contexts. Standard Claude models use the
-/// default window; models requesting the 1M-token context beta carry a `[1m]`
+/// Different models have different max contexts. Opus 5 has a 1M-token context
+/// by default; older models requesting the 1M-token context beta carry a `[1m]`
 /// suffix (e.g. `opus[1m]`). We rely on the configured/reported model string
 /// because the end-of-turn usage report is only available once a turn finishes.
 fn context_window_for_model(model: &str) -> u32 {
-    if model.contains("[1m]") {
+    if model == "claude-opus-5" || model.contains("[1m]") {
         CLAUDE_1M_CONTEXT_WINDOW
     } else {
         DEFAULT_CLAUDE_CONTEXT_WINDOW
@@ -3515,6 +3515,10 @@ mod tests {
         assert_eq!(
             context_window_for_model("claude-opus-4-8"),
             DEFAULT_CLAUDE_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-opus-5"),
+            CLAUDE_1M_CONTEXT_WINDOW
         );
         assert_eq!(
             context_window_for_model("opus[1m]"),
