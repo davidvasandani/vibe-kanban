@@ -116,6 +116,13 @@ in the vendor's storage. Every field is validated server-side before any
 write; the browser never supplies command strings or raw file content, and
 command exit is never equated with verified authentication.
 
+### XIV. Repository verification is worktree-safe
+Repository-mandated verification commands must behave predictably in a fresh
+development worktree. Required tool dependencies are either bootstrapped through
+the repository's locked dependency graph or checked before any multi-stage
+verification begins, with an actionable setup command on failure. Verification
+must never silently skip a language or package after reporting overall success.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -135,5 +142,5 @@ command exit is never equated with verified authentication.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.10.0 (adds vendor-config guest-editor principle XIII; previous
-0.9.0 added asynchronous handoff ownership principle XII)
+**Version**: 0.11.0 (adds worktree-safe verification principle XIV; previous
+0.10.0 added vendor-config guest-editor principle XIII)

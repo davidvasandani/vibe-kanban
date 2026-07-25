@@ -1,23 +1,48 @@
-# Implementation Plan: Reliable Workspace Issue Breadcrumbs
+# Implementation Plan: Worktree-Safe Formatting
 
-Task: `vk/719f-vk-workspace-iss`
+1. Add a Node preflight module at
+   `scripts/check-format-prerequisites.mjs`.
+   - Check the package-local Prettier shims for `web-core`, `local-web`, and
+     `remote-web`.
+   - Gather all missing packages in one pass.
+   - Exit with `pnpm install --frozen-lockfile` guidance when incomplete.
 
-1. Inspect the current navbar breadcrumb data flow and the reachable prior fix
-   identified by the project knowledge base.
-2. Refresh the SpecKit constitution and create the feature's SpecKit artifacts.
-3. Add or retain a pure workspace breadcrumb builder with explicit issue
-   resolution states: none, loading, resolved, and unavailable.
-4. Update `NavbarContainer` to consume the project-issue query's loading signal
-   and map the linked workspace relationship into the correct builder state.
-5. Add focused unit coverage for:
-   - resolved labels, order, and issue navigation;
-   - deferral during linked-issue loading;
-   - settled unavailable behavior without navigation or UUID leakage;
-   - unchanged unlinked workspace behavior.
-6. Run the focused tests, frontend typecheck, formatter, and relevant
-   repository checks; repair any failures caused by the change.
-7. Run an independent Codex diff review and address findings until no
-   significant issues remain.
-8. Update the existing workspace-navbar-breadcrumb knowledge page with this
-   task id, refresh its index entry if needed, and commit the knowledge-base
-   update before handoff.
+2. Add regression tests at
+   `scripts/check-format-prerequisites.test.mjs`.
+   - Use temporary fixture workspaces.
+   - Cover no dependencies, all dependencies, and a partial installation.
+   - Assert the diagnostic is actionable and never reproduces the opaque
+     `prettier: command not found` message.
+
+3. Integrate the check in `package.json`.
+   - Register it as `preformat` so pnpm invokes it before the unchanged root
+     `format` command.
+   - Add `test:format-prerequisites` using Node's built-in test runner.
+
+4. Add the focused regression test to
+   `.github/workflows/test.yml` after the existing dependency install and before
+   concurrent frontend checks.
+
+5. Update setup guidance.
+   - Make `pnpm install --frozen-lockfile` the documented fresh-worktree command
+     in `README.md`.
+   - Add the same requirement to `AGENTS.md` and its task-completion checklist.
+
+6. Verify the failure path before installing dependencies.
+   - Run `pnpm run test:format-prerequisites`.
+   - Run `pnpm run format` with no worktree `node_modules`.
+   - Confirm it exits during `preformat`, prints the setup command, and emits no
+     `backend:format`, `cargo fmt`, or `prettier: command not found` output.
+
+7. Verify the ready-worktree path.
+   - Run `pnpm install --frozen-lockfile`.
+   - Run `pnpm run format`.
+   - Confirm backend, web-core, local-web, and remote-web formatting all
+     complete.
+
+8. Run `git diff --check`, independently review the full diff, address
+   significant findings, and repeat focused/full verification as needed.
+
+9. Record the reusable preflight pattern in
+   `docs/knowledge-base/worktree-formatting-prerequisites.md`, tag it with
+   `7243-make-frontend-fo`, and refresh the knowledge-base index.
