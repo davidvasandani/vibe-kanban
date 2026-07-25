@@ -30,6 +30,65 @@ export type CreateTag = { tag_name: string, content: string, };
 
 export type UpdateTag = { tag_name: string | null, content: string | null, };
 
+export type BrowserSession = { id: string, workspace_id: string, host_id: string, profile: string | null, status: BrowserSessionDbStatus, current_url: string | null, created_at: string, updated_at: string, closed_at: string | null, expires_at: string | null, };
+
+export enum BrowserSessionDbStatus { starting = "starting", running = "running", closed = "closed", failed = "failed" }
+
+export type CreateBrowserSession = { workspace_id: string, profile: string | null, };
+
+export type BrowserControlTransition = { id: string, browser_session_id: string, generation: bigint, controller_type: string, execution_id: string | null, user_id: string | null, connection_id: string | null, reason: string, created_at: string, };
+
+export type BrowserController = { "type": "none" } | { "type": "agent", execution_id: string, } | { "type": "human", user_id: string, connection_id: string, };
+
+export type ControlTransitionReason = "acquire" | "release" | "transfer" | "takeover" | "expired" | "disconnected" | "execution_completed" | "closed";
+
+export type BrowserControlState = { controller: BrowserController, generation: number, lease_expires_at: string | null, };
+
+export enum BrowserSessionStatus { starting = "starting", running = "running", closed = "closed", failed = "failed" }
+
+export type BrowserSessionLiveState = { session_id: string, workspace_id: string, status: BrowserSessionStatus, current_url: string | null, page_title: string | null, control: BrowserControlState, expires_at: string | null, };
+
+export type MouseButton = "left" | "middle" | "right";
+
+export type BrowserAction = { "type": "navigate", url: string, } | { "type": "back" } | { "type": "forward" } | { "type": "reload" } | { "type": "click", x: number, y: number, button: MouseButton | null, } | { "type": "mouse_move", x: number, y: number, } | { "type": "type", text: string, } | { "type": "key", key: string, modifiers: Array<string> | null, } | { "type": "set_viewport", width: number, height: number, } | { "type": "evaluate", expression: string, };
+
+export type BrowserActionResult = { command_id: string, generation: number, 
+/**
+ * Present for Evaluate.
+ */
+value: JsonValue | null, current_url: string | null, };
+
+export type BrowserPageInfo = { url: string | null, title: string | null, console_tail: Array<string>, };
+
+export type BrowserSessionError = { "code": "CONTROL_CONFLICT", controller: BrowserController, generation: number, } | { "code": "STALE_GENERATION", controller: BrowserController, generation: number, } | { "code": "CONTROL_LOST", controller: BrowserController, generation: number, } | { "code": "NO_RUNNING_EXECUTION" } | { "code": "SESSION_CLOSED" } | { "code": "NOT_FOUND" } | { "code": "BROWSER_UNAVAILABLE", message: string, } | { "code": "CAPABILITY_DENIED", capability: string, } | { "code": "DRIVER_ERROR", message: string, } | { "code": "TIMEOUT" } | { "code": "STORAGE_ERROR", message: string, } | { "code": "EXECUTION_NOT_IN_WORKSPACE" };
+
+export type BrowserSessionWithState = { session: BrowserSession, live: BrowserSessionLiveState | null, };
+
+export type BrowserSessionListQuery = { workspace_id: string, include_closed: boolean, };
+
+export type BrowserPrincipalKind = "human" | "agent";
+
+export type BrowserAcquireRequest = { as: BrowserPrincipalKind, execution_id: string | null, take_from_agent: boolean, force: boolean, expected_generation: number | null, };
+
+export type BrowserReleaseRequest = { as: BrowserPrincipalKind, execution_id: string | null, expected_generation: number | null, };
+
+export type BrowserTransferTargetRequest = { "type": "none" } | { "type": "agent", execution_id: string, };
+
+export type BrowserTransferRequest = { as: BrowserPrincipalKind, execution_id: string | null, expected_generation: number, target: BrowserTransferTargetRequest, };
+
+export type BrowserActionRequest = { as: BrowserPrincipalKind, execution_id: string | null, command_id: string, expected_generation: number | null, action: BrowserAction, 
+/**
+ * Agent action tools may auto-acquire an uncontrolled session; they can
+ * never displace a live controller.
+ */
+auto_acquire: boolean, };
+
+export type BrowserCloseQuery = { force: boolean, };
+
+export type BrowserWsServerMessage = { "type": "ready", connection_id: string, state: BrowserSessionLiveState, } | { "type": "state", state: BrowserSessionLiveState, } | { "type": "frame", seq: number, width: number, height: number, } | { "type": "command_result", command_id: string | null, ok: boolean, result: BrowserActionResult | null, control: BrowserControlState | null, error: BrowserSessionError | null, };
+
+export type BrowserWsClientMessage = { "type": "input", command_id: string, expected_generation: number | null, action: BrowserAction, } | { "type": "acquire", take_from_agent: boolean, force: boolean, expected_generation: number | null, } | { "type": "release", expected_generation: number | null, } | { "type": "transfer", expected_generation: number, target: BrowserTransferTargetRequest, };
+
 export type DraftFollowUpData = { message: string, executor_config: ExecutorConfig, };
 
 export type DraftWorkspaceData = { message: string, repos: Array<DraftWorkspaceRepo>, executor_config: ExecutorConfig | null, linked_issue: DraftWorkspaceLinkedIssue | null, attachments: Array<DraftWorkspaceAttachment>, };
@@ -408,7 +467,7 @@ export type McpServerTestResult = { name: string,
  */
 transport: string, status: McpServerTestStatus, latency_ms: bigint | null, tool_count: number | null, server_name: string | null, server_version: string | null, error: string | null, 
 /**
- * Raw `WWW-Authenticate` header from a 401/403 probe response, when the
+ * Raw `WWW-Authenticate` header from an authentication response, when the
  * server sent one (per RFC 9728 it points at the protected-resource
  * metadata needed to start OAuth).
  */

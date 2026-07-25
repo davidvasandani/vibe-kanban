@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id as \"id!: Uuid\", browser_session_id as \"browser_session_id!: Uuid\", generation, controller_type, execution_id as \"execution_id: Uuid\", user_id, connection_id as \"connection_id: Uuid\", reason, created_at as \"created_at!: DateTime<Utc>\"\n               FROM browser_control_transitions\n               WHERE browser_session_id = $1\n               ORDER BY created_at DESC\n               LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: Uuid",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "browser_session_id!: Uuid",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "generation",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "controller_type",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "execution_id: Uuid",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "user_id",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "connection_id: Uuid",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: DateTime<Utc>",
+        "ordinal": 8,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "1f610f4af1fa084a4601ee206fcbae7a0311a27a55b92200ded88576b44dfaa4"
+}

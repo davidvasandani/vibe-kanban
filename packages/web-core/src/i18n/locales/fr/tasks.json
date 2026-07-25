@@ -539,5 +539,40 @@
     "errors": {
       "failed": "Échec de la liaison du PR. Veuillez réessayer."
     }
+  },
+  "browser": {
+    "controller": {
+      "you": "Vous contrôlez",
+      "agent": "Contrôlé par l'agent",
+      "human": "Contrôlé par un humain",
+      "none": "Aucun contrôleur"
+    },
+    "toolbar": {
+      "takeControl": "Prendre le contrôle",
+      "release": "Relâcher",
+      "returnToAgent": "Rendre à l'agent",
+      "return": "Rendre",
+      "executionPlaceholder": "UUID d'exécution",
+      "noExecutions": "Aucune exécution récente"
+    },
+    "view": {
+      "connecting": "Connexion à la session du navigateur…",
+      "waitingForFrames": "En attente des images…"
+    },
+    "errors": {
+      "createFailed": "Impossible de démarrer une session de navigateur",
+      "sessionClosed": "Cette session de navigateur est fermée"
+    },
+    "sessions": {
+      "newSession": "Nouvelle session",
+      "profilePlaceholder": "Profil (facultatif)",
+      "defaultProfile": "par défaut",
+      "empty": "Aucune session de navigateur",
+      "expires": "Expire",
+      "close": "Fermer la session"
+    },
+    "session": {
+      "forceCloseConfirm": "Cette session est contrôlée par un agent. Forcer la fermeture ?"
+    }
   }
 }

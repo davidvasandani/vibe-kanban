@@ -18,6 +18,7 @@ use relay_hosts::{
 };
 use relay_webrtc::WebRtcError;
 use services::services::{
+    browser::types::BrowserSessionError,
     config::{ConfigError, EditorOpenError},
     container::ContainerError,
     file::FileError,
@@ -35,6 +36,8 @@ use worktree_manager::WorktreeError;
 pub enum ApiError {
     #[error(transparent)]
     Repo(#[from] RepoError),
+    #[error(transparent)]
+    BrowserSession(#[from] BrowserSessionError),
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
@@ -208,6 +211,31 @@ impl ErrorInfo {
     }
 }
 
+/// Typed browser-session errors: the message is the serde-tagged JSON of the
+/// error (stable `code` field plus controller/generation context) so REST,
+/// MCP, and the frontend share one machine-readable contract.
+fn browser_session_error(err: &BrowserSessionError) -> ErrorInfo {
+    use axum::http::StatusCode;
+    let status = match err {
+        BrowserSessionError::ControlConflict { .. }
+        | BrowserSessionError::StaleGeneration { .. }
+        | BrowserSessionError::ControlLost { .. }
+        | BrowserSessionError::NoRunningExecution
+        | BrowserSessionError::ExecutionNotInWorkspace => StatusCode::CONFLICT,
+        BrowserSessionError::SessionClosed => StatusCode::GONE,
+        BrowserSessionError::NotFound => StatusCode::NOT_FOUND,
+        BrowserSessionError::BrowserUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+        BrowserSessionError::CapabilityDenied { .. } => StatusCode::FORBIDDEN,
+        BrowserSessionError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        BrowserSessionError::Driver { .. } | BrowserSessionError::Storage { .. } => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    let payload =
+        serde_json::to_string(err).unwrap_or_else(|_| format!("{{\"code\":\"{}\"}}", err.code()));
+    ErrorInfo::with_status(status, "BrowserSessionError", payload)
+}
+
 fn remote_client_error(err: &RemoteClientError) -> ErrorInfo {
     use services::services::remote_client::HandoffErrorCode;
     match err {
@@ -316,6 +344,7 @@ fn remote_client_error(err: &RemoteClientError) -> ErrorInfo {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let info = match &self {
+            ApiError::BrowserSession(err) => browser_session_error(err),
             ApiError::Repo(RepoError::Database(_)) => ErrorInfo::internal("RepoError"),
             ApiError::Repo(RepoError::NotFound) => {
                 ErrorInfo::not_found("RepoError", "Repository not found.")
@@ -616,5 +645,51 @@ impl From<RelayPairingClientError> for ApiError {
                 ApiError::BadGateway(err.to_string())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod browser_error_tests {
+    use axum::http::StatusCode;
+    use services::services::browser::types::{BrowserController, BrowserSessionError};
+
+    use super::browser_session_error;
+
+    #[test]
+    fn typed_codes_map_to_conflict_statuses_and_json_payload() {
+        let err = BrowserSessionError::ControlLost {
+            controller: BrowserController::Human {
+                user_id: "u".into(),
+                connection_id: uuid::Uuid::nil(),
+            },
+            generation: 7,
+        };
+        let info = browser_session_error(&err);
+        assert_eq!(info.status, StatusCode::CONFLICT);
+        let payload: serde_json::Value =
+            serde_json::from_str(info.message.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["code"], "CONTROL_LOST");
+        assert_eq!(payload["generation"], 7);
+        assert_eq!(payload["controller"]["type"], "human");
+    }
+
+    #[test]
+    fn unavailable_maps_to_503_and_capability_to_403() {
+        let unavailable = BrowserSessionError::BrowserUnavailable {
+            message: "no chromium".into(),
+        };
+        assert_eq!(
+            browser_session_error(&unavailable).status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let denied = BrowserSessionError::CapabilityDenied {
+            capability: "evaluate".into(),
+        };
+        assert_eq!(browser_session_error(&denied).status, StatusCode::FORBIDDEN);
+        let stale = BrowserSessionError::StaleGeneration {
+            controller: BrowserController::None,
+            generation: 3,
+        };
+        assert_eq!(browser_session_error(&stale).status, StatusCode::CONFLICT);
     }
 }

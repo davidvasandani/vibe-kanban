@@ -436,6 +436,7 @@
       "validation": {
         "nameRequired": "名前は必須です。",
         "nameWhitespace": "名前の先頭または末尾に空白を含めることはできません。",
+        "nameIdentifier": "サーバー識別子に使用できるのは英数字、アンダースコア、ハイフンのみです。「{{suggestion}}」をお試しください。判読しやすいテキストには別の表示ラベルを使用してください。",
         "nameTaken": "この名前のサーバーは既に存在します。",
         "commandRequired": "コマンドは必須です。",
         "urlRequired": "URL は必須です。",

@@ -115,6 +115,16 @@ import {
   SpecKitTasks,
   SpecKitUpdateArtifactRequest,
   SpecKitToggleTaskRequest,
+  BrowserAcquireRequest,
+  BrowserActionRequest,
+  BrowserActionResult,
+  BrowserControlState,
+  BrowserControlTransition,
+  BrowserPageInfo,
+  BrowserReleaseRequest,
+  BrowserSessionWithState,
+  BrowserTransferRequest,
+  CreateBrowserSession,
 } from 'shared/types';
 import type {
   Project as RemoteProject,
@@ -834,6 +844,123 @@ export const executionProcessesApi = {
       }
     );
     return handleApiResponse<void>(response);
+  },
+};
+
+// Browser Session APIs
+export const browserSessionsApi = {
+  create: async (
+    data: CreateBrowserSession
+  ): Promise<BrowserSessionWithState> => {
+    const response = await makeRequest('/api/browser-sessions', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponse<BrowserSessionWithState>(response);
+  },
+
+  list: async (
+    workspaceId: string,
+    includeClosed = false
+  ): Promise<BrowserSessionWithState[]> => {
+    const params = new URLSearchParams({
+      workspace_id: workspaceId,
+      include_closed: String(includeClosed),
+    });
+    const response = await makeRequest(`/api/browser-sessions?${params}`);
+    return handleApiResponse<BrowserSessionWithState[]>(response);
+  },
+
+  get: async (sessionId: string): Promise<BrowserSessionWithState> => {
+    const response = await makeRequest(`/api/browser-sessions/${sessionId}`);
+    return handleApiResponse<BrowserSessionWithState>(response);
+  },
+
+  close: async (sessionId: string, force = false): Promise<void> => {
+    const response = await makeRequest(
+      `/api/browser-sessions/${sessionId}?force=${force}`,
+      { method: 'DELETE' }
+    );
+    return handleApiResponse<void>(response);
+  },
+
+  getControl: async (sessionId: string): Promise<BrowserControlState> => {
+    const response = await makeRequest(
+      `/api/browser-sessions/${sessionId}/control`
+    );
+    return handleApiResponse<BrowserControlState>(response);
+  },
+
+  acquire: async (
+    sessionId: string,
+    data: BrowserAcquireRequest
+  ): Promise<BrowserControlState> => {
+    const response = await makeRequest(
+      `/api/browser-sessions/${sessionId}/control/acquire`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<BrowserControlState>(response);
+  },
+
+  release: async (
+    sessionId: string,
+    data: BrowserReleaseRequest
+  ): Promise<BrowserControlState> => {
+    const response = await makeRequest(
+      `/api/browser-sessions/${sessionId}/control/release`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<BrowserControlState>(response);
+  },
+
+  transfer: async (
+    sessionId: string,
+    data: BrowserTransferRequest
+  ): Promise<BrowserControlState> => {
+    const response = await makeRequest(
+      `/api/browser-sessions/${sessionId}/control/transfer`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<BrowserControlState>(response);
+  },
+
+  action: async (
+    sessionId: string,
+    data: BrowserActionRequest
+  ): Promise<BrowserActionResult> => {
+    const response = await makeRequest(
+      `/api/browser-sessions/${sessionId}/actions`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<BrowserActionResult>(response);
+  },
+
+  pageInfo: async (sessionId: string): Promise<BrowserPageInfo> => {
+    const response = await makeRequest(
+      `/api/browser-sessions/${sessionId}/page`
+    );
+    return handleApiResponse<BrowserPageInfo>(response);
+  },
+
+  transitions: async (
+    sessionId: string
+  ): Promise<BrowserControlTransition[]> => {
+    const response = await makeRequest(
+      `/api/browser-sessions/${sessionId}/transitions`
+    );
+    return handleApiResponse<BrowserControlTransition[]>(response);
   },
 };
 

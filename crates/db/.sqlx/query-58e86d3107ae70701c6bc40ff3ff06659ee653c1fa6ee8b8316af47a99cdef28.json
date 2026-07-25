@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE browser_sessions\n               SET status = $2,\n                   closed_at = CASE WHEN $3 THEN datetime('now', 'subsec') ELSE closed_at END,\n                   updated_at = datetime('now', 'subsec')\n               WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "58e86d3107ae70701c6bc40ff3ff06659ee653c1fa6ee8b8316af47a99cdef28"
+}

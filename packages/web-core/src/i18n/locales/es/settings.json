@@ -440,6 +440,7 @@
       "validation": {
         "nameRequired": "El nombre es obligatorio.",
         "nameWhitespace": "El nombre no puede empezar ni terminar con espacios.",
+        "nameIdentifier": "Los identificadores de servidor solo pueden contener letras, números, guiones bajos y guiones. Prueba con “{{suggestion}}”; usa una etiqueta de visualización aparte para el texto legible.",
         "nameTaken": "Ya existe un servidor con este nombre.",
         "commandRequired": "El comando es obligatorio.",
         "urlRequired": "La URL es obligatoria.",

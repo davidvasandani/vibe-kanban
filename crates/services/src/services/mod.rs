@@ -2,6 +2,7 @@ pub mod analytics;
 pub mod approvals;
 pub mod auth;
 pub mod aws_sso;
+pub mod browser;
 pub mod cli_tools;
 pub mod config;
 pub mod container;
