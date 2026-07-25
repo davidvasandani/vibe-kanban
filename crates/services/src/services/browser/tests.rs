@@ -406,3 +406,45 @@ fn close_requires_holder_uncontrolled_or_force() {
     let human_controller = h.to_controller();
     assert!(!close_permitted(&agent(exec), &human_controller, false));
 }
+
+#[tokio::test]
+async fn late_joining_observer_gets_the_last_frame() {
+    // Screencast frames only arrive on repaint, and a broadcast channel
+    // delivers nothing sent before a subscriber joined. An observer opening
+    // the live view onto an idle page must still get the current picture.
+    let rt = runtime().await;
+    let ag = agent(Uuid::new_v4());
+    rt.acquire(&ag, false, false, None).unwrap();
+
+    assert!(rt.last_frame().is_none(), "no frame before any repaint");
+
+    // A mutation makes the driver emit a frame.
+    rt.execute(
+        &ag,
+        Uuid::new_v4(),
+        Some(1),
+        &navigate("https://painted.example"),
+    )
+    .await
+    .unwrap();
+    // The forwarder task records it asynchronously.
+    for _ in 0..50 {
+        if rt.last_frame().is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let cached = rt
+        .last_frame()
+        .expect("last frame retained for late joiners");
+    assert!(!cached.data.is_empty());
+
+    // A subscriber attaching now receives nothing live (page is idle) — the
+    // cached frame is what makes the view paint.
+    let mut late = rt.subscribe_frames();
+    assert!(
+        late.try_recv().is_err(),
+        "idle page pushes no new frames to a late subscriber"
+    );
+}
