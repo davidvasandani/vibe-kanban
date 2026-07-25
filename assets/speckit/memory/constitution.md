@@ -25,6 +25,13 @@ each agent's native config format at the boundary. Agent-specific exceptions mus
 be documented in the spec, preserve the shared behavior, and include validation
 for each affected agent.
 
+### V. Settings host scope is a data boundary
+Host-specific Settings features must bind reads, writes, cache keys, and draft
+state to the Settings-selected host. Specs must identify whether a Settings
+section is local-only, remote-only, or host-scoped, and host-scoped work must
+validate that switching hosts cannot show stale data or mutate the wrong
+machine.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -34,4 +41,4 @@ for each affected agent.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.2.0
+**Version**: 0.3.0
