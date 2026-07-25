@@ -139,10 +139,10 @@ sequential.
       failure preserving draft content, delete selected file selecting another
       status, reset-one confirmation, and reset-all refresh behavior. Depends on
       T015, T016, T022.
-- [ ] T024 [P] Run focused frontend tests for pipeline helper, hook/query-key,
+- [x] T024 [P] Run focused frontend tests for pipeline helper, hook/query-key,
       Settings dirty host switching, and Pipelines Settings section behavior.
       Depends on T003, T005, T007, T023.
-- [ ] T025 [P] Run the web-core TypeScript check and resolve only issues caused
+- [x] T025 [P] Run the web-core TypeScript check and resolve only issues caused
       by this feature. Depends on T021.
 - [x] T026 [P] Run localization shape verification, or add a lightweight script
       check if none exists, proving all seven
@@ -155,7 +155,7 @@ sequential.
       after the completed frontend integration. Depends on T024, T025, T026.
 - [ ] T028 Run `pnpm run lint` and fix only issues introduced by the Pipelines
       Settings feature. Depends on T027.
-- [ ] T029 Run `pnpm run format` before completion, as required by `AGENTS.md`,
+- [x] T029 Run `pnpm run format` before completion, as required by `AGENTS.md`,
       then inspect the diff to ensure formatting did not rewrite unrelated user
       changes. Depends on T028.
 - [ ] T030 Manually smoke-test the Settings UI when the local dev environment is

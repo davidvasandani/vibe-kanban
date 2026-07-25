@@ -156,6 +156,8 @@ export function PipelinesSettingsSection() {
   const [validationTuple, setValidationTuple] =
     useState<PipelineValidationTuple | null>(null);
   const latestTupleRef = useRef<PipelineValidationTuple | null>(null);
+  const seededRawIdentityRef = useRef<string | null>(null);
+  const allowRawReseedRef = useRef(false);
 
   const effectiveId = selectedId;
   const isDirty = draftKind !== null && draftContent !== lastPersistedContent;
@@ -164,7 +166,8 @@ export function PipelinesSettingsSection() {
     machineClient,
     draftKind === 'existing' ? selectedId : null
   );
-  const validateMutation = useValidatePipelineMutation(machineClient);
+  const { mutateAsync: validatePipeline } =
+    useValidatePipelineMutation(machineClient);
   const writeMutation = useWritePipelineRawMutation(machineClient);
   const deleteMutation = useDeletePipelineMutation(machineClient);
   const resetMutation = useResetPipelineMutation(machineClient);
@@ -245,6 +248,8 @@ export function PipelinesSettingsSection() {
   }, [draftKind, selectedId]);
 
   useEffect(() => {
+    const rawIdentity =
+      selectedId == null ? null : `${scope}\u0000${selectedId}`;
     if (
       draftKind !== 'existing' ||
       !selectedId ||
@@ -255,6 +260,13 @@ export function PipelinesSettingsSection() {
       return;
     }
 
+    const selectionChanged = seededRawIdentityRef.current !== rawIdentity;
+    if (isDirty && !selectionChanged && !allowRawReseedRef.current) {
+      return;
+    }
+
+    seededRawIdentityRef.current = rawIdentity;
+    allowRawReseedRef.current = false;
     setDraftContent(rawQuery.data);
     setLastPersistedContent(rawQuery.data);
     setMutationError(null);
@@ -262,6 +274,7 @@ export function PipelinesSettingsSection() {
     resetValidation();
   }, [
     draftKind,
+    isDirty,
     rawQuery.data,
     rawQuery.isError,
     rawQuery.isLoading,
@@ -292,7 +305,7 @@ export function PipelinesSettingsSection() {
       setValidationError(null);
 
       try {
-        const result = await validateMutation.mutateAsync({ id, content });
+        const result = await validatePipeline({ id, content });
         if (!validationTupleMatches(latestTupleRef.current, tuple)) {
           return false;
         }
@@ -311,7 +324,7 @@ export function PipelinesSettingsSection() {
         return false;
       }
     },
-    [currentTuple, machineClient, validateMutation]
+    [currentTuple, machineClient, validatePipeline]
   );
 
   useEffect(() => {
@@ -534,11 +547,12 @@ export function PipelinesSettingsSection() {
 
     try {
       setMutationError(null);
+      allowRawReseedRef.current = true;
       await resetMutation.mutateAsync(selectedId);
       setDraftKind('existing');
       await statusesQuery.refetch();
-      await rawQuery.refetch();
     } catch (err) {
+      allowRawReseedRef.current = false;
       setMutationError(errorText(err));
     }
   };
@@ -566,11 +580,12 @@ export function PipelinesSettingsSection() {
 
     try {
       setMutationError(null);
+      allowRawReseedRef.current = true;
       await resetAllMutation.mutateAsync();
       setDraftKind('existing');
       await statusesQuery.refetch();
-      await rawQuery.refetch();
     } catch (err) {
+      allowRawReseedRef.current = false;
       setMutationError(errorText(err));
     }
   };

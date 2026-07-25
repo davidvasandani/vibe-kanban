@@ -128,18 +128,28 @@ vi.mock('./SettingsDirtyContext', () => ({
   }),
 }));
 
-vi.mock('./SettingsHostContext', () => ({
-  useSettingsMachineClient: (): MachineClient =>
-    ({
-      target: {
-        kind: 'remote',
-        id: mocks.currentHost,
-        apiHostId: mocks.currentHost,
-        label: mocks.currentHost,
-      },
-      queryScopeKey: ['machine', mocks.currentHost],
-    }) as MachineClient,
-}));
+vi.mock('./SettingsHostContext', () => {
+  const clients = new Map<string, MachineClient>();
+  return {
+    useSettingsMachineClient: (): MachineClient => {
+      const existing = clients.get(mocks.currentHost);
+      if (existing) {
+        return existing;
+      }
+      const client = {
+        target: {
+          kind: 'remote',
+          id: mocks.currentHost,
+          apiHostId: mocks.currentHost,
+          label: mocks.currentHost,
+        },
+        queryScopeKey: ['machine', mocks.currentHost],
+      } as MachineClient;
+      clients.set(mocks.currentHost, client);
+      return client;
+    },
+  };
+});
 
 vi.mock('@/shared/hooks/usePipelines', () => ({
   usePipelineStatuses: (machineClient: MachineClient) => ({
@@ -164,7 +174,7 @@ vi.mock('@/shared/hooks/usePipelines', () => ({
     refetch: vi.fn(),
   }),
   useValidatePipelineMutation: () => ({
-    mutateAsync: (body: PipelineValidateBody) => mocks.validate(body),
+    mutateAsync: mocks.validate,
   }),
   useWritePipelineRawMutation: () => ({
     mutateAsync: mocks.write,
