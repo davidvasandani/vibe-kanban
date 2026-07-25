@@ -4,6 +4,7 @@ import { IssueSectionContainer } from './IssueSectionContainer';
 import { FileTreeContainer } from './FileTreeContainer';
 import { ProcessListContainer } from './ProcessListContainer';
 import { PreviewControlsContainer } from './PreviewControlsContainer';
+import { BrowserControlsContainer } from './BrowserControlsContainer';
 import { GitPanelContainer } from './GitPanelContainer';
 import { TerminalPanelContainer } from '@/shared/components/TerminalPanelContainer';
 import { WorkspaceNotesContainer } from './WorkspaceNotesContainer';
@@ -64,6 +65,10 @@ export const RightSidebar = memo(function RightSidebar({
     PERSIST_KEYS.devServerSection,
     true
   );
+  const [browserExpanded] = usePersistedExpanded(
+    PERSIST_KEYS.rightPanelBrowser,
+    true
+  );
   const [gitExpanded] = usePersistedExpanded(
     PERSIST_KEYS.gitPanelRepositories,
     true
@@ -80,7 +85,8 @@ export const RightSidebar = memo(function RightSidebar({
   const hasUpperContent =
     rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.CHANGES ||
     rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.LOGS ||
-    rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.PREVIEW;
+    rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.PREVIEW ||
+    rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.BROWSER;
 
   const upperExpanded = (() => {
     if (rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.CHANGES)
@@ -89,6 +95,8 @@ export const RightSidebar = memo(function RightSidebar({
       return processesExpanded;
     if (rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.PREVIEW)
       return devServerExpanded;
+    if (rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.BROWSER)
+      return browserExpanded;
     return false;
   })();
 
@@ -185,6 +193,23 @@ export const RightSidebar = memo(function RightSidebar({
           });
         }
         break;
+      case RIGHT_MAIN_PANEL_MODES.BROWSER:
+        if (selectedWorkspace) {
+          result.unshift({
+            title: 'Browser',
+            persistKey: PERSIST_KEYS.rightPanelBrowser,
+            visible: hasUpperContent,
+            expanded: upperExpanded,
+            content: (
+              <BrowserControlsContainer
+                workspaceId={selectedWorkspace.id}
+                className=""
+              />
+            ),
+            actions: [],
+          });
+        }
+        break;
       case null:
         break;
     }
@@ -201,6 +226,7 @@ export const RightSidebar = memo(function RightSidebar({
     changesExpanded,
     processesExpanded,
     devServerExpanded,
+    browserExpanded,
     isTerminalVisible,
     isTerminalExpanded,
     hasUpperContent,

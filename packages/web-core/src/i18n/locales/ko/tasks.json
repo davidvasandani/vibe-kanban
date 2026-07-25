@@ -539,5 +539,40 @@
     "errors": {
       "failed": "PR 연결에 실패했습니다. 다시 시도해 주세요."
     }
+  },
+  "browser": {
+    "controller": {
+      "you": "내가 제어 중",
+      "agent": "에이전트가 제어 중",
+      "human": "사용자가 제어 중",
+      "none": "컨트롤러 없음"
+    },
+    "toolbar": {
+      "takeControl": "제어 가져오기",
+      "release": "해제",
+      "returnToAgent": "에이전트에게 반환",
+      "return": "반환",
+      "executionPlaceholder": "실행 UUID",
+      "noExecutions": "최근 실행 없음"
+    },
+    "view": {
+      "connecting": "브라우저 세션에 연결 중…",
+      "waitingForFrames": "프레임 대기 중…"
+    },
+    "errors": {
+      "createFailed": "브라우저 세션을 시작하지 못했습니다",
+      "sessionClosed": "이 브라우저 세션은 종료되었습니다"
+    },
+    "sessions": {
+      "newSession": "새 세션",
+      "profilePlaceholder": "프로필 (선택 사항)",
+      "defaultProfile": "기본값",
+      "empty": "브라우저 세션 없음",
+      "expires": "만료",
+      "close": "세션 닫기"
+    },
+    "session": {
+      "forceCloseConfirm": "이 세션은 에이전트가 제어하고 있습니다. 강제로 닫을까요?"
+    }
   }
 }

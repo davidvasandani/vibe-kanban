@@ -6,6 +6,7 @@ update pages (and this index) when a task ships something reusable.
 
 | Page | Summary | Contributing tasks |
 | --- | --- | --- |
+| [worktree-formatting-prerequisites](worktree-formatting-prerequisites.md) | Fail-before-mutation formatter preflights, package-local pnpm executable checks, locked setup guidance, fixture testing, and CI path-filter coverage | `7243-make-frontend-fo` |
 | [interrupted-worktree-recovery](interrupted-worktree-recovery.md) | Restart-safe WIP capture, truthful multi-repo partial-failure metadata, killed-orphan terminal state, and dirty reset/retry guards before process/history cleanup | `959a-restart-rewinds` |
 | [claude-log-normalization](claude-log-normalization.md) | How `ClaudeLogProcessor` turns stream-JSON into `/entries/{i}` patches; `EntryIndexProvider` idioms; the AmpResume index-reset gotcha | `4095-thinking-tokens` |
 | [collapsing-repeated-log-entries](collapsing-repeated-log-entries.md) | Server-side pattern for collapsing uninterrupted repeated log events into one entry with a `✓` per repeat | `4095-thinking-tokens` |

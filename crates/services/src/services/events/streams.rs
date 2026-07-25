@@ -1,4 +1,7 @@
-use db::models::{execution_process::ExecutionProcess, scratch::Scratch, workspace::Workspace};
+use db::models::{
+    browser_session::BrowserSession, execution_process::ExecutionProcess, scratch::Scratch,
+    workspace::Workspace,
+};
 use futures::StreamExt;
 use serde_json::json;
 use tokio_stream::wrappers::BroadcastStream;
@@ -306,6 +309,69 @@ impl EventService {
                         None
                     }
                     Ok(other) => Some(Ok(other)),
+                    Err(_) => None,
+                }
+            },
+        );
+
+        let initial_stream = futures::stream::iter(vec![Ok(initial_msg), Ok(LogMsg::Ready)]);
+        Ok(initial_stream.chain(filtered_stream).boxed())
+    }
+
+    /// Stream browser sessions for a workspace with initial snapshot (raw
+    /// LogMsg format for WebSocket). Rows are DB-backed; live controller
+    /// state rides the per-session live-view WS, not this stream.
+    pub async fn stream_browser_sessions_for_workspace_raw(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>,
+        super::types::EventError,
+    > {
+        let sessions = BrowserSession::find_by_workspace(&self.db.pool, workspace_id, true).await?;
+        let sessions_map: serde_json::Map<String, serde_json::Value> = sessions
+            .into_iter()
+            .map(|session| {
+                (
+                    session.id.to_string(),
+                    serde_json::to_value(session).unwrap(),
+                )
+            })
+            .collect();
+
+        let initial_patch = json!([{
+            "op": "replace",
+            "path": "/browser_sessions",
+            "value": sessions_map
+        }]);
+        let initial_msg = LogMsg::JsonPatch(serde_json::from_value(initial_patch).unwrap());
+
+        let filtered_stream = BroadcastStream::new(self.msg_store.get_receiver()).filter_map(
+            move |msg_result| async move {
+                match msg_result {
+                    Ok(LogMsg::JsonPatch(patch)) => {
+                        if let Some(op) = patch.0.first()
+                            && op.path().starts_with("/browser_sessions/")
+                        {
+                            let value = match op {
+                                json_patch::PatchOperation::Add(a) => Some(&a.value),
+                                json_patch::PatchOperation::Replace(r) => Some(&r.value),
+                                json_patch::PatchOperation::Remove(_) => {
+                                    return Some(Ok(LogMsg::JsonPatch(patch)));
+                                }
+                                _ => None,
+                            };
+                            if let Some(v) = value
+                                && let Ok(session) =
+                                    serde_json::from_value::<BrowserSession>(v.clone())
+                                && session.workspace_id == workspace_id
+                            {
+                                return Some(Ok(LogMsg::JsonPatch(patch)));
+                            }
+                        }
+                        None
+                    }
+                    Ok(_) => None,
                     Err(_) => None,
                 }
             },

@@ -3,8 +3,8 @@ use std::{str::FromStr, sync::Arc};
 use db::{
     DBService,
     models::{
-        execution_process::ExecutionProcess, scratch::Scratch, session::Session,
-        workspace::Workspace,
+        browser_session::BrowserSession, execution_process::ExecutionProcess, scratch::Scratch,
+        session::Session, workspace::Workspace,
     },
 };
 use serde_json::json;
@@ -20,7 +20,7 @@ mod streams;
 #[path = "events/types.rs"]
 pub mod types;
 
-pub use patches::{execution_process_patch, scratch_patch, workspace_patch};
+pub use patches::{browser_session_patch, execution_process_patch, scratch_patch, workspace_patch};
 pub use types::{EventError, EventPatch, EventPatchInner, HookTables, RecordTypes};
 
 #[derive(Clone)]
@@ -99,6 +99,14 @@ impl EventService {
                                     msg_store_for_preupdate.push_patch(patch);
                                 }
                             }
+                            "browser_sessions" => {
+                                if let Ok(value) = preupdate.get_old_column_value(0)
+                                    && let Ok(session_id) = <Uuid as Decode<Sqlite>>::decode(value)
+                                {
+                                    let patch = browser_session_patch::remove(session_id);
+                                    msg_store_for_preupdate.push_patch(patch);
+                                }
+                            }
                             "scratch" => {
                                 // Composite key: need both id (column 0) and scratch_type (column 1)
                                 if let Ok(id_val) = preupdate.get_old_column_value(0)
@@ -128,7 +136,8 @@ impl EventService {
                             let record_type: RecordTypes = match (table, hook.operation.clone()) {
                                 (HookTables::Workspaces, SqliteOperation::Delete)
                                 | (HookTables::ExecutionProcesses, SqliteOperation::Delete)
-                                | (HookTables::Scratch, SqliteOperation::Delete) => {
+                                | (HookTables::Scratch, SqliteOperation::Delete)
+                                | (HookTables::BrowserSessions, SqliteOperation::Delete) => {
                                     return;
                                 }
                                 (HookTables::Workspaces, _) => {
@@ -157,6 +166,19 @@ impl EventService {
                                         Err(e) => {
                                             tracing::error!(
                                                 "Failed to fetch execution_process: {:?}",
+                                                e
+                                            );
+                                            return;
+                                        }
+                                    }
+                                }
+                                (HookTables::BrowserSessions, _) => {
+                                    match BrowserSession::find_by_rowid(&db.pool, rowid).await {
+                                        Ok(Some(session)) => RecordTypes::BrowserSession(session),
+                                        Ok(None) => RecordTypes::DeletedBrowserSession { rowid },
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Failed to fetch browser_session: {:?}",
                                                 e
                                             );
                                             return;
@@ -223,6 +245,19 @@ impl EventService {
                                     return;
                                 }
                                 RecordTypes::DeletedWorkspace { .. } => {
+                                    return;
+                                }
+                                RecordTypes::BrowserSession(session) => {
+                                    let patch = match hook.operation {
+                                        SqliteOperation::Insert => {
+                                            browser_session_patch::add(session)
+                                        }
+                                        _ => browser_session_patch::replace(session),
+                                    };
+                                    msg_store_for_hook.push_patch(patch);
+                                    return;
+                                }
+                                RecordTypes::DeletedBrowserSession { .. } => {
                                     return;
                                 }
                                 RecordTypes::ExecutionProcess(process) => {

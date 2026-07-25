@@ -37,6 +37,7 @@ import { RightSidebar } from './RightSidebar';
 import { ChangesPanelContainer } from './ChangesPanelContainer';
 import { CreateChatBoxContainer } from '@/shared/components/CreateChatBoxContainer';
 import { PreviewBrowserContainer } from './PreviewBrowserContainer';
+import { BrowserPanelContainer } from './BrowserPanelContainer';
 import { WorkspacesGuideDialog } from '@/shared/dialogs/shared/WorkspacesGuideDialog';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { LinkedIssueProvider } from '@/shared/providers/remote/LinkedIssueContext';
@@ -379,6 +380,21 @@ export function WorkspacesLayout() {
               )}
             </div>
 
+            {/* Browser tab */}
+            <div
+              className={cn(
+                'flex-1 min-h-0 overflow-hidden',
+                mobileTab !== 'browser' && 'hidden'
+              )}
+            >
+              {selectedWorkspace?.id && (
+                <BrowserPanelContainer
+                  workspaceId={selectedWorkspace.id}
+                  className=""
+                />
+              )}
+            </div>
+
             {/* Git tab */}
             <div
               className={cn(
@@ -492,6 +508,13 @@ export function WorkspacesLayout() {
                 {rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.PREVIEW &&
                   selectedWorkspace?.id && (
                     <PreviewBrowserContainer
+                      workspaceId={selectedWorkspace.id}
+                      className=""
+                    />
+                  )}
+                {rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.BROWSER &&
+                  selectedWorkspace?.id && (
+                    <BrowserPanelContainer
                       workspaceId={selectedWorkspace.id}
                       className=""
                     />

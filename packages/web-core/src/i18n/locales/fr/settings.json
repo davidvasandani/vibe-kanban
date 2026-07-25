@@ -436,6 +436,7 @@
       "validation": {
         "nameRequired": "Le nom est requis.",
         "nameWhitespace": "Le nom ne peut pas commencer ni se terminer par un espace.",
+        "nameIdentifier": "Les identifiants de serveur ne peuvent contenir que des lettres, des chiffres, des tirets bas et des tirets. Essayez « {{suggestion}} » ; utilisez un libellé d’affichage distinct pour le texte lisible.",
         "nameTaken": "Un serveur portant ce nom existe déjà.",
         "commandRequired": "La commande est requise.",
         "urlRequired": "L'URL est requise.",

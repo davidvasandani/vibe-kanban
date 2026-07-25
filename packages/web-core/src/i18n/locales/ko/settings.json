@@ -436,6 +436,7 @@
       "validation": {
         "nameRequired": "이름은 필수입니다.",
         "nameWhitespace": "이름은 공백으로 시작하거나 끝날 수 없습니다.",
+        "nameIdentifier": "서버 식별자는 문자, 숫자, 밑줄, 하이픈만 사용할 수 있습니다. “{{suggestion}}”을(를) 시도해 보세요. 사람이 읽기 쉬운 텍스트에는 별도의 표시 라벨을 사용하세요.",
         "nameTaken": "이 이름의 서버가 이미 있습니다.",
         "commandRequired": "명령어는 필수입니다.",
         "urlRequired": "URL은 필수입니다.",

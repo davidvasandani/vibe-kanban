@@ -14,6 +14,8 @@
 //! with, and replying via the unverified payload's `response_url` would
 //! hand responses to forged requests.
 
+use std::time::Duration;
+
 use axum::{
     Json, Router,
     body::Bytes,
@@ -424,10 +426,12 @@ async fn handle_message_action(
     StatusCode::OK.into_response()
 }
 
-/// While the AI summary is generated, the initial modal carries this hint so
-/// the user knows an update is coming (FR-8).
-const SUMMARIZING_HINT: &str = "✨ Summarizing this thread — the title and description will \
-update in a moment.";
+/// Delay between shimmer frames of the "Summarizing…" loading modal (FR-8).
+const SUMMARIZE_FRAME_DELAY: Duration = Duration::from_millis(650);
+/// Hard cap on the summarizing wait: past this we stop animating and fall back
+/// to the mechanical prefill so the modal always becomes editable (the AI is a
+/// convenience, never a block — constitution: outbound-AI egress is degradable).
+const SUMMARIZE_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// The deferred half of `handle_message_action`: decide which modal to show
 /// and open it, then (when AI is active) fetch the thread, summarize it, and
@@ -505,89 +509,136 @@ async fn open_shortcut_modal(
         })
         .collect();
 
-    // Build the mechanical prefill (spec FR-2/FR-3) — shown immediately,
-    // independently of the AI path. When AI is active, carry the hint so the
-    // user is told an update is coming before the single follow-up lands.
     let mechanical_title = prefill::title_from_message(message_text);
     let mechanical_description =
         prefill::description_from_message(message_text, permalink.as_deref());
-    let hint = ai_active.then_some(SUMMARIZING_HINT);
-    let created = modal::build_create_issue_modal(
-        &options,
-        &mechanical_title,
-        &mechanical_description,
-        &private_metadata,
-        hint,
-        false,
-    );
-    if created.truncated_projects > 0 {
-        warn!(
-            organization_id = %organization_id,
-            truncated = created.truncated_projects,
-            "slack project selector truncated at Slack's 100-option cap"
+
+    // Helper: the editable create-issue form. Inputs always render fresh here —
+    // either the modal opens straight to it (AI off) or it replaces the
+    // input-less "Summarizing…" modal (AI on), so there is never prior input
+    // state for Slack to preserve.
+    let build_form = |title: &str, description: &str| {
+        let created = modal::build_create_issue_modal(
+            &options,
+            title,
+            description,
+            &private_metadata,
+            None,
+            false,
         );
+        if created.truncated_projects > 0 {
+            warn!(
+                organization_id = %organization_id,
+                truncated = created.truncated_projects,
+                "slack project selector truncated at Slack's 100-option cap"
+            );
+        }
+        created.view
+    };
+
+    // AI off (or no key): open the editable form immediately — unchanged.
+    if !ai_active {
+        let view = build_form(&mechanical_title, &mechanical_description);
+        if let Err(error) = client.views_open(&action.trigger_id, view).await {
+            warn!(%error, "failed to open create-issue modal");
+        }
+        return;
     }
 
-    let view_id = match client.views_open(&action.trigger_id, created.view).await {
-        Ok(view_id) => view_id,
+    // AI on: open the animated "Summarizing…" loading modal (Rovo-style, FR-8),
+    // then animate it while the summary is generated, and finally replace it
+    // with the editable form — AI-filled on success, mechanical on any
+    // failure/timeout (FR-5). The wait is bounded by SUMMARIZE_TIMEOUT so the
+    // modal always becomes editable; the user can Cancel at any point.
+    let view_id = match client
+        .views_open(
+            &action.trigger_id,
+            modal::build_summarizing_modal(0, &private_metadata),
+        )
+        .await
+    {
+        Ok(Some(view_id)) => view_id,
+        Ok(None) => {
+            // Can't animate/update without a view id — fall back to opening the
+            // plain form is impossible (trigger spent), so just log.
+            warn!("slack views.open returned no view id for summarizing modal");
+            return;
+        }
         Err(error) => {
-            warn!(%error, "failed to open create-issue modal");
+            warn!(%error, "failed to open summarizing modal");
             return;
         }
     };
 
-    // The mechanical modal is open and usable. Everything below is optional
-    // enrichment; nothing here can block or undo the modal (FR-2/FR-5).
-    if !ai_active {
-        return;
-    }
-    let Some(view_id) = view_id else {
-        // No view id to update — leave the (hinted) mechanical modal as-is.
-        warn!("slack views.open returned no view id; skipping AI summary");
-        return;
-    };
-
-    let summary = summarize_thread_for_modal(
+    let summary = animate_until_summarized(
         &state,
         &client,
+        &view_id,
+        &private_metadata,
         encrypted_anthropic_api_key.as_deref(),
         &action,
     )
     .await;
 
-    match summary {
-        Some(summary) => {
-            let ai_title = prefill::title_from_message(&summary.title);
-            let ai_description =
-                prefill::description_from_message(&summary.description, permalink.as_deref());
-            // Drop the hint and swap in the AI title/description. `ai_variant
-            // = true` uses fresh input ids so Slack actually shows the new
-            // values on views.update (input-state preservation gotcha).
-            let updated = modal::build_create_issue_modal(
-                &options,
-                &ai_title,
-                &ai_description,
-                &private_metadata,
-                None,
-                true,
-            );
-            if let Err(error) = client.views_update(&view_id, updated.view).await {
-                warn!(%error, "failed to apply AI summary to slack modal");
-            }
+    let final_view = match summary {
+        Some(summary) => build_form(
+            &prefill::title_from_message(&summary.title),
+            &prefill::description_from_message(&summary.description, permalink.as_deref()),
+        ),
+        None => build_form(&mechanical_title, &mechanical_description),
+    };
+    // The terminal update replaces the loading modal with the editable form.
+    // Retry once on failure so a transient error (e.g. a rate-limited frame
+    // just before) can't strand the user on the animated loading screen.
+    if let Err(error) = client.views_update(&view_id, final_view.clone()).await {
+        warn!(%error, "failed to render create-issue form after summarizing; retrying");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if let Err(error) = client.views_update(&view_id, final_view).await {
+            warn!(%error, "failed to render create-issue form after summarizing (retry)");
         }
-        None => {
-            // Degrade (FR-5): re-render the mechanical modal without the hint
-            // so no stale "Summarizing…" notice lingers.
-            let reverted = modal::build_create_issue_modal(
-                &options,
-                &mechanical_title,
-                &mechanical_description,
-                &private_metadata,
-                None,
-                false,
-            );
-            if let Err(error) = client.views_update(&view_id, reverted.view).await {
-                warn!(%error, "failed to clear AI summarizing hint after failure");
+    }
+}
+
+/// Drive the shimmer of the "Summarizing…" modal (re-rendering each frame via
+/// `views.update`) while `summarize_thread_for_modal` runs, returning as soon
+/// as the summary is ready — or `None` when it fails or `SUMMARIZE_TIMEOUT`
+/// elapses. Each frame `views.update` is **fire-and-forget** (spawned) so a
+/// slow Slack call never blocks the select loop: the timeout and a completed
+/// summary are always observed on schedule. Frame errors are ignored (the user
+/// may have closed the modal); the caller renders the final form regardless.
+async fn animate_until_summarized(
+    state: &AppState,
+    client: &SlackClient,
+    view_id: &str,
+    private_metadata: &str,
+    encrypted_anthropic_api_key: Option<&str>,
+    action: &MessageActionPayload,
+) -> Option<crate::anthropic::types::IssueSummary> {
+    let summarize = summarize_thread_for_modal(state, client, encrypted_anthropic_api_key, action);
+    tokio::pin!(summarize);
+
+    let mut ticker = tokio::time::interval(SUMMARIZE_FRAME_DELAY);
+    // A slow frame must not cause a burst of catch-up `views.update` calls.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await; // consume the immediate first tick (frame 0 is shown)
+    let timeout = tokio::time::sleep(SUMMARIZE_TIMEOUT);
+    tokio::pin!(timeout);
+
+    let mut frame: usize = 0;
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut summarize => break result,
+            _ = &mut timeout => break None,
+            _ = ticker.tick() => {
+                frame = frame.wrapping_add(1);
+                let client = client.clone();
+                let view_id = view_id.to_string();
+                let view = modal::build_summarizing_modal(frame, private_metadata);
+                // Fire-and-forget: don't await the frame update on the loop.
+                tokio::spawn(async move {
+                    let _ = client.views_update(&view_id, view).await;
+                });
             }
         }
     }

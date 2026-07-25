@@ -221,9 +221,7 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
             .toLowerCase()
             .replace(/[^a-z0-9_-]+/g, '_')
             .replace(/^_+|_+$/g, '') || 'mcp_server';
-        setError(
-          t('settings.mcp.validation.nameIdentifier', { suggestion })
-        );
+        setError(t('settings.mcp.validation.nameIdentifier', { suggestion }));
         return null;
       }
       if (
