@@ -18,18 +18,43 @@ case is the modal simply keeps the mechanical prefill. Do not "optimize" by
 generating the summary before opening the modal; that would reintroduce the 3s
 risk the base shortcut was designed around.
 
-## The `views.update` swap and its mid-edit race
+## The animated "Summarizing…" loading modal (Rovo-style)
 
-The modal opens (`views.open`, which we changed to **return the created
-`view.id`**), then a single `views.update` swaps in the AI title/description.
-`views.update` replaces the *whole* view, so a user mid-edit in the ~1–3s window
-gets clobbered. v1 mitigation (not elimination): the initial modal carries a
-`context` block "✨ Summarizing thread…" **only when the AI path will run**, so
-the gate must be evaluated *before* building the initial modal. On AI failure we
-issue one `views.update` back to the hint-less mechanical modal so no stale
-"Summarizing…" notice lingers. The race-free alternative — a per-invocation
-block_actions opt-in checkbox (Jira/Rovo style) — needs a new interaction
-dispatch branch and is the documented future upgrade, not v1.
+When the AI path is active the shortcut opens a **dedicated loading modal**
+(`build_summarizing_modal`) rather than the editable form — matching Jira Cloud
+for Slack's Rovo card. `views.open` returns the created `view.id`; the shortcut
+then **re-renders the modal each frame via `views.update`** to animate a
+skeleton shimmer, and finally replaces it with the editable form (AI-filled on
+success, mechanical prefill on failure/timeout). Key points:
+
+- **Block Kit has no spinner or CSS**, so animation is *timed `views.update`
+  frames*, not a hosted GIF (self-contained — no asset/route to serve). Each
+  frame is a section heading + three inline-code skeleton bars with a bright
+  band swept across them (`shimmer_bar(frame, row, width)` — the band moves with
+  `frame` and rows are offset so the sweep reads diagonal). Inline-code wrapping
+  keeps the cells monospace-aligned and gives the card a skeleton background.
+- **The loading modal has no `input` blocks and no `submit` button** (Cancel
+  only). That has a bonus: because the title/description inputs first exist only
+  when we `views.update` to the form, their `initial_value` renders fresh — the
+  input-state-preservation gotcha (below) does not bite, so the final form
+  doesn't need the distinct-id trick.
+- **Concurrency**: `animate_until_summarized` runs the summarize future and the
+  frame ticker under one `tokio::select! { biased; … }` loop — it returns the
+  instant the summary is ready, else after a hard `SUMMARIZE_TIMEOUT` (12s).
+  The wait is bounded and always resolves to an editable form (the user can
+  Cancel anytime), so the AI stays a convenience, never a block. Per-frame
+  `views.update` errors are ignored (the modal may already be closed).
+- `views.update` is well within Slack's rate limit (~18 frames max at 650ms).
+
+### Input-state-preservation gotcha (still relevant for a non-loading swap)
+
+`views.update` **preserves the current input value** for any block whose
+`block_id`+`action_id` are unchanged and *ignores the new `initial_value`*. So
+if you ever swap AI text into an *already-rendered* form (not the loading-modal
+flow), the AI values won't show unless you give the inputs **distinct ids**
+(`title_ai`/`description_ai`) and have `view_submission` accept either set — the
+`ai_variant` path in `build_create_issue_modal`. The loading-modal flow sidesteps
+this by having no inputs until the final render.
 
 ## Outbound LLM call: raw reqwest, structured outputs, HTTP-status errors
 
@@ -85,3 +110,4 @@ admin to re-install the app to grant them.
 ## Contributed by
 
 - `vk/0f53-slack-shortcut-a`
+- `vk/0f53-slack-ai-animated-loading` (animated "Summarizing…" loading modal)
