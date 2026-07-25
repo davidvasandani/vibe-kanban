@@ -20,6 +20,8 @@ use crate::{
 };
 
 const AUTH_METHODS: [&str; 2] = ["cached_token", "xai.api_key"];
+const AUTO_MODE: &str = "auto";
+const ASK_MODE: &str = "ask";
 
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
@@ -39,6 +41,14 @@ pub struct Grok {
 }
 
 impl Grok {
+    fn acp_mode(&self) -> &'static str {
+        if self.yolo.unwrap_or(false) {
+            AUTO_MODE
+        } else {
+            ASK_MODE
+        }
+    }
+
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
         let mut builder = CommandBuilder::new("grok").extend_params(["--no-auto-update"]);
         if let Some(model) = &self.model {
@@ -52,7 +62,9 @@ impl Grok {
     }
 
     fn harness(&self) -> AcpAgentHarness {
-        AcpAgentHarness::with_session_namespace("grok_sessions").with_auth_methods(AUTH_METHODS)
+        AcpAgentHarness::with_session_namespace("grok_sessions")
+            .with_mode(self.acp_mode())
+            .with_auth_methods(AUTH_METHODS)
     }
 }
 
@@ -222,6 +234,23 @@ mod tests {
             builder.params.unwrap(),
             ["--no-auto-update", "agent", "stdio"]
         );
+    }
+
+    #[test]
+    fn auto_permission_uses_auto_acp_mode() {
+        assert_eq!(grok(None, true).acp_mode(), AUTO_MODE);
+    }
+
+    #[test]
+    fn supervised_permission_uses_ask_acp_mode() {
+        assert_eq!(grok(None, false).acp_mode(), ASK_MODE);
+    }
+
+    #[test]
+    fn unset_permission_uses_ask_acp_mode() {
+        let mut grok = grok(None, false);
+        grok.yolo = None;
+        assert_eq!(grok.acp_mode(), ASK_MODE);
     }
 
     #[test]

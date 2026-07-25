@@ -106,6 +106,7 @@ pub struct SessionRuntime {
     idempotency: Arc<Mutex<IdempotencyCache>>,
     state_tx: watch::Sender<BrowserSessionLiveState>,
     frames_tx: broadcast::Sender<BrowserFrame>,
+    last_frame: Arc<Mutex<Option<BrowserFrame>>>,
     frame_forwarder: Mutex<Option<tokio::task::JoinHandle<()>>>,
     last_activity: Mutex<DateTime<Utc>>,
     idle_expiry: Duration,
@@ -135,10 +136,17 @@ impl SessionRuntime {
         let (frames_tx, _) = broadcast::channel(FRAME_FANOUT_CAPACITY);
         let mut driver_frames = handle.subscribe_frames();
         let forwarder_tx = frames_tx.clone();
+        // Retain the most recent frame: CDP only emits on repaint, and a
+        // broadcast channel delivers nothing sent before a subscriber joined.
+        // Without this, anyone opening the live view onto an idle page waits
+        // indefinitely for a frame that only arrives on the next repaint.
+        let last_frame = Arc::new(Mutex::new(None::<BrowserFrame>));
+        let forwarder_last = last_frame.clone();
         let frame_forwarder = tokio::spawn(async move {
             loop {
                 match driver_frames.recv().await {
                     Ok(frame) => {
+                        *forwarder_last.lock().unwrap() = Some(frame.clone());
                         let _ = forwarder_tx.send(frame);
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -156,6 +164,7 @@ impl SessionRuntime {
             idempotency: Arc::new(Mutex::new(IdempotencyCache::new())),
             state_tx,
             frames_tx,
+            last_frame,
             frame_forwarder: Mutex::new(Some(frame_forwarder)),
             last_activity: Mutex::new(now),
             idle_expiry,
@@ -172,6 +181,13 @@ impl SessionRuntime {
 
     pub fn subscribe_frames(&self) -> broadcast::Receiver<BrowserFrame> {
         self.frames_tx.subscribe()
+    }
+
+    /// Most recent screencast frame, if any. New observers are sent this
+    /// immediately so the live view paints at once instead of waiting for
+    /// the page's next repaint.
+    pub fn last_frame(&self) -> Option<BrowserFrame> {
+        self.last_frame.lock().unwrap().clone()
     }
 
     pub fn control_state(&self) -> BrowserControlState {

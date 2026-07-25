@@ -489,6 +489,11 @@ impl BrowserSessionService {
         Ok(self.runtime(id)?.subscribe_frames())
     }
 
+    /// Most recent screencast frame, replayed to newly attached observers.
+    pub fn last_frame(&self, id: Uuid) -> Result<Option<BrowserFrame>, BrowserSessionError> {
+        Ok(self.runtime(id)?.last_frame())
+    }
+
     pub fn watch_state(
         &self,
         id: Uuid,
