@@ -587,16 +587,25 @@ async fn open_shortcut_modal(
         ),
         None => build_form(&mechanical_title, &mechanical_description),
     };
-    if let Err(error) = client.views_update(&view_id, final_view).await {
-        warn!(%error, "failed to render create-issue form after summarizing");
+    // The terminal update replaces the loading modal with the editable form.
+    // Retry once on failure so a transient error (e.g. a rate-limited frame
+    // just before) can't strand the user on the animated loading screen.
+    if let Err(error) = client.views_update(&view_id, final_view.clone()).await {
+        warn!(%error, "failed to render create-issue form after summarizing; retrying");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if let Err(error) = client.views_update(&view_id, final_view).await {
+            warn!(%error, "failed to render create-issue form after summarizing (retry)");
+        }
     }
 }
 
 /// Drive the shimmer of the "Summarizing…" modal (re-rendering each frame via
 /// `views.update`) while `summarize_thread_for_modal` runs, returning as soon
 /// as the summary is ready — or `None` when it fails or `SUMMARIZE_TIMEOUT`
-/// elapses. Frame `views.update` errors are ignored (the user may have closed
-/// the modal); the caller renders the final form regardless.
+/// elapses. Each frame `views.update` is **fire-and-forget** (spawned) so a
+/// slow Slack call never blocks the select loop: the timeout and a completed
+/// summary are always observed on schedule. Frame errors are ignored (the user
+/// may have closed the modal); the caller renders the final form regardless.
 async fn animate_until_summarized(
     state: &AppState,
     client: &SlackClient,
@@ -609,6 +618,8 @@ async fn animate_until_summarized(
     tokio::pin!(summarize);
 
     let mut ticker = tokio::time::interval(SUMMARIZE_FRAME_DELAY);
+    // A slow frame must not cause a burst of catch-up `views.update` calls.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     ticker.tick().await; // consume the immediate first tick (frame 0 is shown)
     let timeout = tokio::time::sleep(SUMMARIZE_TIMEOUT);
     tokio::pin!(timeout);
@@ -621,8 +632,13 @@ async fn animate_until_summarized(
             _ = &mut timeout => break None,
             _ = ticker.tick() => {
                 frame = frame.wrapping_add(1);
+                let client = client.clone();
+                let view_id = view_id.to_string();
                 let view = modal::build_summarizing_modal(frame, private_metadata);
-                let _ = client.views_update(view_id, view).await;
+                // Fire-and-forget: don't await the frame update on the loop.
+                tokio::spawn(async move {
+                    let _ = client.views_update(&view_id, view).await;
+                });
             }
         }
     }
