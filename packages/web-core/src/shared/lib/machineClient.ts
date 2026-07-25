@@ -14,6 +14,11 @@ import type {
   McpAuthStatusResponse,
   McpServerQuery,
   McpServerTestResult,
+  Pipeline,
+  PipelineFileStatus,
+  PipelineRawBody,
+  PipelineValidateBody,
+  PipelineValidation,
   Repo,
   SharedMcpAssignmentTestResult,
   SharedMcpReadResponse,
@@ -108,6 +113,13 @@ export interface MachineClient {
     request: AwsProfileImportRequest
   ) => Promise<AwsProfileImportResult>;
   openAwsSsoSessionLogin: (name: string) => Promise<WebSocket>;
+  listPipelineStatuses: () => Promise<PipelineFileStatus[]>;
+  readPipelineRaw: (id: string) => Promise<string>;
+  validatePipeline: (body: PipelineValidateBody) => Promise<PipelineValidation>;
+  writePipelineRaw: (id: string, body: PipelineRawBody) => Promise<Pipeline>;
+  resetPipeline: (id: string) => Promise<Pipeline>;
+  resetDefaultPipelines: () => Promise<Pipeline[]>;
+  deletePipeline: (id: string) => Promise<void>;
 }
 
 function getMachineRequestOptions(
@@ -440,6 +452,67 @@ export function createMachineClient(
       openLocalApiWebSocket(
         `/api/aws/sso/sessions/${encodeURIComponent(name)}/login/ws`,
         getMachineRequestOptions(runtime, target)
+      ),
+    listPipelineStatuses: async () =>
+      handleApiResponse<PipelineFileStatus[]>(
+        await makeMachineRequest(runtime, target, '/api/pipelines/status', {
+          cache: 'no-store',
+        })
+      ),
+    readPipelineRaw: async (id) =>
+      handleApiResponse<string>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/pipelines/${encodeURIComponent(id)}/raw`,
+          { cache: 'no-store' }
+        )
+      ),
+    validatePipeline: async (body) =>
+      handleApiResponse<PipelineValidation>(
+        await makeMachineRequest(runtime, target, '/api/pipelines/validate', {
+          method: 'POST',
+          body: JSON.stringify(body),
+        })
+      ),
+    writePipelineRaw: async (id, body) =>
+      handleApiResponse<Pipeline>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/pipelines/${encodeURIComponent(id)}/raw`,
+          {
+            method: 'PUT',
+            body: JSON.stringify(body),
+          }
+        )
+      ),
+    resetPipeline: async (id) =>
+      handleApiResponse<Pipeline>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/pipelines/${encodeURIComponent(id)}/reset`,
+          { method: 'POST' }
+        )
+      ),
+    resetDefaultPipelines: async () =>
+      handleApiResponse<Pipeline[]>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          '/api/pipelines/reset-defaults',
+          { method: 'POST' }
+        )
+      ),
+    deletePipeline: async (id) =>
+      handleApiResponse<void>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/pipelines/${encodeURIComponent(id)}`,
+          { method: 'DELETE' }
+        )
       ),
   };
 }

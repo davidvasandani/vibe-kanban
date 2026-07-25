@@ -23,9 +23,11 @@ import {
 import {
   SettingsHostProvider,
   useSettingsHost,
+  type SettingsHostTargetId,
 } from './settings/SettingsHostContext';
 import { SettingsMachineUserSystemProvider } from './settings/SettingsMachineUserSystemProvider';
 import { ConfirmDialog } from '@vibe/ui/components/ConfirmDialog';
+import { confirmSettingsHostSwitch } from './settings/settingsHostSwitch';
 
 export interface SettingsDialogProps {
   initialSection?: SettingsSectionType;
@@ -42,18 +44,15 @@ interface SettingsDialogContentProps {
 function SettingsDialogNavigation({
   activeSection,
   onSectionSelect,
+  onHostSelect,
 }: {
   activeSection: SettingsSectionType;
   onSectionSelect: (sectionId: SettingsSectionType) => void;
+  onHostSelect: (hostId: SettingsHostTargetId) => void;
 }) {
   const { t } = useTranslation('settings');
-  const {
-    availableHosts,
-    hostsResolved,
-    selectedHost,
-    selectedHostId,
-    setSelectedHostId,
-  } = useSettingsHost();
+  const { availableHosts, hostsResolved, selectedHost, selectedHostId } =
+    useSettingsHost();
   const hostSections = SETTINGS_SECTION_DEFINITIONS.filter(
     (section) => section.group === 'host'
   );
@@ -127,7 +126,7 @@ function SettingsDialogNavigation({
                 onClick: handlePairOtherMachines,
               },
             ]}
-            onChange={setSelectedHostId}
+            onChange={onHostSelect}
             placeholder={t('settings.layout.nav.selectHost')}
           />
           {hostSettingsDisabled && (
@@ -158,8 +157,14 @@ function SettingsDialogContent({
   onClose,
 }: SettingsDialogContentProps) {
   const { t } = useTranslation('settings');
-  const { isDirty } = useSettingsDirty();
-  const { availableHosts, hostsResolved, selectedHost } = useSettingsHost();
+  const { isDirty, clearAll } = useSettingsDirty();
+  const {
+    availableHosts,
+    hostsResolved,
+    selectedHost,
+    selectedHostId,
+    setSelectedHostId,
+  } = useSettingsHost();
 
   const resolvedInitialSection = useMemo<SettingsSectionType>(() => {
     if (
@@ -215,6 +220,29 @@ function SettingsDialogContent({
     setActiveSection(sectionId);
     setMobileShowContent(true);
   };
+
+  const handleHostSelect = useCallback(
+    async (hostId: SettingsHostTargetId) => {
+      if (hostId === selectedHostId || isConfirmingRef.current) {
+        return;
+      }
+
+      isConfirmingRef.current = true;
+      try {
+        await confirmSettingsHostSwitch({
+          isDirty,
+          currentHostId: selectedHostId,
+          nextHostId: hostId,
+          clearAll,
+          setSelectedHostId,
+          t,
+        });
+      } finally {
+        isConfirmingRef.current = false;
+      }
+    },
+    [clearAll, isDirty, selectedHostId, setSelectedHostId, t]
+  );
 
   useEffect(() => {
     if (
@@ -298,6 +326,7 @@ function SettingsDialogContent({
             <SettingsDialogNavigation
               activeSection={activeSection}
               onSectionSelect={handleSectionSelect}
+              onHostSelect={handleHostSelect}
             />
           </div>
           {/* Content - hidden on mobile when showing nav */}
