@@ -1,69 +1,54 @@
-# Technical Specification: MCP Tool Count and Last-Checked Time
+# Technical Specification: Claude Opus 5 Model Support
 
-## Summary
+## Objective
 
-Enhance the shared MCP settings view so each configured server card reports the
-number of tools discovered by its most recent successful connectivity check and
-the time that check completed. The presentation should follow the supplied
-Ohana reference while fitting Vibe Kanban's existing compact settings cards.
+Expose the newly released Claude Opus 5 model in Vibe Kanban's hard-coded
+executor model selectors so users can choose it when the backing agent supports
+the model.
 
-## Current behavior
+Anthropic's current model documentation identifies the API model ID as
+`claude-opus-5`. Provider-specific model names must follow each executor's
+existing naming convention.
 
-- The shared MCP settings screen can test all configured assignments or one
-  server at a time.
-- The backend probe already performs `tools/list` and returns `tool_count` in
-  each `McpServerTestResult`.
-- Results are held in component state and used to render per-assignment status
-  icons and failure/authentication details.
-- No completion timestamp is recorded, and successful result metadata is not
-  shown on the server card.
+## Scope
 
-## Required behavior
+- Add Claude Opus 5 to applicable hard-coded executor model catalogs.
+- Preserve provider-specific identifiers and user-facing naming conventions.
+- Add any executor-specific reasoning/variant resolution needed for selecting
+  the new model.
+- Refresh generated schemas when source schema metadata changes.
+- Add or update focused tests for model-name resolution and catalog discovery.
 
-1. After a server test completes, its card shows a concise metadata line with
-   the discovered tool count and a localized last-checked time.
-2. Tool counts come from successful `McpServerTestResult.tool_count` values;
-   unavailable counts must not be represented as zero.
-3. A server assigned to multiple executors must have a deterministic aggregate
-   display. Identical successful counts display once. If successful assignments
-   report different counts, the UI must communicate the range rather than pick
-   an arbitrary assignment.
-4. The last-checked time represents when the latest test response for that
-   server was received in the current UI session.
-5. Testing all servers updates each returned server independently; testing one
-   server updates only that server's metadata.
-6. Retesting preserves prior metadata until the replacement response arrives,
-   then atomically replaces the affected server's displayed count/time.
-7. Loading a fresh configuration, saving/reloading, or completing an OAuth flow
-   must avoid associating stale results with changed server definitions.
-8. The metadata remains readable on narrow layouts and uses the existing design
-   system and translation infrastructure.
+## Requirements
 
-## Data and API impact
-
-No backend API or persistence change is required. `McpServerTestResult` already
-contains `tool_count`; the checked timestamp is client-observed ephemeral UI
-state. No generated shared types should be edited for this feature.
-
-## Accessibility and localization
-
-- Use normal text, not icon-only communication, for count and checked time.
-- Add translatable strings for singular/plural tool counts, count ranges, and
-  the checked-time phrase in every locale or use language-neutral interpolation
-  patterns consistent with this repository's localization policy.
-- Render dates with the user's locale via `Intl`/existing date helpers.
+1. Claude Code must offer an explicit `"claude-opus-5"` entry (display label
+   `"Opus 5"`) alongside its existing aliases, following the `"claude-sonnet-5"`
+   precedent. Existing generic aliases (`"opus"`, `"opus[1m]"`) remain unchanged.
+2. Executors whose published integrations support Opus 5 and whose model lists
+   are maintained in Vibe Kanban must expose the provider-correct identifier.
+3. Cursor-specific reasoning selection must resolve Opus 5 to the correct
+   standard and thinking identifiers if Cursor supports the model.
+4. Existing Opus versions must remain selectable.
+5. Generated artifacts must be produced through the repository's documented
+   generation commands, not edited by hand.
 
 ## Verification
 
-- Unit-test aggregation and timestamp formatting/state behavior, including no
-  result, one count, identical counts, differing counts, and missing counts.
-- Exercise the MCP settings component/type checks to ensure existing test,
-  OAuth, dirty-state, and responsive behavior remains intact.
-- Run repository formatting and focused frontend checks/tests.
+- Run focused Rust tests for every changed executor.
+- Run schema/type generation checks relevant to changed metadata.
+- Run repository formatting.
+- Run broader compilation or checks in proportion to the final change surface.
+- Complete an independent Codex diff review and resolve all significant
+  findings.
 
 ## Non-goals
 
-- Persisting health history or timestamps across page reloads.
-- Periodic/background probing.
-- Changing the MCP probe protocol or backend timeout behavior.
-- Redesigning the MCP settings screen beyond the requested metadata.
+- Changing default models.
+- Removing or deprecating older Claude models.
+- Bumping agent CLI package versions.
+- Adding unsupported fast-mode variants without provider evidence.
+
+## External Source
+
+- Anthropic Claude Platform model overview:
+  https://platform.claude.com/docs/en/about-claude/models/overview
