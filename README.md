@@ -219,8 +219,12 @@ cargo install sqlx-cli
 
 Install dependencies:
 ```bash
-pnpm i
+pnpm install --frozen-lockfile
 ```
+
+Run this install once in every fresh worktree before development or repository
+verification. `pnpm run format` checks this prerequisite before starting Rust
+and frontend formatting and prints the same setup command if it is missing.
 
 ### Running the dev server
 

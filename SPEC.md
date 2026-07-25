@@ -1,72 +1,65 @@
-# Technical Specification: Reliable Workspace Issue Breadcrumbs
+# Technical Specification: Fresh-Worktree Formatting Preflight
 
-Task: `vk/719f-vk-workspace-iss`
+## Goal
+Make `pnpm run format` reliable and understandable in a fresh Vibe Kanban
+development worktree while preserving all existing Rust and frontend formatting
+stages.
 
-## Problem
+## Behavior
 
-The workspace navbar sometimes renders `Issue unavailable` in the breadcrumb
-even though the workspace is linked to an issue. The issue relationship comes
-from the selected remote workspace, while the display label comes from an
-asynchronously synchronized project-issues collection. A temporarily empty
-collection must not be treated as proof that the linked issue is unavailable.
+### Ready worktree
+After:
 
-## Desired behavior
+```bash
+pnpm install --frozen-lockfile
+```
 
-- A workspace linked to an issue renders `Project / ISSUE-N / Workspace` once
-  the issue record is available.
-- During initial project-issue loading, the linked breadcrumb trail is deferred
-  instead of showing either `Issue unavailable`, a raw issue UUID, or the
-  structurally incomplete `Project / Workspace`.
-- `Issue unavailable` is shown only after the issue query has completed and no
-  displayable issue record exists.
-- The resolved issue breadcrumb navigates to the linked project issue using
-  entity UUIDs.
-- An unavailable issue breadcrumb is non-interactive.
-- Workspaces with no linked issue keep the existing
-  `Project / Workspace` breadcrumb.
+`pnpm run format` runs, in order:
 
-## Technical approach
+1. `pnpm run backend:format`
+2. `pnpm run web-core:format`
+3. `pnpm run local-web:format`
+4. `pnpm run remote-web:format`
 
-Keep asynchronous entity resolution and navigation inside
-`packages/web-core`; do not move data access into the presentational navbar in
-`packages/ui`.
+### Missing or incomplete dependency installation
+Before any formatting stage begins, `preformat` checks for the package-local
+Prettier executable used by:
 
-Model issue breadcrumb resolution explicitly:
+- `packages/web-core`
+- `packages/local-web`
+- `packages/remote-web`
 
-1. `none`: no linked issue; render the existing two-level breadcrumb.
-2. `loading`: a linked issue exists and its project-issue collection is still
-   loading; return no custom breadcrumb until resolution settles.
-3. `resolved`: render the issue `simple_id` between project and workspace and
-   attach issue navigation.
-4. `unavailable`: loading finished without a usable `simple_id`; preserve the
-   hierarchy position with a non-link `Issue unavailable` label.
+If any executable is missing, the command exits non-zero, identifies every
+affected package, and directs the user to run:
 
-Use the `isLoading` signal returned by the project issue `useShape` query.
-Do not infer loading from the collection's current length, since an empty
-collection is also a valid settled result. Isolate breadcrumb construction in
-a pure helper so timing-sensitive states can be covered without mounting the
-full provider graph.
+```bash
+pnpm install --frozen-lockfile
+```
 
-## Files expected to change
+It must not run Rustfmt, emit `prettier: command not found`, or silently skip a
+frontend package.
 
-- `packages/web-core/src/shared/components/ui-new/containers/NavbarContainer.tsx`
-- `packages/web-core/src/shared/components/ui-new/containers/navbarBreadcrumbs.ts`
-- `packages/web-core/src/shared/components/ui-new/containers/navbarBreadcrumbs.test.ts`
+## Implementation
+- `scripts/check-format-prerequisites.mjs` owns the preflight and exposes
+  reusable functions for tests.
+- The root `preformat` package lifecycle hook invokes the checker without
+  changing the existing `format` script.
+- `scripts/check-format-prerequisites.test.mjs` uses Node's built-in test runner
+  and temporary fixture workspaces to verify absent, complete, and partial
+  dependency states.
+- The frontend CI job runs the regression test after dependency installation.
 
-Pipeline artifacts under `specs/` and the repository root will also be updated.
+## Compatibility and constraints
+- Node.js 20+ and pnpm 8+ remain the system-level prerequisites.
+- The dependency installation is explicit; formatting does not perform network
+  or lockfile mutations.
+- The checker accounts for Windows `.cmd` executable shims.
+- No formatting rule, package dependency, generated source, or formatter stage
+  changes.
 
 ## Verification
-
-- Unit tests cover linked loading, linked resolved, linked unavailable, and
-  unlinked states.
-- Tests assert breadcrumb order and labels, navigation behavior, absence of
-  raw UUIDs, and absence of a false partial linked hierarchy while loading.
-- Run the focused Vitest test, frontend typecheck, formatting, and the
-  repository-required checks appropriate to the affected package.
-
-## Non-goals
-
-- Changing Electric collection synchronization or recovery behavior.
-- Changing workspace-to-issue persistence.
-- Editing generated shared types.
-- Redesigning navbar presentation or truncation.
+- Run `pnpm run test:format-prerequisites`.
+- In a dependency-free worktree, verify `pnpm run format` exits in `preformat`
+  with the frozen-lockfile setup command and no `backend:format` output.
+- Run `pnpm install --frozen-lockfile`, then `pnpm run format`, and confirm all
+  four existing stages complete.
