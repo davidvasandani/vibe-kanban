@@ -1,30 +1,68 @@
-# Prior Knowledge: Claude Opus 5 Model Support
+# Prior Knowledge: Settings Pipeline Management
 
-The project knowledge base is populated, but it does not yet contain a page
-about maintaining hard-coded executor model catalogs. The closest relevant
-pages are:
+The project knowledge base is populated in both `wiki/` and
+`docs/knowledge-base/`. No existing page documents the pipeline-file management
+API or a Settings pipeline editor, so this feature is new UI territory. The
+following existing guidance constrains the implementation.
 
-- `docs/knowledge-base/grok-executor-integration.md`: executor changes can span
-  Rust implementation, generated schemas/types, frontend presentation, and
-  tests. Its broad cross-product checklist is useful, although this task extends
-  existing executors rather than introducing a new one.
-- `docs/knowledge-base/claude-log-normalization.md`: the Claude executor and its
-  tests are concentrated in `crates/executors/src/executors/claude.rs`.
-  This task should preserve those log-processing contracts and limit changes to
-  discovery/model metadata unless model context behavior requires otherwise.
-- `wiki/managed-cli-tool-catalog.md`: generated artifacts should be refreshed
-  from their Rust sources with repository generation commands and must not be
-  edited directly. Although this page concerns managed CLIs, the same
-  repository invariant applies to executor JSON schemas and shared TypeScript
-  types.
+## Pipeline identity and catalog refresh
 
-## Planning constraints distilled from the knowledge base
+Source: `wiki/task-pipeline-block.md` (`vk/77eb-vk-pipeline`).
 
-1. Trace each changed Rust model catalog into generated schema/type artifacts
-   before deciding the final file set.
-2. Prefer focused executor tests and generation checks over frontend
-   special-casing when the existing UI consumes discovery metadata generically.
-3. Keep the task additive: preserve existing model entries and executor
-   behavior.
-4. If implementation reveals a reusable cross-executor model-catalog update
-   procedure, record it as a new knowledge-base topic after the change ships.
+- Pipeline ids, not display names, are the stable identity. Display names are
+  explicitly non-unique, so the Settings file list and editor selection must
+  key by file id.
+- The task-create `PipelineSection` consumes the React Query-backed pipeline
+  catalog. Every create, write, delete, or reset action must invalidate that
+  catalog as well as the new status/raw queries so task composition does not
+  continue using stale stage definitions.
+- A pipeline edit can change prompt fragments that existing task descriptions
+  use for best-effort reverse parsing. The editor should preserve raw content
+  exactly and avoid implicit rewrites; the server-validated TOML is
+  authoritative.
+
+## Machine-aware Settings requests
+
+Source: `docs/knowledge-base/cli-tool-oauth-login.md`
+(`5a2a-vk-cli-tool-logi`, `6777-aws-sso-config-i`).
+
+- Host-specific Settings features must pass the selected host/relay scope
+  explicitly. Calling the right URL without selected-host routing can silently
+  operate on the UI machine instead of the machine selected in Settings.
+- Pipeline query keys therefore need to include host identity, and every
+  pipeline API method used by Settings must go through the host-aware request
+  transport.
+
+## Settings modal lifecycle and draft ownership
+
+Sources: `docs/knowledge-base/shared-mcp-configuration.md` and
+`docs/knowledge-base/mcp-connectivity-testing.md`.
+
+- The Settings dialog is mounted outside route content and NiceModal can reuse
+  mounted components. Editable fields must be deliberately seeded when the
+  selected pipeline or host changes; stale drafts must not leak across files,
+  hosts, or modal opens.
+- Management dialogs should own provisional form state and keep server state in
+  the existing query layer. Cancel/close must not persist a draft.
+- React-only state guards can reset across modal lifecycle boundaries. Pipeline
+  mutations should rely on TanStack Query pending state and awaited requests,
+  with controls disabled during mutation, rather than a transient success flag
+  as the only duplicate-action guard.
+
+## Reusable validation pattern
+
+Source: `docs/knowledge-base/cli-tool-oauth-login.md`.
+
+- Prefer focused pure-state tests plus frontend type checking and an independent
+  diff review. For this task, the highest-value pure logic is pipeline-id
+  validation, error location formatting, and list selection after mutations.
+- Preserve structured backend errors instead of flattening them prematurely.
+  `PipelineParseError` already carries an optional 1-based line and column,
+  which the editor and malformed-file list should display directly.
+
+## Knowledge gap to close after shipping
+
+If implementation confirms reusable conventions for file-backed Settings
+editors—especially host-scoped query keys, raw draft validation, mutation
+invalidation, or bundled/default reset discoverability—record them in a focused
+knowledge page and add task id `3a97-no-frontend-for` to its contribution list.
