@@ -408,7 +408,7 @@ export type McpServerTestResult = { name: string,
  */
 transport: string, status: McpServerTestStatus, latency_ms: bigint | null, tool_count: number | null, server_name: string | null, server_version: string | null, error: string | null, 
 /**
- * Raw `WWW-Authenticate` header from a 401/403 probe response, when the
+ * Raw `WWW-Authenticate` header from an authentication response, when the
  * server sent one (per RFC 9728 it points at the protected-resource
  * metadata needed to start OAuth).
  */
