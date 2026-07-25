@@ -1465,10 +1465,7 @@ mod tests {
             resolve_cursor_model_name("opus-5", Some("thinking")),
             "opus-5-thinking"
         );
-        assert_eq!(
-            resolve_cursor_model_name("opus-5", None),
-            "opus-5-thinking"
-        );
+        assert_eq!(resolve_cursor_model_name("opus-5", None), "opus-5-thinking");
     }
 
     #[test]
