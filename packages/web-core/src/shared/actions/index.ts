@@ -31,6 +31,7 @@ import {
   ArrowsClockwiseIcon,
   CrosshairIcon,
   DesktopIcon,
+  GlobeIcon,
   PencilSimpleIcon,
   ArrowUpIcon,
   HighlighterIcon,
@@ -698,6 +699,30 @@ export const Actions = {
         .getState()
         .toggleRightMainPanelMode(
           RIGHT_MAIN_PANEL_MODES.PREVIEW,
+          ctx.currentWorkspaceId ?? undefined
+        );
+    },
+  },
+
+  ToggleBrowserMode: {
+    id: 'toggle-browser-mode',
+    label: 'Toggle Browser Panel',
+    icon: GlobeIcon,
+    shortcut: 'V B',
+    requiresTarget: ActionTargetType.NONE,
+    isVisible: (ctx) => !ctx.isCreateMode && ctx.layoutMode === 'workspaces',
+    isActive: (ctx) =>
+      ctx.rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.BROWSER,
+    isEnabled: (ctx) => !ctx.isCreateMode,
+    getLabel: (ctx) =>
+      ctx.rightMainPanelMode === RIGHT_MAIN_PANEL_MODES.BROWSER
+        ? 'Hide Browser Panel'
+        : 'Show Browser Panel',
+    execute: (ctx) => {
+      useUiPreferencesStore
+        .getState()
+        .toggleRightMainPanelMode(
+          RIGHT_MAIN_PANEL_MODES.BROWSER,
           ctx.currentWorkspaceId ?? undefined
         );
     },

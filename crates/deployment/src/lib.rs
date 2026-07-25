@@ -17,6 +17,7 @@ use services::services::{
     analytics::AnalyticsService,
     approvals::Approvals,
     auth::AuthContext,
+    browser::BrowserSessionService,
     config::{Config, ConfigError},
     container::{ContainerError, ContainerService},
     events::{EventError, EventService},
@@ -117,6 +118,8 @@ pub trait Deployment: Clone + Send + Sync + 'static {
     fn remote_info(&self) -> &RemoteInfo;
 
     fn preview_proxy(&self) -> &PreviewProxyService;
+
+    fn browser_sessions(&self) -> &BrowserSessionService;
 
     fn relay_hosts(&self) -> Result<&Arc<RelayHosts>, RelayHostsNotConfigured> {
         Err(RelayHostsNotConfigured)

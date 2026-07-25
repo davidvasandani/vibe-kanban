@@ -5,6 +5,7 @@ use crate::{DeploymentImpl, mcp_gateway, middleware};
 
 pub mod approvals;
 pub mod aws;
+pub mod browser_sessions;
 pub mod cli_tools;
 pub mod config;
 pub mod containers;
@@ -57,6 +58,7 @@ pub fn router(
         .merge(repo::router())
         .merge(events::router(&deployment))
         .merge(approvals::router())
+        .merge(browser_sessions::router(&deployment))
         .merge(scratch::router(&deployment))
         .merge(search::router(&deployment))
         .merge(preview::api_router())

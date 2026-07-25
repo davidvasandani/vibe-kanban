@@ -539,5 +539,40 @@
     "errors": {
       "failed": "PRのリンクに失敗しました。もう一度お試しください。"
     }
+  },
+  "browser": {
+    "controller": {
+      "you": "あなたが操作中",
+      "agent": "エージェントが操作中",
+      "human": "ユーザーが操作中",
+      "none": "コントローラーなし"
+    },
+    "toolbar": {
+      "takeControl": "操作を引き継ぐ",
+      "release": "解放",
+      "returnToAgent": "エージェントに戻す",
+      "return": "戻す",
+      "executionPlaceholder": "実行 UUID",
+      "noExecutions": "最近の実行はありません"
+    },
+    "view": {
+      "connecting": "ブラウザセッションに接続中…",
+      "waitingForFrames": "フレームを待機中…"
+    },
+    "errors": {
+      "createFailed": "ブラウザセッションを開始できませんでした",
+      "sessionClosed": "このブラウザセッションは終了しています"
+    },
+    "sessions": {
+      "newSession": "新しいセッション",
+      "profilePlaceholder": "プロファイル(任意)",
+      "defaultProfile": "デフォルト",
+      "empty": "ブラウザセッションはありません",
+      "expires": "有効期限",
+      "close": "セッションを閉じる"
+    },
+    "session": {
+      "forceCloseConfirm": "このセッションはエージェントが制御しています。強制的に閉じますか？"
+    }
   }
 }

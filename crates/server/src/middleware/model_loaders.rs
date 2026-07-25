@@ -5,7 +5,8 @@ use axum::{
     response::Response,
 };
 use db::models::{
-    execution_process::ExecutionProcess, session::Session, tag::Tag, workspace::Workspace,
+    browser_session::BrowserSession, execution_process::ExecutionProcess, session::Session,
+    tag::Tag, workspace::Workspace,
 };
 use deployment::Deployment;
 use uuid::Uuid;
@@ -107,6 +108,33 @@ pub async fn load_session_middleware(
         }
         Err(e) => {
             tracing::error!("Failed to fetch session {}: {}", session_id, e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    request.extensions_mut().insert(session);
+    Ok(next.run(request).await)
+}
+
+pub async fn load_browser_session_middleware(
+    State(deployment): State<DeploymentImpl>,
+    Path(browser_session_id): Path<Uuid>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let session = match BrowserSession::find_by_id(&deployment.db().pool, browser_session_id).await
+    {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            tracing::warn!("Browser session {} not found", browser_session_id);
+            return Err(StatusCode::NOT_FOUND);
+        }
+        Err(e) => {
+            tracing::error!(
+                "Failed to fetch browser session {}: {}",
+                browser_session_id,
+                e
+            );
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };

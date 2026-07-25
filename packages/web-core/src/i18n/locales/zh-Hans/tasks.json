@@ -539,5 +539,40 @@
     "errors": {
       "failed": "关联 PR 失败，请重试。"
     }
+  },
+  "browser": {
+    "controller": {
+      "you": "您正在控制",
+      "agent": "代理控制中",
+      "human": "用户控制中",
+      "none": "无控制者"
+    },
+    "toolbar": {
+      "takeControl": "接管控制",
+      "release": "释放",
+      "returnToAgent": "交还给代理",
+      "return": "交还",
+      "executionPlaceholder": "执行 UUID",
+      "noExecutions": "没有最近的执行"
+    },
+    "view": {
+      "connecting": "正在连接浏览器会话…",
+      "waitingForFrames": "正在等待画面…"
+    },
+    "errors": {
+      "createFailed": "无法启动浏览器会话",
+      "sessionClosed": "此浏览器会话已关闭"
+    },
+    "sessions": {
+      "newSession": "新建会话",
+      "profilePlaceholder": "配置文件(可选)",
+      "defaultProfile": "默认",
+      "empty": "暂无浏览器会话",
+      "expires": "过期时间",
+      "close": "关闭会话"
+    },
+    "session": {
+      "forceCloseConfirm": "此会话由代理控制。要强制关闭吗？"
+    }
   }
 }

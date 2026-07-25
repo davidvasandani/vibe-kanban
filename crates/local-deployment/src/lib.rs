@@ -19,6 +19,7 @@ use services::services::{
     analytics::{AnalyticsConfig, AnalyticsContext, AnalyticsService, generate_user_id},
     approvals::Approvals,
     auth::AuthContext,
+    browser::{BrowserSessionService, BrowserSessionsConfig},
     config::{Config, load_config_from_file, save_config_to_file},
     container::ContainerService,
     events::EventService,
@@ -74,6 +75,7 @@ pub struct LocalDeployment {
     client_info: ClientInfo,
     remote_info: RemoteInfo,
     preview_proxy: PreviewProxyService,
+    browser_sessions: BrowserSessionService,
     relay_hosts: Option<Arc<RelayHosts>>,
     shutdown: CancellationToken,
     webrtc_host: OnceLock<Arc<WebRtcHost>>,
@@ -277,6 +279,16 @@ impl Deployment for LocalDeployment {
 
         let events = EventService::new(db.clone(), events_msg_store, events_entry_count);
 
+        let browser_config = BrowserSessionsConfig::default();
+        let browser_driver = services::services::browser::select_driver(&browser_config);
+        let browser_sessions = BrowserSessionService::new(
+            db.clone(),
+            browser_driver,
+            browser_config,
+            "local".to_string(),
+        );
+        browser_sessions.spawn_cleanup_watcher(events.msg_store().clone());
+
         let file_search_cache = Arc::new(FileSearchCache::new());
 
         let pty = PtyService::new();
@@ -329,6 +341,7 @@ impl Deployment for LocalDeployment {
             client_info,
             remote_info,
             preview_proxy,
+            browser_sessions,
             relay_hosts,
             shutdown,
             webrtc_host: OnceLock::new(),
@@ -414,6 +427,10 @@ impl Deployment for LocalDeployment {
 
     fn preview_proxy(&self) -> &PreviewProxyService {
         &self.preview_proxy
+    }
+
+    fn browser_sessions(&self) -> &BrowserSessionService {
+        &self.browser_sessions
     }
 
     fn relay_hosts(&self) -> Result<&Arc<RelayHosts>, RelayHostsNotConfigured> {

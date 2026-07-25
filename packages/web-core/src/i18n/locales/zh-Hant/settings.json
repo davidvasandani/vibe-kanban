@@ -436,6 +436,7 @@
       "validation": {
         "nameRequired": "名稱為必填項。",
         "nameWhitespace": "名稱開頭或結尾不能有空白。",
+        "nameIdentifier": "伺服器識別碼只能包含英文字母、數字、底線和連字號。請嘗試使用「{{suggestion}}」；如需易讀文字，請使用另外的顯示標籤。",
         "nameTaken": "已存在同名伺服器。",
         "commandRequired": "指令為必填項。",
         "urlRequired": "URL 為必填項。",

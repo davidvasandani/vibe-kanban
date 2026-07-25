@@ -539,5 +539,40 @@
     "errors": {
       "failed": "Error al vincular el PR. Inténtelo de nuevo."
     }
+  },
+  "browser": {
+    "controller": {
+      "you": "Estás controlando",
+      "agent": "Agente controlando",
+      "human": "Humano controlando",
+      "none": "Sin controlador"
+    },
+    "toolbar": {
+      "takeControl": "Tomar el control",
+      "release": "Liberar",
+      "returnToAgent": "Devolver al agente",
+      "return": "Devolver",
+      "executionPlaceholder": "UUID de ejecución",
+      "noExecutions": "Sin ejecuciones recientes"
+    },
+    "view": {
+      "connecting": "Conectando a la sesión del navegador…",
+      "waitingForFrames": "Esperando fotogramas…"
+    },
+    "errors": {
+      "createFailed": "No se pudo iniciar una sesión del navegador",
+      "sessionClosed": "Esta sesión del navegador está cerrada"
+    },
+    "sessions": {
+      "newSession": "Nueva sesión",
+      "profilePlaceholder": "Perfil (opcional)",
+      "defaultProfile": "predeterminado",
+      "empty": "Sin sesiones del navegador",
+      "expires": "Expira",
+      "close": "Cerrar sesión"
+    },
+    "session": {
+      "forceCloseConfirm": "Un agente controla esta sesión. ¿Forzar el cierre?"
+    }
   }
 }

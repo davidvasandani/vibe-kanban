@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO browser_control_transitions\n               (id, browser_session_id, generation, controller_type, execution_id, user_id, connection_id, reason)\n               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "a21d15c6dd66094ea9204497e6294f530b16f68cd56b4cc57b3fdde1aa91df9e"
+}

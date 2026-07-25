@@ -539,5 +539,40 @@
     "errors": {
       "failed": "Failed to link PR. Please try again."
     }
+  },
+  "browser": {
+    "controller": {
+      "you": "You are controlling",
+      "agent": "Agent controlling",
+      "human": "Human controlling",
+      "none": "No controller"
+    },
+    "toolbar": {
+      "takeControl": "Take control",
+      "release": "Release",
+      "returnToAgent": "Return to agent",
+      "return": "Return",
+      "executionPlaceholder": "Execution UUID",
+      "noExecutions": "No recent executions"
+    },
+    "view": {
+      "connecting": "Connecting to browser session…",
+      "waitingForFrames": "Waiting for frames…"
+    },
+    "errors": {
+      "createFailed": "Failed to start a browser session",
+      "sessionClosed": "This browser session is closed"
+    },
+    "sessions": {
+      "newSession": "New session",
+      "profilePlaceholder": "Profile (optional)",
+      "defaultProfile": "default",
+      "empty": "No browser sessions",
+      "expires": "Expires",
+      "close": "Close session"
+    },
+    "session": {
+      "forceCloseConfirm": "This session is controlled by an agent. Force close it?"
+    }
   }
 }

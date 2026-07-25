@@ -34,6 +34,9 @@ dirs = "5.0"
 async-trait = { workspace = true }
 rust-embed = "8.2"
 ignore = "0.4"
+bytes = "1"
+tokio-tungstenite = { version = "0.26" }
+command-group = { version = "5.0", features = ["with-tokio"] }
 notify-rust = "4.11"
 os_info = "3.12.0"
 reqwest = { workspace = true }

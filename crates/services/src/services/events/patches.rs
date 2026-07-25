@@ -1,5 +1,6 @@
 use db::models::{
-    execution_process::ExecutionProcess, scratch::Scratch, workspace::WorkspaceWithStatus,
+    browser_session::BrowserSession, execution_process::ExecutionProcess, scratch::Scratch,
+    workspace::WorkspaceWithStatus,
 };
 use json_patch::{AddOperation, Patch, PatchOperation, RemoveOperation, ReplaceOperation};
 use uuid::Uuid;
@@ -179,6 +180,46 @@ pub mod approvals_patch {
             path: pending_path(approval_id)
                 .try_into()
                 .expect("Approval path should be valid"),
+        })])
+    }
+}
+
+/// Helper functions for creating browser-session-specific patches
+pub mod browser_session_patch {
+    use super::*;
+
+    fn browser_session_path(session_id: Uuid) -> String {
+        format!(
+            "/browser_sessions/{}",
+            escape_pointer_segment(&session_id.to_string())
+        )
+    }
+
+    pub fn add(session: &BrowserSession) -> Patch {
+        Patch(vec![PatchOperation::Add(AddOperation {
+            path: browser_session_path(session.id)
+                .try_into()
+                .expect("Browser session path should be valid"),
+            value: serde_json::to_value(session)
+                .expect("Browser session serialization should not fail"),
+        })])
+    }
+
+    pub fn replace(session: &BrowserSession) -> Patch {
+        Patch(vec![PatchOperation::Replace(ReplaceOperation {
+            path: browser_session_path(session.id)
+                .try_into()
+                .expect("Browser session path should be valid"),
+            value: serde_json::to_value(session)
+                .expect("Browser session serialization should not fail"),
+        })])
+    }
+
+    pub fn remove(session_id: Uuid) -> Patch {
+        Patch(vec![PatchOperation::Remove(RemoveOperation {
+            path: browser_session_path(session_id)
+                .try_into()
+                .expect("Browser session path should be valid"),
         })])
     }
 }
