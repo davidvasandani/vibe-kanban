@@ -240,23 +240,19 @@ export function NavbarContainer({
     !isProjectIssuesLoading &&
     !linkedIssue &&
     !!linkedIssueId;
-  const {
-    data: fetchedLinkedIssue,
-    isLoading: isFetchedIssueLoading,
-    isError: isFetchedIssueError,
-  } = useQuery({
-    queryKey: ['navbar-linked-issue', linkedIssueId],
-    queryFn: () => getIssue(linkedIssueId!),
-    enabled: shouldFetchLinkedIssue,
-  });
+  const { data: fetchedLinkedIssue, isLoading: isFetchedIssueLoading } =
+    useQuery({
+      queryKey: ['navbar-linked-issue', linkedIssueId],
+      queryFn: () => getIssue(linkedIssueId!),
+      enabled: shouldFetchLinkedIssue,
+    });
   const resolvedLinkedIssue = linkedIssue ?? fetchedLinkedIssue ?? undefined;
   const isWaitingForProjectBreadcrumb =
     shouldResolveBreadcrumbData && !linkedProject && isProjectsLoading;
   const isWaitingForIssueBreadcrumb =
     shouldResolveIssueBreadcrumb &&
     (isProjectIssuesLoading ||
-      (shouldFetchLinkedIssue &&
-        (isFetchedIssueLoading || isFetchedIssueError)));
+      (shouldFetchLinkedIssue && isFetchedIssueLoading));
   const isWaitingForBreadcrumbData =
     isWaitingForProjectBreadcrumb || isWaitingForIssueBreadcrumb;
   const issueBreadcrumbState = useMemo((): WorkspaceBreadcrumbIssueState => {
@@ -266,8 +262,7 @@ export function NavbarContainer({
 
     if (
       isProjectIssuesLoading ||
-      (shouldFetchLinkedIssue &&
-        (isFetchedIssueLoading || isFetchedIssueError))
+      (shouldFetchLinkedIssue && isFetchedIssueLoading)
     ) {
       return { kind: 'loading' };
     }
@@ -289,7 +284,6 @@ export function NavbarContainer({
     isProjectIssuesLoading,
     shouldFetchLinkedIssue,
     isFetchedIssueLoading,
-    isFetchedIssueError,
     resolvedLinkedIssue?.simple_id,
     appNavigation,
   ]);

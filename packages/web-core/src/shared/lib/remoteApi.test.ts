@@ -40,7 +40,10 @@ describe('getIssue', () => {
     vi.mocked(getAuthRuntime).mockReturnValue({
       getToken: vi.fn().mockResolvedValue('token'),
     } as never);
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 404 })));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(null, { status: 404 }))
+    );
 
     await expect(getIssue('missing-issue')).resolves.toBeNull();
   });
