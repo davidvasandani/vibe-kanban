@@ -2351,6 +2351,12 @@ impl ContainerService for LocalContainerService {
                     .stop_adopted_execution(execution_process, status, pgid)
                     .await;
             }
+            // Deliberately returns before `update_completion`, leaving the row
+            // `Running`. That is load-bearing, not an oversight: the next boot's
+            // `cleanup_orphan_executions` selects rows via `find_running` and
+            // unconditionally snapshots their uncommitted work. Marking the row
+            // terminal here would hide it from that sweep and remove the last
+            // safety net for a session whose child vanished with the server.
             return Err(ContainerError::Other(anyhow!(
                 "Child process not found for execution"
             )));
@@ -2677,24 +2683,35 @@ impl ContainerService for LocalContainerService {
             );
             // Mark as interrupted (not killed): the process is stopped by a
             // server shutdown/restart, so the run can be offered for resume.
-            if let Err(error) = self
+            match self
                 .stop_execution(&process, ExecutionProcessStatus::Interrupted)
                 .await
             {
-                tracing::error!(
+                Ok(()) => tracing::info!("Successfully killed process: id={}", process.id),
+                Err(error) => tracing::error!(
                     "Failed to cleanly kill running execution process {:?}: {:?}",
                     process,
                     error
+                ),
+            }
+
+            // Preserve the work whether or not the kill succeeded. Stopping the
+            // process and saving its output are independent concerns, and the
+            // failure case is the one most likely to leave unsaved work on disk:
+            // `stop_execution` reports "child process not found" whenever the
+            // child already died with (or just before) the server, which is the
+            // ordinary shape of a restart. Gating preservation on a clean kill
+            // therefore skipped it in exactly the situation it exists for.
+            // Kept after the stop attempt (never before it) so a live writer has
+            // been signalled first.
+            if let Err(error) = self.commit_interrupted_wip(&process).await {
+                tracing::error!(
+                    "Failed to preserve interrupted process {} work for session {}; \
+                     uncommitted changes may be at risk: {}",
+                    process.id,
+                    process.session_id,
+                    error
                 );
-            } else {
-                tracing::info!("Successfully killed process: id={}", process.id);
-                if let Err(error) = self.commit_interrupted_wip(&process).await {
-                    tracing::error!(
-                        "Failed to preserve interrupted process {} work: {}",
-                        process.id,
-                        error
-                    );
-                }
             }
         }
 

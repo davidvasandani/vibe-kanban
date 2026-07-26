@@ -1,53 +1,85 @@
-# Prior Knowledge: Microsoft Graph PowerShell (v1.0) CLI capability
+# Prior Knowledge: Server restart wipes uncommitted worktree work
 
-The project knowledge base is populated. The most relevant pages are
-`docs/knowledge-base/cli-tool-oauth-login.md` and, secondarily,
-`docs/knowledge-base/workspace-environment-inheritance.md` and
-`docs/knowledge-base/aws-sso-profile-management.md`.
+The knowledge base is populated (17 pages). Exactly one page is directly on
+point, and it is unusually valuable here: it was written by the commit that
+introduced the very mechanism this task must repair.
 
-## Managed CLI tool login boundary (`cli-tool-oauth-login`)
+## `interrupted-worktree-recovery` — the governing page
 
-- VK orchestrates vendor CLIs; it must not become an OAuth client or
-  credential store. Tokens live in the CLI's normal host-side storage.
-- In-app login is offered only when two invariants both hold: (1) credentials
-  survive the login child process and are usable by later agents, and (2) a
-  separate non-secret command independently verifies authentication. The
-  existing catalog already rules out the pinned Graph **beta** CLI
-  (`mgc-beta`) on invariant 2 — so shipping `graph-powershell-1.0` with
-  `CliToolAuthStrategy::Unsupported` and vendor-doc links matches
-  established policy. `Connect-MgGraph -UseDeviceAuthentication` +
-  `Get-MgContext` may satisfy both invariants later, but that is a follow-up
-  acceptance test, not an assumption.
-- Login commands are compiled into the server catalog; nothing command-like
-  is accepted from the browser. Auth probes run with a short timeout,
-  `kill_on_drop`, and a minimal allowlisted environment.
+`docs/knowledge-base/interrupted-worktree-recovery.md`, tags `959a-restart-rewinds`,
+authored by `adf29235` ("Preserve interrupted agent work across restarts", #122)
+— the commit that added `commit_interrupted_wip`.
 
-## CLI tools catalog mechanics (from the catalog source itself)
+The page states the lifecycle invariant this task is enforcing:
 
-- One app-owned directory (`assets::cli_tools_dir()`); only `cli-tools/bin`
-  is exposed on spawned-agent PATH, appended after host paths so
-  host-provided copies win.
-- Installs are atomic: staging → version-directory rename → `bin/` symlink
-  swapped last. Removal deletes the symlink then the tool dir. A manifest
-  without a working symlink reads as "not installed" so the UI offers a
-  clean re-install.
-- The venv strategy (az) already established the precedent for
-  weaker-than-archive verification being recorded honestly in the manifest
-  verification string — the PowerShell module strategy follows it.
-- Renovate custom regex manager tracks `// renovate: datasource=... depName=...`
-  comments above `*_VERSION` consts; catalog pins are never auto-merged.
+> Startup recovery kills an unadopted orphan writer first, then snapshots dirty
+> coding-agent/cleanup-script repositories with `WIP: run interrupted by
+> vibe-kanban shutdown`, and only offers the process for auto-resume after
+> capture succeeds.
 
-## Environment boundaries (`workspace-environment-inheritance`)
+> **Snapshot failures are not a reason to leave a killed execution `Running`:**
+> mark the dead row `Interrupted`, exclude it from the recovered/auto-resume
+> list, and log the failure with execution/repository context.
 
-- Agent PATH assembly happens in `crates/local-deployment/src/container.rs`
-  (merge of inherited PATH + `cli_tools_bin_dir()`); a new tool needs no
-  wiring there — landing a wrapper in `cli-tools/bin` is sufficient.
-- Never mutate the long-lived server environment or write env files as a
-  side channel; the wrapper script carries its own `PSModulePath` setup.
+**The documented invariant and the shipped code disagree.** The page describes
+kill-then-snapshot as a sequence; the code makes the snapshot *conditional on the
+kill succeeding* (`container.rs:2668`, `commit_interrupted_wip` inside the `else`).
+When `stop_execution` returns `Err("Child process not found for execution")` —
+the ordinary case at restart — no snapshot is attempted and the row is left
+`Running`, violating both sentences above. This task closes that gap rather than
+inventing a new policy: the intended behaviour was already written down.
 
-## Host provisioning precedent (`aws-sso-profile-management`, think2.nix)
+Two more directly reusable rules from the same page:
 
-- Host runtimes for agent tooling (e.g. `gws`, `claude-code`) are provided
-  by think2's `environment.systemPackages` and reach the service via
-  `/run/current-system/sw`; the same route serves `pwsh`. App-managed
-  payloads stay out of Nix.
+- **Multi-repository partial failure.** "WIP capture is best-effort across
+  repositories. Attempt every dirty repo even if one commit fails … refresh
+  every repo's `after_head_commit` before returning an aggregate error."
+  `commit_interrupted_wip` already implements this correctly; preserve it when
+  changing the call site.
+- **Verification pattern.** "Keep the reset decision as a small pure helper with
+  a truth-table unit test." This is the established shape for safety predicates
+  in this codebase — `reset_would_discard_uncommitted_work`
+  (`crates/services/src/services/container.rs:73`) plus
+  `dirty_git_reset_requires_explicit_force` (`:1774`) is the working example.
+  New retain/destroy decisions should follow it, because the crates that own the
+  destructive code (`workspace-manager`, `worktree-manager`) have **no test
+  infrastructure at all**, so a pure helper is the only cheaply testable unit.
+
+The page's closing line is a direct instruction for stage 11 of this pipeline:
+
+> Independent review should explicitly probe killed-orphan failure state and
+> multi-repository partial commits; both are easy to miss in the happy path.
+
+The reported incident *is* the killed-orphan failure state. It was flagged as
+easy to miss, and it was missed.
+
+## Reset boundary (same page) — bounds the non-goals
+
+The page fixes the `force_when_dirty` contract: non-forced dirty reset must
+reject; `force_when_dirty=true` is explicit authorisation for `reset --hard` +
+`clean -fd`. The incident report already ruled this path out, and the page
+confirms it is behaving as designed. **Do not touch it.**
+
+## Related but not directly applicable
+
+- `worktree-formatting-prerequisites` (`7243-make-frontend-fo`) — fail-before-mutation
+  preflight checks. The general stance (validate before mutating) is the same
+  instinct behind guarding the orphan sweep, but no shared code.
+- `issue-status-side-effects` (`2f63-auto-archive-wor`, `f464-vk-workspace-mgm`) —
+  terminal-status workspace archiving. Relevant only as background for *why*
+  expiry accelerates to 1h on archive, which is the pressure that made the
+  expiry-sweep guard in #151 necessary.
+
+## Knowledge gaps this task will need to fill
+
+Nothing in the KB covers:
+
+- The **orphan** sweep (`cleanup_orphan_workspaces`) as distinct from the
+  **expiry** sweep. The KB and the #151 work both address expiry; the orphan
+  sweep is undocumented and unguarded.
+- That orphan status is decided by an **exact, un-canonicalised string match**
+  on `container_ref`, making it fragile to path normalisation drift.
+- That the two cleanliness helpers disagree: `is_container_clean` counts
+  untracked files, `check_worktree_clean` (git2) does not.
+
+These are candidates for the stage-12 knowledge update.

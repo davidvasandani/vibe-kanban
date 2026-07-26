@@ -387,7 +387,7 @@ impl WorktreeManager {
         worktree_path: &Path,
     ) -> Result<(), WorktreeError> {
         let worktree_display_name = worktree_path.to_string_lossy().to_string();
-        debug!("Performing cleanup for worktree: {worktree_display_name}");
+        info!("Performing destructive cleanup for worktree: {worktree_display_name}");
 
         // Step 1: Use GitService to remove the worktree registration (force) if present
         // The Git CLI is more robust than libgit2 for mutable worktree operations
@@ -403,10 +403,10 @@ impl WorktreeManager {
 
         // Step 3: Clean up physical worktree directory if it exists
         if worktree_path.exists() {
-            debug!(
-                "Removing existing worktree directory: {}",
-                worktree_path.display()
-            );
+            // `info!`, not `debug!`: this deletes a working tree, and a
+            // destructive step logged below the default level is invisible
+            // exactly when someone is trying to explain where their work went.
+            info!("Removing worktree directory: {}", worktree_path.display());
             std::fs::remove_dir_all(worktree_path).map_err(WorktreeError::Io)?;
         }
 

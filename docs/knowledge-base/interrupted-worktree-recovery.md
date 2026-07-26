@@ -1,6 +1,6 @@
 # Interrupted worktree recovery and reset safety
 
-Tags: `959a-restart-rewinds`
+Tags: `959a-restart-rewinds`, `0bc4-server-restart-w`
 
 ## Lifecycle invariant
 
@@ -13,6 +13,37 @@ offers the process for auto-resume after capture succeeds.
 Snapshot failures are not a reason to leave a killed execution `Running`: mark
 the dead row `Interrupted`, exclude it from the recovered/auto-resume list, and
 log the failure with execution/repository context.
+
+## Preservation is never conditional on teardown succeeding
+
+Stopping a process and preserving its work are independent concerns. Gate the
+second on the first and you skip preservation in precisely the case it exists
+for: `stop_execution` returns "child process not found" whenever the child died
+with (or just before) the server, which is the *ordinary* shape of a restart —
+not an exotic failure. Attempt the WIP snapshot for every non-persistent
+process, on both the success and the error branch, ordered after the stop
+attempt so a live writer has been signalled first.
+
+The same rule generalises: no teardown failure (unreachable repo, failed
+metadata cleanup, unkillable child) may skip preservation of that unit's
+uncommitted work.
+
+## The `Running` row left by a failed stop is load-bearing
+
+`stop_execution` returns before `update_completion` when no child handle and no
+adopted pgid exist, leaving the row `Running`. This looks like a bug and is
+tempting to "fix". Do not.
+
+That row state is exactly what makes the next boot's `cleanup_orphan_executions`
+(which selects via `find_running` and snapshots unconditionally) rescue the
+session. Marking it terminal at shutdown hides it from that sweep and deletes
+the last safety net. The "don't leave a killed execution `Running`" rule above
+applies to the *startup* path, which marks the row terminal only **after**
+attempting capture — not to the shutdown path.
+
+Corollary for triage: because that backstop exists, a shutdown-side preservation
+gap usually costs nothing visible, which is why it survived review. It still
+matters — the backstop needs a next startup to happen at all.
 
 ## Multi-repository partial failure
 
