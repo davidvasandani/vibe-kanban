@@ -141,6 +141,22 @@ of that unit's uncommitted work. Fail-safe direction must be consistent across
 sibling cleanup paths; two routines that decide the same question must not
 disagree about which way to err.
 
+### XVI. Bundled third-party entries install what they advertise
+Anything the product suggests launching on a user's machine — preconfigured MCP
+catalog entries included — names an **immutable, version-addressed artifact**
+(a released version, tag, or digest; never `@latest`, a branch, or a mutable
+tag), and that artifact must come from the same repository the catalog metadata
+links to. Source URL and executable source are one claim, not two.
+
+Integrity must be enforced before any code from an artifact outside the trusted
+delivery mechanism executes. A digest that is checked only later by scheduled
+CI is a detection control, not install-time verification. If prevention cannot
+be shipped because it depends on unavailable external ownership or credentials,
+the exception must be explicit: document the residual threat, controls,
+notification path, and concrete condition that reopens the decision. Dependency
+updates move the source pin, integrity record, tests, and documentation in the
+same reviewed change and fail closed rather than substituting another build.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -154,11 +170,13 @@ disagree about which way to err.
   backend/frontend mapping checks, and fixture-based protocol tests.
 - Diagnostic issue/task creation must use an explicit current project or
   workspace context; never choose an arbitrary project when context is missing.
+- Preconfigured MCP catalog entries stay transport-neutral (`command`, `args`,
+  `env` with credential placeholders); per-agent shape is the adapter's job.
 - Run `pnpm run format` before completing a task.
 
 ## Governance
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.12.0 (adds fail-safe destructive-operation principle XV; previous
-0.11.0 added worktree-safe verification principle XIV)
+**Version**: 0.13.0 (adds verified bundled third-party delivery principle XVI;
+0.12.0 added fail-safe destructive-operation principle XV)
