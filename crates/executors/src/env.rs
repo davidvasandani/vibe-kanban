@@ -115,12 +115,31 @@ impl ExecutionEnv {
     }
 
     /// Return a new env with profile env from CmdOverrides merged in.
-    pub fn with_profile(self, cmd: &CmdOverrides) -> Self {
+    ///
+    /// Profile values override runtime values except for `PATH`, where profile
+    /// entries take precedence but runtime entries remain available. Runtime
+    /// `PATH` can contain execution-owned directories such as the app-managed
+    /// CLI tools bin directory, which a profile must not erase.
+    pub fn with_profile(mut self, cmd: &CmdOverrides) -> Self {
         if let Some(ref profile_env) = cmd.env {
-            self.with_overrides(profile_env)
-        } else {
-            self
+            let runtime_path = env_path(&self.vars).cloned();
+            let profile_path = env_path(profile_env).cloned();
+            self.merge(profile_env);
+
+            if let Some(profile_path) = profile_path {
+                #[cfg(windows)]
+                self.vars.retain(|key, _| !is_path_key(key));
+
+                let effective_path = if let Some(runtime_path) = runtime_path {
+                    workspace_utils::shell::merge_paths(profile_path, runtime_path)
+                } else {
+                    profile_path.into()
+                };
+                self.insert("PATH", effective_path.to_string_lossy().into_owned());
+            }
         }
+
+        self
     }
 
     /// Apply all environment variables to a Command
@@ -137,6 +156,21 @@ impl ExecutionEnv {
     pub fn get(&self, key: &str) -> Option<&String> {
         self.vars.get(key)
     }
+}
+
+fn env_path(env: &HashMap<String, String>) -> Option<&String> {
+    env.iter()
+        .find_map(|(key, value)| is_path_key(key).then_some(value))
+}
+
+#[cfg(not(windows))]
+fn is_path_key(key: &str) -> bool {
+    key == "PATH"
+}
+
+#[cfg(windows)]
+fn is_path_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("PATH")
 }
 
 #[cfg(test)]
@@ -158,5 +192,63 @@ mod tests {
         assert_eq!(merged.vars.get("VK_PROJECT_NAME").unwrap(), "runtime");
         assert_eq!(merged.vars.get("FOO").unwrap(), "profile"); // overrides
         assert_eq!(merged.vars.get("BAR").unwrap(), "profile");
+    }
+
+    #[test]
+    fn profile_path_keeps_runtime_owned_entries() {
+        let mut base = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        let runtime_path =
+            std::env::join_paths(["/runtime/bin", "/managed/cli-tools/bin"]).unwrap();
+        base.insert("PATH", runtime_path.to_string_lossy());
+
+        let mut profile = HashMap::new();
+        let profile_path = std::env::join_paths(["/profile/bin", "/runtime/bin"]).unwrap();
+        profile.insert(
+            "PATH".to_string(),
+            profile_path.to_string_lossy().into_owned(),
+        );
+
+        let merged = base.with_profile(&CmdOverrides {
+            env: Some(profile),
+            ..Default::default()
+        });
+        let paths: Vec<_> = std::env::split_paths(merged.vars.get("PATH").unwrap()).collect();
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/profile/bin"),
+                PathBuf::from("/runtime/bin"),
+                PathBuf::from("/managed/cli-tools/bin"),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn profile_path_casing_is_normalized_on_windows() {
+        let mut base = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        base.insert("PATH", r"C:\runtime");
+
+        let mut profile = HashMap::new();
+        profile.insert("Path".to_string(), r"C:\profile".to_string());
+
+        let merged = base.with_profile(&CmdOverrides {
+            env: Some(profile),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            merged
+                .vars
+                .keys()
+                .filter(|key| key.eq_ignore_ascii_case("PATH"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::env::split_paths(merged.vars.get("PATH").unwrap()).collect::<Vec<_>>(),
+            vec![PathBuf::from(r"C:\profile"), PathBuf::from(r"C:\runtime")]
+        );
     }
 }
