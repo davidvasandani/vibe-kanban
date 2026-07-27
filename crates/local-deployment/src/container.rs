@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use command_group::AsyncGroupChild;
 use db::{
     DBService,
@@ -40,6 +41,10 @@ use executors::{
         WarmReuseHandle, WarmReuseSignal,
     },
     logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
+    mcp_refresh::{
+        McpRefreshErrorCategory, McpRefreshHandle, McpRefreshResult, McpRefreshSignal,
+        McpRefreshStatus,
+    },
 };
 use futures::{FutureExt, StreamExt, TryStreamExt, stream::select};
 use git::GitService;
@@ -51,6 +56,7 @@ use services::services::{
     container::{ContainerError, ContainerRef, ContainerService},
     diff_stream::{self, DiffStreamHandle},
     file::FileService,
+    mcp_refresh::McpRefreshCoordinator,
     notification::NotificationService,
     queued_message::QueuedMessageService,
     remote_client::{RemoteClient, RemoteClientError},
@@ -327,6 +333,8 @@ pub struct LocalContainerService {
     /// the leak where a `Completed` turn row is skipped by `try_stop`. Phase 2,
     /// see `specs/vk/826e-coding-agent-war/`.
     warm_app_servers: Arc<RwLock<HashMap<Uuid, WarmAppServer>>>,
+    mcp_refresh_controls: Arc<RwLock<HashMap<Uuid, (Uuid, McpRefreshHandle)>>>,
+    mcp_refresh_coordinator: McpRefreshCoordinator,
     workspace_touch_times: Arc<RwLock<HashMap<Uuid, Instant>>>,
     config: Arc<RwLock<Config>>,
     git: GitService,
@@ -339,6 +347,63 @@ pub struct LocalContainerService {
 }
 
 impl LocalContainerService {
+    fn register_mcp_refresh_control(
+        &self,
+        session_id: Uuid,
+        execution_id: Uuid,
+        execution_started_at: DateTime<Utc>,
+        signal: McpRefreshSignal,
+    ) {
+        let controls = self.mcp_refresh_controls.clone();
+        let coordinator = self.mcp_refresh_coordinator.clone();
+        tokio::spawn(async move {
+            let handle = match signal.await {
+                Ok(handle) => handle,
+                Err(_) => {
+                    if coordinator
+                        .status(session_id)
+                        .await
+                        .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
+                    {
+                        coordinator
+                            .fail(session_id, McpRefreshErrorCategory::InitializeFailed)
+                            .await;
+                    }
+                    return;
+                }
+            };
+            controls
+                .write()
+                .await
+                .insert(session_id, (execution_id, handle.clone()));
+
+            if let Some(state) = coordinator
+                .status(session_id)
+                .await
+                .filter(|state| state.status == McpRefreshStatus::PendingNextTurn)
+            {
+                // A request racing this execution's startup cannot be
+                // confirmed from this turn: its config was already resolved.
+                // Queue it on this live thread and let the following turn
+                // perform the atomic confirmation.
+                if state.requested_at > execution_started_at {
+                    if let Err(category) = handle.0.queue_refresh().await {
+                        coordinator.fail(session_id, category).await;
+                    }
+                    return;
+                }
+                match handle.0.list_servers().await {
+                    Ok(servers) => {
+                        coordinator.confirm(session_id, servers).await;
+                    }
+                    Err(category) => {
+                        coordinator.fail(session_id, category).await;
+                    }
+                }
+            }
+        });
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         db: DBService,
@@ -359,6 +424,7 @@ impl LocalContainerService {
         let raw_log_tailers = Arc::new(RwLock::new(HashMap::new()));
         let adopted_pgids = Arc::new(RwLock::new(HashMap::new()));
         let warm_app_servers = Arc::new(RwLock::new(HashMap::new()));
+        let mcp_refresh_controls = Arc::new(RwLock::new(HashMap::new()));
         let workspace_touch_times = Arc::new(RwLock::new(HashMap::new()));
         let notification_service = NotificationService::new(config.clone());
 
@@ -373,6 +439,8 @@ impl LocalContainerService {
             raw_log_tailers,
             adopted_pgids,
             warm_app_servers,
+            mcp_refresh_controls,
+            mcp_refresh_coordinator: McpRefreshCoordinator::default(),
             workspace_touch_times,
             config,
             git,
@@ -1346,6 +1414,13 @@ impl LocalContainerService {
                 }
                 child_store.write().await.remove(&exec_id);
             }
+            let mut controls = container.mcp_refresh_controls.write().await;
+            if controls
+                .get(&session_id)
+                .is_some_and(|(control_exec_id, _)| *control_exec_id == exec_id)
+            {
+                controls.remove(&session_id);
+            }
         })
     }
 
@@ -1920,6 +1995,8 @@ impl ContainerService for LocalContainerService {
     /// would skip it). See `specs/vk/826e-coding-agent-war/` (spec FR-4b).
     async fn reap_warm_processes_for_session(&self, session_id: Uuid) {
         self.reap_warm_server(&session_id).await;
+        self.mcp_refresh_controls.write().await.remove(&session_id);
+        self.mcp_refresh_coordinator.remove(session_id).await;
     }
 
     fn db(&self) -> &DBService {
@@ -1932,6 +2009,72 @@ impl ContainerService for LocalContainerService {
 
     fn notification_service(&self) -> &NotificationService {
         &self.notification_service
+    }
+
+    async fn refresh_mcp_tools(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<McpRefreshResult, ContainerError> {
+        let session = Session::find_by_id(&self.db.pool, session_id)
+            .await?
+            .ok_or(SessionError::NotFound)?;
+        if session.workspace_id != workspace_id {
+            return Err(ContainerError::Other(anyhow!(
+                "Session does not belong to workspace"
+            )));
+        }
+        let profile =
+            ExecutionProcess::latest_executor_profile_for_session(&self.db.pool, session_id)
+                .await?;
+        let supported = profile
+            .as_ref()
+            .is_some_and(|profile| profile.executor == BaseCodingAgent::Codex);
+        let result = self
+            .mcp_refresh_coordinator
+            .request(session_id, supported)
+            .await;
+        if result.status != McpRefreshStatus::PendingNextTurn {
+            return Ok(result);
+        }
+
+        let control = self
+            .mcp_refresh_controls
+            .read()
+            .await
+            .get(&session_id)
+            .map(|(_, handle)| handle.clone());
+        if let Some(control) = control
+            && let Err(category) = control.0.queue_refresh().await
+        {
+            return Ok(self
+                .mcp_refresh_coordinator
+                .fail(session_id, category)
+                .await
+                .unwrap_or(result));
+        }
+        // A successful reload is deliberately not confirmed from this
+        // execution's control. Codex adopts the queued inventory at the next
+        // active-turn boundary; that execution's control is registered by
+        // `register_mcp_refresh_control`, which reads the complete status and
+        // atomically confirms this pending generation.
+        Ok(result)
+    }
+
+    async fn mcp_refresh_status(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<Option<McpRefreshResult>, ContainerError> {
+        let session = Session::find_by_id(&self.db.pool, session_id)
+            .await?
+            .ok_or(SessionError::NotFound)?;
+        if session.workspace_id != workspace_id {
+            return Err(ContainerError::Other(anyhow!(
+                "Session does not belong to workspace"
+            )));
+        }
+        Ok(self.mcp_refresh_coordinator.status(session_id).await)
     }
 
     async fn resolve_org_env_vars(&self, workspace: &Workspace) -> HashMap<String, String> {
@@ -2264,18 +2407,41 @@ impl ContainerService for LocalContainerService {
             None
         };
 
-        let mut spawned = match warm_spawned {
-            Some(spawned) => spawned,
-            None => tokio::time::timeout(
+        let spawn_result: Result<_, ContainerError> = match warm_spawned {
+            Some(spawned) => Ok(spawned),
+            None => match tokio::time::timeout(
                 Duration::from_secs(30),
                 executor_action.spawn(&current_dir, approvals_service, &env),
             )
             .await
-            .map_err(|_| {
-                ContainerError::Other(anyhow!(
+            {
+                Ok(result) => result.map_err(ContainerError::ExecutorError),
+                Err(_) => Err(ContainerError::Other(anyhow!(
                     "Timeout: process took more than 30 seconds to start"
-                ))
-            })??,
+                ))),
+            },
+        };
+        let mut spawned = match spawn_result {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                if matches!(
+                    execution_process.run_reason,
+                    ExecutionProcessRunReason::CodingAgent
+                ) && self
+                    .mcp_refresh_coordinator
+                    .status(execution_process.session_id)
+                    .await
+                    .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
+                {
+                    self.mcp_refresh_coordinator
+                        .fail(
+                            execution_process.session_id,
+                            McpRefreshErrorCategory::ProcessLaunchFailed,
+                        )
+                        .await;
+                }
+                return Err(error);
+            }
         };
 
         // Persistent app-servers ask to be kept warm across turns: on a clean
@@ -2286,6 +2452,29 @@ impl ContainerService for LocalContainerService {
         // consumed below, along with the reuse handle the executor surfaces.
         let keep_warm = spawned.keep_warm && self.warm_agents_enabled();
         let warm_reuse = spawned.warm_reuse.take();
+        if let Some(signal) = spawned.mcp_refresh.take() {
+            self.register_mcp_refresh_control(
+                execution_process.session_id,
+                execution_process.id,
+                execution_process.started_at,
+                signal,
+            );
+        } else if matches!(
+            execution_process.run_reason,
+            ExecutionProcessRunReason::CodingAgent
+        ) && self
+            .mcp_refresh_coordinator
+            .status(execution_process.session_id)
+            .await
+            .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
+        {
+            self.mcp_refresh_coordinator
+                .fail(
+                    execution_process.session_id,
+                    McpRefreshErrorCategory::Unsupported,
+                )
+                .await;
+        }
 
         // Record the process group id (== leader pid for grouped spawns) so a
         // later boot can clean up the group if this server dies uncleanly.

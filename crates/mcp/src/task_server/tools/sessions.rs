@@ -140,8 +140,68 @@ struct GetExecutionResponse {
     final_message: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RefreshMcpToolsRequest {
+    #[schemars(description = "Workspace ID. Optional in an orchestrator-scoped MCP context.")]
+    workspace_id: Option<Uuid>,
+    #[schemars(
+        description = "Session ID whose next turn should use refreshed MCP tools. Optional for the orchestrator session in scoped mode."
+    )]
+    session_id: Option<Uuid>,
+}
+
 #[tool_router(router = session_tools_router, vis = "pub")]
 impl McpServer {
+    #[tool(
+        description = "Queue an MCP tool refresh for an active workspace session without replacing its conversation. Codex applies it on the next active turn; unsupported executors are reported explicitly."
+    )]
+    async fn refresh_mcp_tools(
+        &self,
+        Parameters(RefreshMcpToolsRequest {
+            workspace_id,
+            session_id,
+        }): Parameters<RefreshMcpToolsRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let workspace_id = match self.resolve_workspace_id(workspace_id) {
+            Ok(id) => id,
+            Err(error_result) => return Ok(Self::tool_error(error_result)),
+        };
+        if let Err(error_result) = self.scope_allows_workspace(workspace_id) {
+            return Ok(Self::tool_error(error_result));
+        }
+        let Some(session_id) = session_id.or_else(|| self.orchestrator_session_id()) else {
+            return Self::err(
+                "session_id is required outside an orchestrator-scoped MCP context",
+                None,
+            );
+        };
+        if self
+            .orchestrator_session_id()
+            .is_some_and(|scoped_session_id| scoped_session_id != session_id)
+        {
+            return Self::err("Session is outside the configured MCP scope", None);
+        }
+
+        let session_url = self.url(&format!("/api/sessions/{session_id}"));
+        let session: Session = match self.send_json(self.client.get(&session_url)).await {
+            Ok(value) => value,
+            Err(error_result) => return Ok(Self::tool_error(error_result)),
+        };
+        if session.workspace_id != workspace_id {
+            return Self::err("Session does not belong to workspace", None);
+        }
+
+        let url = self.url(&format!(
+            "/api/workspaces/{workspace_id}/sessions/{session_id}/mcp/refresh"
+        ));
+        let result: executors::mcp_refresh::McpRefreshResult =
+            match self.send_json(self.client.post(&url)).await {
+                Ok(value) => value,
+                Err(error_result) => return Ok(Self::tool_error(error_result)),
+            };
+        Self::success(&result)
+    }
+
     #[tool(description = "Create a new session in a workspace.")]
     async fn create_session(
         &self,

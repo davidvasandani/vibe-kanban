@@ -25,6 +25,7 @@ import {
   UserSystemInfo,
   McpServerQuery,
   McpServerTestResult,
+  McpRefreshResult,
   TestMcpServersBody,
   UpdateMcpServersBody,
   GetMcpServerResponse,
@@ -351,6 +352,27 @@ export const handleApiResponse = async <T, E = T>(
 
 // Sessions API
 export const sessionsApi = {
+  refreshMcpTools: async (
+    workspaceId: string,
+    sessionId: string
+  ): Promise<McpRefreshResult> => {
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/sessions/${sessionId}/mcp/refresh`,
+      { method: 'POST' }
+    );
+    return handleApiResponse<McpRefreshResult>(response);
+  },
+
+  getMcpRefreshStatus: async (
+    workspaceId: string,
+    sessionId: string
+  ): Promise<McpRefreshResult | null> => {
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/sessions/${sessionId}/mcp/refresh`
+    );
+    return handleApiResponse<McpRefreshResult | null>(response);
+  },
+
   getByWorkspace: async (workspaceId: string): Promise<Session[]> => {
     const response = await makeRequest(
       `/api/sessions?workspace_id=${workspaceId}`

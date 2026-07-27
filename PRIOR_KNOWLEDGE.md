@@ -1,117 +1,105 @@
-# Prior knowledge for the verified Slack MCP delivery task
+# Prior Knowledge: Active MCP Refresh
 
-Task: `95e9-close-the-unveri`
+The project knowledge base is not empty. The following established facts should
+shape the specification and implementation plan.
 
-The project knowledge base is not empty. The following pages and established
-patterns are relevant.
+## Relevant pages
 
-## Forked MCP server packaging
+### `docs/knowledge-base/mcp-connectivity-testing.md`
 
-Source:
-`docs/knowledge-base/forked-mcp-server-packaging.md` from predecessor task
-`36d7-use-the-maintain` (available in commit `2e4b77aa`, which this branch has
-not yet incorporated).
+- VK historically writes executor-native MCP configuration; it does not own the
+  coding agent's live MCP connections or tool inventory. The existing
+  `mcp_test.rs` probe is a separate, on-demand MCP client, so a successful probe
+  does not prove that a running agent adopted new tools.
+- The reusable transport handshake is `initialize` →
+  `notifications/initialized` → `tools/list`, with stdio, streamable HTTP, and
+  legacy SSE-specific behavior already implemented.
+- Native configurations are deliberately heterogeneous and must be normalized
+  without mistaking unsupported shapes for failures.
+- Diagnostics are untrusted and potentially secret-bearing. Existing rules cap
+  previews, redact configured header values longest-first, omit HTML bodies,
+  sanitize redirect locations, drain stdio stderr, and bound probes by timeout.
+- Tool counts already exist in connectivity results. UI aggregation must not sum
+  counts or treat unknown counts as zero.
 
-- The catalog URL must identify the fork that actually supplies the executable;
-  metadata alone does not select a build.
-- The fork launcher verifies a baked-in digest for each platform binary before
-  execution and uses staged download plus atomic promotion.
-- The operator override intentionally transfers provenance responsibility to
-  the operator.
-- The launcher tarball digest and platform binary digests answer different
-  questions. The inner digest is enforced on every clean launch. The outer
-  digest is only audited because `npx` cannot accept integrity for a URL package.
-- GitHub release assets can be replaced under an existing tag. A scheduled
-  digest test makes replacement detectable, not impossible.
-- Version corrections use a new `-vk.<n+1>` tag; existing assets are never
-  re-uploaded.
-- Renovate must move both occurrences of the version in the GitHub URL,
-  include prerelease fork tags, disable automerge, and remind reviewers to
-  refresh the source constant, digest, and documentation together.
-- Real verification isolates both npm's cache and the launcher's cache and
-  drives the stdio handshake through `tools/list`.
+### `docs/knowledge-base/shared-mcp-configuration.md`
 
-Implication: this task must protect the outer artifact before the package's
-`bin` runs. Adding a signature check inside that same unverified launcher does
-not close the gap.
+- Executor-native files are the source of truth; there is no separate shared MCP
+  registry. A live refresh therefore has to re-read the active executor's native
+  configuration, not a stale shared-settings draft.
+- Shared writes are atomic per native file (stage + rename, with `.bak`), but a
+  multi-profile save may partially succeed. Refresh must scope itself to the
+  selected live session/executor and report what that executor actually loaded.
+- Transport compatibility differs by executor and by UI codec. Codex and Grok
+  support stdio and streamable HTTP but not legacy SSE; adapters cannot assume
+  one universal reload mechanism or config shape.
+- OAuth gateway credentials are encrypted and API-visible values are redacted.
+  Placeholder hydration is narrowly scoped and fails closed, so refresh must not
+  copy or expose credential material while fingerprinting definitions.
 
-## MCP connectivity testing
+### `docs/knowledge-base/forked-mcp-server-packaging.md`
 
-Source: `docs/knowledge-base/mcp-connectivity-testing.md`.
+- The pinned Slack fork is intentionally delivered from
+  `davidvasandani/slack-mcp-server` release assets. The concrete release
+  `v1.3.0-vk.2` is expected to expose attachment retrieval.
+- A real verification must use an isolated cache and perform an MCP handshake
+  through `tools/list`; catalog metadata alone proves nothing about the running
+  binary.
+- Diagnostics from MCP launchers belong on stderr because stdout is protocol
+  framing. An argument-validation error from `attachment_get_data` proves the
+  registered handler exists, while a generic unknown-tool error proves it does
+  not.
 
-- VK primarily writes MCP definitions into agents' native configuration; it
-  does not own the agent's normal MCP install or launch lifecycle.
-- The on-demand probe is the limited exception: it spawns the exact configured
-  stdio command and performs `initialize`, `notifications/initialized`, and
-  `tools/list`.
-- Stdout is protocol-only for stdio servers; diagnostics belong on stderr.
-- Spawned processes must be bounded and killed on timeout.
-- A handler argument error can prove a tool exists and ran even when a
-  successful credential-backed call is unavailable.
+### `docs/knowledge-base/grok-executor-integration.md`
 
-Implication: pointing a preconfigured entry at an app-managed executable
-requires a new lifecycle contract. A catalog string cannot silently assume that
-the per-user executable was installed.
+- Grok runs as an ACP stdio agent and reads `~/.grok/config.toml`; its live
+  session lifecycle is executor/vendor-owned.
+- Generic `tool_output_error` events are not sufficient evidence of an MCP
+  failure. Refresh verification must correlate the actual tool name, call, and
+  result rather than infer from a broad vendor event category.
+- Cross-executor behavior requires end-to-end wiring across executor
+  implementation, generated types, frontend mappings, deployment services, and
+  tests.
 
-## Shared MCP configuration
+### `wiki/agent-process-lifecycle.md`
 
-Source: `docs/knowledge-base/shared-mcp-configuration.md`.
+- A coding-agent turn and its `ExecutionProcess` are currently coupled, although
+  selected executors can keep an app-server process warm across turns.
+- `LocalContainerService` owns process handles and concurrency state. Long-lived
+  OpenCode reuse is behind `VK_KEEP_WARM_AGENTS`; Codex and ACP live reuse are
+  explicitly deferred because their transports are torn down at turn end.
+- Any refresh implementation that claims same-session continuity must account
+  for which agent process is actually alive between turns. A backend-only
+  inventory cache cannot make a short-lived or transport-closed executor adopt
+  tools.
+- Existing concurrency lessons apply: publish/register before removing the old
+  owner, never hold registry locks across process-kill awaits, use
+  generation-conditional retirement, and keep clean cold-start fallback.
 
-- `crates/executors/default_mcp.json` is the canonical suggested-server
-  catalog.
-- Canonical stdio entries use `command`, `args`, and `env`; adapters in
-  `mcp_config.rs` translate them to each agent's native shape.
-- Opencode needs an array command and renames `env` to `environment`.
-- Catalog availability and UI discoverability are separate concerns.
+## Planning implications
 
-Implication: preserve the canonical Slack entry's token placeholder and add
-tests for the unadapted, Codex, and Opencode forms after any delivery change.
+1. Begin with executor capability discovery. The acceptance criteria cannot be
+   met generically by the current connectivity probe or by rewriting config.
+2. Separate the control-plane API/status model from executor-specific live
+   reload adapters. Unsupported executors must be truthful.
+3. Reuse transport normalization, handshake parsing, timeout, and redaction code
+   from `mcp_test.rs` where it is applicable, but do not confuse a VK-owned probe
+   inventory with the agent's active inventory.
+4. Model refresh as immutable generations and retire old connections only after
+   calls using them finish.
+5. Test Slack against the pinned fork artifact and prove the live executor
+   adopted `attachment_get_data`, not merely that an independent probe observed
+   it.
+6. Treat status timestamps as describing a confirmed published generation.
+   Clear or retain them deliberately when configuration changes or a refresh
+   partially fails.
 
-## App-managed CLI tool installer
+## Risks and unresolved constraints
 
-Source: `crates/services/src/services/cli_tools.rs`, with the module-specific
-precedent documented in
-`docs/knowledge-base/powershell-module-cli-tools.md`.
-
-- Managed tools live below `assets::cli_tools_dir()`, with only a stable `bin`
-  directory exposed to spawned agents.
-- Archive installs download to per-tool staging, stream-compute SHA-256, compare
-  against a per-platform pin before extraction, promote a complete version
-  directory, and swap the executable symlink last.
-- A checksum mismatch writes no install.
-- Host copies win over app-owned copies for normal CLI tools.
-- Installation is explicit and per-user; status, install, removal, platform
-  support, and manifest state are all modelled.
-- The current catalog assumes one exposed executable per tool and is surfaced
-  as a user-facing vendor CLI catalog, not as an implementation detail for
-  preconfigured MCP entries.
-
-Implication: this machinery can enforce outer integrity, but adopting it is not
-just adding a checksum row. The plan must account for installation UX,
-generated-config path stability, absence/outdated behavior, platform assets,
-and whether a host binary is allowed to supersede the fork pin.
-
-## Worktree verification prerequisites
-
-Source: `docs/knowledge-base/worktree-formatting-prerequisites.md`.
-
-- Run `pnpm install --frozen-lockfile` before repository formatting and broad
-  verification in a fresh worktree.
-- The formatter preflight intentionally fails before mutation when package-local
-  formatter shims are absent.
-
-Implication: dependency setup is an explicit plan task before final formatting.
-
-## Decision constraints distilled from prior knowledge
-
-1. npm publication is the least invasive prevention mechanism, but package
-   ownership and publish credentials are external prerequisites and must be
-   verified rather than assumed.
-2. The managed installer is technically capable of verification before
-   execution, but it changes the MCP catalog's installation contract and must
-   not create a broken default entry for users who have not installed the tool.
-3. Signature verification is complementary only after the outer fetch itself is
-   authenticated or digest-verified.
-4. If prevention cannot be shipped responsibly in this repository state, an
-   honest detect-only decision must preserve the scheduled audit and state the
-   exact condition that reopens prevention.
+- The knowledge base documents no existing vendor-neutral live MCP reload
+  command for Claude, Codex, Grok, or the other executors.
+- Several executors are one-process-per-turn, and even warm-capable paths do not
+  necessarily preserve their MCP client transport. The functional scope may
+  need a first supported executor with capability-gated rollout.
+- Resources and prompts are not part of the current connectivity result, so
+  their enumeration and schema validation require extension.

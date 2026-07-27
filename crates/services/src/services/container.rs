@@ -42,6 +42,7 @@ use executors::{
             patch::{fix_patch_ops, is_add_or_replace, patch_entry_path},
         },
     },
+    mcp_refresh::McpRefreshResult,
     profile::{ExecutorConfig, ExecutorProfileId},
 };
 use futures::{StreamExt, future, stream::BoxStream};
@@ -129,6 +130,18 @@ pub trait ContainerService {
     fn git(&self) -> &GitService;
 
     fn notification_service(&self) -> &NotificationService;
+
+    async fn refresh_mcp_tools(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<McpRefreshResult, ContainerError>;
+
+    async fn mcp_refresh_status(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<Option<McpRefreshResult>, ContainerError>;
 
     /// Resolve the owning organization's environment variables for a
     /// workspace. Implementations must degrade to an empty map when the

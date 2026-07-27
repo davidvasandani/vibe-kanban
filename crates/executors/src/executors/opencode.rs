@@ -269,6 +269,7 @@ impl Opencode {
             // specs/vk/826e-coding-agent-war/plan.md (Phase 2).
             keep_warm: true,
             warm_reuse: Some(warm_reuse_rx),
+            mcp_refresh: None,
         })
     }
 
@@ -392,6 +393,7 @@ impl Opencode {
             cancel: Some(cancel),
             keep_warm: true,
             warm_reuse: Some(warm_reuse_rx),
+            mcp_refresh: None,
         })
     }
 

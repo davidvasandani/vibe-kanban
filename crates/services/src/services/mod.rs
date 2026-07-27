@@ -15,6 +15,7 @@ pub mod file_search;
 pub mod filesystem;
 pub mod filesystem_watcher;
 pub mod mcp_gateway_secrets;
+pub mod mcp_refresh;
 pub mod notification;
 pub mod oauth_credentials;
 pub mod pipeline_stage;

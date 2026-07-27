@@ -613,6 +613,7 @@ mod tests {
             "get_execution".to_string(),
             "list_background_helpers".to_string(),
             "list_sessions".to_string(),
+            "refresh_mcp_tools".to_string(),
             "run_session_prompt".to_string(),
             "spawn_background_helper".to_string(),
             "stop_background_helper".to_string(),

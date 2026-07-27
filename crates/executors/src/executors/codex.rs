@@ -76,6 +76,7 @@ use crate::{
         SlashCommandDescription, SpawnedChild, StandardCodingAgentExecutor,
     },
     logs::utils::patch,
+    mcp_refresh::McpRefreshHandle,
     model_selector::{ModelInfo, ModelSelectorConfig, PermissionPolicy, ReasoningOption},
     profile::ExecutorConfig,
     stdout_dup::create_stdout_pipe_writer,
@@ -709,6 +710,7 @@ impl Codex {
 
         let new_stdout = create_stdout_pipe_writer(&mut child)?;
         let (exit_signal_tx, exit_signal_rx) = tokio::sync::oneshot::channel();
+        let (mcp_refresh_tx, mcp_refresh_rx) = tokio::sync::oneshot::channel();
         let cancel = tokio_util::sync::CancellationToken::new();
 
         let auto_approve = matches!(
@@ -748,7 +750,12 @@ impl Codex {
 
             let result = async {
                 client.initialize().await?;
-                task(client, exit_signal_tx.clone()).await
+                task(client.clone(), exit_signal_tx.clone()).await?;
+                // Publish the control only after thread/turn startup, so a
+                // pending refresh cannot be confirmed against the pre-turn
+                // global inventory.
+                let _ = mcp_refresh_tx.send(McpRefreshHandle(client));
+                Ok(())
             }
             .await;
 
@@ -793,6 +800,7 @@ impl Codex {
             // teardown — see specs/vk/826e-coding-agent-war/research.md (Phase 3).
             keep_warm: false,
             warm_reuse: None,
+            mcp_refresh: Some(mcp_refresh_rx),
         })
     }
 }

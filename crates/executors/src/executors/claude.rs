@@ -714,6 +714,7 @@ impl ClaudeCode {
             cancel: Some(cancel),
             keep_warm: false,
             warm_reuse: None,
+            mcp_refresh: None,
         })
     }
 }
