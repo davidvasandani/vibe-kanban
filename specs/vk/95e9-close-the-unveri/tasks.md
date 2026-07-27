@@ -52,11 +52,11 @@ may be completed together within their layer.
   T008).
 - [x] T014 [P] Run a clean npm-cache and absent-launcher-cache MCP handshake;
   confirm `attachment_get_data` in `tools/list`, then call it with a real Slack
-  attachment if credentials/fixture are available (depends on T001). The clean
-  launcher download/start was re-run; this environment has no valid Slack token,
-  so it stopped at `invalid_auth` before handshake. The predecessor task's
-  committed T019/T020 record remains the successful clean-cache
-  tools-list/attachment evidence.
+  attachment if credentials/fixture are available (depends on T001). Re-run
+  with the authorised 1Password-provided token and fresh npm/launcher caches:
+  `attachment_get_data` appeared in `tools/list`, and retrieving fixture
+  `F0BJX4Y3N5A` returned one non-empty content block (36,876 payload
+  characters). No token or attachment content was logged.
 - [x] T015 Run `pnpm run format` and proportionate repository checks (depends on
   T011 and all file-changing tasks).
 
