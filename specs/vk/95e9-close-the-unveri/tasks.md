@@ -62,12 +62,12 @@ may be completed together within their layer.
 
 ## Phase 5: Review and knowledge capture
 
-- [ ] T016 Run independent Codex review on the complete diff and record findings
+- [x] T016 Run independent Codex review on the complete diff and record findings
   (depends on T015).
-- [ ] T017 Address confirmed findings in the affected files and rerun relevant
+- [x] T017 Address confirmed findings in the affected files and rerun relevant
   verification; repeat T016 until no significant findings remain (depends on
   T016).
-- [ ] T018 Commit the final reusable knowledge-base update in
+- [x] T018 Commit the final reusable knowledge-base update in
   `docs/knowledge-base/forked-mcp-server-packaging.md` and
   `docs/knowledge-base/INDEX.md` before task handoff (depends on T009, T017).
 

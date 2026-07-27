@@ -1,6 +1,6 @@
 # Packaging a forked MCP server VK can pin
 
-Contributing tasks: `36d7-use-the-maintain`
+Contributing tasks: `36d7-use-the-maintain`, `95e9-close-the-unveri`
 
 How to ship a **fork** of a third-party MCP server through
 `crates/executors/default_mcp.json` when the upstream package name is not ours
@@ -73,9 +73,42 @@ therefore ship a malicious `bin` *and* a matching checksum table, defeating the
 per-binary check. VK cannot close that hole — it writes command lines, it does
 not install MCP servers. So make the residual risk detectable rather than
 pretend it away: a scheduled CI job (`.github/workflows/pinned-artifacts.yml`)
-runs the ignored digest test weekly, which is the difference between "we would
-find out if someone happened to run a test" and "we find out within a week".
-A digest that nothing re-checks on a schedule is a comment, not a control.
+runs the ignored digest test daily. A failure opens or updates a durable GitHub
+issue containing the workflow run and new-tag remediation rule. GitHub schedules
+are best-effort, so "daily" is the target cadence rather than a guaranteed
+24-hour maximum. A digest that nothing re-checks on a schedule is a comment, not
+a control.
+
+## Accepted outer-launcher risk (task 95e9)
+
+Task `95e9-close-the-unveri` re-evaluated the outer tarball gap and retained it
+as an explicit temporary exception:
+
+- The preferred prevention is a fork-controlled npm package pinned as exact
+  `name@version`. npm would verify the packument's `dist.integrity` before the
+  package's `bin` runs. The proposed package did not exist and the task
+  environment had no npm publication identity (`npm whoami` returned
+  `ENEEDAUTH`), so publication was not an authorised repository change.
+- VK's managed CLI installer can verify a download before exposing it, but
+  using it here is not a catalogue-string substitution. It requires a visible
+  per-user install prerequisite, a stable app-data executable-path contract,
+  platform lifecycle UI/API wiring, and disabling normal host-copy precedence.
+  Adding that product surface while npm publication is blocked only on external
+  ownership was judged disproportionate.
+- A fork release writer can still replace the launcher and its baked-in binary
+  digest table. The daily audit detects that condition after publication; it
+  does not protect users who launch the replacement first.
+- `.github/workflows/pinned-artifacts.yml` has `issues: write` only for its
+  digest job. On failure it creates or comments on the fixed
+  `[security] Pinned Slack MCP launcher digest audit failed` issue. The issue is
+  never auto-closed after a green run, so investigation remains explicit.
+
+Reopen prevention as soon as maintainers obtain a fork-controlled npm package
+name and configure trusted launcher publication. Move the catalogue entry to an
+exact registry version, confirm `dist.integrity`, switch Renovate to the npm
+source, and update the source constant, tests, and both documentation layers in
+the same reviewed change. Asset signing remains complementary: verification
+inside the current launcher starts too late to protect that launcher itself.
 
 ## Repository-side guardrails
 
@@ -88,12 +121,21 @@ A digest that nothing re-checks on a schedule is a comment, not a control.
   they are semver **prereleases**, and the default stability filter makes the
   manager match the pin and then never propose anything — coverage that looks
   real and is not.
+- A GitHub release datasource can return `v`-prefixed tags while the URL's
+  captured `currentValue` omits that prefix. Use
+  `extractVersionTemplate: ^v?(?<version>.*)$`: Renovate applies it to datasource
+  versions, and accepting both shapes makes the comparison explicit and robust.
 - When a version appears twice in one URL (release tag *and* tarball filename),
   the custom manager needs **two** `matchStrings` capturing `currentValue`, or a
   bump rewrites half the URL into a 404.
 - Scope pre-existing `packageRules` with `matchFileNames` when adding a second
   dep to the same datasource, or the older rule's `prBodyNotes` will give
   confidently wrong instructions about the new one.
+- A notification step after a failing audit must include a GitHub status
+  function, for example
+  `if: failure() && steps.digest.outcome == 'failure'`. Without `failure()`,
+  Actions implicitly gates the expression on `success()`, so the very failure
+  that should create the incident skips the notification step.
 
 ## Building the artifact
 
