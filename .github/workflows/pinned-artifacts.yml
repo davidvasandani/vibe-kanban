@@ -8,8 +8,8 @@ name: Pinned artifacts
 
 on:
   schedule:
-    # Mondays 05:00 UTC, before the Renovate window.
-    - cron: '0 5 * * 1'
+    # Daily at 05:00 UTC. GitHub schedules are best-effort and may be delayed.
+    - cron: "0 5 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -24,6 +24,9 @@ jobs:
   slack-mcp-launcher-digest:
     name: Slack MCP launcher digest
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v6
 
@@ -34,4 +37,47 @@ jobs:
           cache-key: pinned-artifacts-${{ runner.os }}-${{ runner.arch }}
 
       - name: Verify the pinned Slack MCP launcher matches its recorded digest
+        id: digest
         run: cargo test -p executors slack_pinned_launcher_matches_recorded_digest -- --ignored --nocapture
+
+      - name: Open or update the Slack launcher audit incident
+        if: steps.digest.outcome == 'failure'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const title = '[security] Pinned Slack MCP launcher digest audit failed';
+            const runUrl =
+              `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
+              `/actions/runs/${context.runId}`;
+            const { data: search } = await github.rest.search.issuesAndPullRequests({
+              q:
+                `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open ` +
+                `in:title "${title}"`,
+              per_page: 10,
+            });
+            const existing = search.items.find((issue) => issue.title === title);
+            const evidence =
+              `The pinned Slack MCP launcher digest audit failed in ` +
+              `[workflow run ${context.runId}](${runUrl}).\n\n` +
+              `Treat the GitHub release asset as potentially replaced. ` +
+              `Compare it with \`SLACK_MCP_LAUNCHER_SHA256\` in ` +
+              `\`crates/executors/src/mcp_config.rs\`. Do not re-upload the ` +
+              `existing release asset: publish a new \`-vk.<n+1>\` tag and ` +
+              `move the URL, digest, documentation, and Renovate metadata ` +
+              `together.`;
+            if (existing) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: existing.number,
+                body: evidence,
+              });
+            } else {
+              await github.rest.issues.create({
+                ...context.repo,
+                title,
+                body:
+                  `${evidence}\n\nThis issue is intentionally not closed by a ` +
+                  `later green run; a maintainer must investigate the ` +
+                  `supply-chain incident and close it explicitly.`,
+              });
+            }

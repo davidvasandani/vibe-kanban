@@ -622,7 +622,7 @@ mod tests {
     /// SHA-256 of the pinned launcher tarball. npm — not VK — fetches this
     /// tarball when an agent launches the server, so nothing verifies it at
     /// install time, and GitHub allows a release asset to be replaced under an
-    /// existing tag. This constant plus the weekly `pinned-artifacts` workflow
+    /// existing tag. This constant plus the daily `pinned-artifacts` workflow
     /// (which runs the `#[ignore]`d
     /// [`slack_pinned_launcher_matches_recorded_digest`]) is how such a
     /// replacement gets noticed. The binaries the launcher then downloads are

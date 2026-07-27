@@ -1,10 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended",
-    ":dependencyDashboard",
-    ":semanticCommits"
-  ],
+  "extends": ["config:recommended", ":dependencyDashboard", ":semanticCommits"],
   "baseBranches": ["main"],
   "labels": ["dependencies"],
   "timezone": "UTC",
@@ -78,7 +74,7 @@
       "automerge": false,
       "addLabels": ["needs-review"],
       "prBodyNotes": [
-        ":warning: **Move all three together:** the release URL in `crates/executors/default_mcp.json`, the `SLACK_MCP_FORK_TAG` / `SLACK_MCP_LAUNCHER_SHA256` constants in `crates/executors/src/mcp_config.rs`, and the version documented in `docs/integrations/mcp-server-configuration.mdx`. Then run `cargo test -p executors slack_pinned_launcher_matches_recorded_digest -- --ignored` to confirm the published asset matches the recorded digest."
+        ":warning: **Move all three together:** the release URL in `crates/executors/default_mcp.json`, the `SLACK_MCP_FORK_TAG` / `SLACK_MCP_LAUNCHER_SHA256` constants in `crates/executors/src/mcp_config.rs`, and the version documented in `docs/integrations/mcp-server-configuration.mdx`. Then run `cargo test -p executors slack_pinned_launcher_matches_recorded_digest -- --ignored` to confirm the published asset matches the recorded audit digest. The digest is checked by scheduled CI, not by `npx` before the launcher executes."
       ]
     },
     {

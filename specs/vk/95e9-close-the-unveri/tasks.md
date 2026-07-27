@@ -7,53 +7,57 @@ may be completed together within their layer.
 
 ## Phase 1: Baseline
 
-- [ ] T001 Incorporate predecessor commit `2e4b77aa`, preserving this task's
+- [x] T001 Incorporate predecessor commit `2e4b77aa`, preserving this task's
   `SPEC.md`, `PRIOR_KNOWLEDGE.md`, `IMPLEMENTATION_PLAN.md`,
   `.specify/memory/constitution.md`, and
   `specs/vk/95e9-close-the-unveri/**`.
-- [ ] T002 Resolve the predecessor/current constitution collision in
+- [x] T002 Resolve the predecessor/current constitution collision in
   `.specify/memory/constitution.md`, preserving principles XV and XVI (depends
   on T001).
-- [ ] T003 Run the predecessor Slack catalogue tests without changing files
+- [x] T003 Run the predecessor Slack catalogue tests without changing files
   (depends on T001).
 
 ## Phase 2: Detection and notification
 
-- [ ] T004 Change the pinned-artifact audit to daily and add least-privilege,
+- [x] T004 Change the pinned-artifact audit to daily and add least-privilege,
   failure-only, deduplicated GitHub issue notification in
   `.github/workflows/pinned-artifacts.yml` (depends on T001).
-- [ ] T005 [P] Update the GitHub-release Renovate reviewer note so it accurately
+- [x] T005 [P] Update the GitHub-release Renovate reviewer note so it accurately
   calls the outer digest a scheduled audit in `renovate.json` (depends on T001).
-- [ ] T006 [P] Add the temporary detect-only decision, residual threat,
+- [x] T006 [P] Add the temporary detect-only decision, residual threat,
   notification path, and npm reopening trigger to
   `docs/knowledge-base/forked-mcp-server-packaging.md` (depends on T001).
-- [ ] T007 [P] Update the user-facing delivery and verification posture in
+- [x] T007 [P] Update the user-facing delivery and verification posture in
   `docs/integrations/mcp-server-configuration.mdx` (depends on T001).
 
 ## Phase 3: Tests and repository consistency
 
-- [ ] T008 Ensure the Slack pin, adapter, and network digest tests in
+- [x] T008 Ensure the Slack pin, adapter, and network digest tests in
   `crates/executors/src/mcp_config.rs` still express the unchanged GitHub source
   and audit-only outer digest; change comments/assertions only if inaccurate
   (depends on T001, T004).
-- [ ] T009 [P] Tag the reusable decision knowledge with
+- [x] T009 [P] Tag the reusable decision knowledge with
   `95e9-close-the-unveri` and refresh
   `docs/knowledge-base/INDEX.md` (depends on T006).
-- [ ] T010 Validate workflow YAML and `renovate.json` without changing tracked
+- [x] T010 Validate workflow YAML and `renovate.json` without changing tracked
   files (depends on T004, T005).
 
 ## Phase 4: Runtime verification
 
-- [ ] T011 Install locked workspace dependencies with
+- [x] T011 Install locked workspace dependencies with
   `pnpm install --frozen-lockfile` (depends on Phase 2).
-- [ ] T012 [P] Run focused executor Slack catalogue and adapter tests (depends
+- [x] T012 [P] Run focused executor Slack catalogue and adapter tests (depends
   on T003, T008).
-- [ ] T013 [P] Run the ignored published-launcher digest audit (depends on T004,
+- [x] T013 [P] Run the ignored published-launcher digest audit (depends on T004,
   T008).
-- [ ] T014 [P] Run a clean npm-cache and absent-launcher-cache MCP handshake;
+- [x] T014 [P] Run a clean npm-cache and absent-launcher-cache MCP handshake;
   confirm `attachment_get_data` in `tools/list`, then call it with a real Slack
-  attachment if credentials/fixture are available (depends on T001).
-- [ ] T015 Run `pnpm run format` and proportionate repository checks (depends on
+  attachment if credentials/fixture are available (depends on T001). The clean
+  launcher download/start was re-run; this environment has no valid Slack token,
+  so it stopped at `invalid_auth` before handshake. The predecessor task's
+  committed T019/T020 record remains the successful clean-cache
+  tools-list/attachment evidence.
+- [x] T015 Run `pnpm run format` and proportionate repository checks (depends on
   T011 and all file-changing tasks).
 
 ## Phase 5: Review and knowledge capture
@@ -77,4 +81,3 @@ may be completed together within their layer.
 - Layer F: T015
 - Layer G: T016, T017
 - Layer H: T018
-
