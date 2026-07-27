@@ -157,6 +157,20 @@ notification path, and concrete condition that reopens the decision. Dependency
 updates move the source pin, integrity record, tests, and documentation in the
 same reviewed change and fail closed rather than substituting another build.
 
+### XVII. Live capability state is confirmed and atomic
+Configuration on disk is not evidence that a running external agent adopted a
+change. Any feature that reports a live tool, connector, or protocol capability
+as refreshed MUST receive confirmation from the process that owns that live
+capability set. Unsupported reload paths are reported truthfully rather than
+simulated with an independent probe or whole-session restart.
+
+Capability replacement is generation-based: readers observe one complete old or
+new inventory, never a partially rebuilt set. Refresh coordinates with in-flight
+calls, preserves last known-good capability state on partial failure, and
+identifies failures by stable configured identifier. Configuration comparisons,
+logs, diagnostics, and API results never expose environment values, tokens,
+authorization material, authenticated URLs, or secret-bearing command arguments.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -178,5 +192,5 @@ same reviewed change and fail closed rather than substituting another build.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.13.0 (adds verified bundled third-party delivery principle XVI;
-0.12.0 added fail-safe destructive-operation principle XV)
+**Version**: 0.14.0 (adds confirmed, atomic live-capability principle XVII;
+0.13.0 added verified bundled third-party delivery principle XVI)

@@ -162,6 +162,7 @@ impl AcpAgentHarness {
             // recorded in specs/vk/826e-coding-agent-war/research.md (Phase 3).
             keep_warm: false,
             warm_reuse: None,
+            mcp_refresh: None,
         })
     }
 
@@ -221,6 +222,7 @@ impl AcpAgentHarness {
             // recorded in specs/vk/826e-coding-agent-war/research.md (Phase 3).
             keep_warm: false,
             warm_reuse: None,
+            mcp_refresh: None,
         })
     }
 

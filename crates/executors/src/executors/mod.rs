@@ -382,6 +382,10 @@ pub struct SpawnedChild {
     /// one-shot executors and until an executor opts in. See
     /// `specs/vk/826e-coding-agent-war/` (Phase 2).
     pub warm_reuse: Option<WarmReuseSignal>,
+    /// Executor → Container: a secret-free control surface for refreshing the
+    /// live executor's MCP inventory. `None` for executors without a confirmed
+    /// in-session reload contract.
+    pub mcp_refresh: Option<crate::mcp_refresh::McpRefreshSignal>,
 }
 
 impl From<AsyncGroupChild> for SpawnedChild {
@@ -392,6 +396,7 @@ impl From<AsyncGroupChild> for SpawnedChild {
             cancel: None,
             keep_warm: false,
             warm_reuse: None,
+            mcp_refresh: None,
         }
     }
 }
