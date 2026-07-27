@@ -261,6 +261,7 @@ impl BrowserSessionService {
         force: bool,
     ) -> Result<(), BrowserSessionError> {
         let runtime = self.runtime(id)?;
+        self.expire_and_audit(&runtime).await;
         {
             let control = runtime.control_state();
             if !close_permitted(principal, &control.controller, force) {
@@ -308,7 +309,11 @@ impl BrowserSessionService {
     // ── Control operations ──────────────────────────────────────────────
 
     pub async fn get_control(&self, id: Uuid) -> Result<BrowserControlState, BrowserSessionError> {
-        Ok(self.runtime(id)?.control_state())
+        let runtime = self.runtime(id)?;
+        // Record any lapsed lease before reporting state, so a poll of the
+        // control endpoint can never silently swallow the `Expired` transition.
+        self.expire_and_audit(&runtime).await;
+        Ok(runtime.control_state())
     }
 
     pub async fn acquire_control(
@@ -320,6 +325,7 @@ impl BrowserSessionService {
         expected_generation: Option<u64>,
     ) -> Result<BrowserControlState, BrowserSessionError> {
         let runtime = self.runtime(id)?;
+        self.expire_and_audit(&runtime).await;
         let transition = runtime.acquire(principal, take_from_agent, force, expected_generation)?;
         self.audit(id, &transition).await;
         Ok(runtime.control_state())
@@ -332,6 +338,7 @@ impl BrowserSessionService {
         expected_generation: Option<u64>,
     ) -> Result<BrowserControlState, BrowserSessionError> {
         let runtime = self.runtime(id)?;
+        self.expire_and_audit(&runtime).await;
         let transition = runtime.release(principal, expected_generation)?;
         self.audit(id, &transition).await;
         Ok(runtime.control_state())
@@ -345,6 +352,7 @@ impl BrowserSessionService {
         expected_generation: u64,
     ) -> Result<BrowserControlState, BrowserSessionError> {
         let runtime = self.runtime(id)?;
+        self.expire_and_audit(&runtime).await;
         if let TransferTarget::Agent { execution_id } = &target {
             self.ensure_execution_in_workspace(*execution_id, runtime.workspace_id)
                 .await?;
@@ -448,6 +456,10 @@ impl BrowserSessionService {
             });
         }
         let runtime = self.runtime(id)?;
+        // Audit a lapsed lease before admitting the command; otherwise the
+        // auto-acquire probe / command admission would consume the expiry and
+        // leave it unrecorded.
+        self.expire_and_audit(&runtime).await;
         if auto_acquire {
             let control = runtime.control_state();
             if control.controller.is_none() {
@@ -506,6 +518,22 @@ impl BrowserSessionService {
     }
 
     // ── Audit + sweeping ────────────────────────────────────────────────
+
+    /// Flush a lapsed lease to the audit log before any observation or
+    /// mutation of control state. `expire_if_lapsed` is consume-once: whichever
+    /// observer sees the lapse first (a reader like `get_control`, a mutating
+    /// op, or the 30s sweeper) clears the lease in memory. The lazy path in
+    /// `SessionRuntime::control_state` only *broadcasts* that expiry, so if a
+    /// reader observed it first the `Expired` transition was silently dropped
+    /// from `browser_control_transitions` (the sweeper then found nothing to
+    /// audit). Auditing here — the only control path that also holds the DB
+    /// handle — closes that gap. Idempotent: a no-op once the lease is cleared,
+    /// so it never double-records with the sweeper.
+    async fn expire_and_audit(&self, runtime: &Arc<SessionRuntime>) {
+        if let Some(transition) = runtime.expire_lease_if_lapsed() {
+            self.audit(runtime.id, &transition).await;
+        }
+    }
 
     /// Persist a control transition for audit. URLs/profile contents are
     /// deliberately not part of transition rows (redaction requirement).
