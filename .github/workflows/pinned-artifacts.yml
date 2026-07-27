@@ -41,7 +41,7 @@ jobs:
         run: cargo test -p executors slack_pinned_launcher_matches_recorded_digest -- --ignored --nocapture
 
       - name: Open or update the Slack launcher audit incident
-        if: steps.digest.outcome == 'failure'
+        if: failure() && steps.digest.outcome == 'failure'
         uses: actions/github-script@v8
         with:
           script: |
