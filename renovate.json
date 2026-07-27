@@ -40,7 +40,7 @@
       "depNameTemplate": "davidvasandani/slack-mcp-server",
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "semver",
-      "extractVersionTemplate": "^v(?<version>.*)$"
+      "extractVersionTemplate": "^v?(?<version>.*)$"
     }
   ],
   "packageRules": [
