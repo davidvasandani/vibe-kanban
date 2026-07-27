@@ -65,6 +65,11 @@ servers. Keep entries transport-neutral in that file (`command`, `args`, and
 Opencode calls the stdio environment field `environment`; dropping or leaving it
 as `env` makes credential-dependent catalog entries unusable after adaptation.
 
+A catalog entry's `meta.<server>.url` is a link shown in the UI; it has no
+effect on what the `command`/`args` actually install. When an entry points at a
+fork or any non-obvious build, keep the two in sync deliberately and assert it —
+see [forked-mcp-server-packaging](forked-mcp-server-packaging.md).
+
 The backend exposes this catalog through `/api/mcp-config/default`, but the
 current shared MCP settings UI does not render catalog suggestions. Treat catalog
 availability and UI discoverability as separate capabilities when scoping work.

@@ -1,10 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended",
-    ":dependencyDashboard",
-    ":semanticCommits"
-  ],
+  "extends": ["config:recommended", ":dependencyDashboard", ":semanticCommits"],
   "baseBranches": ["main"],
   "labels": ["dependencies"],
   "timezone": "UTC",
@@ -32,6 +28,19 @@
         "//\\s*renovate:\\s*datasource=(?<datasource>[a-z0-9-]+)\\s+depName=(?<depName>\\S+)(?:\\s+registryUrl=(?<registryUrl>\\S+))?\\s*\\nconst\\s+[A-Z0-9_]+_VERSION:\\s*&str\\s*=\\s*\"(?<currentValue>[^\"]+)\""
       ],
       "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Slack MCP connector: pinned fork release asset in default_mcp.json. Two match strings because the version appears twice in the URL (release tag and tarball filename) and both must move together. Both capture the version without the leading 'v' (the tarball filename has none); extractVersionTemplate strips the 'v' from the datasource's release tags so they compare against the same form.",
+      "managerFilePatterns": ["/crates/executors/default_mcp\\.json$/"],
+      "matchStrings": [
+        "/davidvasandani/slack-mcp-server/releases/download/v(?<currentValue>[0-9][^/\"]*)/",
+        "slack-mcp-server-vk-(?<currentValue>[0-9][^\"]*)\\.tgz"
+      ],
+      "depNameTemplate": "davidvasandani/slack-mcp-server",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver",
+      "extractVersionTemplate": "^v?(?<version>.*)$"
     }
   ],
   "packageRules": [
@@ -49,10 +58,23 @@
       "description": "CLI tool catalog pins: never auto-merge — bumping a version requires refreshing the matching per-platform sha256 pins in cli_tools.rs, or installs fail (loudly) at checksum verification.",
       "matchManagers": ["custom.regex"],
       "matchDatasources": ["github-tags", "github-releases", "pypi"],
+      "matchFileNames": ["crates/services/src/services/cli_tools.rs"],
       "automerge": false,
       "addLabels": ["needs-review"],
       "prBodyNotes": [
         ":warning: **Refresh the sha256 pins:** this version is pinned in `crates/services/src/services/cli_tools.rs` next to per-platform `sha256` hashes. Download the new artifacts, recompute the hashes, and update them in the same PR — a stale hash makes the in-app install fail at verification."
+      ]
+    },
+    {
+      "description": "Slack MCP fork release: never auto-merge — the pinned launcher tarball's sha256 lives in mcp_config.rs and the version is named in the docs, and fork releases are semver prereleases (`-vk.N`) that Renovate would otherwise skip as unstable.",
+      "matchManagers": ["custom.regex"],
+      "matchDatasources": ["github-releases"],
+      "matchPackageNames": ["davidvasandani/slack-mcp-server"],
+      "ignoreUnstable": false,
+      "automerge": false,
+      "addLabels": ["needs-review"],
+      "prBodyNotes": [
+        ":warning: **Move all three together:** the release URL in `crates/executors/default_mcp.json`, the `SLACK_MCP_FORK_TAG` / `SLACK_MCP_LAUNCHER_SHA256` constants in `crates/executors/src/mcp_config.rs`, and the version documented in `docs/integrations/mcp-server-configuration.mdx`. Then run `cargo test -p executors slack_pinned_launcher_matches_recorded_digest -- --ignored` to confirm the published asset matches the recorded audit digest. The digest is checked by scheduled CI, not by `npx` before the launcher executes."
       ]
     },
     {

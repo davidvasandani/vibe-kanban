@@ -614,6 +614,23 @@ mod tests {
         );
     }
 
+    /// Fork release the bundled Slack connector installs. Bumping it means
+    /// refreshing [`SLACK_MCP_LAUNCHER_SHA256`] and the version named in
+    /// `docs/integrations/mcp-server-configuration.mdx` in the same change —
+    /// Renovate's `packageRule` for this pin says so too.
+    const SLACK_MCP_FORK_TAG: &str = "v1.3.0-vk.2";
+    /// SHA-256 of the pinned launcher tarball. npm — not VK — fetches this
+    /// tarball when an agent launches the server, so nothing verifies it at
+    /// install time, and GitHub allows a release asset to be replaced under an
+    /// existing tag. This constant plus the daily `pinned-artifacts` workflow
+    /// (which runs the `#[ignore]`d
+    /// [`slack_pinned_launcher_matches_recorded_digest`]) is how such a
+    /// replacement gets noticed. The binaries the launcher then downloads are
+    /// digest-checked by the launcher itself, on every machine.
+    const SLACK_MCP_LAUNCHER_SHA256: &str =
+        "220e521bed303b8513eecfd45df196a24ed4e70307ef6f57c921cfbfae308c75";
+    const SLACK_MCP_INSTALL_SPEC: &str = "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz";
+
     #[test]
     fn slack_preconfigured_server_matches_the_documented_stdio_contract() {
         let value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
@@ -621,7 +638,7 @@ mod tests {
         assert_eq!(value["slack"]["command"], serde_json::json!("npx"));
         assert_eq!(
             value["slack"]["args"],
-            serde_json::json!(["-y", "slack-mcp-server@latest", "--transport", "stdio"])
+            serde_json::json!(["-y", SLACK_MCP_INSTALL_SPEC, "--transport", "stdio"])
         );
         assert_eq!(
             value["slack"]["env"],
@@ -631,6 +648,74 @@ mod tests {
         assert_eq!(
             value["meta"]["slack"]["url"],
             serde_json::json!("https://github.com/davidvasandani/slack-mcp-server/")
+        );
+    }
+
+    /// Splits `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>`
+    /// into its parts, or `None` if the URL is not a GitHub release asset.
+    fn parse_github_release_asset(url: &str) -> Option<(String, String, String)> {
+        let rest = url.strip_prefix("https://github.com/")?;
+        let (owner, rest) = rest.split_once('/')?;
+        let (repo, rest) = rest.split_once('/')?;
+        let rest = rest.strip_prefix("releases/download/")?;
+        let (tag, asset) = rest.split_once('/')?;
+        (!asset.is_empty()).then(|| (owner.to_string(), repo.to_string(), tag.to_string()))
+    }
+
+    #[test]
+    fn slack_preconfigured_server_pins_an_immutable_fork_artifact() {
+        let value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        let spec = value["slack"]["args"][1].as_str().expect("install spec");
+
+        // A mutable reference here is the defect this pin exists to prevent:
+        // the catalog would advertise the fork while installing whatever the
+        // tag happens to point at today.
+        for mutable in ["@latest", "#master", "#main", "refs/heads/", "/archive/"] {
+            assert!(
+                !spec.contains(mutable),
+                "slack install spec {spec} must not contain the mutable reference {mutable}"
+            );
+        }
+
+        let (owner, repo, tag) =
+            parse_github_release_asset(spec).expect("slack install spec is a release asset URL");
+        assert_eq!(tag, SLACK_MCP_FORK_TAG);
+
+        // The UI links users to `meta.slack.url`; it must be the repository the
+        // artifact is actually built from.
+        let meta_url = value["meta"]["slack"]["url"].as_str().expect("meta url");
+        let meta_repo = meta_url
+            .strip_prefix("https://github.com/")
+            .expect("meta url is a GitHub URL")
+            .trim_end_matches('/');
+        assert_eq!(meta_repo, format!("{owner}/{repo}"));
+    }
+
+    /// Network-backed on purpose, like the `cli_tools` vendor-artifact checks:
+    /// run it deliberately with
+    /// `cargo test -p executors slack_pinned_launcher_matches_recorded_digest -- --ignored`
+    /// after publishing or re-pinning a fork release.
+    #[tokio::test]
+    #[ignore = "downloads the pinned Slack MCP launcher from GitHub"]
+    async fn slack_pinned_launcher_matches_recorded_digest() {
+        use sha2::{Digest, Sha256};
+
+        let value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        let spec = value["slack"]["args"][1].as_str().expect("install spec");
+
+        let bytes = reqwest::get(spec)
+            .await
+            .expect("download pinned launcher")
+            .error_for_status()
+            .expect("pinned launcher is published")
+            .bytes()
+            .await
+            .expect("read pinned launcher");
+
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        assert_eq!(
+            digest, SLACK_MCP_LAUNCHER_SHA256,
+            "the published launcher at {spec} no longer matches the recorded digest"
         );
     }
 
@@ -648,13 +733,7 @@ mod tests {
         assert_eq!(opencode["slack"]["type"], serde_json::json!("local"));
         assert_eq!(
             opencode["slack"]["command"],
-            serde_json::json!([
-                "npx",
-                "-y",
-                "slack-mcp-server@latest",
-                "--transport",
-                "stdio"
-            ])
+            serde_json::json!(["npx", "-y", SLACK_MCP_INSTALL_SPEC, "--transport", "stdio"])
         );
         assert_eq!(
             opencode["slack"]["environment"],

@@ -1,241 +1,140 @@
-# SPEC: Never discard uncommitted worktree work on server restart
+# Close the unverified-install gap in the pinned Slack MCP connector
 
-## Context
+Task: `95e9-close-the-unveri`
 
-A running agent session lost every uncommitted change when
-`vibe-kanban-dev.service` restarted underneath it. The worktree came back clean
-at the base commit, and nothing in the log said it happened.
+## Problem
 
-This spec scopes the **remaining** defects at `HEAD`. Much of the originally
-reported failure mode was already fixed 20 minutes *before* the incident, so
-scoping is the most important part of this document.
+The predecessor task (`36d7-use-the-maintain`) pins the bundled Slack MCP
+connector to a launcher tarball hosted as a GitHub release asset. The launcher
+verifies the selected platform binary before executing it, but `npx` downloads
+and executes the outer tarball without accepting an expected integrity value.
+Because a GitHub release asset can be replaced under an existing tag, control
+of the fork's releases would let an attacker replace both the launcher and its
+baked-in binary digest table. The weekly recorded-digest audit detects that
+replacement after the fact; it does not prevent first execution.
 
-### What was already fixed by #151 (`0fb74539`, 2026-07-25 11:05 -0700 = 18:05 UTC)
+This is inherited risk, not a regression from the former mutable
+`slack-mcp-server@latest` entry.
 
-The incident occurred at **18:25 UTC**, but the server process that destroyed
-the work had been running since ~17:58 UTC — i.e. it was the **pre-#151
-binary**. The 18:25 restart was the rebuild path deploying #151 itself. So the
-observed wipe was caused by code that no longer exists.
+## Goal
 
-#151 landed, and `HEAD` retains, all of:
+Ensure that the bundled Slack connector is delivered through a mechanism that
+authenticates or verifies the outer package before any fork-controlled code
+executes. If no enforceable mechanism can be shipped without unavailable
+external ownership or credentials, record an explicit, reviewable decision to
+retain detection-only controls, including the condition that reopens that
+decision.
 
-- **Repair-first worktree recreation.** `recreate_worktree_internal`
-  (`crates/worktree-manager/src/worktree_manager.rs:119`) now calls
-  `try_repair_worktree_in_place` before any destructive step, so drifted git
-  admin linkage is reconnected in place instead of triggering
-  `remove_dir_all` on an intact working tree.
-- **Move-aside instead of delete.** When repair genuinely cannot reconnect,
-  `preserve_worktree_dir_if_valuable` (`worktree_manager.rs:154`, `:283`) moves
-  the directory to a sibling `<name>.recovered-<epoch>` if it holds
-  uncommitted/untracked changes or an installed `node_modules`.
-- **Expiry-sweep guard.** `cleanup_expired_workspaces`
-  (`crates/local-deployment/src/container.rs:707`) consults `is_container_clean`
-  and retains any expired workspace with pending work, retaining on error too.
+## Dependencies and baseline
 
-**These are not to be re-implemented.** The report's asks about worktree
-recreation, `.recovered-*` preservation, and expiry cleanup are satisfied.
+This task builds on commit `2e4b77aa` / task `36d7-use-the-maintain`, which adds:
 
-### Ruled out by the report, and confirmed here
+- the fork-controlled `v1.3.0-vk.2` launcher release;
+- its pinned URL in `crates/executors/default_mcp.json`;
+- per-platform binary verification inside the launcher;
+- `SLACK_MCP_LAUNCHER_SHA256` and an ignored network audit test;
+- the scheduled pinned-artifact audit;
+- documentation and Renovate coverage for the GitHub release pin.
 
-- **Not the `force_when_dirty` reset path.** `reconcile_worktree_to_commit`
-  logs before discarding; that string never appeared.
-- **Not a project cleanup script.** `repos.cleanup_script` is `NULL`.
-- **Not the "orphaned file cleanup".** Despite the suggestive log line at
-  `crates/local-deployment/src/lib.rs:156`, `delete_orphaned_files`
-  (`crates/services/src/services/file.rs:133`) deletes **DB-tracked attachment
-  blobs from the cache dir**. It never touches worktrees. This suspect named in
-  the report is exonerated.
+The baseline must be incorporated before implementation if it is not already
+an ancestor of the working branch.
 
-## The two real remaining defects
+## Technical approach to evaluate
 
-### D1 — Interrupted WIP is preserved only on the success path (primary)
+### Preferred: immutable npm registry package
 
-`kill_all_running_processes` (`crates/local-deployment/src/container.rs:2668`):
+Publish the launcher under a fork-controlled npm package name, then change the
+catalog entry to `npx -y <name>@<exact-version> --transport stdio`. npm's
+packument supplies `dist.integrity`, and registry tarballs cannot be replaced
+at an existing name/version. npm verifies the tarball before its `bin` runs.
 
-```rust
-if let Err(error) = self.stop_execution(&process, ExecutionProcessStatus::Interrupted).await {
-    tracing::error!("Failed to cleanly kill running execution process {:?}: {:?}", process, error);
-} else {
-    tracing::info!("Successfully killed process: id={}", process.id);
-    if let Err(error) = self.commit_interrupted_wip(&process).await { ... }   // <-- success branch ONLY
-}
-```
+This is the smallest repository-side design, but it is deliverable only if the
+maintainer controls the package namespace and an npm publish credential is
+available. The implementation must not fabricate either prerequisite.
 
-`commit_interrupted_wip` — the entire WIP-preservation mechanism added by #122 —
-sits inside the `else`. When `stop_execution` returns `Err`, uncommitted work is
-**silently left unpreserved**.
+### Enforceable fallback: VK-managed installation
 
-The incident log records exactly that error:
+If npm publication is unavailable, extend the managed CLI tool catalog so VK
+downloads the version-addressed launcher or platform executable, verifies its
+recorded SHA-256 before installation, stages it atomically, and exposes a
+stable executable path usable by generated MCP configuration. This closes the
+outer-artifact gap but requires an explicit per-user installation lifecycle and
+must define behavior when the executable is absent.
 
-```
-Failed to cleanly kill running execution process … Other(Child process not found for execution)
-```
+### Complementary signing
 
-`stop_execution` (`container.rs:2334`) returns that error when there is no
-in-memory child handle *and* no adopted pgid — the common case when the child
-already died with, or just before, the server. So the single most likely
-real-world restart shape is precisely the one that skips preservation.
+Signature verification may strengthen either delivery mechanism but cannot, by
+itself, protect an outer launcher that executes before the signature check.
 
-**Severity, stated accurately.** An earlier draft of this spec claimed D1 alone
-would have saved the reported session. Further tracing showed that is wrong, and
-the correction is worth recording because it inverts an obvious "fix".
+### Detect-only exception
 
-That early `return Err` happens *before* `ExecutionProcess::update_completion`,
-so the row stays marked `Running`. The next startup's `cleanup_orphan_executions`
-(`crates/services/src/services/container.rs:324`) selects exactly those rows and
-calls `commit_interrupted_wip` **unconditionally** — correctly, unlike the
-shutdown path. So today the shutdown gap is usually rescued one restart later,
-*because* of the missing status update.
+Retaining the current GitHub URL package is acceptable only as a written
+decision when both preventative delivery paths are presently blocked or impose
+cost disproportionate to the threat. The record must state:
 
-Two consequences:
+- which prerequisite is missing;
+- why the managed installer is not being adopted;
+- the remaining attack and detection window;
+- the owner/process for audit failure notification; and
+- the concrete trigger for revisiting prevention.
 
-1. D1 is a **defence-in-depth** fix, not the root cause. It still matters: the
-   backstop only fires if there is a next startup (not true for a host shutdown
-   or an uninstall), and it works by accident of an early return rather than by
-   design.
-2. **Do not "fix" the `Running` row at the same time.** Marking it `Interrupted`
-   at shutdown would hide it from `find_running` and delete the backstop. See
-   C-1 in the feature spec.
+Daily auditing may reduce exposure but must not be described as prevention.
 
-### D2 — Orphan-workspace cleanup deletes unconditionally
+## Functional requirements
 
-`cleanup_orphan_workspaces` (`crates/workspace-manager/src/workspace_manager.rs:538`)
-runs at **every** startup and was **not** touched by #151. It scans the worktree
-base dir and, for any directory whose path is not present as a
-`workspaces.container_ref`, calls `cleanup_workspace_without_repos`, which ends
-in an unconditional:
+1. The bundled Slack MCP entry continues to use stdio and preserves
+   `SLACK_MCP_XOXP_TOKEN`.
+2. A clean first launch must not execute fork-controlled bytes until the outer
+   delivery artifact has passed an integrity/authenticity check, unless the
+   detect-only exception is explicitly chosen and documented.
+3. The launcher continues to verify the platform binary before execution.
+4. The catalog continues to adapt correctly for Codex and Opencode.
+5. The fork repository link remains visible in catalog metadata.
+6. An end-to-end clean-cache probe must initialize the connector, observe
+   `attachment_get_data` in `tools/list`, and retrieve a real attachment when
+   suitable Slack credentials and fixture data are available.
 
-```rust
-tokio::fs::remove_dir_all(workspace_dir)
-```
+## Repository consistency requirements
 
-There is **no** uncommitted-work check, **no** running-execution check, and no
-log of what is about to be destroyed beyond the bare path. Its safety rests
-entirely on `container_ref_exists` being an exact string match on an absolute
-path. Any normalisation drift (symlinked `/var/tmp`, a changed `workspace_dir`
-config override, a trailing separator) reclassifies a live workspace as an
-"orphan" and deletes a whole session's work with no recovery path.
+If delivery changes:
 
-It does fail safe on DB error (`if let Ok(false)`) and does iterate per-repo
-subdirectories, so the multi-repo layout is structurally handled.
+- update `crates/executors/default_mcp.json`;
+- update the immutable-pin tests in
+  `crates/executors/src/mcp_config.rs`;
+- update or remove the launcher digest constant and its network audit so they
+  describe the new outer artifact accurately;
+- update `docs/integrations/mcp-server-configuration.mdx`;
+- update the Renovate custom manager and package rule to track the new source;
+- update `docs/knowledge-base/forked-mcp-server-packaging.md`.
 
-**D2 races the very routine that would have saved the work.** The orphan sweep is
-`tokio::spawn`ed from `LocalContainerService::new`
-(`crates/local-deployment/src/container.rs:387`), which runs inside
-`DeploymentImpl::new` — i.e. it is launched *before* `cleanup_orphan_executions`
-is called on the main startup path (`crates/server/src/startup.rs:155` vs
-`:159`), and then runs concurrently with it. So if a live workspace is ever
-misjudged as an orphan, its directory can be deleted while the WIP capture that
-would have rescued it is still pending. Given C-1 establishes that startup
-capture is the mechanism actually protecting users today, an unguarded sweep
-racing it is the sharper of the two defects.
+All version, artifact, digest, documentation, and Renovate changes must land
+together.
 
-## Answers to the report's open investigation questions
+## Verification
 
-These were asked in the report and are resolved by inspection. They need
-**documenting, not fixing**.
-
-**What actually destroyed the tree in the incident?** Startup calls
-`resume_interrupted_coding_agents` (`crates/server/src/startup.rs:170`) →
-`ensure_container_exists` → `WorktreeManager::ensure_worktree_exists`. Pre-#151
-this ran `remove_dir_all` on an intact working tree whenever git's admin linkage
-had drifted. That is the destructive path, it is on the restart critical path,
-and #151 fixed it. Note the same path is reachable from log normalisation
-(`crates/services/src/services/container.rs:1195`) — merely opening a
-workspace's log view can trigger a worktree recreation.
-
-**Can pooled `<repo><N>` admin dirs be reassigned to a different task?** The
-admin dir name is **not** bound to workspace id — nothing in this codebase
-chooses it. `git worktree add` derives `.git/worktrees/<name>` from the
-*basename* of the worktree path, which is `repo.name` alone
-(`crates/workspace-manager/src/workspace_manager.rs:312`), appending an ordinal
-on collision. The workspace id appears only in the *parent* directory
-(`<4-hex-uuid>-<slug>/<repo.name>`).
-
-However, **this is not the second failure mode the report feared.** The mapping
-is never stored or trusted by name: `find_worktree_git_internal_name`
-(`crates/worktree-manager/src/worktree_manager.rs:340`) rediscovers it by
-reading each `worktrees/*/gitdir` and canonicalising it against the target
-*path*. Cleanup therefore matches by path, not by ordinal, so a recycled name
-cannot make one task's teardown clobber another's tree. Binding names to
-workspace id is unnecessary.
-
-**A real cross-workspace hazard does exist, but is second-order.**
-`comprehensive_worktree_cleanup` finishes with a repo-wide `git worktree prune`
-(`worktree_manager.rs:414`). If several workspaces' worktree directories are
-off-disk at once, one workspace's cleanup prunes *other* live workspaces' admin
-entries, so they fail `is_worktree_properly_set_up` and get force-recreated.
-Post-#151 that costs a `.recovered-*` directory rather than the data. Worth
-knowing; not worth destabilising cleanup for now.
-
-**Why does this happen at all?** The default worktree base dir is
-`get_vibe_kanban_temp_dir().join("worktrees")` — i.e. **under `/var/tmp`**
-(`worktree_manager.rs:676`). OS temp reaping can remove worktree directories
-while `.git/worktrees/*` admin entries and DB `container_ref`s survive. That is
-precisely the drifted state that drives the recreate path.
-
-**Is the multi-repo layout handled?** Yes, in both routines.
-`is_container_clean` enumerates `WorkspaceRepo::find_repos_for_workspace` and
-joins each `repo.name` under `container_ref`. `cleanup_workspace_without_repos`
-iterates the parent's subdirectories. Neither mistakes `container_ref` for a
-single git repo. Two gaps worth noting: `is_container_clean` never inspects
-files sitting directly in the workspace root outside any repo subdir, and it
-treats a missing repo subdir as clean.
-
-## Goals
-
-- G1: Uncommitted agent work is never silently discarded by a restart.
-- G2: When work cannot be preserved, that fact is loud in the log.
-- G3: Destructive cleanup names the workspace and path *before* acting.
+- Run focused executor tests for the Slack catalog contract and adapter shapes.
+- Run the ignored published-artifact integrity test when it remains applicable.
+- Validate `renovate-config-validator renovate.json` (or the repository's
+  equivalent).
+- Run repository formatting and proportionate checks after dependency setup.
+- Exercise the connector with an empty npm cache and absent launcher cache.
+  Credential-dependent attachment retrieval may be reported as externally
+  blocked only after the unauthenticated handshake and tool-registration checks
+  have passed and the exact missing credential/fixture is identified.
 
 ## Non-goals
 
-- Re-implementing anything from #151.
-- UI surfacing of the loss (tracked separately in VAS-104).
-- Changing the rebuild/restart trigger itself.
+- Reworking the Slack MCP server's tool behavior.
+- Treating signatures inside an unverified launcher as sufficient protection.
+- Claiming a shorter audit interval eliminates the release-writer threat.
+- Publishing to an npm namespace without explicit ownership and credentials.
 
-## Requirements
+## Acceptance
 
-**FR-1 — Preserve WIP regardless of how the process stopped.**
-`kill_all_running_processes` must attempt `commit_interrupted_wip` for every
-non-persistent process it handles, on both the success and the error branch of
-`stop_execution`. A failure to kill must not imply a failure to preserve — the
-error case is the one where the working tree is most likely to still hold
-unsaved work.
+The task is complete when either:
 
-**FR-2 — Preservation failures are loud.** When `commit_interrupted_wip` fails,
-log at `error` with workspace id and repo name, stating that uncommitted work
-may be at risk.
-
-**FR-3 — Orphan cleanup refuses to destroy pending work.** Before deleting a
-directory judged orphaned, `cleanup_orphans_in_directory` must skip it when any
-contained repo has uncommitted or untracked changes. If cleanliness cannot be
-determined, retain — mirroring the fail-safe stance `cleanup_expired_workspaces`
-already takes.
-
-**FR-4 — Destructive cleanup is instrumented.** Log the workspace path, the
-reason it was judged an orphan, and the action taken, before acting.
-
-**FR-5 — No regression in reclaiming genuinely dead workspaces.** A clean,
-truly orphaned directory must still be collected, or the worktree base dir grows
-without bound.
-
-## Acceptance criteria
-
-- AC-1: With a running coding-agent process whose child handle is absent,
-  `kill_all_running_processes` still produces a WIP commit for each repo with
-  changes. Regression test.
-- AC-2: An orphan-looking workspace dir containing uncommitted or untracked
-  changes survives `cleanup_orphan_workspaces`. Regression test.
-- AC-3: A clean orphan dir is still removed. Regression test.
-- AC-4: Multi-repo workspaces are handled by both paths — a dirty *second* repo
-  is enough to retain the workspace.
-- AC-5: `cargo test --workspace`, `pnpm run check`, `pnpm run lint` pass.
-
-## Risks
-
-- Committing WIP on the error path could produce a commit for a process that is
-  somehow still alive and writing. Accepted: a spurious extra commit is
-  recoverable; lost work is not. This is the same trade #122 already made.
-- Adding a git status call per candidate directory slows startup cleanup
-  slightly. Bounded by the number of directories in the worktree base dir.
+1. the bundled connector's outer artifact is verified before execution and all
+   catalog, test, documentation, Renovate, and end-to-end requirements remain
+   satisfied; or
+2. a committed decision record accepts detection-only risk with the rationale,
+   controls, notification path, and reopening trigger specified above.

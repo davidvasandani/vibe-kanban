@@ -1,85 +1,117 @@
-# Prior Knowledge: Server restart wipes uncommitted worktree work
+# Prior knowledge for the verified Slack MCP delivery task
 
-The knowledge base is populated (17 pages). Exactly one page is directly on
-point, and it is unusually valuable here: it was written by the commit that
-introduced the very mechanism this task must repair.
+Task: `95e9-close-the-unveri`
 
-## `interrupted-worktree-recovery` — the governing page
+The project knowledge base is not empty. The following pages and established
+patterns are relevant.
 
-`docs/knowledge-base/interrupted-worktree-recovery.md`, tags `959a-restart-rewinds`,
-authored by `adf29235` ("Preserve interrupted agent work across restarts", #122)
-— the commit that added `commit_interrupted_wip`.
+## Forked MCP server packaging
 
-The page states the lifecycle invariant this task is enforcing:
+Source:
+`docs/knowledge-base/forked-mcp-server-packaging.md` from predecessor task
+`36d7-use-the-maintain` (available in commit `2e4b77aa`, which this branch has
+not yet incorporated).
 
-> Startup recovery kills an unadopted orphan writer first, then snapshots dirty
-> coding-agent/cleanup-script repositories with `WIP: run interrupted by
-> vibe-kanban shutdown`, and only offers the process for auto-resume after
-> capture succeeds.
+- The catalog URL must identify the fork that actually supplies the executable;
+  metadata alone does not select a build.
+- The fork launcher verifies a baked-in digest for each platform binary before
+  execution and uses staged download plus atomic promotion.
+- The operator override intentionally transfers provenance responsibility to
+  the operator.
+- The launcher tarball digest and platform binary digests answer different
+  questions. The inner digest is enforced on every clean launch. The outer
+  digest is only audited because `npx` cannot accept integrity for a URL package.
+- GitHub release assets can be replaced under an existing tag. A scheduled
+  digest test makes replacement detectable, not impossible.
+- Version corrections use a new `-vk.<n+1>` tag; existing assets are never
+  re-uploaded.
+- Renovate must move both occurrences of the version in the GitHub URL,
+  include prerelease fork tags, disable automerge, and remind reviewers to
+  refresh the source constant, digest, and documentation together.
+- Real verification isolates both npm's cache and the launcher's cache and
+  drives the stdio handshake through `tools/list`.
 
-> **Snapshot failures are not a reason to leave a killed execution `Running`:**
-> mark the dead row `Interrupted`, exclude it from the recovered/auto-resume
-> list, and log the failure with execution/repository context.
+Implication: this task must protect the outer artifact before the package's
+`bin` runs. Adding a signature check inside that same unverified launcher does
+not close the gap.
 
-**The documented invariant and the shipped code disagree.** The page describes
-kill-then-snapshot as a sequence; the code makes the snapshot *conditional on the
-kill succeeding* (`container.rs:2668`, `commit_interrupted_wip` inside the `else`).
-When `stop_execution` returns `Err("Child process not found for execution")` —
-the ordinary case at restart — no snapshot is attempted and the row is left
-`Running`, violating both sentences above. This task closes that gap rather than
-inventing a new policy: the intended behaviour was already written down.
+## MCP connectivity testing
 
-Two more directly reusable rules from the same page:
+Source: `docs/knowledge-base/mcp-connectivity-testing.md`.
 
-- **Multi-repository partial failure.** "WIP capture is best-effort across
-  repositories. Attempt every dirty repo even if one commit fails … refresh
-  every repo's `after_head_commit` before returning an aggregate error."
-  `commit_interrupted_wip` already implements this correctly; preserve it when
-  changing the call site.
-- **Verification pattern.** "Keep the reset decision as a small pure helper with
-  a truth-table unit test." This is the established shape for safety predicates
-  in this codebase — `reset_would_discard_uncommitted_work`
-  (`crates/services/src/services/container.rs:73`) plus
-  `dirty_git_reset_requires_explicit_force` (`:1774`) is the working example.
-  New retain/destroy decisions should follow it, because the crates that own the
-  destructive code (`workspace-manager`, `worktree-manager`) have **no test
-  infrastructure at all**, so a pure helper is the only cheaply testable unit.
+- VK primarily writes MCP definitions into agents' native configuration; it
+  does not own the agent's normal MCP install or launch lifecycle.
+- The on-demand probe is the limited exception: it spawns the exact configured
+  stdio command and performs `initialize`, `notifications/initialized`, and
+  `tools/list`.
+- Stdout is protocol-only for stdio servers; diagnostics belong on stderr.
+- Spawned processes must be bounded and killed on timeout.
+- A handler argument error can prove a tool exists and ran even when a
+  successful credential-backed call is unavailable.
 
-The page's closing line is a direct instruction for stage 11 of this pipeline:
+Implication: pointing a preconfigured entry at an app-managed executable
+requires a new lifecycle contract. A catalog string cannot silently assume that
+the per-user executable was installed.
 
-> Independent review should explicitly probe killed-orphan failure state and
-> multi-repository partial commits; both are easy to miss in the happy path.
+## Shared MCP configuration
 
-The reported incident *is* the killed-orphan failure state. It was flagged as
-easy to miss, and it was missed.
+Source: `docs/knowledge-base/shared-mcp-configuration.md`.
 
-## Reset boundary (same page) — bounds the non-goals
+- `crates/executors/default_mcp.json` is the canonical suggested-server
+  catalog.
+- Canonical stdio entries use `command`, `args`, and `env`; adapters in
+  `mcp_config.rs` translate them to each agent's native shape.
+- Opencode needs an array command and renames `env` to `environment`.
+- Catalog availability and UI discoverability are separate concerns.
 
-The page fixes the `force_when_dirty` contract: non-forced dirty reset must
-reject; `force_when_dirty=true` is explicit authorisation for `reset --hard` +
-`clean -fd`. The incident report already ruled this path out, and the page
-confirms it is behaving as designed. **Do not touch it.**
+Implication: preserve the canonical Slack entry's token placeholder and add
+tests for the unadapted, Codex, and Opencode forms after any delivery change.
 
-## Related but not directly applicable
+## App-managed CLI tool installer
 
-- `worktree-formatting-prerequisites` (`7243-make-frontend-fo`) — fail-before-mutation
-  preflight checks. The general stance (validate before mutating) is the same
-  instinct behind guarding the orphan sweep, but no shared code.
-- `issue-status-side-effects` (`2f63-auto-archive-wor`, `f464-vk-workspace-mgm`) —
-  terminal-status workspace archiving. Relevant only as background for *why*
-  expiry accelerates to 1h on archive, which is the pressure that made the
-  expiry-sweep guard in #151 necessary.
+Source: `crates/services/src/services/cli_tools.rs`, with the module-specific
+precedent documented in
+`docs/knowledge-base/powershell-module-cli-tools.md`.
 
-## Knowledge gaps this task will need to fill
+- Managed tools live below `assets::cli_tools_dir()`, with only a stable `bin`
+  directory exposed to spawned agents.
+- Archive installs download to per-tool staging, stream-compute SHA-256, compare
+  against a per-platform pin before extraction, promote a complete version
+  directory, and swap the executable symlink last.
+- A checksum mismatch writes no install.
+- Host copies win over app-owned copies for normal CLI tools.
+- Installation is explicit and per-user; status, install, removal, platform
+  support, and manifest state are all modelled.
+- The current catalog assumes one exposed executable per tool and is surfaced
+  as a user-facing vendor CLI catalog, not as an implementation detail for
+  preconfigured MCP entries.
 
-Nothing in the KB covers:
+Implication: this machinery can enforce outer integrity, but adopting it is not
+just adding a checksum row. The plan must account for installation UX,
+generated-config path stability, absence/outdated behavior, platform assets,
+and whether a host binary is allowed to supersede the fork pin.
 
-- The **orphan** sweep (`cleanup_orphan_workspaces`) as distinct from the
-  **expiry** sweep. The KB and the #151 work both address expiry; the orphan
-  sweep is undocumented and unguarded.
-- That orphan status is decided by an **exact, un-canonicalised string match**
-  on `container_ref`, making it fragile to path normalisation drift.
-- That the two cleanliness helpers disagree: `is_container_clean` counts
-  untracked files, `check_worktree_clean` (git2) does not.
+## Worktree verification prerequisites
 
-These are candidates for the stage-12 knowledge update.
+Source: `docs/knowledge-base/worktree-formatting-prerequisites.md`.
+
+- Run `pnpm install --frozen-lockfile` before repository formatting and broad
+  verification in a fresh worktree.
+- The formatter preflight intentionally fails before mutation when package-local
+  formatter shims are absent.
+
+Implication: dependency setup is an explicit plan task before final formatting.
+
+## Decision constraints distilled from prior knowledge
+
+1. npm publication is the least invasive prevention mechanism, but package
+   ownership and publish credentials are external prerequisites and must be
+   verified rather than assumed.
+2. The managed installer is technically capable of verification before
+   execution, but it changes the MCP catalog's installation contract and must
+   not create a broken default entry for users who have not installed the tool.
+3. Signature verification is complementary only after the outer fetch itself is
+   authenticated or digest-verified.
+4. If prevention cannot be shipped responsibly in this repository state, an
+   honest detect-only decision must preserve the scheduled audit and state the
+   exact condition that reopens prevention.
