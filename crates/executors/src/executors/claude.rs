@@ -29,7 +29,10 @@ use workspace_utils::{
 };
 
 use self::{
-    client::{AUTO_APPROVE_CALLBACK_ID, ClaudeAgentClient, STOP_GIT_CHECK_CALLBACK_ID},
+    client::{
+        AUTO_APPROVE_CALLBACK_ID, ClaudeAgentClient, DENY_SCHEDULE_WAKEUP_CALLBACK_ID,
+        STOP_GIT_CHECK_CALLBACK_ID,
+    },
     protocol::ProtocolPeer,
     types::{ControlRequestType, ControlResponseType, PermissionMode},
 };
@@ -115,6 +118,14 @@ pub enum ClaudeEffort {
     Max,
 }
 
+/// Name of the Claude Code harness wake-up scheduler tool. Denied/disallowed
+/// under VK because a VK execution has no supervising loop to re-invoke a
+/// parked turn, so the wake-up silently no-ops and the agent abandons its work
+/// (VAS-283).
+const SCHEDULE_WAKEUP_TOOL: &str = "ScheduleWakeup";
+/// Anchored regex matching exactly [`SCHEDULE_WAKEUP_TOOL`] for PreToolUse hooks.
+const SCHEDULE_WAKEUP_MATCHER: &str = "^ScheduleWakeup$";
+
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
 pub struct ClaudeCode {
@@ -173,6 +184,12 @@ impl ClaudeCode {
         } else {
             builder = builder.extend_params(["--disallowedTools=AskUserQuestion"]);
         }
+        // Disallow ScheduleWakeup in every permission mode: VK has no scheduler
+        // to fire it, so it silently no-ops and the agent abandons its turn
+        // (VAS-283). This is the harness-native "tool unavailable" signal; the
+        // PreToolUse deny hook in `get_hooks` is the belt-and-suspenders that
+        // returns an actionable error if the CLI still surfaces the tool.
+        builder = builder.extend_params([format!("--disallowedTools={SCHEDULE_WAKEUP_TOOL}")]);
         if self.dangerously_skip_permissions.unwrap_or(false) {
             builder = builder.extend_params(["--dangerously-skip-permissions"]);
         }
@@ -218,17 +235,24 @@ impl ClaudeCode {
             );
         }
 
-        // Add PreToolUse hooks based on plan/approvals settings
+        // Add PreToolUse hooks based on plan/approvals settings. `ScheduleWakeup`
+        // is denied first in every mode (VAS-283) and excluded from the
+        // catch-all approve/ask matchers so the deny decision is unambiguous
+        // regardless of hook precedence.
         if self.plan.unwrap_or(false) {
             hooks.insert(
                 "PreToolUse".to_string(),
                 serde_json::json!([
                     {
+                        "matcher": SCHEDULE_WAKEUP_MATCHER,
+                        "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
+                    },
+                    {
                         "matcher": "^(ExitPlanMode|AskUserQuestion)$",
                         "hookCallbackIds": ["tool_approval"],
                     },
                     {
-                        "matcher": "^(?!(ExitPlanMode|AskUserQuestion)$).*",
+                        "matcher": "^(?!(ExitPlanMode|AskUserQuestion|ScheduleWakeup)$).*",
                         "hookCallbackIds": [AUTO_APPROVE_CALLBACK_ID],
                     }
                 ]),
@@ -238,7 +262,11 @@ impl ClaudeCode {
                 "PreToolUse".to_string(),
                 serde_json::json!([
                     {
-                        "matcher": "^(?!(Glob|Grep|NotebookRead|Read|Task|TodoWrite)$).*",
+                        "matcher": SCHEDULE_WAKEUP_MATCHER,
+                        "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
+                    },
+                    {
+                        "matcher": "^(?!(Glob|Grep|NotebookRead|Read|Task|TodoWrite|ScheduleWakeup)$).*",
                         "hookCallbackIds": ["tool_approval"],
                     }
                 ]),
@@ -247,6 +275,10 @@ impl ClaudeCode {
             hooks.insert(
                 "PreToolUse".to_string(),
                 serde_json::json!([
+                    {
+                        "matcher": SCHEDULE_WAKEUP_MATCHER,
+                        "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
+                    },
                     {
                         "matcher": "^AskUserQuestion$",
                         "hookCallbackIds": ["tool_approval"],
@@ -2884,6 +2916,97 @@ mod tests {
     fn normalize(json: &ClaudeJson, worktree: &str) -> Vec<NormalizedEntry> {
         let mut processor = ClaudeLogProcessor::new();
         normalize_helper(&mut processor, json, worktree)
+    }
+
+    fn claude_with(plan: Option<bool>, approvals: Option<bool>) -> ClaudeCode {
+        ClaudeCode {
+            claude_code_router: Some(false),
+            plan,
+            approvals,
+            model: None,
+            effort: None,
+            agent: None,
+            append_prompt: AppendPrompt::default(),
+            dangerously_skip_permissions: None,
+            cmd: crate::command::CmdOverrides {
+                base_command_override: None,
+                additional_params: None,
+                env: None,
+            },
+            approvals_service: None,
+            disable_api_key: None,
+        }
+    }
+
+    /// Collect the PreToolUse matcher strings that route to a given callback id.
+    fn matchers_for_callback(hooks: &serde_json::Value, callback_id: &str) -> Vec<String> {
+        hooks["PreToolUse"]
+            .as_array()
+            .expect("PreToolUse array")
+            .iter()
+            .filter(|entry| {
+                entry["hookCallbackIds"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id == callback_id))
+            })
+            .map(|entry| entry["matcher"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    // VAS-283: every permission mode must deny ScheduleWakeup via a dedicated
+    // PreToolUse hook so it cannot silently no-op.
+    #[test]
+    fn schedule_wakeup_denied_in_all_hook_modes() {
+        let modes = [
+            ("auto", claude_with(None, None)),
+            ("plan", claude_with(Some(true), None)),
+            ("approvals", claude_with(None, Some(true))),
+        ];
+        for (label, claude) in modes {
+            let hooks = claude.get_hooks(false).expect("hooks present");
+            let deny_matchers = matchers_for_callback(&hooks, DENY_SCHEDULE_WAKEUP_CALLBACK_ID);
+            assert_eq!(
+                deny_matchers,
+                vec![SCHEDULE_WAKEUP_MATCHER.to_string()],
+                "{label} mode must deny ScheduleWakeup exactly once"
+            );
+
+            // The tool must never be caught by an auto-approve / ask catch-all
+            // (a negative-lookahead `^(?!...)` matcher), otherwise the deny could
+            // be overridden. Those catch-alls must list ScheduleWakeup among
+            // their exclusions.
+            let approve = matchers_for_callback(&hooks, AUTO_APPROVE_CALLBACK_ID);
+            let ask = matchers_for_callback(&hooks, "tool_approval");
+            for matcher in approve.iter().chain(ask.iter()) {
+                if matcher.starts_with("^(?!") {
+                    assert!(
+                        matcher.contains("ScheduleWakeup"),
+                        "{label} catch-all matcher {matcher:?} must exclude ScheduleWakeup"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn schedule_wakeup_disallowed_in_all_command_modes() {
+        let modes = [
+            ("auto", claude_with(None, None)),
+            ("plan", claude_with(Some(true), None)),
+            ("approvals", claude_with(None, Some(true))),
+        ];
+        for (label, claude) in modes {
+            let builder = claude
+                .build_command_builder()
+                .await
+                .expect("command builder");
+            let params = builder.params.unwrap_or_default();
+            let disallowed = format!("--disallowedTools={SCHEDULE_WAKEUP_TOOL}");
+            assert!(
+                params.iter().any(|p| p == &disallowed),
+                "{label} mode command must disallow ScheduleWakeup; got {params:?}"
+            );
+        }
     }
 
     #[test]

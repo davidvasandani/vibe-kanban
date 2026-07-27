@@ -139,6 +139,45 @@ to finalization if the queue is empty/cancelled or execution start fails. The
 general lesson is that an early-finalization shortcut must audit and preserve
 all handoffs owned by the block it bypasses, not only completion notification.
 
+## `ScheduleWakeup` is denied, not honored (VAS-283)
+
+The Claude Code harness offers a `ScheduleWakeup` tool: the agent parks its turn
+and expects a supervising loop to re-invoke it after a delay. VK has no such
+loop — a turn is one process and it is reaped at turn end (both kill points
+above), so any in-process wake-up timer dies with it. Left alone the tool
+returns *success*, the agent ends its turn having done nothing, and the
+execution is recorded `completed` / `exit_code 0` — a silent task abandonment.
+
+`ScheduleWakeup` is purely a harness-side tool: VK never receives the request as
+an actionable event, it only sees the `ToolUse` in the normalized log stream. So
+the fix lives at the tool-permission boundary VK *does* control when it launches
+the CLI (`crates/executors/src/executors/claude.rs`), as two independent layers:
+
+1. **`--disallowedTools=ScheduleWakeup`** in every permission mode
+   (`build_command_builder`) — the harness-native "tool unavailable" signal.
+2. **A PreToolUse `deny` hook** matching `^ScheduleWakeup$` in every mode
+   (`get_hooks` → `DENY_SCHEDULE_WAKEUP_CALLBACK_ID`, handled in
+   `claude/client.rs::on_hook_callback`). The deny is checked **before** the
+   `auto_approve` short-circuit so it also fires in bypass/auto mode — the mode
+   the incident occurred in — and the catch-all approve/ask matchers explicitly
+   exclude `ScheduleWakeup` so the deny is unambiguous. The reason string
+   (`SCHEDULE_WAKEUP_DENY_REASON`) tells the agent to do the work inline or leave
+   a follow-up, so it keeps working instead of parking.
+
+Residual dependency (unverifiable from this repo): both layers assume the CLI
+subjects the harness-injected `ScheduleWakeup` tool to `--disallowedTools` /
+PreToolUse hooks like a normal registry tool. It appears in the tool registry
+like any other tool, so this holds in practice, but a harness change could
+bypass both — in which case the CLI-independent fallback is to detect the
+`ScheduleWakeup` `ToolUse` during log normalization and surface it.
+
+This is the cheap "make the failure honest" guardrail (VAS-283 option A). The
+real capability — persist `(session_id, fire_at, prompt)` and re-invoke via the
+existing `--resume` + `QueuedMessageService` paths (option B) — is deferred to
+be designed alongside VAS-132 ("Issue Background Tasks as Sub-Issues"), which
+covers the same gap (agent-initiated work that outlives the current turn) from
+the background-subagent angle.
+
 ## What already survives restarts (reuse, don't reinvent)
 
 `ExecutionProcess.pgid` is persisted at spawn; boot-time adoption

@@ -24,6 +24,26 @@ const EXIT_PLAN_MODE_NAME: &str = "ExitPlanMode";
 const ASK_USER_QUESTION_NAME: &str = "AskUserQuestion";
 pub const AUTO_APPROVE_CALLBACK_ID: &str = "AUTO_APPROVE_CALLBACK_ID";
 pub const STOP_GIT_CHECK_CALLBACK_ID: &str = "STOP_GIT_CHECK_CALLBACK_ID";
+/// PreToolUse callback id used to deny `ScheduleWakeup` calls (VAS-283).
+pub const DENY_SCHEDULE_WAKEUP_CALLBACK_ID: &str = "DENY_SCHEDULE_WAKEUP_CALLBACK_ID";
+/// Reason surfaced to the agent when it tries to schedule a wake-up under a VK
+/// execution. VK has no supervising loop and reaps the turn's process at turn
+/// end (see `wiki/agent-process-lifecycle.md`), so a harness wake-up timer
+/// never fires and any work parked on it is silently dropped. The message tells
+/// the agent to continue inline instead of ending its turn.
+pub const SCHEDULE_WAKEUP_DENY_REASON: &str = "Scheduled wake-ups are not supported for Vibe Kanban executions: this turn's process is terminated when the turn ends, so the wake-up would never fire and any work you defer to it would be silently dropped. Do the work now in this turn instead of parking it on a wake-up, or leave a follow-up message to continue after the turn completes.";
+
+/// PreToolUse hook response that denies a `ScheduleWakeup` call with an
+/// actionable reason (VAS-283). Extracted so it can be unit-tested directly.
+pub fn schedule_wakeup_deny_response() -> serde_json::Value {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": SCHEDULE_WAKEUP_DENY_REASON,
+        }
+    })
+}
 // Prefix for denial messages from the user, mirrors claude code CLI behavior
 const TOOL_DENY_PREFIX: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said: ";
 
@@ -351,6 +371,15 @@ impl ClaudeAgentClient {
             });
         }
 
+        // Deny scheduled wake-ups (VAS-283). Checked *before* `auto_approve` so
+        // it also denies in bypass/auto mode — the exact mode the incident
+        // occurred in — instead of the auto-approve branch turning it into an
+        // "allow" that lets the agent park its turn on a wake-up that never
+        // fires.
+        if callback_id == DENY_SCHEDULE_WAKEUP_CALLBACK_ID {
+            return Ok(schedule_wakeup_deny_response());
+        }
+
         if self.auto_approve {
             Ok(serde_json::json!({
                 "hookSpecificOutput": {
@@ -386,5 +415,62 @@ impl ClaudeAgentClient {
 
     pub async fn log_message(&self, line: &str) -> Result<(), ExecutorError> {
         self.log_writer.log_raw(line).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{env::RepoContext, executors::codex::client::LogWriter};
+
+    fn auto_approve_client() -> Arc<ClaudeAgentClient> {
+        // `approvals: None` => auto_approve = true, the mode the VAS-283
+        // incident occurred in.
+        ClaudeAgentClient::new(
+            LogWriter::new(tokio::io::sink()),
+            None,
+            RepoContext::default(),
+            String::new(),
+            CancellationToken::new(),
+        )
+    }
+
+    #[test]
+    fn schedule_wakeup_deny_response_is_a_deny() {
+        let resp = schedule_wakeup_deny_response();
+        let out = &resp["hookSpecificOutput"];
+        assert_eq!(out["hookEventName"], "PreToolUse");
+        assert_eq!(out["permissionDecision"], "deny");
+        assert_eq!(out["permissionDecisionReason"], SCHEDULE_WAKEUP_DENY_REASON);
+    }
+
+    #[tokio::test]
+    async fn schedule_wakeup_callback_denies_even_in_auto_approve() {
+        let client = auto_approve_client();
+        let resp = client
+            .on_hook_callback(
+                DENY_SCHEDULE_WAKEUP_CALLBACK_ID.to_string(),
+                serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("callback ok");
+        // Denied despite auto_approve — the deny is checked before the
+        // auto-approve short-circuit, so a parked turn cannot slip through.
+        assert_eq!(resp["hookSpecificOutput"]["permissionDecision"], "deny");
+    }
+
+    #[tokio::test]
+    async fn unrelated_callback_still_auto_approves() {
+        let client = auto_approve_client();
+        let resp = client
+            .on_hook_callback(
+                AUTO_APPROVE_CALLBACK_ID.to_string(),
+                serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect("callback ok");
+        assert_eq!(resp["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 }
