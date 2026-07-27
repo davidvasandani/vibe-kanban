@@ -16,8 +16,9 @@ use codex_app_server_protocol::{
     FileChangeRequestApprovalResponse, GetAccountParams, GetAccountRateLimitsResponse,
     GetAccountResponse, InitializeCapabilities, InitializeParams, InitializeResponse,
     ItemCompletedNotification, JSONRPCError, JSONRPCNotification, JSONRPCRequest, JSONRPCResponse,
-    ListMcpServerStatusParams, ListMcpServerStatusResponse, McpServerStatusDetail, RequestId,
-    ReviewStartParams, ReviewStartResponse, ReviewTarget, ServerRequest, ThreadCompactStartParams,
+    ListMcpServerStatusParams, ListMcpServerStatusResponse, McpAuthStatus,
+    McpServerRefreshResponse, McpServerStatusDetail, RequestId, ReviewStartParams,
+    ReviewStartResponse, ReviewTarget, ServerRequest, ThreadCompactStartParams,
     ThreadCompactStartResponse, ThreadForkParams, ThreadForkResponse, ThreadItem, ThreadReadParams,
     ThreadReadResponse, ThreadStartParams, ThreadStartResponse, ToolRequestUserInputAnswer,
     ToolRequestUserInputQuestion, ToolRequestUserInputResponse, TurnCompletedNotification,
@@ -39,6 +40,10 @@ use crate::{
     approvals::{ExecutorApprovalError, ExecutorApprovalService},
     env::RepoContext,
     executors::{ExecutorError, codex::normalize_logs::Approval},
+    mcp_refresh::{
+        McpRefreshControl, McpRefreshErrorCategory, McpServerRefreshSnapshot,
+        McpServerRefreshStatus, safe_executor_error,
+    },
 };
 
 struct PendingPlan {
@@ -224,16 +229,42 @@ impl AppServerClient {
         &self,
         cursor: Option<String>,
     ) -> Result<ListMcpServerStatusResponse, ExecutorError> {
+        let thread_id = self.thread_id.lock().await.clone();
         let request = ClientRequest::McpServerStatusList {
             request_id: self.next_request_id(),
             params: ListMcpServerStatusParams {
                 cursor,
                 limit: None,
-                detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),
-                thread_id: None,
+                detail: Some(McpServerStatusDetail::Full),
+                thread_id,
             },
         };
         self.send_request(request, "mcpServerStatus/list").await
+    }
+
+    pub async fn refresh_mcp_servers(&self) -> Result<(), ExecutorError> {
+        let request = ClientRequest::McpServerRefresh {
+            request_id: self.next_request_id(),
+            params: None,
+        };
+        self.send_request::<McpServerRefreshResponse>(request, "config/mcpServer/reload")
+            .await?;
+        Ok(())
+    }
+
+    async fn all_mcp_server_statuses(
+        &self,
+    ) -> Result<Vec<codex_app_server_protocol::McpServerStatus>, ExecutorError> {
+        let mut cursor = None;
+        let mut servers = Vec::new();
+        loop {
+            let response = self.list_mcp_server_status(cursor).await?;
+            servers.extend(response.data);
+            match response.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => return Ok(servers),
+            }
+        }
     }
 
     pub async fn thread_compact_start(
@@ -821,6 +852,53 @@ impl AppServerClient {
 }
 
 #[async_trait]
+impl McpRefreshControl for AppServerClient {
+    async fn queue_refresh(&self) -> Result<(), McpRefreshErrorCategory> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.refresh_mcp_servers(),
+        )
+        .await
+        .map_err(|_| McpRefreshErrorCategory::Timeout)?
+        .map_err(|_| McpRefreshErrorCategory::Internal)
+    }
+
+    async fn list_servers(&self) -> Result<Vec<McpServerRefreshSnapshot>, McpRefreshErrorCategory> {
+        let servers = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.all_mcp_server_statuses(),
+        )
+        .await
+        .map_err(|_| McpRefreshErrorCategory::Timeout)?
+        .map_err(|_| McpRefreshErrorCategory::CapabilityListFailed)?;
+        Ok(servers
+            .into_iter()
+            .map(|server| {
+                let auth_failed = matches!(server.auth_status, McpAuthStatus::NotLoggedIn);
+                McpServerRefreshSnapshot {
+                    server_id: server.name,
+                    status: if auth_failed {
+                        McpServerRefreshStatus::FailedUnavailable
+                    } else {
+                        McpServerRefreshStatus::Ready
+                    },
+                    tool_count: Some(server.tools.len() as u32),
+                    resource_count: Some(
+                        (server.resources.len() + server.resource_templates.len()) as u32,
+                    ),
+                    prompt_count: None,
+                    // The pinned status protocol does not expose reuse/restart.
+                    restart_occurred: None,
+                    error: auth_failed.then(|| {
+                        safe_executor_error(McpRefreshErrorCategory::AuthenticationFailed)
+                    }),
+                }
+            })
+            .collect())
+    }
+}
+
+#[async_trait]
 impl JsonRpcCallbacks for AppServerClient {
     async fn on_request(
         &self,
@@ -980,6 +1058,7 @@ fn request_id(request: &ClientRequest) -> RequestId {
         | ClientRequest::TurnStart { request_id, .. }
         | ClientRequest::GetAccount { request_id, .. }
         | ClientRequest::ReviewStart { request_id, .. }
+        | ClientRequest::McpServerRefresh { request_id, .. }
         | ClientRequest::McpServerStatusList { request_id, .. }
         | ClientRequest::ThreadCompactStart { request_id, .. }
         | ClientRequest::ThreadRead { request_id, .. }

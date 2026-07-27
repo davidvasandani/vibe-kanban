@@ -183,3 +183,26 @@ native configuration.
 
 - Explore the [Agent Configurations](/settings/agent-configurations) guide for advanced agent setup
 - Check out [Supported Coding Agents](/supported-coding-agents) for agent-specific features
+## Refreshing tools in an active session
+
+Active Codex workspace sessions expose **Refresh MCP tools** in the session
+toolbar. The action re-reads Codex's MCP configuration without replacing the
+workspace or conversation. Codex queues the new configuration for the next
+active turn, so the initial result is **Pending next turn** rather than a false
+success. After the next turn starts, Vibe Kanban reads the live Codex MCP status
+and records the confirmed server and tool counts.
+
+Other executors currently report **Unsupported** because they do not expose a
+live, confirmable MCP reload operation. Vibe Kanban does not substitute the
+independent connection test for live adoption.
+
+Codex publishes a complete MCP runtime at the next-turn boundary. This makes
+publication atomic and does not interrupt the current turn. The pinned status
+protocol does not report whether an individual server was restarted or reused,
+so Vibe Kanban shows that field as unknown. It also cannot retain an old working
+connection for only one server when that server's replacement fails; the result
+reports that limitation instead of claiming the old tool remains callable.
+
+Refresh diagnostics identify servers only by configured name and use
+allow-listed remediation. Environment values, tokens, OAuth material,
+authenticated URLs, and raw subprocess output are not returned.

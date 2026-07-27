@@ -991,6 +991,18 @@ export type ExecutorAction = { typ: ExecutorActionType, next_action: ExecutorAct
 
 export type McpConfig = { servers: { [key in string]?: JsonValue }, servers_path: Array<string>, template: JsonValue, preconfigured: JsonValue, is_toml_config: boolean, };
 
+export type McpRefreshStatus = "pending_next_turn" | "refreshed" | "partially_refreshed" | "busy" | "unsupported" | "failed";
+
+export type McpRefreshErrorCategory = "executable_unavailable" | "process_launch_failed" | "initialize_failed" | "authentication_failed" | "capability_list_failed" | "invalid_capability_schema" | "timeout" | "refresh_in_progress" | "active_call" | "unsupported" | "internal";
+
+export type McpRefreshError = { category: McpRefreshErrorCategory, message: string, remediation: string, retryable: boolean, };
+
+export type McpServerRefreshStatus = "ready" | "failed_retained" | "failed_unavailable" | "removed" | "disabled";
+
+export type McpServerRefreshSnapshot = { server_id: string, status: McpServerRefreshStatus, tool_count: number | null, resource_count: number | null, prompt_count: number | null, restart_occurred: boolean | null, error: McpRefreshError | null, };
+
+export type McpRefreshResult = { status: McpRefreshStatus, retryable: boolean, generation: bigint, requested_at: string, last_successful_refresh_at: string | null, servers: Array<McpServerRefreshSnapshot>, error: McpRefreshError | null, };
+
 export type ExecutorActionType = { "type": "CodingAgentInitialRequest" } & CodingAgentInitialRequest | { "type": "CodingAgentFollowUpRequest" } & CodingAgentFollowUpRequest | { "type": "ScriptRequest" } & ScriptRequest | { "type": "ReviewRequest" } & ReviewRequest;
 
 export type ExecutorConfig = { 

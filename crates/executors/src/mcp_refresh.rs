@@ -6,8 +6,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::executors::ExecutorError;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -65,7 +63,6 @@ pub struct McpServerRefreshSnapshot {
     pub tool_count: Option<u32>,
     pub resource_count: Option<u32>,
     pub prompt_count: Option<u32>,
-    /// `None` means the executor does not expose this fact.
     pub restart_occurred: Option<bool>,
     pub error: Option<McpRefreshError>,
 }
@@ -84,8 +81,8 @@ pub struct McpRefreshResult {
 
 #[async_trait]
 pub trait McpRefreshControl: Send + Sync {
-    async fn queue_refresh(&self) -> Result<(), ExecutorError>;
-    async fn list_servers(&self) -> Result<Vec<McpServerRefreshSnapshot>, ExecutorError>;
+    async fn queue_refresh(&self) -> Result<(), McpRefreshErrorCategory>;
+    async fn list_servers(&self) -> Result<Vec<McpServerRefreshSnapshot>, McpRefreshErrorCategory>;
 }
 
 #[derive(Clone)]
