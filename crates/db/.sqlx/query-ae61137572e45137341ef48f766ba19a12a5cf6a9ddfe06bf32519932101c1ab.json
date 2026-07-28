@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id as \"id!: Uuid\", workspace_id as \"workspace_id!: Uuid\", host_id, profile, status as \"status!: BrowserSessionDbStatus\", current_url, created_at as \"created_at!: DateTime<Utc>\", updated_at as \"updated_at!: DateTime<Utc>\", closed_at as \"closed_at: DateTime<Utc>\", expires_at as \"expires_at: DateTime<Utc>\"\n               FROM browser_sessions\n               WHERE workspace_id = $1 AND ($2 OR status NOT IN ('closed', 'failed'))\n               ORDER BY created_at DESC",
+  "query": "INSERT INTO browser_sessions (id, workspace_id, host_id, profile, status, expires_at)\n               VALUES ($1, $2, $3, $4, $5, $6)\n               RETURNING id as \"id!: Uuid\", workspace_id as \"workspace_id!: Uuid\", host_id, profile, status as \"status!: BrowserSessionDbStatus\", current_url, pgid, created_at as \"created_at!: DateTime<Utc>\", updated_at as \"updated_at!: DateTime<Utc>\", closed_at as \"closed_at: DateTime<Utc>\", expires_at as \"expires_at: DateTime<Utc>\"",
   "describe": {
     "columns": [
       {
@@ -34,28 +34,33 @@
         "type_info": "Text"
       },
       {
-        "name": "created_at!: DateTime<Utc>",
+        "name": "pgid",
         "ordinal": 6,
-        "type_info": "Text"
+        "type_info": "Integer"
       },
       {
-        "name": "updated_at!: DateTime<Utc>",
+        "name": "created_at!: DateTime<Utc>",
         "ordinal": 7,
         "type_info": "Text"
       },
       {
-        "name": "closed_at: DateTime<Utc>",
+        "name": "updated_at!: DateTime<Utc>",
         "ordinal": 8,
         "type_info": "Text"
       },
       {
-        "name": "expires_at: DateTime<Utc>",
+        "name": "closed_at: DateTime<Utc>",
         "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at: DateTime<Utc>",
+        "ordinal": 10,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 2
+      "Right": 6
     },
     "nullable": [
       false,
@@ -64,11 +69,12 @@
       true,
       false,
       true,
+      true,
       false,
       false,
       true,
       true
     ]
   },
-  "hash": "059f2c0c0257b205aad7440a2588849c781a00e56d8dbcdf9e71375071b0055b"
+  "hash": "ae61137572e45137341ef48f766ba19a12a5cf6a9ddfe06bf32519932101c1ab"
 }

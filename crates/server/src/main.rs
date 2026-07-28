@@ -77,6 +77,10 @@ async fn main() -> Result<(), VibeKanbanError> {
         .await
         .map_err(DeploymentError::from)?;
     deployment
+        .browser_sessions()
+        .cleanup_orphan_sessions()
+        .await;
+    deployment
         .container()
         .restart_interrupted_dev_servers(&interrupted_processes)
         .await;

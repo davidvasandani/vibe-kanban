@@ -182,6 +182,7 @@ impl BrowserSessionService {
                     message: other.to_string(),
                 },
             })?;
+        let pgid = handle.pgid();
         let id = Uuid::new_v4();
         let runtime = Arc::new(SessionRuntime::new(
             id,
@@ -213,6 +214,14 @@ impl BrowserSessionService {
                 });
             }
         })?;
+        // Record the process group id so a later boot can clean up the
+        // group if this server dies uncleanly. Best-effort: a failure here
+        // just means the orphan reaper skips this session.
+        if let Some(pgid) = pgid
+            && let Err(e) = BrowserSession::update_pgid(&self.inner.db.pool, id, pgid as i64).await
+        {
+            tracing::warn!(session_id = %id, error = %e, "failed to record pgid for browser session");
+        }
         Ok(BrowserSessionWithState {
             session: row,
             live: Some(runtime.live_state()),
@@ -302,6 +311,44 @@ impl BrowserSessionService {
         for runtime in targets {
             self.close_runtime(&runtime, BrowserSessionDbStatus::Closed)
                 .await;
+        }
+    }
+
+    /// Kill Chromium process groups orphaned by an unclean previous-server
+    /// exit (crash/SIGKILL) and mark their sessions closed. Call once at
+    /// startup, before any new sessions are created — the in-memory
+    /// `sessions` registry starts empty on every boot, so rows left
+    /// `starting`/`running` from a prior instance have no live owner and
+    /// would otherwise never be reaped.
+    pub async fn cleanup_orphan_sessions(&self) {
+        let open = match BrowserSession::find_open(&self.inner.db.pool).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to list open browser sessions for orphan cleanup");
+                return;
+            }
+        };
+        for session in open {
+            #[cfg(unix)]
+            if let Some(pgid) = session.pgid {
+                let age_secs = (Utc::now() - session.created_at).num_seconds();
+                if utils::process::kill_orphan_process_group(pgid as i32, age_secs).await {
+                    tracing::info!(
+                        session_id = %session.id,
+                        pgid,
+                        "killed orphaned OS process group for browser session"
+                    );
+                }
+            }
+            if let Err(e) = BrowserSession::update_status(
+                &self.inner.db.pool,
+                session.id,
+                BrowserSessionDbStatus::Closed,
+            )
+            .await
+            {
+                tracing::warn!(session_id = %session.id, error = %e, "failed to close orphaned browser session");
+            }
         }
     }
 

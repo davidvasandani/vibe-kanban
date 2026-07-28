@@ -30,7 +30,13 @@ export type CreateTag = { tag_name: string, content: string, };
 
 export type UpdateTag = { tag_name: string | null, content: string | null, };
 
-export type BrowserSession = { id: string, workspace_id: string, host_id: string, profile: string | null, status: BrowserSessionDbStatus, current_url: string | null, created_at: string, updated_at: string, closed_at: string | null, expires_at: string | null, };
+export type BrowserSession = { id: string, workspace_id: string, host_id: string, profile: string | null, status: BrowserSessionDbStatus, current_url: string | null, 
+/**
+ * OS process group id of the spawned Chromium process group, used to
+ * clean up orphaned process groups after a server crash. Not
+ * meaningful across machines.
+ */
+pgid: bigint | null, created_at: string, updated_at: string, closed_at: string | null, expires_at: string | null, };
 
 export enum BrowserSessionDbStatus { starting = "starting", running = "running", closed = "closed", failed = "failed" }
 
