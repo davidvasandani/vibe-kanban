@@ -139,3 +139,8 @@ contributed to it.
   signal; key markSeen and order-freeze off pointer/keydown), the
   starvation-safe debounced re-sort, needs-feedback tiering incl.
   `interrupted`, and per-column error boundaries.
+- [workspace-context-bar-responsive-visibility.md](workspace-context-bar-responsive-visibility.md)
+  — Why the floating workspace context bar is desktop-only, how responsive
+  layout state and physical-device detection combine as a visibility truth
+  table, and where to keep the policy without changing desktop drag/snap
+  behavior or the presentational UI component.
