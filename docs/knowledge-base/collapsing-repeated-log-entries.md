@@ -1,6 +1,6 @@
 # Collapsing repeated log entries into ticked lines
 
-Tags: `4095-thinking-tokens`
+Tags: `4095-thinking-tokens`, `6aac-grok-same-comman`
 
 ## Problem
 
@@ -41,3 +41,28 @@ advances the shared index provider — no per-branch reset code needed.
 Implemented in `ClaudeLogProcessor::push_collapsible_system_message`
 (`crates/executors/src/executors/claude.rs`), applied to both catch-all system-message
 branches (`Some(subtype)` → `System: {subtype}`, `None` → `System message`).
+
+## Collapsing repeated command-tool calls
+
+Task `6aac-grok-same-comman` applied the same display pattern to consecutive
+completed Claude `Bash` tool calls that invoke the exact same Grok command. This
+case needs more state than repeated informational events:
+
+- The screenshot's `grok --cwd ...` rows are outer Claude command-tool entries,
+  not events inside Grok's ACP normalizer. Diagnose which normalizer owns the
+  visible row before changing a vendor executor.
+- Tool-call IDs remain unique even when several calls share one visible entry
+  index. Keep every ID in the tool map so results can still be correlated.
+- Only the latest compacted tool-call ID may refine the shared entry. A late
+  result from an older ID must not overwrite the newer command state.
+- Require the prior invocation to complete successfully before reusing its
+  entry. A failure remains visibly failed and cannot become a success tick.
+- Streaming re-emission of the same tool-call ID is an update, not a repeat; it
+  must retain the current tick count without incrementing it.
+- Scope command compaction narrowly (Grok executable plus exact normalized
+  command text here). Generic identical-command suppression can hide deliberate
+  repeated operations.
+
+The shared-index invariant still applies: a different allocated entry ends the
+run, and any index reset must clear both informational-event and command-call
+trackers.
