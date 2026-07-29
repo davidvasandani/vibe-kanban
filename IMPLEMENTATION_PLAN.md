@@ -1,85 +1,20 @@
-# Implementation Plan: Mobile Workspace Floating Context Bar
+# Implementation Plan
 
-**Task ID:** `vk/2792-vk-workspace-flo`
-**Inputs:** `SPEC.md`, `PRIOR_KNOWLEDGE.md`
-
-## Objective
-
-Prevent the desktop workspace context bar from rendering in the responsive
-mobile workspace layout while preserving all desktop behavior.
-
-## Steps
-
-1. **Establish SpecKit artifacts**
-   - Refresh the repository constitution.
-   - Generate the feature specification at a task-specific path.
-   - Clarify open questions, with the default decision that the redundant
-     context bar is hidden rather than made touch-draggable.
-   - Generate the technical plan, supporting research/data-model/contracts,
-     dependency-ordered tasks, and analysis report.
-
-2. **Create a testable visibility rule**
-   - Add a small pure helper near the context-bar container that accepts the
-     responsive-mobile and physical-mobile signals.
-   - Make the rule return hidden when either signal reports mobile.
-   - Add focused tests for:
-     - responsive mobile / unrecognized physical device;
-     - physical mobile / desktop-sized responsive state;
-     - normal desktop rendering.
-
-3. **Apply the responsive guard**
-   - Read `useIsMobile()` unconditionally in `ContextBarContainer`.
-   - Combine it with the existing `isRealMobileDevice()` guard.
-   - Return `null` before rendering the presentational `ContextBar` when the
-     combined rule says it is mobile.
-   - Leave action preparation, desktop positioning, mouse dragging, and
-     persisted snap position unchanged.
-
-4. **Verify the change**
-   - Install dependencies if the fresh worktree requires it.
-   - Run focused context-bar tests.
-   - Run the relevant frontend type check and ESLint target.
-   - Run repository formatting and confirm it does not alter unrelated files.
-   - Inspect the final diff for scope and accidental generated-file changes.
-
-5. **Independent review**
-   - Run the requested Codex diff-review workflow. If the named
-     `codex-review` skill is unavailable, use the repository's Codex CLI as
-     the closest independent review mechanism and record that fallback.
-   - Address confirmed significant findings.
-   - Repeat focused verification and review until there are no significant
-     findings.
-
-6. **Record reusable knowledge**
-   - Add or update a single knowledge-base topic describing the responsive
-     versus physical-device visibility rule and why mobile reuses the navbar
-     instead of the desktop floating context bar.
-   - Tag it with `vk/2792-vk-workspace-flo`, refresh `wiki/INDEX.md`, and
-     commit the knowledge-base update as required by the pipeline.
-
-## Expected Files
-
-- `packages/web-core/src/pages/workspaces/ContextBarContainer.tsx`
-- A focused test file beside the context-bar visibility helper/container
-- `specs/...` SpecKit artifacts
-- `SPEC.md`
-- `PRIOR_KNOWLEDGE.md`
-- `IMPLEMENTATION_PLAN.md`
-- `wiki/INDEX.md`
-- One relevant `wiki/*.md` topic page
-
-## Ordering and Parallelism
-
-- SpecKit stages are strictly sequential.
-- The helper test and container integration share the same small seam and
-  should be implemented in dependency order.
-- Verification commands that do not mutate files may run together after
-  formatting.
-- Independent review starts only after implementation verification.
-- Knowledge-base writes happen only after the shipped behavior is settled.
-
-## Rollback
-
-The functional change is isolated to a render guard. Reverting the helper,
-test, and combined guard restores the prior context-bar visibility without
-data migration or persistence cleanup.
+1. Inspect the composed-pipeline contract, bundled asset seeding behavior, and
+   focused tests to define the smallest compatible change.
+2. Refresh the `Parallel Sub-Agents` prompts so fan-out is genuinely
+   concurrent, every provider receives the task before execution, read tools
+   remain available under a read-only policy, failures are isolated, and later
+   rounds start fresh children with both original and synthesized context.
+3. Extend bundled seeding with a narrowly scoped legacy-content refresh:
+   replace the on-disk parallel pipeline only when it byte-for-byte matches the
+   previously shipped default, preserving every customized copy.
+4. Add regression tests for the prompt contract and for both unmodified-default
+   upgrade and customized-file preservation.
+5. Run formatting and focused Rust tests, then the broader checks warranted by
+   the touched backend module.
+6. Run an independent Codex diff review, address confirmed findings, and repeat
+   verification until no significant findings remain.
+7. Record reusable bundle-refresh and prompt-orchestration knowledge in the
+   project knowledge base, update its index, and commit the knowledge-base
+   changes as required by the task pipeline.

@@ -171,6 +171,19 @@ identifies failures by stable configured identifier. Configuration comparisons,
 logs, diagnostics, and API results never expose environment values, tokens,
 authorization material, authenticated URLs, or secret-bearing command arguments.
 
+### XVIII. Bundled defaults upgrade without claiming user files
+Bundled defaults copied into user-editable storage remain user-owned after
+seeding. A release may automatically refresh a bundled file only when the
+on-disk bytes are known to be an unmodified previously shipped default.
+Customized files, unrecognized versions, and ambiguous state are preserved.
+Deleted defaults stay deleted unless the product's established empty-directory
+reset behavior is explicitly invoked.
+
+Prompt-driven bundled workflows are executable contracts, not illustrative
+copy. Their regression tests preserve requirements that affect safety and
+completion—such as concurrency, bounded retries, prompt delivery, and required
+read capabilities—rather than checking only stage names or keywords.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -192,5 +205,6 @@ authorization material, authenticated URLs, or secret-bearing command arguments.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.14.0 (adds confirmed, atomic live-capability principle XVII;
-0.13.0 added verified bundled third-party delivery principle XVI)
+**Version**: 0.15.0 (adds user-preserving bundled-default upgrades and
+prompt-workflow contract coverage in principle XVIII; 0.14.0 added confirmed,
+atomic live-capability principle XVII)

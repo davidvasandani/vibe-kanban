@@ -1,24 +1,24 @@
 name = "Parallel Sub-Agents"
-description = "Fan a single prompt out to Claude, Codex, and Grok in parallel, analyze their responses, and iterate up to N rounds."
+description = "Fan one task out to Claude, Codex, and Grok concurrently, synthesize their grounded responses, and iterate for up to N completed rounds."
 
 [[stage]]
 id = "fanout"
 label = "Fan out in parallel"
 default_enabled = true
 heavy = true
-prompt = "Fan this task's prompt out to three sub-agents running in parallel — one using Claude, one using Codex, and one using Grok — giving each the exact same prompt, and collect all three complete responses. Launch them concurrently rather than one after another. If a backend is unavailable, note which one and continue with the sub-agents you can run."
+prompt = "Launch three independent sub-agents concurrently — one using Claude, one using Codex, and one using Grok — through the available agent or noninteractive CLI interfaces. Give each child the exact original task prompt as its initial task input before any follow-up or shutdown instruction. This is read-only analysis: tell the children not to edit the workspace and use a read-only sandbox or permission mode where available, but retain the tools they need to read and inspect the workspace; never disable all tools. Wait for every successfully launched child to finish, then collect its complete final response under a clear provider label. Isolate launch, authentication, timeout, or availability failures by provider so one failure does not block the other children, and do not retry providers serially."
 
 [[stage]]
 id = "analyze"
 label = "Analyze & synthesize"
 default_enabled = true
-prompt = "Analyze the three sub-agent responses side by side: call out where they agree, where they disagree, and the strongest idea from each. Synthesize a single consolidated answer, and list any remaining open questions or contradictions the round did not resolve."
+prompt = "Analyze the returned, provider-labeled sub-agent responses side by side: call out where they agree, where they disagree, and the strongest idea from each successful provider. Identify missing providers and their failures concisely. Synthesize one consolidated answer from actual child responses, list any remaining open questions or contradictions, and never invent a provider response or embed your own answer as a substitute for a failed child."
 
 [[stage]]
 id = "iterate"
 label = "Loop N rounds"
 default_enabled = true
-prompt = "Treat the fan-out and analysis you just completed as round 1, then repeat the parallel fan-out and analysis for the remaining rounds up to a total of N rounds (default N = 3; the operator may change N in this task's description). Feed the previous round's synthesis back to the three sub-agents as context each round. Stop early once the responses converge; otherwise stop after the Nth round. Then emit the final consolidated result."
+prompt = "Treat a fan-out as a completed round only when at least one successfully launched child returns a final response; failed launch attempts do not consume the round budget. Repeat with fresh Claude, Codex, and Grok children launched concurrently for up to N completed rounds total (default N = 3; the operator may change N in this task's description). In every later round, give each child the exact original task prompt first and append the previous round's synthesis as clearly separated context; never replace the original prompt with the synthesis. Apply the same read-only policy while retaining workspace-reading tools, isolate unavailable providers without serial retry, and stop early when the substantive responses converge. If no provider launches successfully, report that the fan-out could not run instead of fabricating a round. Then emit the final consolidated result."
 
 [[stage]]
 id = "code-review"

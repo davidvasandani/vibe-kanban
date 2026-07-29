@@ -1,117 +1,64 @@
-# Technical Specification: Mobile Workspace Floating Context Bar
-
-**Task ID:** `vk/2792-vk-workspace-flo`
-**Status:** Draft for implementation
-**Area:** Workspace chat UI (`packages/web-core`, `packages/ui`)
+# Technical Specification: Reliable Parallel Sub-Agent Pipeline
 
 ## Problem
 
-The control highlighted in the supplied iPhone screenshot is Vibe Kanban's
-workspace **context bar**. It is a floating shortcut palette for desktop
-workspace actions such as opening changes, logs, preview, and Git-related
-views. It is rendered over the workspace conversation and can be dragged
-between six snap points with a mouse.
+The bundled `Parallel Sub-Agents` pipeline asks the execution agent to fan a
+task out to Claude, Codex, and Grok, but it leaves the launch contract
+underspecified. In practice the orchestrator can disable a child agent's tools
+while trying to keep the fan-out read-only, make the task prompt unavailable to
+the child, wait on providers serially, or spend the bounded iteration budget
+retrying an unavailable provider. The resulting synthesis is incomplete and
+contains operational fallback narration instead of three useful analyses.
 
-The context bar is not intended to appear in the mobile workspace layout,
-which already exposes the same destinations in the mobile navigation. Its
-current visibility guard uses physical-device detection
-(`isRealMobileDevice()`), while workspace layout selection uses the responsive
-`useIsMobile()` breakpoint. When those signals disagree—for example in an iOS
-browser/PWA mode whose user agent is not recognized—the desktop-only context
-bar remains visible in the mobile layout. Its drag implementation only handles
-mouse events, so touch users cannot move it, and the absolutely positioned bar
-obscures chat content.
+## Scope
 
-## Goal
+Refresh the bundled pipeline definition and its regression coverage. The fix
+must remain a prompt-driven pipeline; it must not add a provider orchestration
+service or change the generic pipeline file format.
 
-Keep the desktop floating context bar unchanged while ensuring it is never
-rendered when Vibe Kanban is using its mobile workspace layout.
+## Requirements
 
-## Non-goals
-
-- Adding touch dragging to the context bar.
-- Redesigning the context bar or mobile navigation.
-- Changing the mobile breakpoint.
-- Changing context-bar action definitions or persisted desktop snap position.
-- Altering native OS/browser accessibility overlays.
-
-## Proposed Change
-
-1. In `ContextBarContainer`, use the same responsive mobile signal used by
-   `WorkspacesLayout`.
-2. Return `null` whenever the responsive mobile layout is active.
-3. Preserve the existing physical-device guard as defense in depth so a phone
-   cannot show the context bar if viewport detection temporarily reports a
-   desktop width.
-4. Cover the visibility decision with a small unit-testable predicate or
-   component test, including the mismatch that caused the defect:
-   responsive-mobile `true`, physical-mobile `false`.
-
-## Functional Requirements
-
-### FR-1: Identify the control
-
-The implementation and user-facing handoff must identify the highlighted
-control as the Vibe Kanban workspace context bar, a desktop action shortcut
-palette.
-
-### FR-2: Hide in responsive mobile layout
-
-When the application selects its mobile layout, the context bar must not be
-mounted, regardless of user-agent/device detection.
-
-### FR-3: Retain physical-mobile protection
-
-When physical-device detection reports a real mobile device, the context bar
-must remain hidden even if responsive layout detection reports non-mobile.
-
-### FR-4: Preserve desktop behavior
-
-When neither responsive nor physical-device detection reports mobile, the
-context bar must render with the existing actions, snap position, persistence,
-and mouse dragging behavior.
-
-### FR-5: Avoid duplicate mobile controls
-
-Mobile users must continue to use the existing top mobile navigation tabs for
-workspace, chat, changes, logs, preview, browser, and Git destinations; no
-replacement floating control is required.
+1. The fan-out stage must tell the execution agent to start Claude, Codex, and
+   Grok concurrently through their available agent/CLI interfaces.
+2. Every child must receive the original task prompt as its initial prompt,
+   before any follow-up or shutdown instruction.
+3. Child agents must retain the tools needed to read and reason about the
+   workspace. Read-only analysis must be achieved through the prompt and
+   permission/sandbox policy, not by disabling all tools.
+4. The orchestrator must collect complete outputs and identify each output by
+   provider.
+5. Provider launch/authentication/unavailability failures must be reported
+   concisely and must not prevent successful children from completing.
+6. Later rounds must launch a fresh concurrent fan-out with the original prompt
+   plus the previous synthesis, rather than treating failed attempts as rounds
+   or embedding a substitute answer in place of a child response.
+7. Iteration remains bounded at operator-selected `N`, defaulting to three, and
+   may stop early on convergence.
+8. Regression tests must assert the safety- and reliability-critical prompt
+   contract so a future wording change cannot silently restore tool disabling
+   or sequential retries.
+9. Existing installations must receive the refreshed bundled definition via
+   the existing seed-manifest upgrade mechanism without overwriting a
+   user-customized pipeline.
 
 ## Acceptance Criteria
 
-1. At a mobile viewport, the workspace chat contains no floating context bar.
-2. The bar remains absent when responsive detection is mobile but
-   `isRealMobileDevice()` is false.
-3. The bar remains absent when `isRealMobileDevice()` is true.
-4. At a desktop viewport on a non-mobile device, the bar still renders and its
-   mouse drag/snap behavior is unchanged.
-5. Existing mobile workspace navigation remains visible and functional.
-6. Relevant frontend type checks, tests, lint, and formatting pass.
+- The bundled TOML parses and retains the existing stage IDs and defaults.
+- The fan-out prompt explicitly requires concurrent launches, initial delivery
+  of the exact original prompt, workspace-reading capability, and forbids
+  disabling all child tools.
+- The iterate prompt explicitly preserves the original prompt, adds prior
+  synthesis as context, uses fresh concurrent children, and does not count
+  failed launches as completed rounds.
+- The bundled seed manifest recognizes the previous shipped parallel pipeline
+  content and upgrades it to the corrected default while preserving modified
+  local copies.
+- Focused pipeline service tests pass.
 
-## Technical Notes
+## Non-Goals
 
-- `WorkspacesLayout.tsx` already branches on `useIsMobile()` and should remain
-  the source of truth for responsive workspace mode.
-- `ContextBarContainer.tsx` currently performs the physical-device-only guard.
-- The bar's current drag hook listens to `mousedown`, `mousemove`, and
-  `mouseup`; hiding the redundant control on mobile is preferable to expanding
-  its interaction model.
-- No API, database, shared generated type, or persistence schema changes are
-  expected.
-
-## Risks and Mitigations
-
-- **Breakpoint disagreement:** Use the same responsive hook as the workspace
-  layout and keep the physical-device guard.
-- **Hook ordering:** Call responsive hooks unconditionally before an early
-  return to preserve React hook rules.
-- **Desktop regression:** Limit the change to the visibility condition and add
-  tests for the desktop case.
-
-## Verification
-
-- Run focused unit tests for the context-bar visibility rule.
-- Run the relevant frontend type check and lint targets.
-- Run repository formatting as required by `AGENTS.md`.
-- Inspect the final diff and independently review it for mobile/desktop
-  regressions.
+- Guaranteeing that all external providers are installed, authenticated, or
+  available.
+- Selecting provider model versions.
+- Giving child agents permission to modify the workspace.
+- Building a new cross-provider execution API.
