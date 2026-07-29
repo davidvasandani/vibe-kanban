@@ -25,7 +25,8 @@ import {
 import type { EditorType } from 'shared/types';
 import { useActionVisibilityContext } from '@/shared/hooks/useActionVisibilityContext';
 import { CopyButton } from '@/shared/components/CopyButton';
-import { isRealMobileDevice } from '@/shared/hooks/useIsMobile';
+import { isRealMobileDevice, useIsMobile } from '@/shared/hooks/useIsMobile';
+import { shouldRenderWorkspaceContextBar } from './workspaceContextBarVisibility';
 
 /**
  * Check if a ContextBarItem is a divider
@@ -153,6 +154,23 @@ export interface ContextBarContainerProps {
 export function ContextBarContainer({
   containerRef,
 }: ContextBarContainerProps) {
+  const isResponsiveMobile = useIsMobile();
+
+  if (
+    !shouldRenderWorkspaceContextBar({
+      isResponsiveMobile,
+      isRealMobileDevice: isRealMobileDevice(),
+    })
+  ) {
+    return null;
+  }
+
+  return <DesktopContextBarContainer containerRef={containerRef} />;
+}
+
+function DesktopContextBarContainer({
+  containerRef,
+}: ContextBarContainerProps) {
   const { executeAction } = useActions();
   const { config } = useUserSystem();
   const editorType =
@@ -244,8 +262,6 @@ export function ContextBarContainer({
     );
     return toRenderItems(filtered, 'secondary');
   }, [actionCtx, toRenderItems]);
-
-  if (isRealMobileDevice()) return null;
 
   return (
     <ContextBar
