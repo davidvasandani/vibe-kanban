@@ -132,6 +132,19 @@ pub struct AwsSsoProfileStatus {
     pub auth: AwsAuthStatus,
     /// False for `[default]` (list/sign-in only): VK never rewrites it.
     pub editable: bool,
+    /// Shared AWS CLI token-cache identity used to group authentication UI.
+    pub auth_scope: AwsSsoAuthScope,
+}
+
+/// Non-secret identity of the SSO token cache shared by one or more profiles.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AwsSsoAuthScope {
+    /// Namespaced stable key (`session:<name>` or `start-url:<url>`).
+    pub key: String,
+    /// Named session, or the start URL for a legacy inline profile.
+    pub label: String,
+    /// Present for modern profiles backed by `[sso-session <name>]`.
+    pub session_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -486,12 +499,40 @@ fn profiles_referencing_session(doc: &AwsConfigDoc, session: &str) -> Vec<String
         .collect()
 }
 
-fn extract_profile(doc: &AwsConfigDoc, section: &Section) -> Option<(AwsSsoProfile, bool)> {
+fn auth_scope_for_section(section: &Section, profile_name: &str) -> AwsSsoAuthScope {
+    if let Some(session_name) = section_value(section, "sso_session") {
+        return AwsSsoAuthScope {
+            key: format!("session:{session_name}"),
+            label: session_name.clone(),
+            session_name: Some(session_name),
+        };
+    }
+    if let Some(start_url) = section_value(section, "sso_start_url") {
+        return AwsSsoAuthScope {
+            key: format!("start-url:{start_url}"),
+            label: start_url,
+            session_name: None,
+        };
+    }
+    // `extract_profile` rejects profiles without resolvable SSO settings. Keep
+    // this fallback defensive so this shared helper remains total.
+    AwsSsoAuthScope {
+        key: format!("profile:{profile_name}"),
+        label: profile_name.to_string(),
+        session_name: None,
+    }
+}
+
+fn extract_profile(
+    doc: &AwsConfigDoc,
+    section: &Section,
+) -> Option<(AwsSsoProfile, bool, AwsSsoAuthScope)> {
     let (name, editable) = match &section.kind {
         SectionKind::Profile(name) => (name.clone(), true),
         SectionKind::DefaultProfile => ("default".to_string(), false),
         _ => return None,
     };
+    let auth_scope = auth_scope_for_section(section, &name);
     let sessions = session_sections(doc);
     let (sso_start_url, sso_region) = match section_value(section, "sso_session") {
         Some(session) => {
@@ -517,16 +558,27 @@ fn extract_profile(doc: &AwsConfigDoc, section: &Section) -> Option<(AwsSsoProfi
             output: section_value(section, "output"),
         },
         editable,
+        auth_scope,
     ))
 }
 
-/// All fully-resolved SSO profiles in `content`, with their editability.
-fn list_profiles_in(content: &str) -> Result<Vec<(AwsSsoProfile, bool)>, AwsSsoError> {
+/// All fully-resolved SSO profiles with editability and shared auth scope.
+fn list_profile_entries_in(
+    content: &str,
+) -> Result<Vec<(AwsSsoProfile, bool, AwsSsoAuthScope)>, AwsSsoError> {
     let doc = parse_doc(content)?;
     Ok(doc
         .sections
         .iter()
         .filter_map(|section| extract_profile(&doc, section))
+        .collect())
+}
+
+/// All fully-resolved SSO profiles in `content`, with their editability.
+fn list_profiles_in(content: &str) -> Result<Vec<(AwsSsoProfile, bool)>, AwsSsoError> {
+    Ok(list_profile_entries_in(content)?
+        .into_iter()
+        .map(|(profile, editable, _)| (profile, editable))
         .collect())
 }
 
@@ -1041,7 +1093,8 @@ fn login_lock_key_in(content: &str, name: &str) -> Result<String, AwsSsoError> {
         _ => false,
     });
     Ok(section
-        .and_then(|s| section_value(s, "sso_session").or_else(|| section_value(s, "sso_start_url")))
+        .map(|section| auth_scope_for_section(section, name))
+        .map(|scope| scope.session_name.unwrap_or_else(|| scope.label.clone()))
         .unwrap_or_else(|| name.to_string()))
 }
 
@@ -1364,21 +1417,24 @@ async fn discover_with(
 
 pub async fn list_profile_statuses() -> Result<Vec<AwsSsoProfileStatus>, AwsSsoError> {
     let content = read_config(&aws_config_path())?;
-    let profiles = list_profiles_in(&content)?;
+    let profiles = list_profile_entries_in(&content)?;
     let statuses = futures::future::join_all(
         profiles
             .iter()
-            .map(|(profile, _)| async { probe_profile_auth(&profile.name).await }),
+            .map(|(profile, _, _)| async { probe_profile_auth(&profile.name).await }),
     )
     .await;
     Ok(profiles
         .into_iter()
         .zip(statuses)
-        .map(|((profile, editable), auth)| AwsSsoProfileStatus {
-            profile,
-            auth,
-            editable,
-        })
+        .map(
+            |((profile, editable, auth_scope), auth)| AwsSsoProfileStatus {
+                profile,
+                auth,
+                editable,
+                auth_scope,
+            },
+        )
         .collect())
 }
 
@@ -1420,15 +1476,16 @@ pub async fn import_profiles(
 /// Probe one profile's auth state (used after a login attempt).
 pub async fn profile_status(name: &str) -> Result<AwsSsoProfileStatus, AwsSsoError> {
     let content = read_config(&aws_config_path())?;
-    let (profile, editable) = list_profiles_in(&content)?
+    let (profile, editable, auth_scope) = list_profile_entries_in(&content)?
         .into_iter()
-        .find(|(profile, _)| profile.name == name)
+        .find(|(profile, _, _)| profile.name == name)
         .ok_or_else(|| AwsSsoError::NotFound(name.to_string()))?;
     let auth = probe_profile_auth(name).await;
     Ok(AwsSsoProfileStatus {
         profile,
         auth,
         editable,
+        auth_scope,
     })
 }
 
@@ -1848,6 +1905,45 @@ sso_registration_scopes = sso:account:access codewhisperer:analysis
             "{content}\n[default]\nsso_session = org\nsso_account_id = 123456789012\nsso_role_name = R\n"
         );
         assert_eq!(login_lock_key_in(&with_default, "default").unwrap(), "org");
+    }
+
+    #[test]
+    fn auth_scope_distinguishes_named_sessions_and_groups_legacy_urls() {
+        let named = "\
+[sso-session first]\n\
+sso_start_url = https://x/start\n\
+sso_region = us-east-1\n\
+[sso-session second]\n\
+sso_start_url = https://x/start\n\
+sso_region = us-east-1\n\
+[profile a]\n\
+sso_session = first\n\
+sso_account_id = 123456789012\n\
+sso_role_name = R\n\
+[profile b]\n\
+sso_session = second\n\
+sso_account_id = 210987654321\n\
+sso_role_name = R\n";
+        let entries = list_profile_entries_in(named).unwrap();
+        assert_eq!(entries[0].2.key, "session:first");
+        assert_eq!(entries[0].2.session_name.as_deref(), Some("first"));
+        assert_eq!(entries[1].2.key, "session:second");
+
+        let legacy = "\
+[profile legacy]\n\
+sso_start_url = https://x/start\n\
+sso_region = us-east-1\n\
+sso_account_id = 123456789012\n\
+sso_role_name = R\n\
+[profile legacy2]\n\
+sso_start_url = https://x/start\n\
+sso_region = us-east-1\n\
+sso_account_id = 210987654321\n\
+sso_role_name = R\n";
+        let entries = list_profile_entries_in(legacy).unwrap();
+        assert_eq!(entries[0].2.key, "start-url:https://x/start");
+        assert_eq!(entries[0].2, entries[1].2);
+        assert_eq!(entries[0].2.session_name, None);
     }
 
     #[test]

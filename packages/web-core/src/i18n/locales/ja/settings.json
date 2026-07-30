@@ -796,6 +796,13 @@
       "empty": "SSO プロファイルはまだ設定されていません。追加すると、このマシンで AWS にアクセスできるようになります。",
       "cliMissing": "このマシンでは AWS CLI を利用できません。CLI ツールセクションからインストールすると、状態確認とサインインができます。",
       "readOnly": "default プロファイル · 読み取り専用",
+      "scope": {
+        "session": "SSO セッション",
+        "legacy": "従来の SSO 開始 URL",
+        "profiles": "{{count}} 件のプロファイル",
+        "profiles_other": "{{count}} 件のプロファイル"
+      },
+      "manageProfiles": "プロファイルを管理 ({{count}})",
       "actions": {
         "add": "プロファイルを追加",
         "refresh": "状態を更新",

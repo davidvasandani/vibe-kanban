@@ -697,6 +697,13 @@
       "empty": "No SSO profiles configured yet. Add one to enable AWS access on this machine.",
       "cliMissing": "The AWS CLI is not available on this machine. Install it from the CLI Tools section to check status and sign in.",
       "readOnly": "default profile · read-only",
+      "scope": {
+        "session": "SSO session",
+        "legacy": "Legacy SSO start URL",
+        "profiles": "{{count}} profile",
+        "profiles_other": "{{count}} profiles"
+      },
+      "manageProfiles": "Manage profiles ({{count}})",
       "actions": {
         "add": "Add Profile",
         "refresh": "Refresh statuses",

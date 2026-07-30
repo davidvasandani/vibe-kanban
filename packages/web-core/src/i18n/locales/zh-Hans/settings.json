@@ -796,6 +796,13 @@
       "empty": "尚未配置 SSO 配置文件。添加一个即可在此机器上启用 AWS 访问。",
       "cliMissing": "此机器上没有可用的 AWS CLI。请从 CLI 工具部分安装，以便检查状态并登录。",
       "readOnly": "default 配置文件 · 只读",
+      "scope": {
+        "session": "SSO 会话",
+        "legacy": "旧版 SSO 起始 URL",
+        "profiles": "{{count}} 个配置文件",
+        "profiles_other": "{{count}} 个配置文件"
+      },
+      "manageProfiles": "管理配置文件 ({{count}})",
       "actions": {
         "add": "添加配置文件",
         "refresh": "刷新状态",
