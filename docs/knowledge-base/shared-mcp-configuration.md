@@ -1,7 +1,7 @@
 # Shared MCP configuration
 
 Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`,
-`c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`
+`c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`, `d893-fix-slack-mcp`
 
 Vibe Kanban derives shared MCP settings from each base executor's native config
 file. There is no separate registry: the native files remain the source consumed
@@ -73,6 +73,16 @@ see [forked-mcp-server-packaging](forked-mcp-server-packaging.md).
 The backend exposes this catalog through `/api/mcp-config/default`, but the
 current shared MCP settings UI does not render catalog suggestions. Treat catalog
 availability and UI discoverability as separate capabilities when scoping work.
+
+Catalog changes do not rewrite native executor files that were saved from an
+older bundled template. If a later immutable pin makes those files appear to
+conflict with a current profile, handle the transition at the shared read
+boundary with a server-name-aware, exact historical-template migration. Match
+the complete old command, ordered arguments, and environment-key shape; source
+the replacement from the current catalog; and preserve the stored credential.
+Do not generally equate a mutable `latest` launcher with a pinned artifact or
+ignore extra fields. Once the user saves, normal shared materialization writes
+the current pinned definition to every assigned native profile.
 
 ## Shared gateway authentication
 
