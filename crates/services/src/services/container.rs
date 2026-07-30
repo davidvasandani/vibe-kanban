@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 use anyhow::{Error as AnyhowError, anyhow};
@@ -50,7 +50,10 @@ use git::{GitService, GitServiceError};
 use json_patch::Patch;
 use sqlx::Error as SqlxError;
 use thiserror::Error;
-use tokio::{sync::RwLock, task::JoinHandle};
+use tokio::{
+    sync::{OwnedSemaphorePermit, RwLock, Semaphore},
+    task::{AbortHandle, JoinHandle},
+};
 use utils::{
     log_msg::LogMsg,
     msg_store::MsgStore,
@@ -61,6 +64,25 @@ use worktree_manager::WorktreeError;
 
 use crate::services::{execution_process, notification::NotificationService};
 pub type ContainerRef = String;
+
+// Historical normalization temporarily holds raw logs, parsed messages, and
+// normalized patches. Serialize it so reconnects or multiple browser tabs
+// cannot multiply that memory inside the server process.
+static HISTORICAL_NORMALIZATION_PERMITS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(1)));
+
+struct HistoricalNormalizationLifetime {
+    _permit: OwnedSemaphorePermit,
+    tasks: Vec<AbortHandle>,
+}
+
+impl Drop for HistoricalNormalizationLifetime {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
 
 /// Follow-up prompt sent when resuming a coding-agent run that was
 /// interrupted by a server shutdown/restart. Keep in sync with
@@ -1156,8 +1178,18 @@ pub trait ContainerService {
                     .boxed(),
             )
         } else {
+            let permit = HISTORICAL_NORMALIZATION_PERMITS
+                .clone()
+                .acquire_owned()
+                .await
+                .ok()?;
             let raw_messages =
                 execution_process::load_raw_log_messages(&self.db().pool, *id).await?;
+            tracing::info!(
+                execution_id = %id,
+                message_count = raw_messages.len(),
+                "Starting bounded historical log normalization"
+            );
 
             // Create temporary store and populate
             // Include JsonPatch messages (already normalized) and Stdout/Stderr (need normalization)
@@ -1287,15 +1319,22 @@ pub trait ContainerService {
 
             // Await all normalizer tasks, then push Ready so the dedup
             // stream knows when to flush its buffer and terminate.
+            let mut task_abort_handles: Vec<_> =
+                handles.iter().map(JoinHandle::abort_handle).collect();
             {
                 let store = temp_store.clone();
-                tokio::spawn(async move {
+                let completion_task = tokio::spawn(async move {
                     for handle in handles {
                         let _ = handle.await;
                     }
                     store.push(LogMsg::Ready);
                 });
+                task_abort_handles.push(completion_task.abort_handle());
             }
+            let lifetime = HistoricalNormalizationLifetime {
+                _permit: permit,
+                tasks: task_abort_handles,
+            };
 
             // Stream normalized patches, deduplicating consecutive patches
             // that target the same path (only the final state matters for
@@ -1349,6 +1388,13 @@ pub trait ContainerService {
             )
             .filter_map(|opt| async move { opt })
             .map(|p| Ok::<_, std::io::Error>(LogMsg::JsonPatch(p)))
+            // The closure owns the permit and abort handles. Dropping the
+            // WebSocket stream therefore cancels replay instead of leaving
+            // detached normalizers consuming memory.
+            .map(move |item| {
+                let _keep_alive = &lifetime;
+                item
+            })
             .chain(futures::stream::once(async {
                 Ok::<_, std::io::Error>(LogMsg::Finished)
             }));
@@ -1775,13 +1821,31 @@ fn scope_initial_prompt_to_working_dir(prompt: String, repos: &[Repo]) -> String
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
 
     use chrono::Utc;
     use db::models::repo::Repo;
+    use tokio::sync::Semaphore;
     use uuid::Uuid;
 
-    use super::{reset_would_discard_uncommitted_work, scope_initial_prompt_to_working_dir};
+    use super::{
+        HistoricalNormalizationLifetime, reset_would_discard_uncommitted_work,
+        scope_initial_prompt_to_working_dir,
+    };
+
+    #[tokio::test]
+    async fn dropping_historical_normalization_aborts_its_tasks() {
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let lifetime = HistoricalNormalizationLifetime {
+            _permit: permit,
+            tasks: vec![task.abort_handle()],
+        };
+
+        drop(lifetime);
+
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
 
     #[test]
     fn dirty_git_reset_requires_explicit_force() {

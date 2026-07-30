@@ -140,11 +140,19 @@ async fn stream_normalized_logs_ws(
     State(deployment): State<DeploymentImpl>,
     Path(exec_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| async move {
-        let stream = deployment
-            .container()
-            .stream_normalized_logs(&exec_id)
-            .await;
+    ws.on_upgrade(move |mut socket| async move {
+        let stream = tokio::select! {
+            stream = deployment.container().stream_normalized_logs(&exec_id) => stream,
+            inbound = socket.recv() => {
+                tracing::debug!(
+                    execution_id = %exec_id,
+                    ?inbound,
+                    "normalized logs WS closed before historical replay started"
+                );
+                let _ = socket.close().await;
+                return;
+            }
+        };
 
         match stream {
             Some(stream) => {
