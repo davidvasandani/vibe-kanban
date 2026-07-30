@@ -817,6 +817,8 @@ struct RepeatedGrokCommand {
 }
 
 impl ClaudeLogProcessor {
+    const MAX_INLINE_REPEAT_TICKS: usize = 8;
+
     #[cfg(test)]
     fn new() -> Self {
         Self::new_with_strategy(HistoryStrategy::Default)
@@ -847,9 +849,18 @@ impl ClaudeLogProcessor {
             == Some("grok")
     }
 
+    fn repeat_ticks(count: usize) -> String {
+        let repeat_count = count.saturating_sub(1);
+        if repeat_count <= Self::MAX_INLINE_REPEAT_TICKS {
+            "✓".repeat(repeat_count)
+        } else {
+            format!("✓ ×{repeat_count}")
+        }
+    }
+
     fn add_grok_repeat_ticks(entry: &mut NormalizedEntry, count: usize) {
         if count > 1 {
-            entry.content = format!("{} {}", entry.content, "✓".repeat(count - 1));
+            entry.content = format!("{} {}", entry.content, Self::repeat_ticks(count));
         }
     }
 
@@ -940,7 +951,7 @@ impl ClaudeLogProcessor {
             let entry = NormalizedEntry {
                 timestamp: None,
                 entry_type: NormalizedEntryType::SystemMessage,
-                content: format!("{content} {}", "✓".repeat(repeated.count - 1)),
+                content: format!("{content} {}", Self::repeat_ticks(repeated.count)),
                 metadata,
             };
             return ConversationPatch::replace(repeated.entry_index, entry);
@@ -3265,6 +3276,17 @@ mod tests {
         assert_eq!(third_index, 0);
         assert_eq!(third_entry.content, format!("{command} ✓✓"));
         assert_eq!(provider.current(), 1);
+    }
+
+    #[test]
+    fn repeat_ticks_are_bounded_for_large_counts() {
+        assert_eq!(ClaudeLogProcessor::repeat_ticks(1), "");
+        assert_eq!(ClaudeLogProcessor::repeat_ticks(9), "✓✓✓✓✓✓✓✓");
+        assert_eq!(ClaudeLogProcessor::repeat_ticks(10), "✓ ×9");
+        assert_eq!(
+            ClaudeLogProcessor::repeat_ticks(usize::MAX),
+            format!("✓ ×{}", usize::MAX - 1)
+        );
     }
 
     #[test]

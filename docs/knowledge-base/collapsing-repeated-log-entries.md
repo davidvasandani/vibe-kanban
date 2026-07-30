@@ -19,8 +19,9 @@ Collapse **uninterrupted** repeats server-side, in the log normalizer, so every 
    `provider.current() == entry_index + 1` (the tracked entry is still the last allocated —
    see [claude-log-normalization](claude-log-normalization.md)), increment `count` and emit
    `ConversationPatch::replace(entry_index, ...)` with content
-   `format!("{content} {}", "✓".repeat(count - 1))` — one tick per repeat, latest raw JSON
-   kept as metadata.
+   one tick per repeat for short runs, then a compact counted marker (for
+   example, `✓ ×42`) so marker allocation stays bounded by the number of digits
+   in the count. Keep the latest raw JSON as metadata.
 3. Otherwise allocate a fresh index, emit a plain add, and re-arm the tracker with
    `count: 1`.
 
@@ -35,8 +36,9 @@ advances the shared index provider — no per-branch reset code needed.
   it via `replace`.
 - First occurrence must stay byte-identical to the old output so existing tests and
   downstream consumers are unaffected; ticks only appear from the second occurrence on.
-- Tick string is unbounded by design: one wrapping line always beats N lines, and runs are
-  bounded in practice by interruptions.
+- Never render an unbounded tick string. Historical replay and uninterrupted
+  tool loops can make a run much longer than expected, and repeatedly building
+  progressively larger replacement patches can exhaust the server's memory.
 
 Implemented in `ClaudeLogProcessor::push_collapsible_system_message`
 (`crates/executors/src/executors/claude.rs`), applied to both catch-all system-message
