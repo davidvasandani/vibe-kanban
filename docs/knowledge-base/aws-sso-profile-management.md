@@ -1,6 +1,6 @@
 # AWS SSO profile management
 
-Tags: `6777-aws-sso-config-i`, `b5fe-improve-vk-aws-p`
+Tags: `6777-aws-sso-config-i`, `b5fe-improve-vk-aws-p`, `d427-improve-aws-sso`
 
 ## Vendor config files are edited, never owned
 
@@ -120,8 +120,25 @@ URL manually).
   message now points at the AWS section — runtime-parameterized commands do
   not fit the `&'static` catalog and live in a parallel additive module
   instead.
+- Authentication UI groups by the backend-authored token-cache identity, not
+  by profile name or resolved start URL alone. Named `sso_session` values are
+  distinct identities even when their URLs match; legacy inline profiles group
+  by `sso_start_url`. Reuse the same section parser for both the login lock key
+  and the serialized `AwsSsoAuthScope`, or concurrency and presentation can
+  silently disagree.
+- Keep authentication and profile configuration as separate presentation
+  concerns. Render one sign-in terminal per auth scope, then place individual
+  edit/delete rows behind an explicit collapsed management disclosure. After a
+  successful login, refresh the entire profile-status collection because the
+  cached token is shared even though independent authorization probes remain
+  profile-specific.
+- Aggregate shared-scope status conservatively: CLI missing, then
+  unauthenticated, then unknown, and authenticated only when every member probe
+  is authenticated. This avoids turning a role-level probe failure into a
+  false positive for the session.
 
 ## Contributed by
 
 - vk/6777-aws-sso-config-i
 - vk/b5fe-improve-vk-aws-p
+- vk/d427-improve-aws-sso
