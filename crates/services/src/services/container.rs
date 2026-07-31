@@ -1185,22 +1185,43 @@ pub trait ContainerService {
                 .ok()?;
             let raw_messages =
                 execution_process::load_raw_log_messages(&self.db().pool, *id).await?;
+            let total_messages = raw_messages.len();
+            // Bound the history before anything is materialized. Without this a
+            // single long run can exhaust the server's memory every time a
+            // client reconnects to its log stream.
+            let (messages, dropped) = utils::execution_logs::cap_normalizable_history(
+                raw_messages,
+                utils::execution_logs::MAX_HISTORICAL_NORMALIZATION_MSGS,
+            );
             tracing::info!(
                 execution_id = %id,
-                message_count = raw_messages.len(),
+                message_count = messages.len(),
+                total_messages,
+                dropped_messages = dropped,
                 "Starting bounded historical log normalization"
             );
 
-            // Create temporary store and populate
-            // Include JsonPatch messages (already normalized) and Stdout/Stderr (need normalization)
+            // Create temporary store and populate. Messages are pre-filtered to
+            // the normalizable variants (Stdout/Stderr, plus JsonPatch which is
+            // already normalized) and capped to the newest window.
             let temp_store = Arc::new(MsgStore::new());
-            for msg in raw_messages {
-                if matches!(
-                    msg,
-                    LogMsg::Stdout(_) | LogMsg::Stderr(_) | LogMsg::JsonPatch(_)
-                ) {
-                    temp_store.push(msg);
-                }
+            if dropped > 0 {
+                tracing::warn!(
+                    execution_id = %id,
+                    dropped_messages = dropped,
+                    total_messages,
+                    "Historical log too large to normalize in full; showing the most recent messages"
+                );
+                // Tell the reader their view is partial rather than silently
+                // starting mid-conversation.
+                temp_store.push(LogMsg::Stdout(format!(
+                    "[vibe-kanban] {dropped} earlier log messages omitted \
+                     (showing the most recent {} of {total_messages}).\n",
+                    messages.len()
+                )));
+            }
+            for msg in messages {
+                temp_store.push(msg);
             }
             temp_store.push_finished();
 
