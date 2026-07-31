@@ -204,6 +204,15 @@ impl ExecutionSupervisor {
     pub async fn job(&self, execution_id: Uuid) -> Option<Arc<WorkerJob>> {
         self.jobs.read().await.get(&execution_id).cloned()
     }
+
+    pub async fn quarantine(&self, execution_id: Uuid) -> Result<JobSummary, ExecutionError> {
+        let job = self
+            .job(execution_id)
+            .await
+            .ok_or(ExecutionError::NotFound(execution_id))?;
+        *job.state.write().await = JobState::Quarantined;
+        Ok(job.summary().await)
+    }
 }
 
 impl WorkerJob {

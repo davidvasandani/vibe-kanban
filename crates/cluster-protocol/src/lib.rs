@@ -224,6 +224,13 @@ pub struct CancellationRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuarantineRequest {
+    pub authority: RequestAuthority,
+    pub execution_id: Uuid,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CancellationStatus {
     pub execution_id: Uuid,
     pub phase: CancellationPhase,

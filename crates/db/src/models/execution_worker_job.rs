@@ -106,6 +106,21 @@ impl ExecutionWorkerJob {
             .await
     }
 
+    pub async fn find_nonterminal_for_worker(
+        pool: &SqlitePool,
+        worker_node_id: Uuid,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(&format!(
+            "{} WHERE worker_node_id = ? AND dispatch_state NOT IN \
+             ('completed', 'failed', 'killed', 'interrupted', 'indeterminate', 'quarantined') \
+             ORDER BY execution_process_id",
+            Self::SELECT
+        ))
+        .bind(worker_node_id)
+        .fetch_all(pool)
+        .await
+    }
+
     pub async fn acknowledge_sequence(
         pool: &SqlitePool,
         execution_process_id: Uuid,
@@ -126,6 +141,26 @@ impl ExecutionWorkerJob {
         .bind(worker_last_sequence)
         .bind(execution_process_id)
         .bind(sequence)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn observe_worker_sequence(
+        pool: &SqlitePool,
+        execution_process_id: Uuid,
+        worker_last_sequence: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE execution_worker_jobs
+            SET worker_last_sequence = MAX(worker_last_sequence, ?),
+                updated_at = datetime('now', 'subsec')
+            WHERE execution_process_id = ?
+            "#,
+        )
+        .bind(worker_last_sequence)
+        .bind(execution_process_id)
         .execute(pool)
         .await?;
         Ok(result.rows_affected() == 1)

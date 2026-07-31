@@ -305,6 +305,10 @@ mod tests {
         assert_eq!(first.phase, CancellationPhase::Confirmed);
         let repeated = cancel(&supervisor, &request).await.unwrap();
         assert_eq!(repeated.phase, CancellationPhase::AlreadyTerminal);
+        assert_eq!(
+            supervisor.quarantine(execution_id).await.unwrap().state,
+            JobState::Quarantined
+        );
 
         let alive = std::process::Command::new("/bin/sh")
             .args(["-c", &format!("kill -0 {grandchild} 2>/dev/null")])

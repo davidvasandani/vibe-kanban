@@ -95,7 +95,7 @@ files and may be completed together.
 
 ## Layer 6 — Reconciliation and destructive safety
 
-- [ ] T027 Implement coordinator reconnect/job-inventory reconciliation,
+- [x] T027 Implement coordinator reconnect/job-inventory reconciliation,
   unknown-job quarantine, terminal evidence conflict handling, and tests in
   `crates/services/src/services/cluster/reconcile.rs`. Depends on T023, T026.
 - [ ] T028 Implement worker restart job adoption policy and retained terminal

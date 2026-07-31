@@ -13,7 +13,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
 use cluster_protocol::{
     CancellationRequest, DispatchAccepted, EventAcknowledgement, EventBatch, ExecutionDispatch,
-    JobSummary, PROTOCOL_VERSION, RequestAuthority,
+    JobSummary, PROTOCOL_VERSION, QuarantineRequest, RequestAuthority,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,7 @@ pub async fn router(config: &WorkerConfig) -> anyhow::Result<Router> {
         .route("/v1/executions/{execution_id}/events", get(events))
         .route("/v1/executions/{execution_id}/ack", post(acknowledge))
         .route("/v1/executions/{execution_id}/cancel", post(cancel))
+        .route("/v1/executions/{execution_id}/quarantine", post(quarantine))
         .layer(from_fn_with_state(state.clone(), require_signature))
         .with_state(state))
 }
@@ -145,6 +146,35 @@ async fn cancel(
         .await
         .map(Json)
         .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
+}
+
+async fn quarantine(
+    State(state): State<WorkerApiState>,
+    Path(execution_id): Path<Uuid>,
+    Json(payload): Json<QuarantineRequest>,
+) -> Result<Json<JobSummary>, WorkerApiError> {
+    validate_authority(&state, &payload.authority).await?;
+    if payload.execution_id != execution_id {
+        return Err(WorkerApiError::BadRequest(
+            "path execution ID does not match quarantine request".into(),
+        ));
+    }
+    tracing::warn!(%execution_id, reason = %payload.reason, "Quarantining worker job");
+    let cancellation = CancellationRequest {
+        authority: payload.authority,
+        execution_id,
+        graceful_timeout_seconds: 0,
+        terminate_timeout_seconds: 0,
+    };
+    cancellation::cancel(&state.supervisor, &cancellation)
+        .await
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))?;
+    state
+        .supervisor
+        .quarantine(execution_id)
+        .await
+        .map(Json)
+        .map_err(Into::into)
 }
 
 async fn validate_authority(
