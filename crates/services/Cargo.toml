@@ -11,6 +11,7 @@ qa-mode = ["executors/qa-mode"]
 [dependencies]
 indicatif = "0.17"
 api-types = { path = "../api-types" }
+cluster-protocol = { path = "../cluster-protocol" }
 relay-types = { path = "../relay-types" }
 utils = { path = "../utils" }
 git = { path = "../git" }

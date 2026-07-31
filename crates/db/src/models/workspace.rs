@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use executors::actions::{ExecutorAction, ExecutorActionType};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqlitePool, Type, types::Json};
 use thiserror::Error;
 use ts_rs::TS;
 use uuid::Uuid;
@@ -97,6 +97,120 @@ pub struct WorkspaceContext {
 pub struct CreateWorkspace {
     pub branch: String,
     pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Type, TS)]
+#[sqlx(type_name = "workspace_placement_state", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+#[ts(use_ts_enum)]
+pub enum WorkspacePlacementState {
+    Local,
+    Reserved,
+    Provisioning,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize, TS)]
+pub struct WorkspacePlacement {
+    pub workspace_id: Uuid,
+    pub worker_node_id: Option<Uuid>,
+    pub placement_state: WorkspacePlacementState,
+    pub placed_at: Option<DateTime<Utc>>,
+    pub placement_reason: Option<String>,
+    pub requested_worker_node_id: Option<Uuid>,
+    #[ts(type = "unknown")]
+    pub placement_constraints: Option<Json<serde_json::Value>>,
+}
+
+impl WorkspacePlacement {
+    pub async fn find(pool: &SqlitePool, workspace_id: Uuid) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            SELECT id AS workspace_id, worker_node_id, placement_state,
+                   placed_at, placement_reason, requested_worker_node_id,
+                   placement_constraints
+            FROM workspaces
+            WHERE id = ?
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    pub async fn reserve(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        worker_node_id: Uuid,
+        requested_worker_node_id: Option<Uuid>,
+        constraints: Option<&serde_json::Value>,
+        reason: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET worker_node_id = ?,
+                placement_state = 'reserved',
+                placed_at = datetime('now', 'subsec'),
+                placement_reason = ?,
+                requested_worker_node_id = ?,
+                placement_constraints = ?,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ? AND placement_state = 'local' AND worker_node_id IS NULL
+            "#,
+        )
+        .bind(worker_node_id)
+        .bind(reason)
+        .bind(requested_worker_node_id)
+        .bind(constraints.map(Json))
+        .bind(workspace_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn transition(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        expected: WorkspacePlacementState,
+        next: WorkspacePlacementState,
+        reason: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let allowed = matches!(
+            (expected, next),
+            (
+                WorkspacePlacementState::Reserved,
+                WorkspacePlacementState::Provisioning
+            ) | (
+                WorkspacePlacementState::Provisioning,
+                WorkspacePlacementState::Ready
+            ) | (
+                WorkspacePlacementState::Provisioning,
+                WorkspacePlacementState::Failed
+            )
+        );
+        if !allowed {
+            return Ok(false);
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET placement_state = ?,
+                placement_reason = COALESCE(?, placement_reason),
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ? AND placement_state = ?
+            "#,
+        )
+        .bind(next)
+        .bind(reason)
+        .bind(workspace_id)
+        .bind(expected)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
 }
 
 impl Workspace {
@@ -819,9 +933,11 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use uuid::Uuid;
 
-    use super::{CreateWorkspace, Workspace};
+    use super::{CreateWorkspace, Workspace, WorkspacePlacement, WorkspacePlacementState};
+    use crate::models::worker_node::{UpsertWorkerNode, WorkerMountStatus, WorkerNode};
 
     async fn test_pool() -> sqlx::SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -884,6 +1000,89 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn placement_is_sticky_and_transitions_forward() {
+        let pool = test_pool().await;
+        let workspace = Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "vk/cluster-placement-test".to_string(),
+                name: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+        let now = Utc::now();
+        let worker_id = Uuid::new_v4();
+        WorkerNode::upsert_heartbeat(
+            &pool,
+            &UpsertWorkerNode {
+                id: worker_id,
+                hostname: "think3".into(),
+                worker_version: "1".into(),
+                vibe_version: "1".into(),
+                capabilities: serde_json::json!({}),
+                resource_snapshot: serde_json::json!({}),
+                labels: serde_json::json!({}),
+                mount_status: WorkerMountStatus::Healthy,
+                mount_message: None,
+                heartbeat_at: now,
+                lease_expires_at: now + chrono::Duration::seconds(30),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            WorkspacePlacement::reserve(
+                &pool,
+                workspace.id,
+                worker_id,
+                None,
+                None,
+                Some("automatic"),
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !WorkspacePlacement::reserve(&pool, workspace.id, Uuid::new_v4(), None, None, None,)
+                .await
+                .unwrap()
+        );
+        assert!(
+            WorkspacePlacement::transition(
+                &pool,
+                workspace.id,
+                WorkspacePlacementState::Reserved,
+                WorkspacePlacementState::Provisioning,
+                None,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            WorkspacePlacement::transition(
+                &pool,
+                workspace.id,
+                WorkspacePlacementState::Provisioning,
+                WorkspacePlacementState::Ready,
+                Some("provisioned"),
+            )
+            .await
+            .unwrap()
+        );
+
+        let placement = WorkspacePlacement::find(&pool, workspace.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(placement.worker_node_id, Some(worker_id));
+        assert_eq!(placement.placement_state, WorkspacePlacementState::Ready);
+        assert_eq!(placement.placement_reason.as_deref(), Some("provisioned"));
     }
 
     #[test]

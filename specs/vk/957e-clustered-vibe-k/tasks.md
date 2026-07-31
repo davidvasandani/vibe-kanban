@@ -12,21 +12,21 @@ files and may be completed together.
   and root `Cargo.toml`.
 - [x] T002 [P] Add worker-node, placement, execution-job, and repository-lock
   migrations in `crates/db/migrations/`.
-- [ ] T003 Add DB models, transition methods, and migration tests in
+- [x] T003 Add DB models, transition methods, and migration tests in
   `crates/db/src/models/{worker_node,workspace,execution_process,execution_worker_job,repository_admin_lock}.rs`
   and `crates/db/src/models/mod.rs`. Depends on T002.
 - [x] T004 [P] Add cluster configuration parsing/defaults in
   `crates/services/src/services/cluster/config.rs` and module exports. Depends
   on T001.
-- [ ] T005 Register new Rust API types for generation in
+- [x] T005 Register new Rust API types for generation in
   `crates/server/src/bin/generate_types.rs`. Depends on T003.
 
 ## Layer 2 — Worker visibility and scheduling
 
-- [ ] T006 Implement worker registry, heartbeat expiry, draining, mount
+- [x] T006 Implement worker registry, heartbeat expiry, draining, mount
   challenge validation, and unit tests in
   `crates/services/src/services/cluster/registry.rs`. Depends on T003, T004.
-- [ ] T007 [P] Implement eligibility, manual selection validation, weighted
+- [x] T007 [P] Implement eligibility, manual selection validation, weighted
   scoring, deterministic tie breaking, and tests in
   `crates/services/src/services/cluster/scheduler.rs`. Depends on T003, T004.
 - [ ] T008 Implement authenticated coordinator worker endpoints in
