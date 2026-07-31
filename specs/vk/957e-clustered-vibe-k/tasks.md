@@ -157,7 +157,7 @@ files and may be completed together.
   Depends on T031, T037, T040, T042.
 - [x] T044 [P] Run Rust workspace tests/checks and generated-type checks.
   Depends on T043.
-- [ ] T045 [P] Run frontend type checks, rendered tests, and lint. Depends on
+- [x] T045 [P] Run frontend type checks, rendered tests, and lint. Depends on
   T043.
 - [ ] T046 Run `pnpm run format`, re-run affected validation, and inspect both
   repository diffs for unrelated changes. Depends on T044, T045.
