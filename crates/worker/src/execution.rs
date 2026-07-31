@@ -13,6 +13,11 @@ use cluster_protocol::{
     TerminalEvidence, TerminalState,
 };
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
+use executors::{
+    actions::{Executable, ExecutorAction},
+    approvals::NoopExecutorApprovalService,
+    env::{ExecutionEnv, RepoContext},
+};
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::{
@@ -34,6 +39,13 @@ struct WorkerCommandAction {
     program: String,
     #[serde(default)]
     args: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WorkerAction {
+    Command(WorkerCommandAction),
+    Executor(ExecutorAction),
 }
 
 #[derive(Debug, Error)]
@@ -110,8 +122,8 @@ impl ExecutionSupervisor {
             &dispatch.working_directory,
             &self.path_authority,
         )?;
-        let action: WorkerCommandAction = serde_json::from_value(dispatch.action.clone())?;
-        if action.program.trim().is_empty() {
+        let action: WorkerAction = serde_json::from_value(dispatch.action.clone())?;
+        if matches!(&action, WorkerAction::Command(action) if action.program.trim().is_empty()) {
             return Err(ExecutionError::EmptyProgram);
         }
 
@@ -249,22 +261,44 @@ impl WorkerJob {
 
 async fn run_job(
     job: Arc<WorkerJob>,
-    action: WorkerCommandAction,
+    action: WorkerAction,
     working_directory: PathBuf,
     environment: std::collections::BTreeMap<String, String>,
     timeout_seconds: Option<u64>,
 ) {
     set_state(&job, JobState::Starting, ExecutionEventPayload::Starting).await;
-    let mut command = Command::new(action.program);
-    command
-        .args(action.args)
-        .current_dir(working_directory)
-        .envs(environment)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = match command.group_spawn() {
+    let spawned = match action {
+        WorkerAction::Command(action) => {
+            let mut command = Command::new(action.program);
+            command
+                .args(action.args)
+                .current_dir(&working_directory)
+                .envs(&environment)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            command.group_spawn().map_err(|error| error.to_string())
+        }
+        WorkerAction::Executor(action) => {
+            let repo_names = discover_repo_names(&working_directory).await;
+            let mut env = ExecutionEnv::new(
+                RepoContext::new(working_directory.clone(), repo_names),
+                false,
+                String::new(),
+            );
+            env.vars.extend(environment);
+            action
+                .spawn(
+                    &working_directory,
+                    Arc::new(NoopExecutorApprovalService),
+                    &env,
+                )
+                .await
+                .map(|spawned| spawned.child)
+                .map_err(|error| error.to_string())
+        }
+    };
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
             finish_failed(&job, None, format!("failed to start process: {error}")).await;
@@ -314,6 +348,23 @@ async fn run_job(
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+async fn discover_repo_names(workspace: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir(workspace).await else {
+        return names;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.join(".git").exists()
+            && let Some(name) = entry.file_name().to_str()
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names.sort();
+    names
 }
 
 async fn await_output_tasks(

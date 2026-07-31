@@ -12962,6 +12962,7 @@ dependencies = [
  "cluster-protocol",
  "command-group",
  "ed25519-dalek",
+ "executors",
  "reqwest 0.13.2",
  "serde",
  "serde_json",

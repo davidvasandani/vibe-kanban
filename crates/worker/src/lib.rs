@@ -207,7 +207,10 @@ mod tests {
         .unwrap();
         assert_eq!(config.worker_node_id, id);
         assert_eq!(config.coordinator_id, coordinator_id);
-        assert_eq!(config.listen_addr, "0.0.0.0:8086".parse().unwrap());
+        assert_eq!(
+            config.listen_addr,
+            "0.0.0.0:8086".parse::<std::net::SocketAddr>().unwrap()
+        );
         assert_eq!(config.shared_root, PathBuf::from("/srv/vibe-kanban-shared"));
     }
 
