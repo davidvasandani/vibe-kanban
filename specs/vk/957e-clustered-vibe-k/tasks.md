@@ -159,7 +159,7 @@ files and may be completed together.
   Depends on T043.
 - [x] T045 [P] Run frontend type checks, rendered tests, and lint. Depends on
   T043.
-- [ ] T046 Run `pnpm run format`, re-run affected validation, and inspect both
+- [x] T046 Run `pnpm run format`, re-run affected validation, and inspect both
   repository diffs for unrelated changes. Depends on T044, T045.
 - [ ] T047 Perform the two-disposable-node Slice 2 validation where deployment
   access is available and record evidence. Depends on T046.
