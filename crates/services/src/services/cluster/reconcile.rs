@@ -113,6 +113,16 @@ impl ExecutionReconciler {
                 report.conflicts += 1;
                 continue;
             }
+            if !summary.state.is_terminal()
+                && ExecutionProcess::find_by_id(&self.db.pool, summary.execution_id)
+                    .await?
+                    .is_some_and(|process| process.status != ExecutionProcessStatus::Running)
+            {
+                self.mark_indeterminate(summary.execution_id).await?;
+                let _ = self.quarantine_unknown(worker.id, &summary).await;
+                report.conflicts += 1;
+                continue;
+            }
             self.apply_worker_evidence(&summary, report).await?;
             report.jobs_reconciled += 1;
         }

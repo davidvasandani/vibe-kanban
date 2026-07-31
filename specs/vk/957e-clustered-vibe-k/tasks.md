@@ -106,7 +106,7 @@ files and may be completed together.
   unreachable, stale, or conflicting worker evidence in
   `crates/local-deployment/src/` and
   `crates/workspace-manager/src/workspace_manager.rs`. Depends on T027, T029.
-- [ ] T031 Add disconnect/reconnect, missing-job, returning-worker, cursor-gap,
+- [x] T031 Add disconnect/reconnect, missing-job, returning-worker, cursor-gap,
   and cleanup-race integration tests under `crates/worker/tests/` and
   `crates/local-deployment/`. Depends on T025, T028, T030.
 

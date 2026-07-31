@@ -899,6 +899,22 @@ impl LocalContainerService {
                     continue;
                 }
             }
+            if self.cluster_config.enabled {
+                let placement = WorkspacePlacement::find(&self.db.pool, workspace.id).await?;
+                if placement
+                    .as_ref()
+                    .and_then(|value| value.worker_node_id)
+                    .is_some()
+                    && !WorkspacePlacement::begin_cleanup(&self.db.pool, workspace.id, Utc::now())
+                        .await?
+                {
+                    tracing::info!(
+                        workspace_id = %workspace.id,
+                        "Retaining clustered workspace because cleanup ownership changed before reclamation"
+                    );
+                    continue;
+                }
+            }
             self.cleanup_workspace(workspace).await;
         }
         Ok(())

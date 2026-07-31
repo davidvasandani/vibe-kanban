@@ -109,6 +109,7 @@ pub enum WorkspacePlacementState {
     Provisioning,
     Ready,
     Failed,
+    Cleaning,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize, TS)]
@@ -207,6 +208,41 @@ impl WorkspacePlacement {
         .bind(reason)
         .bind(workspace_id)
         .bind(expected)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn begin_cleanup(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET placement_state = 'cleaning',
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?
+              AND placement_state = 'ready'
+              AND worker_node_id IN (
+                SELECT id FROM worker_nodes
+                WHERE status = 'online'
+                  AND mount_status = 'healthy'
+                  AND lease_expires_at > ?
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM sessions s
+                JOIN execution_processes ep ON ep.session_id = s.id
+                JOIN execution_worker_jobs ewj ON ewj.execution_process_id = ep.id
+                WHERE s.workspace_id = workspaces.id
+                  AND ewj.dispatch_state NOT IN ('completed', 'failed', 'killed')
+              )
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(now)
         .execute(pool)
         .await?;
         Ok(result.rows_affected() == 1)

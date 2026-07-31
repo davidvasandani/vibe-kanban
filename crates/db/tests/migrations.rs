@@ -3,8 +3,11 @@
 //! accept every enum variant, keep rejecting unknown values, and decode back
 //! through the sqlx model layer.
 
-use db::models::execution_process::{
-    CreateExecutionProcess, ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus,
+use db::models::{
+    execution_process::{
+        CreateExecutionProcess, ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus,
+    },
+    workspace::WorkspacePlacement,
 };
 use executors::actions::{
     ExecutorAction, ExecutorActionType,
@@ -145,5 +148,46 @@ async fn indeterminate_status_round_trips_through_migrated_schema() {
             .expect("execution present")
             .status,
         ExecutionProcessStatus::Indeterminate
+    );
+}
+
+#[tokio::test]
+async fn cleanup_claim_atomically_fences_new_dispatch() {
+    let pool = migrated_pool().await;
+    let worker_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO worker_nodes
+           (id, hostname, status, worker_version, vibe_version, capabilities,
+            resource_snapshot, labels, mount_status, lease_expires_at)
+           VALUES (?, 'think3', 'online', '1', '1', '{}', '{}', '{}',
+                   'healthy', ?)"#,
+    )
+    .bind(worker_id)
+    .bind(chrono::Utc::now() + chrono::Duration::hours(1))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let workspace_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO workspaces
+           (id, branch, worker_node_id, placement_state)
+           VALUES (?, 'test', ?, 'ready')"#,
+    )
+    .bind(workspace_id)
+    .bind(worker_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    assert!(
+        WorkspacePlacement::begin_cleanup(&pool, workspace_id, chrono::Utc::now())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !WorkspacePlacement::begin_cleanup(&pool, workspace_id, chrono::Utc::now())
+            .await
+            .unwrap(),
+        "a second cleanup or dispatch race cannot claim a non-ready workspace"
     );
 }

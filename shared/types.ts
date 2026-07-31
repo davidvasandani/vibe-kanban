@@ -268,7 +268,7 @@ speckit_host_repo_id: string | null, };
 
 export type WorkspacePlacement = { workspace_id: string, worker_node_id: string | null, placement_state: WorkspacePlacementState, placed_at: string | null, placement_reason: string | null, requested_worker_node_id: string | null, placement_constraints: unknown, };
 
-export enum WorkspacePlacementState { local = "local", reserved = "reserved", provisioning = "provisioning", ready = "ready", failed = "failed" }
+export enum WorkspacePlacementState { local = "local", reserved = "reserved", provisioning = "provisioning", ready = "ready", failed = "failed", cleaning = "cleaning" }
 
 export type WorkerNode = { id: string, hostname: string, status: WorkerNodeStatus, worker_version: string, vibe_version: string, capabilities: unknown, resource_snapshot: unknown, labels: unknown, mount_status: WorkerMountStatus, mount_message: string | null, last_heartbeat_at: string | null, lease_expires_at: string | null, created_at: string, updated_at: string, };
 
