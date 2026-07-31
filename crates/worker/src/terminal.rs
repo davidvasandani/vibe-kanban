@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::path_authority::{PathAuthority, PathAuthorityError};
 
 const OUTPUT_QUEUE_CAPACITY: usize = 128;
+const MAX_TERMINAL_DIMENSION: u16 = 1_000;
 
 #[derive(Debug, Error)]
 pub enum TerminalError {
@@ -48,6 +49,7 @@ impl TerminalService {
     }
 
     pub async fn create(&self, request: TerminalCreateRequest) -> Result<Uuid, TerminalError> {
+        validate_size(request.cols, request.rows)?;
         let workspace = self
             .paths
             .authorize_workspace_path(&request.workspace_path)?;
@@ -115,6 +117,7 @@ impl TerminalService {
     }
 
     pub fn resize(&self, terminal_id: Uuid, cols: u16, rows: u16) -> Result<(), TerminalError> {
+        validate_size(cols, rows)?;
         let sessions = self.sessions.lock().map_err(lock_error)?;
         let session = sessions
             .get(&terminal_id)
@@ -165,4 +168,25 @@ fn lock_error(error: impl ToString) -> TerminalError {
 }
 fn operation_error(error: impl ToString) -> TerminalError {
     TerminalError::Operation(error.to_string())
+}
+
+fn validate_size(cols: u16, rows: u16) -> Result<(), TerminalError> {
+    if cols == 0 || rows == 0 || cols > MAX_TERMINAL_DIMENSION || rows > MAX_TERMINAL_DIMENSION {
+        return Err(TerminalError::Operation(
+            "terminal dimensions are out of range".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_dimensions_are_bounded() {
+        assert!(validate_size(80, 24).is_ok());
+        assert!(validate_size(0, 24).is_err());
+        assert!(validate_size(80, MAX_TERMINAL_DIMENSION + 1).is_err());
+    }
 }

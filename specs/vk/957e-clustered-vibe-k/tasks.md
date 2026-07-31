@@ -118,7 +118,7 @@ files and may be completed together.
 - [x] T033 Implement correlated remote approvals/questions and disconnect
   policies in `crates/worker/src/interaction.rs` and coordinator executor
   integration. Depends on T025.
-- [ ] T034 Add local/remote terminal abstraction and bidirectional authenticated
+- [x] T034 Add local/remote terminal abstraction and bidirectional authenticated
   proxying in `crates/services`, `crates/worker/src/terminal.rs`, and
   `crates/server/src/routes/terminal.rs`. Depends on T012, T023, T024.
 - [ ] T035 Add affinity/job/generation-aware preview routing in

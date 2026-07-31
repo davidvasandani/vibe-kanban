@@ -100,6 +100,11 @@ async fn create_terminal(
     Json(payload): Json<TerminalCreateRequest>,
 ) -> Result<Json<TerminalCreated>, WorkerApiError> {
     validate_authority(&state, &payload.authority).await?;
+    if payload.authority.correlation_id != payload.workspace_id {
+        return Err(WorkerApiError::BadRequest(
+            "terminal authority is not bound to workspace".into(),
+        ));
+    }
     let terminal_id = state
         .terminals
         .create(payload)
