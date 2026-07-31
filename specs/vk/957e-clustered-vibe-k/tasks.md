@@ -79,7 +79,7 @@ files and may be completed together.
 - [x] T022 [P] Implement graceful/TERM/KILL cancellation state machine and
   child/grandchild fixture tests in `crates/worker/src/cancellation.rs`. Depends
   on T021.
-- [ ] T023 Add coordinator worker client, retry/idempotency, event
+- [x] T023 Add coordinator worker client, retry/idempotency, event
   acknowledgement, and replay-gap handling in
   `crates/services/src/services/cluster/client.rs`. Depends on T008, T014, T015.
 - [ ] T024 Refactor local process execution behind a dispatcher boundary and add

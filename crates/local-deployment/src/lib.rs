@@ -20,7 +20,7 @@ use services::services::{
     approvals::Approvals,
     auth::AuthContext,
     browser::{BrowserSessionService, BrowserSessionsConfig},
-    cluster::{ClusterConfig, WorkerRegistry, WorkerScheduler},
+    cluster::{ClusterConfig, WorkerClient, WorkerRegistry, WorkerScheduler},
     config::{Config, load_config_from_file, save_config_to_file},
     container::ContainerService,
     events::EventService,
@@ -80,6 +80,7 @@ pub struct LocalDeployment {
     cluster_config: ClusterConfig,
     worker_registry: WorkerRegistry,
     worker_scheduler: WorkerScheduler,
+    worker_client: Option<WorkerClient>,
     relay_hosts: Option<Arc<RelayHosts>>,
     shutdown: CancellationToken,
     webrtc_host: OnceLock<Arc<WebRtcHost>>,
@@ -258,6 +259,17 @@ impl Deployment for LocalDeployment {
         let trusted_key_auth = TrustedKeyAuthRuntime::new(trusted_keys_path());
         let relay_signing = RelaySigningService::load_or_generate(&server_signing_key_path())
             .expect("Failed to load or generate server signing key");
+        let worker_client = if cluster_config.enabled {
+            Some(
+                WorkerClient::new(
+                    cluster_config.worker_endpoints.clone(),
+                    relay_signing.signing_key().clone(),
+                )
+                .map_err(|error| DeploymentError::Other(anyhow::anyhow!(error)))?,
+            )
+        } else {
+            None
+        };
         let relay_control = Arc::new(RelayControl::new());
         let client_info = ClientInfo::new();
         let preview_proxy = PreviewProxyService::new();
@@ -354,6 +366,7 @@ impl Deployment for LocalDeployment {
             cluster_config,
             worker_registry,
             worker_scheduler,
+            worker_client,
             relay_hosts,
             shutdown,
             webrtc_host: OnceLock::new(),
@@ -455,6 +468,10 @@ impl Deployment for LocalDeployment {
 
     fn worker_scheduler(&self) -> &WorkerScheduler {
         &self.worker_scheduler
+    }
+
+    fn worker_client(&self) -> Option<&WorkerClient> {
+        self.worker_client.as_ref()
     }
 
     fn relay_hosts(&self) -> Result<&Arc<RelayHosts>, RelayHostsNotConfigured> {

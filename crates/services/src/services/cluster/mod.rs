@@ -1,7 +1,9 @@
+pub mod client;
 pub mod config;
 pub mod registry;
 pub mod scheduler;
 
+pub use client::{WorkerClient, WorkerClientError};
 pub use config::{ClusterConfig, ClusterConfigError, SchedulingWeights};
 pub use registry::{
     MountChallenge, MountEvidenceError, WorkerRegistry, WorkerRegistryError,

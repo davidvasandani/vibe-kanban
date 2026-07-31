@@ -13,6 +13,7 @@ pub mod journal;
 pub mod mount_health;
 pub mod path_authority;
 pub mod server;
+pub mod worker_api;
 
 pub const WORKER_NODE_ID_ENV: &str = "VK_WORKER_NODE_ID";
 pub const WORKER_LISTEN_ADDR_ENV: &str = "VK_WORKER_LISTEN_ADDR";
@@ -20,6 +21,7 @@ pub const WORKER_SHARED_ROOT_ENV: &str = "VK_CLUSTER_SHARED_ROOT";
 pub const WORKER_COORDINATOR_URL_ENV: &str = "VK_WORKER_COORDINATOR_URL";
 pub const WORKER_COORDINATOR_ID_ENV: &str = "VK_CLUSTER_COORDINATOR_ID";
 pub const WORKER_SIGNING_KEY_FILE_ENV: &str = "VK_WORKER_SIGNING_KEY_FILE";
+pub const COORDINATOR_PUBLIC_KEY_FILE_ENV: &str = "VK_COORDINATOR_PUBLIC_KEY_FILE";
 pub const WORKER_EXPECTED_EXPORT_ENV: &str = "VK_CLUSTER_EXPECTED_FILESYSTEM_ID";
 pub const WORKER_EXPECTED_UID_ENV: &str = "VK_WORKER_EXPECTED_UID";
 pub const WORKER_EXPECTED_GID_ENV: &str = "VK_WORKER_EXPECTED_GID";
@@ -33,6 +35,7 @@ pub struct WorkerConfig {
     pub coordinator_url: String,
     pub coordinator_id: Uuid,
     pub signing_key_file: PathBuf,
+    pub coordinator_public_key_file: PathBuf,
     pub expected_export: String,
     pub expected_uid: u32,
     pub expected_gid: u32,
@@ -92,6 +95,13 @@ impl WorkerConfig {
                 value: signing_key_file.display().to_string(),
             });
         }
+        let coordinator_public_key_file = PathBuf::from(required(COORDINATOR_PUBLIC_KEY_FILE_ENV)?);
+        if !coordinator_public_key_file.is_absolute() {
+            return Err(WorkerConfigError::Invalid {
+                name: COORDINATOR_PUBLIC_KEY_FILE_ENV,
+                value: coordinator_public_key_file.display().to_string(),
+            });
+        }
         let expected_export = lookup(WORKER_EXPECTED_EXPORT_ENV)
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "172.16.0.99:/var/nfs/shared/VibeKanban/mnt".into());
@@ -111,6 +121,7 @@ impl WorkerConfig {
             coordinator_url,
             coordinator_id,
             signing_key_file,
+            coordinator_public_key_file,
             expected_export,
             expected_uid,
             expected_gid,
@@ -137,15 +148,17 @@ pub async fn run(config: WorkerConfig, shutdown: CancellationToken) -> anyhow::R
         shutdown.child_token(),
     ));
     let worker_node_id = config.worker_node_id;
-    let router = Router::new().route(
-        "/health",
-        get(move || async move {
-            Json(Health {
-                status: "ok",
-                worker_node_id,
-            })
-        }),
-    );
+    let router = Router::new()
+        .route(
+            "/health",
+            get(move || async move {
+                Json(Health {
+                    status: "ok",
+                    worker_node_id,
+                })
+            }),
+        )
+        .merge(worker_api::router(&config).await?);
     let listener = TcpListener::bind(config.listen_addr).await?;
     tracing::info!(
         worker_node_id = %config.worker_node_id,
@@ -184,6 +197,10 @@ mod tests {
             (WORKER_COORDINATOR_URL_ENV, "http://think2:3333"),
             (WORKER_COORDINATOR_ID_ENV, &coordinator_id.to_string()),
             (WORKER_SIGNING_KEY_FILE_ENV, "/run/credentials/worker.key"),
+            (
+                COORDINATOR_PUBLIC_KEY_FILE_ENV,
+                "/run/credentials/coordinator.pub",
+            ),
             (WORKER_EXPECTED_UID_ENV, "1000"),
             (WORKER_EXPECTED_GID_ENV, "100"),
         ])
@@ -201,6 +218,10 @@ mod tests {
                 (WORKER_COORDINATOR_URL_ENV, "http://think2:3333"),
                 (WORKER_COORDINATOR_ID_ENV, &Uuid::new_v4().to_string()),
                 (WORKER_SIGNING_KEY_FILE_ENV, "/run/credentials/worker.key"),
+                (
+                    COORDINATOR_PUBLIC_KEY_FILE_ENV,
+                    "/run/credentials/coordinator.pub"
+                ),
                 (WORKER_EXPECTED_UID_ENV, "1000"),
                 (WORKER_EXPECTED_GID_ENV, "100"),
             ]),
@@ -213,6 +234,10 @@ mod tests {
                 (WORKER_COORDINATOR_URL_ENV, "http://think2:3333"),
                 (WORKER_COORDINATOR_ID_ENV, &Uuid::new_v4().to_string()),
                 (WORKER_SIGNING_KEY_FILE_ENV, "/run/credentials/worker.key"),
+                (
+                    COORDINATOR_PUBLIC_KEY_FILE_ENV,
+                    "/run/credentials/coordinator.pub"
+                ),
                 (WORKER_EXPECTED_UID_ENV, "1000"),
                 (WORKER_EXPECTED_GID_ENV, "100"),
                 (WORKER_SHARED_ROOT_ENV, "relative"),

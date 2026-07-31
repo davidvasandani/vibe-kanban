@@ -325,6 +325,7 @@ mod tests {
             shared_root: PathBuf::from("/shared"),
             coordinator_url: "http://coordinator".into(),
             signing_key_file: PathBuf::from("/run/key"),
+            coordinator_public_key_file: PathBuf::from("/run/coordinator.pub"),
             expected_export: "server:/export".into(),
             expected_uid: 1000,
             expected_gid: 1000,

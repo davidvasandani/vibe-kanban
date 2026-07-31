@@ -70,6 +70,7 @@ pub struct WorkerJob {
     journal: Mutex<EventJournal>,
     child: Mutex<Option<AsyncGroupChild>>,
     cancellation: Mutex<()>,
+    acknowledged_sequence: Mutex<u64>,
 }
 
 impl ExecutionSupervisor {
@@ -126,6 +127,7 @@ impl ExecutionSupervisor {
             journal: Mutex::new(journal),
             child: Mutex::new(None),
             cancellation: Mutex::new(()),
+            acknowledged_sequence: Mutex::new(0),
         });
         jobs.insert(dispatch.execution_id, job.clone());
         drop(jobs);
@@ -170,6 +172,21 @@ impl ExecutionSupervisor {
         }
         summaries.sort_by_key(|summary| summary.execution_id);
         summaries
+    }
+
+    pub async fn acknowledge(
+        &self,
+        execution_id: Uuid,
+        highest_contiguous_sequence: u64,
+    ) -> Result<u64, ExecutionError> {
+        let job = self
+            .job(execution_id)
+            .await
+            .ok_or(ExecutionError::NotFound(execution_id))?;
+        let last = job.journal.lock().await.last_sequence();
+        let mut acknowledged = job.acknowledged_sequence.lock().await;
+        *acknowledged = (*acknowledged).max(highest_contiguous_sequence.min(last));
+        Ok(*acknowledged)
     }
 
     pub async fn job(&self, execution_id: Uuid) -> Option<Arc<WorkerJob>> {
