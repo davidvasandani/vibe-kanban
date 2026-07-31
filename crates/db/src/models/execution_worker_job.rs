@@ -74,9 +74,13 @@ impl ExecutionWorkerJob {
         pool: &SqlitePool,
         execution_process_id: Uuid,
         worker_node_id: Uuid,
-        worker_job_id: Uuid,
         request_digest: &str,
     ) -> Result<Self, sqlx::Error> {
+        // The worker owns the final job ID, but the schema requires a unique
+        // non-null value before dispatch is accepted. Use the already-unique
+        // execution ID as the pending placeholder so concurrent dispatches to
+        // one worker cannot collide.
+        let worker_job_id = execution_process_id;
         sqlx::query(
             r#"
             INSERT INTO execution_worker_jobs (

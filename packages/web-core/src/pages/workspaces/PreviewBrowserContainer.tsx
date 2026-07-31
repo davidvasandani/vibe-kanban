@@ -6,6 +6,7 @@ import {
   useRef,
   useMemo,
 } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import {
   PreviewBrowser,
   MOBILE_WIDTH,
@@ -29,6 +30,7 @@ import { usePreviewNavigation } from '@/shared/hooks/usePreviewNavigation';
 import { PreviewDevToolsBridge } from '@/shared/lib/previewDevToolsBridge';
 import { useInspectModeStore } from '@/features/workspace-chat/model/store/useInspectModeStore';
 import type { PreviewDevToolsMessage } from '@/shared/types/previewDevTools';
+import { executionProcessesApi } from '@/shared/lib/api';
 
 const MIN_RESPONSIVE_WIDTH = 320;
 const MIN_RESPONSIVE_HEIGHT = 480;
@@ -208,6 +210,11 @@ export function PreviewBrowserContainer({
         : latest
     );
   }, [runningDevServers]);
+  const { data: workerJob } = useQuery({
+    queryKey: ['executionWorkerJob', primaryDevServer?.id],
+    queryFn: () => executionProcessesApi.getWorkerJob(primaryDevServer!.id),
+    enabled: Boolean(primaryDevServer),
+  });
   const { logs } = useLogStream(primaryDevServer?.id ?? '');
   const urlInfo = usePreviewUrl(logs, previewProxyPort ?? undefined);
 
@@ -313,7 +320,7 @@ export function PreviewBrowserContainer({
       `http://${hostToken}.localhost:${previewProxyPort}${path}`
     );
     proxyUrl.searchParams.set('_refresh', String(previewRefreshKey));
-    if (primaryDevServer) {
+    if (primaryDevServer && workerJob) {
       proxyUrl.searchParams.set('_vk_workspace', workspaceId);
       proxyUrl.searchParams.set('_vk_execution', primaryDevServer.id);
       proxyUrl.searchParams.set(
@@ -331,6 +338,7 @@ export function PreviewBrowserContainer({
     previewProxyPort,
     previewRefreshKey,
     primaryDevServer,
+    workerJob,
     workspaceId,
   ]);
 

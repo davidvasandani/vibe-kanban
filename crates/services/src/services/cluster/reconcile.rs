@@ -311,15 +311,9 @@ mod tests {
         .await
         .unwrap();
         let worker_id = Uuid::new_v4();
-        ExecutionWorkerJob::create_pending(
-            &pool,
-            execution_id,
-            worker_id,
-            Uuid::new_v4(),
-            "digest",
-        )
-        .await
-        .unwrap();
+        ExecutionWorkerJob::create_pending(&pool, execution_id, worker_id, "digest")
+            .await
+            .unwrap();
 
         let mut config = ClusterConfig::default();
         config.coordinator_id = Some(Uuid::new_v4());

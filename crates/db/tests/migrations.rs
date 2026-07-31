@@ -7,6 +7,7 @@ use db::models::{
     execution_process::{
         CreateExecutionProcess, ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus,
     },
+    execution_worker_job::ExecutionWorkerJob,
     workspace::WorkspacePlacement,
 };
 use executors::actions::{
@@ -113,6 +114,42 @@ async fn check_constraint_rejects_unknown_run_reason() {
         err.to_string().contains("CHECK"),
         "expected CHECK constraint violation, got: {err}"
     );
+}
+
+#[tokio::test]
+async fn concurrent_pending_dispatches_use_distinct_placeholder_job_ids() {
+    let pool = migrated_pool().await;
+    let worker_id = Uuid::new_v4();
+    let first_id = Uuid::new_v4();
+    let second_id = Uuid::new_v4();
+
+    for execution_id in [first_id, second_id] {
+        ExecutionProcess::create(
+            &pool,
+            &CreateExecutionProcess {
+                session_id: Uuid::new_v4(),
+                executor_action: helper_action(),
+                run_reason: ExecutionProcessRunReason::CodingAgent,
+            },
+            execution_id,
+            &[],
+        )
+        .await
+        .expect("create execution");
+        ExecutionWorkerJob::create_pending(&pool, execution_id, worker_id, "digest")
+            .await
+            .expect("create pending worker job");
+    }
+
+    let first = ExecutionWorkerJob::find_by_execution_id(&pool, first_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = ExecutionWorkerJob::find_by_execution_id(&pool, second_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(first.worker_job_id, second.worker_job_id);
 }
 
 #[tokio::test]

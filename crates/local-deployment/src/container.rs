@@ -2796,7 +2796,6 @@ impl ContainerService for LocalContainerService {
             &self.db.pool,
             execution_process.id,
             worker_node_id,
-            Uuid::nil(),
             &request_digest,
         )
         .await?;
