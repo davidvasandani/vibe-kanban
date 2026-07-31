@@ -110,7 +110,7 @@ impl WorkerConfig {
         }
         let expected_export = lookup(WORKER_EXPECTED_EXPORT_ENV)
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "172.16.0.99:/var/nfs/shared/VibeKanban/mnt".into());
+            .unwrap_or_else(|| "172.16.0.99:/var/nfs/shared/VibeKanban".into());
         let expected_uid = parse(WORKER_EXPECTED_UID_ENV, required(WORKER_EXPECTED_UID_ENV)?)?;
         let expected_gid = parse(WORKER_EXPECTED_GID_ENV, required(WORKER_EXPECTED_GID_ENV)?)?;
         let executor_profiles = lookup(WORKER_EXECUTOR_PROFILES_ENV)

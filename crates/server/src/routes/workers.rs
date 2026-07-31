@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{Path, Request, State},
+    extract::{OriginalUri, Path, Request, State},
     middleware::{Next, from_fn_with_state},
     response::{IntoResponse, Json as ResponseJson, Response},
     routing::{get, patch, post},
@@ -167,12 +167,13 @@ async fn require_worker_signature(
     if supplied_digest != computed_digest {
         return Err(ApiError::Unauthorized);
     }
+    let signed_target = signed_request_target(&parts.uri, parts.extensions.get::<OriginalUri>());
     deployment
         .trusted_key_auth()
         .verify_request_signature_with_content_digest(
             &parts.headers,
             &parts.method,
-            parts.uri.path(),
+            &signed_target,
             &computed_digest,
         )
         .await
@@ -186,6 +187,16 @@ async fn require_worker_signature(
         .into_response())
 }
 
+fn signed_request_target(uri: &http::Uri, original_uri: Option<&OriginalUri>) -> String {
+    original_uri
+        .map(|original| &original.0)
+        .unwrap_or(uri)
+        .path_and_query()
+        .map(|target| target.as_str())
+        .unwrap_or_else(|| uri.path())
+        .to_owned()
+}
+
 fn registry_error(error: WorkerRegistryError) -> ApiError {
     match error {
         WorkerRegistryError::Database(error) => ApiError::Database(error),
@@ -195,5 +206,25 @@ fn registry_error(error: WorkerRegistryError) -> ApiError {
         | WorkerRegistryError::WorkerNotRegistered(_)
         | WorkerRegistryError::MissingCoordinatorId
         | WorkerRegistryError::Serialization(_) => ApiError::BadRequest(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_signature_uses_original_nested_request_target() {
+        let nested_uri = "/workers/mount-challenge".parse().unwrap();
+        let original = OriginalUri("/api/workers/mount-challenge?probe=1".parse().unwrap());
+
+        assert_eq!(
+            signed_request_target(&nested_uri, Some(&original)),
+            "/api/workers/mount-challenge?probe=1"
+        );
+        assert_eq!(
+            signed_request_target(&nested_uri, None),
+            "/workers/mount-challenge"
+        );
     }
 }

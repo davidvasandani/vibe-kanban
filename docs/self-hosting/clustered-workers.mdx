@@ -16,7 +16,7 @@ Clustered Vibe Kanban keeps one coordinator and coordinator-local SQLite databas
 Before you enable clustering, confirm that:
 
 - the coordinator and workers use the same numeric UID and GID for workspace files;
-- `172.16.0.99:/var/nfs/shared/VibeKanban/mnt` is snapshot-backed;
+- `172.16.0.99:/var/nfs/shared/VibeKanban` is snapshot-backed;
 - every node mounts it at `/srv/vibe-kanban-shared`;
 - each worker has a stable UUID and reachable LAN address;
 - the coordinator and each worker have separate signing credentials;
@@ -39,7 +39,8 @@ On both nodes, verify the source and filesystem type:
 findmnt --target /srv/vibe-kanban-shared --output SOURCE,FSTYPE,TARGET
 ```
 
-The source must be `172.16.0.99:/var/nfs/shared/VibeKanban/mnt`. Stop if the command reports a local filesystem.
+The source must be `172.16.0.99:/var/nfs/shared/VibeKanban`. UniFi Drive serves
+this export over NFSv3. Stop if the command reports a local filesystem.
 
 </Step>
 

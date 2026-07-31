@@ -15,7 +15,7 @@ pub const LOAD_WEIGHT_ENV: &str = "VK_CLUSTER_LOAD_WEIGHT";
 pub const ACTIVE_EXECUTION_WEIGHT_ENV: &str = "VK_CLUSTER_ACTIVE_EXECUTION_WEIGHT";
 
 const DEFAULT_SHARED_ROOT: &str = "/srv/vibe-kanban-shared";
-const DEFAULT_EXPECTED_FILESYSTEM_ID: &str = "172.16.0.99:/var/nfs/shared/VibeKanban/mnt";
+const DEFAULT_EXPECTED_FILESYSTEM_ID: &str = "172.16.0.99:/var/nfs/shared/VibeKanban";
 const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 10;
 const DEFAULT_LEASE_DURATION_SECONDS: u64 = 30;
 const DEFAULT_LOAD_WEIGHT: f64 = 1.0;

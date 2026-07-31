@@ -70,7 +70,7 @@ state. It:
 
 The coordinator and workers use a configured root such as
 `/srv/vibe-kanban-shared` backed by
-`172.16.0.99:/var/nfs/shared/VibeKanban/mnt`. It contains repositories,
+`172.16.0.99:/var/nfs/shared/VibeKanban`. It contains repositories,
 workspaces, and optional durable execution logs, but never the coordinator's
 SQLite database.
 

@@ -52,3 +52,9 @@ To resume, the storage administrator must export
 to `172.16.100.103` and `172.16.100.104`. The rollout must also choose one
 common workspace UID/GID that is unused on both disposable nodes, rather than
 renumbering their established service accounts implicitly.
+
+The UI.com administrator then added both clients with read-write access to the
+`VibeKanban` shared drive. The resulting canonical export is
+`172.16.0.99:/var/nfs/shared/VibeKanban` over NFSv3 (the earlier `/mnt` suffix
+was invalid). Read-only NFSv3 mounts succeeded from both nodes and reported
+the shared root owner as UID/GID `988:988`.
