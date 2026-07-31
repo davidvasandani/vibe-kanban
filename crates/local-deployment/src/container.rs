@@ -8,8 +8,12 @@ use std::{
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
-use cluster_protocol::{ExecutionDispatch, PROTOCOL_VERSION, PersistencePolicy, RequestAuthority};
+use cluster_protocol::{
+    EventAcknowledgement, ExecutionDispatch, ExecutionEventPayload, PROTOCOL_VERSION,
+    PersistencePolicy, RequestAuthority,
+};
 use command_group::AsyncGroupChild;
 use db::{
     DBService,
@@ -19,7 +23,7 @@ use db::{
             ExecutionContext, ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus,
         },
         execution_process_repo_state::ExecutionProcessRepoState,
-        execution_worker_job::ExecutionWorkerJob,
+        execution_worker_job::{ExecutionWorkerDispatchState, ExecutionWorkerJob},
         project::Project,
         repo::Repo,
         scratch::{DraftFollowUpData, Scratch, ScratchType},
@@ -88,6 +92,23 @@ const WORKSPACE_TOUCH_DEBOUNCE: Duration = Duration::from_mins(2);
 /// exactly as before (Constitution IV — do not enable a runtime path we cannot
 /// observe E2E here). See `specs/vk/826e-coding-agent-war/`.
 const KEEP_WARM_ENV: &str = "VK_KEEP_WARM_AGENTS";
+
+fn push_worker_bytes(store: &MsgStore, encoded: &str, stderr: bool) {
+    let message = match BASE64_STANDARD.decode(encoded) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => {
+            store.push(LogMsg::Stderr(format!(
+                "Worker returned invalid base64 output: {error}"
+            )));
+            return;
+        }
+    };
+    if stderr {
+        store.push(LogMsg::Stderr(message));
+    } else {
+        store.push_stdout(message);
+    }
+}
 
 /// A warm app-server with no active turn for longer than this is proactively
 /// reaped so an abandoned-but-not-closed attempt cannot pin a process forever
@@ -1582,6 +1603,181 @@ impl LocalContainerService {
         map.insert(id, store);
     }
 
+    async fn track_worker_msgs_in_store(
+        &self,
+        execution_process: &ExecutionProcess,
+        worker_node_id: Uuid,
+    ) -> Result<(), ContainerError> {
+        let client = self.worker_client.clone().ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster worker client is not configured"))
+        })?;
+        let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
+        })?;
+        let execution_id = execution_process.id;
+        let store = Arc::new(MsgStore::new());
+        self.msg_stores
+            .write()
+            .await
+            .insert(execution_id, store.clone());
+        let db = self.db.clone();
+        let handle = tokio::spawn(async move {
+            let mut cursor = 0_u64;
+            let mut retry_delay = Duration::from_millis(100);
+            loop {
+                let batch = match client.events(worker_node_id, execution_id, cursor).await {
+                    Ok(batch) => {
+                        retry_delay = Duration::from_millis(100);
+                        batch
+                    }
+                    Err(services::services::cluster::WorkerClientError::ReplayGap { .. }) => {
+                        let _ = ExecutionWorkerJob::mark_output_incomplete(&db.pool, execution_id)
+                            .await;
+                        let _ = ExecutionWorkerJob::update_state(
+                            &db.pool,
+                            execution_id,
+                            ExecutionWorkerDispatchState::Indeterminate,
+                            None,
+                            Some(Utc::now()),
+                        )
+                        .await;
+                        store.push(LogMsg::Stderr(
+                            "Worker output replay gap; execution state is indeterminate".into(),
+                        ));
+                        store.push_finished();
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            execution_id = %execution_id,
+                            worker_node_id = %worker_node_id,
+                            "Worker event poll failed; retrying: {error}"
+                        );
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
+                        continue;
+                    }
+                };
+
+                let mut terminal = None;
+                for event in batch.events {
+                    cursor = event.sequence;
+                    match event.payload {
+                        ExecutionEventPayload::Stdout { data_base64 } => {
+                            push_worker_bytes(&store, &data_base64, false);
+                        }
+                        ExecutionEventPayload::Stderr { data_base64 } => {
+                            push_worker_bytes(&store, &data_base64, true);
+                        }
+                        ExecutionEventPayload::Structured { json } => {
+                            if let Ok(message) = serde_json::from_str::<LogMsg>(&json) {
+                                store.push(message);
+                            } else {
+                                store.push_stdout(format!("{json}\n"));
+                            }
+                        }
+                        ExecutionEventPayload::Completed(evidence) => {
+                            terminal = Some((
+                                ExecutionWorkerDispatchState::Completed,
+                                ExecutionProcessStatus::Completed,
+                                evidence,
+                            ));
+                        }
+                        ExecutionEventPayload::Failed(evidence) => {
+                            terminal = Some((
+                                ExecutionWorkerDispatchState::Failed,
+                                ExecutionProcessStatus::Failed,
+                                evidence,
+                            ));
+                        }
+                        ExecutionEventPayload::Killed(evidence) => {
+                            terminal = Some((
+                                ExecutionWorkerDispatchState::Killed,
+                                ExecutionProcessStatus::Killed,
+                                evidence,
+                            ));
+                        }
+                        ExecutionEventPayload::Indeterminate { reason } => {
+                            store.push(LogMsg::Stderr(format!(
+                                "Worker reported an indeterminate execution: {reason}"
+                            )));
+                            let _ = ExecutionWorkerJob::update_state(
+                                &db.pool,
+                                execution_id,
+                                ExecutionWorkerDispatchState::Indeterminate,
+                                None,
+                                Some(Utc::now()),
+                            )
+                            .await;
+                            store.push_finished();
+                            return;
+                        }
+                        ExecutionEventPayload::Accepted
+                        | ExecutionEventPayload::Starting
+                        | ExecutionEventPayload::InteractionRequested(_)
+                        | ExecutionEventPayload::InteractionAcknowledged { .. }
+                        | ExecutionEventPayload::Preview(_) => {}
+                    }
+                }
+
+                if cursor > 0 {
+                    let _ = ExecutionWorkerJob::acknowledge_sequence(
+                        &db.pool,
+                        execution_id,
+                        cursor as i64,
+                        batch.latest_available as i64,
+                    )
+                    .await;
+                    let acknowledgement = EventAcknowledgement {
+                        authority: RequestAuthority {
+                            protocol_version: PROTOCOL_VERSION,
+                            coordinator_id,
+                            worker_node_id,
+                            correlation_id: execution_id,
+                            issued_at: Utc::now(),
+                            nonce: Uuid::new_v4().to_string(),
+                        },
+                        execution_id,
+                        highest_contiguous_sequence: cursor,
+                    };
+                    if let Err(error) = client.acknowledge(worker_node_id, &acknowledgement).await {
+                        tracing::warn!(%execution_id, "Worker event acknowledgement failed: {error}");
+                    }
+                }
+
+                if let Some((worker_state, process_state, evidence)) = terminal {
+                    let evidence_json = serde_json::to_value(&evidence).ok();
+                    let _ = ExecutionWorkerJob::update_state(
+                        &db.pool,
+                        execution_id,
+                        worker_state,
+                        evidence_json.as_ref(),
+                        Some(evidence.observed_at),
+                    )
+                    .await;
+                    let exit_code = evidence.exit_code.map(i64::from);
+                    if !ExecutionProcess::was_stopped(&db.pool, execution_id).await {
+                        let _ = ExecutionProcess::update_completion(
+                            &db.pool,
+                            execution_id,
+                            process_state,
+                            exit_code,
+                        )
+                        .await;
+                    }
+                    store.push_finished();
+                    break;
+                }
+
+                if batch.latest_available <= cursor {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        });
+        self.add_exit_monitor_handle(execution_id, handle).await;
+        Ok(())
+    }
+
     /// Create a live diff log stream for ongoing attempts for WebSocket
     /// Returns a stream that owns the filesystem watcher - when dropped, watcher is cleaned up
     async fn create_live_diff_stream(
@@ -2421,6 +2617,8 @@ impl ContainerService for LocalContainerService {
                 "Execution worker job was not pending during acceptance"
             )));
         }
+        self.track_worker_msgs_in_store(execution_process, worker_node_id)
+            .await?;
         Ok(())
     }
 
@@ -3197,6 +3395,38 @@ mod queued_follow_up_tests {
             skipped_cleanup_action(false),
             SkippedCleanupAction::Finalize
         );
+    }
+}
+
+#[cfg(test)]
+mod worker_event_tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+    use utils::{log_msg::LogMsg, msg_store::MsgStore};
+
+    use super::push_worker_bytes;
+
+    #[test]
+    fn worker_output_is_forwarded_to_msg_store_in_received_order() {
+        let store = MsgStore::new();
+        push_worker_bytes(&store, &BASE64_STANDARD.encode("first"), false);
+        push_worker_bytes(&store, &BASE64_STANDARD.encode("second"), true);
+        push_worker_bytes(&store, &BASE64_STANDARD.encode("third"), false);
+
+        assert!(matches!(store.get_history().as_slice(), [
+            LogMsg::Stdout(first),
+            LogMsg::Stderr(second),
+            LogMsg::Stdout(third),
+        ] if first == "first" && second == "second" && third == "third"));
+    }
+
+    #[test]
+    fn invalid_worker_output_is_explicitly_reported() {
+        let store = MsgStore::new();
+        push_worker_bytes(&store, "not-base64", false);
+        assert!(matches!(
+            store.get_history().as_slice(),
+            [LogMsg::Stderr(message)] if message.contains("invalid base64")
+        ));
     }
 }
 

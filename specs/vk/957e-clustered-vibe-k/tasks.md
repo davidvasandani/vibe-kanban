@@ -86,7 +86,7 @@ files and may be completed together.
   remote dispatch while preserving local behavior in
   `crates/services/src/services/container.rs` and
   `crates/local-deployment/src/container.rs`. Depends on T019, T021, T023.
-- [ ] T025 Feed worker events into existing `MsgStore`, normalization,
+- [x] T025 Feed worker events into existing `MsgStore`, normalization,
   persistence, and WebSocket paths with ordering tests in
   `crates/local-deployment/src/container.rs`. Depends on T024.
 - [ ] T026 Implement remote cancellation route semantics and explicit
