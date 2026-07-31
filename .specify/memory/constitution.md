@@ -75,6 +75,12 @@ session identity, cancellation, failures, and credential redaction must remain
 correct. Extend the shared executor, log-normalization, profile, and MCP
 abstractions before introducing agent-specific parallel machinery.
 
+Normalized-log compaction must preserve protocol lifecycle identity and patch
+ordering. Repeated events may share a visible entry only when semantic equality,
+adjacency, and completion state are proven; failures stay visible, stale event
+updates cannot overwrite newer occurrences, and compact indicators remain
+bounded under arbitrarily long streams.
+
 ### X. Dialogs hold provisional state; containers hold confirmed state
 Settings dialogs and edit modals own a private snapshot of the data they mutate.
 On open, the dialog is seeded from the current saved state (or blank for "add").
@@ -192,5 +198,5 @@ authorization material, authenticated URLs, or secret-bearing command arguments.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.14.0 (adds confirmed, atomic live-capability principle XVII;
-0.13.0 added verified bundled third-party delivery principle XVI)
+**Version**: 0.15.0 (strengthens external-protocol normalization invariants;
+0.14.0 added confirmed, atomic live-capability principle XVII)
