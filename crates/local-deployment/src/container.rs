@@ -1705,6 +1705,7 @@ impl LocalContainerService {
             .await
             .insert(execution_id, store.clone());
         let db = self.db.clone();
+        let container = self.clone();
         let handle = tokio::spawn(async move {
             let mut cursor = 0_u64;
             let mut retry_delay = Duration::from_millis(100);
@@ -1870,6 +1871,7 @@ impl LocalContainerService {
                         )
                         .await;
                     }
+                    container.finalize_remote_execution(execution_id).await;
                     store.push_finished();
                     break;
                 }
@@ -1881,6 +1883,25 @@ impl LocalContainerService {
         });
         self.add_exit_monitor_handle(execution_id, handle).await;
         Ok(())
+    }
+
+    async fn finalize_remote_execution(&self, execution_id: Uuid) {
+        let Ok(ctx) = ExecutionProcess::load_context(&self.db.pool, execution_id).await else {
+            tracing::warn!(%execution_id, "Could not load remote execution context for finalization");
+            return;
+        };
+        if ctx.execution_process.status == ExecutionProcessStatus::Completed {
+            if let Err(error) = self.try_commit_changes(&ctx).await {
+                tracing::error!(%execution_id, "Remote execution commit failed: {error}");
+            }
+            if let Err(error) = self.try_start_next_action(&ctx).await {
+                tracing::error!(%execution_id, "Remote execution next action failed: {error}");
+            }
+        }
+        if self.should_finalize(&ctx) {
+            self.finalize_task(&ctx).await;
+        }
+        self.update_after_head_commits(execution_id).await;
     }
 
     /// Create a live diff log stream for ongoing attempts for WebSocket

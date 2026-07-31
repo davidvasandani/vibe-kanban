@@ -112,7 +112,7 @@ files and may be completed together.
 
 ## Layer 7 — Full workspace interaction
 
-- [ ] T032 Route setup, cleanup, archive, reviews, follow-ups, dev servers, and
+- [x] T032 Route setup, cleanup, archive, reviews, follow-ups, dev servers, and
   background helpers through persisted affinity in
   `crates/local-deployment/src/container.rs`. Depends on T024, T027.
 - [ ] T033 Implement correlated remote approvals/questions and disconnect

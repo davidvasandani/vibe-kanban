@@ -308,6 +308,7 @@ pub trait ContainerService {
             ExecutionProcessStatus::Failed
                 | ExecutionProcessStatus::Killed
                 | ExecutionProcessStatus::Interrupted
+                | ExecutionProcessStatus::Indeterminate
         ) {
             return true;
         }
@@ -322,7 +323,9 @@ pub trait ContainerService {
         // or interrupted by a server shutdown/restart
         if matches!(
             ctx.execution_process.status,
-            ExecutionProcessStatus::Killed | ExecutionProcessStatus::Interrupted
+            ExecutionProcessStatus::Killed
+                | ExecutionProcessStatus::Interrupted
+                | ExecutionProcessStatus::Indeterminate
         ) {
             return;
         }
