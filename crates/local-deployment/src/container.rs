@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -9,6 +9,7 @@ use std::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use cluster_protocol::{ExecutionDispatch, PROTOCOL_VERSION, PersistencePolicy, RequestAuthority};
 use command_group::AsyncGroupChild;
 use db::{
     DBService,
@@ -18,6 +19,7 @@ use db::{
             ExecutionContext, ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus,
         },
         execution_process_repo_state::ExecutionProcessRepoState,
+        execution_worker_job::ExecutionWorkerJob,
         project::Project,
         repo::Repo,
         scratch::{DraftFollowUpData, Scratch, ScratchType},
@@ -52,7 +54,7 @@ use serde_json::json;
 use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
-    cluster::ClusterConfig,
+    cluster::{ClusterConfig, WorkerClient},
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{ContainerError, ContainerRef, ContainerService},
     diff_stream::{self, DiffStreamHandle},
@@ -63,6 +65,7 @@ use services::services::{
     remote_client::{RemoteClient, RemoteClientError},
     remote_sync,
 };
+use sha2::{Digest, Sha256};
 use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_util::io::ReaderStream;
 use utils::{
@@ -350,6 +353,7 @@ pub struct LocalContainerService {
     remote_client: Option<RemoteClient>,
     cluster_config: ClusterConfig,
     repository_admin_locks: RepositoryAdminLockManager,
+    worker_client: Option<WorkerClient>,
 }
 
 impl LocalContainerService {
@@ -423,6 +427,7 @@ impl LocalContainerService {
         queued_message_service: QueuedMessageService,
         remote_client: Option<RemoteClient>,
         cluster_config: ClusterConfig,
+        worker_client: Option<WorkerClient>,
     ) -> Self {
         let child_store = Arc::new(RwLock::new(HashMap::new()));
         let cancellation_tokens = Arc::new(RwLock::new(HashMap::new()));
@@ -462,6 +467,7 @@ impl LocalContainerService {
             remote_client,
             cluster_config,
             repository_admin_locks,
+            worker_client,
         };
 
         container.spawn_workspace_cleanup();
@@ -2282,6 +2288,140 @@ impl ContainerService for LocalContainerService {
         }
 
         Ok(true)
+    }
+
+    async fn dispatch_execution(
+        &self,
+        workspace: &Workspace,
+        execution_process: &ExecutionProcess,
+        executor_action: &ExecutorAction,
+    ) -> Result<(), ContainerError> {
+        if !self.cluster_config.enabled {
+            return self
+                .start_execution_inner(workspace, execution_process, executor_action)
+                .await;
+        }
+
+        let placement = WorkspacePlacement::find(&self.db.pool, workspace.id)
+            .await?
+            .ok_or_else(|| ContainerError::Other(anyhow!("Workspace placement is missing")))?;
+        if placement.placement_state != WorkspacePlacementState::Ready {
+            return Err(ContainerError::Other(anyhow!(
+                "Cluster workspace is not ready for execution (state: {:?})",
+                placement.placement_state
+            )));
+        }
+        let worker_node_id = placement.worker_node_id.ok_or_else(|| {
+            ContainerError::Other(anyhow!("Ready cluster workspace has no assigned worker"))
+        })?;
+        let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
+        })?;
+        let client = self.worker_client.as_ref().ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster worker client is not configured"))
+        })?;
+        let workspace_path = workspace.container_ref.clone().ok_or_else(|| {
+            ContainerError::Other(anyhow!("Container ref not found for workspace"))
+        })?;
+
+        let mut environment = BTreeMap::new();
+        environment.extend(self.resolve_org_env_vars(workspace).await);
+        environment.insert("VK_WORKSPACE_ID".into(), workspace.id.to_string());
+        environment.insert("VK_WORKSPACE_BRANCH".into(), workspace.branch.clone());
+
+        let executor_profile = match executor_action.typ() {
+            ExecutorActionType::CodingAgentInitialRequest(request) => {
+                request.executor_config.profile_id().to_string()
+            }
+            ExecutorActionType::CodingAgentFollowUpRequest(request) => {
+                request.executor_config.profile_id().to_string()
+            }
+            ExecutorActionType::ReviewRequest(request) => {
+                request.executor_config.profile_id().to_string()
+            }
+            ExecutorActionType::ScriptRequest(_) => "script".into(),
+        };
+        let action = serde_json::to_value(executor_action).map_err(anyhow::Error::from)?;
+        let run_reason = serde_json::to_value(&execution_process.run_reason)
+            .map_err(anyhow::Error::from)?
+            .as_str()
+            .unwrap_or("unknown")
+            .to_owned();
+        let persistence = if execution_process.run_reason.is_persistent() {
+            PersistencePolicy::Persistent
+        } else {
+            PersistencePolicy::Ordinary
+        };
+        let digest_material = serde_json::to_vec(&json!({
+            "execution_id": execution_process.id,
+            "workspace_id": workspace.id,
+            "session_id": execution_process.session_id,
+            "worker_node_id": worker_node_id,
+            "workspace_path": workspace_path,
+            "executor_profile": executor_profile,
+            "action": action,
+            "environment": environment,
+            "run_reason": run_reason,
+            "persistence": persistence,
+        }))
+        .map_err(anyhow::Error::from)?;
+        let request_digest = format!("sha256:{:x}", Sha256::digest(digest_material));
+        let authority = RequestAuthority {
+            protocol_version: PROTOCOL_VERSION,
+            coordinator_id,
+            worker_node_id,
+            correlation_id: execution_process.id,
+            issued_at: Utc::now(),
+            nonce: Uuid::new_v4().to_string(),
+        };
+        let dispatch = ExecutionDispatch {
+            authority,
+            execution_id: execution_process.id,
+            workspace_id: workspace.id,
+            session_id: execution_process.session_id,
+            workspace_path: workspace_path.clone(),
+            working_directory: workspace_path,
+            executor_profile,
+            action,
+            environment,
+            run_reason,
+            timeout_seconds: None,
+            persistence,
+            request_digest: request_digest.clone(),
+        };
+
+        ExecutionWorkerJob::create_pending(
+            &self.db.pool,
+            execution_process.id,
+            worker_node_id,
+            Uuid::nil(),
+            &request_digest,
+        )
+        .await?;
+        let accepted = client
+            .dispatch(worker_node_id, &dispatch)
+            .await
+            .map_err(|error| ContainerError::Other(anyhow!(error)))?;
+        if accepted.execution_id != execution_process.id
+            || accepted.request_digest != request_digest
+        {
+            return Err(ContainerError::Other(anyhow!(
+                "Worker returned mismatched dispatch acceptance"
+            )));
+        }
+        if !ExecutionWorkerJob::record_acceptance(
+            &self.db.pool,
+            execution_process.id,
+            accepted.worker_job_id,
+            accepted.last_sequence as i64,
+        )
+        .await?
+        {
+            return Err(ContainerError::Other(anyhow!(
+                "Execution worker job was not pending during acceptance"
+            )));
+        }
+        Ok(())
     }
 
     async fn start_execution_inner(

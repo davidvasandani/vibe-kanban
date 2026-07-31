@@ -163,6 +163,31 @@ impl ExecutionWorkerJob {
         Ok(result.rows_affected() == 1)
     }
 
+    pub async fn record_acceptance(
+        pool: &SqlitePool,
+        execution_process_id: Uuid,
+        worker_job_id: Uuid,
+        worker_last_sequence: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE execution_worker_jobs
+            SET worker_job_id = ?,
+                dispatch_state = 'accepted',
+                worker_last_sequence = MAX(worker_last_sequence, ?),
+                accepted_at = COALESCE(accepted_at, datetime('now', 'subsec')),
+                updated_at = datetime('now', 'subsec')
+            WHERE execution_process_id = ? AND dispatch_state = 'pending'
+            "#,
+        )
+        .bind(worker_job_id)
+        .bind(worker_last_sequence)
+        .bind(execution_process_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn mark_output_incomplete(
         pool: &SqlitePool,
         execution_process_id: Uuid,

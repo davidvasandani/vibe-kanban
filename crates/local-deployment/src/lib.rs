@@ -295,6 +295,7 @@ impl Deployment for LocalDeployment {
             queued_message_service.clone(),
             remote_client.clone().ok(),
             cluster_config.clone(),
+            worker_client.clone(),
         )
         .await;
 

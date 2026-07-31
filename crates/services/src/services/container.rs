@@ -1079,6 +1079,19 @@ pub trait ContainerService {
         executor_action: &ExecutorAction,
     ) -> Result<(), ContainerError>;
 
+    /// Selects the process owner for an execution. Local implementations keep
+    /// their existing spawn path by default; clustered implementations may
+    /// override this to dispatch to the workspace's persisted worker.
+    async fn dispatch_execution(
+        &self,
+        workspace: &Workspace,
+        execution_process: &ExecutionProcess,
+        executor_action: &ExecutorAction,
+    ) -> Result<(), ContainerError> {
+        self.start_execution_inner(workspace, execution_process, executor_action)
+            .await
+    }
+
     async fn stop_execution(
         &self,
         execution_process: &ExecutionProcess,
@@ -1573,7 +1586,7 @@ pub trait ContainerService {
         }
 
         if let Err(start_error) = self
-            .start_execution_inner(workspace, &execution_process, executor_action)
+            .dispatch_execution(workspace, &execution_process, executor_action)
             .await
         {
             // Mark process as failed

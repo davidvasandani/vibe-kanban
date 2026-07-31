@@ -82,7 +82,7 @@ files and may be completed together.
 - [x] T023 Add coordinator worker client, retry/idempotency, event
   acknowledgement, and replay-gap handling in
   `crates/services/src/services/cluster/client.rs`. Depends on T008, T014, T015.
-- [ ] T024 Refactor local process execution behind a dispatcher boundary and add
+- [x] T024 Refactor local process execution behind a dispatcher boundary and add
   remote dispatch while preserving local behavior in
   `crates/services/src/services/container.rs` and
   `crates/local-deployment/src/container.rs`. Depends on T019, T021, T023.
