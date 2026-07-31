@@ -51,7 +51,10 @@ impl EventJournal {
         evidence: TerminalEvidence,
     ) -> Result<Self, JournalError> {
         let mut journal = Self::new(summary.execution_id, capacity)?;
-        let sequence = summary.last_sequence.max(1);
+        let sequence = summary
+            .last_sequence
+            .checked_add(1)
+            .ok_or(JournalError::SequenceExhausted)?;
         let payload = match evidence.state {
             TerminalState::Completed => ExecutionEventPayload::Completed(evidence.clone()),
             TerminalState::Failed => ExecutionEventPayload::Failed(evidence.clone()),
@@ -275,6 +278,26 @@ mod tests {
         assert_eq!(journal.last_sequence(), 1);
         assert_eq!(journal.terminal_evidence(), Some(&completed));
         assert_eq!(journal.replay_after(0).events.len(), 1);
+    }
+
+    #[test]
+    fn recovered_terminal_event_is_after_the_previous_cursor() {
+        let evidence = terminal(TerminalState::Interrupted, 40);
+        let summary = JobSummary {
+            execution_id: Uuid::from_u128(6),
+            worker_job_id: Uuid::from_u128(7),
+            workspace_id: Uuid::from_u128(8),
+            request_digest: "digest".into(),
+            state: cluster_protocol::JobState::Interrupted,
+            last_sequence: 9,
+            terminal: Some(evidence.clone()),
+        };
+        let journal = EventJournal::recover(&summary, 4, evidence).unwrap();
+
+        let replay = journal.replay_after(summary.last_sequence);
+        assert_eq!(replay.events.len(), 1);
+        assert_eq!(replay.events[0].sequence, 10);
+        assert!(!replay.replay_gap);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
+use sqlx::{FromRow, SqlitePool};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
@@ -19,59 +19,29 @@ impl RepositoryAdminLock {
         now: DateTime<Utc>,
         lease_expires_at: DateTime<Utc>,
     ) -> Result<Option<Self>, sqlx::Error> {
-        let mut tx = pool.begin().await?;
-        let current = Self::find_in_transaction(&mut tx, repo_id).await?;
-        if current
-            .as_ref()
-            .is_some_and(|lock| lock.lease_expires_at > now && lock.operation_id != operation_id)
-        {
-            return Ok(None);
-        }
-
-        let generation = current.map_or(1, |lock| lock.generation + 1);
-        sqlx::query(
+        // The lease predicate is part of the write itself. A preceding SELECT
+        // would allow two contenders to observe the same expired row and both
+        // believe they acquired it.
+        sqlx::query_as::<_, Self>(
             r#"
             INSERT INTO repository_admin_locks (
                 repo_id, generation, operation_id, acquired_at, lease_expires_at
-            ) VALUES (?, ?, ?, ?, ?)
+            ) VALUES (?, 1, ?, ?, ?)
             ON CONFLICT(repo_id) DO UPDATE SET
-                generation = excluded.generation,
+                generation = repository_admin_locks.generation + 1,
                 operation_id = excluded.operation_id,
                 acquired_at = excluded.acquired_at,
                 lease_expires_at = excluded.lease_expires_at
+            WHERE repository_admin_locks.lease_expires_at <= excluded.acquired_at
+               OR repository_admin_locks.operation_id = excluded.operation_id
+            RETURNING repo_id, generation, operation_id, acquired_at, lease_expires_at
             "#,
         )
         .bind(repo_id)
-        .bind(generation)
         .bind(operation_id)
         .bind(now)
         .bind(lease_expires_at)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-
-        Ok(Some(Self {
-            repo_id,
-            generation,
-            operation_id,
-            acquired_at: now,
-            lease_expires_at,
-        }))
-    }
-
-    async fn find_in_transaction(
-        tx: &mut Transaction<'_, Sqlite>,
-        repo_id: Uuid,
-    ) -> Result<Option<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Self>(
-            r#"
-            SELECT repo_id, generation, operation_id, acquired_at, lease_expires_at
-            FROM repository_admin_locks
-            WHERE repo_id = ?
-            "#,
-        )
-        .bind(repo_id)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(pool)
         .await
     }
 

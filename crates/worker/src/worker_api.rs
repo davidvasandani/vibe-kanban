@@ -28,7 +28,6 @@ use crate::{
     execution::{ExecutionError, ExecutionSupervisor},
     path_authority::PathAuthority,
     preview::PreviewService,
-    recovery::RecoveryStore,
     terminal::TerminalService,
 };
 
@@ -69,14 +68,12 @@ struct Acknowledged {
     highest_contiguous_sequence: u64,
 }
 
-pub async fn router(config: &WorkerConfig) -> anyhow::Result<Router> {
+pub async fn router(
+    config: &WorkerConfig,
+    supervisor: ExecutionSupervisor,
+) -> anyhow::Result<Router> {
     let coordinator_key = load_verifying_key(&config.coordinator_public_key_file).await?;
     let path_authority = PathAuthority::new(&config.shared_root)?;
-    let supervisor = ExecutionSupervisor::with_recovery(
-        path_authority.clone(),
-        RecoveryStore::new(&config.state_dir).await?,
-    )
-    .await?;
     let state = WorkerApiState {
         supervisor,
         worker_node_id: config.worker_node_id,

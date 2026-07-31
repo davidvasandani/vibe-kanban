@@ -164,8 +164,15 @@ struct Health {
 }
 
 pub async fn run(config: WorkerConfig, shutdown: CancellationToken) -> anyhow::Result<()> {
+    let path_authority = path_authority::PathAuthority::new(&config.shared_root)?;
+    let supervisor = execution::ExecutionSupervisor::with_recovery(
+        path_authority,
+        recovery::RecoveryStore::new(&config.state_dir).await?,
+    )
+    .await?;
     let coordinator_task = tokio::spawn(server::registration_loop(
         config.clone(),
+        supervisor.clone(),
         shutdown.child_token(),
     ));
     let worker_node_id = config.worker_node_id;
@@ -179,7 +186,7 @@ pub async fn run(config: WorkerConfig, shutdown: CancellationToken) -> anyhow::R
                 })
             }),
         )
-        .merge(worker_api::router(&config).await?);
+        .merge(worker_api::router(&config, supervisor).await?);
     let listener = TcpListener::bind(config.listen_addr).await?;
     tracing::info!(
         worker_node_id = %config.worker_node_id,

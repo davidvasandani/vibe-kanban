@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     WorkerConfig,
+    execution::ExecutionSupervisor,
     mount_health::{MountHealthChecker, SystemMountInspector},
 };
 
@@ -39,7 +40,11 @@ struct LeaseResponse {
 /// Maintains worker registration without coupling process supervision to an
 /// individual HTTP connection. A failed heartbeat always returns to a fresh
 /// registration attempt so coordinator restarts and expired records recover.
-pub async fn registration_loop(config: WorkerConfig, shutdown: CancellationToken) {
+pub async fn registration_loop(
+    config: WorkerConfig,
+    supervisor: ExecutionSupervisor,
+    shutdown: CancellationToken,
+) {
     let signing_key = match load_signing_key(&config.signing_key_file).await {
         Ok(key) => key,
         Err(error) => {
@@ -67,14 +72,16 @@ pub async fn registration_loop(config: WorkerConfig, shutdown: CancellationToken
     };
 
     while !shutdown.is_cancelled() {
-        match coordinator.register(&config).await {
+        match coordinator.register(&config, &supervisor).await {
             Ok(lease) => {
                 info!(
                     worker_node_id = %config.worker_node_id,
                     lease_expires_at = %lease.lease_expires_at,
                     "worker registered with coordinator"
                 );
-                if heartbeat_until_failure(&coordinator, &config, lease, &shutdown).await {
+                if heartbeat_until_failure(&coordinator, &config, &supervisor, lease, &shutdown)
+                    .await
+                {
                     return;
                 }
             }
@@ -90,6 +97,7 @@ pub async fn registration_loop(config: WorkerConfig, shutdown: CancellationToken
 async fn heartbeat_until_failure(
     coordinator: &CoordinatorClient,
     config: &WorkerConfig,
+    supervisor: &ExecutionSupervisor,
     mut lease: CoordinatorLease,
     shutdown: &CancellationToken,
 ) -> bool {
@@ -99,7 +107,7 @@ async fn heartbeat_until_failure(
             () = shutdown.cancelled() => return true,
             () = tokio::time::sleep(delay) => {}
         }
-        match coordinator.heartbeat(config).await {
+        match coordinator.heartbeat(config, supervisor).await {
             Ok(next_lease) => lease = next_lease,
             Err(error) => {
                 warn!(?error, "worker heartbeat failed; returning to registration");
@@ -116,7 +124,11 @@ struct CoordinatorClient {
 }
 
 impl CoordinatorClient {
-    async fn register(&self, config: &WorkerConfig) -> anyhow::Result<CoordinatorLease> {
+    async fn register(
+        &self,
+        config: &WorkerConfig,
+        supervisor: &ExecutionSupervisor,
+    ) -> anyhow::Result<CoordinatorLease> {
         let probe: MountProbe = self.get(MOUNT_CHALLENGE_PATH).await?;
         let mount = mount_health(config, &probe);
         let registration = WorkerRegistration {
@@ -130,7 +142,7 @@ impl CoordinatorClient {
                 preview: false,
                 persistent_process_adoption: false,
             },
-            resources: resource_snapshot(0),
+            resources: resource_snapshot(supervisor.active_execution_count().await),
             labels: BTreeMap::new(),
             mount,
         };
@@ -138,15 +150,19 @@ impl CoordinatorClient {
         validate_lease(response.lease)
     }
 
-    async fn heartbeat(&self, config: &WorkerConfig) -> anyhow::Result<CoordinatorLease> {
+    async fn heartbeat(
+        &self,
+        config: &WorkerConfig,
+        supervisor: &ExecutionSupervisor,
+    ) -> anyhow::Result<CoordinatorLease> {
         // Fetching the probe again ensures a stale local view cannot keep a
         // worker schedulable after the coordinator changes its challenge.
         let probe: MountProbe = self.get(MOUNT_CHALLENGE_PATH).await?;
         let heartbeat = WorkerHeartbeat {
             authority: authority(config),
-            resources: resource_snapshot(0),
+            resources: resource_snapshot(supervisor.active_execution_count().await),
             mount: mount_health(config, &probe),
-            jobs: Vec::new(),
+            jobs: supervisor.inventory().await,
         };
         let response: LeaseResponse = self.post(HEARTBEAT_PATH, &heartbeat).await?;
         validate_lease(response.lease)
@@ -262,12 +278,30 @@ fn hostname() -> String {
 }
 
 fn resource_snapshot(active_execution_count: u32) -> ResourceSnapshot {
+    let load_1m = std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|value| value.split_whitespace().next()?.parse().ok())
+        .unwrap_or(0.0);
+    let available_memory_bytes = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|value| {
+            value.lines().find_map(|line| {
+                let kib = line
+                    .strip_prefix("MemAvailable:")?
+                    .split_whitespace()
+                    .next()?
+                    .parse::<u64>()
+                    .ok()?;
+                kib.checked_mul(1024)
+            })
+        })
+        .unwrap_or(0);
     ResourceSnapshot {
         cpu_count: std::thread::available_parallelism()
             .map(|count| count.get().try_into().unwrap_or(u32::MAX))
             .unwrap_or(1),
-        load_1m: 0.0,
-        available_memory_bytes: 0,
+        load_1m,
+        available_memory_bytes,
         active_execution_count,
     }
 }

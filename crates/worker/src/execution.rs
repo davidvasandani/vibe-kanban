@@ -132,6 +132,8 @@ impl ExecutionSupervisor {
                 }
             };
             let journal = EventJournal::recover(&summary, DEFAULT_JOURNAL_CAPACITY, evidence)?;
+            summary.last_sequence = journal.last_sequence();
+            recovery_store.save(&summary).await?;
             supervisor.jobs.write().await.insert(
                 summary.execution_id,
                 Arc::new(WorkerJob {
@@ -241,6 +243,17 @@ impl ExecutionSupervisor {
         }
         summaries.sort_by_key(|summary| summary.execution_id);
         summaries
+    }
+
+    pub async fn active_execution_count(&self) -> u32 {
+        self.jobs
+            .read()
+            .await
+            .values()
+            .filter(|job| job.state.try_read().is_ok_and(|state| !state.is_terminal()))
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX)
     }
 
     pub async fn acknowledge(
