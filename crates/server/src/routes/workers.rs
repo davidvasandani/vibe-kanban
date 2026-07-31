@@ -1,10 +1,12 @@
 use axum::{
     Json, Router,
+    body::{Body, to_bytes},
     extract::{Path, Request, State},
     middleware::{Next, from_fn_with_state},
     response::{IntoResponse, Json as ResponseJson, Response},
     routing::{get, patch, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
 use cluster_protocol::{CoordinatorLease, MountProbe, WorkerHeartbeat, WorkerRegistration};
 use db::models::worker_node::WorkerNode;
@@ -152,15 +154,36 @@ async fn require_worker_signature(
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
+    let (parts, body) = request.into_parts();
+    let body = to_bytes(body, 4 * 1024 * 1024)
+        .await
+        .map_err(|_| ApiError::Unauthorized)?;
+    let computed_digest = BASE64_STANDARD.encode(Sha256::digest(&body));
+    let supplied_digest = parts
+        .headers
+        .get("x-vk-content-sha256")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(ApiError::Unauthorized)?;
+    if supplied_digest != computed_digest {
+        return Err(ApiError::Unauthorized);
+    }
     deployment
         .trusted_key_auth()
-        .verify_request_signature(request.headers(), request.method(), request.uri().path())
+        .verify_request_signature_with_content_digest(
+            &parts.headers,
+            &parts.method,
+            parts.uri.path(),
+            &computed_digest,
+        )
         .await
         .map_err(|error| {
             tracing::warn!(?error, "rejected worker request signature");
             ApiError::Unauthorized
         })?;
-    Ok(next.run(request).await.into_response())
+    Ok(next
+        .run(Request::from_parts(parts, Body::from(body)))
+        .await
+        .into_response())
 }
 
 fn registry_error(error: WorkerRegistryError) -> ApiError {

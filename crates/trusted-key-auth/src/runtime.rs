@@ -12,6 +12,7 @@ use crate::{
     error::TrustedKeyAuthError,
     request_signature::{
         SignatureVerificationError, VerifiedRequestSignature, verify_trusted_ed25519_signature,
+        verify_trusted_ed25519_signature_with_content_digest,
     },
     trusted_keys::{
         TrustedRelayClient, list_trusted_clients, remove_trusted_client, upsert_trusted_client,
@@ -161,6 +162,23 @@ impl TrustedKeyAuthRuntime {
         path: &str,
     ) -> Result<VerifiedRequestSignature, SignatureVerificationError> {
         verify_trusted_ed25519_signature(headers, method, path, &self.trusted_keys_path).await
+    }
+
+    pub async fn verify_request_signature_with_content_digest(
+        &self,
+        headers: &http::HeaderMap,
+        method: &http::Method,
+        path: &str,
+        content_digest: &str,
+    ) -> Result<VerifiedRequestSignature, SignatureVerificationError> {
+        verify_trusted_ed25519_signature_with_content_digest(
+            headers,
+            method,
+            path,
+            content_digest,
+            &self.trusted_keys_path,
+        )
+        .await
     }
 }
 

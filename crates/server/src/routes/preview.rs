@@ -273,13 +273,19 @@ async fn proxy_cluster_preview(
             body_base64: String::new(),
         };
         return match client.preview_websocket(job.worker_node_id, &payload).await {
-            Ok(upstream) => ws
-                .on_upgrade(move |browser| async move {
+            Ok((upstream, selected_protocol)) => {
+                let ws = if let Some(protocol) = selected_protocol {
+                    ws.protocols([protocol])
+                } else {
+                    ws
+                };
+                ws.on_upgrade(move |browser| async move {
                     if let Err(error) = bridge_axum_ws(browser, upstream).await {
                         tracing::debug!("cluster preview WebSocket closed: {error}");
                     }
                 })
-                .into_response(),
+                .into_response()
+            }
             Err(error) => {
                 tracing::warn!(execution_id = %metadata.execution_id, "cluster preview WebSocket failed: {error}");
                 (StatusCode::BAD_GATEWAY, "Preview WebSocket unavailable").into_response()

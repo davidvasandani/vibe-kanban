@@ -170,9 +170,12 @@ impl WorkerClient {
         worker_node_id: Uuid,
         request: &PreviewHttpRequest,
     ) -> Result<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        (
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Option<String>,
+        ),
         WorkerClientError,
     > {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -202,10 +205,15 @@ impl WorkerClient {
         for (name, value) in signed.headers() {
             ws_request.headers_mut().insert(name, value.clone());
         }
-        let (stream, _) = tokio_tungstenite::connect_async(ws_request)
+        let (stream, response) = tokio_tungstenite::connect_async(ws_request)
             .await
             .map_err(|error| WorkerClientError::WebSocket(error.to_string()))?;
-        Ok(stream)
+        let selected_protocol = response
+            .headers()
+            .get("sec-websocket-protocol")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        Ok((stream, selected_protocol))
     }
 
     pub async fn terminal_output(

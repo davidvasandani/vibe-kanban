@@ -10,6 +10,7 @@ use cluster_protocol::{
 use ed25519_dalek::{Signer, SigningKey};
 use reqwest::{Client, Method, RequestBuilder};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -169,7 +170,7 @@ impl CoordinatorClient {
     }
 
     async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> anyhow::Result<T> {
-        let request = self.signed(self.client.get(self.url(path)), Method::GET, path);
+        let request = self.signed(self.client.get(self.url(path)), Method::GET, path, &[]);
         decode_response(request.send().await?, path).await
     }
 
@@ -178,16 +179,28 @@ impl CoordinatorClient {
         path: &str,
         payload: &impl serde::Serialize,
     ) -> anyhow::Result<T> {
-        let request = self.signed(self.client.post(self.url(path)), Method::POST, path);
-        decode_response(request.json(payload).send().await?, path).await
+        let body = serde_json::to_vec(payload)?;
+        let request = self
+            .signed(self.client.post(self.url(path)), Method::POST, path, &body)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
+        decode_response(request.send().await?, path).await
     }
 
-    fn signed(&self, request: RequestBuilder, method: Method, path: &str) -> RequestBuilder {
+    fn signed(
+        &self,
+        request: RequestBuilder,
+        method: Method,
+        path: &str,
+        body: &[u8],
+    ) -> RequestBuilder {
         let timestamp = Utc::now().timestamp();
-        let message = signed_message(timestamp, &method, path);
+        let content_digest = BASE64_STANDARD.encode(Sha256::digest(body));
+        let message = signed_message(timestamp, &method, path, &content_digest);
         let signature = self.signing_key.sign(message.as_bytes());
         request
             .header("x-vk-timestamp", timestamp.to_string())
+            .header("x-vk-content-sha256", content_digest)
             .header(
                 "x-vk-signature",
                 BASE64_STANDARD.encode(signature.to_bytes()),
@@ -234,8 +247,8 @@ async fn load_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> 
     Ok(SigningKey::from_bytes(&seed))
 }
 
-fn signed_message(timestamp: i64, method: &Method, path: &str) -> String {
-    format!("{timestamp}.{}.{path}", method.as_str())
+fn signed_message(timestamp: i64, method: &Method, path: &str, content_digest: &str) -> String {
+    format!("{timestamp}.{}.{path}.{content_digest}", method.as_str())
 }
 
 fn authority(config: &WorkerConfig) -> RequestAuthority {
@@ -342,9 +355,13 @@ mod tests {
         let timestamp = 1_700_000_000;
         let path = "/api/workers/register";
         let key = SigningKey::from_bytes(&[9_u8; 32]);
-        let message = signed_message(timestamp, &Method::POST, path);
+        let digest = BASE64_STANDARD.encode(Sha256::digest([]));
+        let message = signed_message(timestamp, &Method::POST, path, &digest);
         let signature = key.sign(message.as_bytes());
-        assert_eq!(message, "1700000000.POST./api/workers/register");
+        assert_eq!(
+            message,
+            format!("1700000000.POST./api/workers/register.{digest}")
+        );
         key.verifying_key()
             .verify(message.as_bytes(), &signature)
             .unwrap();
