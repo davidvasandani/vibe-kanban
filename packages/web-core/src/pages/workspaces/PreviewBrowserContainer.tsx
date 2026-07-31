@@ -313,6 +313,14 @@ export function PreviewBrowserContainer({
       `http://${hostToken}.localhost:${previewProxyPort}${path}`
     );
     proxyUrl.searchParams.set('_refresh', String(previewRefreshKey));
+    if (primaryDevServer) {
+      proxyUrl.searchParams.set('_vk_workspace', workspaceId);
+      proxyUrl.searchParams.set('_vk_execution', primaryDevServer.id);
+      proxyUrl.searchParams.set(
+        '_vk_generation',
+        String(new Date(primaryDevServer.started_at).getTime())
+      );
+    }
 
     return proxyUrl.toString();
   }, [
@@ -322,6 +330,8 @@ export function PreviewBrowserContainer({
     isLoopbackPreview,
     previewProxyPort,
     previewRefreshKey,
+    primaryDevServer,
+    workspaceId,
   ]);
 
   const urlInputRef = useRef<HTMLInputElement>(null);

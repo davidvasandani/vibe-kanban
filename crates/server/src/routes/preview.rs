@@ -1,9 +1,16 @@
 use axum::{
     Router,
+    body::{Body, to_bytes},
     extract::{Path, Request, State, ws::rejection::WebSocketUpgradeRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::any,
+};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use chrono::Utc;
+use cluster_protocol::{PROTOCOL_VERSION, PreviewHttpRequest, RequestAuthority};
+use db::models::{
+    execution_process::ExecutionProcess, execution_worker_job::ExecutionWorkerJob, session::Session,
 };
 use deployment::Deployment;
 use ws_bridge::{bridge_axum_ws, connect_upstream_ws};
@@ -113,6 +120,9 @@ async fn subdomain_proxy_request(
     State(deployment): State<DeploymentImpl>,
     request: Request,
 ) -> Response {
+    if let Some(metadata) = preview_metadata(&request) {
+        return proxy_cluster_preview(&deployment, request, metadata).await;
+    }
     let Some(server_addr) = deployment.client_info().get_server_addr() else {
         return (
             StatusCode::BAD_REQUEST,
@@ -136,4 +146,152 @@ async fn subdomain_proxy_request(
         request,
     )
     .await
+}
+
+struct ClusterPreviewMetadata {
+    workspace_id: uuid::Uuid,
+    execution_id: uuid::Uuid,
+    generation: u64,
+}
+
+fn preview_metadata(request: &Request) -> Option<ClusterPreviewMetadata> {
+    let values = url::form_urlencoded::parse(request.uri().query()?.as_bytes())
+        .into_owned()
+        .collect::<std::collections::HashMap<_, _>>();
+    Some(ClusterPreviewMetadata {
+        workspace_id: values.get("_vk_workspace")?.parse().ok()?,
+        execution_id: values.get("_vk_execution")?.parse().ok()?,
+        generation: values.get("_vk_generation")?.parse().ok()?,
+    })
+}
+
+async fn proxy_cluster_preview(
+    deployment: &DeploymentImpl,
+    request: Request,
+    metadata: ClusterPreviewMetadata,
+) -> Response {
+    let Some(client) = deployment.worker_client() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Worker client unavailable").into_response();
+    };
+    let Ok(Some(process)) =
+        ExecutionProcess::find_by_id(&deployment.db().pool, metadata.execution_id).await
+    else {
+        return (StatusCode::GONE, "Preview execution is no longer available").into_response();
+    };
+    let Ok(Some(session)) = Session::find_by_id(&deployment.db().pool, process.session_id).await
+    else {
+        return (StatusCode::GONE, "Preview session is no longer available").into_response();
+    };
+    if session.workspace_id != metadata.workspace_id
+        || process.started_at.timestamp_millis() as u64 != metadata.generation
+    {
+        return (StatusCode::GONE, "Stale preview generation").into_response();
+    }
+    let Ok(Some(job)) =
+        ExecutionWorkerJob::find_by_execution_id(&deployment.db().pool, metadata.execution_id)
+            .await
+    else {
+        return (StatusCode::GONE, "Preview worker job is unavailable").into_response();
+    };
+    let Some(coordinator_id) = deployment.cluster_config().coordinator_id else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Coordinator identity unavailable",
+        )
+            .into_response();
+    };
+    let host = request
+        .headers()
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let Some(port) = host
+        .split('.')
+        .next()
+        .and_then(|label| label.split("--").next())
+        .and_then(|value| value.parse::<u16>().ok())
+    else {
+        return (StatusCode::BAD_REQUEST, "Invalid preview port").into_response();
+    };
+    if request.headers().contains_key("upgrade") {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "Cluster preview WebSocket tunnel unavailable",
+        )
+            .into_response();
+    }
+    let (parts, body) = request.into_parts();
+    let query = parts
+        .uri
+        .query()
+        .map(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .filter(|(key, _)| !key.starts_with("_vk_"))
+                .fold(
+                    url::form_urlencoded::Serializer::new(String::new()),
+                    |mut serializer, (key, value)| {
+                        serializer.append_pair(&key, &value);
+                        serializer
+                    },
+                )
+                .finish()
+        })
+        .unwrap_or_default();
+    let path_and_query = if query.is_empty() {
+        parts.uri.path().to_string()
+    } else {
+        format!("{}?{query}", parts.uri.path())
+    };
+    let body = match to_bytes(body, 50 * 1024 * 1024).await {
+        Ok(body) => body,
+        Err(_) => {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "Preview request too large").into_response();
+        }
+    };
+    let payload = PreviewHttpRequest {
+        authority: RequestAuthority {
+            protocol_version: PROTOCOL_VERSION,
+            coordinator_id,
+            worker_node_id: job.worker_node_id,
+            correlation_id: metadata.execution_id,
+            issued_at: Utc::now(),
+            nonce: uuid::Uuid::new_v4().to_string(),
+        },
+        workspace_id: metadata.workspace_id,
+        execution_id: metadata.execution_id,
+        worker_job_id: job.worker_job_id,
+        generation: metadata.generation,
+        port,
+        method: parts.method.to_string(),
+        path_and_query,
+        headers: parts
+            .headers
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.to_string(), value.to_string()))
+            })
+            .collect(),
+        body_base64: BASE64_STANDARD.encode(body),
+    };
+    match client.proxy_preview(job.worker_node_id, &payload).await {
+        Ok(upstream) => {
+            let mut response = Response::builder().status(upstream.status);
+            for (name, value) in upstream.headers {
+                response = response.header(name, value);
+            }
+            match BASE64_STANDARD.decode(upstream.body_base64) {
+                Ok(body) => response
+                    .body(Body::from(body))
+                    .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response()),
+                Err(_) => (StatusCode::BAD_GATEWAY, "Invalid preview response").into_response(),
+            }
+        }
+        Err(error) => {
+            tracing::warn!(execution_id = %metadata.execution_id, "cluster preview proxy failed: {error}");
+            (StatusCode::BAD_GATEWAY, "Preview upstream unavailable").into_response()
+        }
+    }
 }
