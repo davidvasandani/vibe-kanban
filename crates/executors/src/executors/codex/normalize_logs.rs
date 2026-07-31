@@ -90,11 +90,21 @@ struct CommandState {
     exit_code: Option<i32>,
     awaiting_approval: bool,
     call_id: String,
+    repeat_count: usize,
 }
 
 impl ToNormalizedEntry for CommandState {
     fn to_normalized_entry(&self) -> NormalizedEntry {
-        let content = self.command.to_string();
+        let successful_count = if matches!(self.status, ToolStatus::Success) {
+            self.repeat_count
+        } else {
+            self.repeat_count.saturating_sub(1)
+        };
+        let content = if successful_count > 1 {
+            format!("{} {}", self.command, repeat_ticks(successful_count))
+        } else {
+            self.command.to_string()
+        };
 
         NormalizedEntry {
             timestamp: None,
@@ -383,6 +393,16 @@ struct LogState {
     plans: HashMap<String, PlanState>,
     review: Option<ReviewState>,
     model_params: ModelParamsState,
+    repeated_command: Option<RepeatedCommand>,
+}
+
+struct RepeatedCommand {
+    entry_index: usize,
+    command: String,
+    count: usize,
+    latest_call_id: String,
+    latest_completed: bool,
+    last_successful_entry: Option<NormalizedEntry>,
 }
 
 struct ModelParamsState {
@@ -415,6 +435,176 @@ impl LogState {
                 model: None,
                 reasoning_effort: None,
             },
+            repeated_command: None,
+        }
+    }
+
+    fn start_command(
+        &mut self,
+        call_id: String,
+        command: String,
+        msg_store: &Arc<MsgStore>,
+        entry_index: &EntryIndexProvider,
+    ) {
+        if let Some(mut command_state) = self.commands.remove(&call_id) {
+            command_state.command = command;
+            command_state.status = ToolStatus::Created;
+            command_state.awaiting_approval = false;
+            command_state.repeat_count = command_state.repeat_count.max(1);
+            if let Some(index) = command_state.index {
+                if is_repeatable_review_command(&command_state.command) {
+                    let same_repeated_call = self
+                        .repeated_command
+                        .as_ref()
+                        .filter(|repeated| {
+                            repeated.entry_index == index && repeated.latest_call_id == call_id
+                        })
+                        .map(|repeated| repeated.command.clone());
+                    if let Some(display_command) = same_repeated_call {
+                        command_state.command = display_command;
+                    } else if self.repeated_command.is_none() {
+                        self.repeated_command = Some(RepeatedCommand {
+                            entry_index: index,
+                            command: command_state.command.clone(),
+                            count: command_state.repeat_count,
+                            latest_call_id: call_id.clone(),
+                            latest_completed: false,
+                            last_successful_entry: None,
+                        });
+                    }
+                }
+                replace_normalized_entry(msg_store, index, command_state.to_normalized_entry());
+                self.commands.insert(call_id, command_state);
+                return;
+            }
+
+            let (index, repeat_count, is_new) =
+                self.allocate_command_entry(&call_id, &command_state.command, entry_index);
+            command_state.index = Some(index);
+            command_state.repeat_count = repeat_count;
+            if !is_new && let Some(repeated) = self.repeated_command.as_ref() {
+                command_state.command = repeated.command.clone();
+            }
+            upsert_normalized_entry(
+                msg_store,
+                index,
+                command_state.to_normalized_entry(),
+                is_new,
+            );
+            self.commands.insert(call_id, command_state);
+            return;
+        }
+
+        let (index, repeat_count, is_new) =
+            self.allocate_command_entry(&call_id, &command, entry_index);
+        let command = if is_new {
+            command
+        } else {
+            self.repeated_command
+                .as_ref()
+                .map(|repeated| repeated.command.clone())
+                .unwrap_or(command)
+        };
+
+        let command_state = CommandState {
+            index: Some(index),
+            command,
+            stdout: String::new(),
+            stderr: String::new(),
+            formatted_output: None,
+            status: ToolStatus::Created,
+            exit_code: None,
+            awaiting_approval: false,
+            call_id: call_id.clone(),
+            repeat_count,
+        };
+        upsert_normalized_entry(
+            msg_store,
+            index,
+            command_state.to_normalized_entry(),
+            is_new,
+        );
+        self.commands.insert(call_id, command_state);
+    }
+
+    fn allocate_command_entry(
+        &mut self,
+        call_id: &str,
+        command: &str,
+        entry_index: &EntryIndexProvider,
+    ) -> (usize, usize, bool) {
+        if is_repeatable_review_command(command) {
+            if let Some(repeated) = self.repeated_command.as_mut()
+                && repeated.latest_completed
+                && entry_index.current() == repeated.entry_index + 1
+            {
+                repeated.count += 1;
+                repeated.latest_call_id = call_id.to_string();
+                repeated.latest_completed = false;
+                (repeated.entry_index, repeated.count, false)
+            } else {
+                let index = entry_index.next();
+                self.repeated_command = Some(RepeatedCommand {
+                    entry_index: index,
+                    command: command.to_string(),
+                    count: 1,
+                    latest_call_id: call_id.to_string(),
+                    latest_completed: false,
+                    last_successful_entry: None,
+                });
+                (index, 1, true)
+            }
+        } else {
+            (entry_index.next(), 1, true)
+        }
+    }
+
+    fn complete_command(
+        &mut self,
+        call_id: &str,
+        status: ToolStatus,
+        exit_code: Option<i32>,
+        formatted_output: Option<String>,
+        msg_store: &Arc<MsgStore>,
+    ) {
+        let Some(mut command_state) = self.commands.remove(call_id) else {
+            return;
+        };
+        let succeeded = matches!(status, ToolStatus::Success);
+        command_state.formatted_output = formatted_output;
+        command_state.exit_code = exit_code;
+        command_state.awaiting_approval = false;
+        command_state.status = status;
+        let mut failed_index_is_new = false;
+
+        if is_repeatable_review_command(&command_state.command)
+            && let Some(repeated) = self.repeated_command.as_mut()
+            && repeated.entry_index == command_state.index.unwrap_or(usize::MAX)
+            && repeated.latest_call_id == call_id
+        {
+            repeated.latest_completed = succeeded;
+            if succeeded {
+                repeated.last_successful_entry = Some(command_state.to_normalized_entry());
+            } else if repeated.count > 1
+                && let Some(successful_entry) = repeated.last_successful_entry.take()
+            {
+                replace_normalized_entry(msg_store, repeated.entry_index, successful_entry);
+                let failed_index = self.entry_index.next();
+                command_state.index = Some(failed_index);
+                command_state.repeat_count = 1;
+                repeated.entry_index = failed_index;
+                repeated.count = 1;
+                failed_index_is_new = true;
+            }
+        }
+
+        if let Some(index) = command_state.index {
+            upsert_normalized_entry(
+                msg_store,
+                index,
+                command_state.to_normalized_entry(),
+                failed_index_is_new,
+            );
         }
     }
 
@@ -493,6 +683,17 @@ impl LogState {
         clear_awaiting: bool,
         msg_store: &Arc<MsgStore>,
     ) {
+        if clear_awaiting
+            && matches!(
+                status,
+                ToolStatus::Failed | ToolStatus::Denied { .. } | ToolStatus::TimedOut
+            )
+            && self.commands.contains_key(call_id)
+        {
+            self.complete_command(call_id, status, None, None, msg_store);
+            return;
+        }
+
         if let Some(cmd) = self.commands.get_mut(call_id) {
             cmd.status = status.clone();
             if clear_awaiting {
@@ -550,9 +751,31 @@ impl LogState {
             .entry(call_id.clone())
             .or_insert_with(|| CommandState {
                 call_id,
+                repeat_count: 1,
                 ..Default::default()
             })
     }
+}
+
+const MAX_INLINE_REPEAT_TICKS: usize = 8;
+
+fn repeat_ticks(count: usize) -> String {
+    let repeat_count = count.saturating_sub(1);
+    if repeat_count <= MAX_INLINE_REPEAT_TICKS {
+        "✓".repeat(repeat_count)
+    } else {
+        format!("✓ ×{repeat_count}")
+    }
+}
+
+fn is_repeatable_review_command(command: &str) -> bool {
+    let Some(parts) = shlex::split(unwrap_shell_command(command)) else {
+        return false;
+    };
+    parts.len() == 3
+        && parts[0].rsplit('/').next() == Some("codex")
+        && parts[1] == "review"
+        && parts[2] == "--uncommitted"
 }
 
 enum UpdateMode {
@@ -910,17 +1133,7 @@ fn handle_direct_item_started(
             state.plans.insert(id, plan_state);
         }
         AppThreadItem::CommandExecution { id, command, .. } => {
-            let mut command_state = state.commands.remove(&id).unwrap_or_default();
-            command_state.command = command;
-            command_state.status = ToolStatus::Created;
-            command_state.awaiting_approval = false;
-            command_state.call_id = id.clone();
-            let index = command_state.index.unwrap_or_else(|| {
-                add_normalized_entry(msg_store, entry_index, command_state.to_normalized_entry())
-            });
-            command_state.index = Some(index);
-            replace_normalized_entry(msg_store, index, command_state.to_normalized_entry());
-            state.commands.insert(id, command_state);
+            state.start_command(id, command, msg_store, entry_index);
         }
         AppThreadItem::FileChange { id, changes, .. } => {
             let normalized = normalize_app_file_changes(worktree_path, &changes);
@@ -1069,15 +1282,13 @@ fn handle_direct_item_completed(
             status,
             ..
         } => {
-            if let Some(mut command_state) = state.commands.remove(&id) {
-                command_state.formatted_output = aggregated_output;
-                command_state.exit_code = exit_code;
-                command_state.awaiting_approval = false;
-                command_state.status = app_command_status_to_tool_status(&status);
-                if let Some(index) = command_state.index {
-                    replace_normalized_entry(msg_store, index, command_state.to_normalized_entry());
-                }
-            }
+            state.complete_command(
+                &id,
+                app_command_status_to_tool_status(&status),
+                exit_code,
+                aggregated_output,
+                msg_store,
+            );
         }
         AppThreadItem::FileChange { id, status, .. } => {
             if let Some(patch_state) = state.patches.remove(&id) {
@@ -1236,26 +1447,28 @@ fn handle_direct_request(
         ServerRequest::CommandExecutionRequestApproval { params, .. } => {
             let call_id = params.item_id;
             let approval_id = params.approval_id.unwrap_or_default();
-            let command_state = state.command_state(call_id.clone());
-            if let Some(command) = params.command.filter(|command| !command.is_empty()) {
-                command_state.command = command;
-            } else if command_state.command.is_empty() {
-                command_state.command = params
-                    .reason
-                    .filter(|reason| !reason.is_empty())
-                    .unwrap_or_else(|| "command execution".to_string());
-            }
-            command_state.awaiting_approval = true;
-            command_state.status = ToolStatus::PendingApproval { approval_id };
-            if let Some(index) = command_state.index {
-                replace_normalized_entry(msg_store, index, command_state.to_normalized_entry());
-            } else {
-                let index = add_normalized_entry(
-                    msg_store,
-                    entry_index,
-                    command_state.to_normalized_entry(),
-                );
-                command_state.index = Some(index);
+            let existing_command = state
+                .commands
+                .get(&call_id)
+                .map(|command_state| command_state.command.clone())
+                .filter(|command| !command.is_empty());
+            let command = params
+                .command
+                .filter(|command| !command.is_empty())
+                .or(existing_command)
+                .unwrap_or_else(|| {
+                    params
+                        .reason
+                        .filter(|reason| !reason.is_empty())
+                        .unwrap_or_else(|| "command execution".to_string())
+                });
+            state.start_command(call_id.clone(), command, msg_store, entry_index);
+            if let Some(command_state) = state.commands.get_mut(&call_id) {
+                command_state.awaiting_approval = true;
+                command_state.status = ToolStatus::PendingApproval { approval_id };
+                if let Some(index) = command_state.index {
+                    replace_normalized_entry(msg_store, index, command_state.to_normalized_entry());
+                }
             }
             true
         }
@@ -1662,26 +1875,23 @@ pub fn normalize_logs(
                         command.join(" ")
                     };
 
-                    let command_state = state.commands.entry(call_id.clone()).or_default();
-
-                    if command_state.command.is_empty() {
-                        command_state.command = command_text;
-                    }
-                    command_state.awaiting_approval = true;
-                    command_state.call_id = call_id.clone();
-                    if let Some(index) = command_state.index {
-                        replace_normalized_entry(
-                            &msg_store,
-                            index,
-                            command_state.to_normalized_entry(),
-                        );
-                    } else {
-                        let index = add_normalized_entry(
-                            &msg_store,
-                            &entry_index,
-                            command_state.to_normalized_entry(),
-                        );
-                        command_state.index = Some(index);
+                    let pending_status = state.commands.get(&call_id).and_then(|command_state| {
+                        matches!(command_state.status, ToolStatus::PendingApproval { .. })
+                            .then(|| command_state.status.clone())
+                    });
+                    state.start_command(call_id.clone(), command_text, &msg_store, &entry_index);
+                    if let Some(command_state) = state.commands.get_mut(&call_id) {
+                        command_state.awaiting_approval = true;
+                        if let Some(status) = pending_status {
+                            command_state.status = status;
+                        }
+                        if let Some(index) = command_state.index {
+                            replace_normalized_entry(
+                                &msg_store,
+                                index,
+                                command_state.to_normalized_entry(),
+                            );
+                        }
                     }
                 }
                 EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
@@ -1757,27 +1967,7 @@ pub fn normalize_logs(
                     if command_text.is_empty() {
                         continue;
                     }
-                    state.commands.insert(
-                        call_id.clone(),
-                        CommandState {
-                            index: None,
-                            command: command_text,
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            formatted_output: None,
-                            status: ToolStatus::Created,
-                            exit_code: None,
-                            awaiting_approval: false,
-                            call_id: call_id.clone(),
-                        },
-                    );
-                    let command_state = state.commands.get_mut(&call_id).unwrap();
-                    let index = add_normalized_entry(
-                        &msg_store,
-                        &entry_index,
-                        command_state.to_normalized_entry(),
-                    );
-                    command_state.index = Some(index)
+                    state.start_command(call_id, command_text, &msg_store, &entry_index);
                 }
                 EventMsg::ExecCommandOutputDelta(ExecCommandOutputDeltaEvent {
                     call_id,
@@ -1821,25 +2011,18 @@ pub fn normalize_logs(
                     process_id: _,
                     ..
                 }) => {
-                    if let Some(mut command_state) = state.commands.remove(&call_id) {
-                        command_state.formatted_output = Some(formatted_output);
-                        command_state.exit_code = Some(exit_code);
-                        command_state.awaiting_approval = false;
-                        command_state.status = if exit_code == 0 {
-                            ToolStatus::Success
-                        } else {
-                            ToolStatus::Failed
-                        };
-                        let Some(index) = command_state.index else {
-                            tracing::error!("missing entry index for existing command state");
-                            continue;
-                        };
-                        replace_normalized_entry(
-                            &msg_store,
-                            index,
-                            command_state.to_normalized_entry(),
-                        );
-                    }
+                    let status = if exit_code == 0 {
+                        ToolStatus::Success
+                    } else {
+                        ToolStatus::Failed
+                    };
+                    state.complete_command(
+                        &call_id,
+                        status,
+                        Some(exit_code),
+                        Some(formatted_output),
+                        &msg_store,
+                    );
                 }
                 EventMsg::StreamError(StreamErrorEvent {
                     message,
@@ -2728,6 +2911,153 @@ mod tests {
         latest_normalized_entries(&msg_store)
     }
 
+    async fn normalize_lines_with_history(
+        lines: &[String],
+    ) -> (Vec<NormalizedEntry>, Vec<(String, usize)>) {
+        let msg_store = Arc::new(MsgStore::new());
+        for line in lines {
+            msg_store.push_stdout(format!("{line}\n"));
+        }
+        msg_store.push_finished();
+
+        for handle in normalize_logs(msg_store.clone(), Path::new("/tmp/test-worktree")) {
+            handle.await.unwrap();
+        }
+
+        let operations = msg_store
+            .get_history()
+            .into_iter()
+            .filter_map(|msg| {
+                let LogMsg::JsonPatch(patch) = msg else {
+                    return None;
+                };
+                let value = serde_json::to_value(patch).ok()?;
+                let operation = value.as_array()?.first()?;
+                let op = operation.get("op")?.as_str()?.to_string();
+                let index = operation
+                    .get("path")?
+                    .as_str()?
+                    .strip_prefix("/entries/")?
+                    .parse()
+                    .ok()?;
+                Some((op, index))
+            })
+            .collect();
+
+        (latest_normalized_entries(&msg_store), operations)
+    }
+
+    fn direct_command_item(id: &str, command: &str, status: &str, exit_code: Option<i32>) -> Value {
+        json!({
+            "type": "commandExecution",
+            "id": id,
+            "command": command,
+            "cwd": "/tmp/test-worktree",
+            "processId": null,
+            "source": "agent",
+            "status": status,
+            "commandActions": [],
+            "aggregatedOutput": "",
+            "exitCode": exit_code,
+            "durationMs": 1
+        })
+    }
+
+    fn direct_command_started(id: &str, command: &str) -> String {
+        let line = json!({
+            "jsonrpc": "2.0",
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "startedAtMs": 0,
+                "item": direct_command_item(id, command, "inProgress", None)
+            }
+        })
+        .to_string();
+        serde_json::from_str::<ServerNotification>(&line).unwrap();
+        line
+    }
+
+    fn direct_command_completed(id: &str, command: &str, succeeded: bool) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "completedAtMs": 1,
+                "item": direct_command_item(
+                    id,
+                    command,
+                    if succeeded { "completed" } else { "failed" },
+                    Some(if succeeded { 0 } else { 1 })
+                )
+            }
+        })
+        .to_string()
+    }
+
+    fn legacy_command_started(id: &str, command: &str) -> String {
+        json!({
+            "method": "codex/event/exec_command_begin",
+            "params": {
+                "msg": {
+                    "type": "exec_command_begin",
+                    "call_id": id,
+                    "turn_id": "turn-1",
+                    "command": [command],
+                    "cwd": "file:///tmp/test-worktree",
+                    "parsed_cmd": []
+                }
+            }
+        })
+        .to_string()
+    }
+
+    fn legacy_command_approval_requested(id: &str, command: &str) -> String {
+        json!({
+            "method": "codex/event/exec_approval_request",
+            "params": {
+                "msg": {
+                    "type": "exec_approval_request",
+                    "call_id": id,
+                    "turn_id": "turn-1",
+                    "started_at_ms": 0,
+                    "command": [command],
+                    "cwd": "/tmp/test-worktree",
+                    "reason": null,
+                    "parsed_cmd": []
+                }
+            }
+        })
+        .to_string()
+    }
+
+    fn legacy_command_completed(id: &str, command: &str, succeeded: bool) -> String {
+        json!({
+            "method": "codex/event/exec_command_end",
+            "params": {
+                "msg": {
+                    "type": "exec_command_end",
+                    "call_id": id,
+                    "turn_id": "turn-1",
+                    "command": [command],
+                    "cwd": "file:///tmp/test-worktree",
+                    "parsed_cmd": [],
+                    "stdout": "",
+                    "stderr": "",
+                    "aggregated_output": "",
+                    "exit_code": if succeeded { 0 } else { 1 },
+                    "duration": {"secs": 0, "nanos": 1},
+                    "formatted_output": "",
+                    "status": if succeeded { "completed" } else { "failed" }
+                }
+            }
+        })
+        .to_string()
+    }
+
     fn tool_use<'a>(entries: &'a [NormalizedEntry], tool_name: &str) -> &'a NormalizedEntry {
         entries
             .iter()
@@ -2761,6 +3091,309 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    #[test]
+    fn recognizes_only_the_reported_review_command_and_bounds_ticks() {
+        assert!(is_repeatable_review_command(
+            "bash -lc '/opt/tools/codex review --uncommitted'"
+        ));
+        assert!(!is_repeatable_review_command("codex review --base main"));
+        assert!(!is_repeatable_review_command("codex exec --uncommitted"));
+        assert_eq!(repeat_ticks(1), "");
+        assert_eq!(repeat_ticks(9), "✓✓✓✓✓✓✓✓");
+        assert_eq!(repeat_ticks(10), "✓ ×9");
+        assert_eq!(repeat_ticks(usize::MAX), format!("✓ ×{}", usize::MAX - 1));
+
+        let mut in_flight = CommandState {
+            command: "codex review --uncommitted".to_string(),
+            status: ToolStatus::Created,
+            repeat_count: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            in_flight.to_normalized_entry().content,
+            "codex review --uncommitted ✓"
+        );
+        in_flight.status = ToolStatus::Success;
+        assert_eq!(
+            in_flight.to_normalized_entry().content,
+            "codex review --uncommitted ✓✓"
+        );
+    }
+
+    #[tokio::test]
+    async fn collapses_adjacent_direct_review_commands_into_one_entry() {
+        let command = "codex review --uncommitted";
+        let mut lines = Vec::new();
+        for (id, reported_command) in [
+            ("review-1", command),
+            (
+                "review-2",
+                "bash -lc '/opt/tools/codex review --uncommitted'",
+            ),
+            ("review-3", command),
+        ] {
+            lines.push(direct_command_started(id, reported_command));
+            lines.push(direct_command_completed(id, reported_command, true));
+        }
+
+        let (entries, operations) = normalize_lines_with_history(&lines).await;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, format!("{command} ✓✓"));
+        assert!(matches!(
+            entries[0].entry_type,
+            NormalizedEntryType::ToolUse {
+                status: ToolStatus::Success,
+                ..
+            }
+        ));
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|(operation, _)| operation == "add")
+                .count(),
+            1
+        );
+        assert!(operations.iter().all(|(_, index)| *index == 0));
+    }
+
+    #[tokio::test]
+    async fn overlapping_review_commands_complete_their_distinct_rows() {
+        let command = "codex review --uncommitted";
+        let entries = normalize_lines(&[
+            direct_command_started("review-1", command),
+            direct_command_started("review-2", command),
+            direct_command_started("review-1", command),
+            direct_command_completed("review-2", command, true),
+            direct_command_completed("review-1", command, true),
+            direct_command_started("review-3", command),
+            direct_command_completed("review-3", command, true),
+        ])
+        .await;
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| matches!(
+            entry.entry_type,
+            NormalizedEntryType::ToolUse {
+                status: ToolStatus::Success,
+                ..
+            }
+        )));
+        assert_eq!(entries[1].content, format!("{command} ✓"));
+    }
+
+    #[tokio::test]
+    async fn direct_review_repeat_marker_is_bounded() {
+        let command = "codex review --uncommitted";
+        let mut lines = Vec::new();
+        for n in 0..10 {
+            let id = format!("review-{n}");
+            lines.push(direct_command_started(&id, command));
+            lines.push(direct_command_completed(&id, command, true));
+        }
+
+        let entries = normalize_lines(&lines).await;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, format!("{command} ✓ ×9"));
+    }
+
+    #[tokio::test]
+    async fn direct_review_run_respects_updates_interruptions_and_command_scope() {
+        let command = "codex review --uncommitted";
+        let lines = [
+            direct_command_started("review-1", command),
+            direct_command_started("review-1", command),
+            direct_command_completed("review-1", command, true),
+            direct_command_started("other-1", "cargo test"),
+            direct_command_completed("other-1", "cargo test", true),
+            direct_command_started("other-2", "cargo test"),
+            direct_command_completed("other-2", "cargo test", true),
+            direct_command_started("review-2", command),
+            direct_command_completed("review-2", command, true),
+            direct_command_started("review-3", "codex review --base main"),
+            direct_command_completed("review-3", "codex review --base main", true),
+        ];
+
+        let entries = normalize_lines(&lines).await;
+
+        assert_eq!(entries.len(), 5);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.content == "cargo test")
+                .count(),
+            2
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.content == command)
+                .count(),
+            2
+        );
+        assert!(entries.iter().all(|entry| !entry.content.contains('✓')));
+    }
+
+    #[tokio::test]
+    async fn failed_direct_review_repeat_stays_failed_and_breaks_the_run() {
+        let command = "codex review --uncommitted";
+        let lines = [
+            direct_command_started("review-1", command),
+            direct_command_completed("review-1", command, true),
+            direct_command_started("review-2", command),
+            direct_command_completed("review-2", command, true),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "req-review-3",
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "review-3",
+                    "startedAtMs": 0,
+                    "approvalId": "approval-review-3",
+                    "command": command
+                }
+            })
+            .to_string(),
+            direct_command_started("review-3", command),
+            direct_command_completed("review-3", command, false),
+            direct_command_started("review-4", command),
+            direct_command_completed("review-4", command, true),
+        ];
+
+        let entries = normalize_lines(&lines).await;
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].content, format!("{command} ✓"));
+        assert!(matches!(
+            entries[0].entry_type,
+            NormalizedEntryType::ToolUse {
+                status: ToolStatus::Success,
+                ..
+            }
+        ));
+        assert_eq!(entries[1].content, command);
+        assert!(matches!(
+            entries[1].entry_type,
+            NormalizedEntryType::ToolUse {
+                status: ToolStatus::Failed,
+                ..
+            }
+        ));
+        assert_eq!(entries[2].content, command);
+        assert!(matches!(
+            entries[2].entry_type,
+            NormalizedEntryType::ToolUse {
+                status: ToolStatus::Success,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn collapses_adjacent_legacy_review_commands_with_the_same_patch_contract() {
+        let command = "codex review --uncommitted";
+        let mut lines = Vec::new();
+        for id in ["legacy-1", "legacy-2", "legacy-3"] {
+            lines.push(legacy_command_started(id, command));
+            lines.push(legacy_command_completed(id, command, true));
+        }
+
+        let (entries, operations) = normalize_lines_with_history(&lines).await;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, format!("{command} ✓✓"));
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|(operation, _)| operation == "add")
+                .count(),
+            1
+        );
+        assert!(operations.iter().all(|(_, index)| *index == 0));
+    }
+
+    #[tokio::test]
+    async fn legacy_command_allocates_an_entry_after_an_approval_placeholder() {
+        let call_id = "approved-legacy";
+        let command = "cargo test";
+        let entries = normalize_lines(&[
+            Approval::approval_requested(
+                call_id.to_string(),
+                "codex.exec_command".to_string(),
+                "approval-1".to_string(),
+            )
+            .raw(),
+            legacy_command_started(call_id, command),
+            legacy_command_completed(call_id, command, true),
+        ])
+        .await;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, command);
+        assert!(matches!(
+            entries[0].entry_type,
+            NormalizedEntryType::ToolUse {
+                status: ToolStatus::Success,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn legacy_approval_details_preserve_pending_status() {
+        let call_id = "pending-legacy";
+        let command = "codex review --uncommitted";
+        let approval_details = legacy_command_approval_requested(call_id, command);
+        let notification: JSONRPCNotification = serde_json::from_str(&approval_details).unwrap();
+        serde_json::from_value::<CodexNotificationParams>(notification.params.unwrap()).unwrap();
+        let entries = normalize_lines(&[
+            Approval::approval_requested(
+                call_id.to_string(),
+                "codex.exec_command".to_string(),
+                "approval-pending".to_string(),
+            )
+            .raw(),
+            approval_details,
+        ])
+        .await;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, command);
+        assert!(matches!(
+            entries[0].entry_type,
+            NormalizedEntryType::ToolUse {
+                status: ToolStatus::PendingApproval { .. },
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn collapses_legacy_review_commands_that_require_approval() {
+        let command = "codex review --uncommitted";
+        let mut lines = Vec::new();
+        for id in ["approved-review-1", "approved-review-2"] {
+            lines.push(legacy_command_approval_requested(id, command));
+            lines.push(legacy_command_started(id, command));
+            lines.push(legacy_command_completed(id, command, true));
+        }
+
+        let entries = normalize_lines(&lines).await;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, format!("{command} ✓"));
+        assert!(matches!(
+            entries[0].entry_type,
+            NormalizedEntryType::ToolUse {
+                status: ToolStatus::Success,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -2809,6 +3442,72 @@ mod tests {
             &entry.entry_type,
             NormalizedEntryType::UserFeedback { denied_tool } if denied_tool == "Exec Command"
         )));
+    }
+
+    #[tokio::test]
+    async fn denied_review_preserves_the_prior_successful_run() {
+        let command = "codex review --uncommitted";
+        let denied_call_id = "review-denied";
+        let (entries, operations) = normalize_lines_with_history(&[
+            direct_command_started("review-1", command),
+            direct_command_completed("review-1", command, true),
+            direct_command_started("review-2", command),
+            direct_command_completed("review-2", command, true),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "req-denied-review",
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": denied_call_id,
+                    "startedAtMs": 0,
+                    "approvalId": "approval-denied-review",
+                    "command": command
+                }
+            })
+            .to_string(),
+            Approval::approval_response(
+                denied_call_id.to_string(),
+                "codex.exec_command".to_string(),
+                ApprovalStatus::Denied {
+                    reason: Some("Denied by user".to_string()),
+                },
+            )
+            .raw(),
+        ])
+        .await;
+
+        let command_entries = entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.entry_type,
+                    NormalizedEntryType::ToolUse {
+                        action_type: ActionType::CommandRun { .. },
+                        ..
+                    }
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(command_entries.len(), 2, "patch operations: {operations:?}");
+        assert_eq!(command_entries[0].content, format!("{command} ✓"));
+        assert!(matches!(
+            command_entries[0].entry_type,
+            NormalizedEntryType::ToolUse {
+                status: ToolStatus::Success,
+                ..
+            }
+        ));
+        assert_eq!(command_entries[1].content, command);
+        assert!(matches!(
+            command_entries[1].entry_type,
+            NormalizedEntryType::ToolUse {
+                status: ToolStatus::Denied { .. },
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
