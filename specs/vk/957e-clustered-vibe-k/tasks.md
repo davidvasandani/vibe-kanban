@@ -152,7 +152,7 @@ files and may be completed together.
 - [x] T042 Regenerate `shared/types.ts` and schemas with
   `pnpm run generate-types`; do not hand-edit generated outputs. Depends on
   T005, T026, T037.
-- [ ] T043 Install dependencies with `pnpm install --frozen-lockfile` and run
+- [x] T043 Install dependencies with `pnpm install --frozen-lockfile` and run
   focused protocol, DB, scheduler, worker, container, frontend, and Nix tests.
   Depends on T031, T037, T040, T042.
 - [ ] T044 [P] Run Rust workspace tests/checks and generated-type checks.
