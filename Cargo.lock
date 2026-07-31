@@ -1267,6 +1267,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluster-protocol"
+version = "0.1.43"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"

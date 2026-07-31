@@ -4,6 +4,7 @@ pub mod auth;
 pub mod aws_sso;
 pub mod browser;
 pub mod cli_tools;
+pub mod cluster;
 pub mod config;
 pub mod container;
 pub mod diff_stream;
