@@ -161,7 +161,7 @@ files and may be completed together.
   T043.
 - [x] T046 Run `pnpm run format`, re-run affected validation, and inspect both
   repository diffs for unrelated changes. Depends on T044, T045.
-- [ ] T047 Perform the two-disposable-node Slice 2 validation where deployment
+- [x] T047 Perform the two-disposable-node Slice 2 validation where deployment
   access is available and record evidence. Depends on T046.
 
 ## Layer 10 — Review and knowledge
