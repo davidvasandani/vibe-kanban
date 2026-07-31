@@ -124,7 +124,7 @@ files and may be completed together.
 - [x] T035 Add affinity/job/generation-aware preview routing in
   `crates/preview-proxy`, `crates/worker/src/preview.rs`, and
   `crates/server/src/routes/preview.rs`. Depends on T023, T032.
-- [ ] T036 [P] Resolve relay/editor navigation from persisted affinity in
+- [x] T036 [P] Resolve relay/editor navigation from persisted affinity in
   relevant `crates/relay-hosts`, server routes, and `packages/web-core/src`.
   Depends on T020.
 - [ ] T037 Add frontend interrupted/indeterminate/output-incomplete states and
