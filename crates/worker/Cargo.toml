@@ -29,6 +29,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 utils = { path = "../utils" }
 uuid = { version = "1.0", features = ["serde", "v4"] }
+ws-bridge = { path = "../ws-bridge" }
 
 [dev-dependencies]
 tempfile = "3"

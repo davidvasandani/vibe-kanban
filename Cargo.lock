@@ -13011,6 +13011,7 @@ dependencies = [
  "tracing-subscriber",
  "utils",
  "uuid",
+ "ws-bridge",
 ]
 
 [[package]]

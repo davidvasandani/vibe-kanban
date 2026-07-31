@@ -1,7 +1,10 @@
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::{Path, Request, State, ws::rejection::WebSocketUpgradeRejection},
+    extract::{
+        FromRequestParts, Path, Request, State,
+        ws::{WebSocketUpgrade, rejection::WebSocketUpgradeRejection},
+    },
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::any,
@@ -213,14 +216,7 @@ async fn proxy_cluster_preview(
     else {
         return (StatusCode::BAD_REQUEST, "Invalid preview port").into_response();
     };
-    if request.headers().contains_key("upgrade") {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            "Cluster preview WebSocket tunnel unavailable",
-        )
-            .into_response();
-    }
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
     let query = parts
         .uri
         .query()
@@ -242,6 +238,54 @@ async fn proxy_cluster_preview(
     } else {
         format!("{}?{query}", parts.uri.path())
     };
+    let headers = parts
+        .headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.to_string(), value.to_string()))
+        })
+        .collect();
+    let authority = RequestAuthority {
+        protocol_version: PROTOCOL_VERSION,
+        coordinator_id,
+        worker_node_id: job.worker_node_id,
+        correlation_id: metadata.execution_id,
+        issued_at: Utc::now(),
+        nonce: uuid::Uuid::new_v4().to_string(),
+    };
+    let ws_upgrade = WebSocketUpgrade::from_request_parts(&mut parts, &())
+        .await
+        .ok();
+    if let Some(ws) = ws_upgrade {
+        let payload = PreviewHttpRequest {
+            authority,
+            workspace_id: metadata.workspace_id,
+            execution_id: metadata.execution_id,
+            worker_job_id: job.worker_job_id,
+            generation: metadata.generation,
+            port,
+            method: "GET".into(),
+            path_and_query,
+            headers,
+            body_base64: String::new(),
+        };
+        return match client.preview_websocket(job.worker_node_id, &payload).await {
+            Ok(upstream) => ws
+                .on_upgrade(move |browser| async move {
+                    if let Err(error) = bridge_axum_ws(browser, upstream).await {
+                        tracing::debug!("cluster preview WebSocket closed: {error}");
+                    }
+                })
+                .into_response(),
+            Err(error) => {
+                tracing::warn!(execution_id = %metadata.execution_id, "cluster preview WebSocket failed: {error}");
+                (StatusCode::BAD_GATEWAY, "Preview WebSocket unavailable").into_response()
+            }
+        };
+    }
     let body = match to_bytes(body, 50 * 1024 * 1024).await {
         Ok(body) => body,
         Err(_) => {
@@ -249,14 +293,7 @@ async fn proxy_cluster_preview(
         }
     };
     let payload = PreviewHttpRequest {
-        authority: RequestAuthority {
-            protocol_version: PROTOCOL_VERSION,
-            coordinator_id,
-            worker_node_id: job.worker_node_id,
-            correlation_id: metadata.execution_id,
-            issued_at: Utc::now(),
-            nonce: uuid::Uuid::new_v4().to_string(),
-        },
+        authority,
         workspace_id: metadata.workspace_id,
         execution_id: metadata.execution_id,
         worker_job_id: job.worker_job_id,
@@ -264,16 +301,7 @@ async fn proxy_cluster_preview(
         port,
         method: parts.method.to_string(),
         path_and_query,
-        headers: parts
-            .headers
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|value| (name.to_string(), value.to_string()))
-            })
-            .collect(),
+        headers,
         body_base64: BASE64_STANDARD.encode(body),
     };
     match client.proxy_preview(job.worker_node_id, &payload).await {
@@ -293,5 +321,32 @@ async fn proxy_cluster_preview(
             tracing::warn!(execution_id = %metadata.execution_id, "cluster preview proxy failed: {error}");
             (StatusCode::BAD_GATEWAY, "Preview upstream unavailable").into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_metadata_requires_complete_cluster_identity() {
+        let workspace_id = uuid::Uuid::new_v4();
+        let execution_id = uuid::Uuid::new_v4();
+        let request = Request::builder()
+            .uri(format!(
+                "/?_vk_workspace={workspace_id}&_vk_execution={execution_id}&_vk_generation=42"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let metadata = preview_metadata(&request).unwrap();
+        assert_eq!(metadata.workspace_id, workspace_id);
+        assert_eq!(metadata.execution_id, execution_id);
+        assert_eq!(metadata.generation, 42);
+
+        let incomplete = Request::builder()
+            .uri(format!("/?_vk_workspace={workspace_id}"))
+            .body(Body::empty())
+            .unwrap();
+        assert!(preview_metadata(&incomplete).is_none());
     }
 }

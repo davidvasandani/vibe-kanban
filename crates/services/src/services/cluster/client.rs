@@ -24,6 +24,8 @@ pub enum WorkerClientError {
     InvalidUrl(#[from] url::ParseError),
     #[error("worker transport failed: {0}")]
     Transport(#[from] reqwest::Error),
+    #[error("worker WebSocket transport failed: {0}")]
+    WebSocket(String),
     #[error("worker rejected request with status {status}: {message}")]
     Rejected { status: StatusCode, message: String },
     #[error("worker reported a dispatch digest conflict")]
@@ -161,6 +163,49 @@ impl WorkerClient {
             request.execution_id, request.generation, request.port
         );
         self.post_with_retry(worker_node_id, &path, request).await
+    }
+
+    pub async fn preview_websocket(
+        &self,
+        worker_node_id: Uuid,
+        request: &PreviewHttpRequest,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        WorkerClientError,
+    > {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let path = format!(
+            "/v1/executions/{}/preview/{}/{}/ws",
+            request.execution_id, request.generation, request.port
+        );
+        let query = preview_ws_query(request);
+        let endpoint = self.endpoint_for(worker_node_id).await?;
+        let http_url = endpoint.join(&format!("{path}?{query}"))?;
+        let signed = self
+            .signed(self.http.get(http_url.clone()), Method::GET, &path, &[])
+            .build()?;
+        let mut ws_url = http_url;
+        ws_url
+            .set_scheme(if ws_url.scheme() == "https" {
+                "wss"
+            } else {
+                "ws"
+            })
+            .map_err(|_| WorkerClientError::WebSocket("invalid worker WebSocket URL".into()))?;
+        let mut ws_request = ws_url
+            .as_str()
+            .into_client_request()
+            .map_err(|error| WorkerClientError::WebSocket(error.to_string()))?;
+        for (name, value) in signed.headers() {
+            ws_request.headers_mut().insert(name, value.clone());
+        }
+        let (stream, _) = tokio_tungstenite::connect_async(ws_request)
+            .await
+            .map_err(|error| WorkerClientError::WebSocket(error.to_string()))?;
+        Ok(stream)
     }
 
     pub async fn terminal_output(
@@ -303,6 +348,18 @@ impl WorkerClient {
                 BASE64_STANDARD.encode(signature.to_bytes()),
             )
     }
+}
+
+fn preview_ws_query(request: &PreviewHttpRequest) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer
+        .append_pair("workspace_id", &request.workspace_id.to_string())
+        .append_pair("worker_job_id", &request.worker_job_id.to_string())
+        .append_pair("path_and_query", &request.path_and_query);
+    if let Some(protocols) = request.headers.get("sec-websocket-protocol") {
+        serializer.append_pair("protocols", protocols);
+    }
+    serializer.finish()
 }
 
 async fn decode<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, WorkerClientError> {

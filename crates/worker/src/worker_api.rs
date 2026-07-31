@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{Path, Query, Request, State},
+    extract::{Path, Query, Request, State, ws::WebSocketUpgrade},
     http::StatusCode,
     middleware::{Next, from_fn_with_state},
     response::{IntoResponse, Response},
@@ -56,6 +56,14 @@ struct EventsQuery {
     after: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct PreviewWsQuery {
+    workspace_id: Uuid,
+    worker_job_id: Uuid,
+    path_and_query: String,
+    protocols: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct Acknowledged {
     highest_contiguous_sequence: u64,
@@ -89,6 +97,10 @@ pub async fn router(config: &WorkerConfig) -> anyhow::Result<Router> {
             "/v1/executions/{execution_id}/preview/{generation}/{port}",
             post(proxy_preview),
         )
+        .route(
+            "/v1/executions/{execution_id}/preview/{generation}/{port}/ws",
+            get(proxy_preview_ws),
+        )
         .route("/v1/executions/{execution_id}", post(dispatch))
         .route("/v1/executions/{execution_id}/events", get(events))
         .route("/v1/executions/{execution_id}/ack", post(acknowledge))
@@ -100,6 +112,39 @@ pub async fn router(config: &WorkerConfig) -> anyhow::Result<Router> {
         .route("/v1/executions/{execution_id}/quarantine", post(quarantine))
         .layer(from_fn_with_state(state.clone(), require_signature))
         .with_state(state))
+}
+
+async fn proxy_preview_ws(
+    State(state): State<WorkerApiState>,
+    Path((execution_id, generation, port)): Path<(Uuid, u64, u16)>,
+    Query(query): Query<PreviewWsQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<impl IntoResponse, WorkerApiError> {
+    if generation == 0
+        || port == 0
+        || !query.path_and_query.starts_with('/')
+        || !state
+            .supervisor
+            .authorizes_preview(execution_id, query.workspace_id, query.worker_job_id)
+            .await
+    {
+        return Err(WorkerApiError::Forbidden);
+    }
+    let upstream_url = format!("ws://127.0.0.1:{port}{}", query.path_and_query);
+    let (upstream, selected_protocol) =
+        ws_bridge::connect_upstream_ws(upstream_url, query.protocols.as_deref())
+            .await
+            .map_err(|error| WorkerApiError::BadRequest(error.to_string()))?;
+    let ws = if let Some(protocol) = selected_protocol {
+        ws.protocols([protocol])
+    } else {
+        ws
+    };
+    Ok(ws.on_upgrade(move |client| async move {
+        if let Err(error) = ws_bridge::bridge_axum_ws(client, upstream).await {
+            tracing::debug!("preview websocket closed: {error}");
+        }
+    }))
 }
 
 async fn proxy_preview(

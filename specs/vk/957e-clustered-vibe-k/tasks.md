@@ -121,7 +121,7 @@ files and may be completed together.
 - [x] T034 Add local/remote terminal abstraction and bidirectional authenticated
   proxying in `crates/services`, `crates/worker/src/terminal.rs`, and
   `crates/server/src/routes/terminal.rs`. Depends on T012, T023, T024.
-- [ ] T035 Add affinity/job/generation-aware preview routing in
+- [x] T035 Add affinity/job/generation-aware preview routing in
   `crates/preview-proxy`, `crates/worker/src/preview.rs`, and
   `crates/server/src/routes/preview.rs`. Depends on T023, T032.
 - [ ] T036 [P] Resolve relay/editor navigation from persisted affinity in
