@@ -29,6 +29,7 @@ use db::{
         scratch::{DraftFollowUpData, Scratch, ScratchType},
         session::{Session, SessionError},
         task::Task,
+        worker_node::{WorkerMountStatus, WorkerNode, WorkerNodeStatus},
         workspace::{Workspace, WorkspacePlacement, WorkspacePlacementState},
         workspace_repo::WorkspaceRepo,
     },
@@ -130,6 +131,17 @@ async fn mark_remote_execution_indeterminate(
     )
     .await?;
     Ok(())
+}
+
+fn worker_cleanup_evidence_safe(
+    worker: &WorkerNode,
+    has_unsafe_jobs: bool,
+    now: DateTime<Utc>,
+) -> bool {
+    worker.status == WorkerNodeStatus::Online
+        && worker.mount_status == WorkerMountStatus::Healthy
+        && worker.lease_expires_at.is_some_and(|lease| lease > now)
+        && !has_unsafe_jobs
 }
 
 /// A warm app-server with no active turn for longer than this is proactively
@@ -856,6 +868,13 @@ impl LocalContainerService {
             expired_workspaces.len()
         );
         for workspace in &expired_workspaces {
+            if !self.cluster_workspace_cleanup_safe(workspace).await? {
+                tracing::info!(
+                    workspace_id = %workspace.id,
+                    "Retaining expired clustered workspace because worker ownership is active or uncertain"
+                );
+                continue;
+            }
             // Never auto-delete a workspace whose worktree still holds pending
             // work. Archival accelerates expiry to 1h (vs 72h), so an archived
             // workspace with uncommitted or untracked changes could otherwise be
@@ -885,12 +904,37 @@ impl LocalContainerService {
         Ok(())
     }
 
+    async fn cluster_workspace_cleanup_safe(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<bool, DeploymentError> {
+        if !self.cluster_config.enabled {
+            return Ok(true);
+        }
+        let Some(placement) = WorkspacePlacement::find(&self.db.pool, workspace.id).await? else {
+            return Ok(false);
+        };
+        let Some(worker_node_id) = placement.worker_node_id else {
+            return Ok(placement.placement_state == WorkspacePlacementState::Local);
+        };
+        let Some(worker) = WorkerNode::find_by_id(&self.db.pool, worker_node_id).await? else {
+            return Ok(false);
+        };
+        let has_unsafe_jobs =
+            ExecutionWorkerJob::has_unsafe_for_workspace(&self.db.pool, workspace.id).await?;
+        Ok(worker_cleanup_evidence_safe(
+            &worker,
+            has_unsafe_jobs,
+            Utc::now(),
+        ))
+    }
+
     fn spawn_workspace_cleanup(&self) {
         let container = self.clone();
         tokio::spawn(async move {
             container
                 .workspace_manager
-                .cleanup_orphan_workspaces()
+                .cleanup_orphan_workspaces(!container.cluster_config.enabled)
                 .await;
 
             let mut cleanup_interval =
@@ -3558,6 +3602,61 @@ mod worker_event_tests {
         assert!(matches!(
             store.get_history().as_slice(),
             [LogMsg::Stderr(message)] if message.contains("invalid base64")
+        ));
+    }
+}
+
+#[cfg(test)]
+mod cluster_cleanup_tests {
+    use chrono::{Duration, Utc};
+    use db::models::worker_node::{WorkerMountStatus, WorkerNode, WorkerNodeStatus};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::worker_cleanup_evidence_safe;
+
+    fn worker(status: WorkerNodeStatus, lease_offset_seconds: i64) -> WorkerNode {
+        let now = Utc::now();
+        WorkerNode {
+            id: Uuid::new_v4(),
+            hostname: "think3".into(),
+            status,
+            worker_version: "1".into(),
+            vibe_version: "1".into(),
+            capabilities: json!({}).into(),
+            resource_snapshot: json!({}).into(),
+            labels: json!({}).into(),
+            mount_status: WorkerMountStatus::Healthy,
+            mount_message: None,
+            last_heartbeat_at: Some(now),
+            lease_expires_at: Some(now + Duration::seconds(lease_offset_seconds)),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn cleanup_requires_current_worker_evidence_and_no_unsafe_jobs() {
+        let now = Utc::now();
+        assert!(worker_cleanup_evidence_safe(
+            &worker(WorkerNodeStatus::Online, 30),
+            false,
+            now
+        ));
+        assert!(!worker_cleanup_evidence_safe(
+            &worker(WorkerNodeStatus::Offline, 30),
+            false,
+            now
+        ));
+        assert!(!worker_cleanup_evidence_safe(
+            &worker(WorkerNodeStatus::Online, -1),
+            false,
+            now
+        ));
+        assert!(!worker_cleanup_evidence_safe(
+            &worker(WorkerNodeStatus::Online, 30),
+            true,
+            now
         ));
     }
 }

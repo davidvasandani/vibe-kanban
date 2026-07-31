@@ -171,6 +171,16 @@ impl WorkerNode {
         .await?;
         Ok(result.rows_affected())
     }
+
+    pub async fn mark_offline(pool: &SqlitePool, id: Uuid) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE worker_nodes SET status = 'offline', updated_at = datetime('now', 'subsec') WHERE id = ?",
+        )
+        .bind(id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
 }
 
 #[cfg(test)]

@@ -121,6 +121,26 @@ impl ExecutionWorkerJob {
         .await
     }
 
+    pub async fn has_unsafe_for_workspace(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM execution_worker_jobs ewj
+            JOIN execution_processes ep ON ep.id = ewj.execution_process_id
+            JOIN sessions s ON s.id = ep.session_id
+            WHERE s.workspace_id = ?
+              AND ewj.dispatch_state NOT IN ('completed', 'failed', 'killed')
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(count > 0)
+    }
+
     pub async fn acknowledge_sequence(
         pool: &SqlitePool,
         execution_process_id: Uuid,

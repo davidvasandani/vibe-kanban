@@ -102,7 +102,7 @@ files and may be completed together.
   inventory in `crates/worker/src/recovery.rs`. Depends on T021, T022.
 - [x] T029 Reorder startup so reconciliation precedes execution/workspace
   cleanup in `crates/local-deployment/src/lib.rs`. Depends on T027.
-- [ ] T030 Make expiry and orphan cleanup affinity-aware and retain on active,
+- [x] T030 Make expiry and orphan cleanup affinity-aware and retain on active,
   unreachable, stale, or conflicting worker evidence in
   `crates/local-deployment/src/` and
   `crates/workspace-manager/src/workspace_manager.rs`. Depends on T027, T029.

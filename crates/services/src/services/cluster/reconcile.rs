@@ -68,6 +68,7 @@ impl ExecutionReconciler {
                 Err(error) => {
                     tracing::warn!(worker_node_id = %worker.id, "Worker inventory unavailable: {error}");
                     report.workers_unreachable.push(worker.id);
+                    WorkerNode::mark_offline(&self.db.pool, worker.id).await?;
                     continue;
                 }
             };

@@ -704,10 +704,16 @@ impl WorkspaceManager {
         }
     }
 
-    pub async fn cleanup_orphan_workspaces(&self) {
+    pub async fn cleanup_orphan_workspaces(&self, allow_reclamation: bool) {
         if std::env::var("DISABLE_WORKTREE_CLEANUP").is_ok() {
             info!(
                 "Orphan workspace cleanup is disabled via DISABLE_WORKTREE_CLEANUP environment variable"
+            );
+            return;
+        }
+        if !allow_reclamation {
+            info!(
+                "Orphan workspace cleanup is retaining unreferenced directories because shared workers may still own them"
             );
             return;
         }

@@ -17,6 +17,7 @@ use db::{
         execution_process_repo_state::{
             CreateExecutionProcessRepoState, ExecutionProcessRepoState,
         },
+        execution_worker_job::ExecutionWorkerJob,
         repo::Repo,
         session::{CreateSession, Session, SessionError},
         workspace::{Workspace, WorkspaceError},
@@ -360,6 +361,20 @@ pub trait ContainerService {
         let running_processes = ExecutionProcess::find_running(&self.db().pool).await?;
         let mut interrupted = Vec::new();
         for process in running_processes {
+            // A running row owned by a worker is not a coordinator-local
+            // orphan. Reconciliation is authoritative for that row; if it
+            // remained running, evidence was unavailable and cleanup must
+            // preserve both the process and workspace state.
+            if ExecutionWorkerJob::find_by_execution_id(&self.db().pool, process.id)
+                .await?
+                .is_some()
+            {
+                tracing::info!(
+                    execution_id = %process.id,
+                    "Retaining worker-owned running execution during orphan cleanup"
+                );
+                continue;
+            }
             // Detached processes (dev servers) are left running across
             // restarts; if still alive, re-attach instead of killing.
             if self.try_adopt_execution(&process).await {
