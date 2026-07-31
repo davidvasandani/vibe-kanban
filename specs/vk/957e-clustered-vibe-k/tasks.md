@@ -100,7 +100,7 @@ files and may be completed together.
   `crates/services/src/services/cluster/reconcile.rs`. Depends on T023, T026.
 - [x] T028 Implement worker restart job adoption policy and retained terminal
   inventory in `crates/worker/src/recovery.rs`. Depends on T021, T022.
-- [ ] T029 Reorder startup so reconciliation precedes execution/workspace
+- [x] T029 Reorder startup so reconciliation precedes execution/workspace
   cleanup in `crates/local-deployment/src/lib.rs`. Depends on T027.
 - [ ] T030 Make expiry and orphan cleanup affinity-aware and retain on active,
   unreachable, stale, or conflicting worker evidence in

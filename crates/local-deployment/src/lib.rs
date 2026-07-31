@@ -20,7 +20,7 @@ use services::services::{
     approvals::Approvals,
     auth::AuthContext,
     browser::{BrowserSessionService, BrowserSessionsConfig},
-    cluster::{ClusterConfig, WorkerClient, WorkerRegistry, WorkerScheduler},
+    cluster::{ClusterConfig, ExecutionReconciler, WorkerClient, WorkerRegistry, WorkerScheduler},
     config::{Config, load_config_from_file, save_config_to_file},
     container::ContainerService,
     events::EventService,
@@ -298,6 +298,25 @@ impl Deployment for LocalDeployment {
             worker_client.clone(),
         )
         .await;
+
+        if let Some(client) = worker_client.clone() {
+            let reconciler = ExecutionReconciler::new(db.clone(), client, &cluster_config)
+                .map_err(|error| DeploymentError::Other(anyhow::anyhow!(error)))?;
+            let report = reconciler
+                .reconcile()
+                .await
+                .map_err(|error| DeploymentError::Other(anyhow::anyhow!(error)))?;
+            tracing::info!(
+                workers_reached = report.workers_reached,
+                workers_unreachable = report.workers_unreachable.len(),
+                jobs_reconciled = report.jobs_reconciled,
+                jobs_missing = report.jobs_missing,
+                jobs_quarantined = report.jobs_quarantined,
+                conflicts = report.conflicts,
+                "Cluster execution reconciliation completed before cleanup"
+            );
+        }
+        container.start_cleanup_tasks();
 
         let events = EventService::new(db.clone(), events_msg_store, events_entry_count);
 

@@ -513,9 +513,11 @@ impl LocalContainerService {
             worker_client,
         };
 
-        container.spawn_workspace_cleanup();
-
         container
+    }
+
+    pub fn start_cleanup_tasks(&self) {
+        self.spawn_workspace_cleanup();
     }
 
     fn map_workspace_manager_error(err: WorkspaceError) -> ContainerError {
