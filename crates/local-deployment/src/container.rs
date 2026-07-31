@@ -12,7 +12,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
 use cluster_protocol::{
     CancellationPhase, CancellationRequest, EventAcknowledgement, ExecutionDispatch,
-    ExecutionEventPayload, PROTOCOL_VERSION, PersistencePolicy, RequestAuthority, TerminalState,
+    ExecutionEventPayload, InteractionRequest, InteractionResponse, PROTOCOL_VERSION,
+    PersistencePolicy, RequestAuthority, TerminalState,
 };
 use command_group::AsyncGroupChild;
 use db::{
@@ -74,6 +75,7 @@ use sha2::{Digest, Sha256};
 use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_util::io::ReaderStream;
 use utils::{
+    approvals::{ApprovalOutcome, ApprovalRequest},
     log_msg::LogMsg,
     msg_store::MsgStore,
     text::{git_branch_id, short_uuid, truncate_to_char_boundary},
@@ -412,6 +414,78 @@ pub struct LocalContainerService {
 }
 
 impl LocalContainerService {
+    fn route_worker_interaction(
+        &self,
+        execution_id: Uuid,
+        worker_node_id: Uuid,
+        interaction: InteractionRequest,
+    ) {
+        let Some(client) = self.worker_client.clone() else {
+            tracing::error!(%execution_id, "Cannot route worker interaction without a worker client");
+            return;
+        };
+        let Some(coordinator_id) = self.cluster_config.coordinator_id else {
+            tracing::error!(%execution_id, "Cannot route worker interaction without coordinator identity");
+            return;
+        };
+        let approvals = self.approvals.clone();
+        tokio::spawn(async move {
+            let mut request = ApprovalRequest::new(interaction.prompt, execution_id);
+            request.id = interaction.interaction_id.to_string();
+            if let Some(expires_at) = interaction.expires_at {
+                request.timeout_at = expires_at;
+            }
+            let is_question = interaction.kind == "question";
+            let Ok((_, waiter)) = approvals.create_with_waiter(request, is_question).await else {
+                tracing::error!(%execution_id, interaction_id = %interaction.interaction_id, "Failed to register worker interaction");
+                return;
+            };
+            let mut outcome = waiter.await;
+            let deadline = interaction.expires_at;
+            loop {
+                if matches!(
+                    interaction.disconnect_policy,
+                    cluster_protocol::DisconnectPolicy::FailClosed
+                ) && deadline.is_some_and(|deadline| Utc::now() >= deadline)
+                {
+                    outcome = ApprovalOutcome::Denied {
+                        reason: Some(
+                            "coordinator could not deliver approval before timeout".into(),
+                        ),
+                    };
+                }
+                let response = InteractionResponse {
+                    authority: RequestAuthority {
+                        protocol_version: PROTOCOL_VERSION,
+                        coordinator_id,
+                        worker_node_id,
+                        correlation_id: execution_id,
+                        issued_at: Utc::now(),
+                        nonce: Uuid::new_v4().to_string(),
+                    },
+                    execution_id,
+                    interaction_id: interaction.interaction_id,
+                    response: serde_json::to_string(&outcome)
+                        .expect("approval outcome must serialize"),
+                };
+                match client.respond_interaction(worker_node_id, &response).await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        tracing::warn!(%execution_id, interaction_id = %interaction.interaction_id, "Worker interaction response failed; retrying: {error}");
+                        if matches!(
+                            interaction.disconnect_policy,
+                            cluster_protocol::DisconnectPolicy::Timeout
+                        ) && deadline.is_some_and(|deadline| Utc::now() >= deadline)
+                        {
+                            outcome = ApprovalOutcome::TimedOut;
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        });
+    }
+
     fn register_mcp_refresh_control(
         &self,
         session_id: Uuid,
@@ -1818,9 +1892,15 @@ impl LocalContainerService {
                             store.push_finished();
                             return;
                         }
+                        ExecutionEventPayload::InteractionRequested(interaction) => {
+                            container.route_worker_interaction(
+                                execution_id,
+                                worker_node_id,
+                                interaction,
+                            );
+                        }
                         ExecutionEventPayload::Accepted
                         | ExecutionEventPayload::Starting
-                        | ExecutionEventPayload::InteractionRequested(_)
                         | ExecutionEventPayload::InteractionAcknowledged { .. }
                         | ExecutionEventPayload::Preview(_) => {}
                     }

@@ -13,7 +13,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
 use cluster_protocol::{
     CancellationRequest, DispatchAccepted, EventAcknowledgement, EventBatch, ExecutionDispatch,
-    JobSummary, PROTOCOL_VERSION, QuarantineRequest, RequestAuthority,
+    InteractionResponse, JobSummary, PROTOCOL_VERSION, QuarantineRequest, RequestAuthority,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -75,6 +75,10 @@ pub async fn router(config: &WorkerConfig) -> anyhow::Result<Router> {
         .route("/v1/executions/{execution_id}/events", get(events))
         .route("/v1/executions/{execution_id}/ack", post(acknowledge))
         .route("/v1/executions/{execution_id}/cancel", post(cancel))
+        .route(
+            "/v1/executions/{execution_id}/interactions/{interaction_id}",
+            post(respond_interaction),
+        )
         .route("/v1/executions/{execution_id}/quarantine", post(quarantine))
         .layer(from_fn_with_state(state.clone(), require_signature))
         .with_state(state))
@@ -151,6 +155,32 @@ async fn cancel(
         .await
         .map(Json)
         .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
+}
+
+async fn respond_interaction(
+    State(state): State<WorkerApiState>,
+    Path((execution_id, interaction_id)): Path<(Uuid, Uuid)>,
+    Json(payload): Json<InteractionResponse>,
+) -> Result<Json<serde_json::Value>, WorkerApiError> {
+    validate_authority(&state, &payload.authority).await?;
+    if payload.execution_id != execution_id || payload.interaction_id != interaction_id {
+        return Err(WorkerApiError::BadRequest(
+            "path IDs do not match interaction response".into(),
+        ));
+    }
+    let outcome = serde_json::from_str(&payload.response).map_err(|error| {
+        WorkerApiError::BadRequest(format!("invalid interaction response: {error}"))
+    })?;
+    if !state
+        .supervisor
+        .respond_interaction(execution_id, interaction_id, outcome)
+        .await?
+    {
+        return Err(WorkerApiError::BadRequest(
+            "interaction is not pending".into(),
+        ));
+    }
+    Ok(Json(serde_json::json!({ "acknowledged": true })))
 }
 
 async fn quarantine(

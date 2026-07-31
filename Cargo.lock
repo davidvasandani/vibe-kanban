@@ -12958,6 +12958,7 @@ name = "worker"
 version = "0.1.43"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "chrono",
@@ -12975,6 +12976,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "utils",
  "uuid",
 ]
 

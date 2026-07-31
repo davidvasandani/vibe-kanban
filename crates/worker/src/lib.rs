@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 pub mod cancellation;
 pub mod execution;
+pub mod interaction;
 pub mod journal;
 pub mod mount_health;
 pub mod path_authority;

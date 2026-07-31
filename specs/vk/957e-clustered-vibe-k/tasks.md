@@ -115,7 +115,7 @@ files and may be completed together.
 - [x] T032 Route setup, cleanup, archive, reviews, follow-ups, dev servers, and
   background helpers through persisted affinity in
   `crates/local-deployment/src/container.rs`. Depends on T024, T027.
-- [ ] T033 Implement correlated remote approvals/questions and disconnect
+- [x] T033 Implement correlated remote approvals/questions and disconnect
   policies in `crates/worker/src/interaction.rs` and coordinator executor
   integration. Depends on T025.
 - [ ] T034 Add local/remote terminal abstraction and bidirectional authenticated

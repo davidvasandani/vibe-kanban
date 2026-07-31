@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use cluster_protocol::{
     CancellationRequest, CancellationStatus, DispatchAccepted, EventAcknowledgement, EventBatch,
-    ExecutionDispatch, JobSummary, QuarantineRequest,
+    ExecutionDispatch, InteractionResponse, JobSummary, QuarantineRequest,
 };
 use ed25519_dalek::{Signer, SigningKey};
 use reqwest::{Client, Method, StatusCode};
@@ -123,6 +123,21 @@ impl WorkerClient {
     ) -> Result<JobSummary, WorkerClientError> {
         let path = format!("/v1/executions/{}/quarantine", request.execution_id);
         self.post_with_retry(worker_node_id, &path, request).await
+    }
+
+    pub async fn respond_interaction(
+        &self,
+        worker_node_id: Uuid,
+        response: &InteractionResponse,
+    ) -> Result<(), WorkerClientError> {
+        let path = format!(
+            "/v1/executions/{}/interactions/{}",
+            response.execution_id, response.interaction_id
+        );
+        let _: serde_json::Value = self
+            .post_with_retry(worker_node_id, &path, response)
+            .await?;
+        Ok(())
     }
 
     pub async fn inventory(

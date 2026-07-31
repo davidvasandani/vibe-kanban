@@ -15,7 +15,6 @@ use cluster_protocol::{
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use executors::{
     actions::{Executable, ExecutorAction},
-    approvals::NoopExecutorApprovalService,
     env::{ExecutionEnv, RepoContext},
 };
 use serde::Deserialize;
@@ -28,6 +27,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
+    interaction::{InteractionBroker, WorkerApprovalService},
     journal::{EventJournal, JournalError},
     path_authority::{PathAuthority, PathAuthorityError},
     recovery::{RecoveryError, RecoveryStore},
@@ -88,6 +88,7 @@ pub struct WorkerJob {
     cancellation: Mutex<()>,
     acknowledged_sequence: Mutex<u64>,
     recovery_store: Option<RecoveryStore>,
+    interactions: Arc<InteractionBroker>,
 }
 
 impl ExecutionSupervisor {
@@ -144,6 +145,7 @@ impl ExecutionSupervisor {
                     cancellation: Mutex::new(()),
                     acknowledged_sequence: Mutex::new(0),
                     recovery_store: Some(recovery_store.clone()),
+                    interactions: Arc::new(InteractionBroker::default()),
                 }),
             );
         }
@@ -193,6 +195,7 @@ impl ExecutionSupervisor {
             cancellation: Mutex::new(()),
             acknowledged_sequence: Mutex::new(0),
             recovery_store: self.recovery_store.clone(),
+            interactions: Arc::new(InteractionBroker::default()),
         });
         jobs.insert(dispatch.execution_id, job.clone());
         drop(jobs);
@@ -268,6 +271,24 @@ impl ExecutionSupervisor {
         job.persist().await;
         Ok(job.summary().await)
     }
+
+    pub async fn respond_interaction(
+        &self,
+        execution_id: Uuid,
+        interaction_id: Uuid,
+        outcome: utils::approvals::ApprovalOutcome,
+    ) -> Result<bool, ExecutionError> {
+        let job = self
+            .job(execution_id)
+            .await
+            .ok_or(ExecutionError::NotFound(execution_id))?;
+        let responded = job.interactions.respond(interaction_id, outcome).await;
+        if responded {
+            job.emit(ExecutionEventPayload::InteractionAcknowledged { interaction_id })
+                .await;
+        }
+        Ok(responded)
+    }
 }
 
 impl WorkerJob {
@@ -330,6 +351,10 @@ impl WorkerJob {
             self.persist().await;
         }
     }
+
+    pub(crate) async fn emit(&self, payload: ExecutionEventPayload) {
+        let _ = self.journal.lock().await.append(SystemTime::now(), payload);
+    }
 }
 
 async fn run_job(
@@ -363,7 +388,7 @@ async fn run_job(
             action
                 .spawn(
                     &working_directory,
-                    Arc::new(NoopExecutorApprovalService),
+                    WorkerApprovalService::new(job.clone(), job.interactions.clone()),
                     &env,
                 )
                 .await
