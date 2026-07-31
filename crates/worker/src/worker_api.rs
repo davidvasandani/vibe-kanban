@@ -13,9 +13,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
 use cluster_protocol::{
     CancellationRequest, DispatchAccepted, EventAcknowledgement, EventBatch, ExecutionDispatch,
-    InteractionResponse, JobSummary, PROTOCOL_VERSION, QuarantineRequest, RequestAuthority,
-    TerminalClose, TerminalCreateRequest, TerminalCreated, TerminalInput, TerminalOutputBatch,
-    TerminalResize,
+    InteractionResponse, JobSummary, PROTOCOL_VERSION, PreviewHttpRequest, PreviewHttpResponse,
+    QuarantineRequest, RequestAuthority, TerminalClose, TerminalCreateRequest, TerminalCreated,
+    TerminalInput, TerminalOutputBatch, TerminalResize,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ use crate::{
     WorkerConfig, cancellation,
     execution::{ExecutionError, ExecutionSupervisor},
     path_authority::PathAuthority,
+    preview::PreviewService,
     recovery::RecoveryStore,
     terminal::TerminalService,
 };
@@ -46,6 +47,7 @@ struct WorkerApiState {
     coordinator_key: VerifyingKey,
     seen_nonces: Arc<Mutex<HashMap<String, tokio::time::Instant>>>,
     terminals: TerminalService,
+    preview: PreviewService,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +76,7 @@ pub async fn router(config: &WorkerConfig) -> anyhow::Result<Router> {
         coordinator_key,
         seen_nonces: Arc::new(Mutex::new(HashMap::new())),
         terminals: TerminalService::new(path_authority),
+        preview: PreviewService::new(),
     };
     Ok(Router::new()
         .route("/v1/jobs", get(inventory))
@@ -82,6 +85,10 @@ pub async fn router(config: &WorkerConfig) -> anyhow::Result<Router> {
         .route("/v1/terminals/{terminal_id}/input", post(terminal_input))
         .route("/v1/terminals/{terminal_id}/resize", post(terminal_resize))
         .route("/v1/terminals/{terminal_id}/close", post(close_terminal))
+        .route(
+            "/v1/executions/{execution_id}/preview/{generation}/{port}",
+            post(proxy_preview),
+        )
         .route("/v1/executions/{execution_id}", post(dispatch))
         .route("/v1/executions/{execution_id}/events", get(events))
         .route("/v1/executions/{execution_id}/ack", post(acknowledge))
@@ -93,6 +100,34 @@ pub async fn router(config: &WorkerConfig) -> anyhow::Result<Router> {
         .route("/v1/executions/{execution_id}/quarantine", post(quarantine))
         .layer(from_fn_with_state(state.clone(), require_signature))
         .with_state(state))
+}
+
+async fn proxy_preview(
+    State(state): State<WorkerApiState>,
+    Path((execution_id, generation, port)): Path<(Uuid, u64, u16)>,
+    Json(payload): Json<PreviewHttpRequest>,
+) -> Result<Json<PreviewHttpResponse>, WorkerApiError> {
+    validate_authority(&state, &payload.authority).await?;
+    if payload.execution_id != execution_id
+        || payload.generation != generation
+        || payload.port != port
+        || payload.authority.correlation_id != execution_id
+    {
+        return Err(WorkerApiError::BadRequest("preview target mismatch".into()));
+    }
+    if !state
+        .supervisor
+        .authorizes_preview(execution_id, payload.workspace_id, payload.worker_job_id)
+        .await
+    {
+        return Err(WorkerApiError::Forbidden);
+    }
+    state
+        .preview
+        .proxy(payload)
+        .await
+        .map(Json)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
 }
 
 async fn create_terminal(

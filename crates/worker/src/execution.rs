@@ -262,6 +262,20 @@ impl ExecutionSupervisor {
         self.jobs.read().await.get(&execution_id).cloned()
     }
 
+    pub async fn authorizes_preview(
+        &self,
+        execution_id: Uuid,
+        workspace_id: Uuid,
+        worker_job_id: Uuid,
+    ) -> bool {
+        let Some(job) = self.job(execution_id).await else {
+            return false;
+        };
+        job.workspace_id == workspace_id
+            && job.worker_job_id == worker_job_id
+            && !job.state().await.is_terminal()
+    }
+
     pub async fn quarantine(&self, execution_id: Uuid) -> Result<JobSummary, ExecutionError> {
         let job = self
             .job(execution_id)

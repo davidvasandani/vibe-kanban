@@ -344,6 +344,27 @@ pub struct PreviewTarget {
     pub generation: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreviewHttpRequest {
+    pub authority: RequestAuthority,
+    pub workspace_id: Uuid,
+    pub execution_id: Uuid,
+    pub worker_job_id: Uuid,
+    pub generation: u64,
+    pub port: u16,
+    pub method: String,
+    pub path_and_query: String,
+    pub headers: BTreeMap<String, String>,
+    pub body_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreviewHttpResponse {
+    pub status: u16,
+    pub headers: BTreeMap<String, String>,
+    pub body_base64: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

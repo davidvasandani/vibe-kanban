@@ -13,6 +13,7 @@ pub mod interaction;
 pub mod journal;
 pub mod mount_health;
 pub mod path_authority;
+pub mod preview;
 pub mod recovery;
 pub mod server;
 pub mod terminal;

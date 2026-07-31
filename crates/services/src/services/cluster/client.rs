@@ -3,8 +3,9 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use cluster_protocol::{
     CancellationRequest, CancellationStatus, DispatchAccepted, EventAcknowledgement, EventBatch,
-    ExecutionDispatch, InteractionResponse, JobSummary, QuarantineRequest, TerminalClose,
-    TerminalCreateRequest, TerminalCreated, TerminalInput, TerminalOutputBatch, TerminalResize,
+    ExecutionDispatch, InteractionResponse, JobSummary, PreviewHttpRequest, PreviewHttpResponse,
+    QuarantineRequest, TerminalClose, TerminalCreateRequest, TerminalCreated, TerminalInput,
+    TerminalOutputBatch, TerminalResize,
 };
 use ed25519_dalek::{Signer, SigningKey};
 use reqwest::{Client, Method, StatusCode};
@@ -148,6 +149,18 @@ impl WorkerClient {
     ) -> Result<TerminalCreated, WorkerClientError> {
         self.post_with_retry(worker_node_id, "/v1/terminals", request)
             .await
+    }
+
+    pub async fn proxy_preview(
+        &self,
+        worker_node_id: Uuid,
+        request: &PreviewHttpRequest,
+    ) -> Result<PreviewHttpResponse, WorkerClientError> {
+        let path = format!(
+            "/v1/executions/{}/preview/{}/{}",
+            request.execution_id, request.generation, request.port
+        );
+        self.post_with_retry(worker_node_id, &path, request).await
     }
 
     pub async fn terminal_output(
