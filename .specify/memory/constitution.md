@@ -192,6 +192,20 @@ monotonic cursors and make replay gaps visible. Shared Git worktree
 administration remains single-owner and serialized even when ordinary commands
 run on several nodes.
 
+### XIX. Historical views are bounded and resumable
+Large append-oriented histories MUST open from a server-enforced bounded recent
+window and fetch older windows only on user demand. Client-side virtualization
+or slicing does not satisfy this rule when the backend still replays, transfers,
+or retains the complete history. Pages have deterministic order, stable
+identity, validated opaque continuation state, explicit exhaustion, and
+single-flight cancellation on scope changes.
+
+When bounded history transitions into a live stream, the contract MUST define
+an authoritative snapshot boundary so events cannot be lost or duplicated.
+Incremental replacements retain their original semantic identity across page
+boundaries. Prepending history preserves the user's visible anchor, and a page
+failure leaves the already loaded recent window usable and retryable.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -213,5 +227,5 @@ run on several nodes.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.16.0 (adds affinity-bound, evidence-backed distributed execution;
-0.15.0 strengthened external-protocol normalization invariants)
+**Version**: 0.17.0 (adds bounded, resumable historical-view and live-handoff
+invariants; 0.16.0 added affinity-bound distributed execution)
