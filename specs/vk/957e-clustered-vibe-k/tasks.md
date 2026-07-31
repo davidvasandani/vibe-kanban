@@ -143,7 +143,7 @@ files and may be completed together.
 - [x] T040 Add Nix evaluation assertions/tests for invalid role, missing
   credential, mismatched/local shared root, service ordering, and firewall in
   the closest Vibe Kanban module test files. Depends on T039.
-- [ ] T041 Document two-node Slice 2 rollout, drain, credential rotation,
+- [x] T041 Document two-node Slice 2 rollout, drain, credential rotation,
   snapshot/recovery, mount-loss, reconciliation, and rollback in Vibe
   Kanban-scoped docs. Depends on T031, T039.
 
