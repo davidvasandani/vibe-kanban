@@ -136,7 +136,7 @@ files and may be completed together.
 - [x] T038 Add coordinator/worker role, shared NFS root, credential file,
   listener, scheduling, and health options in
   `../homelab/modules/vibe-kanban-rebuild.nix`. Depends on T011.
-- [ ] T039 Add identical NFS mount ordering, consistent service UID/GID,
+- [x] T039 Add identical NFS mount ordering, consistent service UID/GID,
   coordinator-local data path, systemd credentials, worker units, LAN firewall,
   and capacity/mount health in `../homelab/modules/vibe-kanban-rebuild.nix`.
   Depends on T014, T038.
