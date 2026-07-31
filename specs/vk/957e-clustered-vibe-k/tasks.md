@@ -149,7 +149,7 @@ files and may be completed together.
 
 ## Layer 9 — Generated artifacts and verification
 
-- [ ] T042 Regenerate `shared/types.ts` and schemas with
+- [x] T042 Regenerate `shared/types.ts` and schemas with
   `pnpm run generate-types`; do not hand-edit generated outputs. Depends on
   T005, T026, T037.
 - [ ] T043 Install dependencies with `pnpm install --frozen-lockfile` and run
