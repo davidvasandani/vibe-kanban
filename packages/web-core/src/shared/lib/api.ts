@@ -12,6 +12,7 @@ import {
   DirectoryListResponse,
   DirectoryEntry,
   ExecutionProcess,
+  ExecutionWorkerJob,
   ExecutionProcessRepoState,
   GitBranch,
   Repo,
@@ -856,6 +857,15 @@ export const executionProcessesApi = {
   getDetails: async (processId: string): Promise<ExecutionProcess> => {
     const response = await makeRequest(`/api/execution-processes/${processId}`);
     return handleApiResponse<ExecutionProcess>(response);
+  },
+
+  getWorkerJob: async (
+    processId: string
+  ): Promise<ExecutionWorkerJob | null> => {
+    const response = await makeRequest(
+      `/api/execution-processes/${processId}/worker-job`
+    );
+    return handleApiResponse<ExecutionWorkerJob | null>(response);
   },
 
   getRepoStates: async (

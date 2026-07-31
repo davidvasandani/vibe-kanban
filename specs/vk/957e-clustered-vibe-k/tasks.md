@@ -127,7 +127,7 @@ files and may be completed together.
 - [x] T036 [P] Resolve relay/editor navigation from persisted affinity in
   relevant `crates/relay-hosts`, server routes, and `packages/web-core/src`.
   Depends on T020.
-- [ ] T037 Add frontend interrupted/indeterminate/output-incomplete states and
+- [x] T037 Add frontend interrupted/indeterminate/output-incomplete states and
   terminal/preview routing tests in `packages/web-core/src`. Depends on T026,
   T034, T035.
 

@@ -100,7 +100,7 @@ async fn terminal_ws(
     let environment = deployment.container().resolve_org_env_vars(&attempt).await;
 
     let placement = WorkspacePlacement::find(&deployment.db().pool, attempt.id).await?;
-    if let Some(worker_node_id) = placement.and_then(|placement| placement.worker_node_id) {
+    if let Some(worker_node_id) = terminal_worker_id(placement) {
         let client = deployment.worker_client().cloned().ok_or_else(|| {
             ApiError::BadRequest("Cluster worker client is not configured".into())
         })?;
@@ -146,6 +146,10 @@ async fn terminal_ws(
             )
         })
         .into_response())
+}
+
+fn terminal_worker_id(placement: Option<WorkspacePlacement>) -> Option<Uuid> {
+    placement.and_then(|placement| placement.worker_node_id)
 }
 
 fn terminal_authority(
@@ -322,4 +326,27 @@ async fn send_error(socket: &mut MaybeSignedWebSocket, message: &str) -> anyhow:
 
 pub(super) fn router() -> Router<DeploymentImpl> {
     Router::new().route("/terminal/ws", get(terminal_ws))
+}
+
+#[cfg(test)]
+mod tests {
+    use db::models::workspace::WorkspacePlacementState;
+
+    use super::*;
+
+    #[test]
+    fn terminal_uses_persisted_worker_affinity() {
+        let worker_node_id = Uuid::new_v4();
+        let placement = WorkspacePlacement {
+            workspace_id: Uuid::new_v4(),
+            worker_node_id: Some(worker_node_id),
+            placement_state: WorkspacePlacementState::Ready,
+            placed_at: None,
+            placement_reason: None,
+            requested_worker_node_id: None,
+            placement_constraints: None,
+        };
+        assert_eq!(terminal_worker_id(Some(placement)), Some(worker_node_id));
+        assert_eq!(terminal_worker_id(None), None);
+    }
 }
