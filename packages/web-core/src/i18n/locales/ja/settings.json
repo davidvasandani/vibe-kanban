@@ -44,7 +44,9 @@
         "slack": "Slack",
         "slackDesc": "Slack ワークスペース連携",
         "pipelines": "Pipelines",
-        "pipelinesDesc": "Pipeline TOML files and defaults"
+        "pipelinesDesc": "Pipeline TOML files and defaults",
+        "workers": "クラスターワーカー",
+        "workersDesc": "ワーカーの正常性、ストレージ、スケジューリング"
       }
     },
     "general": {

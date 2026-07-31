@@ -572,7 +572,7 @@ impl LocalContainerService {
             RepositoryAdminLockManager::new(db.pool.clone(), Duration::from_mins(5))
                 .expect("static repository lock lease must be valid");
 
-        let container = LocalContainerService {
+        LocalContainerService {
             db,
             workspace_manager,
             child_store,
@@ -597,9 +597,7 @@ impl LocalContainerService {
             cluster_config,
             repository_admin_locks,
             worker_client,
-        };
-
-        container
+        }
     }
 
     pub fn start_cleanup_tasks(&self) {

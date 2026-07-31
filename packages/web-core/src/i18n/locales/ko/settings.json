@@ -44,7 +44,9 @@
         "slack": "Slack",
         "slackDesc": "Slack 워크스페이스 연결",
         "pipelines": "Pipelines",
-        "pipelinesDesc": "Pipeline TOML files and defaults"
+        "pipelinesDesc": "Pipeline TOML files and defaults",
+        "workers": "클러스터 워커",
+        "workersDesc": "워커 상태, 스토리지 및 스케줄링"
       }
     },
     "general": {

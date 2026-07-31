@@ -515,6 +515,10 @@
       "repoStep": "你想在哪些仓库上工作？",
       "chatStep": "你想做什么工作？"
     },
+    "worker": {
+      "label": "运行于",
+      "automatic": "自动分配"
+    },
     "repoPicker": {
       "actions": {
         "recent": "最近",

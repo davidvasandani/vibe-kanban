@@ -44,7 +44,9 @@
         "slack": "Slack",
         "slackDesc": "Conexión del espacio de trabajo de Slack",
         "pipelines": "Pipelines",
-        "pipelinesDesc": "Pipeline TOML files and defaults"
+        "pipelinesDesc": "Pipeline TOML files and defaults",
+        "workers": "Trabajadores del clúster",
+        "workersDesc": "Estado de los trabajadores, almacenamiento y programación"
       }
     },
     "general": {
@@ -809,6 +811,13 @@
       "empty": "Aún no hay perfiles SSO configurados. Añade uno para habilitar el acceso a AWS en esta máquina.",
       "cliMissing": "La CLI de AWS no está disponible en esta máquina. Instálala desde la sección Herramientas de CLI para comprobar el estado e iniciar sesión.",
       "readOnly": "perfil default · solo lectura",
+      "scope": {
+        "session": "Sesión de SSO",
+        "legacy": "URL de inicio de SSO heredada",
+        "profiles": "{{count}} perfil",
+        "profiles_other": "{{count}} perfiles"
+      },
+      "manageProfiles": "Gestionar perfiles ({{count}})",
       "actions": {
         "add": "Añadir perfil",
         "refresh": "Actualizar estados",

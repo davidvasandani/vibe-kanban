@@ -44,7 +44,9 @@
         "slack": "Slack",
         "slackDesc": "Slack 工作区连接",
         "pipelines": "Pipelines",
-        "pipelinesDesc": "Pipeline TOML files and defaults"
+        "pipelinesDesc": "Pipeline TOML files and defaults",
+        "workers": "集群工作节点",
+        "workersDesc": "工作节点健康状况、存储和调度"
       }
     },
     "general": {
