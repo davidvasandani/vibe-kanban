@@ -48,6 +48,8 @@ pub enum ExecutionProcessStatus {
     /// Stopped by a server shutdown/restart (e.g. a deploy), not by the user
     /// or a failure. Interrupted coding-agent runs can be resumed.
     Interrupted,
+    /// The coordinator cannot verify the terminal state of a remote process.
+    Indeterminate,
 }
 
 #[derive(Debug, Clone, Type, Serialize, Deserialize, PartialEq, TS)]

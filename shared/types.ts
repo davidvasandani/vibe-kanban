@@ -291,7 +291,7 @@ pgid: bigint | null,
  */
 dropped: boolean, started_at: string, completed_at: string | null, created_at: string, updated_at: string, };
 
-export enum ExecutionProcessStatus { running = "running", completed = "completed", failed = "failed", killed = "killed", interrupted = "interrupted" }
+export enum ExecutionProcessStatus { running = "running", completed = "completed", failed = "failed", killed = "killed", interrupted = "interrupted", indeterminate = "indeterminate" }
 
 export type ExecutionProcessRunReason = "setupscript" | "cleanupscript" | "archivescript" | "codingagent" | "devserver" | "backgroundhelper";
 

@@ -111,3 +111,39 @@ async fn check_constraint_rejects_unknown_run_reason() {
         "expected CHECK constraint violation, got: {err}"
     );
 }
+
+#[tokio::test]
+async fn indeterminate_status_round_trips_through_migrated_schema() {
+    let pool = migrated_pool().await;
+    let process_id = Uuid::new_v4();
+    ExecutionProcess::create(
+        &pool,
+        &CreateExecutionProcess {
+            session_id: Uuid::new_v4(),
+            executor_action: helper_action(),
+            run_reason: ExecutionProcessRunReason::CodingAgent,
+        },
+        process_id,
+        &[],
+    )
+    .await
+    .expect("create execution");
+
+    ExecutionProcess::update_completion(
+        &pool,
+        process_id,
+        ExecutionProcessStatus::Indeterminate,
+        None,
+    )
+    .await
+    .expect("persist indeterminate status");
+
+    assert_eq!(
+        ExecutionProcess::find_by_id(&pool, process_id)
+            .await
+            .expect("query execution")
+            .expect("execution present")
+            .status,
+        ExecutionProcessStatus::Indeterminate
+    );
+}

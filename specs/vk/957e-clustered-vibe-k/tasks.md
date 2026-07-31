@@ -89,7 +89,7 @@ files and may be completed together.
 - [x] T025 Feed worker events into existing `MsgStore`, normalization,
   persistence, and WebSocket paths with ordering tests in
   `crates/local-deployment/src/container.rs`. Depends on T024.
-- [ ] T026 Implement remote cancellation route semantics and explicit
+- [x] T026 Implement remote cancellation route semantics and explicit
   indeterminate state in `crates/server/src/routes/execution_processes.rs` and
   related DB/API types. Depends on T022, T024.
 

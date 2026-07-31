@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
 use cluster_protocol::{
-    EventAcknowledgement, ExecutionDispatch, ExecutionEventPayload, PROTOCOL_VERSION,
-    PersistencePolicy, RequestAuthority,
+    CancellationPhase, CancellationRequest, EventAcknowledgement, ExecutionDispatch,
+    ExecutionEventPayload, PROTOCOL_VERSION, PersistencePolicy, RequestAuthority, TerminalState,
 };
 use command_group::AsyncGroupChild;
 use db::{
@@ -108,6 +108,28 @@ fn push_worker_bytes(store: &MsgStore, encoded: &str, stderr: bool) {
     } else {
         store.push_stdout(message);
     }
+}
+
+async fn mark_remote_execution_indeterminate(
+    db: &DBService,
+    execution_id: Uuid,
+) -> Result<(), ContainerError> {
+    ExecutionWorkerJob::update_state(
+        &db.pool,
+        execution_id,
+        ExecutionWorkerDispatchState::Indeterminate,
+        None,
+        Some(Utc::now()),
+    )
+    .await?;
+    ExecutionProcess::update_completion(
+        &db.pool,
+        execution_id,
+        ExecutionProcessStatus::Indeterminate,
+        None,
+    )
+    .await?;
+    Ok(())
 }
 
 /// A warm app-server with no active turn for longer than this is proactively
@@ -1641,6 +1663,13 @@ impl LocalContainerService {
                             Some(Utc::now()),
                         )
                         .await;
+                        let _ = ExecutionProcess::update_completion(
+                            &db.pool,
+                            execution_id,
+                            ExecutionProcessStatus::Indeterminate,
+                            None,
+                        )
+                        .await;
                         store.push(LogMsg::Stderr(
                             "Worker output replay gap; execution state is indeterminate".into(),
                         ));
@@ -1707,6 +1736,13 @@ impl LocalContainerService {
                                 ExecutionWorkerDispatchState::Indeterminate,
                                 None,
                                 Some(Utc::now()),
+                            )
+                            .await;
+                            let _ = ExecutionProcess::update_completion(
+                                &db.pool,
+                                execution_id,
+                                ExecutionProcessStatus::Indeterminate,
+                                None,
                             )
                             .await;
                             store.push_finished();
@@ -2908,6 +2944,93 @@ impl ContainerService for LocalContainerService {
         // process has no running turn so it is not the `child` below — reap it
         // by session key. Idempotent no-op when there is none.
         self.reap_warm_server(&execution_process.session_id).await;
+
+        if let Some(worker_job) =
+            ExecutionWorkerJob::find_by_execution_id(&self.db.pool, execution_process.id).await?
+        {
+            let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
+                ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
+            })?;
+            let client = self.worker_client.as_ref().ok_or_else(|| {
+                ContainerError::Other(anyhow!("Cluster worker client is not configured"))
+            })?;
+            let request = CancellationRequest {
+                authority: RequestAuthority {
+                    protocol_version: PROTOCOL_VERSION,
+                    coordinator_id,
+                    worker_node_id: worker_job.worker_node_id,
+                    correlation_id: execution_process.id,
+                    issued_at: Utc::now(),
+                    nonce: Uuid::new_v4().to_string(),
+                },
+                execution_id: execution_process.id,
+                graceful_timeout_seconds: 5,
+                terminate_timeout_seconds: 5,
+            };
+            match client.cancel(worker_job.worker_node_id, &request).await {
+                Ok(response)
+                    if matches!(
+                        response.phase,
+                        CancellationPhase::Confirmed | CancellationPhase::AlreadyTerminal
+                    ) && response.terminal.is_some() =>
+                {
+                    let evidence = response.terminal.expect("guarded above");
+                    let (worker_state, process_state) = match evidence.state {
+                        TerminalState::Completed => (
+                            ExecutionWorkerDispatchState::Completed,
+                            ExecutionProcessStatus::Completed,
+                        ),
+                        TerminalState::Failed => (
+                            ExecutionWorkerDispatchState::Failed,
+                            ExecutionProcessStatus::Failed,
+                        ),
+                        TerminalState::Killed => (
+                            ExecutionWorkerDispatchState::Killed,
+                            ExecutionProcessStatus::Killed,
+                        ),
+                        TerminalState::Interrupted => (
+                            ExecutionWorkerDispatchState::Interrupted,
+                            ExecutionProcessStatus::Interrupted,
+                        ),
+                    };
+                    let evidence_json = serde_json::to_value(&evidence).ok();
+                    ExecutionWorkerJob::update_state(
+                        &self.db.pool,
+                        execution_process.id,
+                        worker_state,
+                        evidence_json.as_ref(),
+                        Some(evidence.observed_at),
+                    )
+                    .await?;
+                    ExecutionProcess::update_completion(
+                        &self.db.pool,
+                        execution_process.id,
+                        process_state,
+                        evidence.exit_code.map(i64::from),
+                    )
+                    .await?;
+                }
+                Ok(response) => {
+                    tracing::warn!(
+                        execution_id = %execution_process.id,
+                        phase = ?response.phase,
+                        "Worker did not confirm a terminal state after cancellation"
+                    );
+                    mark_remote_execution_indeterminate(&self.db, execution_process.id).await?;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        execution_id = %execution_process.id,
+                        "Remote cancellation could not be confirmed: {error}"
+                    );
+                    mark_remote_execution_indeterminate(&self.db, execution_process.id).await?;
+                }
+            }
+            if let Some(store) = self.msg_stores.read().await.get(&execution_process.id) {
+                store.push_finished();
+            }
+            return Ok(());
+        }
 
         let Some(child) = self.get_child_from_store(&execution_process.id).await else {
             // No in-memory handle: the process may have been adopted from a
