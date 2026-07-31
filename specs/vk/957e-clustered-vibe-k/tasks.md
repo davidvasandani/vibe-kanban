@@ -49,18 +49,18 @@ files and may be completed together.
 - [x] T013 [P] Implement mount-table/export, coordinator-probe, writability,
   filesystem identity, and UID/GID validation with fixtures in
   `crates/worker/src/mount_health.rs`. Depends on T011.
-- [ ] T014 Implement authenticated registration/heartbeat and compatibility
+- [x] T014 Implement authenticated registration/heartbeat and compatibility
   negotiation in `crates/worker/src/server.rs`. Depends on T006, T011, T013.
 - [x] T015 Add bounded event journal, cursor replay/gap behavior, atomic terminal
   evidence, and tests in `crates/worker/src/journal.rs`. Depends on T011.
 
 ## Layer 4 — Shared provisioning and Git ownership
 
-- [ ] T016 Add canonical shared workspace/repository/log path resolution in
+- [x] T016 Add canonical shared workspace/repository/log path resolution in
   `crates/workspace-manager/src/workspace_manager.rs`. Depends on T003, T004.
-- [ ] T017 Implement repository-scoped in-process locking plus SQLite fencing
+- [x] T017 Implement repository-scoped in-process locking plus SQLite fencing
   in `crates/worktree-manager/src/worktree_manager.rs`. Depends on T003.
-- [ ] T018 Remove/serialize unsafe repo-wide prune and cover concurrent
+- [x] T018 Remove/serialize unsafe repo-wide prune and cover concurrent
   create/remove/prune in `crates/worktree-manager/src/worktree_manager.rs`.
   Depends on T017.
 - [ ] T019 Change workspace creation to reserve placement before provisioning

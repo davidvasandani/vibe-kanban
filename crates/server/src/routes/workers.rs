@@ -11,6 +11,7 @@ use db::models::worker_node::WorkerNode;
 use deployment::Deployment;
 use serde::{Deserialize, Serialize};
 use services::services::cluster::{MountChallenge, WorkerRegistryError};
+use sha2::{Digest, Sha256};
 use utils::response::ApiResponse;
 use uuid::Uuid;
 
@@ -75,7 +76,7 @@ async fn get_mount_challenge(
     State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<MountProbe>>, ApiError> {
     Ok(ResponseJson(ApiResponse::success(
-        mount_challenge(&deployment)?.probe,
+        mount_challenge(&deployment).await?.probe,
     )))
 }
 
@@ -86,7 +87,7 @@ async fn register(
     claim_nonce(&deployment, &payload.authority.nonce).await?;
     let (worker, lease) = deployment
         .worker_registry()
-        .register(&payload, &mount_challenge(&deployment)?, Utc::now())
+        .register(&payload, &mount_challenge(&deployment).await?, Utc::now())
         .await
         .map_err(registry_error)?;
     Ok(ResponseJson(ApiResponse::success(RegistrationResponse {
@@ -102,7 +103,7 @@ async fn heartbeat(
     claim_nonce(&deployment, &payload.authority.nonce).await?;
     let (worker, lease) = deployment
         .worker_registry()
-        .heartbeat(&payload, &mount_challenge(&deployment)?, Utc::now())
+        .heartbeat(&payload, &mount_challenge(&deployment).await?, Utc::now())
         .await
         .map_err(registry_error)?;
     Ok(ResponseJson(ApiResponse::success(RegistrationResponse {
@@ -111,7 +112,7 @@ async fn heartbeat(
     })))
 }
 
-fn mount_challenge(deployment: &DeploymentImpl) -> Result<MountChallenge, ApiError> {
+async fn mount_challenge(deployment: &DeploymentImpl) -> Result<MountChallenge, ApiError> {
     let config = deployment.cluster_config();
     if !config.enabled {
         return Err(ApiError::BadRequest("Cluster mode is disabled".into()));
@@ -120,11 +121,19 @@ fn mount_challenge(deployment: &DeploymentImpl) -> Result<MountChallenge, ApiErr
         .coordinator_id
         .ok_or_else(|| ApiError::BadRequest("Cluster coordinator ID is missing".into()))?;
     let id = coordinator_id.to_string();
+    let relative_path = format!(".coordinator-probes/{id}");
+    let probe_path = config.shared_root.join(&relative_path);
+    let contents = format!("vibe-kanban-coordinator:{id}\n");
+    if let Some(parent) = probe_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(&probe_path, contents.as_bytes()).await?;
+    let digest = format!("{:x}", Sha256::digest(contents.as_bytes()));
     Ok(MountChallenge {
         probe: MountProbe {
             id: id.clone(),
-            relative_path: format!(".coordinator-probes/{id}"),
-            expected_contents_digest: format!("coordinator:{id}"),
+            relative_path,
+            expected_contents_digest: digest,
         },
         expected_filesystem_id: config.expected_filesystem_id.clone(),
     })

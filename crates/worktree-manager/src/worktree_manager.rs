@@ -3,18 +3,210 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, LazyLock, Mutex, OnceLock},
+    time::Duration,
 };
 
 static WORKSPACE_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
+use chrono::{TimeDelta, Utc};
+use db::models::repository_admin_lock::RepositoryAdminLock;
 use git::{GitCli, GitService, GitServiceError};
+use sqlx::SqlitePool;
 use thiserror::Error;
 use tracing::{debug, info, trace};
 use utils::{path::normalize_macos_private_alias, shell::resolve_executable_path};
+use uuid::Uuid;
 
-// Global synchronization for worktree creation to prevent race conditions
-static WORKTREE_CREATION_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+// Every mutation of a repository's shared `.git/worktrees` namespace uses the
+// same repository-scoped lock. Per-worktree locks still permit repo-wide prune
+// to race with a create/remove in another workspace.
+static REPOSITORY_OPERATION_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static REPOSITORY_ADMIN_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Coordinator-side repository lock combining process-local exclusion with a
+/// monotonically fenced SQLite lease.
+#[derive(Clone)]
+pub struct RepositoryAdminLockManager {
+    pool: SqlitePool,
+    lease_duration: Duration,
+}
+
+#[cfg(test)]
+mod repository_admin_lock_tests {
+    use std::time::Duration;
+
+    use sqlx::sqlite::SqlitePoolOptions;
+    use uuid::Uuid;
+
+    use super::{RepositoryAdminLockManager, WorktreeError, canonical_lock_key};
+
+    async fn manager() -> RepositoryAdminLockManager {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TABLE repository_admin_locks (
+                repo_id BLOB PRIMARY KEY NOT NULL,
+                generation INTEGER NOT NULL,
+                operation_id BLOB NOT NULL,
+                acquired_at TEXT NOT NULL,
+                lease_expires_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        RepositoryAdminLockManager::new(pool, Duration::from_secs(30)).unwrap()
+    }
+
+    #[test]
+    fn lock_keys_must_be_absolute() {
+        assert!(matches!(
+            canonical_lock_key(std::path::Path::new("relative")),
+            Err(WorktreeError::InvalidPath(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_repository_operations_are_serialized_and_fenced() {
+        let manager = manager().await;
+        let repo_id = Uuid::new_v4();
+        let path = tempfile::tempdir().unwrap();
+        let first = manager.acquire(repo_id, path.path()).await.unwrap();
+        assert_eq!(first.generation(), 1);
+
+        let waiting_manager = manager.clone();
+        let waiting_path = path.path().to_path_buf();
+        let waiting =
+            tokio::spawn(async move { waiting_manager.acquire(repo_id, &waiting_path).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiting.is_finished());
+
+        first.release().await.unwrap();
+        let second = waiting.await.unwrap().unwrap();
+        assert_eq!(second.generation(), 2);
+        assert_ne!(second.operation_id(), Uuid::nil());
+        second.release().await.unwrap();
+    }
+}
+
+pub struct RepositoryAdminGuard {
+    pool: SqlitePool,
+    record: RepositoryAdminLock,
+    _local_guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl RepositoryAdminLockManager {
+    pub fn new(pool: SqlitePool, lease_duration: Duration) -> Result<Self, WorktreeError> {
+        if lease_duration.is_zero() {
+            return Err(WorktreeError::InvalidLeaseDuration);
+        }
+        Ok(Self {
+            pool,
+            lease_duration,
+        })
+    }
+
+    pub async fn acquire(
+        &self,
+        repository_id: Uuid,
+        repository_path: &Path,
+    ) -> Result<RepositoryAdminGuard, WorktreeError> {
+        let key = canonical_lock_key(repository_path)?;
+        let mutex = {
+            let mut locks = REPOSITORY_ADMIN_LOCKS.lock().unwrap();
+            locks
+                .entry(key)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let local_guard = mutex.lock_owned().await;
+        let now = Utc::now();
+        let lease_expires_at = now
+            + TimeDelta::from_std(self.lease_duration)
+                .map_err(|_| WorktreeError::InvalidLeaseDuration)?;
+        let operation_id = Uuid::new_v4();
+        let record = RepositoryAdminLock::acquire(
+            &self.pool,
+            repository_id,
+            operation_id,
+            now,
+            lease_expires_at,
+        )
+        .await?
+        .ok_or(WorktreeError::RepositoryLockBusy(repository_id))?;
+
+        Ok(RepositoryAdminGuard {
+            pool: self.pool.clone(),
+            record,
+            _local_guard: local_guard,
+        })
+    }
+}
+
+impl RepositoryAdminGuard {
+    pub fn generation(&self) -> i64 {
+        self.record.generation
+    }
+
+    pub fn operation_id(&self) -> Uuid {
+        self.record.operation_id
+    }
+
+    pub async fn release(self) -> Result<(), WorktreeError> {
+        let released = RepositoryAdminLock::release(
+            &self.pool,
+            self.record.repo_id,
+            self.record.generation,
+            self.record.operation_id,
+        )
+        .await?;
+        if !released {
+            return Err(WorktreeError::RepositoryLockLost(self.record.repo_id));
+        }
+        Ok(())
+    }
+}
+
+fn canonical_lock_key(path: &Path) -> Result<PathBuf, WorktreeError> {
+    if !path.is_absolute() {
+        return Err(WorktreeError::InvalidPath(path.display().to_string()));
+    }
+    // A caller may identify the repository through one of its worktrees. Git's
+    // common directory is the actual shared administration namespace and must
+    // therefore map every such alias to the same lock.
+    let authority_path = GitService::new()
+        .get_common_dir(path)
+        .unwrap_or_else(|_| path.to_path_buf());
+    Ok(dunce::canonicalize(&authority_path).unwrap_or(authority_path))
+}
+
+fn repository_operation_lock(path: &Path) -> Result<Arc<tokio::sync::Mutex<()>>, WorktreeError> {
+    let key = canonical_lock_key(path)?;
+    let mut locks = REPOSITORY_OPERATION_LOCKS.lock().unwrap();
+    Ok(locks
+        .entry(key)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone())
+}
+
+async fn finish_fenced_operation(
+    operation: Result<(), WorktreeError>,
+    guard: RepositoryAdminGuard,
+) -> Result<(), WorktreeError> {
+    let release = guard.release().await;
+    match operation {
+        Err(error) => Err(error),
+        Ok(()) => release,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct WorktreeCleanup {
@@ -47,6 +239,14 @@ pub enum WorktreeError {
     BranchNotFound(String),
     #[error("Repository error: {0}")]
     Repository(String),
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+    #[error("repository administration lock for {0} is held by another owner")]
+    RepositoryLockBusy(Uuid),
+    #[error("repository administration lock for {0} was replaced or expired")]
+    RepositoryLockLost(Uuid),
+    #[error("repository administration lease duration must be positive and representable")]
+    InvalidLeaseDuration,
 }
 
 pub struct WorktreeManager;
@@ -64,6 +264,8 @@ impl WorktreeManager {
         base_branch: &str,
         create_branch: bool,
     ) -> Result<(), WorktreeError> {
+        let lock = repository_operation_lock(repo_path)?;
+        let _guard = lock.lock().await;
         if create_branch {
             let repo_path_owned = repo_path.to_path_buf();
             let branch_name_owned = branch_name.to_string();
@@ -80,7 +282,28 @@ impl WorktreeManager {
             .map_err(|e| WorktreeError::TaskJoin(format!("Task join error: {e}")))??;
         }
 
-        Self::ensure_worktree_exists(repo_path, branch_name, worktree_path).await
+        Self::ensure_worktree_exists_unlocked(repo_path, branch_name, worktree_path).await
+    }
+
+    pub async fn create_worktree_fenced(
+        lock_manager: &RepositoryAdminLockManager,
+        repository_id: Uuid,
+        repo_path: &Path,
+        branch_name: &str,
+        worktree_path: &Path,
+        base_branch: &str,
+        create_branch: bool,
+    ) -> Result<(), WorktreeError> {
+        let guard = lock_manager.acquire(repository_id, repo_path).await?;
+        let result = Self::create_worktree(
+            repo_path,
+            branch_name,
+            worktree_path,
+            base_branch,
+            create_branch,
+        )
+        .await;
+        finish_fenced_operation(result, guard).await
     }
 
     /// Ensure worktree exists, recreating if necessary with proper synchronization
@@ -90,19 +313,29 @@ impl WorktreeManager {
         branch_name: &str,
         worktree_path: &Path,
     ) -> Result<(), WorktreeError> {
-        let path_str = worktree_path.to_string_lossy().to_string();
-
-        // Get or create a lock for this specific worktree path
-        let lock = {
-            let mut locks = WORKTREE_CREATION_LOCKS.lock().unwrap();
-            locks
-                .entry(path_str.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-
-        // Acquire the lock for this specific worktree path
+        let lock = repository_operation_lock(repo_path)?;
         let _guard = lock.lock().await;
+        Self::ensure_worktree_exists_unlocked(repo_path, branch_name, worktree_path).await
+    }
+
+    pub async fn ensure_worktree_exists_fenced(
+        lock_manager: &RepositoryAdminLockManager,
+        repository_id: Uuid,
+        repo_path: &Path,
+        branch_name: &str,
+        worktree_path: &Path,
+    ) -> Result<(), WorktreeError> {
+        let guard = lock_manager.acquire(repository_id, repo_path).await?;
+        let result = Self::ensure_worktree_exists(repo_path, branch_name, worktree_path).await;
+        finish_fenced_operation(result, guard).await
+    }
+
+    async fn ensure_worktree_exists_unlocked(
+        repo_path: &Path,
+        branch_name: &str,
+        worktree_path: &Path,
+    ) -> Result<(), WorktreeError> {
+        let path_str = worktree_path.to_string_lossy().to_string();
 
         // Check if worktree already exists and is properly set up
         if Self::is_worktree_properly_set_up(repo_path, worktree_path).await? {
@@ -559,23 +792,18 @@ impl WorktreeManager {
     pub async fn cleanup_worktree(worktree: &WorktreeCleanup) -> Result<(), WorktreeError> {
         let path_str = worktree.worktree_path.to_string_lossy().to_string();
 
-        // Get the same lock to ensure we don't interfere with creation
-        let lock = {
-            let mut locks = WORKTREE_CREATION_LOCKS.lock().unwrap();
-            locks
-                .entry(path_str.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-
-        let _guard = lock.lock().await;
-
         // Try to determine the git repo path if not provided
         let resolved_repo_path = if let Some(repo_path) = &worktree.git_repo_path {
             Some(repo_path.to_path_buf())
         } else {
             Self::infer_git_repo_path(&worktree.worktree_path).await
         };
+
+        let lock_path = resolved_repo_path
+            .as_deref()
+            .unwrap_or(&worktree.worktree_path);
+        let lock = repository_operation_lock(lock_path)?;
+        let _guard = lock.lock().await;
 
         if let Some(repo_path) = resolved_repo_path {
             Self::comprehensive_worktree_cleanup_async(&repo_path, &worktree.worktree_path).await?;
@@ -589,6 +817,21 @@ impl WorktreeManager {
         }
 
         Ok(())
+    }
+
+    pub async fn cleanup_worktree_fenced(
+        lock_manager: &RepositoryAdminLockManager,
+        repository_id: Uuid,
+        worktree: &WorktreeCleanup,
+    ) -> Result<(), WorktreeError> {
+        let repo_path = worktree.git_repo_path.as_deref().ok_or_else(|| {
+            WorktreeError::InvalidPath(
+                "fenced cleanup requires an authoritative repository path".into(),
+            )
+        })?;
+        let guard = lock_manager.acquire(repository_id, repo_path).await?;
+        let result = Self::cleanup_worktree(worktree).await;
+        finish_fenced_operation(result, guard).await
     }
 
     /// Try to infer the git repository path from a worktree
@@ -648,6 +891,8 @@ impl WorktreeManager {
         old_path: &Path,
         new_path: &Path,
     ) -> Result<(), WorktreeError> {
+        let lock = repository_operation_lock(repo_path)?;
+        let _guard = lock.lock().await;
         let repo_path = repo_path.to_path_buf();
         let old_path = old_path.to_path_buf();
         let new_path = new_path.to_path_buf();
@@ -733,6 +978,45 @@ async fn create_worktree_when_repo_path_is_a_worktree() {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_create_remove_and_prune_share_repository_lock() {
+    use tempfile::TempDir;
+
+    let td = TempDir::new().unwrap();
+    let repo_path = td.path().join("repo");
+    GitService::new()
+        .initialize_repo_with_main_branch(&repo_path)
+        .unwrap();
+    let first_path = td.path().join("first");
+    let second_path = td.path().join("second");
+
+    let create_first =
+        WorktreeManager::create_worktree(&repo_path, "concurrent-first", &first_path, "main", true);
+    let create_second = WorktreeManager::create_worktree(
+        &repo_path,
+        "concurrent-second",
+        &second_path,
+        "main",
+        true,
+    );
+    let (first_result, second_result) = tokio::join!(create_first, create_second);
+    first_result.unwrap();
+    second_result.unwrap();
+    assert!(first_path.join(".git").is_file());
+    assert!(second_path.join(".git").is_file());
+
+    let first_cleanup = WorktreeCleanup::new(first_path.clone(), Some(repo_path.clone()));
+    let remove_first = WorktreeManager::cleanup_worktree(&first_cleanup);
+    let ensure_second =
+        WorktreeManager::ensure_worktree_exists(&repo_path, "concurrent-second", &second_path);
+    let (remove_result, ensure_result) = tokio::join!(remove_first, ensure_second);
+    remove_result.unwrap();
+    ensure_result.unwrap();
+
+    assert!(!first_path.exists());
+    assert!(second_path.join(".git").is_file());
 }
 
 /// Regression: when a worktree's git admin linkage has drifted (e.g. after a

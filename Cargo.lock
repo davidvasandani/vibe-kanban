@@ -12956,8 +12956,13 @@ version = "0.1.43"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
+ "chrono",
  "cluster-protocol",
+ "ed25519-dalek",
+ "reqwest 0.13.2",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
@@ -12988,13 +12993,17 @@ dependencies = [
 name = "worktree-manager"
 version = "0.1.43"
 dependencies = [
+ "chrono",
+ "db",
  "dunce",
  "git",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "utils",
+ "uuid",
 ]
 
 [[package]]

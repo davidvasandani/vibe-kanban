@@ -17,6 +17,69 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use worktree_manager::{WorktreeCleanup, WorktreeError, WorktreeManager};
 
+const SHARED_REPOSITORIES_DIR: &str = "repositories";
+const SHARED_WORKSPACES_DIR: &str = "workspaces";
+const SHARED_EXECUTION_LOGS_DIR: &str = "execution-logs";
+
+/// Canonical, host-independent paths within the cluster shared volume.
+///
+/// IDs, rather than user-controlled names, form every authoritative path so
+/// all nodes derive exactly the same location without path traversal or naming
+/// collisions. Display names may still be used inside workspace metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedWorkspacePaths {
+    root: PathBuf,
+}
+
+impl SharedWorkspacePaths {
+    pub fn new(root: impl Into<PathBuf>) -> Result<Self, WorkspaceError> {
+        let root = root.into();
+        if !root.is_absolute() {
+            return Err(WorkspaceError::InvalidSharedRoot(root));
+        }
+        Ok(Self { root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn repositories_dir(&self) -> PathBuf {
+        self.root.join(SHARED_REPOSITORIES_DIR)
+    }
+
+    pub fn repository_dir(&self, repository_id: Uuid) -> PathBuf {
+        self.repositories_dir().join(repository_id.to_string())
+    }
+
+    pub fn workspaces_dir(&self) -> PathBuf {
+        self.root.join(SHARED_WORKSPACES_DIR)
+    }
+
+    pub fn workspace_dir(&self, workspace_id: Uuid) -> PathBuf {
+        self.workspaces_dir().join(workspace_id.to_string())
+    }
+
+    pub fn execution_logs_dir(&self) -> PathBuf {
+        self.root.join(SHARED_EXECUTION_LOGS_DIR)
+    }
+
+    pub fn execution_log_dir(&self, execution_id: Uuid) -> PathBuf {
+        self.execution_logs_dir().join(execution_id.to_string())
+    }
+
+    pub async fn create_base_dirs(&self) -> Result<(), std::io::Error> {
+        for path in [
+            self.repositories_dir(),
+            self.workspaces_dir(),
+            self.execution_logs_dir(),
+        ] {
+            tokio::fs::create_dir_all(path).await?;
+        }
+        Ok(())
+    }
+}
+
 /// Git-visible work found in a workspace directory that a delete would destroy.
 /// Names the first repository found to be dirty, for logging.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +126,8 @@ pub enum WorkspaceError {
     NoRepositories,
     #[error("Partial workspace creation failed: {0}")]
     PartialCreation(String),
+    #[error("shared workspace root must be absolute: {0}")]
+    InvalidSharedRoot(PathBuf),
 }
 
 /// Info about a single repo's worktree within a workspace
@@ -739,6 +804,52 @@ impl WorkspaceManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod shared_path_tests {
+    use std::path::PathBuf;
+
+    use uuid::Uuid;
+
+    use super::SharedWorkspacePaths;
+
+    #[test]
+    fn derives_stable_id_only_paths_under_shared_root() {
+        let paths = SharedWorkspacePaths::new("/srv/vibe-kanban-shared").unwrap();
+        let repo_id = Uuid::from_u128(1);
+        let workspace_id = Uuid::from_u128(2);
+        let execution_id = Uuid::from_u128(3);
+
+        assert_eq!(
+            paths.repository_dir(repo_id),
+            PathBuf::from("/srv/vibe-kanban-shared/repositories").join(repo_id.to_string())
+        );
+        assert_eq!(
+            paths.workspace_dir(workspace_id),
+            PathBuf::from("/srv/vibe-kanban-shared/workspaces").join(workspace_id.to_string())
+        );
+        assert_eq!(
+            paths.execution_log_dir(execution_id),
+            PathBuf::from("/srv/vibe-kanban-shared/execution-logs").join(execution_id.to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_relative_shared_root() {
+        assert!(SharedWorkspacePaths::new("relative/shared").is_err());
+    }
+
+    #[tokio::test]
+    async fn creates_all_base_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("shared");
+        let paths = SharedWorkspacePaths::new(&root).unwrap();
+        paths.create_base_dirs().await.unwrap();
+        assert!(paths.repositories_dir().is_dir());
+        assert!(paths.workspaces_dir().is_dir());
+        assert!(paths.execution_logs_dir().is_dir());
     }
 }
 

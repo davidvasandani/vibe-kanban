@@ -81,9 +81,12 @@ impl RepositoryAdminLock {
         generation: i64,
         operation_id: Uuid,
     ) -> Result<bool, sqlx::Error> {
+        // Retain the row as a fencing tombstone. Deleting it would reset the
+        // next owner's generation to 1 and let an old token become ambiguous.
         let result = sqlx::query(
             r#"
-            DELETE FROM repository_admin_locks
+            UPDATE repository_admin_locks
+            SET lease_expires_at = acquired_at
             WHERE repo_id = ? AND generation = ? AND operation_id = ?
             "#,
         )
