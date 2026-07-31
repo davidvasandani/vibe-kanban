@@ -14,6 +14,8 @@ use chrono::Utc;
 use cluster_protocol::{
     CancellationRequest, DispatchAccepted, EventAcknowledgement, EventBatch, ExecutionDispatch,
     InteractionResponse, JobSummary, PROTOCOL_VERSION, QuarantineRequest, RequestAuthority,
+    TerminalClose, TerminalCreateRequest, TerminalCreated, TerminalInput, TerminalOutputBatch,
+    TerminalResize,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -26,6 +28,7 @@ use crate::{
     execution::{ExecutionError, ExecutionSupervisor},
     path_authority::PathAuthority,
     recovery::RecoveryStore,
+    terminal::TerminalService,
 };
 
 const SIGNATURE_HEADER: &str = "x-vk-signature";
@@ -42,6 +45,7 @@ struct WorkerApiState {
     coordinator_id: Uuid,
     coordinator_key: VerifyingKey,
     seen_nonces: Arc<Mutex<HashMap<String, tokio::time::Instant>>>,
+    terminals: TerminalService,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,8 +61,9 @@ struct Acknowledged {
 
 pub async fn router(config: &WorkerConfig) -> anyhow::Result<Router> {
     let coordinator_key = load_verifying_key(&config.coordinator_public_key_file).await?;
+    let path_authority = PathAuthority::new(&config.shared_root)?;
     let supervisor = ExecutionSupervisor::with_recovery(
-        PathAuthority::new(&config.shared_root)?,
+        path_authority.clone(),
         RecoveryStore::new(&config.state_dir).await?,
     )
     .await?;
@@ -68,9 +73,15 @@ pub async fn router(config: &WorkerConfig) -> anyhow::Result<Router> {
         coordinator_id: config.coordinator_id,
         coordinator_key,
         seen_nonces: Arc::new(Mutex::new(HashMap::new())),
+        terminals: TerminalService::new(path_authority),
     };
     Ok(Router::new()
         .route("/v1/jobs", get(inventory))
+        .route("/v1/terminals", post(create_terminal))
+        .route("/v1/terminals/{terminal_id}/output", get(terminal_output))
+        .route("/v1/terminals/{terminal_id}/input", post(terminal_input))
+        .route("/v1/terminals/{terminal_id}/resize", post(terminal_resize))
+        .route("/v1/terminals/{terminal_id}/close", post(close_terminal))
         .route("/v1/executions/{execution_id}", post(dispatch))
         .route("/v1/executions/{execution_id}/events", get(events))
         .route("/v1/executions/{execution_id}/ack", post(acknowledge))
@@ -82,6 +93,81 @@ pub async fn router(config: &WorkerConfig) -> anyhow::Result<Router> {
         .route("/v1/executions/{execution_id}/quarantine", post(quarantine))
         .layer(from_fn_with_state(state.clone(), require_signature))
         .with_state(state))
+}
+
+async fn create_terminal(
+    State(state): State<WorkerApiState>,
+    Json(payload): Json<TerminalCreateRequest>,
+) -> Result<Json<TerminalCreated>, WorkerApiError> {
+    validate_authority(&state, &payload.authority).await?;
+    let terminal_id = state
+        .terminals
+        .create(payload)
+        .await
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))?;
+    Ok(Json(TerminalCreated { terminal_id }))
+}
+
+async fn terminal_output(
+    State(state): State<WorkerApiState>,
+    Path(terminal_id): Path<Uuid>,
+) -> Result<Json<TerminalOutputBatch>, WorkerApiError> {
+    state
+        .terminals
+        .output(terminal_id)
+        .map(Json)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
+}
+
+async fn terminal_input(
+    State(state): State<WorkerApiState>,
+    Path(terminal_id): Path<Uuid>,
+    Json(payload): Json<TerminalInput>,
+) -> Result<Json<serde_json::Value>, WorkerApiError> {
+    validate_authority(&state, &payload.authority).await?;
+    if payload.terminal_id != terminal_id {
+        return Err(WorkerApiError::BadRequest("terminal ID mismatch".into()));
+    }
+    let bytes = BASE64_STANDARD
+        .decode(payload.data_base64)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))?;
+    state
+        .terminals
+        .input(terminal_id, &bytes)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))?;
+    Ok(Json(serde_json::json!({ "acknowledged": true })))
+}
+
+async fn terminal_resize(
+    State(state): State<WorkerApiState>,
+    Path(terminal_id): Path<Uuid>,
+    Json(payload): Json<TerminalResize>,
+) -> Result<Json<serde_json::Value>, WorkerApiError> {
+    validate_authority(&state, &payload.authority).await?;
+    if payload.terminal_id != terminal_id {
+        return Err(WorkerApiError::BadRequest("terminal ID mismatch".into()));
+    }
+    state
+        .terminals
+        .resize(terminal_id, payload.cols, payload.rows)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))?;
+    Ok(Json(serde_json::json!({ "acknowledged": true })))
+}
+
+async fn close_terminal(
+    State(state): State<WorkerApiState>,
+    Path(terminal_id): Path<Uuid>,
+    Json(payload): Json<TerminalClose>,
+) -> Result<Json<serde_json::Value>, WorkerApiError> {
+    validate_authority(&state, &payload.authority).await?;
+    if payload.terminal_id != terminal_id {
+        return Err(WorkerApiError::BadRequest("terminal ID mismatch".into()));
+    }
+    state
+        .terminals
+        .close(terminal_id)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))?;
+    Ok(Json(serde_json::json!({ "acknowledged": true })))
 }
 
 async fn inventory(State(state): State<WorkerApiState>) -> Json<Vec<JobSummary>> {

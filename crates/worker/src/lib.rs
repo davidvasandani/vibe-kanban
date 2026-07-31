@@ -15,6 +15,7 @@ pub mod mount_health;
 pub mod path_authority;
 pub mod recovery;
 pub mod server;
+pub mod terminal;
 pub mod worker_api;
 
 pub const WORKER_NODE_ID_ENV: &str = "VK_WORKER_NODE_ID";

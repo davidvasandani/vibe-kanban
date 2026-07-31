@@ -3,7 +3,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use cluster_protocol::{
     CancellationRequest, CancellationStatus, DispatchAccepted, EventAcknowledgement, EventBatch,
-    ExecutionDispatch, InteractionResponse, JobSummary, QuarantineRequest,
+    ExecutionDispatch, InteractionResponse, JobSummary, QuarantineRequest, TerminalClose,
+    TerminalCreateRequest, TerminalCreated, TerminalInput, TerminalOutputBatch, TerminalResize,
 };
 use ed25519_dalek::{Signer, SigningKey};
 use reqwest::{Client, Method, StatusCode};
@@ -137,6 +138,64 @@ impl WorkerClient {
         let _: serde_json::Value = self
             .post_with_retry(worker_node_id, &path, response)
             .await?;
+        Ok(())
+    }
+
+    pub async fn create_terminal(
+        &self,
+        worker_node_id: Uuid,
+        request: &TerminalCreateRequest,
+    ) -> Result<TerminalCreated, WorkerClientError> {
+        self.post_with_retry(worker_node_id, "/v1/terminals", request)
+            .await
+    }
+
+    pub async fn terminal_output(
+        &self,
+        worker_node_id: Uuid,
+        terminal_id: Uuid,
+    ) -> Result<TerminalOutputBatch, WorkerClientError> {
+        let path = format!("/v1/terminals/{terminal_id}/output");
+        let endpoint = self.endpoint_for(worker_node_id).await?;
+        let response = self
+            .signed(
+                self.http.get(endpoint.join(&path)?),
+                Method::GET,
+                &path,
+                &[],
+            )
+            .send()
+            .await?;
+        decode(response).await
+    }
+
+    pub async fn terminal_input(
+        &self,
+        worker_node_id: Uuid,
+        request: &TerminalInput,
+    ) -> Result<(), WorkerClientError> {
+        let path = format!("/v1/terminals/{}/input", request.terminal_id);
+        let _: serde_json::Value = self.post_with_retry(worker_node_id, &path, request).await?;
+        Ok(())
+    }
+
+    pub async fn terminal_resize(
+        &self,
+        worker_node_id: Uuid,
+        request: &TerminalResize,
+    ) -> Result<(), WorkerClientError> {
+        let path = format!("/v1/terminals/{}/resize", request.terminal_id);
+        let _: serde_json::Value = self.post_with_retry(worker_node_id, &path, request).await?;
+        Ok(())
+    }
+
+    pub async fn close_terminal(
+        &self,
+        worker_node_id: Uuid,
+        request: &TerminalClose,
+    ) -> Result<(), WorkerClientError> {
+        let path = format!("/v1/terminals/{}/close", request.terminal_id);
+        let _: serde_json::Value = self.post_with_retry(worker_node_id, &path, request).await?;
         Ok(())
     }
 

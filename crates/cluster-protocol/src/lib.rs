@@ -293,6 +293,50 @@ pub enum DisconnectPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalCreateRequest {
+    pub authority: RequestAuthority,
+    pub workspace_id: Uuid,
+    pub workspace_path: String,
+    pub working_directory: String,
+    pub environment: BTreeMap<String, String>,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalCreated {
+    pub terminal_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalInput {
+    pub authority: RequestAuthority,
+    pub terminal_id: Uuid,
+    pub data_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalResize {
+    pub authority: RequestAuthority,
+    pub terminal_id: Uuid,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalClose {
+    pub authority: RequestAuthority,
+    pub terminal_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalOutputBatch {
+    pub terminal_id: Uuid,
+    pub chunks_base64: Vec<String>,
+    pub closed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreviewTarget {
     pub workspace_id: Uuid,
     pub worker_job_id: Uuid,
