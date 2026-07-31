@@ -158,13 +158,29 @@ struct ClusterPreviewMetadata {
 }
 
 fn preview_metadata(request: &Request) -> Option<ClusterPreviewMetadata> {
-    let values = url::form_urlencoded::parse(request.uri().query()?.as_bytes())
-        .into_owned()
-        .collect::<std::collections::HashMap<_, _>>();
+    if let Some(query) = request.uri().query() {
+        let values = url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect::<std::collections::HashMap<_, _>>();
+        if let (Some(workspace), Some(execution), Some(generation)) = (
+            values.get("_vk_workspace"),
+            values.get("_vk_execution"),
+            values.get("_vk_generation"),
+        ) {
+            return Some(ClusterPreviewMetadata {
+                workspace_id: workspace.parse().ok()?,
+                execution_id: execution.parse().ok()?,
+                generation: generation.parse().ok()?,
+            });
+        }
+    }
+    let host = request.headers().get("host")?.to_str().ok()?;
+    let labels = host.split('.').collect::<Vec<_>>();
+    let marker = labels.iter().position(|label| *label == "vk")?;
     Some(ClusterPreviewMetadata {
-        workspace_id: values.get("_vk_workspace")?.parse().ok()?,
-        execution_id: values.get("_vk_execution")?.parse().ok()?,
-        generation: values.get("_vk_generation")?.parse().ok()?,
+        workspace_id: labels.get(marker + 1)?.parse().ok()?,
+        execution_id: labels.get(marker + 2)?.parse().ok()?,
+        generation: labels.get(marker + 3)?.parse().ok()?,
     })
 }
 
@@ -354,5 +370,18 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert!(preview_metadata(&incomplete).is_none());
+
+        let host_routed = Request::builder()
+            .uri("/asset.js")
+            .header(
+                "host",
+                format!("3000.vk.{workspace_id}.{execution_id}.42.localhost:40775"),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let metadata = preview_metadata(&host_routed).unwrap();
+        assert_eq!(metadata.workspace_id, workspace_id);
+        assert_eq!(metadata.execution_id, execution_id);
+        assert_eq!(metadata.generation, 42);
     }
 }

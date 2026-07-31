@@ -442,10 +442,14 @@ async fn require_signature(
     if content_digest != computed_digest {
         return Err(WorkerApiError::Unauthorized);
     }
+    let signed_target = parts
+        .uri
+        .path_and_query()
+        .map_or(parts.uri.path(), |value| value.as_str());
     let message = format!(
         "{timestamp}.{}.{}.{}",
         parts.method.as_str(),
-        parts.uri.path(),
+        signed_target,
         content_digest
     );
     state

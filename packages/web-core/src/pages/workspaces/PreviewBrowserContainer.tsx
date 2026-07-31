@@ -314,8 +314,13 @@ export function PreviewBrowserContainer({
     const path = effectiveParsedUrl.pathname + effectiveParsedUrl.search;
 
     // Subdomain-based routing: the proxy extracts the port from the Host header
-    const hostToken =
+    let hostToken =
       hostId != null ? `${devServerPort}--${hostId}` : devServerPort;
+    if (primaryDevServer && workerJob) {
+      hostToken = `${hostToken}.vk.${workspaceId}.${primaryDevServer.id}.${new Date(
+        primaryDevServer.started_at
+      ).getTime()}`;
+    }
     const proxyUrl = new URL(
       `http://${hostToken}.localhost:${previewProxyPort}${path}`
     );

@@ -83,10 +83,11 @@ impl WorkerClient {
         after: u64,
     ) -> Result<EventBatch, WorkerClientError> {
         let path = format!("/v1/executions/{execution_id}/events");
+        let signed_target = format!("{path}?after={after}");
         let endpoint = self.endpoint_for(worker_node_id).await?;
-        let url = endpoint.join(&format!("{path}?after={after}"))?;
+        let url = endpoint.join(&signed_target)?;
         let response = self
-            .signed(self.http.get(url), Method::GET, &path, &[])
+            .signed(self.http.get(url), Method::GET, &signed_target, &[])
             .send()
             .await?;
         let batch: EventBatch = decode(response).await?;
@@ -185,10 +186,16 @@ impl WorkerClient {
             request.execution_id, request.generation, request.port
         );
         let query = preview_ws_query(request);
+        let signed_target = format!("{path}?{query}");
         let endpoint = self.endpoint_for(worker_node_id).await?;
-        let http_url = endpoint.join(&format!("{path}?{query}"))?;
+        let http_url = endpoint.join(&signed_target)?;
         let signed = self
-            .signed(self.http.get(http_url.clone()), Method::GET, &path, &[])
+            .signed(
+                self.http.get(http_url.clone()),
+                Method::GET,
+                &signed_target,
+                &[],
+            )
             .build()?;
         let mut ws_url = http_url;
         ws_url
