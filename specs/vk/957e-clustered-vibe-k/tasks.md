@@ -133,7 +133,7 @@ files and may be completed together.
 
 ## Layer 8 — Deployment
 
-- [ ] T038 Add coordinator/worker role, shared NFS root, credential file,
+- [x] T038 Add coordinator/worker role, shared NFS root, credential file,
   listener, scheduling, and health options in
   `../homelab/modules/vibe-kanban-rebuild.nix`. Depends on T011.
 - [ ] T039 Add identical NFS mount ordering, consistent service UID/GID,
