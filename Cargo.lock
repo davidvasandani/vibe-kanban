@@ -12959,6 +12959,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "cluster-protocol",
+ "command-group",
  "ed25519-dalek",
  "reqwest 0.13.2",
  "serde",

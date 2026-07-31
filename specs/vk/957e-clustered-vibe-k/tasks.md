@@ -73,10 +73,10 @@ files and may be completed together.
 
 ## Layer 5 — Remote coding-agent execution
 
-- [ ] T021 Implement idempotent worker job supervision, request-digest conflict,
+- [x] T021 Implement idempotent worker job supervision, request-digest conflict,
   process groups, scoped environment delivery, and executor event adaptation in
   `crates/worker/src/execution.rs`. Depends on T012, T015.
-- [ ] T022 [P] Implement graceful/TERM/KILL cancellation state machine and
+- [x] T022 [P] Implement graceful/TERM/KILL cancellation state machine and
   child/grandchild fixture tests in `crates/worker/src/cancellation.rs`. Depends
   on T021.
 - [ ] T023 Add coordinator worker client, retry/idempotency, event

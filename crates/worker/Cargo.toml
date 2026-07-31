@@ -13,6 +13,7 @@ axum = { workspace = true }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 cluster-protocol = { path = "../cluster-protocol" }
+command-group = { version = "5.0", features = ["with-tokio"] }
 ed25519-dalek = "2.2.0"
 reqwest = { workspace = true }
 serde = { workspace = true }
