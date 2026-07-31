@@ -36,6 +36,8 @@ pub struct CreateAndStartWorkspaceRequest {
     pub executor_config: ExecutorConfig,
     pub prompt: String,
     pub attachment_ids: Option<Vec<Uuid>>,
+    /// Optional manual placement override. `None` uses automatic scheduling.
+    pub requested_worker_node_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]

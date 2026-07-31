@@ -85,6 +85,7 @@ import {
   ContinueRebaseRequest,
   Session,
   Workspace,
+  WorkspacePlacement,
   WorkerNode,
   StartReviewRequest,
   ReviewError,
@@ -480,6 +481,13 @@ export const workspacesApi = {
   get: async (workspaceId: string): Promise<Workspace> => {
     const response = await makeRequest(`/api/workspaces/${workspaceId}`);
     return handleApiResponse<Workspace>(response);
+  },
+
+  getPlacement: async (workspaceId: string): Promise<WorkspacePlacement> => {
+    const response = await makeRequest(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/placement`
+    );
+    return handleApiResponse<WorkspacePlacement>(response);
   },
 
   update: async (

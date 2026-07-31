@@ -68,7 +68,7 @@ files and may be completed together.
   `crates/local-deployment/src/container.rs`,
   `crates/services/src/services/container.rs`, and workspace creation routes.
   Depends on T007, T016, T018.
-- [ ] T020 [P] Add manual placement create controls and workspace affinity/state
+- [x] T020 [P] Add manual placement create controls and workspace affinity/state
   display under `packages/web-core/src/`. Depends on T005, T019.
 
 ## Layer 5 — Remote coding-agent execution

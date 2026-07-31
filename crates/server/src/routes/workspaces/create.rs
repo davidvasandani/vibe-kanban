@@ -234,6 +234,7 @@ pub async fn create_and_start_workspace(
         executor_config,
         prompt,
         attachment_ids,
+        requested_worker_node_id,
     } = payload;
 
     let mut workspace_prompt = normalize_prompt(&prompt).ok_or_else(|| {
@@ -363,15 +364,24 @@ pub async fn create_and_start_workspace(
         let executor_profile = executor_config.profile_id().to_string();
         let selected = deployment
             .worker_scheduler()
-            .select(&workers, &executor_profile, None, Utc::now())
+            .select(
+                &workers,
+                &executor_profile,
+                requested_worker_node_id,
+                Utc::now(),
+            )
             .map_err(|error| ApiError::BadRequest(error.to_string()))?;
         let reserved = WorkspacePlacement::reserve(
             &deployment.db().pool,
             workspace.id,
             selected.id,
+            requested_worker_node_id,
             None,
-            None,
-            Some("automatic scheduler selection"),
+            Some(if requested_worker_node_id.is_some() {
+                "manual worker selection"
+            } else {
+                "automatic scheduler selection"
+            }),
         )
         .await?;
         if !reserved {

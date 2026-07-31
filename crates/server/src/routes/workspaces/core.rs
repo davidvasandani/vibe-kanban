@@ -7,7 +7,7 @@ use axum::{
 use db::models::{
     coding_agent_turn::CodingAgentTurn,
     execution_process::{ExecutionProcess, ExecutionProcessStatus},
-    workspace::{Workspace, WorkspaceError},
+    workspace::{Workspace, WorkspaceError, WorkspacePlacement},
 };
 use deployment::Deployment;
 use serde::Deserialize;
@@ -38,6 +38,16 @@ pub async fn get_workspace(
     Extension(workspace): Extension<Workspace>,
 ) -> Result<ResponseJson<ApiResponse<Workspace>>, ApiError> {
     Ok(ResponseJson(ApiResponse::success(workspace)))
+}
+
+pub async fn get_workspace_placement(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<WorkspacePlacement>>, ApiError> {
+    let placement = WorkspacePlacement::find(&deployment.db().pool, workspace.id)
+        .await?
+        .ok_or(WorkspaceError::WorkspaceNotFound)?;
+    Ok(ResponseJson(ApiResponse::success(placement)))
 }
 
 pub async fn update_workspace(
