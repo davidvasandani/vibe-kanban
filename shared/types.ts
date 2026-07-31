@@ -543,11 +543,29 @@ export type AwsSsoProfile = { name: string, sso_start_url: string, sso_region: s
 
 export type AwsAuthStatus = { "status": "authenticated", identity: string, } | { "status": "unauthenticated" } | { "status": "unknown", message: string, } | { "status": "cli_missing" };
 
+export type AwsSsoAuthScope = { 
+/**
+ * Namespaced stable key (`session:<name>` or `start-url:<url>`).
+ */
+key: string, 
+/**
+ * Named session, or the start URL for a legacy inline profile.
+ */
+label: string, 
+/**
+ * Present for modern profiles backed by `[sso-session <name>]`.
+ */
+session_name: string | null, };
+
 export type AwsSsoProfileStatus = { profile: AwsSsoProfile, auth: AwsAuthStatus, 
 /**
  * False for `[default]` (list/sign-in only): VK never rewrites it.
  */
-editable: boolean, };
+editable: boolean, 
+/**
+ * Shared AWS CLI token-cache identity used to group authentication UI.
+ */
+auth_scope: AwsSsoAuthScope, };
 
 export type AwsSsoSession = { name: string, sso_start_url: string, sso_region: string, };
 

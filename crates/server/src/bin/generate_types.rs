@@ -167,6 +167,7 @@ fn generate_types_content() -> String {
         services::services::cli_tools::CliToolStatus::decl(),
         services::services::aws_sso::AwsSsoProfile::decl(),
         services::services::aws_sso::AwsAuthStatus::decl(),
+        services::services::aws_sso::AwsSsoAuthScope::decl(),
         services::services::aws_sso::AwsSsoProfileStatus::decl(),
         services::services::aws_sso::AwsSsoSession::decl(),
         services::services::aws_sso::AwsSsoAccount::decl(),

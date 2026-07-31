@@ -796,6 +796,13 @@
       "empty": "尚未設定 SSO 設定檔。新增一個即可在此機器上啟用 AWS 存取。",
       "cliMissing": "此機器上沒有可用的 AWS CLI。請從 CLI 工具區段安裝，以便檢查狀態並登入。",
       "readOnly": "default 設定檔 · 唯讀",
+      "scope": {
+        "session": "SSO 工作階段",
+        "legacy": "舊版 SSO 起始 URL",
+        "profiles": "{{count}} 個設定檔",
+        "profiles_other": "{{count}} 個設定檔"
+      },
+      "manageProfiles": "管理設定檔 ({{count}})",
       "actions": {
         "add": "新增設定檔",
         "refresh": "重新整理狀態",
