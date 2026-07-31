@@ -6,6 +6,7 @@ update pages (and this index) when a task ships something reusable.
 
 | Page | Summary | Contributing tasks |
 | --- | --- | --- |
+| [clustered-workspace-execution](clustered-workspace-execution.md) | Coordinator/worker authority boundaries, sticky affinity, mount validation, authenticated replay, host-aware previews, reconciliation, and single-writer shared Git safety | `957e-clustered-vibe-k` |
 | [worktree-formatting-prerequisites](worktree-formatting-prerequisites.md) | Fail-before-mutation formatter preflights, package-local pnpm executable checks, locked setup guidance, fixture testing, and CI path-filter coverage | `7243-make-frontend-fo` |
 | [interrupted-worktree-recovery](interrupted-worktree-recovery.md) | Restart-safe WIP capture, truthful multi-repo partial-failure metadata, killed-orphan terminal state, dirty reset/retry guards before process/history cleanup, why preservation must never be gated on a successful teardown, and why the `Running` row left by a failed stop is load-bearing | `959a-restart-rewinds`, `0bc4-server-restart-w` |
 | [workspace-directory-reclamation](workspace-directory-reclamation.md) | The two workspace sweeps (expiry vs orphan) and why guarding one misses the other; filesystem-only cleanliness probing when there is no DB record; the `filter_map(ok)`/`Path::exists` traps that turn "indeterminate" into "clean"; the two divergent cleanliness definitions; visible destructive logging; and how to test the sweep safely on a shared host | `0bc4-server-restart-w` |

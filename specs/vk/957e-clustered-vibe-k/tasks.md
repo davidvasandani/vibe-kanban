@@ -166,11 +166,11 @@ files and may be completed together.
 
 ## Layer 10 — Review and knowledge
 
-- [ ] T048 Run independent Codex review across the Vibe Kanban diff and scoped
+- [x] T048 Run independent Codex review across the Vibe Kanban diff and scoped
   homelab module diff, address confirmed findings, and repeat verification/review
   until no significant findings remain. Depends on T046 and T047 when
   available.
-- [ ] T049 Update `docs/knowledge-base/` and its index with reusable clustered
+- [x] T049 Update `docs/knowledge-base/` and its index with reusable clustered
   execution, shared-mount validation, replay/reconciliation, and shared-Git
   safety knowledge tagged `957e-clustered-vibe-k`; commit the knowledge-base
   update. Depends on T048.
