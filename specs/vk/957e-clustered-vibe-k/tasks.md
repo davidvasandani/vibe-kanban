@@ -155,7 +155,7 @@ files and may be completed together.
 - [x] T043 Install dependencies with `pnpm install --frozen-lockfile` and run
   focused protocol, DB, scheduler, worker, container, frontend, and Nix tests.
   Depends on T031, T037, T040, T042.
-- [ ] T044 [P] Run Rust workspace tests/checks and generated-type checks.
+- [x] T044 [P] Run Rust workspace tests/checks and generated-type checks.
   Depends on T043.
 - [ ] T045 [P] Run frontend type checks, rendered tests, and lint. Depends on
   T043.
