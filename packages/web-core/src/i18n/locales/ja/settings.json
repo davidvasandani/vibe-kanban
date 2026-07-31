@@ -44,7 +44,9 @@
         "slack": "Slack",
         "slackDesc": "Slack ワークスペース連携",
         "pipelines": "Pipelines",
-        "pipelinesDesc": "Pipeline TOML files and defaults"
+        "pipelinesDesc": "Pipeline TOML files and defaults",
+        "workers": "クラスターワーカー",
+        "workersDesc": "ワーカーの正常性、ストレージ、スケジューリング"
       }
     },
     "general": {
@@ -734,6 +736,19 @@
       "noHostAvailable": "No host is available for host-specific settings yet.",
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
+    },
+    "workers": {
+      "title": "クラスターワーカー",
+      "description": "ワーカーの正常性、共有ストレージ、キャパシティ、スケジューリング状態。",
+      "loading": "ワーカーを読み込んでいます…",
+      "loadError": "クラスターワーカーを読み込めませんでした。",
+      "empty": "登録されているワーカーはまだありません。",
+      "schedulable": "スケジュール可能",
+      "unschedulable": "スケジュール不可",
+      "active": "アクティブな実行",
+      "load": "負荷",
+      "drain": "ドレイン",
+      "resume": "スケジューリングを再開"
     },
     "attachments": {
       "title": "添付ファイル",

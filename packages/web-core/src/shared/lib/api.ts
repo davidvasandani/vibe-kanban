@@ -12,6 +12,7 @@ import {
   DirectoryListResponse,
   DirectoryEntry,
   ExecutionProcess,
+  ExecutionWorkerJob,
   ExecutionProcessRepoState,
   GitBranch,
   Repo,
@@ -85,6 +86,8 @@ import {
   ContinueRebaseRequest,
   Session,
   Workspace,
+  WorkspacePlacement,
+  WorkerNode,
   StartReviewRequest,
   ReviewError,
   GitRemote,
@@ -481,6 +484,13 @@ export const workspacesApi = {
     return handleApiResponse<Workspace>(response);
   },
 
+  getPlacement: async (workspaceId: string): Promise<WorkspacePlacement> => {
+    const response = await makeRequest(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/placement`
+    );
+    return handleApiResponse<WorkspacePlacement>(response);
+  },
+
   update: async (
     workspaceId: string,
     data: { archived?: boolean; pinned?: boolean; name?: string }
@@ -847,6 +857,15 @@ export const executionProcessesApi = {
   getDetails: async (processId: string): Promise<ExecutionProcess> => {
     const response = await makeRequest(`/api/execution-processes/${processId}`);
     return handleApiResponse<ExecutionProcess>(response);
+  },
+
+  getWorkerJob: async (
+    processId: string
+  ): Promise<ExecutionWorkerJob | null> => {
+    const response = await makeRequest(
+      `/api/execution-processes/${processId}/worker-job`
+    );
+    return handleApiResponse<ExecutionWorkerJob | null>(response);
   },
 
   getRepoStates: async (
@@ -2089,6 +2108,27 @@ export const releasesApi = {
     const response = await makeRequest('/api/releases');
     const result = await handleApiResponse<ReleasesResponse>(response);
     return result.releases;
+  },
+};
+
+export const workerNodesApi = {
+  list: async (): Promise<WorkerNode[]> => {
+    const response = await makeRequest('/api/worker-nodes');
+    return handleApiResponse<WorkerNode[]>(response);
+  },
+
+  setDraining: async (
+    workerNodeId: string,
+    draining: boolean
+  ): Promise<WorkerNode> => {
+    const response = await makeRequest(
+      `/api/worker-nodes/${encodeURIComponent(workerNodeId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ draining }),
+      }
+    );
+    return handleApiResponse<WorkerNode>(response);
   },
 };
 

@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/api-types",
+    "crates/cluster-protocol",
     "crates/relay-client",
     "crates/server",
     "crates/relay-types",
@@ -11,6 +12,7 @@ members = [
     "crates/executors",
     "crates/services",
     "crates/worktree-manager",
+    "crates/worker",
     "crates/workspace-manager",
     "crates/relay-control",
     "crates/relay-protocol",

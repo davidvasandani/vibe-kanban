@@ -18,6 +18,7 @@ use services::services::{
     approvals::Approvals,
     auth::AuthContext,
     browser::BrowserSessionService,
+    cluster::{ClusterConfig, WorkerClient, WorkerRegistry, WorkerScheduler},
     config::{Config, ConfigError},
     container::{ContainerError, ContainerService},
     events::{EventError, EventService},
@@ -120,6 +121,14 @@ pub trait Deployment: Clone + Send + Sync + 'static {
     fn preview_proxy(&self) -> &PreviewProxyService;
 
     fn browser_sessions(&self) -> &BrowserSessionService;
+
+    fn cluster_config(&self) -> &ClusterConfig;
+
+    fn worker_registry(&self) -> &WorkerRegistry;
+
+    fn worker_scheduler(&self) -> &WorkerScheduler;
+
+    fn worker_client(&self) -> Option<&WorkerClient>;
 
     fn relay_hosts(&self) -> Result<&Arc<RelayHosts>, RelayHostsNotConfigured> {
         Err(RelayHostsNotConfigured)

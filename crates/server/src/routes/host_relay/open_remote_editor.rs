@@ -1,4 +1,5 @@
 use axum::{Json, Router, extract::State, routing::post};
+use db::models::workspace::WorkspacePlacement;
 use deployment::Deployment;
 use futures_util::StreamExt;
 use http::{HeaderMap, Method, StatusCode};
@@ -37,7 +38,11 @@ async fn open_remote_workspace_in_editor(
     Json(req): Json<OpenRemoteWorkspaceInEditorRequest>,
 ) -> Result<Json<ApiResponse<desktop_bridge::service::OpenRemoteEditorResponse>>, ApiError> {
     let relay_hosts = deployment.relay_hosts()?;
-    let relay_host = relay_hosts.host(req.host_id).await?;
+    let placement = WorkspacePlacement::find(&deployment.db().pool, req.workspace_id).await?;
+    let target_host_id = placement
+        .and_then(|placement| placement.worker_node_id)
+        .unwrap_or(req.host_id);
+    let relay_host = relay_hosts.host(target_host_id).await?;
 
     // Build the editor path API URL.
     let api_path = build_editor_path_api_path(req.workspace_id, req.file_path.as_deref());
@@ -78,7 +83,7 @@ async fn open_remote_workspace_in_editor(
     let response = desktop_bridge::service::open_remote_editor(
         local_port,
         deployment.relay_signing(),
-        &req.host_id.to_string(),
+        &target_host_id.to_string(),
         &workspace_path,
         req.editor_type.as_deref(),
     )

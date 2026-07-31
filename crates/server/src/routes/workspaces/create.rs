@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 
 use axum::{Json, extract::State, response::Json as ResponseJson};
+use chrono::Utc;
 use db::models::{
     requests::{
         CreateAndStartWorkspaceRequest, CreateAndStartWorkspaceResponse, CreateWorkspaceApiRequest,
     },
-    workspace::{CreateWorkspace, Workspace},
+    worker_node::WorkerNode,
+    workspace::{CreateWorkspace, Workspace, WorkspacePlacement},
 };
 use deployment::Deployment;
 use services::services::container::ContainerService;
@@ -232,6 +234,7 @@ pub async fn create_and_start_workspace(
         executor_config,
         prompt,
         attachment_ids,
+        requested_worker_node_id,
     } = payload;
 
     let mut workspace_prompt = normalize_prompt(&prompt).ok_or_else(|| {
@@ -355,6 +358,38 @@ pub async fn create_and_start_workspace(
     }
 
     let workspace = managed_workspace.workspace.clone();
+
+    if deployment.cluster_config().enabled {
+        let workers = WorkerNode::fetch_all(&deployment.db().pool).await?;
+        let executor_profile = executor_config.profile_id().to_string();
+        let selected = deployment
+            .worker_scheduler()
+            .select(
+                &workers,
+                &executor_profile,
+                requested_worker_node_id,
+                Utc::now(),
+            )
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        let reserved = WorkspacePlacement::reserve(
+            &deployment.db().pool,
+            workspace.id,
+            selected.id,
+            requested_worker_node_id,
+            None,
+            Some(if requested_worker_node_id.is_some() {
+                "manual worker selection"
+            } else {
+                "automatic scheduler selection"
+            }),
+        )
+        .await?;
+        if !reserved {
+            return Err(ApiError::BadRequest(
+                "Workspace placement was already assigned or could not be reserved".into(),
+            ));
+        }
+    }
     tracing::info!("Created workspace {}", workspace.id);
 
     let execution_process = deployment

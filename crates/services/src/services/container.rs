@@ -17,6 +17,7 @@ use db::{
         execution_process_repo_state::{
             CreateExecutionProcessRepoState, ExecutionProcessRepoState,
         },
+        execution_worker_job::ExecutionWorkerJob,
         repo::Repo,
         session::{CreateSession, Session, SessionError},
         workspace::{Workspace, WorkspaceError},
@@ -307,6 +308,7 @@ pub trait ContainerService {
             ExecutionProcessStatus::Failed
                 | ExecutionProcessStatus::Killed
                 | ExecutionProcessStatus::Interrupted
+                | ExecutionProcessStatus::Indeterminate
         ) {
             return true;
         }
@@ -321,7 +323,9 @@ pub trait ContainerService {
         // or interrupted by a server shutdown/restart
         if matches!(
             ctx.execution_process.status,
-            ExecutionProcessStatus::Killed | ExecutionProcessStatus::Interrupted
+            ExecutionProcessStatus::Killed
+                | ExecutionProcessStatus::Interrupted
+                | ExecutionProcessStatus::Indeterminate
         ) {
             return;
         }
@@ -360,6 +364,20 @@ pub trait ContainerService {
         let running_processes = ExecutionProcess::find_running(&self.db().pool).await?;
         let mut interrupted = Vec::new();
         for process in running_processes {
+            // A running row owned by a worker is not a coordinator-local
+            // orphan. Reconciliation is authoritative for that row; if it
+            // remained running, evidence was unavailable and cleanup must
+            // preserve both the process and workspace state.
+            if ExecutionWorkerJob::find_by_execution_id(&self.db().pool, process.id)
+                .await?
+                .is_some()
+            {
+                tracing::info!(
+                    execution_id = %process.id,
+                    "Retaining worker-owned running execution during orphan cleanup"
+                );
+                continue;
+            }
             // Detached processes (dev servers) are left running across
             // restarts; if still alive, re-attach instead of killing.
             if self.try_adopt_execution(&process).await {
@@ -1079,6 +1097,19 @@ pub trait ContainerService {
         executor_action: &ExecutorAction,
     ) -> Result<(), ContainerError>;
 
+    /// Selects the process owner for an execution. Local implementations keep
+    /// their existing spawn path by default; clustered implementations may
+    /// override this to dispatch to the workspace's persisted worker.
+    async fn dispatch_execution(
+        &self,
+        workspace: &Workspace,
+        execution_process: &ExecutionProcess,
+        executor_action: &ExecutorAction,
+    ) -> Result<(), ContainerError> {
+        self.start_execution_inner(workspace, execution_process, executor_action)
+            .await
+    }
+
     async fn stop_execution(
         &self,
         execution_process: &ExecutionProcess,
@@ -1594,7 +1625,7 @@ pub trait ContainerService {
         }
 
         if let Err(start_error) = self
-            .start_execution_inner(workspace, &execution_process, executor_action)
+            .dispatch_execution(workspace, &execution_process, executor_action)
             .await
         {
             // Mark process as failed

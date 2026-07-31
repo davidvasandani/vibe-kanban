@@ -52,6 +52,7 @@ describe('carouselTier', () => {
     expect(carouselTier(ws({ latestProcessStatus: 'failed' }))).toBe(1);
     expect(carouselTier(ws({ latestProcessStatus: 'killed' }))).toBe(1);
     expect(carouselTier(ws({ latestProcessStatus: 'interrupted' }))).toBe(1);
+    expect(carouselTier(ws({ latestProcessStatus: 'indeterminate' }))).toBe(1);
   });
 
   it('sorts an interrupted workspace ahead of idle and running ones', () => {

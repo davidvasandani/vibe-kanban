@@ -261,7 +261,8 @@
     "selectAttempt": "Select an attempt to view execution processes.",
     "started": "Started: {{date}}",
     "copyLogs": "ログをコピー",
-    "logsCopied": "コピーしました！"
+    "logsCopied": "コピーしました！",
+    "outputIncomplete": "割り当てられたワーカーから一部の出力を復元できませんでした。表示されているログは不完全な可能性があります。"
   },
   "rebase": {
     "common": {

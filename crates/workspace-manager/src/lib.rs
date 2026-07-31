@@ -1,6 +1,6 @@
 mod workspace_manager;
 
 pub use workspace_manager::{
-    ManagedWorkspace, RepoWorkspaceInput, RepoWorktree, WorkspaceDeletionContext, WorkspaceError,
-    WorkspaceManager, WorktreeContainer,
+    ManagedWorkspace, RepoWorkspaceInput, RepoWorktree, SharedWorkspacePaths,
+    WorkspaceDeletionContext, WorkspaceError, WorkspaceManager, WorktreeContainer,
 };

@@ -515,6 +515,10 @@
       "repoStep": "¿En qué repositorios te gustaría trabajar?",
       "chatStep": "¿En qué te gustaría trabajar?"
     },
+    "worker": {
+      "label": "Ejecutar en",
+      "automatic": "Colocación automática"
+    },
     "repoPicker": {
       "actions": {
         "recent": "Recientes",

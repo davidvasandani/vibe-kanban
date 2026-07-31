@@ -9,6 +9,7 @@ uninlined-format-args = "allow"
 
 [dependencies]
 api-types = { path = "../api-types" }
+cluster-protocol = { path = "../cluster-protocol" }
 deployment = { path = "../deployment" }
 executors = { path = "../executors" }
 local-deployment = { path = "../local-deployment" }

@@ -1,3 +1,6 @@
 mod worktree_manager;
 
-pub use worktree_manager::{WorktreeCleanup, WorktreeError, WorktreeManager};
+pub use worktree_manager::{
+    RepositoryAdminGuard, RepositoryAdminLockManager, WorktreeCleanup, WorktreeError,
+    WorktreeManager,
+};

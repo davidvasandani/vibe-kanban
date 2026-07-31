@@ -45,7 +45,8 @@ export interface WorkspaceSummaryProps {
     | 'completed'
     | 'failed'
     | 'killed'
-    | 'interrupted';
+    | 'interrupted'
+    | 'indeterminate';
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
   onClick?: () => void;
   className?: string;
@@ -81,7 +82,8 @@ export function WorkspaceSummary({
   const isFailed =
     latestProcessStatus === 'failed' ||
     latestProcessStatus === 'killed' ||
-    latestProcessStatus === 'interrupted';
+    latestProcessStatus === 'interrupted' ||
+    latestProcessStatus === 'indeterminate';
 
   const handleOpenCommandBar = (e: React.MouseEvent) => {
     e.stopPropagation();

@@ -177,6 +177,21 @@ identifies failures by stable configured identifier. Configuration comparisons,
 logs, diagnostics, and API results never expose environment values, tokens,
 authorization material, authenticated URLs, or secret-bearing command arguments.
 
+### XVIII. Distributed execution is affinity-bound and evidence-backed
+Workspace process ownership MUST be explicit, persisted, and stable. A
+coordinator may dispatch work only to the worker assigned to that workspace,
+and the worker must authorize the execution ID and canonical workspace path
+against that assignment. Retries are idempotent and cannot create a second
+process for one execution.
+
+Remote liveness and terminal state require worker evidence. A timeout,
+disconnect, missing handle, or expired lease is not proof that a process
+completed or was killed; expose interruption or indeterminacy and preserve the
+workspace until reconciliation establishes safety. Ordered event streams carry
+monotonic cursors and make replay gaps visible. Shared Git worktree
+administration remains single-owner and serialized even when ordinary commands
+run on several nodes.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -198,5 +213,5 @@ authorization material, authenticated URLs, or secret-bearing command arguments.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.15.0 (strengthens external-protocol normalization invariants;
-0.14.0 added confirmed, atomic live-capability principle XVII)
+**Version**: 0.16.0 (adds affinity-bound, evidence-backed distributed execution;
+0.15.0 strengthened external-protocol normalization invariants)

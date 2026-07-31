@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use axum::{
     Router,
@@ -7,7 +7,15 @@ use axum::{
     routing::get,
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use db::models::{workspace::Workspace, workspace_repo::WorkspaceRepo};
+use chrono::Utc;
+use cluster_protocol::{
+    PROTOCOL_VERSION, RequestAuthority, TerminalClose, TerminalCreateRequest, TerminalInput,
+    TerminalResize,
+};
+use db::models::{
+    workspace::{Workspace, WorkspacePlacement},
+    workspace_repo::WorkspaceRepo,
+};
 use deployment::Deployment;
 use serde::{Deserialize, Serialize};
 use services::services::container::ContainerService;
@@ -54,7 +62,7 @@ async fn terminal_ws(
     ws: SignedWsUpgrade,
     State(deployment): State<DeploymentImpl>,
     Query(query): Query<TerminalQuery>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let attempt = Workspace::find_by_id(&deployment.db().pool, query.workspace_id)
         .await?
         .ok_or_else(|| ApiError::BadRequest("Attempt not found".to_string()))?;
@@ -91,16 +99,145 @@ async fn terminal_ws(
 
     let environment = deployment.container().resolve_org_env_vars(&attempt).await;
 
-    Ok(ws.on_upgrade(move |socket| {
-        handle_terminal_ws(
-            socket,
-            deployment,
-            working_dir,
-            environment,
-            query.cols,
-            query.rows,
+    let placement = WorkspacePlacement::find(&deployment.db().pool, attempt.id).await?;
+    if let Some(worker_node_id) = terminal_worker_id(placement) {
+        let client = deployment.worker_client().cloned().ok_or_else(|| {
+            ApiError::BadRequest("Cluster worker client is not configured".into())
+        })?;
+        let coordinator_id = deployment.cluster_config().coordinator_id.ok_or_else(|| {
+            ApiError::BadRequest("Cluster coordinator identity is missing".into())
+        })?;
+        let request = TerminalCreateRequest {
+            authority: terminal_authority(coordinator_id, worker_node_id, attempt.id),
+            workspace_id: attempt.id,
+            workspace_path: base_dir.to_string_lossy().into_owned(),
+            working_directory: working_dir.to_string_lossy().into_owned(),
+            environment: environment.into_iter().collect::<BTreeMap<_, _>>(),
+            cols: query.cols,
+            rows: query.rows,
+        };
+        let terminal = client
+            .create_terminal(worker_node_id, &request)
+            .await
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        return Ok(ws
+            .on_upgrade(move |socket| {
+                handle_remote_terminal_ws(
+                    socket,
+                    client,
+                    coordinator_id,
+                    worker_node_id,
+                    attempt.id,
+                    terminal.terminal_id,
+                )
+            })
+            .into_response());
+    }
+
+    Ok(ws
+        .on_upgrade(move |socket| {
+            handle_terminal_ws(
+                socket,
+                deployment,
+                working_dir,
+                environment,
+                query.cols,
+                query.rows,
+            )
+        })
+        .into_response())
+}
+
+fn terminal_worker_id(placement: Option<WorkspacePlacement>) -> Option<Uuid> {
+    placement.and_then(|placement| placement.worker_node_id)
+}
+
+fn terminal_authority(
+    coordinator_id: Uuid,
+    worker_node_id: Uuid,
+    correlation_id: Uuid,
+) -> RequestAuthority {
+    RequestAuthority {
+        protocol_version: PROTOCOL_VERSION,
+        coordinator_id,
+        worker_node_id,
+        correlation_id,
+        issued_at: Utc::now(),
+        nonce: Uuid::new_v4().to_string(),
+    }
+}
+
+async fn handle_remote_terminal_ws(
+    mut socket: MaybeSignedWebSocket,
+    client: services::services::cluster::WorkerClient,
+    coordinator_id: Uuid,
+    worker_node_id: Uuid,
+    workspace_id: Uuid,
+    terminal_id: Uuid,
+) {
+    let mut poll = tokio::time::interval(Duration::from_millis(50));
+    loop {
+        tokio::select! {
+            _ = poll.tick() => {
+                match client.terminal_output(worker_node_id, terminal_id).await {
+                    Ok(batch) => {
+                        for data in batch.chunks_base64 {
+                            let message = TerminalMessage::Output { data };
+                            if socket.send(Message::Text(serde_json::to_string(&message).unwrap_or_default().into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        if batch.closed { break; }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%terminal_id, "remote terminal output failed: {error}");
+                        let _ = send_error(&mut socket, &error.to_string()).await;
+                        break;
+                    }
+                }
+            }
+            inbound = socket.recv() => {
+                match inbound {
+                    Ok(Some(Message::Text(text))) => {
+                        if let Ok(command) = serde_json::from_str::<TerminalCommand>(text.as_str()) {
+                            let result = match command {
+                                TerminalCommand::Input { data } => client.terminal_input(worker_node_id, &TerminalInput {
+                                    authority: terminal_authority(coordinator_id, worker_node_id, workspace_id),
+                                    terminal_id,
+                                    data_base64: data,
+                                }).await,
+                                TerminalCommand::Resize { cols, rows } => client.terminal_resize(worker_node_id, &TerminalResize {
+                                    authority: terminal_authority(coordinator_id, worker_node_id, workspace_id),
+                                    terminal_id,
+                                    cols,
+                                    rows,
+                                }).await,
+                            };
+                            if let Err(error) = result {
+                                tracing::warn!(%terminal_id, "remote terminal command failed: {error}");
+                                break;
+                            }
+                        }
+                    }
+                    Ok(Some(Message::Close(_))) | Ok(None) => break,
+                    Ok(Some(_)) => {}
+                    Err(error) => {
+                        tracing::warn!(%terminal_id, "remote terminal websocket failed: {error}");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let _ = client
+        .close_terminal(
+            worker_node_id,
+            &TerminalClose {
+                authority: terminal_authority(coordinator_id, worker_node_id, workspace_id),
+                terminal_id,
+            },
         )
-    }))
+        .await;
 }
 
 async fn handle_terminal_ws(
@@ -189,4 +326,27 @@ async fn send_error(socket: &mut MaybeSignedWebSocket, message: &str) -> anyhow:
 
 pub(super) fn router() -> Router<DeploymentImpl> {
     Router::new().route("/terminal/ws", get(terminal_ws))
+}
+
+#[cfg(test)]
+mod tests {
+    use db::models::workspace::WorkspacePlacementState;
+
+    use super::*;
+
+    #[test]
+    fn terminal_uses_persisted_worker_affinity() {
+        let worker_node_id = Uuid::new_v4();
+        let placement = WorkspacePlacement {
+            workspace_id: Uuid::new_v4(),
+            worker_node_id: Some(worker_node_id),
+            placement_state: WorkspacePlacementState::Ready,
+            placed_at: None,
+            placement_reason: None,
+            requested_worker_node_id: None,
+            placement_constraints: None,
+        };
+        assert_eq!(terminal_worker_id(Some(placement)), Some(worker_node_id));
+        assert_eq!(terminal_worker_id(None), None);
+    }
 }

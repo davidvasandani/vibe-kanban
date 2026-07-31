@@ -3,8 +3,12 @@
 //! accept every enum variant, keep rejecting unknown values, and decode back
 //! through the sqlx model layer.
 
-use db::models::execution_process::{
-    CreateExecutionProcess, ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus,
+use db::models::{
+    execution_process::{
+        CreateExecutionProcess, ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus,
+    },
+    execution_worker_job::ExecutionWorkerJob,
+    workspace::WorkspacePlacement,
 };
 use executors::actions::{
     ExecutorAction, ExecutorActionType,
@@ -109,5 +113,118 @@ async fn check_constraint_rejects_unknown_run_reason() {
     assert!(
         err.to_string().contains("CHECK"),
         "expected CHECK constraint violation, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_pending_dispatches_use_distinct_placeholder_job_ids() {
+    let pool = migrated_pool().await;
+    let worker_id = Uuid::new_v4();
+    let first_id = Uuid::new_v4();
+    let second_id = Uuid::new_v4();
+
+    for execution_id in [first_id, second_id] {
+        ExecutionProcess::create(
+            &pool,
+            &CreateExecutionProcess {
+                session_id: Uuid::new_v4(),
+                executor_action: helper_action(),
+                run_reason: ExecutionProcessRunReason::CodingAgent,
+            },
+            execution_id,
+            &[],
+        )
+        .await
+        .expect("create execution");
+        ExecutionWorkerJob::create_pending(&pool, execution_id, worker_id, "digest")
+            .await
+            .expect("create pending worker job");
+    }
+
+    let first = ExecutionWorkerJob::find_by_execution_id(&pool, first_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = ExecutionWorkerJob::find_by_execution_id(&pool, second_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(first.worker_job_id, second.worker_job_id);
+}
+
+#[tokio::test]
+async fn indeterminate_status_round_trips_through_migrated_schema() {
+    let pool = migrated_pool().await;
+    let process_id = Uuid::new_v4();
+    ExecutionProcess::create(
+        &pool,
+        &CreateExecutionProcess {
+            session_id: Uuid::new_v4(),
+            executor_action: helper_action(),
+            run_reason: ExecutionProcessRunReason::CodingAgent,
+        },
+        process_id,
+        &[],
+    )
+    .await
+    .expect("create execution");
+
+    ExecutionProcess::update_completion(
+        &pool,
+        process_id,
+        ExecutionProcessStatus::Indeterminate,
+        None,
+    )
+    .await
+    .expect("persist indeterminate status");
+
+    assert_eq!(
+        ExecutionProcess::find_by_id(&pool, process_id)
+            .await
+            .expect("query execution")
+            .expect("execution present")
+            .status,
+        ExecutionProcessStatus::Indeterminate
+    );
+}
+
+#[tokio::test]
+async fn cleanup_claim_atomically_fences_new_dispatch() {
+    let pool = migrated_pool().await;
+    let worker_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO worker_nodes
+           (id, hostname, status, worker_version, vibe_version, capabilities,
+            resource_snapshot, labels, mount_status, lease_expires_at)
+           VALUES (?, 'think3', 'online', '1', '1', '{}', '{}', '{}',
+                   'healthy', ?)"#,
+    )
+    .bind(worker_id)
+    .bind(chrono::Utc::now() + chrono::Duration::hours(1))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let workspace_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO workspaces
+           (id, branch, worker_node_id, placement_state)
+           VALUES (?, 'test', ?, 'ready')"#,
+    )
+    .bind(workspace_id)
+    .bind(worker_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    assert!(
+        WorkspacePlacement::begin_cleanup(&pool, workspace_id, chrono::Utc::now())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !WorkspacePlacement::begin_cleanup(&pool, workspace_id, chrono::Utc::now())
+            .await
+            .unwrap(),
+        "a second cleanup or dispatch race cannot claim a non-ready workspace"
     );
 }

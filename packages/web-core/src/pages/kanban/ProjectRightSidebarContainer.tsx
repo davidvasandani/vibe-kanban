@@ -272,6 +272,7 @@ function WorkspaceSessionPanel({
         },
         prompt,
         attachment_ids: null,
+        requested_worker_node_id: null,
       });
 
       await workspacesApi.update(workspaceId, { archived: true });

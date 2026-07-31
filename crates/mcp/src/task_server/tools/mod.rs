@@ -560,6 +560,7 @@ impl McpServer {
             ExecutionProcessStatus::Failed => "failed",
             ExecutionProcessStatus::Killed => "killed",
             ExecutionProcessStatus::Interrupted => "interrupted",
+            ExecutionProcessStatus::Indeterminate => "indeterminate",
         }
     }
 }
@@ -568,10 +569,18 @@ impl McpServer {
 mod tests {
     use std::{collections::BTreeSet, sync::Once};
 
+    #[test]
+    fn indeterminate_execution_status_has_a_stable_label() {
+        assert_eq!(
+            McpServer::execution_process_status_label(&ExecutionProcessStatus::Indeterminate),
+            "indeterminate"
+        );
+    }
+
     use rmcp::handler::server::tool::ToolRouter;
     use uuid::Uuid;
 
-    use super::McpServer;
+    use super::{ExecutionProcessStatus, McpServer};
     use crate::task_server::{McpContext, McpMode, McpRepoContext};
 
     static RUSTLS_PROVIDER: Once = Once::new();

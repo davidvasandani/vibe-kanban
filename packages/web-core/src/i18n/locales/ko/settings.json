@@ -44,7 +44,9 @@
         "slack": "Slack",
         "slackDesc": "Slack 워크스페이스 연결",
         "pipelines": "Pipelines",
-        "pipelinesDesc": "Pipeline TOML files and defaults"
+        "pipelinesDesc": "Pipeline TOML files and defaults",
+        "workers": "클러스터 워커",
+        "workersDesc": "워커 상태, 스토리지 및 스케줄링"
       }
     },
     "general": {
@@ -734,6 +736,19 @@
       "noHostAvailable": "No host is available for host-specific settings yet.",
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
+    },
+    "workers": {
+      "title": "클러스터 워커",
+      "description": "워커 상태, 공유 스토리지, 용량 및 스케줄링 상태입니다.",
+      "loading": "워커를 불러오는 중…",
+      "loadError": "클러스터 워커를 불러올 수 없습니다.",
+      "empty": "아직 등록된 워커가 없습니다.",
+      "schedulable": "스케줄 가능",
+      "unschedulable": "스케줄 불가",
+      "active": "활성 실행",
+      "load": "부하",
+      "drain": "드레인",
+      "resume": "스케줄링 재개"
     },
     "attachments": {
       "title": "첨부 파일",

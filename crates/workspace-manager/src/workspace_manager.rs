@@ -15,7 +15,72 @@ use git::{GitService, GitServiceError};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-use worktree_manager::{WorktreeCleanup, WorktreeError, WorktreeManager};
+use worktree_manager::{
+    RepositoryAdminLockManager, WorktreeCleanup, WorktreeError, WorktreeManager,
+};
+
+const SHARED_REPOSITORIES_DIR: &str = "repositories";
+const SHARED_WORKSPACES_DIR: &str = "workspaces";
+const SHARED_EXECUTION_LOGS_DIR: &str = "execution-logs";
+
+/// Canonical, host-independent paths within the cluster shared volume.
+///
+/// IDs, rather than user-controlled names, form every authoritative path so
+/// all nodes derive exactly the same location without path traversal or naming
+/// collisions. Display names may still be used inside workspace metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedWorkspacePaths {
+    root: PathBuf,
+}
+
+impl SharedWorkspacePaths {
+    pub fn new(root: impl Into<PathBuf>) -> Result<Self, WorkspaceError> {
+        let root = root.into();
+        if !root.is_absolute() {
+            return Err(WorkspaceError::InvalidSharedRoot(root));
+        }
+        Ok(Self { root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn repositories_dir(&self) -> PathBuf {
+        self.root.join(SHARED_REPOSITORIES_DIR)
+    }
+
+    pub fn repository_dir(&self, repository_id: Uuid) -> PathBuf {
+        self.repositories_dir().join(repository_id.to_string())
+    }
+
+    pub fn workspaces_dir(&self) -> PathBuf {
+        self.root.join(SHARED_WORKSPACES_DIR)
+    }
+
+    pub fn workspace_dir(&self, workspace_id: Uuid) -> PathBuf {
+        self.workspaces_dir().join(workspace_id.to_string())
+    }
+
+    pub fn execution_logs_dir(&self) -> PathBuf {
+        self.root.join(SHARED_EXECUTION_LOGS_DIR)
+    }
+
+    pub fn execution_log_dir(&self, execution_id: Uuid) -> PathBuf {
+        self.execution_logs_dir().join(execution_id.to_string())
+    }
+
+    pub async fn create_base_dirs(&self) -> Result<(), std::io::Error> {
+        for path in [
+            self.repositories_dir(),
+            self.workspaces_dir(),
+            self.execution_logs_dir(),
+        ] {
+            tokio::fs::create_dir_all(path).await?;
+        }
+        Ok(())
+    }
+}
 
 /// Git-visible work found in a workspace directory that a delete would destroy.
 /// Names the first repository found to be dirty, for logging.
@@ -63,6 +128,8 @@ pub enum WorkspaceError {
     NoRepositories,
     #[error("Partial workspace creation failed: {0}")]
     PartialCreation(String),
+    #[error("shared workspace root must be absolute: {0}")]
+    InvalidSharedRoot(PathBuf),
 }
 
 /// Info about a single repo's worktree within a workspace
@@ -303,6 +370,25 @@ impl WorkspaceManager {
         repos: &[RepoWorkspaceInput],
         branch_name: &str,
     ) -> Result<WorktreeContainer, WorkspaceError> {
+        Self::create_workspace_with_locking(workspace_dir, repos, branch_name, None).await
+    }
+
+    pub async fn create_workspace_fenced(
+        workspace_dir: &Path,
+        repos: &[RepoWorkspaceInput],
+        branch_name: &str,
+        lock_manager: &RepositoryAdminLockManager,
+    ) -> Result<WorktreeContainer, WorkspaceError> {
+        Self::create_workspace_with_locking(workspace_dir, repos, branch_name, Some(lock_manager))
+            .await
+    }
+
+    async fn create_workspace_with_locking(
+        workspace_dir: &Path,
+        repos: &[RepoWorkspaceInput],
+        branch_name: &str,
+        lock_manager: Option<&RepositoryAdminLockManager>,
+    ) -> Result<WorktreeContainer, WorkspaceError> {
         if repos.is_empty() {
             return Err(WorkspaceError::NoRepositories);
         }
@@ -326,15 +412,31 @@ impl WorkspaceManager {
                 worktree_path.display()
             );
 
-            match WorktreeManager::create_worktree(
-                &input.repo.path,
-                branch_name,
-                &worktree_path,
-                &input.target_branch,
-                true,
-            )
-            .await
-            {
+            let create_result = match lock_manager {
+                Some(lock_manager) => {
+                    WorktreeManager::create_worktree_fenced(
+                        lock_manager,
+                        input.repo.id,
+                        &input.repo.path,
+                        branch_name,
+                        &worktree_path,
+                        &input.target_branch,
+                        true,
+                    )
+                    .await
+                }
+                None => {
+                    WorktreeManager::create_worktree(
+                        &input.repo.path,
+                        branch_name,
+                        &worktree_path,
+                        &input.target_branch,
+                        true,
+                    )
+                    .await
+                }
+            };
+            match create_result {
                 Ok(()) => {
                     created_worktrees.push(RepoWorktree {
                         repo_id: input.repo.id,
@@ -385,6 +487,30 @@ impl WorkspaceManager {
         repos: &[RepoWorkspaceInput],
         branch_name: &str,
     ) -> Result<(), WorkspaceError> {
+        Self::ensure_workspace_exists_with_locking(workspace_dir, repos, branch_name, None).await
+    }
+
+    pub async fn ensure_workspace_exists_fenced(
+        workspace_dir: &Path,
+        repos: &[RepoWorkspaceInput],
+        branch_name: &str,
+        lock_manager: &RepositoryAdminLockManager,
+    ) -> Result<(), WorkspaceError> {
+        Self::ensure_workspace_exists_with_locking(
+            workspace_dir,
+            repos,
+            branch_name,
+            Some(lock_manager),
+        )
+        .await
+    }
+
+    async fn ensure_workspace_exists_with_locking(
+        workspace_dir: &Path,
+        repos: &[RepoWorkspaceInput],
+        branch_name: &str,
+        lock_manager: Option<&RepositoryAdminLockManager>,
+    ) -> Result<(), WorkspaceError> {
         if repos.is_empty() {
             return Err(WorkspaceError::NoRepositories);
         }
@@ -412,21 +538,55 @@ impl WorkspaceManager {
             );
 
             if git.check_branch_exists(&repo.path, branch_name)? {
-                WorktreeManager::ensure_worktree_exists(&repo.path, branch_name, &worktree_path)
-                    .await?;
+                match lock_manager {
+                    Some(lock_manager) => {
+                        WorktreeManager::ensure_worktree_exists_fenced(
+                            lock_manager,
+                            repo.id,
+                            &repo.path,
+                            branch_name,
+                            &worktree_path,
+                        )
+                        .await?;
+                    }
+                    None => {
+                        WorktreeManager::ensure_worktree_exists(
+                            &repo.path,
+                            branch_name,
+                            &worktree_path,
+                        )
+                        .await?;
+                    }
+                }
             } else {
                 info!(
                     "Workspace branch '{}' missing in repo '{}'; creating from target branch '{}'",
                     branch_name, repo.name, input.target_branch
                 );
-                WorktreeManager::create_worktree(
-                    &repo.path,
-                    branch_name,
-                    &worktree_path,
-                    &input.target_branch,
-                    true,
-                )
-                .await?;
+                match lock_manager {
+                    Some(lock_manager) => {
+                        WorktreeManager::create_worktree_fenced(
+                            lock_manager,
+                            repo.id,
+                            &repo.path,
+                            branch_name,
+                            &worktree_path,
+                            &input.target_branch,
+                            true,
+                        )
+                        .await?;
+                    }
+                    None => {
+                        WorktreeManager::create_worktree(
+                            &repo.path,
+                            branch_name,
+                            &worktree_path,
+                            &input.target_branch,
+                            true,
+                        )
+                        .await?;
+                    }
+                }
             }
         }
 
@@ -544,10 +704,16 @@ impl WorkspaceManager {
         }
     }
 
-    pub async fn cleanup_orphan_workspaces(&self) {
+    pub async fn cleanup_orphan_workspaces(&self, allow_reclamation: bool) {
         if std::env::var("DISABLE_WORKTREE_CLEANUP").is_ok() {
             info!(
                 "Orphan workspace cleanup is disabled via DISABLE_WORKTREE_CLEANUP environment variable"
+            );
+            return;
+        }
+        if !allow_reclamation {
+            info!(
+                "Orphan workspace cleanup is retaining unreferenced directories because shared workers may still own them"
             );
             return;
         }
@@ -739,6 +905,52 @@ impl WorkspaceManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod shared_path_tests {
+    use std::path::PathBuf;
+
+    use uuid::Uuid;
+
+    use super::SharedWorkspacePaths;
+
+    #[test]
+    fn derives_stable_id_only_paths_under_shared_root() {
+        let paths = SharedWorkspacePaths::new("/srv/vibe-kanban-shared").unwrap();
+        let repo_id = Uuid::from_u128(1);
+        let workspace_id = Uuid::from_u128(2);
+        let execution_id = Uuid::from_u128(3);
+
+        assert_eq!(
+            paths.repository_dir(repo_id),
+            PathBuf::from("/srv/vibe-kanban-shared/repositories").join(repo_id.to_string())
+        );
+        assert_eq!(
+            paths.workspace_dir(workspace_id),
+            PathBuf::from("/srv/vibe-kanban-shared/workspaces").join(workspace_id.to_string())
+        );
+        assert_eq!(
+            paths.execution_log_dir(execution_id),
+            PathBuf::from("/srv/vibe-kanban-shared/execution-logs").join(execution_id.to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_relative_shared_root() {
+        assert!(SharedWorkspacePaths::new("relative/shared").is_err());
+    }
+
+    #[tokio::test]
+    async fn creates_all_base_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("shared");
+        let paths = SharedWorkspacePaths::new(&root).unwrap();
+        paths.create_base_dirs().await.unwrap();
+        assert!(paths.repositories_dir().is_dir());
+        assert!(paths.workspaces_dir().is_dir());
+        assert!(paths.execution_logs_dir().is_dir());
     }
 }
 

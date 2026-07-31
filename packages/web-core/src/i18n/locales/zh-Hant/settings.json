@@ -44,7 +44,9 @@
         "slack": "Slack",
         "slackDesc": "Slack 工作區連線",
         "pipelines": "Pipelines",
-        "pipelinesDesc": "Pipeline TOML files and defaults"
+        "pipelinesDesc": "Pipeline TOML files and defaults",
+        "workers": "叢集工作節點",
+        "workersDesc": "工作節點健康狀況、儲存空間與排程"
       }
     },
     "general": {
@@ -734,6 +736,19 @@
       "noHostAvailable": "No host is available for host-specific settings yet.",
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
+    },
+    "workers": {
+      "title": "叢集工作節點",
+      "description": "工作節點健康狀況、共用儲存空間、容量與排程狀態。",
+      "loading": "正在載入工作節點…",
+      "loadError": "無法載入叢集工作節點。",
+      "empty": "尚未有工作節點註冊。",
+      "schedulable": "可排程",
+      "unschedulable": "不可排程",
+      "active": "使用中的執行",
+      "load": "負載",
+      "drain": "排空",
+      "resume": "恢復排程"
     },
     "attachments": {
       "title": "附件",

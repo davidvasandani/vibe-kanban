@@ -515,6 +515,10 @@
       "repoStep": "どのリポジトリで作業しますか？",
       "chatStep": "何に取り組みますか？"
     },
+    "worker": {
+      "label": "実行先",
+      "automatic": "自動配置"
+    },
     "repoPicker": {
       "actions": {
         "recent": "最近",
