@@ -309,22 +309,26 @@ if [ -n "${VK_REMOTE_STATIC_RELEASES:-}" ]; then
   # World-readable so the (non-builder) remote service user can serve it
   # regardless of the build umask.
   chmod -R g+rwX,o+rX "$REMOTE_RELEASE" || true
-  # Atomic repoint: stage a new "current" symlink, then rename it over the old
-  # one. rename(2) is atomic, so the live site never resolves to a half-copied
-  # tree. Both paths live in the releases dir (same filesystem, builder-owned).
-  ln -sfn "$REMOTE_RELEASE" "${VK_REMOTE_STATIC_RELEASES}/.current-${BUILD_ID}"
-  mv -Tf "${VK_REMOTE_STATIC_RELEASES}/.current-${BUILD_ID}" \
-    "${VK_REMOTE_STATIC_RELEASES}/current"
-  # Retain the 3 most recent builds; prune older ones so the releases dir
-  # doesn't grow without bound.
-  ls -1dt "${VK_REMOTE_STATIC_RELEASES}"/build-* 2>/dev/null \
-    | tail -n +4 \
-    | xargs -r rm -rf
-  echo "✅ Remote web published: $REMOTE_RELEASE"
+  if [ "${VK_RELEASES_DEFER_FLIP:-0}" = "1" ]; then
+    echo "✅ Remote web staged (live flip deferred): $REMOTE_RELEASE"
+  else
+    # Atomic repoint: stage a new "current" symlink, then rename it over the
+    # old one. rename(2) is atomic, so the live site never resolves to a
+    # half-copied tree.
+    ln -sfn "$REMOTE_RELEASE" "${VK_REMOTE_STATIC_RELEASES}/.current-${BUILD_ID}"
+    mv -Tf "${VK_REMOTE_STATIC_RELEASES}/.current-${BUILD_ID}" \
+      "${VK_REMOTE_STATIC_RELEASES}/current"
+    # Retain the 3 most recent builds; prune older ones so the releases dir
+    # doesn't grow without bound.
+    ls -1dt "${VK_REMOTE_STATIC_RELEASES}"/build-* 2>/dev/null \
+      | tail -n +4 \
+      | xargs -r rm -rf
+    echo "✅ Remote web published: $REMOTE_RELEASE"
+  fi
 fi
 
 # --- Flip the binary release live --------------------------------------------
-if [ -n "${VK_RELEASES_DIR:-}" ]; then
+if [ -n "${VK_RELEASES_DIR:-}" ] && [ "${VK_RELEASES_DEFER_FLIP:-0}" != "1" ]; then
   # Serialize the previous-repoint + current-flip + prune across concurrent
   # builders (CI + local rebuild can race): without the lock, one builder's
   # prune could snapshot current/previous, lose the race to another's flip,
@@ -362,6 +366,8 @@ if [ -n "${VK_RELEASES_DIR:-}" ]; then
         done
   ) 200>"${VK_RELEASES_DIR}/.publish-lock"
   echo "✅ Binary release published: $RELEASE"
+elif [ -n "${VK_RELEASES_DIR:-}" ]; then
+  echo "✅ Binary release staged (live flip deferred): $RELEASE"
 fi
 
 echo ""
