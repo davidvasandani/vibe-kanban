@@ -12,6 +12,7 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 cluster-protocol = { path = "../cluster-protocol" }
 serde = { workspace = true }
+sha2 = "0.10"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = "0.7"

@@ -7,6 +7,8 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+pub mod journal;
+pub mod mount_health;
 pub mod path_authority;
 
 pub const WORKER_NODE_ID_ENV: &str = "VK_WORKER_NODE_ID";

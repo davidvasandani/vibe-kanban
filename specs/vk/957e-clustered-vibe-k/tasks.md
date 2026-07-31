@@ -46,12 +46,12 @@ files and may be completed together.
   `Cargo.toml`, and `local-build.sh`. Depends on T001, T004.
 - [x] T012 Implement shared-root canonical path authorization and symlink-escape
   tests in `crates/worker/src/path_authority.rs`. Depends on T011.
-- [ ] T013 [P] Implement mount-table/export, coordinator-probe, writability,
+- [x] T013 [P] Implement mount-table/export, coordinator-probe, writability,
   filesystem identity, and UID/GID validation with fixtures in
   `crates/worker/src/mount_health.rs`. Depends on T011.
 - [ ] T014 Implement authenticated registration/heartbeat and compatibility
   negotiation in `crates/worker/src/server.rs`. Depends on T006, T011, T013.
-- [ ] T015 Add bounded event journal, cursor replay/gap behavior, atomic terminal
+- [x] T015 Add bounded event journal, cursor replay/gap behavior, atomic terminal
   evidence, and tests in `crates/worker/src/journal.rs`. Depends on T011.
 
 ## Layer 4 — Shared provisioning and Git ownership
