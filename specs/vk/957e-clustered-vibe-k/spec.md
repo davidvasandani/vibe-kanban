@@ -146,8 +146,9 @@ reporting disconnects and uncertain outcomes truthfully.
   with the homelab's existing secret owner. No credential is generated into or
   embedded in the Nix store.
 - The production default mount path is `/srv/vibe-kanban-shared`, backed by
-  `172.16.0.99:/var/nfs/shared/VibeKanban`, and remains configurable only as
-  one shared-root option that must match across coordinator and workers.
+  `172.16.0.99:/var/nfs/shared/VibeKanban`; the application root defaults to
+  its `cluster/` child so export-root ownership can differ from the NFS-mapped
+  workspace identity. Both paths must match across coordinator and workers.
 - Direct authenticated LAN HTTP/WebSocket is the implemented carrier. Protocol
   boundaries retain addressed-worker semantics so relay carriage can be added
   later without changing execution semantics.

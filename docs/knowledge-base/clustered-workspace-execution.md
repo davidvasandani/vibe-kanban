@@ -22,12 +22,19 @@ schedulable, each worker verifies all of the following:
 - the path is a mount point backed by the expected NFS export;
 - a coordinator-issued probe is visible;
 - required directories are writable;
-- ownership matches the worker UID and GID;
+- storage-side ownership matches the configured expected UID and GID;
 - capacity remains below the operational threshold.
 
 Mount loss immediately makes the worker unschedulable. Preserve workspace data
 and report uncertainty; do not fall back to an identically named local
 directory.
+
+Keep the NFS mountpoint separate from the application root. Some managed NAS
+exports retain one owner on the export root but map all new collaborative
+writes to another UID/GID. Mount the export at a stable parent, create a
+dedicated cluster child through the coordinator, and validate that child's
+mapped identity. Do not conflate the worker's local account UID/GID with the
+storage-side identity produced by NFS squashing.
 
 Deployment credentials must remain runtime paths. Nix module options for
 private keys should accept absolute strings, reject `/nix/store/` paths, and
@@ -49,6 +56,11 @@ On restart, reconcile both directions:
 - persistent jobs may be re-adopted only with verifiable worker evidence;
 - ordinary agents are never silently marked complete after a disconnect.
 
+Lease expiry also needs to reach user-facing reads. Expiring stale `online`
+rows only inside scheduler selection leaves an admin UI claiming a dead worker
+is healthy; expire leases before listing workers (or in a periodic registry
+task) as well as filtering them during placement.
+
 A failed dispatch must also terminalise its worker-job record. Otherwise a job
 that never started appears pending indefinitely and contaminates later
 reconciliation.
@@ -63,6 +75,15 @@ a different event cursor or preview target.
 Apply an explicit body limit before buffering signed requests. Account for
 encoding expansion: a base64-wrapped preview body is larger than the underlying
 payload.
+
+Framework nesting can rewrite the URI visible to inner middleware. In Axum,
+verify worker signatures against `OriginalUri` so a request signed as
+`/api/workers/...` is not checked as the stripped `/workers/...` target.
+
+Anti-replay nonces and idempotent dispatch retries must be designed together.
+On a transient dispatch retry, preserve the execution ID and request digest but
+refresh the authority timestamp and nonce. Replaying the exact envelope should
+remain forbidden, while the refreshed envelope returns the existing worker job.
 
 ## Preserve affinity through browser subrequests
 

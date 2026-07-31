@@ -73,7 +73,17 @@ impl WorkerClient {
         dispatch: &ExecutionDispatch,
     ) -> Result<DispatchAccepted, WorkerClientError> {
         let path = format!("/v1/executions/{}", dispatch.execution_id);
-        self.post_with_retry(worker_node_id, &path, dispatch).await
+        let mut payload = dispatch.clone();
+        for attempt in 0..2 {
+            if attempt > 0 {
+                refresh_dispatch_authority(&mut payload, chrono::Utc::now(), Uuid::new_v4());
+            }
+            match self.post(worker_node_id, &path, &payload).await {
+                Err(error) if attempt == 0 && retryable_dispatch_error(&error) => {}
+                result => return result,
+            }
+        }
+        unreachable!("bounded dispatch retry returns on final attempt")
     }
 
     pub async fn events(
@@ -105,9 +115,7 @@ impl WorkerClient {
             highest_contiguous_sequence: u64,
         }
         let path = format!("/v1/executions/{}/ack", acknowledgement.execution_id);
-        let response: Acknowledged = self
-            .post_with_retry(worker_node_id, &path, acknowledgement)
-            .await?;
+        let response: Acknowledged = self.post(worker_node_id, &path, acknowledgement).await?;
         Ok(response.highest_contiguous_sequence)
     }
 
@@ -117,8 +125,7 @@ impl WorkerClient {
         cancellation: &CancellationRequest,
     ) -> Result<CancellationStatus, WorkerClientError> {
         let path = format!("/v1/executions/{}/cancel", cancellation.execution_id);
-        self.post_with_retry(worker_node_id, &path, cancellation)
-            .await
+        self.post(worker_node_id, &path, cancellation).await
     }
 
     pub async fn quarantine(
@@ -127,7 +134,7 @@ impl WorkerClient {
         request: &QuarantineRequest,
     ) -> Result<JobSummary, WorkerClientError> {
         let path = format!("/v1/executions/{}/quarantine", request.execution_id);
-        self.post_with_retry(worker_node_id, &path, request).await
+        self.post(worker_node_id, &path, request).await
     }
 
     pub async fn respond_interaction(
@@ -139,9 +146,7 @@ impl WorkerClient {
             "/v1/executions/{}/interactions/{}",
             response.execution_id, response.interaction_id
         );
-        let _: serde_json::Value = self
-            .post_with_retry(worker_node_id, &path, response)
-            .await?;
+        let _: serde_json::Value = self.post(worker_node_id, &path, response).await?;
         Ok(())
     }
 
@@ -150,8 +155,7 @@ impl WorkerClient {
         worker_node_id: Uuid,
         request: &TerminalCreateRequest,
     ) -> Result<TerminalCreated, WorkerClientError> {
-        self.post_with_retry(worker_node_id, "/v1/terminals", request)
-            .await
+        self.post(worker_node_id, "/v1/terminals", request).await
     }
 
     pub async fn proxy_preview(
@@ -163,7 +167,7 @@ impl WorkerClient {
             "/v1/executions/{}/preview/{}/{}",
             request.execution_id, request.generation, request.port
         );
-        self.post_with_retry(worker_node_id, &path, request).await
+        self.post(worker_node_id, &path, request).await
     }
 
     pub async fn preview_websocket(
@@ -248,7 +252,7 @@ impl WorkerClient {
         request: &TerminalInput,
     ) -> Result<(), WorkerClientError> {
         let path = format!("/v1/terminals/{}/input", request.terminal_id);
-        let _: serde_json::Value = self.post_with_retry(worker_node_id, &path, request).await?;
+        let _: serde_json::Value = self.post(worker_node_id, &path, request).await?;
         Ok(())
     }
 
@@ -258,7 +262,7 @@ impl WorkerClient {
         request: &TerminalResize,
     ) -> Result<(), WorkerClientError> {
         let path = format!("/v1/terminals/{}/resize", request.terminal_id);
-        let _: serde_json::Value = self.post_with_retry(worker_node_id, &path, request).await?;
+        let _: serde_json::Value = self.post(worker_node_id, &path, request).await?;
         Ok(())
     }
 
@@ -268,7 +272,7 @@ impl WorkerClient {
         request: &TerminalClose,
     ) -> Result<(), WorkerClientError> {
         let path = format!("/v1/terminals/{}/close", request.terminal_id);
-        let _: serde_json::Value = self.post_with_retry(worker_node_id, &path, request).await?;
+        let _: serde_json::Value = self.post(worker_node_id, &path, request).await?;
         Ok(())
     }
 
@@ -285,7 +289,7 @@ impl WorkerClient {
         decode(response).await
     }
 
-    async fn post_with_retry<T: DeserializeOwned>(
+    async fn post<T: DeserializeOwned>(
         &self,
         worker_node_id: Uuid,
         path: &str,
@@ -293,32 +297,16 @@ impl WorkerClient {
     ) -> Result<T, WorkerClientError> {
         let endpoint = self.endpoint_for(worker_node_id).await?;
         let body = serde_json::to_vec(payload).expect("protocol payload must serialize");
-        for attempt in 0..2 {
-            let request = self.signed(
-                self.http
-                    .post(endpoint.join(path)?)
-                    .header(reqwest::header::CONTENT_TYPE, "application/json")
-                    .body(body.clone()),
-                Method::POST,
-                path,
-                &body,
-            );
-            match request.send().await {
-                Ok(response)
-                    if response.status().is_server_error()
-                        || response.status() == StatusCode::REQUEST_TIMEOUT
-                        || response.status() == StatusCode::TOO_MANY_REQUESTS =>
-                {
-                    if attempt == 1 {
-                        return decode(response).await;
-                    }
-                }
-                Ok(response) => return decode(response).await,
-                Err(error) if attempt == 1 => return Err(error.into()),
-                Err(_) => {}
-            }
-        }
-        unreachable!("bounded retry loop returns on final attempt")
+        let request = self.signed(
+            self.http
+                .post(endpoint.join(path)?)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone()),
+            Method::POST,
+            path,
+            &body,
+        );
+        decode(request.send().await?).await
     }
 
     async fn endpoint_for(&self, worker_node_id: Uuid) -> Result<Url, WorkerClientError> {
@@ -362,6 +350,27 @@ impl WorkerClient {
                 "x-vk-signature",
                 BASE64_STANDARD.encode(signature.to_bytes()),
             )
+    }
+}
+
+fn refresh_dispatch_authority(
+    dispatch: &mut ExecutionDispatch,
+    issued_at: chrono::DateTime<chrono::Utc>,
+    nonce: Uuid,
+) {
+    dispatch.authority.issued_at = issued_at;
+    dispatch.authority.nonce = nonce.to_string();
+}
+
+fn retryable_dispatch_error(error: &WorkerClientError) -> bool {
+    match error {
+        WorkerClientError::Transport(_) => true,
+        WorkerClientError::Rejected { status, .. } => {
+            status.is_server_error()
+                || *status == StatusCode::REQUEST_TIMEOUT
+                || *status == StatusCode::TOO_MANY_REQUESTS
+        }
+        _ => false,
     }
 }
 
@@ -416,8 +425,13 @@ fn validate_event_batch(batch: &EventBatch) -> Result<(), WorkerClientError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use chrono::Utc;
-    use cluster_protocol::{ExecutionEvent, ExecutionEventPayload};
+    use cluster_protocol::{
+        ExecutionEvent, ExecutionEventPayload, PROTOCOL_VERSION, PersistencePolicy,
+        RequestAuthority,
+    };
 
     use super::*;
 
@@ -456,6 +470,69 @@ mod tests {
         assert!(matches!(
             validate_event_batch(&batch(&[4, 6])),
             Err(WorkerClientError::ReplayGap { .. })
+        ));
+    }
+
+    #[test]
+    fn dispatch_retry_refreshes_only_replay_authority() {
+        let execution_id = Uuid::new_v4();
+        let original_time = Utc::now() - chrono::TimeDelta::seconds(1);
+        let mut dispatch = ExecutionDispatch {
+            authority: RequestAuthority {
+                protocol_version: PROTOCOL_VERSION,
+                coordinator_id: Uuid::new_v4(),
+                worker_node_id: Uuid::new_v4(),
+                correlation_id: execution_id,
+                issued_at: original_time,
+                nonce: "first".into(),
+            },
+            execution_id,
+            workspace_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            workspace_path: "/shared/workspace".into(),
+            working_directory: "/shared/workspace".into(),
+            executor_profile: "codex".into(),
+            action: serde_json::json!({}),
+            environment: BTreeMap::new(),
+            run_reason: "test".into(),
+            timeout_seconds: None,
+            persistence: PersistencePolicy::Ordinary,
+            request_digest: "stable-digest".into(),
+        };
+        let original = dispatch.clone();
+        let retry_time = Utc::now();
+        let retry_nonce = Uuid::new_v4();
+
+        refresh_dispatch_authority(&mut dispatch, retry_time, retry_nonce);
+
+        assert_eq!(dispatch.execution_id, original.execution_id);
+        assert_eq!(dispatch.request_digest, original.request_digest);
+        assert_eq!(
+            dispatch.authority.correlation_id,
+            original.authority.correlation_id
+        );
+        assert_eq!(dispatch.authority.issued_at, retry_time);
+        assert_eq!(dispatch.authority.nonce, retry_nonce.to_string());
+    }
+
+    #[test]
+    fn dispatch_retries_only_transient_rejections() {
+        let rejected = |status| WorkerClientError::Rejected {
+            status,
+            message: "test".into(),
+        };
+        assert!(retryable_dispatch_error(&rejected(
+            StatusCode::INTERNAL_SERVER_ERROR
+        )));
+        assert!(retryable_dispatch_error(&rejected(
+            StatusCode::REQUEST_TIMEOUT
+        )));
+        assert!(retryable_dispatch_error(&rejected(
+            StatusCode::TOO_MANY_REQUESTS
+        )));
+        assert!(!retryable_dispatch_error(&rejected(StatusCode::FORBIDDEN)));
+        assert!(!retryable_dispatch_error(
+            &WorkerClientError::DigestConflict
         ));
     }
 }

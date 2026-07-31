@@ -50,6 +50,11 @@ pub fn worker_router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
 async fn list_workers(
     State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<Vec<WorkerNode>>>, ApiError> {
+    deployment
+        .worker_registry()
+        .expire_heartbeats(Utc::now())
+        .await
+        .map_err(registry_error)?;
     Ok(ResponseJson(ApiResponse::success(
         WorkerNode::fetch_all(&deployment.db().pool).await?,
     )))

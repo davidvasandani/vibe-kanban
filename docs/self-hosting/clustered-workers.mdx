@@ -15,7 +15,7 @@ Clustered Vibe Kanban keeps one coordinator and coordinator-local SQLite databas
 
 Before you enable clustering, confirm that:
 
-- the coordinator and workers use the same numeric UID and GID for workspace files;
+- the workers validate the storage-side numeric UID/GID produced by the NFS export policy;
 - `172.16.0.99:/var/nfs/shared/VibeKanban` is snapshot-backed;
 - every node mounts it at `/srv/vibe-kanban-shared`;
 - each worker has a stable UUID and reachable LAN address;
@@ -23,7 +23,7 @@ Before you enable clustering, confirm that:
 - TCP port `8086` is allowed only on the trusted cluster LAN; and
 - the worker binary and coordinator come from the same Vibe Kanban release.
 
-The Nix options live under `services.vibe-kanban-rebuild`. Use `clusterRole = "coordinator"` on the coordinator and `clusterRole = "worker"` on worker nodes. The module orders both services after the shared mount and delivers worker credentials through systemd credentials.
+The Nix options live under `services.vibe-kanban-rebuild`. Use `clusterRole = "coordinator"` on the coordinator and `clusterRole = "worker"` on worker nodes. The module mounts the export at `sharedMount`, creates `sharedRoot` (by default `/srv/vibe-kanban-shared/cluster`) inside it, orders both services after that preparation, and delivers worker credentials through systemd credentials. `worker.expectedSharedUid` and `worker.expectedSharedGid` describe storage-side ownership and are intentionally independent of the worker's local account UID/GID.
 
 ## Run the two-node Slice 2 trial
 
@@ -31,7 +31,7 @@ Use disposable or snapshot-protected nodes for the first trial. Start with one c
 
 <Steps>
 <Step title="Prepare shared storage">
-  Create the `repositories`, `workspaces`, and `execution-logs` directories on the NFS volume. Apply the configured service UID and GID, then take a baseline snapshot.
+  The coordinator creates the cluster root inside the NFS mount. Create the `repositories`, `workspaces`, and `execution-logs` directories there, verify their storage-side UID/GID, then take a baseline snapshot.
 
 On both nodes, verify the source and filesystem type:
 

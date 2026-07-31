@@ -68,15 +68,16 @@ state. It:
 
 ### Shared volume
 
-The coordinator and workers use a configured root such as
-`/srv/vibe-kanban-shared` backed by
-`172.16.0.99:/var/nfs/shared/VibeKanban`. It contains repositories,
+The coordinator and workers mount
+`172.16.0.99:/var/nfs/shared/VibeKanban` at `/srv/vibe-kanban-shared` and use
+a configured application root such as `/srv/vibe-kanban-shared/cluster`. It contains repositories,
 workspaces, and optional durable execution logs, but never the coordinator's
 SQLite database.
 
 Every schedulable node validates that the configured path is the expected NFS
 mount rather than a local fallback, can observe a coordinator-issued probe, has
-the expected filesystem identity, and has correct `vibe-kanban` UID/GID access.
+the expected filesystem identity, and observes the configured storage-side
+UID/GID after any NFS identity mapping.
 
 ### Worker
 
