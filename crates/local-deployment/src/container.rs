@@ -2799,13 +2799,38 @@ impl ContainerService for LocalContainerService {
             &request_digest,
         )
         .await?;
-        let accepted = client
-            .dispatch(worker_node_id, &dispatch)
-            .await
-            .map_err(|error| ContainerError::Other(anyhow!(error)))?;
+        let accepted = match client.dispatch(worker_node_id, &dispatch).await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                let evidence = serde_json::json!({
+                    "reason": "worker dispatch failed",
+                    "error": error.to_string(),
+                });
+                ExecutionWorkerJob::update_state(
+                    &self.db.pool,
+                    execution_process.id,
+                    ExecutionWorkerDispatchState::Failed,
+                    Some(&evidence),
+                    Some(Utc::now()),
+                )
+                .await?;
+                return Err(ContainerError::Other(anyhow!(error)));
+            }
+        };
         if accepted.execution_id != execution_process.id
             || accepted.request_digest != request_digest
         {
+            let evidence = serde_json::json!({
+                "reason": "worker returned mismatched dispatch acceptance",
+            });
+            ExecutionWorkerJob::update_state(
+                &self.db.pool,
+                execution_process.id,
+                ExecutionWorkerDispatchState::Failed,
+                Some(&evidence),
+                Some(Utc::now()),
+            )
+            .await?;
             return Err(ContainerError::Other(anyhow!(
                 "Worker returned mismatched dispatch acceptance"
             )));

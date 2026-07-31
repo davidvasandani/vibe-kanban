@@ -34,7 +34,10 @@ use crate::{
 const SIGNATURE_HEADER: &str = "x-vk-signature";
 const TIMESTAMP_HEADER: &str = "x-vk-timestamp";
 const CONTENT_DIGEST_HEADER: &str = "x-vk-content-sha256";
-const MAX_SIGNED_BODY_BYTES: usize = 1024 * 1024;
+// Preview requests allow 50 MiB of raw body data at the coordinator. The
+// signed worker envelope carries that body base64-encoded inside JSON, so keep
+// enough headroom for the 4/3 expansion and protocol metadata.
+const MAX_SIGNED_BODY_BYTES: usize = 72 * 1024 * 1024;
 const MAX_TIMESTAMP_DRIFT_SECONDS: i64 = 30;
 const NONCE_RETENTION: Duration = Duration::from_secs(120);
 
