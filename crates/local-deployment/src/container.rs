@@ -23,7 +23,7 @@ use db::{
         scratch::{DraftFollowUpData, Scratch, ScratchType},
         session::{Session, SessionError},
         task::Task,
-        workspace::Workspace,
+        workspace::{Workspace, WorkspacePlacement, WorkspacePlacementState},
         workspace_repo::WorkspaceRepo,
     },
 };
@@ -52,6 +52,7 @@ use serde_json::json;
 use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
+    cluster::ClusterConfig,
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{ContainerError, ContainerRef, ContainerService},
     diff_stream::{self, DiffStreamHandle},
@@ -70,7 +71,10 @@ use utils::{
     text::{git_branch_id, short_uuid, truncate_to_char_boundary},
 };
 use uuid::Uuid;
-use workspace_manager::{RepoWorkspaceInput, WorkspaceError, WorkspaceManager};
+use workspace_manager::{
+    RepoWorkspaceInput, SharedWorkspacePaths, WorkspaceError, WorkspaceManager,
+};
+use worktree_manager::RepositoryAdminLockManager;
 
 use crate::{command, copy};
 
@@ -344,6 +348,8 @@ pub struct LocalContainerService {
     queued_message_service: QueuedMessageService,
     notification_service: NotificationService,
     remote_client: Option<RemoteClient>,
+    cluster_config: ClusterConfig,
+    repository_admin_locks: RepositoryAdminLockManager,
 }
 
 impl LocalContainerService {
@@ -416,6 +422,7 @@ impl LocalContainerService {
         approvals: Approvals,
         queued_message_service: QueuedMessageService,
         remote_client: Option<RemoteClient>,
+        cluster_config: ClusterConfig,
     ) -> Self {
         let child_store = Arc::new(RwLock::new(HashMap::new()));
         let cancellation_tokens = Arc::new(RwLock::new(HashMap::new()));
@@ -427,6 +434,9 @@ impl LocalContainerService {
         let mcp_refresh_controls = Arc::new(RwLock::new(HashMap::new()));
         let workspace_touch_times = Arc::new(RwLock::new(HashMap::new()));
         let notification_service = NotificationService::new(config.clone());
+        let repository_admin_locks =
+            RepositoryAdminLockManager::new(db.pool.clone(), Duration::from_mins(5))
+                .expect("static repository lock lease must be valid");
 
         let container = LocalContainerService {
             db,
@@ -450,6 +460,8 @@ impl LocalContainerService {
             queued_message_service,
             notification_service,
             remote_client,
+            cluster_config,
+            repository_admin_locks,
         };
 
         container.spawn_workspace_cleanup();
@@ -479,6 +491,9 @@ impl LocalContainerService {
                 repo_name
             )),
             WorkspaceError::PartialCreation(msg) => ContainerError::Other(anyhow!(msg)),
+            WorkspaceError::InvalidSharedRoot(path) => {
+                ContainerError::Other(anyhow!("Invalid shared workspace root: {}", path.display()))
+            }
         }
     }
 
@@ -2131,6 +2146,10 @@ impl ContainerService for LocalContainerService {
     }
 
     async fn create(&self, workspace: &Workspace) -> Result<ContainerRef, ContainerError> {
+        if self.cluster_config.enabled {
+            return create_cluster_workspace(self, workspace).await;
+        }
+
         let label = workspace.name.as_deref().unwrap_or("workspace");
         let workspace_dir_name =
             LocalContainerService::dir_name_from_workspace(&workspace.id, label);
@@ -2188,13 +2207,33 @@ impl ContainerService for LocalContainerService {
             WorkspaceManager::get_workspace_base_dir().join(&workspace_dir_name)
         };
 
-        WorkspaceManager::ensure_workspace_exists(
-            &workspace_dir,
-            &workspace_inputs,
-            &workspace.branch,
-        )
-        .await
-        .map_err(Self::map_workspace_manager_error)?;
+        if self.cluster_config.enabled {
+            let placement = WorkspacePlacement::find(&self.db.pool, workspace.id)
+                .await?
+                .ok_or_else(|| ContainerError::Other(anyhow!("Workspace placement is missing")))?;
+            if placement.placement_state != WorkspacePlacementState::Ready {
+                return Err(ContainerError::Other(anyhow!(
+                    "Cluster workspace is not ready (state: {:?})",
+                    placement.placement_state
+                )));
+            }
+            WorkspaceManager::ensure_workspace_exists_fenced(
+                &workspace_dir,
+                &workspace_inputs,
+                &workspace.branch,
+                &self.repository_admin_locks,
+            )
+            .await
+            .map_err(Self::map_workspace_manager_error)?;
+        } else {
+            WorkspaceManager::ensure_workspace_exists(
+                &workspace_dir,
+                &workspace_inputs,
+                &workspace.branch,
+            )
+            .await
+            .map_err(Self::map_workspace_manager_error)?;
+        }
 
         if workspace.container_ref.is_none() {
             Workspace::update_container_ref(
@@ -2907,6 +2946,86 @@ impl ContainerService for LocalContainerService {
         Ok(())
     }
 }
+
+async fn create_cluster_workspace(
+    service: &LocalContainerService,
+    workspace: &Workspace,
+) -> Result<ContainerRef, ContainerError> {
+    let placement = WorkspacePlacement::find(&service.db.pool, workspace.id)
+        .await?
+        .ok_or_else(|| ContainerError::Other(anyhow!("Workspace placement is missing")))?;
+    if placement.placement_state != WorkspacePlacementState::Reserved
+        || placement.worker_node_id.is_none()
+    {
+        return Err(ContainerError::Other(anyhow!(
+            "Workspace must have a reserved worker before provisioning"
+        )));
+    }
+    if !WorkspacePlacement::transition(
+        &service.db.pool,
+        workspace.id,
+        WorkspacePlacementState::Reserved,
+        WorkspacePlacementState::Provisioning,
+        None,
+    )
+    .await?
+    {
+        return Err(ContainerError::Other(anyhow!(
+            "Workspace placement changed before provisioning"
+        )));
+    }
+
+    let result = async {
+        let paths = SharedWorkspacePaths::new(&service.cluster_config.shared_root)
+            .map_err(LocalContainerService::map_workspace_manager_error)?;
+        paths.create_base_dirs().await?;
+        let workspace_dir = paths.workspace_dir(workspace.id);
+        let (repositories, workspace_inputs) = service.workspace_repo_inputs(workspace.id).await?;
+        let created_workspace = WorkspaceManager::create_workspace_fenced(
+            &workspace_dir,
+            &workspace_inputs,
+            &workspace.branch,
+            &service.repository_admin_locks,
+        )
+        .await
+        .map_err(LocalContainerService::map_workspace_manager_error)?;
+        service
+            .copy_files_and_images(&created_workspace.workspace_dir, workspace)
+            .await?;
+        LocalContainerService::create_workspace_config_files(
+            &created_workspace.workspace_dir,
+            &repositories,
+        )
+        .await?;
+        let container_ref = created_workspace
+            .workspace_dir
+            .to_string_lossy()
+            .to_string();
+        Workspace::update_container_ref(&service.db.pool, workspace.id, &container_ref).await?;
+        Ok::<_, ContainerError>(container_ref)
+    }
+    .await;
+
+    let (next, reason) = match &result {
+        Ok(_) => (WorkspacePlacementState::Ready, None),
+        Err(error) => (WorkspacePlacementState::Failed, Some(error.to_string())),
+    };
+    let transitioned = WorkspacePlacement::transition(
+        &service.db.pool,
+        workspace.id,
+        WorkspacePlacementState::Provisioning,
+        next,
+        reason.as_deref(),
+    )
+    .await?;
+    if !transitioned && result.is_ok() {
+        return Err(ContainerError::Other(anyhow!(
+            "Workspace provisioning completed but ready state could not be persisted"
+        )));
+    }
+    result
+}
+
 fn success_exit_status() -> std::process::ExitStatus {
     #[cfg(unix)]
     {

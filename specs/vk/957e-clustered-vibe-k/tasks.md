@@ -63,7 +63,7 @@ files and may be completed together.
 - [x] T018 Remove/serialize unsafe repo-wide prune and cover concurrent
   create/remove/prune in `crates/worktree-manager/src/worktree_manager.rs`.
   Depends on T017.
-- [ ] T019 Change workspace creation to reserve placement before provisioning
+- [x] T019 Change workspace creation to reserve placement before provisioning
   and persist `ready`/`failed` truthfully in
   `crates/local-deployment/src/container.rs`,
   `crates/services/src/services/container.rs`, and workspace creation routes.

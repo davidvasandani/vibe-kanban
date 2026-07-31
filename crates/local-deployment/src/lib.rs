@@ -282,6 +282,7 @@ impl Deployment for LocalDeployment {
             approvals.clone(),
             queued_message_service.clone(),
             remote_client.clone().ok(),
+            cluster_config.clone(),
         )
         .await;
 

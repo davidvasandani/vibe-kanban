@@ -15,7 +15,9 @@ use git::{GitService, GitServiceError};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-use worktree_manager::{WorktreeCleanup, WorktreeError, WorktreeManager};
+use worktree_manager::{
+    RepositoryAdminLockManager, WorktreeCleanup, WorktreeError, WorktreeManager,
+};
 
 const SHARED_REPOSITORIES_DIR: &str = "repositories";
 const SHARED_WORKSPACES_DIR: &str = "workspaces";
@@ -368,6 +370,25 @@ impl WorkspaceManager {
         repos: &[RepoWorkspaceInput],
         branch_name: &str,
     ) -> Result<WorktreeContainer, WorkspaceError> {
+        Self::create_workspace_with_locking(workspace_dir, repos, branch_name, None).await
+    }
+
+    pub async fn create_workspace_fenced(
+        workspace_dir: &Path,
+        repos: &[RepoWorkspaceInput],
+        branch_name: &str,
+        lock_manager: &RepositoryAdminLockManager,
+    ) -> Result<WorktreeContainer, WorkspaceError> {
+        Self::create_workspace_with_locking(workspace_dir, repos, branch_name, Some(lock_manager))
+            .await
+    }
+
+    async fn create_workspace_with_locking(
+        workspace_dir: &Path,
+        repos: &[RepoWorkspaceInput],
+        branch_name: &str,
+        lock_manager: Option<&RepositoryAdminLockManager>,
+    ) -> Result<WorktreeContainer, WorkspaceError> {
         if repos.is_empty() {
             return Err(WorkspaceError::NoRepositories);
         }
@@ -391,15 +412,31 @@ impl WorkspaceManager {
                 worktree_path.display()
             );
 
-            match WorktreeManager::create_worktree(
-                &input.repo.path,
-                branch_name,
-                &worktree_path,
-                &input.target_branch,
-                true,
-            )
-            .await
-            {
+            let create_result = match lock_manager {
+                Some(lock_manager) => {
+                    WorktreeManager::create_worktree_fenced(
+                        lock_manager,
+                        input.repo.id,
+                        &input.repo.path,
+                        branch_name,
+                        &worktree_path,
+                        &input.target_branch,
+                        true,
+                    )
+                    .await
+                }
+                None => {
+                    WorktreeManager::create_worktree(
+                        &input.repo.path,
+                        branch_name,
+                        &worktree_path,
+                        &input.target_branch,
+                        true,
+                    )
+                    .await
+                }
+            };
+            match create_result {
                 Ok(()) => {
                     created_worktrees.push(RepoWorktree {
                         repo_id: input.repo.id,
@@ -450,6 +487,30 @@ impl WorkspaceManager {
         repos: &[RepoWorkspaceInput],
         branch_name: &str,
     ) -> Result<(), WorkspaceError> {
+        Self::ensure_workspace_exists_with_locking(workspace_dir, repos, branch_name, None).await
+    }
+
+    pub async fn ensure_workspace_exists_fenced(
+        workspace_dir: &Path,
+        repos: &[RepoWorkspaceInput],
+        branch_name: &str,
+        lock_manager: &RepositoryAdminLockManager,
+    ) -> Result<(), WorkspaceError> {
+        Self::ensure_workspace_exists_with_locking(
+            workspace_dir,
+            repos,
+            branch_name,
+            Some(lock_manager),
+        )
+        .await
+    }
+
+    async fn ensure_workspace_exists_with_locking(
+        workspace_dir: &Path,
+        repos: &[RepoWorkspaceInput],
+        branch_name: &str,
+        lock_manager: Option<&RepositoryAdminLockManager>,
+    ) -> Result<(), WorkspaceError> {
         if repos.is_empty() {
             return Err(WorkspaceError::NoRepositories);
         }
@@ -477,21 +538,55 @@ impl WorkspaceManager {
             );
 
             if git.check_branch_exists(&repo.path, branch_name)? {
-                WorktreeManager::ensure_worktree_exists(&repo.path, branch_name, &worktree_path)
-                    .await?;
+                match lock_manager {
+                    Some(lock_manager) => {
+                        WorktreeManager::ensure_worktree_exists_fenced(
+                            lock_manager,
+                            repo.id,
+                            &repo.path,
+                            branch_name,
+                            &worktree_path,
+                        )
+                        .await?;
+                    }
+                    None => {
+                        WorktreeManager::ensure_worktree_exists(
+                            &repo.path,
+                            branch_name,
+                            &worktree_path,
+                        )
+                        .await?;
+                    }
+                }
             } else {
                 info!(
                     "Workspace branch '{}' missing in repo '{}'; creating from target branch '{}'",
                     branch_name, repo.name, input.target_branch
                 );
-                WorktreeManager::create_worktree(
-                    &repo.path,
-                    branch_name,
-                    &worktree_path,
-                    &input.target_branch,
-                    true,
-                )
-                .await?;
+                match lock_manager {
+                    Some(lock_manager) => {
+                        WorktreeManager::create_worktree_fenced(
+                            lock_manager,
+                            repo.id,
+                            &repo.path,
+                            branch_name,
+                            &worktree_path,
+                            &input.target_branch,
+                            true,
+                        )
+                        .await?;
+                    }
+                    None => {
+                        WorktreeManager::create_worktree(
+                            &repo.path,
+                            branch_name,
+                            &worktree_path,
+                            &input.target_branch,
+                            true,
+                        )
+                        .await?;
+                    }
+                }
             }
         }
 
