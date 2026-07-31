@@ -85,6 +85,7 @@ import {
   ContinueRebaseRequest,
   Session,
   Workspace,
+  WorkerNode,
   StartReviewRequest,
   ReviewError,
   GitRemote,
@@ -2089,6 +2090,27 @@ export const releasesApi = {
     const response = await makeRequest('/api/releases');
     const result = await handleApiResponse<ReleasesResponse>(response);
     return result.releases;
+  },
+};
+
+export const workerNodesApi = {
+  list: async (): Promise<WorkerNode[]> => {
+    const response = await makeRequest('/api/worker-nodes');
+    return handleApiResponse<WorkerNode[]>(response);
+  },
+
+  setDraining: async (
+    workerNodeId: string,
+    draining: boolean
+  ): Promise<WorkerNode> => {
+    const response = await makeRequest(
+      `/api/worker-nodes/${encodeURIComponent(workerNodeId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ draining }),
+      }
+    );
+    return handleApiResponse<WorkerNode>(response);
   },
 };
 

@@ -296,10 +296,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        sqlx::migrate!("../db/migrations")
-            .run(&pool)
-            .await
-            .unwrap();
+        sqlx::migrate!("../db/migrations").run(&pool).await.unwrap();
         let coordinator_id = Uuid::new_v4();
         (
             WorkerRegistry::new(

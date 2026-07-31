@@ -10,6 +10,9 @@ use uuid::Uuid;
 
 use crate::{
     error::TrustedKeyAuthError,
+    request_signature::{
+        SignatureVerificationError, VerifiedRequestSignature, verify_trusted_ed25519_signature,
+    },
     trusted_keys::{
         TrustedRelayClient, list_trusted_clients, remove_trusted_client, upsert_trusted_client,
     },
@@ -149,6 +152,15 @@ impl TrustedKeyAuthRuntime {
 
         seen.insert(normalized.to_string(), now);
         Ok(())
+    }
+
+    pub async fn verify_request_signature(
+        &self,
+        headers: &http::HeaderMap,
+        method: &http::Method,
+        path: &str,
+    ) -> Result<VerifiedRequestSignature, SignatureVerificationError> {
+        verify_trusted_ed25519_signature(headers, method, path, &self.trusted_keys_path).await
     }
 }
 

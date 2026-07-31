@@ -1,0 +1,23 @@
+[package]
+name = "worker"
+version = "0.1.43"
+edition = "2024"
+
+[[bin]]
+name = "vibe-kanban-worker"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+cluster-protocol = { path = "../cluster-protocol" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = "0.7"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { version = "1.0", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tempfile = "3"

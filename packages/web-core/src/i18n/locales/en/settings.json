@@ -35,6 +35,8 @@
         "awsDesc": "AWS SSO profiles and sign-in",
         "pipelines": "Pipelines",
         "pipelinesDesc": "Pipeline TOML files and defaults",
+        "workers": "Cluster Workers",
+        "workersDesc": "Worker health, storage, and scheduling",
         "organizations": "Organization Settings",
         "organizationsDesc": "Manage organization members and permissions",
         "remote-projects": "Projects",
@@ -54,6 +56,19 @@
       "noHostAvailable": "No host is available for host-specific settings yet.",
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
+    },
+    "workers": {
+      "title": "Cluster workers",
+      "description": "Worker health, shared storage, capacity, and scheduling state.",
+      "loading": "Loading workers…",
+      "loadError": "Unable to load cluster workers.",
+      "empty": "No workers have registered yet.",
+      "schedulable": "Schedulable",
+      "unschedulable": "Not schedulable",
+      "active": "Active executions",
+      "load": "Load",
+      "drain": "Drain",
+      "resume": "Resume scheduling"
     },
     "general": {
       "loading": "Loading settings...",

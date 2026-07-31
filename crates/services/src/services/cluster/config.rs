@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub const CLUSTER_ENABLED_ENV: &str = "VK_CLUSTER_ENABLED";
 pub const COORDINATOR_ID_ENV: &str = "VK_CLUSTER_COORDINATOR_ID";
 pub const SHARED_ROOT_ENV: &str = "VK_CLUSTER_SHARED_ROOT";
+pub const EXPECTED_FILESYSTEM_ID_ENV: &str = "VK_CLUSTER_EXPECTED_FILESYSTEM_ID";
 pub const WORKER_ENDPOINTS_ENV: &str = "VK_CLUSTER_WORKER_ENDPOINTS";
 pub const HEARTBEAT_INTERVAL_SECONDS_ENV: &str = "VK_CLUSTER_HEARTBEAT_INTERVAL_SECONDS";
 pub const LEASE_DURATION_SECONDS_ENV: &str = "VK_CLUSTER_LEASE_DURATION_SECONDS";
@@ -14,6 +15,7 @@ pub const LOAD_WEIGHT_ENV: &str = "VK_CLUSTER_LOAD_WEIGHT";
 pub const ACTIVE_EXECUTION_WEIGHT_ENV: &str = "VK_CLUSTER_ACTIVE_EXECUTION_WEIGHT";
 
 const DEFAULT_SHARED_ROOT: &str = "/srv/vibe-kanban-shared";
+const DEFAULT_EXPECTED_FILESYSTEM_ID: &str = "172.16.0.99:/var/nfs/shared/VibeKanban/mnt";
 const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 10;
 const DEFAULT_LEASE_DURATION_SECONDS: u64 = 30;
 const DEFAULT_LOAD_WEIGHT: f64 = 1.0;
@@ -39,6 +41,7 @@ pub struct ClusterConfig {
     pub enabled: bool,
     pub coordinator_id: Option<Uuid>,
     pub shared_root: PathBuf,
+    pub expected_filesystem_id: String,
     pub worker_endpoints: Vec<Url>,
     pub heartbeat_interval: Duration,
     pub lease_duration: Duration,
@@ -51,6 +54,7 @@ impl Default for ClusterConfig {
             enabled: false,
             coordinator_id: None,
             shared_root: PathBuf::from(DEFAULT_SHARED_ROOT),
+            expected_filesystem_id: DEFAULT_EXPECTED_FILESYSTEM_ID.to_owned(),
             worker_endpoints: Vec::new(),
             heartbeat_interval: Duration::from_secs(DEFAULT_HEARTBEAT_INTERVAL_SECONDS),
             lease_duration: Duration::from_secs(DEFAULT_LEASE_DURATION_SECONDS),
@@ -100,6 +104,9 @@ impl ClusterConfig {
         }
         if let Some(value) = nonempty(lookup(SHARED_ROOT_ENV)) {
             config.shared_root = PathBuf::from(value);
+        }
+        if let Some(value) = nonempty(lookup(EXPECTED_FILESYSTEM_ID_ENV)) {
+            config.expected_filesystem_id = value;
         }
         if let Some(value) = nonempty(lookup(WORKER_ENDPOINTS_ENV)) {
             config.worker_endpoints = parse_worker_endpoints(&value)?;
@@ -234,6 +241,7 @@ mod tests {
             (CLUSTER_ENABLED_ENV, "yes"),
             (COORDINATOR_ID_ENV, &coordinator_id.to_string()),
             (SHARED_ROOT_ENV, "/mnt/vibe"),
+            (EXPECTED_FILESYSTEM_ID_ENV, "nfs:test"),
             (
                 WORKER_ENDPOINTS_ENV,
                 "http://think3:8081, https://think4.example:8081/",
@@ -248,6 +256,7 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.coordinator_id, Some(coordinator_id));
         assert_eq!(config.shared_root, PathBuf::from("/mnt/vibe"));
+        assert_eq!(config.expected_filesystem_id, "nfs:test");
         assert_eq!(config.worker_endpoints.len(), 2);
         assert_eq!(config.heartbeat_interval, Duration::from_secs(15));
         assert_eq!(config.lease_duration, Duration::from_secs(45));

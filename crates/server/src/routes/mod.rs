@@ -34,6 +34,7 @@ pub mod ssh_session;
 pub mod tags;
 pub mod terminal;
 pub mod webrtc;
+pub mod workers;
 pub mod workspaces;
 
 pub fn router(
@@ -59,6 +60,8 @@ pub fn router(
         .merge(events::router(&deployment))
         .merge(approvals::router())
         .merge(browser_sessions::router(&deployment))
+        .merge(workers::admin_router())
+        .merge(workers::worker_router(&deployment))
         .merge(scratch::router(&deployment))
         .merge(search::router(&deployment))
         .merge(preview::api_router())

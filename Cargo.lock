@@ -9034,6 +9034,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "cluster-protocol",
  "db",
  "deployment",
  "desktop-bridge",
@@ -12947,6 +12948,23 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "worker"
+version = "0.1.43"
+dependencies = [
+ "anyhow",
+ "axum",
+ "cluster-protocol",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

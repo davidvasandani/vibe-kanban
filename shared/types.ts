@@ -266,6 +266,16 @@ speckit_feature_key: string | null,
  */
 speckit_host_repo_id: string | null, };
 
+export type WorkspacePlacement = { workspace_id: string, worker_node_id: string | null, placement_state: WorkspacePlacementState, placed_at: string | null, placement_reason: string | null, requested_worker_node_id: string | null, placement_constraints: unknown, };
+
+export enum WorkspacePlacementState { local = "local", reserved = "reserved", provisioning = "provisioning", ready = "ready", failed = "failed" }
+
+export type WorkerNode = { id: string, hostname: string, status: WorkerNodeStatus, worker_version: string, vibe_version: string, capabilities: unknown, resource_snapshot: unknown, labels: unknown, mount_status: WorkerMountStatus, mount_message: string | null, last_heartbeat_at: string | null, lease_expires_at: string | null, created_at: string, updated_at: string, };
+
+export enum WorkerNodeStatus { online = "online", offline = "offline", draining = "draining" }
+
+export enum WorkerMountStatus { healthy = "healthy", missing = "missing", local_fallback = "local_fallback", wrong_filesystem = "wrong_filesystem", probe_not_visible = "probe_not_visible", read_only = "read_only", ownership_mismatch = "ownership_mismatch", io_error = "io_error" }
+
 export type Session = { id: string, workspace_id: string, name: string | null, executor: string | null, agent_working_dir: string | null, created_at: string, updated_at: string, };
 
 export type ExecutionProcess = { id: string, session_id: string, run_reason: ExecutionProcessRunReason, executor_action: ExecutorAction, status: ExecutionProcessStatus, exit_code: bigint | null, 
@@ -284,6 +294,10 @@ dropped: boolean, started_at: string, completed_at: string | null, created_at: s
 export enum ExecutionProcessStatus { running = "running", completed = "completed", failed = "failed", killed = "killed", interrupted = "interrupted" }
 
 export type ExecutionProcessRunReason = "setupscript" | "cleanupscript" | "archivescript" | "codingagent" | "devserver" | "backgroundhelper";
+
+export type ExecutionWorkerJob = { execution_process_id: string, worker_node_id: string, worker_job_id: string, request_digest: string, dispatch_state: ExecutionWorkerDispatchState, last_event_sequence: bigint, worker_last_sequence: bigint, lease_expires_at: string | null, output_complete: boolean, terminal_evidence: unknown, dispatched_at: string, accepted_at: string | null, completed_at: string | null, created_at: string, updated_at: string, };
+
+export enum ExecutionWorkerDispatchState { pending = "pending", accepted = "accepted", starting = "starting", running = "running", cancelling = "cancelling", completed = "completed", failed = "failed", killed = "killed", interrupted = "interrupted", indeterminate = "indeterminate", quarantined = "quarantined" }
 
 export type ExecutionProcessRepoState = { id: string, execution_process_id: string, repo_id: string, before_head_commit: string | null, after_head_commit: string | null, merge_commit: string | null, created_at: Date, updated_at: Date, };
 

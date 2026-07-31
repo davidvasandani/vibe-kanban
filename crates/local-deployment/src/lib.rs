@@ -20,6 +20,7 @@ use services::services::{
     approvals::Approvals,
     auth::AuthContext,
     browser::{BrowserSessionService, BrowserSessionsConfig},
+    cluster::{ClusterConfig, WorkerRegistry, WorkerScheduler},
     config::{Config, load_config_from_file, save_config_to_file},
     container::ContainerService,
     events::EventService,
@@ -76,6 +77,9 @@ pub struct LocalDeployment {
     remote_info: RemoteInfo,
     preview_proxy: PreviewProxyService,
     browser_sessions: BrowserSessionService,
+    cluster_config: ClusterConfig,
+    worker_registry: WorkerRegistry,
+    worker_scheduler: WorkerScheduler,
     relay_hosts: Option<Arc<RelayHosts>>,
     shutdown: CancellationToken,
     webrtc_host: OnceLock<Arc<WebRtcHost>>,
@@ -150,6 +154,10 @@ impl Deployment for LocalDeployment {
         };
 
         let file = FileService::new(db.clone().pool)?;
+        let cluster_config = ClusterConfig::from_env()
+            .map_err(|error| DeploymentError::Other(anyhow::anyhow!(error)))?;
+        let worker_registry = WorkerRegistry::new(db.pool.clone(), cluster_config.clone());
+        let worker_scheduler = WorkerScheduler::new(&cluster_config);
         {
             let file_service = file.clone();
             tokio::spawn(async move {
@@ -342,6 +350,9 @@ impl Deployment for LocalDeployment {
             remote_info,
             preview_proxy,
             browser_sessions,
+            cluster_config,
+            worker_registry,
+            worker_scheduler,
             relay_hosts,
             shutdown,
             webrtc_host: OnceLock::new(),
@@ -431,6 +442,18 @@ impl Deployment for LocalDeployment {
 
     fn browser_sessions(&self) -> &BrowserSessionService {
         &self.browser_sessions
+    }
+
+    fn cluster_config(&self) -> &ClusterConfig {
+        &self.cluster_config
+    }
+
+    fn worker_registry(&self) -> &WorkerRegistry {
+        &self.worker_registry
+    }
+
+    fn worker_scheduler(&self) -> &WorkerScheduler {
+        &self.worker_scheduler
     }
 
     fn relay_hosts(&self) -> Result<&Arc<RelayHosts>, RelayHostsNotConfigured> {

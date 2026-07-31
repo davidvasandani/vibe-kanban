@@ -12,6 +12,7 @@ members = [
     "crates/executors",
     "crates/services",
     "crates/worktree-manager",
+    "crates/worker",
     "crates/workspace-manager",
     "crates/relay-control",
     "crates/relay-protocol",

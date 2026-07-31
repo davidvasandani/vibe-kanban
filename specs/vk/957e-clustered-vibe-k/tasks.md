@@ -29,22 +29,22 @@ files and may be completed together.
 - [x] T007 [P] Implement eligibility, manual selection validation, weighted
   scoring, deterministic tie breaking, and tests in
   `crates/services/src/services/cluster/scheduler.rs`. Depends on T003, T004.
-- [ ] T008 Implement authenticated coordinator worker endpoints in
+- [x] T008 Implement authenticated coordinator worker endpoints in
   `crates/server/src/routes/workers.rs`, route wiring in
   `crates/server/src/routes/mod.rs`, and deployment state wiring in
   `crates/local-deployment/src/lib.rs`. Depends on T006, T007.
-- [ ] T009 [P] Add worker administration API client methods in
+- [x] T009 [P] Add worker administration API client methods in
   `packages/web-core/src/shared/lib/api.ts`. Depends on T005, T008.
-- [ ] T010 Add worker health/draining administration UI and tests under
+- [x] T010 Add worker health/draining administration UI and tests under
   `packages/web-core/src/shared/dialogs/settings/` and localized strings under
   `packages/web-core/src/i18n/locales/`. Depends on T009.
 
 ## Layer 3 — Worker daemon and mount safety
 
-- [ ] T011 Create worker crate/binary lifecycle in
+- [x] T011 Create worker crate/binary lifecycle in
   `crates/worker/Cargo.toml`, `crates/worker/src/{lib,main}.rs`, root
   `Cargo.toml`, and `local-build.sh`. Depends on T001, T004.
-- [ ] T012 Implement shared-root canonical path authorization and symlink-escape
+- [x] T012 Implement shared-root canonical path authorization and symlink-escape
   tests in `crates/worker/src/path_authority.rs`. Depends on T011.
 - [ ] T013 [P] Implement mount-table/export, coordinator-probe, writability,
   filesystem identity, and UID/GID validation with fixtures in

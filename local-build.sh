@@ -93,7 +93,7 @@ echo "🔨 Building Rust binaries..."
 # crates/tauri-app, whose GTK/glib system deps aren't installed on the
 # headless Linux CI runner. The Tauri build is opt-in below via --desktop.
 cargo build --release --manifest-path Cargo.toml \
-  --bin server --bin vibe-kanban-mcp --bin review
+  --bin server --bin vibe-kanban-mcp --bin review --bin vibe-kanban-worker
 
 echo "Building Remote API binary..."
 # crates/remote is excluded from the cargo workspace (exclude = [...]), so it
@@ -138,6 +138,10 @@ chmod +x "$DIST_STAGING/$PLATFORM/remote"
 # Run directly by the relay service, so it ships unzipped + executable.
 cp ${CARGO_TARGET_DIR}/release/relay-server "$DIST_STAGING/$PLATFORM/relay-server"
 chmod +x "$DIST_STAGING/$PLATFORM/relay-server"
+
+# Cluster worker daemon, deployed directly by the homelab worker units.
+cp ${CARGO_TARGET_DIR}/release/vibe-kanban-worker "$DIST_STAGING/$PLATFORM/vibe-kanban-worker"
+chmod +x "$DIST_STAGING/$PLATFORM/vibe-kanban-worker"
 
 echo "✅ CLI build complete!"
 echo "📁 Files created:"
@@ -233,7 +237,7 @@ chmod -R g+rwX,o+rX npx-cli/dist || true
 #
 #   $VK_RELEASES_DIR/
 #     build-<id>/bin/{vibe-kanban,vibe-kanban-mcp,vibe-kanban-review,
-#                     remote,relay-server}
+#                     remote,relay-server,vibe-kanban-worker}
 #     build-<id>/release.json      {"sha", "build_id", "built_at"}
 #     current  -> build-<id>       (atomic rename flip)
 #     previous -> old current      (single-step rollback target)
@@ -267,6 +271,7 @@ if [ -n "${VK_RELEASES_DIR:-}" ]; then
   cp "${CARGO_TARGET_DIR}/release/review" "$RELEASE/bin/vibe-kanban-review"
   cp "${CARGO_TARGET_DIR}/release/remote" "$RELEASE/bin/remote"
   cp "${CARGO_TARGET_DIR}/release/relay-server" "$RELEASE/bin/relay-server"
+  cp "${CARGO_TARGET_DIR}/release/vibe-kanban-worker" "$RELEASE/bin/vibe-kanban-worker"
   chmod 755 "$RELEASE/bin/"*
 
   # Self-describing release: a deploy reconciler compares `sha` against its
