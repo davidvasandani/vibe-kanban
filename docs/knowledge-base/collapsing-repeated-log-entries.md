@@ -1,6 +1,6 @@
 # Collapsing repeated log entries into ticked lines
 
-Tags: `4095-thinking-tokens`, `6aac-grok-same-comman`
+Tags: `4095-thinking-tokens`, `6aac-grok-same-comman`, `a5f8-concat-repeating`
 
 ## Problem
 
@@ -68,3 +68,34 @@ case needs more state than repeated informational events:
 The shared-index invariant still applies: a different allocated entry ends the
 run, and any index reset must clear both informational-event and command-call
 trackers.
+
+## Codex review-command compaction
+
+Task `a5f8-concat-repeating` applied the lifecycle-aware pattern to the exact
+semantic operation `codex review --uncommitted` in
+`crates/executors/src/executors/codex/normalize_logs.rs`. Both the app-server
+protocol and legacy Codex events feed the same start/completion helpers.
+
+Reusable protocol lessons:
+
+- Canonicalize eligibility across shell wrappers and absolute executable paths,
+  but retain the first row's display command. Equivalent reported forms belong
+  to the same semantic run.
+- Approval requests are lifecycle starts. They can arrive before the command
+  start notification, so approval and start events must share allocation logic;
+  a duplicate start for the same call must retain the saved successful snapshot
+  and any `PendingApproval` status.
+- A repeat count can include an in-flight occurrence, but the visible tick count
+  must include only successful occurrences. Pending or running calls retain the
+  prior success marker until they complete.
+- If a reused occurrence fails, restore the last successful collapsed entry and
+  add the failed occurrence at a new index. Otherwise the failure would erase
+  the successful history it temporarily replaced.
+- Stale start/completion updates for older call IDs may still update their own
+  distinct rows, but must never replace the active repeat owner. Overlapping
+  eligible commands therefore remain separate while still reaching terminal
+  status.
+- Test the full ordering matrix, not only serial start/end pairs: approval then
+  start, denial without start, duplicate start, overlapping calls, stale
+  updates, wrapper/path variants, failure after prior successes, and both
+  supported protocols.
