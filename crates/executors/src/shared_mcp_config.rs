@@ -339,7 +339,7 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
             .clone()
             .unwrap_or_else(|| "<unknown>".to_string());
         for (server_name, entry) in &snapshot.servers {
-            let definition = canonical_definition(entry);
+            let definition = canonical_definition_for_server(server_name, entry);
             let fingerprint = normalized_fingerprint(&definition);
             by_name.entry(server_name.clone()).or_default().push((
                 NativeMcpSource {
@@ -602,6 +602,44 @@ pub fn canonical_definition(entry: &Value) -> McpServerDefinition {
         value: entry.clone(),
         representable_in_form: false,
     }
+}
+
+fn canonical_definition_for_server(name: &str, entry: &Value) -> McpServerDefinition {
+    let mut definition = canonical_definition(entry);
+    if name != "slack" || !is_legacy_bundled_slack_definition(&definition) {
+        return definition;
+    }
+
+    let Some(current_entry) = PRECONFIGURED_MCP_SERVERS.get("slack") else {
+        return definition;
+    };
+    let current = canonical_definition(current_entry);
+    let Some(env) = definition.value.get("env").cloned() else {
+        return definition;
+    };
+
+    definition = current;
+    if let Some(value) = definition.value.as_object_mut() {
+        value.insert("env".to_string(), env);
+    }
+    definition
+}
+
+fn is_legacy_bundled_slack_definition(definition: &McpServerDefinition) -> bool {
+    definition.transport == McpTransportKind::Stdio
+        && definition.value.get("command").and_then(Value::as_str) == Some("npx")
+        && definition.value.get("args")
+            == Some(&serde_json::json!([
+                "-y",
+                "slack-mcp-server@latest",
+                "--transport",
+                "stdio"
+            ]))
+        && definition
+            .value
+            .get("env")
+            .and_then(Value::as_object)
+            .is_some_and(|env| env.len() == 1 && env.contains_key("SLACK_MCP_XOXP_TOKEN"))
 }
 
 fn compact_object<const N: usize>(entries: [(&str, Value); N]) -> Value {
@@ -938,6 +976,8 @@ mod tests {
 
     use super::*;
 
+    const SLACK_MCP_INSTALL_SPEC: &str = "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz";
+
     fn snapshot(
         executor: BaseCodingAgent,
         servers: HashMap<String, Value>,
@@ -957,6 +997,109 @@ mod tests {
         }
     }
 
+    fn toml_snapshot(
+        executor: BaseCodingAgent,
+        server_name: &str,
+        entry_toml: &str,
+    ) -> NativeProfileSnapshot {
+        let toml_value: toml::Value = toml::from_str(entry_toml).unwrap();
+        let entry = serde_json::to_value(toml_value).unwrap();
+        NativeProfileSnapshot {
+            profile: SharedMcpProfile {
+                executor,
+                display_name: executor.to_string(),
+                supports_mcp: true,
+                config_path: Some(format!("/tmp/{executor}.toml")),
+                servers_path: vec!["mcp_servers".to_string()],
+                read_error: None,
+            },
+            config_path: Some(PathBuf::from(format!("/tmp/{executor}.toml"))),
+            mcp_config: McpConfig::new(
+                vec!["mcp_servers".to_string()],
+                json!({"mcp_servers": {}}),
+                json!({}),
+                true,
+            ),
+            servers: HashMap::from([(server_name.to_string(), entry)]),
+        }
+    }
+
+    fn json_snapshot(
+        executor: BaseCodingAgent,
+        server_name: &str,
+        entry: Value,
+    ) -> NativeProfileSnapshot {
+        snapshot(executor, HashMap::from([(server_name.to_string(), entry)]))
+    }
+
+    fn slack_json_entry_with_spec(token: &str, install_spec: &str) -> Value {
+        json!({
+            "command": "npx",
+            "args": ["-y", install_spec, "--transport", "stdio"],
+            "env": {
+                "SLACK_MCP_XOXP_TOKEN": token
+            }
+        })
+    }
+
+    fn slack_json_entry(token: &str) -> Value {
+        slack_json_entry_with_spec(token, SLACK_MCP_INSTALL_SPEC)
+    }
+
+    fn slack_toml_entry_with_spec(token: &str, install_spec: &str) -> String {
+        format!(
+            r#"
+command = "npx"
+args = ["-y", "{install_spec}", "--transport", "stdio"]
+
+[env]
+SLACK_MCP_XOXP_TOKEN = "{token}"
+"#
+        )
+    }
+
+    fn slack_toml_entry(token: &str) -> String {
+        slack_toml_entry_with_spec(token, SLACK_MCP_INSTALL_SPEC)
+    }
+
+    fn slack_round_trip_snapshots(
+        entries: &HashMap<BaseCodingAgent, Value>,
+    ) -> Vec<NativeProfileSnapshot> {
+        [
+            BaseCodingAgent::Codex,
+            BaseCodingAgent::ClaudeCode,
+            BaseCodingAgent::Gemini,
+            BaseCodingAgent::Grok,
+        ]
+        .into_iter()
+        .map(|executor| {
+            let entry = entries.get(&executor).expect("executor entry").clone();
+            if matches!(executor, BaseCodingAgent::Codex | BaseCodingAgent::Grok) {
+                NativeProfileSnapshot {
+                    profile: SharedMcpProfile {
+                        executor,
+                        display_name: executor.to_string(),
+                        supports_mcp: true,
+                        config_path: Some(format!("/tmp/{executor}.toml")),
+                        servers_path: vec!["mcp_servers".to_string()],
+                        read_error: None,
+                    },
+                    config_path: Some(PathBuf::from(format!("/tmp/{executor}.toml"))),
+                    mcp_config: McpConfig::new(
+                        vec!["mcp_servers".to_string()],
+                        json!({"mcp_servers": {}}),
+                        json!({}),
+                        true,
+                    ),
+                    servers: HashMap::from([("slack".to_string(), entry)]),
+                }
+            } else {
+                json_snapshot(executor, "slack", entry)
+            }
+        })
+        .collect()
+    }
+
     #[test]
     fn reconciles_identical_same_name_entries() {
         let entry = json!({"command":"npx","args":["-y","server"]});
@@ -973,6 +1116,210 @@ mod tests {
         assert_eq!(response.servers.len(), 1);
         assert_eq!(response.conflicts.len(), 0);
         assert_eq!(response.servers[0].assignments.len(), 2);
+    }
+
+    #[test]
+    fn migrates_the_known_legacy_slack_template_while_reconciling_profiles() {
+        let legacy = slack_json_entry_with_spec("xoxp-test", "slack-mcp-server@latest");
+        let response = reconcile_snapshots(vec![
+            toml_snapshot(
+                BaseCodingAgent::Codex,
+                "slack",
+                &slack_toml_entry("xoxp-test"),
+            ),
+            json_snapshot(BaseCodingAgent::ClaudeCode, "slack", legacy.clone()),
+            json_snapshot(BaseCodingAgent::Gemini, "slack", legacy.clone()),
+            toml_snapshot(
+                BaseCodingAgent::Grok,
+                "slack",
+                &slack_toml_entry_with_spec("xoxp-test", "slack-mcp-server@latest"),
+            ),
+        ]);
+
+        assert_eq!(response.conflicts.len(), 0);
+        assert_eq!(response.servers.len(), 1);
+        let server = &response.servers[0];
+        assert_eq!(server.name, "slack");
+        assert!(matches!(
+            server.source_kind,
+            SharedMcpSourceKind::Reconciled
+        ));
+        assert_eq!(server.assignments.len(), 4);
+        assert_eq!(server.native_sources.len(), 4);
+
+        let first_fingerprint = server.native_sources[0]
+            .normalized_fingerprint
+            .as_ref()
+            .expect("fingerprint");
+        assert!(
+            server
+                .native_sources
+                .iter()
+                .all(|source| source.normalized_fingerprint.as_ref() == Some(first_fingerprint))
+        );
+        assert_eq!(server.definition.transport, McpTransportKind::Stdio);
+        assert_eq!(server.definition.value, slack_json_entry("xoxp-test"));
+    }
+
+    #[test]
+    fn only_the_exact_legacy_slack_template_is_migrated() {
+        let legacy_with_extra_env = json!({
+            "command": "npx",
+            "args": ["-y", "slack-mcp-server@latest", "--transport", "stdio"],
+            "env": {
+                "SLACK_MCP_XOXP_TOKEN": "xoxp-test",
+                "EXTRA": "value"
+            }
+        });
+        let response = reconcile_snapshots(vec![
+            json_snapshot(
+                BaseCodingAgent::Codex,
+                "slack",
+                slack_json_entry("xoxp-test"),
+            ),
+            json_snapshot(BaseCodingAgent::ClaudeCode, "slack", legacy_with_extra_env),
+        ]);
+
+        assert_eq!(response.servers.len(), 0);
+        assert_eq!(response.conflicts.len(), 1);
+    }
+
+    #[test]
+    fn equivalent_slack_conflicts_on_semantic_stdio_differences() {
+        let cases = [
+            (
+                "command",
+                json!({
+                    "command": "node",
+                    "args": ["-y", SLACK_MCP_INSTALL_SPEC, "--transport", "stdio"],
+                    "env": {"SLACK_MCP_XOXP_TOKEN": "xoxp-test"}
+                }),
+            ),
+            (
+                "arg",
+                json!({
+                    "command": "npx",
+                    "args": ["--yes", SLACK_MCP_INSTALL_SPEC, "--transport", "stdio"],
+                    "env": {"SLACK_MCP_XOXP_TOKEN": "xoxp-test"}
+                }),
+            ),
+            (
+                "transport",
+                json!({
+                    "command": "npx",
+                    "args": ["-y", SLACK_MCP_INSTALL_SPEC, "--transport", "sse"],
+                    "env": {"SLACK_MCP_XOXP_TOKEN": "xoxp-test"}
+                }),
+            ),
+            (
+                "release artifact",
+                json!({
+                    "command": "npx",
+                    "args": [
+                        "-y",
+                        "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.1/slack-mcp-server-vk-1.3.0-vk.1.tgz",
+                        "--transport",
+                        "stdio"
+                    ],
+                    "env": {"SLACK_MCP_XOXP_TOKEN": "xoxp-test"}
+                }),
+            ),
+            (
+                "env key",
+                json!({
+                    "command": "npx",
+                    "args": ["-y", SLACK_MCP_INSTALL_SPEC, "--transport", "stdio"],
+                    "env": {"SLACK_TOKEN": "xoxp-test"}
+                }),
+            ),
+            (
+                "token value",
+                json!({
+                    "command": "npx",
+                    "args": ["-y", SLACK_MCP_INSTALL_SPEC, "--transport", "stdio"],
+                    "env": {"SLACK_MCP_XOXP_TOKEN": "xoxp-other"}
+                }),
+            ),
+        ];
+
+        for (field, changed_entry) in cases {
+            let response = reconcile_snapshots(vec![
+                toml_snapshot(
+                    BaseCodingAgent::Codex,
+                    "slack",
+                    &slack_toml_entry("xoxp-test"),
+                ),
+                json_snapshot(BaseCodingAgent::ClaudeCode, "slack", changed_entry),
+            ]);
+
+            assert_eq!(
+                response.servers.len(),
+                0,
+                "changed {field} should not reconcile"
+            );
+            assert_eq!(
+                response.conflicts.len(),
+                1,
+                "changed {field} should conflict"
+            );
+            assert_eq!(response.conflicts[0].variants.len(), 2);
+        }
+    }
+
+    #[test]
+    fn migrated_slack_definition_materializes_and_reconciles_without_conflict() {
+        let legacy = slack_json_entry_with_spec("xoxp-test", "slack-mcp-server@latest");
+        let first = reconcile_snapshots(vec![
+            json_snapshot(
+                BaseCodingAgent::Codex,
+                "slack",
+                slack_json_entry("xoxp-test"),
+            ),
+            json_snapshot(BaseCodingAgent::ClaudeCode, "slack", legacy.clone()),
+            json_snapshot(BaseCodingAgent::Gemini, "slack", legacy.clone()),
+            toml_snapshot(
+                BaseCodingAgent::Grok,
+                "slack",
+                &slack_toml_entry_with_spec("xoxp-test", "slack-mcp-server@latest"),
+            ),
+        ]);
+        let definition = first.servers[0].definition.clone();
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "slack".to_string(),
+                definition,
+                assignments: vec![
+                    BaseCodingAgent::Codex,
+                    BaseCodingAgent::ClaudeCode,
+                    BaseCodingAgent::Gemini,
+                    BaseCodingAgent::Grok,
+                ],
+                native_overrides: HashMap::new(),
+            }],
+            removed_servers: Vec::new(),
+            resolved_conflicts: Vec::new(),
+        };
+        let entries = request.servers[0]
+            .assignments
+            .iter()
+            .copied()
+            .map(|executor| {
+                let (servers, _) =
+                    plan_servers_for_executor(executor, &HashMap::new(), &request).unwrap();
+                let entry = servers.get("slack").expect("slack entry").clone();
+                assert_eq!(entry, slack_json_entry("xoxp-test"));
+                (executor, entry)
+            })
+            .collect();
+
+        let second = reconcile_snapshots(slack_round_trip_snapshots(&entries));
+        assert_eq!(second.conflicts.len(), 0);
+        assert_eq!(second.servers.len(), 1);
+        assert_eq!(second.servers[0].assignments.len(), 4);
+        assert_eq!(
+            second.servers[0].definition.value,
+            slack_json_entry("xoxp-test")
+        );
     }
 
     #[test]
