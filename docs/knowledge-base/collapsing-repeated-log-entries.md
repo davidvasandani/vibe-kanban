@@ -99,3 +99,23 @@ Reusable protocol lessons:
   start, denial without start, duplicate start, overlapping calls, stale
   updates, wrapper/path variants, failure after prior successes, and both
   supported protocols.
+
+## Abstraction threshold for future compactors
+
+There are currently three compaction cases: Claude system messages, Claude/Grok
+`Bash` calls, and Codex review commands. Keep their lifecycle processors
+separate for now. They share visible output and adjacency rules, but differ
+materially in identity, approval ordering, streaming, failure recovery, and
+protocol ownership. A generic lifecycle state machine today would mostly be
+callbacks and policy switches that obscure those invariants.
+
+When adding more compactors:
+
+- Prefer extracting the genuinely identical primitives first: bounded repeat
+  marker formatting, the `current() == entry_index + 1` adjacency predicate,
+  and possibly a small `{ entry_index, count }` value type.
+- Keep executor/protocol lifecycle transitions beside their owning normalizer.
+- Reconsider a shared lifecycle abstraction when another command compactor has
+  substantially the same start, approval, streaming, completion, stale-event,
+  and failure-splitting behavior. That additional implementation is the
+  evidence needed to design the abstraction around a proven common shape.
