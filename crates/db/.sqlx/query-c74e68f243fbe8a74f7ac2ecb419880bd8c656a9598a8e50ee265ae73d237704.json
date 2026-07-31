@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id as \"id!: Uuid\", workspace_id as \"workspace_id!: Uuid\", host_id, profile, status as \"status!: BrowserSessionDbStatus\", current_url, created_at as \"created_at!: DateTime<Utc>\", updated_at as \"updated_at!: DateTime<Utc>\", closed_at as \"closed_at: DateTime<Utc>\", expires_at as \"expires_at: DateTime<Utc>\"\n               FROM browser_sessions WHERE rowid = $1",
+  "query": "SELECT id as \"id!: Uuid\", workspace_id as \"workspace_id!: Uuid\", host_id, profile, status as \"status!: BrowserSessionDbStatus\", current_url, pgid, created_at as \"created_at!: DateTime<Utc>\", updated_at as \"updated_at!: DateTime<Utc>\", closed_at as \"closed_at: DateTime<Utc>\", expires_at as \"expires_at: DateTime<Utc>\"\n               FROM browser_sessions\n               WHERE workspace_id = $1 AND ($2 OR status NOT IN ('closed', 'failed'))\n               ORDER BY created_at DESC",
   "describe": {
     "columns": [
       {
@@ -34,28 +34,33 @@
         "type_info": "Text"
       },
       {
-        "name": "created_at!: DateTime<Utc>",
+        "name": "pgid",
         "ordinal": 6,
-        "type_info": "Text"
+        "type_info": "Integer"
       },
       {
-        "name": "updated_at!: DateTime<Utc>",
+        "name": "created_at!: DateTime<Utc>",
         "ordinal": 7,
         "type_info": "Text"
       },
       {
-        "name": "closed_at: DateTime<Utc>",
+        "name": "updated_at!: DateTime<Utc>",
         "ordinal": 8,
         "type_info": "Text"
       },
       {
-        "name": "expires_at: DateTime<Utc>",
+        "name": "closed_at: DateTime<Utc>",
         "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at: DateTime<Utc>",
+        "ordinal": 10,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       false,
@@ -64,11 +69,12 @@
       true,
       false,
       true,
+      true,
       false,
       false,
       true,
       true
     ]
   },
-  "hash": "f632f8e6d91e98f5774b42327f3d17fd876aa579d3220b842e919c4af1e4b11e"
+  "hash": "c74e68f243fbe8a74f7ac2ecb419880bd8c656a9598a8e50ee265ae73d237704"
 }
