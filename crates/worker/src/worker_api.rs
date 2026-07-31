@@ -25,6 +25,7 @@ use crate::{
     WorkerConfig, cancellation,
     execution::{ExecutionError, ExecutionSupervisor},
     path_authority::PathAuthority,
+    recovery::RecoveryStore,
 };
 
 const SIGNATURE_HEADER: &str = "x-vk-signature";
@@ -56,7 +57,11 @@ struct Acknowledged {
 
 pub async fn router(config: &WorkerConfig) -> anyhow::Result<Router> {
     let coordinator_key = load_verifying_key(&config.coordinator_public_key_file).await?;
-    let supervisor = ExecutionSupervisor::new(PathAuthority::new(&config.shared_root)?);
+    let supervisor = ExecutionSupervisor::with_recovery(
+        PathAuthority::new(&config.shared_root)?,
+        RecoveryStore::new(&config.state_dir).await?,
+    )
+    .await?;
     let state = WorkerApiState {
         supervisor,
         worker_node_id: config.worker_node_id,

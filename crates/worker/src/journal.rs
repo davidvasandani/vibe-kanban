@@ -1,6 +1,8 @@
 use std::{collections::VecDeque, time::SystemTime};
 
-use cluster_protocol::{EventBatch, ExecutionEvent, ExecutionEventPayload, TerminalEvidence};
+use cluster_protocol::{
+    EventBatch, ExecutionEvent, ExecutionEventPayload, JobSummary, TerminalEvidence, TerminalState,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -41,6 +43,32 @@ impl EventJournal {
             events: VecDeque::with_capacity(capacity),
             terminal: None,
         })
+    }
+
+    pub fn recover(
+        summary: &JobSummary,
+        capacity: usize,
+        evidence: TerminalEvidence,
+    ) -> Result<Self, JournalError> {
+        let mut journal = Self::new(summary.execution_id, capacity)?;
+        let sequence = summary.last_sequence.max(1);
+        let payload = match evidence.state {
+            TerminalState::Completed => ExecutionEventPayload::Completed(evidence.clone()),
+            TerminalState::Failed => ExecutionEventPayload::Failed(evidence.clone()),
+            TerminalState::Killed => ExecutionEventPayload::Killed(evidence.clone()),
+            TerminalState::Interrupted => ExecutionEventPayload::Interrupted(evidence.clone()),
+        };
+        journal.events.push_back(ExecutionEvent {
+            execution_id: summary.execution_id,
+            sequence,
+            worker_timestamp: evidence.observed_at,
+            payload,
+        });
+        journal.next_sequence = sequence
+            .checked_add(1)
+            .ok_or(JournalError::SequenceExhausted)?;
+        journal.terminal = Some(evidence);
+        Ok(journal)
     }
 
     pub fn execution_id(&self) -> Uuid {
@@ -123,7 +151,8 @@ fn terminal_evidence(payload: &ExecutionEventPayload) -> Option<TerminalEvidence
     match payload {
         ExecutionEventPayload::Completed(evidence)
         | ExecutionEventPayload::Failed(evidence)
-        | ExecutionEventPayload::Killed(evidence) => Some(evidence.clone()),
+        | ExecutionEventPayload::Killed(evidence)
+        | ExecutionEventPayload::Interrupted(evidence) => Some(evidence.clone()),
         _ => None,
     }
 }

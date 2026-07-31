@@ -195,6 +195,7 @@ pub enum ExecutionEventPayload {
     Completed(TerminalEvidence),
     Failed(TerminalEvidence),
     Killed(TerminalEvidence),
+    Interrupted(TerminalEvidence),
     Indeterminate { reason: String },
 }
 

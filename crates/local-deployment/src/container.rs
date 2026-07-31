@@ -1726,6 +1726,13 @@ impl LocalContainerService {
                                 evidence,
                             ));
                         }
+                        ExecutionEventPayload::Interrupted(evidence) => {
+                            terminal = Some((
+                                ExecutionWorkerDispatchState::Interrupted,
+                                ExecutionProcessStatus::Interrupted,
+                                evidence,
+                            ));
+                        }
                         ExecutionEventPayload::Indeterminate { reason } => {
                             store.push(LogMsg::Stderr(format!(
                                 "Worker reported an indeterminate execution: {reason}"

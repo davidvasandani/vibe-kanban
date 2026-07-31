@@ -30,6 +30,7 @@ use uuid::Uuid;
 use crate::{
     journal::{EventJournal, JournalError},
     path_authority::{PathAuthority, PathAuthorityError},
+    recovery::{RecoveryError, RecoveryStore},
 };
 
 const DEFAULT_JOURNAL_CAPACITY: usize = 4_096;
@@ -64,6 +65,8 @@ pub enum ExecutionError {
     Journal(#[from] JournalError),
     #[error("execution {0} was not found")]
     NotFound(Uuid),
+    #[error(transparent)]
+    Recovery(#[from] RecoveryError),
 }
 
 #[derive(Clone)]
@@ -71,6 +74,7 @@ pub struct ExecutionSupervisor {
     path_authority: PathAuthority,
     jobs: Arc<RwLock<HashMap<Uuid, Arc<WorkerJob>>>>,
     journal_capacity: usize,
+    recovery_store: Option<RecoveryStore>,
 }
 
 pub struct WorkerJob {
@@ -83,6 +87,7 @@ pub struct WorkerJob {
     child: Mutex<Option<AsyncGroupChild>>,
     cancellation: Mutex<()>,
     acknowledged_sequence: Mutex<u64>,
+    recovery_store: Option<RecoveryStore>,
 }
 
 impl ExecutionSupervisor {
@@ -95,7 +100,54 @@ impl ExecutionSupervisor {
             path_authority,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             journal_capacity,
+            recovery_store: None,
         }
+    }
+
+    pub async fn with_recovery(
+        path_authority: PathAuthority,
+        recovery_store: RecoveryStore,
+    ) -> Result<Self, ExecutionError> {
+        let supervisor = Self {
+            path_authority,
+            jobs: Arc::new(RwLock::new(HashMap::new())),
+            journal_capacity: DEFAULT_JOURNAL_CAPACITY,
+            recovery_store: Some(recovery_store.clone()),
+        };
+        for mut summary in recovery_store.load().await? {
+            let evidence = match summary.terminal.clone() {
+                Some(evidence) if summary.state.is_terminal() => evidence,
+                _ => {
+                    let evidence = TerminalEvidence {
+                        state: TerminalState::Interrupted,
+                        exit_code: None,
+                        signal: None,
+                        observed_at: Utc::now(),
+                    };
+                    summary.state = JobState::Interrupted;
+                    summary.terminal = Some(evidence.clone());
+                    recovery_store.save(&summary).await?;
+                    evidence
+                }
+            };
+            let journal = EventJournal::recover(&summary, DEFAULT_JOURNAL_CAPACITY, evidence)?;
+            supervisor.jobs.write().await.insert(
+                summary.execution_id,
+                Arc::new(WorkerJob {
+                    execution_id: summary.execution_id,
+                    worker_job_id: summary.worker_job_id,
+                    workspace_id: summary.workspace_id,
+                    request_digest: summary.request_digest,
+                    state: RwLock::new(summary.state),
+                    journal: Mutex::new(journal),
+                    child: Mutex::new(None),
+                    cancellation: Mutex::new(()),
+                    acknowledged_sequence: Mutex::new(0),
+                    recovery_store: Some(recovery_store.clone()),
+                }),
+            );
+        }
+        Ok(supervisor)
     }
 
     /// Accepts a dispatch exactly once per execution ID. Replays with the same
@@ -140,9 +192,11 @@ impl ExecutionSupervisor {
             child: Mutex::new(None),
             cancellation: Mutex::new(()),
             acknowledged_sequence: Mutex::new(0),
+            recovery_store: self.recovery_store.clone(),
         });
         jobs.insert(dispatch.execution_id, job.clone());
         drop(jobs);
+        job.persist().await;
 
         tokio::spawn(run_job(
             job.clone(),
@@ -211,6 +265,7 @@ impl ExecutionSupervisor {
             .await
             .ok_or(ExecutionError::NotFound(execution_id))?;
         *job.state.write().await = JobState::Quarantined;
+        job.persist().await;
         Ok(job.summary().await)
     }
 }
@@ -239,6 +294,14 @@ impl WorkerJob {
         }
     }
 
+    async fn persist(&self) {
+        if let Some(store) = &self.recovery_store
+            && let Err(error) = store.save(&self.summary().await).await
+        {
+            tracing::error!(execution_id = %self.execution_id, "Failed to persist worker job: {error}");
+        }
+    }
+
     pub async fn child(&self) -> tokio::sync::MutexGuard<'_, Option<AsyncGroupChild>> {
         self.child.lock().await
     }
@@ -264,6 +327,7 @@ impl WorkerJob {
             .is_ok();
         if appended {
             *self.state.write().await = state;
+            self.persist().await;
         }
     }
 }
@@ -318,6 +382,7 @@ async fn run_job(
     let stderr = child.inner().stderr.take();
     *job.child.lock().await = Some(child);
     *job.state.write().await = JobState::Running;
+    job.persist().await;
 
     let mut stdout_task =
         stdout.map(|stdout| tokio::spawn(stream_output(job.clone(), stdout, false)));
@@ -609,5 +674,55 @@ mod tests {
             supervisor.dispatch(request).await,
             Err(ExecutionError::WorkingDirectoryOutsideWorkspace)
         ));
+    }
+
+    #[tokio::test]
+    async fn restart_retains_terminal_jobs_and_interrupts_unverified_active_jobs() {
+        let temp = TempDir::new().unwrap();
+        let shared = temp.path().join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        let store = RecoveryStore::new(temp.path().join("state")).await.unwrap();
+        let active = JobSummary {
+            execution_id: Uuid::new_v4(),
+            worker_job_id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            request_digest: "active".into(),
+            state: JobState::Running,
+            last_sequence: 4,
+            terminal: None,
+        };
+        let terminal_evidence = terminal_evidence(TerminalState::Completed, Some(0), None);
+        let completed = JobSummary {
+            execution_id: Uuid::new_v4(),
+            worker_job_id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            request_digest: "completed".into(),
+            state: JobState::Completed,
+            last_sequence: 7,
+            terminal: Some(terminal_evidence.clone()),
+        };
+        store.save(&active).await.unwrap();
+        store.save(&completed).await.unwrap();
+
+        let supervisor =
+            ExecutionSupervisor::with_recovery(PathAuthority::new(&shared).unwrap(), store)
+                .await
+                .unwrap();
+        let inventory = supervisor.inventory().await;
+        let recovered_active = inventory
+            .iter()
+            .find(|job| job.execution_id == active.execution_id)
+            .unwrap();
+        assert_eq!(recovered_active.state, JobState::Interrupted);
+        assert_eq!(
+            recovered_active.terminal.as_ref().unwrap().state,
+            TerminalState::Interrupted
+        );
+        let recovered_completed = inventory
+            .iter()
+            .find(|job| job.execution_id == completed.execution_id)
+            .unwrap();
+        assert_eq!(recovered_completed.state, JobState::Completed);
+        assert_eq!(recovered_completed.terminal, Some(terminal_evidence));
     }
 }

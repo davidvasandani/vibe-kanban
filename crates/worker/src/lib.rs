@@ -12,6 +12,7 @@ pub mod execution;
 pub mod journal;
 pub mod mount_health;
 pub mod path_authority;
+pub mod recovery;
 pub mod server;
 pub mod worker_api;
 
@@ -26,6 +27,7 @@ pub const WORKER_EXPECTED_EXPORT_ENV: &str = "VK_CLUSTER_EXPECTED_FILESYSTEM_ID"
 pub const WORKER_EXPECTED_UID_ENV: &str = "VK_WORKER_EXPECTED_UID";
 pub const WORKER_EXPECTED_GID_ENV: &str = "VK_WORKER_EXPECTED_GID";
 pub const WORKER_EXECUTOR_PROFILES_ENV: &str = "VK_WORKER_EXECUTOR_PROFILES";
+pub const WORKER_STATE_DIR_ENV: &str = "VK_WORKER_STATE_DIR";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerConfig {
@@ -40,6 +42,7 @@ pub struct WorkerConfig {
     pub expected_uid: u32,
     pub expected_gid: u32,
     pub executor_profiles: Vec<String>,
+    pub state_dir: PathBuf,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -61,7 +64,7 @@ impl WorkerConfig {
                 .filter(|value| !value.trim().is_empty())
                 .ok_or(WorkerConfigError::Missing(name))
         };
-        let worker_node_id = parse(WORKER_NODE_ID_ENV, required(WORKER_NODE_ID_ENV)?)?;
+        let worker_node_id: Uuid = parse(WORKER_NODE_ID_ENV, required(WORKER_NODE_ID_ENV)?)?;
         let listen_addr = lookup(WORKER_LISTEN_ADDR_ENV)
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "0.0.0.0:8086".into());
@@ -114,6 +117,20 @@ impl WorkerConfig {
             .filter(|profile| !profile.is_empty())
             .map(str::to_owned)
             .collect();
+        let state_dir = lookup(WORKER_STATE_DIR_ENV)
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                shared_root
+                    .join("execution-logs/worker-state")
+                    .join(worker_node_id.to_string())
+            });
+        if !state_dir.is_absolute() {
+            return Err(WorkerConfigError::Invalid {
+                name: WORKER_STATE_DIR_ENV,
+                value: state_dir.display().to_string(),
+            });
+        }
         Ok(Self {
             worker_node_id,
             listen_addr,
@@ -126,6 +143,7 @@ impl WorkerConfig {
             expected_uid,
             expected_gid,
             executor_profiles,
+            state_dir,
         })
     }
 }

@@ -98,7 +98,7 @@ files and may be completed together.
 - [x] T027 Implement coordinator reconnect/job-inventory reconciliation,
   unknown-job quarantine, terminal evidence conflict handling, and tests in
   `crates/services/src/services/cluster/reconcile.rs`. Depends on T023, T026.
-- [ ] T028 Implement worker restart job adoption policy and retained terminal
+- [x] T028 Implement worker restart job adoption policy and retained terminal
   inventory in `crates/worker/src/recovery.rs`. Depends on T021, T022.
 - [ ] T029 Reorder startup so reconciliation precedes execution/workspace
   cleanup in `crates/local-deployment/src/lib.rs`. Depends on T027.
