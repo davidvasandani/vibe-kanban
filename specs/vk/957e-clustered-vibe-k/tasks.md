@@ -140,7 +140,7 @@ files and may be completed together.
   coordinator-local data path, systemd credentials, worker units, LAN firewall,
   and capacity/mount health in `../homelab/modules/vibe-kanban-rebuild.nix`.
   Depends on T014, T038.
-- [ ] T040 Add Nix evaluation assertions/tests for invalid role, missing
+- [x] T040 Add Nix evaluation assertions/tests for invalid role, missing
   credential, mismatched/local shared root, service ordering, and firewall in
   the closest Vibe Kanban module test files. Depends on T039.
 - [ ] T041 Document two-node Slice 2 rollout, drain, credential rotation,
