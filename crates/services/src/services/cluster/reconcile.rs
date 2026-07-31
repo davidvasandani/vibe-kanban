@@ -315,8 +315,10 @@ mod tests {
             .await
             .unwrap();
 
-        let mut config = ClusterConfig::default();
-        config.coordinator_id = Some(Uuid::new_v4());
+        let config = ClusterConfig {
+            coordinator_id: Some(Uuid::new_v4()),
+            ..Default::default()
+        };
         let reconciler = ExecutionReconciler::new(
             DBService { pool: pool.clone() },
             WorkerClient::new(vec![], SigningKey::from_bytes(&[9; 32])).unwrap(),

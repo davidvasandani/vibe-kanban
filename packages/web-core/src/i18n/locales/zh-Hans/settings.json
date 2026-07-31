@@ -735,6 +735,19 @@
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
     },
+    "workers": {
+      "title": "集群工作节点",
+      "description": "工作节点健康状况、共享存储、容量和调度状态。",
+      "loading": "正在加载工作节点…",
+      "loadError": "无法加载集群工作节点。",
+      "empty": "尚未有工作节点注册。",
+      "schedulable": "可调度",
+      "unschedulable": "不可调度",
+      "active": "活动执行",
+      "load": "负载",
+      "drain": "排空",
+      "resume": "恢复调度"
+    },
     "attachments": {
       "title": "附件",
       "description": "此部署的附件存储状态。",

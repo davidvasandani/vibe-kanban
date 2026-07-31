@@ -735,6 +735,19 @@
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
     },
+    "workers": {
+      "title": "Workers du cluster",
+      "description": "État des workers, stockage partagé, capacité et état de planification.",
+      "loading": "Chargement des workers…",
+      "loadError": "Impossible de charger les workers du cluster.",
+      "empty": "Aucun worker ne s'est encore enregistré.",
+      "schedulable": "Planifiable",
+      "unschedulable": "Non planifiable",
+      "active": "Exécutions actives",
+      "load": "Charge",
+      "drain": "Drainer",
+      "resume": "Reprendre la planification"
+    },
     "attachments": {
       "title": "Pièces jointes",
       "description": "État du stockage des pièces jointes pour ce déploiement.",

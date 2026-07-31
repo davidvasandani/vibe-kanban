@@ -735,6 +735,19 @@
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
     },
+    "workers": {
+      "title": "クラスターワーカー",
+      "description": "ワーカーの正常性、共有ストレージ、キャパシティ、スケジューリング状態。",
+      "loading": "ワーカーを読み込んでいます…",
+      "loadError": "クラスターワーカーを読み込めませんでした。",
+      "empty": "登録されているワーカーはまだありません。",
+      "schedulable": "スケジュール可能",
+      "unschedulable": "スケジュール不可",
+      "active": "アクティブな実行",
+      "load": "負荷",
+      "drain": "ドレイン",
+      "resume": "スケジューリングを再開"
+    },
     "attachments": {
       "title": "添付ファイル",
       "description": "このデプロイの添付ファイルストレージのステータス。",

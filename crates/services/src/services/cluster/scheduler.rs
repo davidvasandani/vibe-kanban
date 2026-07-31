@@ -101,9 +101,9 @@ pub fn eligibility(
     if worker.mount_status != WorkerMountStatus::Healthy {
         return Err(IneligibleReason::UnhealthyMount);
     }
-    if !worker
+    if worker
         .lease_expires_at
-        .is_some_and(|lease_expires_at| lease_expires_at > now)
+        .is_none_or(|lease_expires_at| lease_expires_at <= now)
     {
         return Err(IneligibleReason::MissingOrExpiredLease);
     }

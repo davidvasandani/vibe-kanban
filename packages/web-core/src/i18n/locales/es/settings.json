@@ -735,6 +735,19 @@
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
     },
+    "workers": {
+      "title": "Trabajadores del clúster",
+      "description": "Estado de los trabajadores, almacenamiento compartido, capacidad y estado de programación.",
+      "loading": "Cargando trabajadores…",
+      "loadError": "No se pudieron cargar los trabajadores del clúster.",
+      "empty": "Todavía no se ha registrado ningún trabajador.",
+      "schedulable": "Programable",
+      "unschedulable": "No programable",
+      "active": "Ejecuciones activas",
+      "load": "Carga",
+      "drain": "Drenar",
+      "resume": "Reanudar la programación"
+    },
     "attachments": {
       "title": "Archivos adjuntos",
       "description": "Estado del almacenamiento de archivos adjuntos para esta implementación.",
