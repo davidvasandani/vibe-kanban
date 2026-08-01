@@ -283,10 +283,37 @@ fn validate_lease(lease: CoordinatorLease) -> anyhow::Result<CoordinatorLease> {
     Ok(lease)
 }
 
+/// The worker's hostname, reported at registration and shown in the admin list.
+///
+/// `HOSTNAME` is a shell convention — bash exports it for interactive shells,
+/// but systemd does not place it in a unit's environment. Workers run as units,
+/// so this resolved to "unknown" on every node. `worker_nodes.hostname` carries
+/// a UNIQUE index, so the first worker claimed "unknown" and every subsequent
+/// one failed to register with a constraint violation: a two-node cluster could
+/// never form. Fall back to the kernel's value, which is always readable on the
+/// Linux hosts workers run on. The env var stays first so a deployment can
+/// still override the reported name.
 fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|hostname| !hostname.trim().is_empty())
+    resolve_hostname(
+        std::env::var("HOSTNAME").ok(),
+        std::fs::read_to_string("/proc/sys/kernel/hostname").ok(),
+        std::fs::read_to_string("/etc/hostname").ok(),
+    )
+}
+
+/// Pick the first candidate that carries a non-empty name, trimmed.
+///
+/// Split out from [`hostname`] so the precedence is testable without mutating
+/// process environment or touching the filesystem.
+fn resolve_hostname(env: Option<String>, kernel: Option<String>, etc: Option<String>) -> String {
+    fn non_empty(value: String) -> Option<String> {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }
+
+    env.and_then(non_empty)
+        .or_else(|| kernel.and_then(non_empty))
+        .or_else(|| etc.and_then(non_empty))
         .unwrap_or_else(|| "unknown".into())
 }
 
@@ -387,5 +414,38 @@ mod tests {
         assert_eq!(authority.worker_node_id, config.worker_node_id);
         assert_eq!(authority.coordinator_id, config.coordinator_id);
         assert_eq!(authority.protocol_version, PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn hostname_prefers_the_environment_override() {
+        let resolved = resolve_hostname(
+            Some("override".into()),
+            Some("kernel".into()),
+            Some("etc".into()),
+        );
+        assert_eq!(resolved, "override");
+    }
+
+    #[test]
+    fn hostname_falls_back_to_the_kernel_under_systemd() {
+        // systemd does not export HOSTNAME, which is how every worker
+        // registered as "unknown" and collided on the UNIQUE index.
+        let resolved = resolve_hostname(None, Some("think3\n".into()), None);
+        assert_eq!(resolved, "think3");
+    }
+
+    #[test]
+    fn hostname_skips_blank_candidates() {
+        let resolved = resolve_hostname(
+            Some("   ".into()),
+            Some("\n".into()),
+            Some("think4\n".into()),
+        );
+        assert_eq!(resolved, "think4");
+    }
+
+    #[test]
+    fn hostname_is_unknown_only_when_nothing_resolves() {
+        assert_eq!(resolve_hostname(None, None, None), "unknown");
     }
 }
