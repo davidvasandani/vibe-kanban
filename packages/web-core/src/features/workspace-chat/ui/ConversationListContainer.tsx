@@ -191,6 +191,14 @@ export const ConversationList = forwardRef<
   } | null>(null);
   const pendingInteractionAnchorFrameRef = useRef<number | null>(null);
   const pendingInteractionAnchorDeadlineRef = useRef(0);
+  const historyTopSentinelRef = useRef<HTMLDivElement | null>(null);
+  const historyAnchorFrameRef = useRef<number | null>(null);
+  const historyAnchorRef = useRef<{
+    semanticKey: string;
+    top: number;
+    scrollHeight: number;
+  } | null>(null);
+  const historyAnchorDeadlineRef = useRef(0);
 
   // Use ref to access current repos without causing callback recreation
   const reposRef = useRef(repos);
@@ -383,7 +391,13 @@ export const ConversationList = forwardRef<
     }
   };
 
-  const { isFirstTurn, isLoadingHistory } = useConversationHistory({
+  const {
+    isFirstTurn,
+    hasEarlierHistory,
+    isLoadingEarlier,
+    loadEarlierError,
+    loadEarlier,
+  } = useConversationHistory({
     attempt,
     onTimelineUpdated,
     scopeKey: conversationScopeKey,
@@ -395,6 +409,118 @@ export const ConversationList = forwardRef<
     () => prevRowsRef.current,
     [filteredEntries]
   );
+
+  const clearHistoryAnchor = useCallback(() => {
+    if (historyAnchorFrameRef.current !== null) {
+      cancelAnimationFrame(historyAnchorFrameRef.current);
+      historyAnchorFrameRef.current = null;
+    }
+    historyAnchorRef.current = null;
+    historyAnchorDeadlineRef.current = 0;
+  }, []);
+
+  const correctHistoryAnchor = useCallback(() => {
+    historyAnchorFrameRef.current = null;
+    const anchor = historyAnchorRef.current;
+    const scrollEl = tanstackScrollRef.current;
+    if (!anchor || !scrollEl) {
+      clearHistoryAnchor();
+      return;
+    }
+
+    const anchorNode = Array.from(
+      scrollEl.querySelectorAll<HTMLElement>('[data-semantic-key]')
+    ).find((node) => node.dataset.semanticKey === anchor.semanticKey);
+
+    if (anchorNode) {
+      const delta = anchorNode.getBoundingClientRect().top - anchor.top;
+      if (Math.abs(delta) >= 0.5) {
+        scrollEl.scrollTop += delta;
+      }
+    } else {
+      // A large prepend can move the anchor outside the virtualizer's render
+      // window. Follow the growing scroll height until the saved row is
+      // rendered, then use its semantic key for the final pixel correction.
+      const heightDelta = scrollEl.scrollHeight - anchor.scrollHeight;
+      if (Math.abs(heightDelta) >= 0.5) {
+        scrollEl.scrollTop += heightDelta;
+        anchor.scrollHeight = scrollEl.scrollHeight;
+      }
+    }
+
+    if (performance.now() < historyAnchorDeadlineRef.current) {
+      historyAnchorFrameRef.current =
+        requestAnimationFrame(correctHistoryAnchor);
+      return;
+    }
+
+    clearHistoryAnchor();
+  }, [clearHistoryAnchor]);
+
+  const requestEarlierHistory = useCallback(async () => {
+    if (isLoadingEarlier || !hasEarlierHistory) return;
+
+    const scrollEl = tanstackScrollRef.current;
+    if (scrollEl) {
+      const containerTop = scrollEl.getBoundingClientRect().top;
+      const firstVisibleRow = Array.from(
+        scrollEl.querySelectorAll<HTMLElement>('[data-semantic-key]')
+      ).find((node) => node.getBoundingClientRect().bottom > containerTop + 1);
+      const semanticKey = firstVisibleRow?.dataset.semanticKey;
+      if (firstVisibleRow && semanticKey) {
+        clearHistoryAnchor();
+        historyAnchorRef.current = {
+          semanticKey,
+          top: firstVisibleRow.getBoundingClientRect().top,
+          scrollHeight: scrollEl.scrollHeight,
+        };
+      }
+    }
+
+    await loadEarlier();
+
+    if (historyAnchorRef.current) {
+      historyAnchorDeadlineRef.current = performance.now() + 500;
+      historyAnchorFrameRef.current =
+        requestAnimationFrame(correctHistoryAnchor);
+    }
+  }, [
+    clearHistoryAnchor,
+    correctHistoryAnchor,
+    hasEarlierHistory,
+    isLoadingEarlier,
+    loadEarlier,
+  ]);
+
+  useEffect(() => {
+    const sentinel = historyTopSentinelRef.current;
+    const scrollEl = tanstackScrollRef.current;
+    if (
+      !sentinel ||
+      !scrollEl ||
+      !hasEarlierHistory ||
+      isLoadingEarlier ||
+      loadEarlierError
+    ) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) {
+          void requestEarlierHistory();
+        }
+      },
+      { root: scrollEl }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [
+    hasEarlierHistory,
+    isLoadingEarlier,
+    loadEarlierError,
+    requestEarlierHistory,
+  ]);
 
   const hasActiveStreamingTurn = useMemo(
     () =>
@@ -749,8 +875,9 @@ export const ConversationList = forwardRef<
   useEffect(() => {
     return () => {
       clearPendingInteractionAnchor();
+      clearHistoryAnchor();
     };
-  }, [clearPendingInteractionAnchor]);
+  }, [clearHistoryAnchor, clearPendingInteractionAnchor]);
 
   return (
     <ApprovalFormProvider>
@@ -780,29 +907,57 @@ export const ConversationList = forwardRef<
             )}
           </div>
 
-          {isLoadingHistory && !showLoader && (
-            <div className="flex flex-col items-center gap-2 px-double py-3">
-              <div className="flex w-full max-w-md flex-col gap-1.5">
-                <div className="flex items-center gap-2">
-                  <div className="h-2.5 w-16 animate-pulse rounded-full bg-foreground/10" />
-                  <div className="h-2.5 flex-1 animate-pulse rounded-full bg-foreground/[0.06]" />
-                </div>
-                <div className="flex items-center gap-2">
-                  <div
-                    className="h-2.5 w-24 animate-pulse rounded-full bg-foreground/[0.07]"
-                    style={{ animationDelay: '150ms' }}
-                  />
-                  <div
-                    className="h-2.5 w-32 animate-pulse rounded-full bg-foreground/[0.05]"
-                    style={{ animationDelay: '150ms' }}
-                  />
-                </div>
+          <div ref={historyTopSentinelRef} className="h-px" />
+
+          {(hasEarlierHistory || isLoadingEarlier || loadEarlierError) &&
+            !showLoader && (
+              <div className="flex flex-col items-center gap-2 px-double py-3">
+                {isLoadingEarlier ? (
+                  <>
+                    <div className="flex w-full max-w-md flex-col gap-1.5">
+                      <div className="flex items-center gap-2">
+                        <div className="h-2.5 w-16 animate-pulse rounded-full bg-foreground/10" />
+                        <div className="h-2.5 flex-1 animate-pulse rounded-full bg-foreground/[0.06]" />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div
+                          className="h-2.5 w-24 animate-pulse rounded-full bg-foreground/[0.07]"
+                          style={{ animationDelay: '150ms' }}
+                        />
+                        <div
+                          className="h-2.5 w-32 animate-pulse rounded-full bg-foreground/[0.05]"
+                          style={{ animationDelay: '150ms' }}
+                        />
+                      </div>
+                    </div>
+                    <span className="text-xs text-low">
+                      {t('conversation.loadingEarlierMessages')}
+                    </span>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="rounded px-base py-half text-xs text-low hover:text-normal focus:outline-none focus:ring-1 focus:ring-brand"
+                    onClick={() => void requestEarlierHistory()}
+                  >
+                    {loadEarlierError
+                      ? t('conversation.retryEarlierMessages', {
+                          defaultValue: 'Retry loading earlier messages',
+                        })
+                      : t('conversation.loadEarlierMessages', {
+                          defaultValue: 'Load earlier messages',
+                        })}
+                  </button>
+                )}
+                {loadEarlierError && !isLoadingEarlier && (
+                  <span className="text-xs text-error" role="status">
+                    {t('conversation.loadEarlierMessagesError', {
+                      defaultValue: 'Earlier messages could not be loaded.',
+                    })}
+                  </span>
+                )}
               </div>
-              <span className="text-xs text-low">
-                {t('conversation.loadingEarlierMessages')}
-              </span>
-            </div>
-          )}
+            )}
 
           {showEmptyState && (
             <div className="flex min-h-full items-center justify-center px-double py-12">

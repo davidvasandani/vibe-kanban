@@ -70,6 +70,28 @@ discipline. Raw logs remain the rebuildable source of truth.
   aggregation.
 - A failed older page leaves the loaded recent tail usable and retryable.
 
+## Shipped bounded-preload slice
+
+Task `65ab-lazy-load-vk-wor` removed the frontend's idle loop that automatically
+opened every older completed-process log stream. Workspace chat now loads its
+newest completed processes for the initial view, then requests older processes
+only when the top sentinel intersects or the user activates the load/retry
+control. Both triggers share a single-flight request; stale session generations
+are ignored; failures are isolated per process so older turns remain reachable
+and failed turns remain retryable.
+
+Prepending saves the first visible row's semantic key, top offset, and scroll
+height. Scroll-height compensation first keeps a virtualized anchor in the
+render window, after which semantic-key correction restores its exact offset.
+The active-process normalized-log WebSocket remains independent and continues
+streaming while historical pages load.
+
+This slice pages by completed execution process, not within a process. Finished
+process normalization is bounded to the newest 2,000 normalizable messages, so
+an individual request no longer grows without limit, but durable materialized
+normalized state and the session-scoped cursor contract described above are
+still required for lossless history beyond that per-process boundary.
+
 ## Design gates before product code
 
 Choose the materialization storage/crash-atomicity boundary (SQLite versus an
