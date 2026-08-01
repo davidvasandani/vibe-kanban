@@ -725,3 +725,79 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod matching_parity_tests {
+    use super::advertises_executor_profile;
+
+    /// The predicate as it behaved before canonicalisation was introduced.
+    fn legacy(advertised: &str, requested: &str) -> bool {
+        advertised == requested
+            || (!advertised.contains(':')
+                && requested
+                    .split_once(':')
+                    .is_some_and(|(executor, _variant)| executor == advertised))
+    }
+
+    #[test]
+    fn only_intended_pairs_differ_from_the_legacy_predicate() {
+        // Exhaustive over the shapes that actually occur, so an unintended
+        // behaviour change shows up as a failure rather than as a surprise in
+        // production. Anything not listed as an intended fix must agree.
+        let advertised = [
+            "CODEX",
+            "codex",
+            "Codex",
+            "claude-code",
+            "CLAUDE_CODE",
+            "CODEX:PLAN",
+            "codex:plan",
+            "CODEX:",
+            "CODEX:DEFAULT",
+            "codexfoo",
+            "future_agent",
+            "future_agent:X",
+            "",
+            "CURSOR",
+            "CURSOR_AGENT",
+        ];
+        let requested = [
+            "CODEX",
+            "CODEX:DEFAULT",
+            "CODEX:PLAN",
+            "CLAUDE_CODE:DEFAULT",
+            "codexfoo:DEFAULT",
+            "future_agent:DEFAULT",
+            "future_agent",
+            "CURSOR_AGENT:DEFAULT",
+            "",
+        ];
+
+        // (advertised, requested) pairs that SHOULD differ, each a deliberate
+        // fix: an operator-typed spelling now matching the generated request.
+        let intended_fixes = [
+            ("codex", "CODEX"),
+            ("codex", "CODEX:DEFAULT"),
+            ("codex", "CODEX:PLAN"),
+            ("Codex", "CODEX"),
+            ("Codex", "CODEX:DEFAULT"),
+            ("Codex", "CODEX:PLAN"),
+            ("claude-code", "CLAUDE_CODE:DEFAULT"),
+            ("codex:plan", "CODEX:PLAN"),
+            ("CURSOR", "CURSOR_AGENT:DEFAULT"),
+        ];
+
+        for a in advertised {
+            for r in requested {
+                let now = advertises_executor_profile(a, r);
+                let before = legacy(a, r);
+                let intended = intended_fixes.contains(&(a, r));
+                assert_eq!(
+                    now,
+                    if intended { !before } else { before },
+                    "({a:?}, {r:?}): legacy={before} new={now} intended_fix={intended}"
+                );
+            }
+        }
+    }
+}

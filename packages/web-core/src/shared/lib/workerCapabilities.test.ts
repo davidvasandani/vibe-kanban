@@ -99,10 +99,30 @@ describe('clusterSupportsExecutor', () => {
     expect(clusterSupportsExecutor(['CURSOR'], 'CURSOR_AGENT')).toBe(true);
   });
 
-  it('does not treat a pinned variant as general support', () => {
-    // The whole point of comparing profiles rather than executor names: a
-    // CODEX:PLAN-only cluster cannot serve a default Codex request.
-    expect(clusterSupportsExecutor(['CODEX:PLAN'], 'CODEX')).toBe(false);
+  it('agrees with the backend about an exactly-advertised DEFAULT', () => {
+    // The request is built as `EXECUTOR:${variant ?? 'DEFAULT'}`, so a worker
+    // advertising CODEX:DEFAULT really can serve it. An earlier revision
+    // answered false when the variant argument was omitted, greying out an
+    // agent the cluster runs — the one failure this gate must never produce.
+    expect(clusterSupportsExecutor(['CODEX:DEFAULT'], 'CODEX')).toBe(true);
+    expect(clusterSupportsExecutor(['CODEX:DEFAULT'], 'CODEX', 'DEFAULT')).toBe(
+      true
+    );
+  });
+
+  it('treats an unknown variant as "any variant of this executor"', () => {
+    // Callers omit the variant for agents the user has not selected, because
+    // it has not resolved yet. That must degrade open.
+    expect(clusterSupportsExecutor(['CODEX:PLAN'], 'CODEX', undefined)).toBe(
+      true
+    );
+    expect(clusterSupportsExecutor(['CLAUDE_CODE:PLAN'], 'CODEX')).toBe(false);
+  });
+
+  it('does not treat a pinned variant as support for a different one', () => {
+    // The point of comparing profiles rather than executor names: a
+    // CODEX:PLAN-only cluster cannot serve a CODEX:DEFAULT request. This only
+    // applies once the variant is known — see the degrade-open case above.
     expect(clusterSupportsExecutor(['CODEX:PLAN'], 'CODEX', 'DEFAULT')).toBe(
       false
     );

@@ -152,6 +152,48 @@ Four `[NEEDS CLARIFICATION]` markers and `Status: Draft` after clarify ran.
   only. It degrades *open*, which is the correct direction, and `expire_leases`
   flips such workers to `offline` anyway. Recorded in an AC.
 
+## Found during implementation and review (not by `/speckit.analyze`)
+
+### I1 — The UI contradicted the backend on an exactly-advertised `DEFAULT` — **fixed**
+
+`useExecutorConfig.ts:16` composes the request as
+`` `${executor}:${variant ?? 'DEFAULT'}` ``. A worker advertising exactly
+`CODEX:DEFAULT` therefore *is* satisfiable, but the container called
+`clusterSupportsExecutor` without a variant, and the helper treated a missing
+variant as "no variant" — answering `false` and greying out a working agent.
+The same class of defect as M4, introduced while fixing M5.
+
+Fix: an omitted variant now means "any variant of this executor" (degrade open),
+and the container passes the variant it will actually send for the current
+selection. Two regression tests added.
+
+### I2 — FR-3's "variants are preserved verbatim" premise was wrong — **spec superseded**
+
+The spec asserted variants are free-form and must not be case-folded, and the
+analysis (m15) reinforced it. Reading `profile.rs` showed the opposite: variant
+keys already have a canonical form (`canonical_variant_key` — SCREAMING_SNAKE
+with `DEFAULT` preserved) that `ExecutorProfile` storage enforces, so a request
+always carries `PLAN`, never `plan`. Byte-exact variant comparison would have
+left `codex:plan` in Nix permanently unmatchable — the exact bug being fixed,
+one level down.
+
+Resolution: reuse the shipped `canonical_variant_key` on both sides
+(constitution VI). This *supersedes* m15.
+
+### I3 — `cargo test --workspace` false pass — **corrected**
+
+An earlier verification piped cargo through `tail`, so the exit code read was
+`tail`'s. It hid that `crates/tauri-app` cannot build here (no GTK/glib). Re-run
+unpiped as `--exclude vibe-kanban-tauri`: exit 0, 70 binaries, 0 failures.
+
+### I4 — Exhaustive parity test added
+
+Rather than reasoning about M2's truth table by inspection, the pre-change
+predicate is kept in the test module and asserted equivalent across 135
+(advertised, requested) pairs except an explicit list of 9 intended fixes. This
+is now the main evidence that the canonicalisation rewrite changed nothing
+unintended.
+
 ## Net effect
 
 No finding invalidates the approach. Three change observable behaviour (M3, m15

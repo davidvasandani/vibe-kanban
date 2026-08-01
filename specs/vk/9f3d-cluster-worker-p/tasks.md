@@ -147,15 +147,32 @@ and 4 are mutually independent. Layer 5 is verification.
 
 - [x] **T050** `cargo test -p executors -p worker -p services`, then
       `cargo test --workspace`.
+      **Sandbox caveat**: `--workspace` cannot complete here — `crates/tauri-app`
+      needs a GTK/glib stack that is not installed, unrelated to this change.
+      Verified as `cargo test --workspace --exclude vibe-kanban-tauri`: exit 0,
+      70 test binaries, 0 failures. `crates/remote` is excluded from the
+      workspace by `Cargo.toml` and was not run.
+      **False-pass caught**: an earlier attempt piped cargo through `tail`, so
+      the exit status observed was `tail`'s (0) and hid the glib failure
+      completely. Never read an exit code through a pipe.
 - [x] **T051** [P] `pnpm run generate-types:check` — expect **no** diff;
       `SchedulingError` is not a ts-rs type (research R-4). A diff here means
-      something leaked into the generated contract.
+      something leaked into the generated contract. Confirmed: "shared/types.ts
+      is up to date".
 - [x] **T052** [P] `pnpm run check` and `pnpm run lint`.
+      **Sandbox caveat**: `pnpm run check` begins with a git-based
+      legacy-path guard that cannot run (unreachable gitdir), and
+      `pnpm run lint`'s `backend:lint` runs clippy over `--all-targets`,
+      which pulls in the same glib-dependent Tauri crate. Ran the constituent
+      checks directly instead: `local-web:check`, `remote-web:check`,
+      `web-core:check`, `ui:check`, both ESLint targets, the unused-i18n-key
+      script, and `cargo clippy -p executors -p worker -p services -p server
+      --all-targets --features qa-mode -- -D warnings`. All pass.
 - [x] **T053** `pnpm run format` (repository requirement, run last).
 - [x] **T054** Read the complete diff for consistency. Note: this worktree's
       `.git` points at an unreachable gitdir, so `git diff` is unavailable —
       review file-by-file instead.
-- [ ] **T055** Document the staged-rollout requirement for this change (analysis
+- [x] **T055** Document the staged-rollout requirement for this change (analysis
       m16): upgrade one worker, confirm it registers, then the second. Under the
       new fail-closed startup a simultaneous two-node deploy can take the whole
       cluster down at once if either node carries a latent misconfiguration.
@@ -164,9 +181,9 @@ and 4 are mutually independent. Layer 5 is verification.
 
 ## Layer 6 — Review and knowledge capture
 
-- [ ] **T060** Independent Codex review of the diff; iterate to no significant
+- [x] **T060** Independent Codex review of the diff; iterate to no significant
       findings.
-- [ ] **T061** Add `docs/knowledge-base/worker-capability-advertisement.md` (no
+- [x] **T061** Add `docs/knowledge-base/worker-capability-advertisement.md` (no
       such page exists) following that directory's conventions: `Tags:` line
       under the H1, a `## Verification pattern` section, and a table row
       appended to `INDEX.md` with link text excluding `.md`. Cross-reference

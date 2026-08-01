@@ -179,12 +179,28 @@ export function CreateChatBoxContainer({
     if (advertisedProfiles === null) return undefined;
     const unsupported = new Map<BaseCodingAgent, string>();
     for (const option of executorOptions) {
-      if (!clusterSupportsExecutor(advertisedProfiles, option)) {
+      // The request is composed as `EXECUTOR:${variant ?? 'DEFAULT'}`, so the
+      // variant is known for the current selection and only resolves for the
+      // others once they are picked. Checking those against a guessed variant
+      // would grey out agents the cluster can actually run.
+      const requestedVariant =
+        option === effectiveExecutor
+          ? (selectedVariant ?? 'DEFAULT')
+          : undefined;
+      if (
+        !clusterSupportsExecutor(advertisedProfiles, option, requestedVariant)
+      ) {
         unsupported.set(option, t('createMode.worker.executorUnavailable'));
       }
     }
     return unsupported.size > 0 ? unsupported : undefined;
-  }, [advertisedProfiles, executorOptions, t]);
+  }, [
+    advertisedProfiles,
+    executorOptions,
+    effectiveExecutor,
+    selectedVariant,
+    t,
+  ]);
 
   // Shown beside the picker when the user's *current* agent is unavailable.
   // The selection is deliberately left alone: silently switching it would
@@ -407,7 +423,8 @@ export function CreateChatBoxContainer({
                               effectiveExecutor === null ||
                               clusterSupportsExecutor(
                                 clusterAdvertisedProfiles([worker]),
-                                effectiveExecutor
+                                effectiveExecutor,
+                                selectedVariant ?? 'DEFAULT'
                               );
                             return (
                               <SelectItem

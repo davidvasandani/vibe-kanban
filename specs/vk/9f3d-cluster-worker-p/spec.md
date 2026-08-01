@@ -45,8 +45,15 @@ credentials this feature has no way to provision.
   whitespace prevents startup. Being capable of nothing is a misconfiguration,
   not a default.
 - **FR-3**: Accepted entries are canonicalised before they are advertised. An
-  entry may name a bare executor or an executor with a variant; the executor
-  half is canonicalised, the variant half is preserved exactly as written.
+  entry may name a bare executor or an executor with a variant; both halves are
+  canonicalised, each using the convention that already governs it — the
+  executor half as the deserializer normalises executor names, the variant half
+  as profile storage normalises variant keys.
+  *(Revised during implementation. This originally said the variant was
+  preserved verbatim, on the belief that variants are free-form. They are not:
+  `canonical_variant_key` already imposes a canonical form that
+  `ExecutorProfile` storage enforces, so a request always carries `PLAN` and an
+  operator writing `codex:plan` would otherwise never match. See analysis I2.)*
 - **FR-4**: Capability matching compares the executor half without regard to
   case or the `-`/`_` separator, so advertisements recorded by an earlier build
   continue to match after an upgrade with no operator action. Variant halves are

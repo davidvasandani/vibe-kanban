@@ -85,10 +85,21 @@ export function clusterAdvertisedProfiles(
 /**
  * Whether `executor` can run somewhere on the cluster.
  *
- * Compares whole profiles rather than executor names. A cluster advertising
- * only `CODEX:PLAN` does not support a plain Codex request, and reporting it as
- * available would recreate the write-a-prompt-then-get-rejected dead end this
- * gate exists to remove.
+ * Compares whole profiles rather than executor names, because a cluster
+ * advertising only `CODEX:PLAN` genuinely cannot serve a `CODEX:DEFAULT`
+ * request, and calling it available would recreate the
+ * write-a-prompt-then-get-rejected dead end this gate exists to remove.
+ *
+ * `variant` is the variant that will actually be requested — the caller builds
+ * it as `variant ?? 'DEFAULT'`, matching how the request is composed. Omit it
+ * when the variant is not yet known (the user has not selected this agent, so
+ * its variant has not resolved); the check then asks only whether *some*
+ * variant of that executor is runnable.
+ *
+ * Omitting must not be treated as "no variant". A worker advertising exactly
+ * `CODEX:DEFAULT` does satisfy the `CODEX:DEFAULT` the UI would send, so
+ * answering `false` here would grey out an agent the cluster can run — the one
+ * failure this gate must never produce.
  */
 export function clusterSupportsExecutor(
   advertised: string[] | null,
@@ -105,6 +116,8 @@ export function clusterSupportsExecutor(
     if (profile === null || profile.executor !== wanted) return false;
     // A bare advertisement covers every variant of that executor.
     if (profile.variant === null) return true;
-    return wantedVariant !== null && profile.variant === wantedVariant;
+    // Variant unknown: any advertised variant of this executor will do.
+    if (wantedVariant === null) return true;
+    return profile.variant === wantedVariant;
   });
 }
