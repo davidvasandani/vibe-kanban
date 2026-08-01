@@ -114,13 +114,41 @@ pub fn eligibility(
         .is_some_and(|profiles| {
             profiles
                 .iter()
-                .any(|profile| profile.as_str() == Some(executor_profile))
+                .filter_map(|profile| profile.as_str())
+                .any(|advertised| advertises_executor_profile(advertised, executor_profile))
         })
     {
         return Err(IneligibleReason::MissingExecutor);
     }
 
     Ok(())
+}
+
+/// Whether a worker advertising `advertised` can run `requested`.
+///
+/// `ExecutorProfileId` renders as `EXECUTOR:VARIANT` whenever a variant is set,
+/// and the UI always sends one ("DEFAULT"), so a requested profile is almost
+/// always qualified. A variant selects a mode of the same agent — the type's own
+/// examples are "PLAN" and "ROUTER" — so a worker that can run the executor can
+/// run every variant of it. Capability is therefore an executor-level property,
+/// and an operator advertising the bare executor name means "any variant".
+///
+/// Matching on the full string alone made that configuration unschedulable:
+/// workers advertising ["CLAUDE_CODE"] were rejected as MissingExecutor for
+/// every request the UI produced, so a cluster could register healthy workers
+/// that silently never received work.
+///
+/// A qualified advertisement still pins exactly one variant, so an operator who
+/// wants that can keep expressing it.
+fn advertises_executor_profile(advertised: &str, requested: &str) -> bool {
+    if advertised == requested {
+        return true;
+    }
+    // Bare executor advertisement matches any variant of that executor.
+    !advertised.contains(':')
+        && requested
+            .split_once(':')
+            .is_some_and(|(executor, _variant)| executor == advertised)
 }
 
 fn metric(worker: &WorkerNode, name: &str) -> Option<f64> {
@@ -189,6 +217,53 @@ mod tests {
         candidate = worker(1, now);
         assert_eq!(
             eligibility(&candidate, "gemini", now),
+            Err(IneligibleReason::MissingExecutor)
+        );
+    }
+
+    #[test]
+    fn bare_executor_advertisement_accepts_any_variant() {
+        // The UI always sends a variant, so requests arrive qualified while
+        // operators configure the bare executor name. Rejecting that made
+        // healthy workers permanently unschedulable in production.
+        let now = Utc::now();
+        let candidate = worker(1, now);
+
+        assert_eq!(eligibility(&candidate, "codex:DEFAULT", now), Ok(()));
+        assert_eq!(eligibility(&candidate, "codex:PLAN", now), Ok(()));
+        assert_eq!(eligibility(&candidate, "codex", now), Ok(()));
+    }
+
+    #[test]
+    fn bare_advertisement_does_not_match_a_different_executor() {
+        let now = Utc::now();
+        let candidate = worker(1, now);
+
+        assert_eq!(
+            eligibility(&candidate, "gemini:DEFAULT", now),
+            Err(IneligibleReason::MissingExecutor)
+        );
+        // Prefix overlap must not be mistaken for a match.
+        assert_eq!(
+            eligibility(&candidate, "codexfoo:DEFAULT", now),
+            Err(IneligibleReason::MissingExecutor)
+        );
+    }
+
+    #[test]
+    fn qualified_advertisement_still_pins_one_variant() {
+        let now = Utc::now();
+        let mut candidate = worker(1, now);
+        candidate.capabilities = Json(json!({"executor_profiles": ["codex:PLAN"]}));
+
+        assert_eq!(eligibility(&candidate, "codex:PLAN", now), Ok(()));
+        assert_eq!(
+            eligibility(&candidate, "codex:DEFAULT", now),
+            Err(IneligibleReason::MissingExecutor)
+        );
+        // A bare request must not widen a deliberately pinned advertisement.
+        assert_eq!(
+            eligibility(&candidate, "codex", now),
             Err(IneligibleReason::MissingExecutor)
         );
     }
