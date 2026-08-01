@@ -2613,32 +2613,47 @@ impl ContainerService for LocalContainerService {
             WorkspaceManager::get_workspace_base_dir().join(&workspace_dir_name)
         };
 
-        if self.cluster_config.enabled {
+        // Enabling clustering must not change how coordinator-local workspaces
+        // behave. `Local` is a terminal, valid placement — it is what every
+        // workspace created before clustering has, and what "Automatic
+        // placement" yields when no worker is chosen — so it takes the same
+        // unfenced local path it took before. Only a workspace actually placed
+        // on a worker lives on shared storage and needs the fenced path.
+        let cluster_placement = if self.cluster_config.enabled {
             let placement = WorkspacePlacement::find(&self.db.pool, workspace.id)
                 .await?
                 .ok_or_else(|| ContainerError::Other(anyhow!("Workspace placement is missing")))?;
-            if placement.placement_state != WorkspacePlacementState::Ready {
-                return Err(ContainerError::Other(anyhow!(
-                    "Cluster workspace is not ready (state: {:?})",
-                    placement.placement_state
-                )));
-            }
-            WorkspaceManager::ensure_workspace_exists_fenced(
-                &workspace_dir,
-                &workspace_inputs,
-                &workspace.branch,
-                &self.repository_admin_locks,
-            )
-            .await
-            .map_err(Self::map_workspace_manager_error)?;
+            Some(placement.placement_state)
         } else {
-            WorkspaceManager::ensure_workspace_exists(
-                &workspace_dir,
-                &workspace_inputs,
-                &workspace.branch,
-            )
-            .await
-            .map_err(Self::map_workspace_manager_error)?;
+            None
+        };
+
+        match cluster_placement {
+            Some(state) if state != WorkspacePlacementState::Local => {
+                if state != WorkspacePlacementState::Ready {
+                    return Err(ContainerError::Other(anyhow!(
+                        "Cluster workspace is not ready (state: {:?})",
+                        state
+                    )));
+                }
+                WorkspaceManager::ensure_workspace_exists_fenced(
+                    &workspace_dir,
+                    &workspace_inputs,
+                    &workspace.branch,
+                    &self.repository_admin_locks,
+                )
+                .await
+                .map_err(Self::map_workspace_manager_error)?;
+            }
+            _ => {
+                WorkspaceManager::ensure_workspace_exists(
+                    &workspace_dir,
+                    &workspace_inputs,
+                    &workspace.branch,
+                )
+                .await
+                .map_err(Self::map_workspace_manager_error)?;
+            }
         }
 
         if workspace.container_ref.is_none() {
@@ -2705,6 +2720,14 @@ impl ContainerService for LocalContainerService {
         let placement = WorkspacePlacement::find(&self.db.pool, workspace.id)
             .await?
             .ok_or_else(|| ContainerError::Other(anyhow!("Workspace placement is missing")))?;
+        // A coordinator-local workspace executes locally whether or not this
+        // node is a cluster coordinator. Without this, turning clustering on
+        // made every pre-existing workspace unrunnable.
+        if placement.placement_state == WorkspacePlacementState::Local {
+            return self
+                .start_execution_inner(workspace, execution_process, executor_action)
+                .await;
+        }
         if placement.placement_state != WorkspacePlacementState::Ready {
             return Err(ContainerError::Other(anyhow!(
                 "Cluster workspace is not ready for execution (state: {:?})",
