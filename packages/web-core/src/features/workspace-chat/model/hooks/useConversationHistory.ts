@@ -26,12 +26,20 @@ export interface UseConversationHistoryResult {
   loadEarlierError: string | null;
   /** Load one bounded batch of older completed processes. */
   loadEarlier: () => Promise<void>;
+  /** Whether explicitly loaded older history can be released at the tail. */
+  hasEvictableHistory: boolean;
+  /** Release older batches while retaining the recent tail and live process. */
+  releaseEarlierHistory: () => void;
 }
 import {
+  MAX_RECENT_HISTORY_PROCESSES,
   MIN_INITIAL_ENTRIES,
   REMAINING_BATCH_SIZE,
 } from '@/shared/hooks/useConversationHistory/constants';
-import { getUnloadedHistoricProcesses } from '../conversation-history-paging';
+import {
+  getRecentProcessIdsToRetain,
+  getUnloadedHistoricProcesses,
+} from '../conversation-history-paging';
 
 export const useConversationHistory = ({
   onTimelineUpdated,
@@ -58,6 +66,7 @@ export const useConversationHistory = ({
   const [hasEarlierHistory, setHasEarlierHistory] = useState(false);
   const [isLoadingEarlier, setIsLoadingEarlier] = useState(false);
   const [loadEarlierError, setLoadEarlierError] = useState<string | null>(null);
+  const [hasEvictableHistory, setHasEvictableHistory] = useState(false);
 
   // Derive whether this is the first turn (no follow-up processes exist)
   const isFirstTurn = useMemo(() => {
@@ -383,6 +392,7 @@ export const useConversationHistory = ({
       mergeIntoDisplayed((state) => {
         Object.assign(state, batch);
       });
+      if (Object.keys(batch).length > 0) setHasEvictableHistory(true);
       emitEntries(displayedExecutionProcesses.current, 'historic', false);
       setHasEarlierHistory(hasUnloadedHistoricProcesses());
       if (failedProcessCount > 0) {
@@ -402,6 +412,40 @@ export const useConversationHistory = ({
       }
     }
   }, [emitEntries, hasUnloadedHistoricProcesses, loadEarlierBatch]);
+
+  const releaseEarlierHistory = useCallback(() => {
+    if (!hasEvictableHistory || loadEarlierInFlightRef.current) return;
+
+    const loadedConversationEntryCounts = new Map(
+      Object.values(displayedExecutionProcesses.current).map((processState) => [
+        processState.executionProcess.id,
+        flattenEntries({
+          [processState.executionProcess.id]: processState,
+        }).length,
+      ])
+    );
+    const retainedIds = getRecentProcessIdsToRetain(
+      executionProcesses.current,
+      loadedConversationEntryCounts,
+      MIN_INITIAL_ENTRIES,
+      MAX_RECENT_HISTORY_PROCESSES
+    );
+    let removedAny = false;
+
+    mergeIntoDisplayed((state) => {
+      for (const processId of Object.keys(state)) {
+        if (retainedIds.has(processId)) continue;
+        delete state[processId];
+        removedAny = true;
+      }
+    });
+
+    setHasEvictableHistory(false);
+    setHasEarlierHistory(hasUnloadedHistoricProcesses());
+    if (removedAny) {
+      emitEntries(displayedExecutionProcesses.current, 'historic', false);
+    }
+  }, [emitEntries, hasEvictableHistory, hasUnloadedHistoricProcesses]);
 
   const ensureProcessVisible = useCallback((p: ExecutionProcess) => {
     mergeIntoDisplayed((state) => {
@@ -459,6 +503,7 @@ export const useConversationHistory = ({
     setHasEarlierHistory(false);
     setIsLoadingEarlier(false);
     setLoadEarlierError(null);
+    setHasEvictableHistory(false);
     emitEntries(displayedExecutionProcesses.current, 'initial', true);
   }, [scopeKey, emitEntries]);
 
@@ -611,5 +656,7 @@ export const useConversationHistory = ({
     isLoadingEarlier,
     loadEarlierError,
     loadEarlier,
+    hasEvictableHistory,
+    releaseEarlierHistory,
   };
 };

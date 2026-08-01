@@ -199,6 +199,7 @@ export const ConversationList = forwardRef<
     scrollHeight: number;
   } | null>(null);
   const historyAnchorDeadlineRef = useRef(0);
+  const canCollectEarlierHistoryAtTailRef = useRef(false);
 
   // Use ref to access current repos without causing callback recreation
   const reposRef = useRef(repos);
@@ -397,6 +398,8 @@ export const ConversationList = forwardRef<
     isLoadingEarlier,
     loadEarlierError,
     loadEarlier,
+    hasEvictableHistory,
+    releaseEarlierHistory,
   } = useConversationHistory({
     attempt,
     onTimelineUpdated,
@@ -592,6 +595,33 @@ export const ConversationList = forwardRef<
     onAtBottomChange,
     shouldSuppressSizeAdjustment: shouldSuppressInteractionDrivenSizeAdjustment,
   });
+
+  useEffect(() => {
+    if (!conversationVirtualizer.isAtBottom) {
+      if (hasEvictableHistory) {
+        canCollectEarlierHistoryAtTailRef.current = true;
+      }
+      return;
+    }
+
+    if (
+      canCollectEarlierHistoryAtTailRef.current &&
+      hasEvictableHistory &&
+      !isLoadingEarlier
+    ) {
+      canCollectEarlierHistoryAtTailRef.current = false;
+      releaseEarlierHistory();
+    }
+  }, [
+    conversationVirtualizer.isAtBottom,
+    hasEvictableHistory,
+    isLoadingEarlier,
+    releaseEarlierHistory,
+  ]);
+
+  useEffect(() => {
+    canCollectEarlierHistoryAtTailRef.current = false;
+  }, [conversationScopeKey]);
 
   // NOTE: Do NOT call conversationVirtualizer.virtualizer.measure() when
   // firstUnvirtualizedRowIndex changes. measure() wipes ALL cached item sizes,

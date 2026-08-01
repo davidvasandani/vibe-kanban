@@ -86,6 +86,13 @@ render window, after which semantic-key correction restores its exact offset.
 The active-process normalized-log WebSocket remains independent and continues
 streaming while historical pages load.
 
+Explicitly loaded older batches are retained while the reader remains away
+from the live tail. Once they return to the bottom, the frontend releases those
+batches and reconstructs the recent-tail window: all running processes plus the
+newest completed processes needed to cross the initial entry threshold, capped
+at 20 completed processes so empty/script-only records cannot make retention
+unbounded. Released processes remain discoverable and can be loaded again.
+
 This slice pages by completed execution process, not within a process. Finished
 process normalization is bounded to the newest 2,000 normalizable messages, so
 an individual request no longer grows without limit, but durable materialized
