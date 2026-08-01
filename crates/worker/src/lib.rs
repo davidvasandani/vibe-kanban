@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf, str::FromStr};
 
 use axum::{Json, Router, routing::get};
+use executors::profile::{canonical_profile_string, valid_executor_names};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -54,6 +55,14 @@ pub enum WorkerConfigError {
     Missing(&'static str),
     #[error("invalid {name}: {value:?}")]
     Invalid { name: &'static str, value: String },
+    #[error("invalid {name}: {value:?} does not name a known executor (valid: {valid})")]
+    UnknownExecutorProfile {
+        name: &'static str,
+        value: String,
+        valid: String,
+    },
+    #[error("{name} must name at least one executor (valid: {valid})")]
+    NoExecutorProfiles { name: &'static str, valid: String },
 }
 
 impl WorkerConfig {
@@ -113,13 +122,37 @@ impl WorkerConfig {
             .unwrap_or_else(|| "172.16.0.99:/var/nfs/shared/VibeKanban".into());
         let expected_uid = parse(WORKER_EXPECTED_UID_ENV, required(WORKER_EXPECTED_UID_ENV)?)?;
         let expected_gid = parse(WORKER_EXPECTED_GID_ENV, required(WORKER_EXPECTED_GID_ENV)?)?;
+        // Validate the advertised capability set here rather than letting the
+        // coordinator discover it is unusable. An unknown or empty list produces
+        // a worker that registers, heartbeats, and reports healthy while being
+        // eligible for nothing — the coordinator has no way to tell that apart
+        // from a deliberately narrow worker, so the misconfiguration is silent
+        // until someone wonders why a node never receives work.
+        //
+        // Canonicalising here also means every row the coordinator stores is
+        // comparable; the scheduler's tolerance for non-canonical values only
+        // has to cover rows written by older workers.
         let executor_profiles = lookup(WORKER_EXECUTOR_PROFILES_ENV)
             .unwrap_or_default()
             .split(',')
             .map(str::trim)
             .filter(|profile| !profile.is_empty())
-            .map(str::to_owned)
-            .collect();
+            .map(|profile| {
+                canonical_profile_string(profile).ok_or_else(|| {
+                    WorkerConfigError::UnknownExecutorProfile {
+                        name: WORKER_EXECUTOR_PROFILES_ENV,
+                        value: profile.to_owned(),
+                        valid: valid_executor_names(),
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if executor_profiles.is_empty() {
+            return Err(WorkerConfigError::NoExecutorProfiles {
+                name: WORKER_EXECUTOR_PROFILES_ENV,
+                valid: valid_executor_names(),
+            });
+        }
         let state_dir = lookup(WORKER_STATE_DIR_ENV)
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from)
@@ -231,6 +264,10 @@ mod tests {
             ),
             (WORKER_EXPECTED_UID_ENV, "1000"),
             (WORKER_EXPECTED_GID_ENV, "100"),
+            // Now required. This case previously omitted it and passed, which
+            // is exactly the defect: it asserted that a worker capable of
+            // running nothing was a valid default configuration.
+            (WORKER_EXECUTOR_PROFILES_ENV, "CLAUDE_CODE"),
         ])
         .unwrap();
         assert_eq!(config.worker_node_id, id);
@@ -240,6 +277,90 @@ mod tests {
             "0.0.0.0:8086".parse::<std::net::SocketAddr>().unwrap()
         );
         assert_eq!(config.shared_root, PathBuf::from("/srv/vibe-kanban-shared"));
+        assert_eq!(config.executor_profiles, vec!["CLAUDE_CODE".to_string()]);
+    }
+
+    /// Every variable a worker needs apart from its executor profiles.
+    fn base(id: &str, coordinator_id: &str) -> Vec<(&'static str, String)> {
+        vec![
+            (WORKER_NODE_ID_ENV, id.to_owned()),
+            (WORKER_COORDINATOR_URL_ENV, "http://think2:3333".to_owned()),
+            (WORKER_COORDINATOR_ID_ENV, coordinator_id.to_owned()),
+            (
+                WORKER_SIGNING_KEY_FILE_ENV,
+                "/run/credentials/worker.key".to_owned(),
+            ),
+            (
+                COORDINATOR_PUBLIC_KEY_FILE_ENV,
+                "/run/credentials/coordinator.pub".to_owned(),
+            ),
+            (WORKER_EXPECTED_UID_ENV, "1000".to_owned()),
+            (WORKER_EXPECTED_GID_ENV, "100".to_owned()),
+        ]
+    }
+
+    fn parse_profiles(raw: &str) -> Result<Vec<String>, WorkerConfigError> {
+        let id = Uuid::new_v4().to_string();
+        let coordinator_id = Uuid::new_v4().to_string();
+        let mut values = base(&id, &coordinator_id);
+        values.push((WORKER_EXECUTOR_PROFILES_ENV, raw.to_owned()));
+        let values: HashMap<_, _> = values
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect();
+        WorkerConfig::from_lookup(|name| values.get(name).cloned())
+            .map(|config| config.executor_profiles)
+    }
+
+    #[test]
+    fn canonicalises_operator_written_executor_profiles() {
+        assert_eq!(
+            parse_profiles("codex, claude-code").unwrap(),
+            vec!["CODEX".to_string(), "CLAUDE_CODE".to_string()]
+        );
+        // A variant survives, canonicalised the same way profile storage
+        // canonicalises its keys — so `codex:plan` still matches a request
+        // built as CODEX:PLAN.
+        assert_eq!(
+            parse_profiles("codex:plan").unwrap(),
+            vec!["CODEX:PLAN".to_string()]
+        );
+    }
+
+    #[test]
+    fn rejects_an_executor_name_that_does_not_exist() {
+        let error = parse_profiles("CLAUDE_CODE,codx").unwrap_err();
+        assert_eq!(
+            error,
+            WorkerConfigError::UnknownExecutorProfile {
+                name: WORKER_EXECUTOR_PROFILES_ENV,
+                value: "codx".to_owned(),
+                valid: valid_executor_names(),
+            }
+        );
+        // The operator has to be able to act on this without reading our
+        // source, so the message carries both the typo and the alternatives.
+        let rendered = error.to_string();
+        assert!(rendered.contains("codx"), "{rendered}");
+        assert!(rendered.contains("CLAUDE_CODE"), "{rendered}");
+    }
+
+    #[test]
+    fn rejects_a_worker_that_would_be_eligible_for_nothing() {
+        // Unset, empty, and whitespace-only are the same operator mistake and
+        // must not silently produce a permanently unschedulable worker.
+        for raw in ["", "   ", ",", " , "] {
+            let error = parse_profiles(raw).unwrap_err();
+            assert_eq!(
+                error,
+                WorkerConfigError::NoExecutorProfiles {
+                    name: WORKER_EXECUTOR_PROFILES_ENV,
+                    valid: valid_executor_names(),
+                },
+                "{raw:?}"
+            );
+            assert!(error.to_string().contains("CODEX"), "{raw:?}");
+        }
     }
 
     #[test]

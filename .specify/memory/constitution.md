@@ -192,6 +192,30 @@ monotonic cursors and make replay gaps visible. Shared Git worktree
 administration remains single-owner and serialized even when ordinary commands
 run on several nodes.
 
+### XIX. Advertised capability is validated at its source and legible at its failure
+An operator-supplied capability list (executor profiles, tool identifiers, node
+labels) is untrusted input, not configuration that can be trusted verbatim.
+Whichever component **owns** the capability validates it at startup against the
+canonical enumeration and fails closed with a message naming the offending value
+and the valid set; a component that would register as capable of nothing is a
+misconfiguration, not a default. Values are canonicalised at the boundary so
+comparison never depends on operator casing or punctuation, and a consumer
+matching such a value must tolerate rows written by an earlier build.
+
+Capability is proved where proof is available and cheap; where a probe would be
+unreliable it stays advisory and is surfaced, never used to silently withdraw a
+capability that currently works. A consumer must not synthesise or widen a
+capability its owner did not advertise.
+
+When scheduling or dispatch fails for want of a capability, the error
+distinguishes *"nothing here can do this"* from *"nothing here is healthy"* —
+they have opposite remedies — and names the capabilities that are available.
+Any UI offering a choice that a capability set can refuse reflects that set as a
+visible unsupported state rather than letting the user reach a rejection after
+committing work; that reflection is an affordance, and the owning component
+remains the enforcement point. A gate that fails to parse its input must degrade
+to permitting everything, never to hiding everything.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -213,5 +237,5 @@ run on several nodes.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.16.0 (adds affinity-bound, evidence-backed distributed execution;
-0.15.0 strengthened external-protocol normalization invariants)
+**Version**: 0.17.0 (adds validated, legible capability advertisement; 0.16.0
+added affinity-bound, evidence-backed distributed execution)

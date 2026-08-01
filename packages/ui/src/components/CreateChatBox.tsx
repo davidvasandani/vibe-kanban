@@ -27,6 +27,12 @@ export interface ExecutorProps<TExecutor extends string = string> {
   selected: TExecutor | null;
   options: TExecutor[];
   onChange: (executor: TExecutor) => void;
+  /**
+   * Options that cannot currently run, mapped to a short reason shown beside
+   * them. Optional: callers with no such constraint omit it, and the option
+   * list behaves exactly as before.
+   */
+  unsupported?: ReadonlyMap<TExecutor, string>;
 }
 
 export interface SaveAsDefaultProps {
@@ -164,15 +170,23 @@ export function CreateChatBox<TExecutor extends string = string>({
             <DropdownMenuLabel>
               {t('tasks:conversation.executors')}
             </DropdownMenuLabel>
-            {executor.options.map((exec) => (
-              <DropdownMenuItem
-                key={exec}
-                icon={executor.selected === exec ? CheckIcon : undefined}
-                onClick={() => executor.onChange(exec)}
-              >
-                {formatExecutorLabel(exec)}
-              </DropdownMenuItem>
-            ))}
+            {executor.options.map((exec) => {
+              const unsupportedReason = executor.unsupported?.get(exec);
+              return (
+                <DropdownMenuItem
+                  key={exec}
+                  icon={executor.selected === exec ? CheckIcon : undefined}
+                  disabled={unsupportedReason !== undefined}
+                  // Visible text, not a title tooltip: a disabled item sets
+                  // pointer-events-none, so hover never fires and a tooltip
+                  // would leave the row dimmed with no explanation.
+                  badge={unsupportedReason}
+                  onClick={() => executor.onChange(exec)}
+                >
+                  {formatExecutorLabel(exec)}
+                </DropdownMenuItem>
+              );
+            })}
           </ToolbarDropdown>
           {saveAsDefault?.visible && (
             <label className="flex items-center gap-1.5 text-sm text-low cursor-pointer ml-2">

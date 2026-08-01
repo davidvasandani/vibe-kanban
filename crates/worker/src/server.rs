@@ -407,7 +407,9 @@ mod tests {
             expected_export: "server:/export".into(),
             expected_uid: 1000,
             expected_gid: 1000,
-            executor_profiles: vec!["codex".into()],
+            // Canonical: WorkerConfig::from_lookup can no longer produce a
+            // lowercase profile, so a fixture using one is not reachable state.
+            executor_profiles: vec!["CODEX".into()],
             state_dir: PathBuf::from("/shared/execution-logs/worker-state/test"),
         };
         let authority = authority(&config);

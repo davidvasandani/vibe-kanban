@@ -1,287 +1,209 @@
-# Technical Spec: Clustered Vibe Kanban with Shared Workspace Storage
+# Technical Spec: Legible Worker Executor Capabilities
 
-## Summary
+## Problem
 
-Add a coordinator/worker execution model to the self-hosted Vibe Kanban
-deployment. One coordinator remains authoritative for the UI, API, SQLite,
-workspace records, scheduling, and Git worktree administration. Eligible
-`think-cluster` nodes run an authenticated worker daemon that supervises
-workspace processes on a shared NFS volume mounted at the same absolute path on
-every node.
+Creating a workspace with the Codex agent on the clustered self-hosted
+deployment fails after submit with:
 
-Workspace placement occurs before provisioning and is sticky for the lifetime of
-the workspace. The worker protocol provides idempotent dispatch, ordered and
-replayable execution events, cancellation with acknowledgement, health and mount
-validation, and restart reconciliation. Existing coordinator-local execution
-remains available when clustering is disabled.
+```
+no eligible worker supports executor profile "CODEX:DEFAULT"
+```
+
+The scheduler is behaving correctly. The failure is a configuration and
+legibility problem, not a scheduling bug.
+
+### Observed chain
+
+1. `crates/server/src/routes/workspaces/create.rs:362` — when clustering is
+   enabled, *every* workspace creation must be placed on a worker. There is no
+   coordinator-local fallback.
+2. The requested profile is stringified via `ExecutorProfileId`'s `Display`
+   impl (`crates/executors/src/profile.rs:111`) as `CODEX:DEFAULT`.
+   `BaseCodingAgent` renders SCREAMING_SNAKE_CASE.
+3. `WorkerScheduler::select` filters by `eligibility()`
+   (`crates/services/src/services/cluster/scheduler.rs:110`), which requires the
+   worker's `capabilities.executor_profiles` to contain `CODEX:DEFAULT` or the
+   bare `CODEX`.
+4. Workers advertise verbatim whatever the operator placed in
+   `VK_WORKER_EXECUTOR_PROFILES` (`crates/worker/src/lib.rs:116`,
+   `crates/worker/src/server.rs:141`). Nothing validates, canonicalises, or
+   verifies the list.
+5. In the governing homelab module both workers are configured
+   `executorProfiles = [ "CLAUDE_CODE" ]` (`hosts/think/think3.nix:122`,
+   `hosts/think/think4.nix:122`).
+
+`CODEX:DEFAULT` therefore matches nothing, `NoEligibleWorkers` is returned as a
+400, and the create dialog renders it via `createWorkspace.error`.
+
+This is not Codex-specific. Enabling clustering silently reduced the deployment
+to a single agent; Grok, Gemini, Copilot and the rest fail identically. The
+coordinator (think2) has an installed, authenticated `codex` CLI, but
+coordinator-local execution is unreachable once `clusterRole = "coordinator"`.
+
+### Defects this spec addresses
+
+- **D1 — Unvalidated advertisement.** An operator can advertise an executor name
+  that does not exist. `lookup(WORKER_EXECUTOR_PROFILES_ENV).unwrap_or_default()`
+  means an unset or empty variable produces a worker that registers, reports
+  healthy, appears online in the admin UI, and is eligible for nothing. Silent.
+- **D2 — Case-sensitive matching.** `advertises_executor_profile` compares
+  `&str` values directly. `executorProfiles = [ "codex" ]` is accepted by Nix,
+  registered by the worker, and never matches `CODEX:DEFAULT`. The scheduler's
+  own unit tests use lowercase `"codex"` throughout — self-consistent, but not
+  data the running system can produce.
+- **D3 — Dead-end error.** The message names only the profile that failed. It
+  does not say what the cluster *can* run, and it cannot distinguish "no worker
+  has this executor" from "every worker is offline / unhealthy mount / expired
+  lease". Those need opposite remedies.
+- **D4 — Unreachable option offered.** The create-mode executor picker offers
+  every configured agent regardless of cluster capability, so the failure only
+  surfaces after the user has written a prompt.
+
+## Guiding prior art
+
+From `docs/knowledge-base/clustered-workspace-execution.md`:
+
+- *"Treat a shared mount as a capability, not a directory."* Mount health is
+  **proved** before a worker becomes schedulable. Executor profiles are the one
+  capability that stayed an asserted env string.
+- The coordinator is authoritative for placement, but capabilities are
+  **worker-authored and coordinator-consumed**. The coordinator must not
+  synthesise or widen a worker's advertised set.
+- *"Never retry a dispatch on a different worker."* A `NoEligibleWorkers`
+  rejection cannot be papered over by failing to another node; the fix belongs
+  at advertisement and registration time.
+
+From `wiki/managed-cli-tool-catalog.md`: `CliToolId::ALL` is load-bearing, and
+forgetting an entry *"makes the tool effectively invisible even if a catalog
+entry exists"* — answered there with a **completeness test**. Same idiom
+applies.
+
+From `docs/knowledge-base/grok-executor-integration.md`: *"Backend-only
+compatibility checks leave the UI able to construct saves that the backend
+rejects."* D4 is exactly that.
 
 ## Scope
 
-- Vibe Kanban source in this repository.
-- Deployment changes only in the Vibe Kanban service's governing homelab module,
-  `modules/vibe-kanban-rebuild.nix`, and its directly related Vibe Kanban
-  configuration.
-- Coordinator-owned worker registry, health tracking, draining, scheduling, and
-  sticky workspace affinity.
-- A new lightweight worker binary/service for process supervision.
-- Shared workspace roots under one configurable identical absolute path.
-- Remote coding-agent execution with ordered output, completion, cancellation,
-  and reconnect/reconciliation semantics.
-- Coordinator-only, repository-scoped serialization of worktree administration.
-- Host-aware follow-ups, setup/cleanup/review processes, terminal sessions,
-  previews/dev servers, editor routing, and approvals.
-- UI visibility and manual placement controls for workers and affected
-  workspaces/executions.
-- Backwards-compatible single-node operation when no remote workers are enabled.
+In scope, all within this repository:
 
-## Out of Scope
+- Worker-side validation and canonicalisation of `VK_WORKER_EXECUTOR_PROFILES`.
+- Case-insensitive, canonicalising profile matching in the scheduler.
+- A scheduling error that distinguishes cause and names the cluster's supported
+  profiles.
+- Create-mode UI gating of executors no eligible worker can run.
 
-- Changes to services other than Vibe Kanban.
-- Multiple active coordinators or shared SQLite.
-- Live migration of a workspace or running process between workers.
-- Automatic continuation of an ordinary coding-agent process on another worker.
-- Storage replication, Kubernetes-style orchestration, autoscaling, or
-  preemption.
-- Replacing the existing relay remote-access product.
-- Treating SSH sessions as durable process supervision.
+Explicitly out of scope:
 
-## Architecture
+- **Provisioning Codex credentials on think3/think4**, and the homelab module
+  changes that would accompany them (`codex` in the worker unit's `path`, a
+  credential mechanism paralleling `opClaudeOauthTokenRef`, and flipping
+  `executorProfiles`). Blocked on an unanswered question: whether Codex on
+  think2 authenticates via a ChatGPT device login writing `~/.codex/auth.json`
+  or via `OPENAI_API_KEY`. The two need different Nix plumbing —
+  `clustered-workspace-execution.md` requires secret options to take absolute
+  paths, reject `/nix/store/` paths, and load through systemd credentials.
+- **Auto-de-advertising unavailable executors.** Tempting given the "prove,
+  don't assert" principle, and `get_availability_info()` already exists per
+  executor (`crates/executors/src/executors/codex.rs:264`). Rejected for now:
+  Claude Code on the workers authenticates via the `CLAUDE_CODE_OAUTH_TOKEN`
+  environment variable, not an on-disk credential, so a file-presence probe
+  would report `NotFound` and **silently unschedule the one agent that
+  currently works**. Any availability probe must be advisory (surfaced, not
+  enforced) and is deferred.
+- Coordinator-local execution fallback when no worker supports a profile. This
+  contradicts the placement authority model.
 
-### Coordinator
+## Requirements
 
-The existing Vibe Kanban server remains the only owner of SQLite and application
-state. It:
+### R1 — Worker validates its advertised profiles at startup
 
-1. authenticates workers and records their advertised capabilities and health;
-2. selects a worker before materializing a workspace;
-3. persists placement and shared paths transactionally enough that an
-   incompletely provisioned workspace is not runnable;
-4. exclusively creates/removes/prunes Git worktrees under repository-scoped
-   fenced locks;
-5. creates execution records and dispatches immutable, idempotent execution
-   requests;
-6. consumes ordered worker events into the existing `MsgStore`, persistence,
-   normalization, and WebSocket paths;
-7. routes input, approvals, cancellation, terminals, previews, and editor
-   actions to the workspace's persisted worker; and
-8. reconciles worker-reported jobs after either side reconnects.
+`WorkerConfig::from_env` parses each comma-separated entry as an optional
+`EXECUTOR` or `EXECUTOR:VARIANT` pair and resolves the executor half through
+`BaseCodingAgent::from_str`.
 
-### Shared volume
+- Unknown executor name → startup error naming the offending value and listing
+  the valid executor names. The worker must not register.
+- Empty or unset variable → startup error. A worker eligible for nothing is a
+  misconfiguration, not a default.
+- Accepted entries are canonicalised to SCREAMING_SNAKE_CASE, preserving the
+  variant verbatim (variants are user-defined and not enumerable).
 
-The coordinator and workers mount
-`172.16.0.99:/var/nfs/shared/VibeKanban` at `/srv/vibe-kanban-shared` and use
-a configured application root such as `/srv/vibe-kanban-shared/cluster`. It contains repositories,
-workspaces, and optional durable execution logs, but never the coordinator's
-SQLite database.
+Failing closed at startup is correct here: a worker that cannot be scheduled has
+no useful degraded mode, and the deploy health gate will surface the failure.
 
-Every schedulable node validates that the configured path is the expected NFS
-mount rather than a local fallback, can observe a coordinator-issued probe, has
-the expected filesystem identity, and observes the configured storage-side
-UID/GID after any NFS identity mapping.
+### R2 — Matching is canonicalising, not byte-exact
 
-### Worker
+`advertises_executor_profile` compares the executor half case-insensitively and
+the variant half case-insensitively. R1 prevents new bad rows, but existing
+registrations in the coordinator's database may already hold lowercase values
+written by the current build; those must keep working across the upgrade without
+an operator touching them.
 
-The worker is a separate Rust binary with no SQLite access and no authority to
-administer Git worktrees. It validates all requested paths against the configured
-shared root and the workspace assignment carried by an authenticated dispatch.
-It supervises process groups, stores a bounded replay buffer or durable event
-log, accepts correlated input/approval responses, escalates cancellation, and
-reports authoritative terminal state.
+The existing bare-vs-qualified semantics are preserved exactly: a bare
+advertisement matches any variant of that executor; a qualified advertisement
+pins one variant and is not widened by a bare request.
 
-### Transport
+### R3 — The scheduling error states the cause and the remedy
 
-The initial carrier is authenticated LAN HTTP plus WebSocket on the flat cluster
-network. Protocol types and transport-facing traits remain independent enough
-for the existing relay to carry addressed worker traffic later. Requests include
-coordinator identity, worker identity, execution ID, monotonic sequence/cursor,
-and anti-replay authentication.
+`SchedulingError::NoEligibleWorkers` is replaced by two distinguishable
+outcomes, decided by whether any worker passes the non-executor eligibility
+checks (online, healthy mount, live lease):
 
-## Data Model
+- **At least one healthy worker, none advertising the executor** — report the
+  requested profile plus the sorted set of profiles the healthy workers do
+  advertise. Remedy: change agent, or advertise it on a worker.
+- **No healthy worker at all** — report the worker count and a tally of the
+  reasons they were rejected. Remedy: fix the workers. Naming the executor here
+  would be actively misleading.
 
-### `worker_nodes`
+The distinction is derived from the existing `IneligibleReason` values, so no
+new eligibility state is introduced.
 
-- stable `id` and `hostname`;
-- lifecycle status (`online`, `offline`, `draining`);
-- worker and compatible Vibe Kanban versions;
-- last heartbeat and lease expiry;
-- capabilities/executor profiles and optional labels;
-- CPU count/load, available memory, and active execution count;
-- shared-mount validation state and diagnostic reason.
+### R4 — The create-mode picker does not offer unreachable executors
 
-### Workspace affinity
+When worker nodes exist, `CreateChatBoxContainer` computes the union of
+executor profiles advertised by *eligible* workers (online + healthy mount;
+lease expiry is a server-side concern and is deliberately not re-implemented in
+the browser) and marks any executor option outside that union as unsupported —
+disabled, with a reason.
 
-Add `worker_node_id`, placement state, placement timestamp, placement reason, and
-optional requested-node/constraint data to workspaces. A runnable workspace has
-exactly one persisted worker and a canonical path within the shared workspace
-root. Placement cannot change while the workspace exists in the first release.
+`WorkerNode.capabilities` is typed `unknown` in generated TypeScript
+(`#[ts(type = "unknown")]`), so parsing must be defensive: any shape that is not
+a string array yields no constraint. When the parsed union is empty — no
+workers, capabilities absent, or an unrecognised shape — **no gating is applied
+at all**. A UI that hides every agent because it failed to parse a field is
+worse than the 400 it replaces.
 
-### Execution ownership
+This is an affordance, not an authorisation boundary; R3 remains the enforcement
+point.
 
-Add worker node ID, worker job ID, last acknowledged event sequence, and lease
-expiry to execution ownership records. Dispatch identity is the coordinator
-execution UUID; a worker must return the existing job for a repeated start with
-the same ID and reject mismatched payload reuse.
+## Non-goals
 
-## Functional Requirements
-
-### Registration, health, and scheduling
-
-1. Workers authenticate, register stable identity/capabilities, and heartbeat.
-2. Offline, draining, incompatible, executor-missing, or mount-unhealthy workers
-   are never selected automatically.
-3. A valid manual request wins; otherwise scheduling ranks eligible workers by
-   configurable weighted load and active execution count, with a deterministic
-   tie break.
-4. Health state and the reason a worker is unschedulable are visible to
-   administrators.
-
-### Workspace provisioning
-
-1. Placement is reserved and persisted before directory/worktree creation.
-2. The coordinator creates the shared workspace and all worktrees while holding
-   repository-scoped administration locks with stale-owner/fencing semantics.
-3. Attachments and generated configuration are copied before the workspace is
-   marked runnable.
-4. Failures produce an explicit provisioning-failed state and preserve data for
-   diagnosis; no execution is dispatched.
-5. Cleanup is forbidden while the assigned worker reports activity or is
-   unreachable and ownership is uncertain.
-
-### Dispatch and events
-
-1. Dispatch carries execution/workspace/session IDs, validated shared path,
-   executor action/profile, working directory, environment and scoped secrets,
-   reason, timeout, and persistence policy.
-2. Start and cancellation are idempotent by execution ID.
-3. Worker events are monotonically sequenced and cover accepted, starting,
-   stdout, stderr, structured executor messages, approval/question requests,
-   preview metadata, completed, failed, killed, and indeterminate/worker-lost.
-4. The coordinator acknowledges persisted sequences and resumes from its last
-   acknowledged cursor after reconnect.
-5. A bounded worker replay window is retained; a cursor gap is surfaced as
-   incomplete output rather than silently ignored.
-6. Secrets are neither included in persisted dispatch diagnostics nor written to
-   shared execution logs.
-
-### Cancellation and interaction
-
-1. Cancellation attempts executor-specific graceful shutdown, then timed
-   process-group termination and force kill.
-2. Coordinator timeout or disconnect is not represented as a confirmed kill.
-3. Approval/question messages correlate approval ID, execution ID, type,
-   deadline, response, and worker acknowledgement; disconnect behavior is
-   explicitly fail-closed, pause, or timeout per executor capability.
-4. Terminal sessions and dev-server processes run on the assigned worker.
-5. Preview proxying and editor links resolve the workspace's persisted worker,
-   not a currently selected UI host.
-
-### Recovery
-
-1. On coordinator startup/reconnect, each worker reports active and retained
-   jobs. Matching records resume from the last acknowledged sequence.
-2. A SQLite-running execution absent from its assigned online worker becomes
-   interrupted or indeterminate; it is never inferred complete.
-3. Unknown worker jobs are quarantined by default and may be terminated only by
-   explicit configured policy.
-4. After worker restart, durably supervised persistent jobs may be re-adopted;
-   ordinary unsupervised coding-agent jobs become interrupted.
-5. A worker returning after loss cannot overwrite a newer terminal coordinator
-   decision; conflicting evidence is retained for audit.
-
-## Security Requirements
-
-- Mutual worker/coordinator authentication with rotatable credentials.
-- Authorization binds every operation to the persisted workspace/worker and
-  execution IDs.
-- Canonicalized paths must remain beneath the configured shared root; symlink
-  escapes and arbitrary paths are rejected.
-- Signed/nonce-protected dispatch and cancellation requests prevent replay.
-- Secrets are scoped to one execution and redacted from logs.
-- Audit logs include coordinator, worker, workspace, execution, dispatch, and
-  cancellation identifiers without secret values.
-- The shared SSH identity may bootstrap credentials but is not the steady-state
-  application credential.
-
-## Deployment Requirements
-
-- Add coordinator and worker options to `modules/vibe-kanban-rebuild.nix`.
-- Keep `db.v2.sqlite` on coordinator-local persistent storage.
-- Mount the NFS export at one configurable identical absolute path on think2 and
-  each enabled worker node, with ordering that prevents service start on a local
-  fallback directory.
-- Run services as `vibe-kanban` with consistent UID/GID.
-- Default network exposure to the cluster LAN and firewall only coordinator to
-  worker protocol ports.
-- Provide credential files through the existing Vibe Kanban secret mechanism,
-  not the Nix store.
-- Add capacity/mount health observability and document snapshot/recovery
-  prerequisites without configuring unrelated storage services.
-
-## Delivery Strategy
-
-Implementation remains sliceable behind configuration:
-
-1. worker visibility, authentication, mount health, and draining;
-2. sticky placement plus one remote coding-agent path with stream/cancel;
-3. remaining workspace interactions, approvals, terminals, previews, and editor;
-4. replay, leases, reconciliation, and operational safeguards;
-5. weighted scheduling, labels, constraints, and manual overrides.
-
-The first deployable validation must run Slice 2 on two disposable nodes. Later
-slices may build on the same protocol without weakening the failure semantics
-specified here.
-
-## Acceptance Criteria
-
-- One UI creates a workspace on any eligible enabled node and immediately sees
-  its shared files from the coordinator.
-- Placement is persisted before provisioning and all subsequent workspace
-  process types remain on that node.
-- Duplicate dispatch cannot start a second process.
-- Live logs preserve order, reconnect from an acknowledged cursor, and remain
-  available after completion.
-- Cancellation kills the remote process group only when worker acknowledgement
-  establishes the terminal result.
-- Coordinator restart reconnects or truthfully marks executions interrupted or
-  indeterminate.
-- A missing, masked, read-only, identity-mismatched, or ownership-invalid mount
-  makes a worker unschedulable.
-- Worker loss is visible and prevents unsafe cleanup.
-- Terminal, preview, and editor routing use persisted affinity.
-- Concurrent workspaces on different nodes cannot concurrently mutate shared
-  Git worktree administration metadata.
-- SQLite remains local to the coordinator and no other service is changed.
-- Clustering-disabled installations retain current single-node behavior.
+- Changing placement, stickiness, dispatch, lease, or mount semantics.
+- Changing the `cluster-protocol` wire format. `WorkerCapabilities` keeps
+  `executor_profiles: Vec<String>`; only the values the worker puts in it become
+  canonical. Registration and heartbeat payloads are covered by the request
+  signature's body digest, so avoiding a shape change avoids a lockstep upgrade.
+- A general worker capability framework.
 
 ## Verification
 
-- Unit tests for eligibility/scoring, sticky placement, path authorization,
-  idempotency, event ordering/replay gaps, cancellation transitions, mount
-  validation, and reconciliation.
-- Database migration/round-trip tests and generated TypeScript type checks.
-- Protocol integration tests with an in-process coordinator and worker,
-  including disconnect/reconnect and duplicate delivery.
-- Process-group cancellation test using a child/grandchild fixture.
-- Repository-lock concurrency test.
-- Frontend tests for worker state, manual selection, and indeterminate status.
-- Nix evaluation/tests for coordinator/worker roles, mount dependencies,
-  credentials, users, and firewall rules.
-- Formatting, lint, relevant Rust/TypeScript test suites, and an independent
-  Codex diff review.
+- Unit tests in `crates/worker` for R1: unknown executor rejected, empty
+  rejected, mixed-case canonicalised, variant preserved.
+- Unit tests in `crates/services` for R2 and R3: lowercase legacy advertisement
+  matches a canonical request; bare/qualified semantics unchanged; the two
+  error variants are produced in the right circumstances. Existing scheduler
+  tests are updated to use data the running system can actually produce
+  (canonical `CLAUDE_CODE`, requests like `CODEX:DEFAULT`) rather than the
+  current lowercase fixtures.
+- A frontend test for R4 covering: gating applied, unsupported option disabled,
+  and each degenerate capability shape leaving the picker fully enabled.
+- `pnpm run check`, `pnpm run lint`, `cargo test --workspace`,
+  `pnpm run generate-types:check`, `pnpm run format`.
+- Independent Codex review of the diff.
 
-## Risks and Mitigations
-
-- **Scope size:** preserve delivery-slice boundaries and backwards-compatible
-  local execution so partial rollout is operable.
-- **Split-brain execution:** immutable sticky affinity, idempotent dispatch,
-  leases, and worker-side assignment validation.
-- **Shared Git corruption:** coordinator-only administration plus fenced
-  repository locks.
-- **False healthy mount:** verify mount identity and a coordinator probe, not
-  merely directory existence/writability.
-- **Lost or duplicated output:** monotonic sequences, acknowledgement, replay,
-  and explicit cursor-gap state.
-- **Incorrect success after disconnect:** terminal states require worker
-  evidence; otherwise report interruption or indeterminacy.
-- **Unsafe cleanup:** preserve workspace data whenever worker liveness or process
-  ownership is uncertain.
+Per `wiki/self-hosted-deployment.md`, local tests do not replace the two-node
+deployment gate. The R1 startup failure mode in particular should be confirmed
+against a real worker before this is relied upon, because it converts a
+misconfiguration that previously produced a running-but-useless worker into a
+service that refuses to start.
