@@ -136,6 +136,9 @@ impl From<WorkspaceManagerError> for ApiError {
                 ApiError::BadRequest("Workspace has no repositories configured".to_string())
             }
             WorkspaceManagerError::PartialCreation(msg) => ApiError::Conflict(msg),
+            WorkspaceManagerError::WorktreeNotPortable { repo_name, detail } => ApiError::Conflict(
+                format!("Repository '{repo_name}' has a worktree other nodes cannot use: {detail}"),
+            ),
             WorkspaceManagerError::InvalidSharedRoot(path) => {
                 ApiError::BadRequest(format!("Invalid shared workspace root: {}", path.display()))
             }

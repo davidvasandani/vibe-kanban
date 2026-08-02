@@ -192,19 +192,63 @@ monotonic cursors and make replay gaps visible. Shared Git worktree
 administration remains single-owner and serialized even when ordinary commands
 run on several nodes.
 
-### XIX. Historical views are bounded and resumable
-Large append-oriented histories MUST open from a server-enforced bounded recent
-window and fetch older windows only on user demand. Client-side virtualization
-or slicing does not satisfy this rule when the backend still replays, transfers,
-or retains the complete history. Pages have deterministic order, stable
-identity, validated opaque continuation state, explicit exhaustion, and
-single-flight cancellation on scope changes.
+### XIX. Observability is a read-only surface
+Metrics, telemetry, and diagnostic sampling exist to be *looked at*. They are
+never evidence.
 
-When bounded history transitions into a live stream, the contract MUST define
-an authoritative snapshot boundary so events cannot be lost or duplicated.
-Incremental replacements retain their original semantic identity across page
-boundaries. Prepending history preserves the user's visible anchor, and a page
-failure leaves the already loaded recent window usable and retryable.
+No observability path may write scheduling, liveness, lease, eligibility, or
+lifecycle state, and no lifecycle decision may read from one. A node that fails
+to report metrics is not offline; a node that reports them is not healthy. The
+existing evidence channel remains the only authority on both questions.
+
+Absence is typed, never fabricated. Unreachable, unsupported, not-implemented,
+and stale are distinct statuses carrying their reason, and each renders as
+itself. A zero that means "no reading" is prohibited — a failed read is not a
+measurement, and a UI that shows `0%` for a dead host is a defect.
+
+Live streams are bounded and self-correcting. Retention is a fixed-size window
+whose memory does not grow with uptime, and no emitted payload may grow with
+elapsed time. A patch stream is an optimisation over a periodic full snapshot,
+never a replacement for one: a dropped message, a replay gap, or a change in the
+member set forces a resnapshot rather than interpolation. Every streamed
+collection is keyed by stable identity — never by array position — so that
+membership changing mid-stream cannot make a `replace` land on the wrong row.
+
+Sampling tasks terminate. A background sampler holds only a weak reference to
+its owner, re-checks each tick that a consumer still exists, exits when none
+does, and never holds a lock across an await.
+
+Host introspection is secret-hostile by default. Process environments are never
+read. Anything derived from a process command line is redacted at the point of
+collection — before it is stored, transmitted, or logged — so that an
+unredacted value never exists outside the sampler. Redaction errs toward
+removing too much: an over-redacted command is cosmetic, an under-redacted one
+is a disclosure.
+
+### XX. Cross-node paths are node-identical and structurally verified
+Any absolute path written into shared storage that another node must later
+resolve MUST resolve to the same object on every node, and that property MUST be
+asserted by the code that records it — never left to an operator convention, a
+documentation note, or a naming coincidence.
+
+Three rules follow. **Verify structure, not spelling:** assert that a resolved
+target lies within the shared root, never that its text lacks a known-bad prefix.
+**A same-named local directory is not the target:** existence proves nothing, and
+a resolver that accepts a local path merely because it exists is a defect, not a
+fallback — the shared-mount rule applied to every recorded path. **Both ends of a
+two-sided pointer are repaired and re-probed together;** a zero exit from a repair
+command is not verification, and an object a path claims to reference is proven
+present, never assumed.
+
+Enforcement is level-triggered. A check that runs only where the path is first
+written is an edge trigger and will stall silently; the same assertion runs at
+startup, at placement, and before use, enumerating every violation in one pass
+with an actionable remedy rather than aborting on the first. A one-off migration
+with no recurring check is a comment, not a control.
+
+Where a shared namespace is consolidated, its blast radius is re-derived rather
+than inherited: an operation that was safe while it touched one node's metadata
+is not automatically safe once every node's metadata lives in one place.
 
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
@@ -227,5 +271,8 @@ failure leaves the already loaded recent window usable and retryable.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.17.0 (adds bounded, resumable historical-view and live-handoff
-invariants; 0.16.0 added affinity-bound distributed execution)
+**Version**: 0.18.0 (adds cross-node path portability — node-identical shared
+paths, structural rather than textual assertions, no same-named-local fallback,
+two-sided pointer repair, level-triggered enforcement, and re-derived blast
+radius for consolidated namespaces; 0.17.0 added observability as a read-only
+surface; 0.16.0 added affinity-bound, evidence-backed distributed execution)

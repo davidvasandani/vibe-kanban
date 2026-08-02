@@ -580,10 +580,24 @@ impl WorktreeManager {
 
         let worktree_root = canonicalize_for_compare(&normalize_macos_private_alias(worktree_path));
         let worktree_metadata_path = Self::get_worktree_metadata_path(git_repo_path)?;
-        let worktree_metadata_folders = match fs::read_dir(&worktree_metadata_path) {
-            Ok(read_dir) => read_dir
-                .filter_map(|entry| entry.ok())
-                .collect::<Vec<fs::DirEntry>>(),
+        // Every unreadable entry is an error, not a miss. Under clustering this
+        // directory holds one registration per live workspace of the repository
+        // and lives on NFS, where a transient read failure is ordinary; silently
+        // dropping entries would return `Ok(None)` and send the caller on to a
+        // broader cleanup against every other workspace's metadata.
+        let mut worktree_metadata_folders = Vec::new();
+        match fs::read_dir(&worktree_metadata_path) {
+            Ok(read_dir) => {
+                for entry in read_dir {
+                    worktree_metadata_folders.push(entry.map_err(|e| {
+                        WorktreeError::Repository(format!(
+                            "Failed to read an entry of worktree metadata directory at {}: {}",
+                            worktree_metadata_path.display(),
+                            e
+                        ))
+                    })?);
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
                 return Err(WorktreeError::Repository(format!(
@@ -592,16 +606,35 @@ impl WorktreeManager {
                     e
                 )));
             }
-        };
+        }
         // read the worktrees/*/gitdir and see which one matches the worktree_path
         for entry in worktree_metadata_folders {
             let gitdir_path = entry.path().join("gitdir");
-            if gitdir_path.exists()
-                && let Ok(gitdir_content) = fs::read_to_string(&gitdir_path)
-                && normalize_macos_private_alias(Path::new(gitdir_content.trim()))
-                    .parent()
-                    .map(canonicalize_for_compare)
-                    .is_some_and(|p| p == worktree_root)
+            // `fs::exists` rather than `Path::exists`: the latter reports
+            // `false` for "stat failed" as well as "absent", which would turn an
+            // indeterminate registration into an invisible one.
+            match fs::exists(&gitdir_path) {
+                Ok(false) => continue,
+                Err(e) => {
+                    return Err(WorktreeError::Repository(format!(
+                        "Failed to stat worktree registration at {}: {}",
+                        gitdir_path.display(),
+                        e
+                    )));
+                }
+                Ok(true) => {}
+            }
+            let gitdir_content = fs::read_to_string(&gitdir_path).map_err(|e| {
+                WorktreeError::Repository(format!(
+                    "Failed to read worktree registration at {}: {}",
+                    gitdir_path.display(),
+                    e
+                ))
+            })?;
+            if normalize_macos_private_alias(Path::new(gitdir_content.trim()))
+                .parent()
+                .map(canonicalize_for_compare)
+                .is_some_and(|p| p == worktree_root)
             {
                 return Ok(Some(entry.file_name().to_string_lossy().to_string()));
             }
@@ -643,11 +676,20 @@ impl WorktreeManager {
             std::fs::remove_dir_all(worktree_path).map_err(WorktreeError::Io)?;
         }
 
-        // Step 4: Good-practice to clean up any other stale admin entries
-        if let Err(e) = git_service.prune_worktrees(git_repo_path) {
-            debug!("git worktree prune non-fatal error: {}", e);
-        }
-
+        // Deliberately no `git worktree prune` here. Steps 1 and 2 already
+        // removed *this* worktree's registration by resolved path, so a prune
+        // could only ever touch registrations belonging to somebody else.
+        //
+        // That was tolerable when a repository's `worktrees/` directory held a
+        // handful of entries owned by one node. It is not tolerable now: a
+        // clustered repository's registrations all live in one shared store, so
+        // this call would reach every other workspace of the repository —
+        // including workspaces owned by other nodes. Prune decides by asking
+        // whether a worktree directory is present, and over NFS a momentarily
+        // unreadable directory is indistinguishable from a deleted one, so
+        // cleaning up one workspace could unregister live ones. The same
+        // operation has already cost this fleet a production build once, when it
+        // walked registrations it did not own and died partway through.
         debug!("Comprehensive cleanup completed for worktree: {worktree_display_name}",);
         Ok(())
     }
@@ -1217,5 +1259,66 @@ async fn forced_recreation_moves_recoverable_data_aside() {
     assert!(
         recovered.join("node_modules").join("marker.txt").exists(),
         "recovered directory should contain the preserved node_modules"
+    );
+}
+
+/// Cleaning up one worktree must not disturb another worktree of the same
+/// repository.
+///
+/// This is cheap to get wrong and expensive to discover. Cleanup used to finish
+/// with a repository-wide `git worktree prune`, which was tolerable while a
+/// repository's registrations belonged to one node and one workspace at a time.
+/// Under clustering every workspace of a repository shares one store, so that
+/// prune reached other workspaces' registrations — and on network storage a
+/// directory that is momentarily unreadable looks exactly like a deleted one.
+#[tokio::test]
+async fn cleanup_of_one_worktree_leaves_a_sibling_registration_intact() {
+    use tempfile::TempDir;
+    let td = TempDir::new().unwrap();
+
+    let repo_path = td.path().join("repo");
+    let git_service = GitService::new();
+    git_service
+        .initialize_repo_with_main_branch(&repo_path)
+        .unwrap();
+
+    let doomed = td.path().join("ws-doomed").join("repo");
+    let survivor = td.path().join("ws-survivor").join("repo");
+    WorktreeManager::create_worktree(&repo_path, "vk/doomed", &doomed, "main", true)
+        .await
+        .unwrap();
+    WorktreeManager::create_worktree(&repo_path, "vk/survivor", &survivor, "main", true)
+        .await
+        .unwrap();
+
+    // Both worktrees share one `worktrees/` namespace, and git names their
+    // registrations after the path basename — which is identical here, so the
+    // second is disambiguated with a suffix. Resolve each by path.
+    let survivor_registration =
+        WorktreeManager::find_worktree_git_internal_name(&repo_path, &survivor)
+            .unwrap()
+            .expect("the surviving worktree should be registered");
+
+    WorktreeManager::cleanup_worktree(&WorktreeCleanup::new(
+        doomed.clone(),
+        Some(repo_path.clone()),
+    ))
+    .await
+    .unwrap();
+
+    assert!(!doomed.exists(), "the targeted worktree should be gone");
+    assert!(
+        survivor.join(".git").is_file(),
+        "the sibling worktree directory must survive"
+    );
+    assert_eq!(
+        WorktreeManager::find_worktree_git_internal_name(&repo_path, &survivor).unwrap(),
+        Some(survivor_registration),
+        "the sibling's registration must survive under the same name"
+    );
+    assert_eq!(
+        git_service.get_current_branch(&survivor).unwrap(),
+        "vk/survivor",
+        "the sibling worktree must still be usable"
     );
 }
