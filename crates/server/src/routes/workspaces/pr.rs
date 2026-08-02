@@ -34,7 +34,7 @@ use services::services::{
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
-use workspace_manager::WorkspaceManager;
+use workspace_manager::{RepoWorkspaceInput, WorkspaceManager};
 
 use crate::{DeploymentImpl, error::ApiError};
 
@@ -676,8 +676,18 @@ async fn cleanup_failed_pr_workspace(pool: &sqlx::SqlitePool, workspace: &Worksp
 
     // Spawn background cleanup for filesystem resources (worktrees, workspace dir)
     if let Some(workspace_dir) = workspace_dir {
+        // Resolved against the registered checkout, which is the only case this
+        // path can reach: there is no container service in scope to read a
+        // placement from. That is correct rather than a fallback — a clustered
+        // workspace's worktrees are rolled back by `create_cluster_workspace`'s
+        // own failure path, which knows the store they were created in.
+        let cleanup_inputs: Vec<RepoWorkspaceInput> = repositories
+            .into_iter()
+            .map(|repo| RepoWorkspaceInput::new(repo, String::new()))
+            .collect();
         tokio::spawn(async move {
-            if let Err(e) = WorkspaceManager::cleanup_workspace(&workspace_dir, &repositories).await
+            if let Err(e) =
+                WorkspaceManager::cleanup_workspace(&workspace_dir, &cleanup_inputs).await
             {
                 tracing::error!(
                     "Background cleanup failed for workspace {} at {}: {}",

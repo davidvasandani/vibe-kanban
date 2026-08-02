@@ -24,6 +24,7 @@ use tokio::{
     process::Command,
     sync::{Mutex, RwLock},
 };
+use utils::worktree_linkage::{LinkageStatus, WorktreeLinkage};
 use uuid::Uuid;
 
 use crate::{
@@ -65,6 +66,8 @@ pub enum ExecutionError {
     Journal(#[from] JournalError),
     #[error("execution {0} was not found")]
     NotFound(Uuid),
+    #[error("workspace contains a worktree this node cannot use: {detail}")]
+    WorktreeUnusable { detail: String },
     #[error(transparent)]
     Recovery(#[from] RecoveryError),
 }
@@ -182,6 +185,11 @@ impl ExecutionSupervisor {
         if matches!(&action, WorkerAction::Command(action) if action.program.trim().is_empty()) {
             return Err(ExecutionError::EmptyProgram);
         }
+        // Refuse before a job record exists, alongside the other admission
+        // checks. A workspace whose worktrees do not resolve on this node cannot
+        // be worked in, and discovering that inside an agent turn wastes the
+        // turn. The worker never repairs — that authority is the coordinator's.
+        verify_worktrees_are_usable(&workspace_path, self.path_authority.shared_root()).await?;
 
         let worker_job_id = Uuid::new_v4();
         let mut journal = EventJournal::new(dispatch.execution_id, self.journal_capacity)?;
@@ -405,7 +413,12 @@ async fn run_job(
             command.group_spawn().map_err(|error| error.to_string())
         }
         WorkerAction::Executor(action) => {
-            let repo_names = discover_repo_names(&working_directory).await;
+            // Admission already proved this workspace is enumerable and its
+            // worktrees usable, so an error here is a race, not a state worth
+            // failing the spawn over.
+            let repo_names = discover_repo_names(&working_directory)
+                .await
+                .unwrap_or_default();
             let mut env = ExecutionEnv::new(
                 RepoContext::new(working_directory.clone(), repo_names),
                 false,
@@ -476,21 +489,83 @@ async fn run_job(
     }
 }
 
-async fn discover_repo_names(workspace: &Path) -> Vec<String> {
+/// Repository directories inside a workspace.
+///
+/// Returns `Err` when the workspace cannot be enumerated, rather than an empty
+/// list. The difference matters: an empty list means "this workspace has no
+/// repositories", a failed read means "this node could not tell" — and on a
+/// network mount the second is routine. Collapsing them would let a preflight
+/// that walks this list conclude there is nothing to check and admit work into a
+/// workspace it never inspected.
+async fn discover_repo_names(workspace: &Path) -> std::io::Result<Vec<String>> {
     let mut names = Vec::new();
-    let Ok(mut entries) = tokio::fs::read_dir(workspace).await else {
-        return names;
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    let mut entries = tokio::fs::read_dir(workspace).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        // Only directories can be repositories. Test this *before* joining
+        // `.git`: on a regular file — and a workspace root routinely holds
+        // `CLAUDE.md`, `AGENTS.md` and copied attachments — `<file>/.git`
+        // stats as `NotADirectory`, an error rather than "absent", which would
+        // otherwise fail enumeration and take every dispatch down with it.
+        if !entry.file_type().await?.is_dir() {
+            continue;
+        }
         let path = entry.path();
-        if path.join(".git").exists()
+        if std::fs::exists(path.join(".git"))?
             && let Some(name) = entry.file_name().to_str()
         {
             names.push(name.to_owned());
         }
     }
     names.sort();
-    names
+    Ok(names)
+}
+
+/// Refuse a dispatch whose workspace holds a worktree this node cannot use.
+///
+/// The worker deliberately cannot fix anything here — worktree administration
+/// belongs to the coordinator — but it is the only participant that can tell
+/// whether a worktree resolves *on this node*, which is the question that
+/// actually matters. Refusing costs a dispatch; accepting costs an agent turn,
+/// because the failure surfaces as `fatal: not a git repository` several tool
+/// calls in.
+async fn verify_worktrees_are_usable(
+    workspace_path: &Path,
+    shared_root: &Path,
+) -> Result<(), ExecutionError> {
+    let repo_names = discover_repo_names(workspace_path).await.map_err(|e| {
+        ExecutionError::WorktreeUnusable {
+            detail: format!(
+                "could not enumerate repositories in {}: {e}",
+                workspace_path.display()
+            ),
+        }
+    })?;
+
+    let mut unusable = Vec::new();
+    for name in repo_names {
+        // A `.recovered-<epoch>` sibling is a copy the coordinator moved aside
+        // to preserve work; its registration is deliberately gone. It is
+        // evidence of a past rescue, not a workspace the agent is meant to use,
+        // and refusing dispatch over one would strand the workspace forever.
+        if name.contains(".recovered-") {
+            continue;
+        }
+        let repo_path = workspace_path.join(&name);
+        match WorktreeLinkage::probe(&repo_path, shared_root) {
+            // `OwnRepository` is a repository someone put in the workspace, not
+            // a managed worktree; it is not this check's business.
+            LinkageStatus::Portable { .. } | LinkageStatus::OwnRepository => {}
+            other => unusable.push(format!("{name}: {}", other.describe())),
+        }
+    }
+
+    if unusable.is_empty() {
+        Ok(())
+    } else {
+        Err(ExecutionError::WorktreeUnusable {
+            detail: unusable.join("; "),
+        })
+    }
 }
 
 async fn await_output_tasks(
@@ -776,5 +851,96 @@ mod tests {
             .unwrap();
         assert_eq!(recovered_completed.state, JobState::Completed);
         assert_eq!(recovered_completed.terminal, Some(terminal_evidence));
+    }
+}
+
+#[cfg(test)]
+mod worktree_preflight_tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// A workspace root routinely holds plain files — `CLAUDE.md` and
+    /// `AGENTS.md` are written there by workspace provisioning, and attachments
+    /// are copied there. Enumeration must step over them.
+    ///
+    /// It is worth a test of its own because getting it wrong is not a partial
+    /// failure: `<file>/.git` stats as `NotADirectory` rather than "absent", so
+    /// a single stray file at the workspace root would fail enumeration and
+    /// make the preflight refuse *every* dispatch to that workspace.
+    #[tokio::test]
+    async fn files_in_the_workspace_root_do_not_break_enumeration() {
+        let fixture = TempDir::new().unwrap();
+        let workspace = fixture.path();
+        fs::write(workspace.join("CLAUDE.md"), "# guidance\n").unwrap();
+        fs::write(workspace.join("attachment.png"), b"not a repo").unwrap();
+        fs::create_dir_all(workspace.join("plain-dir")).unwrap();
+        fs::create_dir_all(workspace.join("repo")).unwrap();
+        fs::write(workspace.join("repo").join(".git"), "gitdir: /elsewhere\n").unwrap();
+
+        let names = discover_repo_names(workspace).await.unwrap();
+
+        assert_eq!(names, vec!["repo".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_workspace_that_cannot_be_enumerated_is_refused_not_assumed_empty() {
+        let fixture = TempDir::new().unwrap();
+        let missing = fixture.path().join("gone");
+
+        let error = verify_worktrees_are_usable(&missing, fixture.path())
+            .await
+            .expect_err("an unreadable workspace must not be treated as having no repositories");
+
+        assert!(matches!(error, ExecutionError::WorktreeUnusable { .. }));
+    }
+
+    /// The production defect, seen from the worker: a worktree pointing at
+    /// storage only the coordinator can reach.
+    #[tokio::test]
+    async fn refuses_a_workspace_whose_worktree_points_outside_the_shared_root() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let workspace = shared_root.join("workspaces").join("ws-1");
+        fs::create_dir_all(workspace.join("repo")).unwrap();
+        fs::write(
+            workspace.join("repo").join(".git"),
+            "gitdir: /srv/src/repo/.git/worktrees/repo\n",
+        )
+        .unwrap();
+
+        let error = verify_worktrees_are_usable(&workspace, &shared_root)
+            .await
+            .expect_err("a dangling worktree must be refused before any work starts");
+
+        match error {
+            ExecutionError::WorktreeUnusable { detail } => {
+                assert!(detail.contains("repo"), "{detail}")
+            }
+            other => panic!("expected WorktreeUnusable, got {other:?}"),
+        }
+    }
+
+    /// A `.recovered-<epoch>` sibling is preserved evidence of a past rescue,
+    /// not a worktree the agent uses. Refusing over one would strand the
+    /// workspace permanently, since the worker cannot repair anything.
+    #[tokio::test]
+    async fn ignores_preserved_recovery_directories() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let workspace = shared_root.join("workspaces").join("ws-1");
+        fs::create_dir_all(workspace.join("repo.recovered-1712000000")).unwrap();
+        fs::write(
+            workspace.join("repo.recovered-1712000000").join(".git"),
+            "gitdir: /srv/src/repo/.git/worktrees/repo\n",
+        )
+        .unwrap();
+        fs::create_dir_all(&shared_root).unwrap();
+
+        verify_worktrees_are_usable(&workspace, &shared_root)
+            .await
+            .expect("a preserved recovery directory must not block dispatch");
     }
 }

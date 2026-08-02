@@ -79,10 +79,12 @@ use utils::{
     log_msg::LogMsg,
     msg_store::MsgStore,
     text::{git_branch_id, short_uuid, truncate_to_char_boundary},
+    worktree_linkage::WorktreeLinkage,
 };
 use uuid::Uuid;
 use workspace_manager::{
-    RepoWorkspaceInput, SharedWorkspacePaths, WorkspaceError, WorkspaceManager,
+    AdoptOutcome, RepoWorkspaceInput, SharedRepositoryStore, SharedWorkspacePaths, WorkspaceError,
+    WorkspaceManager,
 };
 use worktree_manager::RepositoryAdminLockManager;
 
@@ -626,6 +628,13 @@ impl LocalContainerService {
                 repo_name
             )),
             WorkspaceError::PartialCreation(msg) => ContainerError::Other(anyhow!(msg)),
+            WorkspaceError::WorktreeNotPortable { repo_name, detail } => {
+                ContainerError::Other(anyhow!(
+                    "Repository '{}' has a worktree other nodes cannot use: {}",
+                    repo_name,
+                    detail
+                ))
+            }
             WorkspaceError::InvalidSharedRoot(path) => {
                 ContainerError::Other(anyhow!("Invalid shared workspace root: {}", path.display()))
             }
@@ -651,6 +660,12 @@ impl LocalContainerService {
             .map(|wr| (wr.repo_id, wr.target_branch.clone()))
             .collect();
 
+        // Resolve, once and here, which Git directory administers this
+        // workspace's worktrees. Every caller — create, ensure, cleanup, diff —
+        // goes through this function, so the decision is made in one place
+        // rather than re-derived (and eventually disagreed about) per call site.
+        let store = self.shared_repository_store_for(workspace_id).await?;
+
         let workspace_inputs: Vec<RepoWorkspaceInput> = repositories
             .iter()
             .map(|repo| {
@@ -661,11 +676,108 @@ impl LocalContainerService {
                         workspace_id
                     ))
                 })?;
-                Ok(RepoWorkspaceInput::new(repo.clone(), target_branch))
+                Ok(match &store {
+                    Some(store) => RepoWorkspaceInput::shared(
+                        repo.clone(),
+                        target_branch,
+                        store.path_for(repo.id),
+                    ),
+                    None => RepoWorkspaceInput::new(repo.clone(), target_branch),
+                })
             })
             .collect::<Result<_, ContainerError>>()?;
 
         Ok((repositories, workspace_inputs))
+    }
+
+    /// Best-effort repair of one cluster worktree that predates the shared
+    /// store.
+    ///
+    /// Deliberately never fails the caller. Every outcome is either a no-op
+    /// (the common case, once healed), a repair, or a refusal that leaves the
+    /// worktree exactly as it was — and a workspace that cannot be healed is
+    /// still better served by the ordinary `ensure` path reporting its own
+    /// error than by this one masking it.
+    async fn heal_cluster_worktree(
+        &self,
+        store: &SharedRepositoryStore,
+        workspace_dir: &Path,
+        input: &RepoWorkspaceInput,
+        branch: &str,
+    ) {
+        let worktree_path = workspace_dir.join(&input.repo.name);
+        // The store must hold the workspace's branch before anything is
+        // re-pointed at it, or adoption would refuse — correctly, but for a
+        // reason we can fix here by fetching from the checkout that still has
+        // it.
+        if let Err(e) = store.ensure(&input.repo, branch).await {
+            tracing::warn!(
+                repo = %input.repo.name,
+                "could not prepare the shared store while healing {}: {e}",
+                worktree_path.display()
+            );
+            return;
+        }
+        match store.adopt(&input.repo, &worktree_path, branch).await {
+            Ok(AdoptOutcome::AlreadyPortable) => {}
+            Ok(AdoptOutcome::Adopted { common_dir }) => tracing::info!(
+                repo = %input.repo.name,
+                "re-linked {} to {}",
+                worktree_path.display(),
+                common_dir.display()
+            ),
+            Ok(AdoptOutcome::Skipped { reason }) => tracing::info!(
+                repo = %input.repo.name,
+                "left {} alone: {reason}",
+                worktree_path.display()
+            ),
+            Err(e) => tracing::warn!(
+                repo = %input.repo.name,
+                "could not re-link {}: {e}",
+                worktree_path.display()
+            ),
+        }
+    }
+
+    /// The shared repository store this workspace's worktrees belong to, or
+    /// `None` when they belong to the operator's registered checkout.
+    ///
+    /// `None` for every workspace when clustering is disabled, and for a
+    /// `Local` placement when it is enabled — `Local` is a valid terminal state
+    /// meaning "runs on the coordinator", which is what every workspace created
+    /// before clustering has. Every other placement state, `Cleaning` included,
+    /// belongs to the store: a clustered workspace's registrations live there,
+    /// so cleaning it up against the registered checkout would delete the
+    /// directory while unregistering nothing.
+    async fn shared_repository_store_for(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Option<SharedRepositoryStore>, ContainerError> {
+        if !self.cluster_config.enabled {
+            return Ok(None);
+        }
+        let Some(placement) = WorkspacePlacement::find(&self.db.pool, workspace_id).await? else {
+            return Ok(None);
+        };
+        // Exhaustive on purpose: a new placement state must be a compile error
+        // here, not a silent fallthrough to the registered checkout.
+        let uses_shared_store = match placement.placement_state {
+            WorkspacePlacementState::Local => false,
+            WorkspacePlacementState::Reserved
+            | WorkspacePlacementState::Provisioning
+            | WorkspacePlacementState::Ready
+            | WorkspacePlacementState::Failed
+            | WorkspacePlacementState::Cleaning => true,
+        };
+        if !uses_shared_store {
+            return Ok(None);
+        }
+        let store = SharedRepositoryStore::new(
+            &self.cluster_config.shared_root,
+            self.repository_admin_locks.clone(),
+        )
+        .map_err(Self::map_workspace_manager_error)?;
+        Ok(Some(store))
     }
 
     async fn get_child_from_store(&self, id: &Uuid) -> Option<Arc<RwLock<AsyncGroupChild>>> {
@@ -893,11 +1005,21 @@ impl LocalContainerService {
         };
         let workspace_dir = PathBuf::from(container_ref);
 
-        let repositories = WorkspaceRepo::find_repos_for_workspace(&self.db.pool, workspace.id)
-            .await
-            .unwrap_or_default();
+        // Resolve through the same seam creation used, so a clustered
+        // workspace's registrations are removed from the store that holds them.
+        let workspace_inputs = match self.workspace_repo_inputs(workspace.id).await {
+            Ok((_, inputs)) => inputs,
+            Err(e) => {
+                tracing::warn!(
+                    "Could not resolve repositories for workspace {}: {}",
+                    workspace.id,
+                    e
+                );
+                Vec::new()
+            }
+        };
 
-        if repositories.is_empty() {
+        if workspace_inputs.is_empty() {
             tracing::warn!(
                 "No repositories found for workspace {}, cleaning up workspace directory only",
                 workspace.id
@@ -908,7 +1030,7 @@ impl LocalContainerService {
                 tracing::warn!("Failed to remove workspace directory: {}", e);
             }
         } else {
-            WorkspaceManager::cleanup_workspace(&workspace_dir, &repositories)
+            WorkspaceManager::cleanup_workspace(&workspace_dir, &workspace_inputs)
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!(
@@ -2636,6 +2758,27 @@ impl ContainerService for LocalContainerService {
                         state
                     )));
                 }
+                // Heal before ensuring. A workspace created before this change
+                // has worktrees pointing at the coordinator's own checkout, and
+                // `ensure_workspace_exists_fenced` now administers them in the
+                // shared store — where that branch does not yet exist. Left
+                // alone it would take the "branch missing" arm, fail to repair
+                // linkage it cannot see, and fall through to destructive
+                // recreation, deleting exactly the work this change exists to
+                // rescue. Adoption re-links the worktree first, so `ensure`
+                // then finds a healthy worktree on the expected branch and does
+                // nothing.
+                if let Some(store) = self.shared_repository_store_for(workspace.id).await? {
+                    for input in &workspace_inputs {
+                        self.heal_cluster_worktree(
+                            &store,
+                            &workspace_dir,
+                            input,
+                            &workspace.branch,
+                        )
+                        .await;
+                    }
+                }
                 WorkspaceManager::ensure_workspace_exists_fenced(
                     &workspace_dir,
                     &workspace_inputs,
@@ -3623,6 +3766,36 @@ impl ContainerService for LocalContainerService {
     }
 }
 
+/// Fail unless every worktree in `workspace_dir` is backed by a repository that
+/// resolves inside `shared_root`.
+///
+/// Enumerates all of them and reports every violation, rather than stopping at
+/// the first: an operator fixing a multi-repository workspace needs the whole
+/// list, not one entry at a time. `Indeterminate` counts as a violation here
+/// because this runs before a workspace is advertised as ready, and "could not
+/// tell" is not a basis for telling a user their workspace works.
+fn assert_worktrees_are_portable(
+    shared_root: &Path,
+    workspace_dir: &Path,
+    inputs: &[RepoWorkspaceInput],
+) -> Result<(), ContainerError> {
+    let mut violations = Vec::new();
+    for input in inputs {
+        let worktree_path = workspace_dir.join(&input.repo.name);
+        let status = WorktreeLinkage::probe(&worktree_path, shared_root);
+        if !status.is_portable() {
+            violations.push(format!("{}: {}", input.repo.name, status.describe()));
+        }
+    }
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(ContainerError::Other(anyhow!(
+        "worktrees are not usable from other nodes: {}",
+        violations.join("; ")
+    )))
+}
+
 async fn create_cluster_workspace(
     service: &LocalContainerService,
     workspace: &Workspace,
@@ -3657,6 +3830,26 @@ async fn create_cluster_workspace(
         paths.create_base_dirs().await?;
         let workspace_dir = paths.workspace_dir(workspace.id);
         let (repositories, workspace_inputs) = service.workspace_repo_inputs(workspace.id).await?;
+
+        // Materialise the shared store for every repository *before* any
+        // worktree is created from it. Without this the worktree would be
+        // created from the coordinator's own checkout and record a path no
+        // worker can resolve — the defect this exists to close.
+        let store = service
+            .shared_repository_store_for(workspace.id)
+            .await?
+            .ok_or_else(|| {
+                ContainerError::Other(anyhow!(
+                    "Cluster provisioning requires a shared repository store"
+                ))
+            })?;
+        for input in &workspace_inputs {
+            store
+                .ensure(&input.repo, &input.target_branch)
+                .await
+                .map_err(LocalContainerService::map_workspace_manager_error)?;
+        }
+
         let created_workspace = WorkspaceManager::create_workspace_fenced(
             &workspace_dir,
             &workspace_inputs,
@@ -3665,6 +3858,16 @@ async fn create_cluster_workspace(
         )
         .await
         .map_err(LocalContainerService::map_workspace_manager_error)?;
+
+        // Assert portability before this workspace can be advertised as ready.
+        // A workspace whose worktrees a worker cannot use must fail loudly here,
+        // not silently several minutes into an agent's first turn.
+        assert_worktrees_are_portable(
+            paths.root(),
+            &created_workspace.workspace_dir,
+            &workspace_inputs,
+        )?;
+
         service
             .copy_files_and_images(&created_workspace.workspace_dir, workspace)
             .await?;

@@ -57,6 +57,7 @@ jobs:
               - '.github/actions/**'
             backend:
               - 'crates/api-types/**'
+              - 'crates/cluster-protocol/**'
               - 'crates/db/**'
               - 'crates/deployment/**'
               - 'crates/executors/**'
@@ -67,6 +68,9 @@ jobs:
               - 'crates/server/**'
               - 'crates/services/**'
               - 'crates/utils/**'
+              - 'crates/worker/**'
+              - 'crates/workspace-manager/**'
+              - 'crates/worktree-manager/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'shared/**'
