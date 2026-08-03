@@ -8,6 +8,7 @@ members = [
     "crates/relay-types",
     "crates/trusted-key-auth",
     "crates/mcp",
+    "crates/node-metrics",
     "crates/db",
     "crates/executors",
     "crates/services",

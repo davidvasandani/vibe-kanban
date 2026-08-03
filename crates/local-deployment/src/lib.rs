@@ -20,7 +20,10 @@ use services::services::{
     approvals::Approvals,
     auth::AuthContext,
     browser::{BrowserSessionService, BrowserSessionsConfig},
-    cluster::{ClusterConfig, ExecutionReconciler, WorkerClient, WorkerRegistry, WorkerScheduler},
+    cluster::{
+        ClusterConfig, ClusterMetricsService, ExecutionReconciler, WorkerClient, WorkerRegistry,
+        WorkerScheduler,
+    },
     config::{Config, load_config_from_file, save_config_to_file},
     container::ContainerService,
     events::EventService,
@@ -81,6 +84,7 @@ pub struct LocalDeployment {
     worker_registry: WorkerRegistry,
     worker_scheduler: WorkerScheduler,
     worker_client: Option<WorkerClient>,
+    cluster_metrics: Arc<ClusterMetricsService>,
     relay_hosts: Option<Arc<RelayHosts>>,
     shutdown: CancellationToken,
     webrtc_host: OnceLock<Arc<WebRtcHost>>,
@@ -270,6 +274,12 @@ impl Deployment for LocalDeployment {
         } else {
             None
         };
+        // Read-only observability. The local sampler runs unconditionally (one
+        // `/proc` read per tick); the worker collector only runs while a drawer
+        // is open, so an idle cluster issues zero `GET /v1/metrics` requests.
+        let cluster_metrics =
+            ClusterMetricsService::new(db.pool.clone(), &cluster_config, worker_client.clone());
+        cluster_metrics.spawn_local_sampler(shutdown.child_token());
         let relay_control = Arc::new(RelayControl::new());
         let client_info = ClientInfo::new();
         let preview_proxy = PreviewProxyService::new();
@@ -387,6 +397,7 @@ impl Deployment for LocalDeployment {
             worker_registry,
             worker_scheduler,
             worker_client,
+            cluster_metrics,
             relay_hosts,
             shutdown,
             webrtc_host: OnceLock::new(),
@@ -492,6 +503,10 @@ impl Deployment for LocalDeployment {
 
     fn worker_client(&self) -> Option<&WorkerClient> {
         self.worker_client.as_ref()
+    }
+
+    fn cluster_metrics(&self) -> &Arc<ClusterMetricsService> {
+        &self.cluster_metrics
     }
 
     fn relay_hosts(&self) -> Result<&Arc<RelayHosts>, RelayHostsNotConfigured> {

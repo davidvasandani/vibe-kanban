@@ -75,6 +75,21 @@ fn generate_types_content() -> String {
         db::models::worker_node::WorkerNode::decl(),
         db::models::worker_node::WorkerNodeStatus::decl(),
         db::models::worker_node::WorkerMountStatus::decl(),
+        // Cluster metrics. `node-metrics` is a leaf crate with no database or
+        // HTTP dependency; the coordinator-side aggregation types that wrap it
+        // live in `services`.
+        node_metrics::CpuSample::decl(),
+        node_metrics::MemorySample::decl(),
+        node_metrics::FilesystemSample::decl(),
+        node_metrics::NetworkSample::decl(),
+        node_metrics::ProcessSample::decl(),
+        node_metrics::HostSample::decl(),
+        node_metrics::SampleBatch::decl(),
+        node_metrics::NodeRole::decl(),
+        node_metrics::NodeMetricsAvailability::decl(),
+        services::services::cluster::NodeHealth::decl(),
+        services::services::cluster::MetricsNode::decl(),
+        services::services::cluster::ClusterMetricsSnapshot::decl(),
         db::models::session::Session::decl(),
         db::models::execution_process::ExecutionProcess::decl(),
         db::models::execution_process::ExecutionProcessStatus::decl(),

@@ -18,6 +18,7 @@ use cluster_protocol::{
     TerminalInput, TerminalOutputBatch, TerminalResize,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
+use node_metrics::{MetricsSampler, SampleBatch};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -50,10 +51,23 @@ struct WorkerApiState {
     seen_nonces: Arc<Mutex<HashMap<String, tokio::time::Instant>>>,
     terminals: TerminalService,
     preview: PreviewService,
+    /// Host metrics for this worker. Read-only from every route's point of
+    /// view: nothing on this path can influence a lease, a job, or the
+    /// worker's liveness (constitution XIX).
+    metrics: Arc<MetricsSampler>,
 }
 
 #[derive(Debug, Deserialize)]
 struct EventsQuery {
+    #[serde(default)]
+    after: u64,
+}
+
+/// The metrics cursor. Defaulted rather than required so an omitted `after` is
+/// a cold read rather than a `400` — the signature already covers the query
+/// string, so a client cannot vary this without re-signing.
+#[derive(Debug, Deserialize)]
+struct MetricsQuery {
     #[serde(default)]
     after: u64,
 }
@@ -74,6 +88,7 @@ struct Acknowledged {
 pub async fn router(
     config: &WorkerConfig,
     supervisor: ExecutionSupervisor,
+    metrics: Arc<MetricsSampler>,
 ) -> anyhow::Result<Router> {
     let coordinator_key = load_verifying_key(&config.coordinator_public_key_file).await?;
     let path_authority = PathAuthority::new(&config.shared_root)?;
@@ -85,9 +100,18 @@ pub async fn router(
         seen_nonces: Arc::new(Mutex::new(HashMap::new())),
         terminals: TerminalService::new(path_authority),
         preview: PreviewService::new(),
+        metrics,
     };
-    Ok(Router::new()
+    Ok(build_router(state))
+}
+
+/// Route table and middleware stack, split out so tests exercise the exact
+/// wiring the binary uses — in particular that `/v1/metrics` sits *inside* the
+/// `require_signature` layer rather than beside it.
+fn build_router(state: WorkerApiState) -> Router {
+    Router::new()
         .route("/v1/jobs", get(inventory))
+        .route("/v1/metrics", get(metrics))
         .route("/v1/terminals", post(create_terminal))
         .route("/v1/terminals/{terminal_id}/output", get(terminal_output))
         .route("/v1/terminals/{terminal_id}/input", post(terminal_input))
@@ -111,7 +135,7 @@ pub async fn router(
         )
         .route("/v1/executions/{execution_id}/quarantine", post(quarantine))
         .layer(from_fn_with_state(state.clone(), require_signature))
-        .with_state(state))
+        .with_state(state)
 }
 
 async fn proxy_preview_ws(
@@ -257,6 +281,20 @@ async fn close_terminal(
 
 async fn inventory(State(state): State<WorkerApiState>) -> Json<Vec<JobSummary>> {
     Json(state.supervisor.inventory().await)
+}
+
+/// Host metrics since `after`.
+///
+/// Shaped exactly like [`inventory`]: a bodyless signed `GET` with no
+/// payload-level [`RequestAuthority`], because there is no body to bind one to.
+/// Transport signature plus timestamp drift is the whole authentication story,
+/// and the signature covers `?after=`, so a captured signature cannot be reused
+/// against a different cursor.
+async fn metrics(
+    State(state): State<WorkerApiState>,
+    Query(query): Query<MetricsQuery>,
+) -> Json<SampleBatch> {
+    Json(state.metrics.since(query.after))
 }
 
 async fn dispatch(
@@ -501,8 +539,10 @@ impl IntoResponse for WorkerApiError {
 
 #[cfg(test)]
 mod tests {
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer, SigningKey};
+    use node_metrics::types::SamplerConfig;
     use tempfile::TempDir;
+    use tower::ServiceExt;
 
     use super::*;
 
@@ -515,5 +555,125 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(load_verifying_key(&path).await.unwrap(), expected);
+    }
+
+    fn coordinator_key() -> SigningKey {
+        SigningKey::from_bytes(&[7_u8; 32])
+    }
+
+    /// The real route table with a hand-built state, so these cases test the
+    /// production wiring rather than a parallel router assembled in the test.
+    fn metrics_router(temp: &TempDir, sampler: Arc<MetricsSampler>) -> Router {
+        let state = WorkerApiState {
+            supervisor: ExecutionSupervisor::new(
+                PathAuthority::new(temp.path()).expect("shared root"),
+            ),
+            worker_node_id: Uuid::new_v4(),
+            coordinator_id: Uuid::new_v4(),
+            coordinator_key: coordinator_key().verifying_key(),
+            seen_nonces: Arc::new(Mutex::new(HashMap::new())),
+            terminals: TerminalService::new(PathAuthority::new(temp.path()).expect("shared root")),
+            preview: PreviewService::new(),
+            metrics: sampler,
+        };
+        build_router(state)
+    }
+
+    /// Builds the same envelope `WorkerClient::signed` emits: unix-epoch
+    /// seconds as a decimal string, the digest of the empty body, and a
+    /// signature over `{timestamp}.{METHOD}.{path_and_query}.{digest}`.
+    fn signed_get(request_target: &str, signed_target: &str, timestamp: i64) -> Request<Body> {
+        let digest = BASE64_STANDARD.encode(Sha256::digest([]));
+        let message = format!("{timestamp}.GET.{signed_target}.{digest}");
+        let signature = coordinator_key().sign(message.as_bytes());
+        Request::builder()
+            .method("GET")
+            .uri(request_target)
+            .header(TIMESTAMP_HEADER, timestamp.to_string())
+            .header(CONTENT_DIGEST_HEADER, digest)
+            .header(
+                SIGNATURE_HEADER,
+                BASE64_STANDARD.encode(signature.to_bytes()),
+            )
+            .body(Body::empty())
+            .expect("request builds")
+    }
+
+    async fn status_of(router: Router, request: Request<Body>) -> StatusCode {
+        router
+            .oneshot(request)
+            .await
+            .expect("router responds")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn metrics_rejects_an_unsigned_request() {
+        let temp = TempDir::new().unwrap();
+        let router = metrics_router(
+            &temp,
+            Arc::new(MetricsSampler::new(SamplerConfig::default())),
+        );
+        let request = Request::builder()
+            .method("GET")
+            .uri("/v1/metrics?after=0")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status_of(router, request).await, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The cursor is inside the signed string, so a captured signature cannot
+    /// be replayed against a different `after` to fish out samples the
+    /// coordinator never asked for.
+    #[tokio::test]
+    async fn metrics_rejects_a_signature_over_a_different_cursor() {
+        let temp = TempDir::new().unwrap();
+        let router = metrics_router(
+            &temp,
+            Arc::new(MetricsSampler::new(SamplerConfig::default())),
+        );
+        let request = signed_get(
+            "/v1/metrics?after=9",
+            "/v1/metrics?after=0",
+            Utc::now().timestamp(),
+        );
+        assert_eq!(status_of(router, request).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn metrics_rejects_a_stale_timestamp() {
+        let temp = TempDir::new().unwrap();
+        let router = metrics_router(
+            &temp,
+            Arc::new(MetricsSampler::new(SamplerConfig::default())),
+        );
+        let stale = Utc::now().timestamp() - (MAX_TIMESTAMP_DRIFT_SECONDS + 5);
+        let request = signed_get("/v1/metrics?after=0", "/v1/metrics?after=0", stale);
+        assert_eq!(status_of(router, request).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn metrics_returns_only_samples_after_the_cursor() {
+        let temp = TempDir::new().unwrap();
+        let sampler = Arc::new(MetricsSampler::new(SamplerConfig::default()));
+        for _ in 0..3 {
+            sampler.sample_now().expect("sample");
+        }
+        let router = metrics_router(&temp, sampler);
+        let request = signed_get(
+            "/v1/metrics?after=2",
+            "/v1/metrics?after=2",
+            Utc::now().timestamp(),
+        );
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), MAX_SIGNED_BODY_BYTES)
+            .await
+            .expect("body");
+        let batch: SampleBatch = serde_json::from_slice(&body).expect("SampleBatch");
+        let sequences: Vec<u64> = batch.samples.iter().map(|sample| sample.sequence).collect();
+        assert_eq!(sequences, vec![3]);
+        assert_eq!(batch.latest_sequence, 3);
     }
 }

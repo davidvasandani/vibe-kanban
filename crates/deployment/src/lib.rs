@@ -18,7 +18,9 @@ use services::services::{
     approvals::Approvals,
     auth::AuthContext,
     browser::BrowserSessionService,
-    cluster::{ClusterConfig, WorkerClient, WorkerRegistry, WorkerScheduler},
+    cluster::{
+        ClusterConfig, ClusterMetricsService, WorkerClient, WorkerRegistry, WorkerScheduler,
+    },
     config::{Config, ConfigError},
     container::{ContainerError, ContainerService},
     events::{EventError, EventService},
@@ -129,6 +131,10 @@ pub trait Deployment: Clone + Send + Sync + 'static {
     fn worker_scheduler(&self) -> &WorkerScheduler;
 
     fn worker_client(&self) -> Option<&WorkerClient>;
+
+    /// Read-only host metrics for the cluster. Nothing reachable through this
+    /// handle writes scheduling, liveness, lease, or lifecycle state.
+    fn cluster_metrics(&self) -> &Arc<ClusterMetricsService>;
 
     fn relay_hosts(&self) -> Result<&Arc<RelayHosts>, RelayHostsNotConfigured> {
         Err(RelayHostsNotConfigured)

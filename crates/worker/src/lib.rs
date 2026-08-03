@@ -1,6 +1,7 @@
-use std::{net::SocketAddr, path::PathBuf, str::FromStr};
+use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
 
 use axum::{Json, Router, routing::get};
+use node_metrics::{MetricsSampler, types::SamplerConfig};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -175,6 +176,20 @@ pub async fn run(config: WorkerConfig, shutdown: CancellationToken) -> anyhow::R
         supervisor.clone(),
         shutdown.child_token(),
     ));
+    // Host metrics sample continuously, independently of the registration and
+    // heartbeat loop: the sampler feeds `GET /v1/metrics` only and is not part
+    // of the evidence channel. The ticker holds a `Weak`, so this `Arc` and the
+    // shutdown signal are jointly what keep it alive.
+    let metrics = Arc::new(MetricsSampler::new(SamplerConfig::default()));
+    let metrics_task = {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let shutdown = shutdown.child_token();
+        tokio::spawn(async move {
+            shutdown.cancelled().await;
+            let _ = tx.send(true);
+        });
+        MetricsSampler::spawn(&metrics, rx)
+    };
     let worker_node_id = config.worker_node_id;
     let router = Router::new()
         .route(
@@ -186,7 +201,7 @@ pub async fn run(config: WorkerConfig, shutdown: CancellationToken) -> anyhow::R
                 })
             }),
         )
-        .merge(worker_api::router(&config, supervisor).await?);
+        .merge(worker_api::router(&config, supervisor, metrics.clone()).await?);
     let listener = TcpListener::bind(config.listen_addr).await?;
     tracing::info!(
         worker_node_id = %config.worker_node_id,
@@ -199,6 +214,7 @@ pub async fn run(config: WorkerConfig, shutdown: CancellationToken) -> anyhow::R
         .with_graceful_shutdown(shutdown.cancelled_owned())
         .await?;
     coordinator_task.abort();
+    metrics_task.abort();
     Ok(())
 }
 
