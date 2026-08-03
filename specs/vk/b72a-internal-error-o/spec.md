@@ -92,6 +92,20 @@ fetch trying to recover the missing branch — a long unexplained wait.
   registered checkout's freshness, which is the freshness the branch picker
   already showed the user; no new network fetch is added to the create path
   (see [`clarifications.md`](clarifications.md) C2).
+- **A *local* target branch still short-circuits `ensure` and can go stale.**
+  Pre-existing behaviour, unchanged here: once the store holds
+  `refs/heads/main`, later provisionings return early and never refresh it. This
+  work fixes the remote-tracking case (the default, and the reported one) and
+  deliberately leaves the local case alone — closing it means taking the
+  administration lease on every `ensure`, which is a different change with a
+  different risk profile.
+- **The heads mirror is refused once any workspace exists.** `git fetch` will
+  not write `refs/heads/vk/…` while a worktree has it checked out, so
+  `+refs/heads/*:refs/heads/*` fails in the steady state. That is pre-existing
+  (#174 shipped it) and is why the two mirrors must be separate invocations —
+  see [`analysis.md`](analysis.md) R1. Making the heads mirror itself work is
+  out of scope, and force-updating a branch a live workspace is sitting on would
+  need its own design.
 
 ## Acceptance Criteria
 

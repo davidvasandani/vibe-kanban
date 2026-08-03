@@ -181,7 +181,15 @@ impl SharedRepositoryStore {
                 reason: format!("no shared store at {} to adopt into", store.display()),
             });
         }
-        if !Self::branch_commit_present(&cli, &store, branch)? {
+        // A *local* head, specifically. `write_linkage` below writes
+        // `ref: refs/heads/{branch}` into the worktree's HEAD, so a guard
+        // satisfied by a same-named remote-tracking ref would point a live
+        // worktree at an unborn branch — and the `git reset -q` that follows
+        // would then clear the index instead of rebuilding it, making every
+        // tracked file in someone's work-in-progress read as deleted, while
+        // this function reported `Adopted`. The guard and the mutation must
+        // agree on what "present" means.
+        if !Self::local_branch_commit_present(&cli, &store, branch)? {
             return Ok(AdoptOutcome::Skipped {
                 reason: format!(
                     "branch '{branch}' and its commits are not present in {}; \
@@ -332,42 +340,84 @@ impl SharedRepositoryStore {
         // Deliberately *not* done by giving the store its own `origin` fetch
         // refspec: `configure` retargets `origin` at the forge, so a store that
         // populated `refs/remotes/origin/*` itself would carry a second,
-        // differently-fresh notion of `origin/main`. `git clone --bare` creates
-        // no `refs/remotes/*` at all, so there is nothing here to shadow.
+        // differently-fresh notion of `origin/main`.
         //
-        // Additive: force-update, never `--prune`. This namespace is shared by
-        // every workspace of this repository on every node.
-        if let Err(e) = cli.fetch_with_refspecs(
-            store,
-            &repo.path.to_string_lossy(),
-            &[
-                "+refs/heads/*:refs/heads/*",
-                "+refs/remotes/*:refs/remotes/*",
-            ],
-        ) {
-            debug!(
-                repo = %repo.name,
-                "could not refresh the shared store from the registered checkout: {e}"
-            );
+        // Two invocations, not one, and this is load-bearing rather than
+        // stylistic. `git fetch` is atomic across its refspecs, and the heads
+        // mirror is *routinely* refused: once any workspace exists, the store
+        // has a worktree checked out on `vk/…`, and `mirror_branch_back` has
+        // pushed that same branch into the checkout, so the heads refspec hits
+        // `refusing to fetch into branch '…' checked out at …` and aborts the
+        // whole command. Batched, that refusal would silently discard the
+        // remote-tracking mirror — the one this change exists to add — for every
+        // repository that already has a workspace. Separately, each namespace
+        // fails on its own and the other still lands.
+        //
+        // Additive: force-update, never `--prune`. These namespaces are shared
+        // by every workspace of this repository on every node.
+        for refspec in [
+            "+refs/heads/*:refs/heads/*",
+            "+refs/remotes/*:refs/remotes/*",
+        ] {
+            if let Err(e) = cli.fetch_with_refspec(store, &repo.path.to_string_lossy(), refspec) {
+                debug!(
+                    repo = %repo.name,
+                    "could not mirror {refspec} from the registered checkout: {e}"
+                );
+            }
         }
+        // Why a fetch could not be attempted, if any was tried and failed. The
+        // refusal at the end reads very differently when it is "the branch is
+        // not there" versus "we never managed to ask".
+        let mut failed_remotes: Vec<String> = Vec::new();
         if !Self::branch_commit_present(&cli, store, target_branch)?
             && let Ok(remotes) = cli.list_remotes(store)
         {
             // The checkout mirror above covers the ordinary case. This reaches
             // the real forge for the one it does not: a branch that exists
             // upstream and that the coordinator's checkout has never fetched.
+            // If the target branch is prefixed with a remote's name, only that
+            // remote can hold it. Asking the others would send the
+            // local-to-local form — `+refs/heads/upstream/main:refs/heads/upstream/main`
+            // to `origin` — and if that remote happens to hold a branch
+            // literally named `upstream/main`, it lands as a *local* head in the
+            // shared store, where local-first resolution then prefers it forever,
+            // at the wrong commit, for every workspace on every node.
+            let owning_remote = remotes
+                .iter()
+                .find(|(name, _)| target_branch.starts_with(&format!("{name}/")))
+                .map(|(name, _)| name.clone());
+            let mut fetch_failures = Vec::new();
             for (name, url) in remotes {
                 if name == REGISTERED_REMOTE {
                     continue;
                 }
+                if let Some(owner) = &owning_remote
+                    && &name != owner
+                {
+                    continue;
+                }
                 let refspec = Self::fallback_refspec(&name, target_branch);
-                let _ = cli.fetch_with_refspec(store, &url, &refspec);
+                // Recorded, not discarded. The refusal below asserts the branch
+                // is not present; if the only attempt to obtain it never ran —
+                // expired forge credentials, an unreachable host,
+                // `GIT_TERMINAL_PROMPT=0` declining a prompt — then that
+                // assertion misdirects the very investigation this message
+                // exists to shorten.
+                if let Err(e) = cli.fetch_with_refspec(store, &url, &refspec) {
+                    debug!(
+                        repo = %repo.name,
+                        "could not fetch '{target_branch}' from remote '{name}': {e}"
+                    );
+                    fetch_failures.push(format!("{name}: {e}"));
+                }
                 // A zero exit is not evidence that the ref we need now exists;
                 // ask the store.
                 if Self::branch_commit_present(&cli, store, target_branch)? {
                     break;
                 }
             }
+            failed_remotes = fetch_failures;
         }
 
         match Self::resolved_branch_ref(&cli, store, target_branch)? {
@@ -382,11 +432,20 @@ impl SharedRepositoryStore {
             None => Err(WorkspaceError::SharedStore {
                 repo_name: repo.name.clone(),
                 branch: target_branch.to_string(),
-                detail: format!(
-                    "no branch of that name is present in {}, as either a local \
-                     or a remote-tracking ref",
-                    store.display()
-                ),
+                detail: if failed_remotes.is_empty() {
+                    format!(
+                        "no branch of that name is present in {}, as either a \
+                         local or a remote-tracking ref",
+                        store.display()
+                    )
+                } else {
+                    format!(
+                        "no branch of that name is present in {}, and fetching \
+                         it failed ({})",
+                        store.display(),
+                        failed_remotes.join("; ")
+                    )
+                },
             }),
         }
     }
@@ -472,7 +531,13 @@ impl SharedRepositoryStore {
     fn mirror_branch_back(&self, repo: &Repo, branch: &str) -> Result<(), WorkspaceError> {
         let store = self.path_for(repo.id);
         let cli = GitCli::new();
-        if !Self::branch_commit_present(&cli, &store, branch).unwrap_or(false) {
+        // Local heads only: `GitCli::push` sends
+        // `refs/heads/{branch}:refs/heads/{branch}`, so a match on a
+        // remote-tracking ref would spawn a push whose source ref does not
+        // exist — a guaranteed failure, once per repository per provisioning,
+        // swallowed into a debug line. There is also nothing to mirror back: a
+        // remote-tracking ref came *from* the checkout.
+        if !Self::local_branch_commit_present(&cli, &store, branch).unwrap_or(false) {
             return Ok(());
         }
         if let Err(e) = cli.push(&store, &repo.path.to_string_lossy(), branch, false) {
@@ -484,11 +549,25 @@ impl SharedRepositoryStore {
         Ok(())
     }
 
+    /// Whether `ensure` can return without doing anything.
+    ///
+    /// Local heads only, and this is the difference between a fresh workspace
+    /// and a silently stale one. A remote-tracking ref is a copy of a branch
+    /// that moves upstream: once `refs/remotes/origin/main` exists, accepting it
+    /// here would skip the mirror on every later provisioning and freeze the
+    /// store at whatever commit the first one captured — so every workspace
+    /// after the first would branch from a stale target while the picker showed
+    /// the current one. Since `origin/main` is the default target branch, that
+    /// would be the common case, not the corner.
+    ///
+    /// A local head still short-circuits, exactly as before this change. That
+    /// carries its own staleness for a local target branch, which is pre-existing
+    /// behaviour and deliberately left alone here.
     fn store_resolves(store: &Path, branch: &str) -> Result<bool, WorkspaceError> {
         if !Self::is_store(store)? {
             return Ok(false);
         }
-        Self::branch_commit_present(&GitCli::new(), store, branch)
+        Self::local_branch_commit_present(&GitCli::new(), store, branch)
     }
 
     /// A directory is a store only if it holds an object database. An empty or
@@ -515,6 +594,14 @@ impl SharedRepositoryStore {
     /// a ref that names an object the store does not hold is not a branch this
     /// store can serve. Reusing one probe also keeps one failure direction —
     /// `CommandFailed` means absent, anything else propagates.
+    ///
+    /// The two refs are spelled out rather than left to git's own revision
+    /// precedence, which would resolve the bare name for us. That precedence is
+    /// wider than `find_branch`: it also accepts `refs/tags/<name>` and
+    /// `refs/<name>`, so a repository with a tag named `main` would resolve a
+    /// target branch `main` to the tag. Naming the two namespaces keeps this
+    /// answering the same question `find_branch` answers, which is what
+    /// `branch_resolution_agrees_with_git_services_branch_lookup` pins.
     fn resolved_branch_ref(
         cli: &GitCli,
         store: &Path,
@@ -540,6 +627,23 @@ impl SharedRepositoryStore {
         branch: &str,
     ) -> Result<bool, WorkspaceError> {
         Ok(Self::resolved_branch_ref(cli, store, branch)?.is_some())
+    }
+
+    /// Whether the store holds `branch` as a **local head** specifically.
+    ///
+    /// Distinct from [`Self::branch_commit_present`], and the distinction
+    /// matters in three places. A remote-tracking ref is a *copy* of something
+    /// that moves upstream, so it is never evidence that this store is up to
+    /// date; a workspace branch is always a local head, so anything that acts on
+    /// one — pushing it back to the checkout, re-linking a worktree to it — must
+    /// not be satisfied by a same-named remote-tracking ref.
+    fn local_branch_commit_present(
+        cli: &GitCli,
+        store: &Path,
+        branch: &str,
+    ) -> Result<bool, WorkspaceError> {
+        Ok(Self::resolved_branch_ref(cli, store, branch)?
+            .is_some_and(|reference| reference.starts_with("refs/heads/")))
     }
 
     /// A branch may be checked out by at most one worktree. Adopting a branch
@@ -1051,9 +1155,6 @@ mod tests {
         // A second commit reachable only from origin/main, so a test that
         // silently substituted the local `main` would resolve to a different
         // commit and be caught.
-        cli()
-            .set_config(path, "user.email", "test@vibekanban.invalid")
-            .unwrap();
         fs::write(path.join("upstream.txt"), "from upstream\n").unwrap();
         cli().add_all(path).unwrap();
         cli().commit(path, "upstream commit").unwrap();
@@ -1153,6 +1254,170 @@ mod tests {
         }
     }
 
+    /// The steady state, which is where the first version of this fix silently
+    /// stopped working.
+    ///
+    /// Once a workspace exists, the store has a worktree checked out on its
+    /// branch and `mirror_branch_back` has pushed that branch into the
+    /// checkout. `git fetch` then refuses `+refs/heads/*:refs/heads/*` with
+    /// `refusing to fetch into branch '…' checked out at …` — and `git fetch`
+    /// is atomic across refspecs, so batching the remote-tracking mirror into
+    /// the same invocation made it fail wholesale for every repository that
+    /// already had a workspace. The fix works on the first workspace either
+    /// way; only this test tells the two apart.
+    #[tokio::test]
+    async fn the_remote_tracking_mirror_survives_a_checked_out_branch() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let checkout = fixture.path().join("srv-src").join("repo");
+        fs::create_dir_all(&shared_root).unwrap();
+        seed_checkout_with_remote(&checkout);
+        let repo = repo_record("repo", &checkout);
+
+        let store_handle = store_with_locks(&shared_root).await;
+        let store = store_handle.ensure(&repo, "origin/main").await.unwrap();
+
+        // A live workspace: a branch in the store, checked out by a worktree,
+        // and present in the checkout too — exactly what `mirror_branch_back`
+        // produces.
+        git::GitService::new()
+            .create_branch(&store, "vk/live", "origin/main")
+            .unwrap();
+        let worktree = shared_root.join("workspaces").join("live").join("repo");
+        fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        cli()
+            .worktree_add(&store, &worktree, "vk/live", false)
+            .unwrap();
+        cli()
+            .git(&checkout, ["update-ref", "refs/heads/vk/live", "HEAD"])
+            .unwrap();
+
+        // The checkout's origin/main moves on, as it does when git-projects
+        // refreshes it.
+        fs::write(checkout.join("later.txt"), "later\n").unwrap();
+        cli().add_all(&checkout).unwrap();
+        cli().commit(&checkout, "upstream moves on").unwrap();
+        cli()
+            .git(
+                &checkout,
+                ["update-ref", "refs/remotes/origin/main", "HEAD"],
+            )
+            .unwrap();
+        let moved = cli()
+            .resolve_commit(&checkout, "refs/remotes/origin/main")
+            .unwrap()
+            .unwrap();
+
+        store_handle.ensure(&repo, "origin/main").await.unwrap();
+
+        assert_eq!(
+            cli()
+                .resolve_commit(&store, "refs/remotes/origin/main")
+                .unwrap()
+                .unwrap(),
+            moved,
+            "the remote-tracking mirror must still land while a branch is checked out"
+        );
+    }
+
+    /// A store that resolves the target branch must not therefore stop
+    /// refreshing it. A remote-tracking ref is a copy of something that moves.
+    #[tokio::test]
+    async fn a_moved_target_branch_is_picked_up_by_the_next_provisioning() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let checkout = fixture.path().join("srv-src").join("repo");
+        fs::create_dir_all(&shared_root).unwrap();
+        seed_checkout_with_remote(&checkout);
+        let repo = repo_record("repo", &checkout);
+
+        let store_handle = store_with_locks(&shared_root).await;
+        let store = store_handle.ensure(&repo, "origin/main").await.unwrap();
+        let first = cli()
+            .resolve_commit(&store, "refs/remotes/origin/main")
+            .unwrap()
+            .unwrap();
+
+        fs::write(checkout.join("newer.txt"), "newer\n").unwrap();
+        cli().add_all(&checkout).unwrap();
+        cli().commit(&checkout, "upstream advances").unwrap();
+        cli()
+            .git(
+                &checkout,
+                ["update-ref", "refs/remotes/origin/main", "HEAD"],
+            )
+            .unwrap();
+
+        store_handle.ensure(&repo, "origin/main").await.unwrap();
+
+        let second = cli()
+            .resolve_commit(&store, "refs/remotes/origin/main")
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            second, first,
+            "the second workspace would otherwise branch from a frozen commit \
+             while the picker showed the current one"
+        );
+        assert_eq!(
+            second,
+            cli()
+                .resolve_commit(&checkout, "refs/remotes/origin/main")
+                .unwrap()
+                .unwrap()
+        );
+    }
+
+    /// `adopt` rewrites a live worktree's HEAD to `refs/heads/{branch}`, so a
+    /// same-named remote-tracking ref must not satisfy its guard — the reset
+    /// that follows would clear the index rather than rebuild it.
+    #[tokio::test]
+    async fn adopt_refuses_a_branch_that_is_only_a_remote_tracking_ref() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let node_local = fixture.path().join("srv-src");
+        fs::create_dir_all(&shared_root).unwrap();
+        fs::create_dir_all(&node_local).unwrap();
+
+        let repo_path = node_local.join("repo");
+        seed_repo(&repo_path);
+        let repo = repo_record("repo", &repo_path);
+        let store = shared_root.join("repositories").join(repo.id.to_string());
+        fs::create_dir_all(store.parent().unwrap()).unwrap();
+        cli().clone_bare(&repo_path, &store).unwrap();
+        // The store knows `origin/wip` only as a remote-tracking ref.
+        cli()
+            .git(&store, ["update-ref", "refs/remotes/origin/wip", "main"])
+            .unwrap();
+
+        let workspace = shared_root.join("workspaces").join("ws-1");
+        let worktree = workspace.join("repo");
+        fs::create_dir_all(&workspace).unwrap();
+        git::GitService::new()
+            .create_branch(&repo_path, "origin/wip", "main")
+            .unwrap();
+        cli()
+            .worktree_add(&repo_path, &worktree, "origin/wip", false)
+            .unwrap();
+        fs::write(worktree.join("agent-work.txt"), "irreplaceable\n").unwrap();
+        fs::rename(&repo_path, node_local.join("moved-away")).unwrap();
+
+        let outcome = store_for(&shared_root)
+            .adopt(&repo, &worktree, "origin/wip")
+            .await
+            .unwrap();
+
+        match outcome {
+            AdoptOutcome::Skipped { reason } => assert!(reason.contains("not present"), "{reason}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(worktree.join("agent-work.txt")).unwrap(),
+            "irreplaceable\n",
+            "a refusal must leave the working tree untouched"
+        );
+    }
+
     /// The store must answer "does this name a branch here?" the same way
     /// `GitService::find_branch` does — local first, then remote-tracking — or
     /// it cannot serve the branches the rest of the product already accepted.
@@ -1209,6 +1474,35 @@ mod tests {
                 "the two resolvers disagree about '{branch}'"
             );
         }
+    }
+
+    /// Spelling out the two namespaces is not redundant with git's own revision
+    /// precedence. That precedence also accepts `refs/tags/<name>`, so
+    /// delegating to it would let a tag stand in for a branch — which
+    /// `GitService::find_branch` never does, and which would put a workspace on
+    /// a base that is not a branch at all.
+    #[test]
+    fn a_tag_is_not_a_branch() {
+        let fixture = TempDir::new().unwrap();
+        let checkout = fixture.path().join("repo");
+        seed_repo(&checkout);
+        cli().git(&checkout, ["tag", "only-a-tag", "HEAD"]).unwrap();
+
+        assert!(
+            cli().commit_exists(&checkout, "only-a-tag").unwrap(),
+            "precondition: git's bare-name precedence does resolve the tag"
+        );
+        assert_eq!(
+            SharedRepositoryStore::resolved_branch_ref(&cli(), &checkout, "only-a-tag").unwrap(),
+            None,
+            "a tag must not satisfy a target branch"
+        );
+        assert!(
+            !git::GitService::new()
+                .check_branch_exists(&checkout, "only-a-tag")
+                .unwrap(),
+            "and the rule being matched agrees"
+        );
     }
 
     #[test]

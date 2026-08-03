@@ -121,3 +121,108 @@ against their current contents, which hold `refs/heads/*` only.
 E1, E2, W1 and W2 are folded into `tasks.md` as T012a, T013a, T015a and an
 amendment to T005 before implementation begins. I1–I4 are recorded, not acted
 on.
+
+---
+
+# Post-implementation review round
+
+Codex CLI is not installed on this worker and no `codex-review` skill is
+registered, so the independent pass was run as five parallel reviewers (a
+line-by-line diff scan, a removed-behaviour audit, a cross-file tracer, a
+reuse/simplification/efficiency/conventions pass, and an adversarial reviewer
+briefed to refute the change). Substituting them is recorded here rather than
+claimed as a Codex run.
+
+Four of the five converged on the same defects. All were in the change, not in
+the diagnosis.
+
+### R1 — the fix silently stopped working after the first workspace *(fixed)*
+
+`git fetch` is **atomic across its refspecs**. Batching
+`+refs/heads/*:refs/heads/*` with `+refs/remotes/*:refs/remotes/*` meant that
+when the heads refspec was refused, the whole command aborted and wrote
+nothing — including the remote-tracking mirror this change exists to add.
+
+And the heads refspec is refused in the *steady state*, not a corner: once a
+workspace exists the store has a worktree checked out on `vk/…`, and
+`mirror_branch_back` has pushed that branch into the checkout, so git answers
+`refusing to fetch into branch 'refs/heads/vk/…' checked out at …` (exit 128).
+Reproduced on git 2.54.0.
+
+So the first workspace of a repository would have worked and every later one
+would have fallen back to a forge fetch — reintroducing the reported failure
+with a nicer message. The `fetch_with_refspecs` helper added in T002 was
+reverted; the two mirrors are now separate invocations with independent
+error handling, and `fetch_with_refspec`'s doc comment states why.
+Pinned by `the_remote_tracking_mirror_survives_a_checked_out_branch`.
+
+### R2 — the store froze at the first commit it learned *(fixed)*
+
+Widening `branch_commit_present` also widened `store_resolves`, which is
+`ensure`'s early return. Once `refs/remotes/origin/main` existed, every later
+`ensure` short-circuited before the mirror — so workspaces 2..N branched from
+whatever commit the first one captured, while the picker showed the current
+one. Silent, and `origin/main` is the default, so it would have been the common
+case.
+
+`store_resolves` now requires a *local head*: a remote-tracking ref is a copy of
+something that moves and is never evidence the store is current. Pinned by
+`a_moved_target_branch_is_picked_up_by_the_next_provisioning`.
+
+### R3 — `adopt` could have emptied a live worktree's index *(fixed)*
+
+`adopt`'s pre-mutation guard used the widened predicate, but `write_linkage`
+writes `ref: refs/heads/{branch}`. A workspace branch matching only a
+remote-tracking ref would have been adopted onto an unborn HEAD, and the
+`git reset -q` that follows would have cleared the index instead of rebuilding
+it — every tracked file in someone's work-in-progress reading as deleted, while
+the function reported `Adopted`. Exactly the "half-adopted worktree ... looks
+repaired" outcome its own comment says must be impossible.
+
+The guard now requires a local head, so it agrees with the mutation. Pinned by
+`adopt_refuses_a_branch_that_is_only_a_remote_tracking_ref`.
+
+### R4 — a guaranteed-failing push per provisioning *(fixed)*
+
+`mirror_branch_back` was gated by the widened predicate but pushes
+`refs/heads/{branch}:refs/heads/{branch}`. For `origin/main` it spawned a push
+whose source ref does not exist, once per repository per `ensure`, swallowed at
+`debug!`. Now gated on a local head — and there is nothing to mirror back for a
+ref that came *from* the checkout.
+
+### R5 — the fallback loop could poison the shared store *(fixed)*
+
+The loop asked *every* remote for the target branch. For a target prefixed with
+one remote's name, the others received the local-to-local refspec — and a remote
+that happened to hold a branch literally named `upstream/main` would have landed
+it as a **local** head in the shared store, where local-first resolution then
+prefers it forever, at the wrong commit, for every workspace on every node. The
+loop now only asks the remote whose name prefixes the target branch.
+
+### R6 — a failed fallback fetch was discarded *(fixed)*
+
+The refusal message asserts the branch is not present. If the only attempt to
+obtain it never ran — expired credentials, unreachable host,
+`GIT_TERMINAL_PROMPT=0` declining — that assertion misdirects the investigation
+this message exists to shorten. Failures are now logged and folded into the
+error text.
+
+### Considered and not changed
+
+- **`+refs/remotes/*` is broader than the target branch needs.** Deliberate: it
+  is what makes "the set you can pick equals the set the store can serve" true
+  by construction, which is the property C2 chose. Narrowing it would reintroduce
+  a per-branch fetch.
+- **Delegating to git's bare-name revision precedence** instead of naming the two
+  namespaces. Rejected and now tested: that precedence also accepts
+  `refs/tags/<name>`, so a tag named `main` would satisfy a target branch, which
+  `GitService::find_branch` never does (`a_tag_is_not_a_branch`).
+- **A local target branch still short-circuits and can go stale.** Pre-existing
+  behaviour, unchanged by this work, and fixing it means taking the lease on
+  every `ensure`. Recorded as out of scope.
+- **`fallback_refspec` duplicates the refspec shape in `GitService::fetch_branch_from_remote`.**
+  Real duplication, but that function is private, takes a git2 `Reference`, and
+  sits on the PR/rebase path with no coverage; refactoring it inside a bug fix is
+  the scope creep the plan set out to avoid.
+- **The error message discloses the store's absolute path.** It already did
+  before this change, and for a self-hosted operator that is the point.

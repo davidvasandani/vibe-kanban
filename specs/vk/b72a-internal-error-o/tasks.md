@@ -143,3 +143,24 @@ real and on the same request path; none causes this report.
   clustering is enabled (`container.rs:1153` → `workspace_manager.rs:778`). The
   "no dev server on this host" rule stands, for contention rather than
   reclamation.
+
+## Review round (stage 11)
+
+- [x] **T021** `crates/git/src/cli.rs`: revert `fetch_with_refspecs`; document why
+      one refspec per invocation is load-bearing (analysis R1).
+- [x] **T022** `shared_repository.rs`: issue the two mirrors separately with
+      independent error handling (R1).
+- [x] **T023** Add `local_branch_commit_present`; use it in `store_resolves` (R2),
+      `adopt` (R3) and `mirror_branch_back` (R4).
+- [x] **T024** Restrict the fallback loop to the remote whose name prefixes the
+      target branch (R5).
+- [x] **T025** Log and surface fallback fetch failures instead of discarding them
+      (R6).
+- [x] **T026** `a_tag_is_not_a_branch` — pins the rejection of git's bare-name
+      precedence, which also accepts tags.
+- [x] **T027** `the_remote_tracking_mirror_survives_a_checked_out_branch` (R1) and
+      `a_moved_target_branch_is_picked_up_by_the_next_provisioning` (R2).
+- [x] **T028** `adopt_refuses_a_branch_that_is_only_a_remote_tracking_ref` (R3).
+- [x] **T029** Control: both new regression tests fail against the flawed first
+      version (batched refspec restored, `store_resolves` widened) and pass after.
+- [x] **T030** Re-verify: 70 suites green, clippy clean, `cargo fmt --all`.
