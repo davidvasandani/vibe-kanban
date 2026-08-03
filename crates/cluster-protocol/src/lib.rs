@@ -109,6 +109,19 @@ pub struct ExecutionDispatch {
     pub workspace_path: String,
     pub working_directory: String,
     pub executor_profile: String,
+    /// The definition of `executor_profile`, as the coordinator resolved it.
+    ///
+    /// `executor_profile` is only a *name*. Variants are user-defined data in
+    /// the coordinator's `profiles.json`, and a worker has only the embedded
+    /// defaults — so a worker sent a name it does not hold cannot run it. The
+    /// coordinator is authoritative for product state, so it sends the
+    /// definition rather than expecting the worker to have the same file.
+    ///
+    /// Optional, and absence means "resolve locally": a worker running against
+    /// an older coordinator, or replaying a dispatch recorded before this
+    /// field existed, keeps its previous behaviour instead of failing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_profile_config: Option<Value>,
     pub action: Value,
     pub environment: BTreeMap<String, String>,
     pub run_reason: String,
@@ -409,6 +422,7 @@ mod tests {
             workspace_path: "/srv/vibe-kanban-shared/workspaces/w".into(),
             working_directory: "/srv/vibe-kanban-shared/workspaces/w/repo".into(),
             executor_profile: "codex".into(),
+            executor_profile_config: Some(serde_json::json!({"PLAN": {"CODEX": {}}})),
             action: serde_json::json!({"type": "coding_agent"}),
             environment: BTreeMap::from([("SAFE".into(), "value".into())]),
             run_reason: "coding_agent".into(),
@@ -420,6 +434,31 @@ mod tests {
         let encoded = serde_json::to_vec(&dispatch).unwrap();
         let decoded: ExecutionDispatch = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, dispatch);
+    }
+
+    /// A worker running this build must still accept a dispatch from a
+    /// coordinator that predates the field, rather than refusing the whole
+    /// message — the two are upgraded separately.
+    #[test]
+    fn a_dispatch_without_a_profile_definition_still_decodes() {
+        let encoded = serde_json::json!({
+            "authority": authority(),
+            "execution_id": Uuid::from_u128(4),
+            "workspace_id": Uuid::from_u128(5),
+            "session_id": Uuid::from_u128(6),
+            "workspace_path": "/srv/vibe-kanban-shared/workspaces/w",
+            "working_directory": "/srv/vibe-kanban-shared/workspaces/w/repo",
+            "executor_profile": "codex",
+            "action": {"type": "coding_agent"},
+            "environment": {},
+            "run_reason": "coding_agent",
+            "timeout_seconds": null,
+            "persistence": "ordinary",
+            "request_digest": "sha256:abc",
+        });
+
+        let decoded: ExecutionDispatch = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.executor_profile_config, None);
     }
 
     #[test]

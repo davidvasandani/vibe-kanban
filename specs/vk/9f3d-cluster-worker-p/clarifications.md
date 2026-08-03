@@ -1,7 +1,7 @@
 # Clarifications: Legible Worker Executor Capabilities
 
 `/speckit.clarify` resolved the four open questions in `spec.md` against the
-project constitution (principles XI, XVIII, XIX), the existing cluster
+project constitution (principles XI, XVIII, XXI, XXII), the existing cluster
 knowledge-base pages, and the live homelab configuration.
 
 ## Decisions
@@ -49,7 +49,7 @@ Reasoning:
   silently change the user's remembered default agent. Constitution X reserves
   persistent writes for explicit submit actions.
 - Blocking submit client-side would make the gate an enforcement point, which
-  constitution XIX explicitly forbids — it must stay an affordance, because it
+  constitution XXII explicitly forbids — it must stay an affordance, because it
   reads a possibly-stale worker list and degrades open when it cannot parse.
 - Therefore: unsupported options render disabled-with-reason in the list, and if
   the *currently selected* agent is unsupported, the same reason renders inline
@@ -62,7 +62,7 @@ Reasoning:
 Resolved: **report the advertised strings exactly as workers published them**,
 deduplicated and sorted; do not reduce `CODEX:PLAN` to `CODEX`.
 
-Reasoning: constitution XIX forbids a consumer synthesising or widening a
+Reasoning: constitution XXII forbids a consumer synthesising or widening a
 capability its owner did not advertise, and principle XI requires diagnostics to
 preserve backend-provided evidence rather than reinterpret it. Collapsing
 `CODEX:PLAN` to `CODEX` would tell an operator the cluster runs Codex generally

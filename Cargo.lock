@@ -11612,6 +11612,7 @@ dependencies = [
  "shellexpand",
  "shlex",
  "similar",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -13018,6 +13019,7 @@ dependencies = [
 name = "workspace-manager"
 version = "0.1.43"
 dependencies = [
+ "chrono",
  "db",
  "git",
  "sqlx",

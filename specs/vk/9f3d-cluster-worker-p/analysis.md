@@ -41,7 +41,7 @@ pinning it.
 `"CODEX:"` today contains `':'`, so it is excluded from the bare branch and
 matches only itself. Collapsing it to `(CODEX, None)` in the scheduler would make
 it match every variant — a consumer widening an advertisement whose author wrote
-a `':'`, which constitution XIX forbids and clarification 3 refuses elsewhere.
+a `':'`, which constitution XXII forbids and clarification 3 refuses elsewhere.
 
 **Fix**: `canonical_profile_parts` becomes faithful — the variant is `Some(v)`
 iff a `':'` was present, `v` possibly empty. Dropping an empty variant is
@@ -52,7 +52,7 @@ scheduler compares what it was given.
 
 A row advertising `CURSOR` (which `from_str` accepts) yields frontend set
 `{CURSOR}` while `executorOptions` carries `CURSOR_AGENT`, so the picker would
-disable an agent the scheduler *would* place — constitution XIX's "never used to
+disable an agent the scheduler *would* place — constitution XXII's "never used to
 silently withdraw a capability that currently works".
 
 **Fix**: alias map in the helper, with a test mirroring T011.
@@ -193,6 +193,24 @@ predicate is kept in the test module and asserted equivalent across 135
 (advertised, requested) pairs except an explicit list of 9 intended fixes. This
 is now the main evidence that the canonicalisation rewrite changed nothing
 unintended.
+
+### I5 — Constitution XIX collided with main; slimmed and renumbered to XXII
+
+While this branch was in flight, main added principles XIX (Observability), XX
+(Cross-node paths) and XXI (One convention per concept), reaching v0.19.0. The
+proposed principle collided by number *and* substantially by content: XXI
+already requires reusing an existing resolution rule rather than re-deriving it,
+and already states that *"a consumer that handles every case except the default
+is broken for almost every user"* — which is exactly defect I1 above, found
+independently in this branch's own UI code.
+
+Resolution: keep main's XIX–XXI untouched, renumber to **XXII**, and cut
+everything XXI already says. What remains is only the genuinely new material:
+validate an operator-supplied capability list at its owner and fail closed; a
+consumer must not widen what it was given; probes stay advisory and never
+withdraw a working capability; a UI mirror degrades to permitting everything.
+Constitution bumped to v0.20.0 and all references in this feature's documents
+updated from XIX to XXII.
 
 ## Net effect
 

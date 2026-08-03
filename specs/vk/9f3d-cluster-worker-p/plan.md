@@ -37,7 +37,7 @@ half via `BaseCodingAgent::from_str`, and returns the variant slice unchanged.
 The returned variant is `Some(v)` **iff a `':'` was present**, where `v` may be
 empty. This faithfulness matters: per analysis M3, collapsing `"CODEX:"` to "no
 variant" inside the *scheduler* would let a consumer widen an advertisement
-whose author wrote a `':'`, which constitution XIX forbids.
+whose author wrote a `':'`, which constitution XXII forbids.
 
 `canonical_profile_string` renders `EXECUTOR` or `EXECUTOR:VARIANT` with the
 variant **verbatim** (FR-3), and **drops an empty variant** — this normalisation
@@ -122,7 +122,7 @@ It is already `Copy + Eq`.
 `MissingExecutor` and names nothing available (analysis M8). Add a
 `RequestedWorkerMissingExecutor { worker_node_id, executor_profile, supported }`
 variant, returned when the pinned worker's only failure is `MissingExecutor`.
-Constitution XIX requires the capability failure to explain itself regardless of
+Constitution XXII requires the capability failure to explain itself regardless of
 which path reached it.
 
 Per research R-4 the server call site needs no change and no generated type
@@ -155,7 +155,7 @@ to executor names. Two corrections from analysis:
 - **M4**: canonicalisation must apply the `CURSOR` → `CURSOR_AGENT` alias. A row
   advertising `CURSOR` is legitimate, but `executorOptions` carries
   `CURSOR_AGENT`, so without the alias the picker would disable an agent the
-  scheduler *would* place — constitution XIX's "never silently withdraw a
+  scheduler *would* place — constitution XXII's "never silently withdraw a
   capability that currently works".
 
 Lease expiry is deliberately not re-checked client-side (analysis m19): it

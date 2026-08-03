@@ -192,29 +192,112 @@ monotonic cursors and make replay gaps visible. Shared Git worktree
 administration remains single-owner and serialized even when ordinary commands
 run on several nodes.
 
-### XIX. Advertised capability is validated at its source and legible at its failure
+### XIX. Observability is a read-only surface
+Metrics, telemetry, and diagnostic sampling exist to be *looked at*. They are
+never evidence.
+
+No observability path may write scheduling, liveness, lease, eligibility, or
+lifecycle state, and no lifecycle decision may read from one. A node that fails
+to report metrics is not offline; a node that reports them is not healthy. The
+existing evidence channel remains the only authority on both questions.
+
+Absence is typed, never fabricated. Unreachable, unsupported, not-implemented,
+and stale are distinct statuses carrying their reason, and each renders as
+itself. A zero that means "no reading" is prohibited — a failed read is not a
+measurement, and a UI that shows `0%` for a dead host is a defect.
+
+Live streams are bounded and self-correcting. Retention is a fixed-size window
+whose memory does not grow with uptime, and no emitted payload may grow with
+elapsed time. A patch stream is an optimisation over a periodic full snapshot,
+never a replacement for one: a dropped message, a replay gap, or a change in the
+member set forces a resnapshot rather than interpolation. Every streamed
+collection is keyed by stable identity — never by array position — so that
+membership changing mid-stream cannot make a `replace` land on the wrong row.
+
+Sampling tasks terminate. A background sampler holds only a weak reference to
+its owner, re-checks each tick that a consumer still exists, exits when none
+does, and never holds a lock across an await.
+
+Host introspection is secret-hostile by default. Process environments are never
+read. Anything derived from a process command line is redacted at the point of
+collection — before it is stored, transmitted, or logged — so that an
+unredacted value never exists outside the sampler. Redaction errs toward
+removing too much: an over-redacted command is cosmetic, an under-redacted one
+is a disclosure.
+
+### XX. Cross-node paths are node-identical and structurally verified
+Any absolute path written into shared storage that another node must later
+resolve MUST resolve to the same object on every node, and that property MUST be
+asserted by the code that records it — never left to an operator convention, a
+documentation note, or a naming coincidence.
+
+Three rules follow. **Verify structure, not spelling:** assert that a resolved
+target lies within the shared root, never that its text lacks a known-bad prefix.
+**A same-named local directory is not the target:** existence proves nothing, and
+a resolver that accepts a local path merely because it exists is a defect, not a
+fallback — the shared-mount rule applied to every recorded path. **Both ends of a
+two-sided pointer are repaired and re-probed together;** a zero exit from a repair
+command is not verification, and an object a path claims to reference is proven
+present, never assumed.
+
+Enforcement is level-triggered. A check that runs only where the path is first
+written is an edge trigger and will stall silently; the same assertion runs at
+startup, at placement, and before use, enumerating every violation in one pass
+with an actionable remedy rather than aborting on the first. A one-off migration
+with no recurring check is a comment, not a control.
+
+Where a shared namespace is consolidated, its blast radius is re-derived rather
+than inherited: an operation that was safe while it touched one node's metadata
+is not automatically safe once every node's metadata lives in one place.
+Writes into such a namespace are **additive by default**: an operation that
+deletes or prunes entries there needs an argument for why every other holder of
+the namespace, on every node, is unaffected.
+
+### XXI. One convention per concept, and failures say what failed
+A value that already has a resolution rule in this codebase is resolved by that
+rule everywhere it is consumed. Re-deriving the rule at a new call site — a
+second string format, a narrower lookup, an extra normalisation — is a defect
+even when it passes its own tests, because the two definitions will disagree on
+exactly the inputs the original rule exists to handle. Find the existing
+resolver, call it, or match its outcome exactly and say so in a comment naming
+it.
+
+Consumers must accept the full domain the producer emits. Where a producer is
+user-facing (a picker, an API request body, a config field), the domain includes
+its *default* value, and the default is the case most likely to reach
+production — a consumer that handles every case except the default is broken for
+almost every user.
+
+A failure that a maintainer could act on must reach the operator with the fact
+that identifies it. Collapsing a specific, diagnosable failure into a generic
+message ("an internal error occurred") is a defect in its own right: it converts
+a one-line diagnosis into an investigation, and it does so precisely when the
+system is already failing. Server errors keep their status but carry a message
+naming what failed and which entity it failed for. Widening an error channel is
+scoped to the failure being surfaced — a blanket unwrapping of every internal
+error is not the remedy, and messages remain free of secrets, tokens, and
+environment values.
+
+### XXII. Advertised capability is validated at its source and never silently withdrawn
 An operator-supplied capability list (executor profiles, tool identifiers, node
-labels) is untrusted input, not configuration that can be trusted verbatim.
-Whichever component **owns** the capability validates it at startup against the
-canonical enumeration and fails closed with a message naming the offending value
-and the valid set; a component that would register as capable of nothing is a
-misconfiguration, not a default. Values are canonicalised at the boundary so
-comparison never depends on operator casing or punctuation, and a consumer
-matching such a value must tolerate rows written by an earlier build.
+labels) is untrusted input. The component that **owns** the capability validates
+it at startup against the canonical enumeration and fails closed, naming the
+offending value and the valid set; a component that would register as capable of
+nothing is a misconfiguration, not a default. Canonicalise at that boundary —
+per principle XXI, using the resolver the value already has — so a consumer
+never depends on operator casing or punctuation, and so a consumer can tolerate
+values written by an earlier build.
 
-Capability is proved where proof is available and cheap; where a probe would be
-unreliable it stays advisory and is surfaced, never used to silently withdraw a
-capability that currently works. A consumer must not synthesise or widen a
-capability its owner did not advertise.
+A consumer must not synthesise or widen a capability its owner did not
+advertise. Normalisation that is legitimate when authoring your own declaration
+is not legitimate when interpreting someone else's.
 
-When scheduling or dispatch fails for want of a capability, the error
-distinguishes *"nothing here can do this"* from *"nothing here is healthy"* —
-they have opposite remedies — and names the capabilities that are available.
-Any UI offering a choice that a capability set can refuse reflects that set as a
-visible unsupported state rather than letting the user reach a rejection after
-committing work; that reflection is an affordance, and the owning component
-remains the enforcement point. A gate that fails to parse its input must degrade
-to permitting everything, never to hiding everything.
+Capability is proved where proof is cheap and reliable; where a probe would be
+unreliable it stays advisory and is surfaced, never used to withdraw a
+capability that currently works. Any UI that mirrors a capability set is an
+affordance, not an authorisation boundary — the owning component remains the
+enforcement point, and a mirror that cannot parse its input degrades to
+permitting everything, never to hiding everything.
 
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
@@ -237,5 +320,16 @@ to permitting everything, never to hiding everything.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.17.0 (adds validated, legible capability advertisement; 0.16.0
-added affinity-bound, evidence-backed distributed execution)
+**Version**: 0.20.0 (adds validated, never-silently-withdrawn capability
+advertisement — an owner validates its own operator-supplied capability list and
+fails closed, a consumer neither widens it nor withdraws a working capability,
+and a UI mirror degrades to permitting everything; 0.19.0 added
+one-convention-per-concept — reuse the existing
+resolution rule rather than re-deriving it, accept the producer's default value,
+and report failures with the fact that identifies them instead of a generic
+internal error; also makes writes into a consolidated shared namespace additive
+by default; 0.18.0 added cross-node path portability — node-identical shared
+paths, structural rather than textual assertions, no same-named-local fallback,
+two-sided pointer repair, level-triggered enforcement, and re-derived blast
+radius for consolidated namespaces; 0.17.0 added observability as a read-only
+surface; 0.16.0 added affinity-bound, evidence-backed distributed execution)

@@ -95,13 +95,36 @@ struct UnsavedWork {
 pub struct RepoWorkspaceInput {
     pub repo: Repo,
     pub target_branch: String,
+    /// The Git directory that owns this repository's worktree administration
+    /// *for this workspace*.
+    ///
+    /// For a workspace that runs on the coordinator this is `repo.path`, the
+    /// operator's registered checkout, exactly as before. For a workspace placed
+    /// on a worker it is the shared store, because `repo.path` names storage no
+    /// other node can reach and a worktree created from it is unusable there.
+    pub git_path: PathBuf,
 }
 
 impl RepoWorkspaceInput {
+    /// Administer this repository's worktree in the registered checkout — the
+    /// behaviour every workspace had before clustering, and the behaviour every
+    /// coordinator-local workspace still has.
     pub fn new(repo: Repo, target_branch: String) -> Self {
+        let git_path = repo.path.clone();
         Self {
             repo,
             target_branch,
+            git_path,
+        }
+    }
+
+    /// Administer this repository's worktree in the shared store, so the paths
+    /// git records resolve identically on every node.
+    pub fn shared(repo: Repo, target_branch: String, store: PathBuf) -> Self {
+        Self {
+            repo,
+            target_branch,
+            git_path: store,
         }
     }
 }
@@ -130,6 +153,23 @@ pub enum WorkspaceError {
     PartialCreation(String),
     #[error("shared workspace root must be absolute: {0}")]
     InvalidSharedRoot(PathBuf),
+    /// A worktree that a worker must be able to use is backed by a repository
+    /// the worker cannot resolve. Carries the repository name and a description
+    /// of what the linkage actually resolved to, because the operator's next
+    /// question is always "which repo, and pointing where?".
+    #[error("worktree for repository '{repo_name}' is not usable from other nodes: {detail}")]
+    WorktreeNotPortable { repo_name: String, detail: String },
+    /// The shared repository store cannot serve a workspace's target branch.
+    /// Carries the repository and the branch because this reaches the user
+    /// through the API, and "which repo, which branch?" is the only question
+    /// worth answering there — a generic internal error turns a one-line
+    /// diagnosis into an investigation.
+    #[error("shared repository store for '{repo_name}' cannot serve branch '{branch}': {detail}")]
+    SharedStore {
+        repo_name: String,
+        branch: String,
+        detail: String,
+    },
 }
 
 /// Info about a single repo's worktree within a workspace
@@ -320,7 +360,23 @@ impl WorkspaceManager {
                     workspace_dir.display()
                 );
 
-                if let Err(e) = Self::cleanup_workspace(&workspace_dir, &repositories).await {
+                // `repo_paths` is the deletion context's record of which Git
+                // directory administers each repository's worktree, resolved by
+                // whoever built the context. Pair them back up rather than
+                // re-deriving from `repo.path`, which is wrong for a clustered
+                // workspace.
+                let cleanup_inputs: Vec<RepoWorkspaceInput> = repositories
+                    .iter()
+                    .cloned()
+                    .zip(repo_paths.iter().cloned())
+                    .map(|(repo, git_path)| RepoWorkspaceInput {
+                        target_branch: String::new(),
+                        repo,
+                        git_path,
+                    })
+                    .collect();
+
+                if let Err(e) = Self::cleanup_workspace(&workspace_dir, &cleanup_inputs).await {
                     error!(
                         "Background workspace cleanup failed for {} at {}: {}",
                         workspace_id,
@@ -417,7 +473,7 @@ impl WorkspaceManager {
                     WorktreeManager::create_worktree_fenced(
                         lock_manager,
                         input.repo.id,
-                        &input.repo.path,
+                        &input.git_path,
                         branch_name,
                         &worktree_path,
                         &input.target_branch,
@@ -427,7 +483,7 @@ impl WorkspaceManager {
                 }
                 None => {
                     WorktreeManager::create_worktree(
-                        &input.repo.path,
+                        &input.git_path,
                         branch_name,
                         &worktree_path,
                         &input.target_branch,
@@ -441,7 +497,7 @@ impl WorkspaceManager {
                     created_worktrees.push(RepoWorktree {
                         repo_id: input.repo.id,
                         repo_name: input.repo.name.clone(),
-                        source_repo_path: input.repo.path.clone(),
+                        source_repo_path: input.git_path.clone(),
                         worktree_path,
                     });
                 }
@@ -517,7 +573,7 @@ impl WorkspaceManager {
 
         // Try legacy migration first (single repo projects only)
         // Old layout had worktree directly at workspace_dir; new layout has it at workspace_dir/{repo_name}
-        if repos.len() == 1 && Self::migrate_legacy_worktree(workspace_dir, &repos[0].repo).await? {
+        if repos.len() == 1 && Self::migrate_legacy_worktree(workspace_dir, &repos[0]).await? {
             return Ok(());
         }
 
@@ -537,13 +593,13 @@ impl WorkspaceManager {
                 worktree_path.display()
             );
 
-            if git.check_branch_exists(&repo.path, branch_name)? {
+            if git.check_branch_exists(&input.git_path, branch_name)? {
                 match lock_manager {
                     Some(lock_manager) => {
                         WorktreeManager::ensure_worktree_exists_fenced(
                             lock_manager,
                             repo.id,
-                            &repo.path,
+                            &input.git_path,
                             branch_name,
                             &worktree_path,
                         )
@@ -551,7 +607,7 @@ impl WorkspaceManager {
                     }
                     None => {
                         WorktreeManager::ensure_worktree_exists(
-                            &repo.path,
+                            &input.git_path,
                             branch_name,
                             &worktree_path,
                         )
@@ -568,7 +624,7 @@ impl WorkspaceManager {
                         WorktreeManager::create_worktree_fenced(
                             lock_manager,
                             repo.id,
-                            &repo.path,
+                            &input.git_path,
                             branch_name,
                             &worktree_path,
                             &input.target_branch,
@@ -578,7 +634,7 @@ impl WorkspaceManager {
                     }
                     None => {
                         WorktreeManager::create_worktree(
-                            &repo.path,
+                            &input.git_path,
                             branch_name,
                             &worktree_path,
                             &input.target_branch,
@@ -593,18 +649,24 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    /// Clean up all worktrees in a workspace
+    /// Clean up all worktrees in a workspace.
+    ///
+    /// Takes resolved inputs rather than bare `Repo` records, because a bare
+    /// record cannot say which Git directory administers *this* workspace's
+    /// worktrees. Cleaning a clustered workspace against `repo.path` would
+    /// unregister nothing — the registration lives in the shared store — while
+    /// still deleting the directory, leaving an orphaned registration behind.
     pub async fn cleanup_workspace(
         workspace_dir: &Path,
-        repos: &[Repo],
+        repos: &[RepoWorkspaceInput],
     ) -> Result<(), WorkspaceError> {
         info!("Cleaning up workspace at {}", workspace_dir.display());
 
         let cleanup_data: Vec<WorktreeCleanup> = repos
             .iter()
-            .map(|repo| {
-                let worktree_path = workspace_dir.join(&repo.name);
-                WorktreeCleanup::new(worktree_path, Some(repo.path.clone()))
+            .map(|input| {
+                let worktree_path = workspace_dir.join(&input.repo.name);
+                WorktreeCleanup::new(worktree_path, Some(input.git_path.clone()))
             })
             .collect();
 
@@ -636,8 +698,9 @@ impl WorkspaceManager {
     /// Returns Ok(true) if migration was performed, Ok(false) if no migration needed.
     async fn migrate_legacy_worktree(
         workspace_dir: &Path,
-        repo: &Repo,
+        input: &RepoWorkspaceInput,
     ) -> Result<bool, WorkspaceError> {
+        let repo = &input.repo;
         let expected_worktree_path = workspace_dir.join(&repo.name);
 
         // Detect old-style: workspace_dir exists AND has .git file (worktree marker)
@@ -667,13 +730,14 @@ impl WorkspaceManager {
         );
         let temp_path = workspace_dir.with_file_name(temp_name);
 
-        WorktreeManager::move_worktree(&repo.path, workspace_dir, &temp_path).await?;
+        WorktreeManager::move_worktree(&input.git_path, workspace_dir, &temp_path).await?;
 
         // Create new workspace directory
         tokio::fs::create_dir_all(workspace_dir).await?;
 
         // Move worktree to final location using git worktree move
-        WorktreeManager::move_worktree(&repo.path, &temp_path, &expected_worktree_path).await?;
+        WorktreeManager::move_worktree(&input.git_path, &temp_path, &expected_worktree_path)
+            .await?;
 
         if temp_path.exists() {
             let _ = tokio::fs::remove_dir_all(&temp_path).await;
