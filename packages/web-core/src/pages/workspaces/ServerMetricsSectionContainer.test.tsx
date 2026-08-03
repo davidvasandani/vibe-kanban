@@ -280,7 +280,15 @@ describe('ServerMetricsSectionContainer', () => {
       snapshotOf(
         node({
           latest: hostSample({
-            cpu: cpuSample({ total_busy_percent: null }),
+            cpu: cpuSample({
+              total_busy_percent: null,
+              // Load is absent too, so the whole readings block can be
+              // asserted to contain no digit at all — the strongest form of
+              // "a missing reading is never a zero".
+              load_1m: null,
+              load_5m: null,
+              load_15m: null,
+            }),
             memory: memorySample({ total_bytes: null, used_bytes: null }),
           }),
         })
@@ -295,12 +303,35 @@ describe('ServerMetricsSectionContainer', () => {
     expect(
       readings?.querySelectorAll('[data-testid="meter-no-reading"]')
     ).toHaveLength(2);
-    expect(readings?.textContent).toBe('CPU—Memory—');
-    // The invariant: a missing reading is never rendered as a zero.
+    expect(readings?.textContent).toBe('CPU—Memory—Load— / — / —');
+    // The invariant: a missing reading is never rendered as a zero. An absent
+    // load must not read as `0.00`, which would say "idle" rather than
+    // "unknown".
     expect(readings?.textContent).not.toContain('0');
     expect(
       readings?.querySelectorAll('[data-testid="meter-fill"]')
     ).toHaveLength(0);
+  });
+
+  it('shows all three load averages in the node summary', async () => {
+    mocks.snapshot.mockResolvedValue(
+      snapshotOf(
+        node({
+          latest: hostSample({
+            cpu: cpuSample({ load_1m: 3.61, load_5m: 3.17, load_15m: 3.19 }),
+          }),
+        })
+      )
+    );
+
+    await renderContainer();
+
+    const readings = container.querySelector(
+      '[data-testid="metrics-node-readings"]'
+    );
+    // Two decimal places, all three windows, so a rising or falling trend is
+    // legible without expanding the node.
+    expect(readings?.textContent).toContain('3.61 / 3.17 / 3.19');
   });
 
   it('expands a node into its panels, rendering rate-derived nulls as em dashes', async () => {
