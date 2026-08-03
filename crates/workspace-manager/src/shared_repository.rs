@@ -321,10 +321,29 @@ impl SharedRepositoryStore {
         // Bring the branches this workspace might need into the store. A remote
         // that cannot be reached is tolerated; the target branch resolving
         // afterwards is not optional.
-        if let Err(e) = cli.fetch_with_refspec(
+        //
+        // Both namespaces, because a target branch may name either. The picker
+        // offered whatever `get_all_branches` read from this same checkout, so
+        // copying the checkout's refs verbatim makes the set of branches a user
+        // can pick and the set this store can serve the same set, by
+        // construction — and as fresh as that checkout, which is the freshness
+        // the user was shown.
+        //
+        // Deliberately *not* done by giving the store its own `origin` fetch
+        // refspec: `configure` retargets `origin` at the forge, so a store that
+        // populated `refs/remotes/origin/*` itself would carry a second,
+        // differently-fresh notion of `origin/main`. `git clone --bare` creates
+        // no `refs/remotes/*` at all, so there is nothing here to shadow.
+        //
+        // Additive: force-update, never `--prune`. This namespace is shared by
+        // every workspace of this repository on every node.
+        if let Err(e) = cli.fetch_with_refspecs(
             store,
             &repo.path.to_string_lossy(),
-            "+refs/heads/*:refs/heads/*",
+            &[
+                "+refs/heads/*:refs/heads/*",
+                "+refs/remotes/*:refs/remotes/*",
+            ],
         ) {
             debug!(
                 repo = %repo.name,
@@ -334,25 +353,65 @@ impl SharedRepositoryStore {
         if !Self::branch_commit_present(&cli, store, target_branch)?
             && let Ok(remotes) = cli.list_remotes(store)
         {
+            // The checkout mirror above covers the ordinary case. This reaches
+            // the real forge for the one it does not: a branch that exists
+            // upstream and that the coordinator's checkout has never fetched.
             for (name, url) in remotes {
                 if name == REGISTERED_REMOTE {
                     continue;
                 }
-                let refspec = format!("+refs/heads/{target_branch}:refs/heads/{target_branch}");
-                if cli.fetch_with_refspec(store, &url, &refspec).is_ok() {
+                let refspec = Self::fallback_refspec(&name, target_branch);
+                let _ = cli.fetch_with_refspec(store, &url, &refspec);
+                // A zero exit is not evidence that the ref we need now exists;
+                // ask the store.
+                if Self::branch_commit_present(&cli, store, target_branch)? {
                     break;
                 }
             }
         }
 
-        if !Self::branch_commit_present(&cli, store, target_branch)? {
-            return Err(WorkspaceError::PartialCreation(format!(
-                "shared store {} does not resolve target branch '{target_branch}'",
-                store.display()
-            )));
+        match Self::resolved_branch_ref(&cli, store, target_branch)? {
+            Some(reference) => {
+                debug!(
+                    repo = %repo.name,
+                    store = %store.display(),
+                    "target branch '{target_branch}' resolves to {reference}"
+                );
+                Ok(())
+            }
+            None => Err(WorkspaceError::SharedStore {
+                repo_name: repo.name.clone(),
+                branch: target_branch.to_string(),
+                detail: format!(
+                    "no branch of that name is present in {}, as either a local \
+                     or a remote-tracking ref",
+                    store.display()
+                ),
+            }),
         }
+    }
 
-        Ok(())
+    /// The refspec that could actually bring `target_branch` into the store
+    /// from the remote called `remote_name`.
+    ///
+    /// A remote-prefixed target names a branch that upstream knows under a
+    /// different name: `origin/main` is upstream's `main`, and it belongs in the
+    /// store's remote-tracking namespace where `resolved_branch_ref` will look
+    /// for it. Asking a forge for `refs/heads/origin/main` — which is what this
+    /// used to do — is a network round trip that cannot succeed, paid once per
+    /// repository on the workspace-creation request.
+    ///
+    /// A target that is not prefixed with *this* remote's name is left in the
+    /// original local-to-local form: nothing about it says this remote holds a
+    /// branch under some other name, and guessing would be worse than the
+    /// bounded attempt that already happens.
+    fn fallback_refspec(remote_name: &str, target_branch: &str) -> String {
+        match target_branch.strip_prefix(&format!("{remote_name}/")) {
+            Some(upstream_branch) if !upstream_branch.is_empty() => {
+                format!("+refs/heads/{upstream_branch}:refs/remotes/{target_branch}")
+            }
+            _ => format!("+refs/heads/{target_branch}:refs/heads/{target_branch}"),
+        }
     }
 
     /// Configure a freshly cloned store, before it is published and therefore
@@ -438,14 +497,49 @@ impl SharedRepositoryStore {
         Ok(std::fs::exists(store.join("objects"))?)
     }
 
+    /// The ref a workspace's target branch names in the store, or `None` when
+    /// it names nothing here.
+    ///
+    /// A target branch is not necessarily a local branch name. The picker that
+    /// produced it lists branches under the names `git::get_all_branches`
+    /// returns — `origin/main` for a remote-tracking branch, `main` for a local
+    /// one — and `origin/main` is the default it applies when a repository has
+    /// no configured `default_target_branch`, which is most of them. So the
+    /// order here is local, then remote-tracking: the same order, with the same
+    /// outcome, as `GitService::find_branch`, which is what validated the
+    /// user's choice against the registered checkout in the first place.
+    /// Resolving it any other way here would mean the store could not serve the
+    /// branch the rest of the product already accepted.
+    ///
+    /// Presence is proven with `commit_exists` (`cat-file -e`) for both forms:
+    /// a ref that names an object the store does not hold is not a branch this
+    /// store can serve. Reusing one probe also keeps one failure direction —
+    /// `CommandFailed` means absent, anything else propagates.
+    fn resolved_branch_ref(
+        cli: &GitCli,
+        store: &Path,
+        branch: &str,
+    ) -> Result<Option<String>, WorkspaceError> {
+        for reference in [
+            format!("refs/heads/{branch}"),
+            format!("refs/remotes/{branch}"),
+        ] {
+            let present = cli.commit_exists(store, &reference).map_err(|e| {
+                WorkspaceError::PartialCreation(format!("could not query the store: {e}"))
+            })?;
+            if present {
+                return Ok(Some(reference));
+            }
+        }
+        Ok(None)
+    }
+
     fn branch_commit_present(
         cli: &GitCli,
         store: &Path,
         branch: &str,
     ) -> Result<bool, WorkspaceError> {
-        let reference = format!("refs/heads/{branch}");
-        cli.commit_exists(store, &reference)
-            .map_err(|e| WorkspaceError::PartialCreation(format!("could not query the store: {e}")))
+        Ok(Self::resolved_branch_ref(cli, store, branch)?.is_some())
     }
 
     /// A branch may be checked out by at most one worktree. Adopting a branch
@@ -918,6 +1012,259 @@ mod tests {
             paths: SharedWorkspacePaths::new(shared_root).unwrap(),
             locks: unreachable_locks(),
         }
+    }
+
+    /// A store handle whose administration lease actually works. `ensure`, unlike
+    /// `adopt`, takes the lease, so it needs a pool holding the lock table.
+    async fn store_with_locks(shared_root: &Path) -> SharedRepositoryStore {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TABLE repository_admin_locks (
+                repo_id BLOB PRIMARY KEY NOT NULL,
+                generation INTEGER NOT NULL,
+                operation_id BLOB NOT NULL,
+                acquired_at TEXT NOT NULL,
+                lease_expires_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        SharedRepositoryStore {
+            paths: SharedWorkspacePaths::new(shared_root).unwrap(),
+            locks: RepositoryAdminLockManager::new(pool, std::time::Duration::from_secs(30))
+                .unwrap(),
+        }
+    }
+
+    /// A checkout shaped like `/srv/src/<repo>`: a local `main` **and** a
+    /// remote-tracking `origin/main`, which is the name the create screen
+    /// defaults a repository's target branch to.
+    fn seed_checkout_with_remote(path: &Path) {
+        seed_repo(path);
+        // A second commit reachable only from origin/main, so a test that
+        // silently substituted the local `main` would resolve to a different
+        // commit and be caught.
+        cli()
+            .set_config(path, "user.email", "test@vibekanban.invalid")
+            .unwrap();
+        fs::write(path.join("upstream.txt"), "from upstream\n").unwrap();
+        cli().add_all(path).unwrap();
+        cli().commit(path, "upstream commit").unwrap();
+        cli()
+            .git(path, ["update-ref", "refs/remotes/origin/main", "HEAD"])
+            .unwrap();
+        // Rewind the local branch so the two genuinely differ.
+        cli().git(path, ["reset", "--hard", "HEAD~1"]).unwrap();
+        cli()
+            .set_remote_url(path, "origin", "https://example.invalid/org/repo.git")
+            .unwrap();
+    }
+
+    /// The failure the user reported: a workspace whose target branch is the
+    /// create screen's default, `origin/main`, could not be provisioned at all.
+    #[tokio::test]
+    async fn ensure_serves_a_remote_prefixed_target_branch() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let checkout = fixture.path().join("srv-src").join("repo");
+        fs::create_dir_all(&shared_root).unwrap();
+        seed_checkout_with_remote(&checkout);
+        let repo = repo_record("repo", &checkout);
+        let upstream = cli()
+            .resolve_commit(&checkout, "refs/remotes/origin/main")
+            .unwrap()
+            .unwrap();
+
+        let store_handle = store_with_locks(&shared_root).await;
+        let store = store_handle.ensure(&repo, "origin/main").await.unwrap();
+
+        assert_eq!(
+            SharedRepositoryStore::resolved_branch_ref(&cli(), &store, "origin/main").unwrap(),
+            Some("refs/remotes/origin/main".to_string()),
+            "a remote-prefixed target branch must resolve in the store"
+        );
+        assert_eq!(
+            cli()
+                .resolve_commit(&store, "refs/remotes/origin/main")
+                .unwrap()
+                .unwrap(),
+            upstream,
+            "it must resolve to the upstream commit, not the local branch's"
+        );
+
+        // The step that used to fail one frame later: the workspace branch is
+        // created from the target branch *in the store*, through git2's
+        // local-then-remote lookup.
+        git::GitService::new()
+            .create_branch(&store, "vk/work", "origin/main")
+            .unwrap();
+        let worktree = shared_root.join("workspaces").join("ws-1").join("repo");
+        fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        cli()
+            .worktree_add(&store, &worktree, "vk/work", false)
+            .unwrap();
+        assert_eq!(
+            cli().resolve_commit(&worktree, "HEAD").unwrap().unwrap(),
+            upstream
+        );
+    }
+
+    /// Mirroring is additive. `refs/remotes/*` in the store is shared by every
+    /// workspace of this repository on every node, so a second `ensure` must not
+    /// drop refs the registered checkout does not happen to have.
+    #[tokio::test]
+    async fn ensure_never_removes_refs_another_workspace_may_hold() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let checkout = fixture.path().join("srv-src").join("repo");
+        fs::create_dir_all(&shared_root).unwrap();
+        seed_checkout_with_remote(&checkout);
+        let repo = repo_record("repo", &checkout);
+
+        let store_handle = store_with_locks(&shared_root).await;
+        let store = store_handle.ensure(&repo, "origin/main").await.unwrap();
+
+        // Stand in for another live workspace's branch, and for a
+        // remote-tracking ref the checkout has since dropped.
+        cli()
+            .git(
+                &store,
+                ["update-ref", "refs/heads/vk/other-workspace", "main"],
+            )
+            .unwrap();
+        cli()
+            .git(&store, ["update-ref", "refs/remotes/origin/gone", "main"])
+            .unwrap();
+
+        store_handle.ensure(&repo, "origin/main").await.unwrap();
+
+        for reference in ["refs/heads/vk/other-workspace", "refs/remotes/origin/gone"] {
+            assert!(
+                cli().commit_exists(&store, reference).unwrap(),
+                "{reference} must survive a re-run; mirroring is additive"
+            );
+        }
+    }
+
+    /// The store must answer "does this name a branch here?" the same way
+    /// `GitService::find_branch` does — local first, then remote-tracking — or
+    /// it cannot serve the branches the rest of the product already accepted.
+    #[tokio::test]
+    async fn branch_resolution_prefers_a_local_branch_over_a_remote_one() {
+        let fixture = TempDir::new().unwrap();
+        let checkout = fixture.path().join("repo");
+        seed_repo(&checkout);
+        fs::write(checkout.join("other.txt"), "other\n").unwrap();
+        cli().add_all(&checkout).unwrap();
+        cli().commit(&checkout, "second").unwrap();
+        // `shared` exists as both a local and a remote-tracking branch, at
+        // different commits.
+        cli()
+            .git(&checkout, ["update-ref", "refs/remotes/shared", "HEAD"])
+            .unwrap();
+        cli()
+            .git(&checkout, ["update-ref", "refs/heads/shared", "HEAD~1"])
+            .unwrap();
+
+        assert_eq!(
+            SharedRepositoryStore::resolved_branch_ref(&cli(), &checkout, "shared").unwrap(),
+            Some("refs/heads/shared".to_string())
+        );
+        assert_eq!(
+            SharedRepositoryStore::resolved_branch_ref(&cli(), &checkout, "nope").unwrap(),
+            None
+        );
+    }
+
+    /// Pins the duplicated rule to the one it copies. This resolver cannot call
+    /// `GitService::find_branch` — that answers "does the ref exist", while a
+    /// store must prove the commit object is present — so the agreement is
+    /// asserted instead of assumed.
+    #[test]
+    fn branch_resolution_agrees_with_git_services_branch_lookup() {
+        let fixture = TempDir::new().unwrap();
+        let checkout = fixture.path().join("repo");
+        seed_repo(&checkout);
+        cli()
+            .git(
+                &checkout,
+                ["update-ref", "refs/remotes/origin/main", "HEAD"],
+            )
+            .unwrap();
+
+        let git = git::GitService::new();
+        for branch in ["main", "origin/main", "absent", "origin/absent"] {
+            assert_eq!(
+                SharedRepositoryStore::resolved_branch_ref(&cli(), &checkout, branch)
+                    .unwrap()
+                    .is_some(),
+                git.check_branch_exists(&checkout, branch).unwrap(),
+                "the two resolvers disagree about '{branch}'"
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_refspec_targets_the_remote_tracking_namespace() {
+        // A remote-prefixed target names a branch upstream knows by another
+        // name, and belongs where the resolver will look for it.
+        assert_eq!(
+            SharedRepositoryStore::fallback_refspec("origin", "origin/main"),
+            "+refs/heads/main:refs/remotes/origin/main"
+        );
+        assert_eq!(
+            SharedRepositoryStore::fallback_refspec("origin", "origin/release/1.x"),
+            "+refs/heads/release/1.x:refs/remotes/origin/release/1.x"
+        );
+        // A plain local name keeps the original local-to-local form.
+        assert_eq!(
+            SharedRepositoryStore::fallback_refspec("origin", "main"),
+            "+refs/heads/main:refs/heads/main"
+        );
+        // Prefixed with a *different* remote's name: nothing says this remote
+        // holds it under another name, so do not guess.
+        assert_eq!(
+            SharedRepositoryStore::fallback_refspec("upstream", "origin/main"),
+            "+refs/heads/origin/main:refs/heads/origin/main"
+        );
+    }
+
+    /// A branch that exists nowhere must still fail — and say which repository
+    /// and which branch, because that failure is shown to the user.
+    #[tokio::test]
+    async fn ensure_reports_which_repository_and_branch_it_could_not_serve() {
+        let fixture = TempDir::new().unwrap();
+        let shared_root = fixture.path().join("shared");
+        let checkout = fixture.path().join("srv-src").join("repo");
+        fs::create_dir_all(&shared_root).unwrap();
+        seed_checkout_with_remote(&checkout);
+        let repo = repo_record("repo", &checkout);
+
+        let error = store_with_locks(&shared_root)
+            .await
+            .ensure(&repo, "origin/no-such-branch")
+            .await
+            .expect_err("a branch that exists nowhere cannot be served");
+
+        match &error {
+            WorkspaceError::SharedStore {
+                repo_name, branch, ..
+            } => {
+                assert_eq!(repo_name, "repo");
+                assert_eq!(branch, "origin/no-such-branch");
+            }
+            other => panic!("expected SharedStore, got {other:?}"),
+        }
+        let rendered = error.to_string();
+        assert!(rendered.contains("repo"), "{rendered}");
+        assert!(rendered.contains("origin/no-such-branch"), "{rendered}");
     }
 
     fn unreachable_locks() -> RepositoryAdminLockManager {

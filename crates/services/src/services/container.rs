@@ -140,6 +140,11 @@ pub enum ContainerError {
     Io(#[from] std::io::Error),
     #[error("Failed to kill process: {0}")]
     KillFailed(std::io::Error),
+    /// A clustered workspace could not be provisioned from its shared
+    /// repository store. Distinct from `Other` so the message survives to the
+    /// API instead of being rendered as a generic internal error.
+    #[error("{0}")]
+    SharedStore(String),
     #[error(transparent)]
     Other(#[from] AnyhowError), // Catches any unclassified errors
 }

@@ -459,13 +459,26 @@ impl GitCli {
         remote_url: &str,
         refspec: &str,
     ) -> Result<(), GitCliError> {
+        self.fetch_with_refspecs(repo_path, remote_url, &[refspec])
+    }
+
+    /// Fetch several refspecs from the given remote in one invocation.
+    ///
+    /// One `git fetch` rather than one per refspec: callers that mirror a
+    /// repository run inside an administration lease, where each extra
+    /// invocation is another process spawn and another connection. A wildcard
+    /// refspec that matches nothing is not an error to git, so refspecs cannot
+    /// fail each other here.
+    pub fn fetch_with_refspecs(
+        &self,
+        repo_path: &Path,
+        remote_url: &str,
+        refspecs: &[&str],
+    ) -> Result<(), GitCliError> {
         let envs = vec![(OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0"))];
 
-        let args = [
-            OsString::from("fetch"),
-            OsString::from(remote_url),
-            OsString::from(refspec),
-        ];
+        let mut args = vec![OsString::from("fetch"), OsString::from(remote_url)];
+        args.extend(refspecs.iter().map(OsString::from));
 
         match self.git_with_env(repo_path, args, &envs) {
             Ok(_) => Ok(()),

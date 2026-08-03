@@ -159,6 +159,17 @@ pub enum WorkspaceError {
     /// question is always "which repo, and pointing where?".
     #[error("worktree for repository '{repo_name}' is not usable from other nodes: {detail}")]
     WorktreeNotPortable { repo_name: String, detail: String },
+    /// The shared repository store cannot serve a workspace's target branch.
+    /// Carries the repository and the branch because this reaches the user
+    /// through the API, and "which repo, which branch?" is the only question
+    /// worth answering there — a generic internal error turns a one-line
+    /// diagnosis into an investigation.
+    #[error("shared repository store for '{repo_name}' cannot serve branch '{branch}': {detail}")]
+    SharedStore {
+        repo_name: String,
+        branch: String,
+        detail: String,
+    },
 }
 
 /// Info about a single repo's worktree within a workspace

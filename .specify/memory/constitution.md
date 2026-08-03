@@ -249,6 +249,34 @@ with no recurring check is a comment, not a control.
 Where a shared namespace is consolidated, its blast radius is re-derived rather
 than inherited: an operation that was safe while it touched one node's metadata
 is not automatically safe once every node's metadata lives in one place.
+Writes into such a namespace are **additive by default**: an operation that
+deletes or prunes entries there needs an argument for why every other holder of
+the namespace, on every node, is unaffected.
+
+### XXI. One convention per concept, and failures say what failed
+A value that already has a resolution rule in this codebase is resolved by that
+rule everywhere it is consumed. Re-deriving the rule at a new call site — a
+second string format, a narrower lookup, an extra normalisation — is a defect
+even when it passes its own tests, because the two definitions will disagree on
+exactly the inputs the original rule exists to handle. Find the existing
+resolver, call it, or match its outcome exactly and say so in a comment naming
+it.
+
+Consumers must accept the full domain the producer emits. Where a producer is
+user-facing (a picker, an API request body, a config field), the domain includes
+its *default* value, and the default is the case most likely to reach
+production — a consumer that handles every case except the default is broken for
+almost every user.
+
+A failure that a maintainer could act on must reach the operator with the fact
+that identifies it. Collapsing a specific, diagnosable failure into a generic
+message ("an internal error occurred") is a defect in its own right: it converts
+a one-line diagnosis into an investigation, and it does so precisely when the
+system is already failing. Server errors keep their status but carry a message
+naming what failed and which entity it failed for. Widening an error channel is
+scoped to the failure being surfaced — a blanket unwrapping of every internal
+error is not the remedy, and messages remain free of secrets, tokens, and
+environment values.
 
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
@@ -271,7 +299,11 @@ is not automatically safe once every node's metadata lives in one place.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.18.0 (adds cross-node path portability — node-identical shared
+**Version**: 0.19.0 (adds one-convention-per-concept — reuse the existing
+resolution rule rather than re-deriving it, accept the producer's default value,
+and report failures with the fact that identifies them instead of a generic
+internal error; also makes writes into a consolidated shared namespace additive
+by default; 0.18.0 added cross-node path portability — node-identical shared
 paths, structural rather than textual assertions, no same-named-local fallback,
 two-sided pointer repair, level-triggered enforcement, and re-derived blast
 radius for consolidated namespaces; 0.17.0 added observability as a read-only
