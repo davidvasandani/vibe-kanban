@@ -7,6 +7,7 @@ use std::{
 
 use convert_case::{Case, Casing};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as DeError};
+use strum::VariantNames;
 use thiserror::Error;
 use ts_rs::TS;
 
@@ -16,7 +17,7 @@ use crate::{
 };
 
 /// Return the canonical form for variant keys.
-/// – "DEFAULT" is kept as-is  
+/// – "DEFAULT" is kept as-is
 /// – everything else is converted to SCREAMING_SNAKE_CASE
 pub fn canonical_variant_key<S: AsRef<str>>(raw: S) -> String {
     let key = raw.as_ref();
@@ -26,6 +27,53 @@ pub fn canonical_variant_key<S: AsRef<str>>(raw: S) -> String {
         // Convert to SCREAMING_SNAKE_CASE by first going to snake_case then uppercase
         key.to_case(Case::Snake).to_case(Case::ScreamingSnake)
     }
+}
+
+/// Split an `EXECUTOR[:VARIANT]` capability string into canonical parts.
+///
+/// Capability strings are authored by hand — a cluster operator writes them into
+/// worker configuration — so they arrive in whatever shape the operator typed,
+/// while every string this codebase *generates* is already canonical. Comparing
+/// the two byte-for-byte silently unschedules correctly-configured workers, so
+/// both sides go through here first.
+///
+/// The executor half is normalised exactly as [`de_base_coding_agent_kebab`]
+/// normalises deserialized values (`-` → `_`, upper-cased), and the variant half
+/// through [`canonical_variant_key`], the same function that canonicalises the
+/// keys of [`ExecutorProfile::configurations`]. Reusing both keeps a
+/// hand-written `claude-code:plan` equal to a generated `CLAUDE_CODE:PLAN`.
+///
+/// Returns `None` when the executor half names no known agent. The variant is
+/// `Some` if and only if a `':'` was present, so a caller can distinguish a bare
+/// `CODEX` (which matches any variant) from a `CODEX:` that pins one.
+pub fn canonical_profile_parts(raw: &str) -> Option<(BaseCodingAgent, Option<String>)> {
+    let (executor, variant) = match raw.split_once(':') {
+        Some((executor, variant)) => (executor, Some(variant)),
+        None => (raw, None),
+    };
+    let executor = executor.trim().replace('-', "_").to_ascii_uppercase();
+    let executor = BaseCodingAgent::from_str(&executor).ok()?;
+    Some((executor, variant.map(|v| canonical_variant_key(v.trim()))))
+}
+
+/// Canonical `EXECUTOR` or `EXECUTOR:VARIANT` rendering of a capability string.
+///
+/// For use where a capability is *authored*. Unlike [`canonical_profile_parts`]
+/// this drops an empty variant, so `"CODEX:"` becomes `"CODEX"` — pinning "the
+/// variant whose name is the empty string" is never what an operator means. A
+/// consumer must not make that assumption on someone else's behalf, which is
+/// why the distinction survives in `canonical_profile_parts`.
+pub fn canonical_profile_string(raw: &str) -> Option<String> {
+    let (executor, variant) = canonical_profile_parts(raw)?;
+    Some(match variant.filter(|variant| !variant.is_empty()) {
+        Some(variant) => format!("{executor}:{variant}"),
+        None => executor.to_string(),
+    })
+}
+
+/// Every executor name a capability string may legally use, for error messages.
+pub fn valid_executor_names() -> String {
+    CodingAgent::VARIANTS.join(", ")
 }
 
 #[derive(Error, Debug)]
@@ -554,5 +602,110 @@ impl ExecutorConfigs {
         let selected = agents_with_info[0].0;
         tracing::info!("Recommended executor: {}", selected);
         Ok(ExecutorProfileId::new(selected))
+    }
+}
+
+#[cfg(test)]
+mod capability_string_tests {
+    use super::*;
+
+    #[test]
+    fn canonicalises_operator_written_executor_names() {
+        // The shapes an operator plausibly writes into worker configuration.
+        for raw in ["CODEX", "codex", "Codex", " codex "] {
+            assert_eq!(
+                canonical_profile_string(raw).as_deref(),
+                Some("CODEX"),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            canonical_profile_string("claude-code").as_deref(),
+            Some("CLAUDE_CODE")
+        );
+        assert_eq!(
+            canonical_profile_string("claude_code").as_deref(),
+            Some("CLAUDE_CODE")
+        );
+    }
+
+    #[test]
+    fn canonicalises_the_variant_the_same_way_profile_storage_does() {
+        // Variants are not free-form: ExecutorProfile keys go through
+        // canonical_variant_key, so a request carries "PLAN", never "plan".
+        // An operator writing the lowercase form must still match.
+        assert_eq!(
+            canonical_profile_string("codex:plan").as_deref(),
+            Some("CODEX:PLAN")
+        );
+        assert_eq!(
+            canonical_profile_string("claude-code:default").as_deref(),
+            Some("CLAUDE_CODE:DEFAULT")
+        );
+    }
+
+    #[test]
+    fn an_empty_variant_is_dropped_when_authoring_but_visible_when_comparing() {
+        // Authoring collapses "CODEX:" to "CODEX" — nobody means "the variant
+        // named empty string". A consumer must not make that call for someone
+        // else, so the colon stays observable through the parts API.
+        assert_eq!(canonical_profile_string("CODEX:").as_deref(), Some("CODEX"));
+
+        let (executor, variant) = canonical_profile_parts("CODEX:").unwrap();
+        assert_eq!(executor, BaseCodingAgent::Codex);
+        assert_eq!(variant.as_deref(), Some(""));
+
+        let (_, bare) = canonical_profile_parts("CODEX").unwrap();
+        assert_eq!(bare, None);
+    }
+
+    #[test]
+    fn cursor_resolves_through_its_alias_to_the_canonical_name() {
+        // BaseCodingAgent declares serialize = "CURSOR" and "CURSOR_AGENT".
+        // Both parse; strum's preferred output name is the longest, so
+        // canonicalisation lands on CURSOR_AGENT. Pinned because that rule is
+        // a strum implementation detail this feature depends on.
+        assert_eq!(
+            canonical_profile_string("CURSOR").as_deref(),
+            Some("CURSOR_AGENT")
+        );
+        assert_eq!(
+            canonical_profile_string("cursor-agent").as_deref(),
+            Some("CURSOR_AGENT")
+        );
+    }
+
+    #[test]
+    fn unknown_and_empty_executors_are_rejected() {
+        for raw in ["", "   ", "nope", "codexfoo", ":DEFAULT"] {
+            assert_eq!(canonical_profile_string(raw), None, "{raw}");
+            assert_eq!(canonical_profile_parts(raw), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn valid_executor_names_lists_agents_operators_can_configure() {
+        // Advisory error text, so assert membership rather than the whole list:
+        // QaMock is feature-gated and would make an exact assertion brittle.
+        let names = valid_executor_names();
+        for expected in ["CODEX", "CLAUDE_CODE", "CURSOR_AGENT"] {
+            assert!(names.contains(expected), "{expected} missing from {names}");
+        }
+    }
+
+    #[test]
+    fn every_advertised_name_round_trips_through_canonicalisation() {
+        // Completeness guard: VARIANTS is generated from the outer CodingAgent
+        // enum while parsing goes through BaseCodingAgent's discriminants. The
+        // two agreeing is a coincidence of the derives, not a guarantee — if
+        // they ever diverge, an operator could copy a name out of our own error
+        // message and have the worker reject it.
+        for name in CodingAgent::VARIANTS {
+            assert_eq!(
+                canonical_profile_string(name).as_deref(),
+                Some(*name),
+                "{name} from valid_executor_names() does not round-trip"
+            );
+        }
     }
 }

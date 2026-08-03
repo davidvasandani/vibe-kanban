@@ -534,7 +534,10 @@
     },
     "worker": {
       "label": "Run on",
-      "automatic": "Automatic placement"
+      "automatic": "Automatic placement",
+      "executorUnavailable": "Unavailable",
+      "executorUnavailableNotice": "No worker in this cluster can run {{agent}}.",
+      "workerCannotRunAgent": "cannot run {{agent}}"
     },
     "repoPicker": {
       "actions": {

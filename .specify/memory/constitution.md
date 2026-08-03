@@ -278,6 +278,27 @@ scoped to the failure being surfaced — a blanket unwrapping of every internal
 error is not the remedy, and messages remain free of secrets, tokens, and
 environment values.
 
+### XXII. Advertised capability is validated at its source and never silently withdrawn
+An operator-supplied capability list (executor profiles, tool identifiers, node
+labels) is untrusted input. The component that **owns** the capability validates
+it at startup against the canonical enumeration and fails closed, naming the
+offending value and the valid set; a component that would register as capable of
+nothing is a misconfiguration, not a default. Canonicalise at that boundary —
+per principle XXI, using the resolver the value already has — so a consumer
+never depends on operator casing or punctuation, and so a consumer can tolerate
+values written by an earlier build.
+
+A consumer must not synthesise or widen a capability its owner did not
+advertise. Normalisation that is legitimate when authoring your own declaration
+is not legitimate when interpreting someone else's.
+
+Capability is proved where proof is cheap and reliable; where a probe would be
+unreliable it stays advisory and is surfaced, never used to withdraw a
+capability that currently works. Any UI that mirrors a capability set is an
+affordance, not an authorisation boundary — the owning component remains the
+enforcement point, and a mirror that cannot parse its input degrades to
+permitting everything, never to hiding everything.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -299,7 +320,11 @@ environment values.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.19.0 (adds one-convention-per-concept — reuse the existing
+**Version**: 0.20.0 (adds validated, never-silently-withdrawn capability
+advertisement — an owner validates its own operator-supplied capability list and
+fails closed, a consumer neither widens it nor withdraws a working capability,
+and a UI mirror degrades to permitting everything; 0.19.0 added
+one-convention-per-concept — reuse the existing
 resolution rule rather than re-deriving it, accept the producer's default value,
 and report failures with the fact that identifies them instead of a generic
 internal error; also makes writes into a consolidated shared namespace additive

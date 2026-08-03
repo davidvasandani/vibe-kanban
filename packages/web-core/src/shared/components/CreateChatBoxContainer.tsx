@@ -28,6 +28,10 @@ import { CreateModeRepoPickerBar } from './CreateModeRepoPickerBar';
 import { ModelSelectorContainer } from '@/shared/components/ModelSelectorContainer';
 import { workerNodesApi } from '@/shared/lib/api';
 import {
+  clusterAdvertisedProfiles,
+  clusterSupportsExecutor,
+} from '@/shared/lib/workerCapabilities';
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -162,6 +166,48 @@ export function CreateChatBoxContainer({
     configExecutorProfile: config?.executor_profile,
     onPersist: (cfg) => setDraftConfig(cfg),
   });
+
+  // Which agents the cluster can actually run. An affordance only — the
+  // coordinator still enforces placement — so it degrades to "no constraint"
+  // whenever the capability data cannot be read.
+  const advertisedProfiles = useMemo(
+    () => clusterAdvertisedProfiles(workerNodes),
+    [workerNodes]
+  );
+
+  const unsupportedExecutors = useMemo(() => {
+    if (advertisedProfiles === null) return undefined;
+    const unsupported = new Map<BaseCodingAgent, string>();
+    for (const option of executorOptions) {
+      // The request is composed as `EXECUTOR:${variant ?? 'DEFAULT'}`, so the
+      // variant is known for the current selection and only resolves for the
+      // others once they are picked. Checking those against a guessed variant
+      // would grey out agents the cluster can actually run.
+      const requestedVariant =
+        option === effectiveExecutor
+          ? (selectedVariant ?? 'DEFAULT')
+          : undefined;
+      if (
+        !clusterSupportsExecutor(advertisedProfiles, option, requestedVariant)
+      ) {
+        unsupported.set(option, t('createMode.worker.executorUnavailable'));
+      }
+    }
+    return unsupported.size > 0 ? unsupported : undefined;
+  }, [
+    advertisedProfiles,
+    executorOptions,
+    effectiveExecutor,
+    selectedVariant,
+    t,
+  ]);
+
+  // Shown beside the picker when the user's *current* agent is unavailable.
+  // The selection is deliberately left alone: silently switching it would
+  // persist a different default than the user chose.
+  const selectedExecutorUnavailable =
+    effectiveExecutor !== null &&
+    unsupportedExecutors?.has(effectiveExecutor) === true;
 
   const repoId = repos.length === 1 ? repos[0]?.id : undefined;
   const repoSummaryLabel = useMemo(() => {
@@ -367,21 +413,47 @@ export function CreateChatBoxContainer({
                             {t('createMode.worker.automatic')}
                           </SelectItem>
                           {workerNodes.map((worker) => {
-                            const eligible =
+                            const healthy =
                               worker.status === WorkerNodeStatus.online &&
                               worker.mount_status === WorkerMountStatus.healthy;
+                            // A healthy worker that cannot run the selected
+                            // agent is just as unpickable as an offline one,
+                            // and saying which is which saves a round trip.
+                            const runsAgent =
+                              effectiveExecutor === null ||
+                              clusterSupportsExecutor(
+                                clusterAdvertisedProfiles([worker]),
+                                effectiveExecutor,
+                                selectedVariant ?? 'DEFAULT'
+                              );
                             return (
                               <SelectItem
                                 key={worker.id}
                                 value={worker.id}
-                                disabled={!eligible}
+                                disabled={!healthy || !runsAgent}
                               >
                                 {worker.hostname}
+                                {healthy && !runsAgent
+                                  ? ` — ${t(
+                                      'createMode.worker.workerCannotRunAgent',
+                                      { agent: effectiveExecutor }
+                                    )}`
+                                  : ''}
                               </SelectItem>
                             );
                           })}
                         </SelectContent>
                       </Select>
+                    </div>
+                  )}
+                  {selectedExecutorUnavailable && (
+                    <div
+                      role="status"
+                      className="flex justify-end text-xs text-error"
+                    >
+                      {t('createMode.worker.executorUnavailableNotice', {
+                        agent: effectiveExecutor,
+                      })}
                     </div>
                   )}
                   <CreateChatBox
@@ -429,6 +501,7 @@ export function CreateChatBoxContainer({
                       selected: effectiveExecutor,
                       options: executorOptions,
                       onChange: handleExecutorChange,
+                      unsupported: unsupportedExecutors,
                     }}
                     formatExecutorLabel={toPrettyCase}
                     error={displayError}

@@ -1,195 +1,209 @@
-# Cluster workspace creation fails with "An internal error occurred"
+# Technical Spec: Legible Worker Executor Capabilities
 
-Task id: `b72a-internal-error-o`
+## Problem
 
-> Constraints distilled from the project knowledge base are in
-> [`PRIOR_KNOWLEDGE.md`](PRIOR_KNOWLEDGE.md).
-
-## Symptom
-
-On the coordinator (think2, `vibe.vasandani.dev`), starting a new issue from the
-create-mode chat box ("What would you like to work on?") with **Run on:
-Automatic placement** returns:
-
-> An internal error occurred. Please try again.
-
-Sometimes instead the request hangs for a long time before the workspace
-eventually starts. Reported against release `293f7017` (PR #174, built
-2026-08-02T16:44Z), on a two-repository selection (`homelab`, `vibe-kanban`).
-
-## Root cause
-
-`SharedRepositoryStore::ensure` — added by #174 — decides whether the shared
-bare store can serve a workspace's **target branch** by asking for one specific
-ref (`crates/workspace-manager/src/shared_repository.rs:441-449`):
-
-```rust
-fn branch_commit_present(cli: &GitCli, store: &Path, branch: &str) -> Result<bool, WorkspaceError> {
-    let reference = format!("refs/heads/{branch}");
-    cli.commit_exists(store, &reference)
-    ...
-}
-```
-
-A `target_branch` in this codebase is **not** guaranteed to be a local branch
-name. The repo-wide convention, established by `GitService::find_branch`
-(`crates/git/src/lib.rs:1410-1425`) and `GitService::check_branch_exists`
-(`crates/git/src/lib.rs:1281-1294`), is *local first, then remote*: the string
-`origin/main` resolves to `refs/remotes/origin/main`.
-
-And `origin/main` is exactly what the create screen sends. `get_all_branches`
-returns remote-tracking branches under their remote-prefixed names, and
-`resolveDefaultBranch` (`packages/web-core/src/shared/lib/defaultBranch.ts`)
-defaults a newly added repo to the literal string `origin/main` (see
-`wiki/create-mode-repo-branch-defaulting.md`). `repo.default_target_branch` is
-NULL at registration, so for most repos the built-in `origin/main` default is
-what actually applies.
-
-The store is a `git clone --bare` of the coordinator's checkout, so it holds
-`refs/heads/main` and has **no** `refs/heads/origin/main` and no
-`refs/remotes/origin/main`. Verified on the live share:
+Creating a workspace with the Codex agent on the clustered self-hosted
+deployment fails after submit with:
 
 ```
-$ git -C /srv/vibe-kanban-shared/cluster/repositories/b2a286a2-… \
-      cat-file -e 'refs/heads/origin/main^{commit}'
-fatal: Not a valid object name refs/heads/origin/main^{commit}
-$ git -C … cat-file -e 'refs/heads/main^{commit}'      # PRESENT
+no eligible worker supports executor profile "CODEX:DEFAULT"
 ```
 
-So for a repo left on the default branch, `ensure` takes the slow path every
-time and then fails at its closing check (`shared_repository.rs:348-353`):
+The scheduler is behaving correctly. The failure is a configuration and
+legibility problem, not a scheduling bug.
 
-```rust
-if !Self::branch_commit_present(&cli, store, target_branch)? {
-    return Err(WorkspaceError::PartialCreation(format!(
-        "shared store {} does not resolve target branch '{target_branch}'", …)));
-}
-```
+### Observed chain
 
-`PartialCreation` → `LocalContainerService::map_workspace_manager_error`
-(`crates/local-deployment/src/container.rs:628`) → `ContainerError::Other` →
-`ApiError::Container` → `ErrorInfo::internal("ContainerError")`
-(`crates/server/src/error.rs:518`) → the generic message the user sees.
+1. `crates/server/src/routes/workspaces/create.rs:362` — when clustering is
+   enabled, *every* workspace creation must be placed on a worker. There is no
+   coordinator-local fallback.
+2. The requested profile is stringified via `ExecutorProfileId`'s `Display`
+   impl (`crates/executors/src/profile.rs:111`) as `CODEX:DEFAULT`.
+   `BaseCodingAgent` renders SCREAMING_SNAKE_CASE.
+3. `WorkerScheduler::select` filters by `eligibility()`
+   (`crates/services/src/services/cluster/scheduler.rs:110`), which requires the
+   worker's `capabilities.executor_profiles` to contain `CODEX:DEFAULT` or the
+   bare `CODEX`.
+4. Workers advertise verbatim whatever the operator placed in
+   `VK_WORKER_EXECUTOR_PROFILES` (`crates/worker/src/lib.rs:116`,
+   `crates/worker/src/server.rs:141`). Nothing validates, canonicalises, or
+   verifies the list.
+5. In the governing homelab module both workers are configured
+   `executorProfiles = [ "CLAUDE_CODE" ]` (`hosts/think/think3.nix:122`,
+   `hosts/think/think4.nix:122`).
 
-The mirroring fetch that is supposed to top the store up cannot help, because it
-only copies the checkout's *local* heads (`shared_repository.rs:324-328`):
+`CODEX:DEFAULT` therefore matches nothing, `NoEligibleWorkers` is returned as a
+400, and the create dialog renders it via `createWorkspace.error`.
 
-```rust
-cli.fetch_with_refspec(store, &repo.path.to_string_lossy(), "+refs/heads/*:refs/heads/*")
-```
+This is not Codex-specific. Enabling clustering silently reduced the deployment
+to a single agent; Grok, Gemini, Copilot and the rest fail identically. The
+coordinator (think2) has an installed, authenticated `codex` CLI, but
+coordinator-local execution is unreachable once `clusterRole = "coordinator"`.
 
-Even if `branch_commit_present` were fixed on its own, provisioning would still
-fail one step later: `create_worktree` calls
-`GitService::create_branch(store, "vk/…", target_branch)`
-(`crates/worktree-manager/src/worktree_manager.rs:274-282`), whose `find_branch`
-looks for `refs/remotes/origin/main` **in the store**. The store must actually
-carry the remote-tracking refs.
+### Defects this spec addresses
 
-### Why it is intermittent
+- **D1 — Unvalidated advertisement.** An operator can advertise an executor name
+  that does not exist. `lookup(WORKER_EXECUTOR_PROFILES_ENV).unwrap_or_default()`
+  means an unset or empty variable produces a worker that registers, reports
+  healthy, appears online in the admin UI, and is eligible for nothing. Silent.
+- **D2 — Case-sensitive matching.** `advertises_executor_profile` compares
+  `&str` values directly. `executorProfiles = [ "codex" ]` is accepted by Nix,
+  registered by the worker, and never matches `CODEX:DEFAULT`. The scheduler's
+  own unit tests use lowercase `"codex"` throughout — self-consistent, but not
+  data the running system can produce.
+- **D3 — Dead-end error.** The message names only the profile that failed. It
+  does not say what the cluster *can* run, and it cannot distinguish "no worker
+  has this executor" from "every worker is offline / unhealthy mount / expired
+  lease". Those need opposite remedies.
+- **D4 — Unreachable option offered.** The create-mode executor picker offers
+  every configured agent regardless of cluster capability, so the failure only
+  surfaces after the user has written a prompt.
 
-It is deterministic per branch selection, not random:
+## Guiding prior art
 
-- target branch left at the default `origin/main` → always fails;
-- target branch changed to a local name (`main`, a `vk/…` branch, or whatever
-  `resolveDefaultBranch` fell through to when `origin/main` was absent from the
-  list) → succeeds.
+From `docs/knowledge-base/clustered-workspace-execution.md`:
 
-That is why the same user sees both outcomes, and why the cluster workspaces
-that do exist on the share (`b72a595d`, `19a4a176`, `87949b5a`) all carry local
-branch names.
+- *"Treat a shared mount as a capability, not a directory."* Mount health is
+  **proved** before a worker becomes schedulable. Executor profiles are the one
+  capability that stayed an asserted env string.
+- The coordinator is authoritative for placement, but capabilities are
+  **worker-authored and coordinator-consumed**. The coordinator must not
+  synthesise or widen a worker's advertised set.
+- *"Never retry a dispatch on a different worker."* A `NoEligibleWorkers`
+  rejection cannot be papered over by failing to another node; the fix belongs
+  at advertisement and registration time.
 
-### Why it hangs
+From `wiki/managed-cli-tool-catalog.md`: `CliToolId::ALL` is load-bearing, and
+forgetting an entry *"makes the tool effectively invisible even if a catalog
+entry exists"* — answered there with a **completeness test**. Same idiom
+applies.
 
-Before returning the error, `ensure` does slow work per repository, inside the
-HTTP request, with no timeout at any layer (no axum `TimeoutLayer`;
-`makeLocalApiRequest` issues a bare `fetch` with no `AbortSignal`):
-
-1. `clone_into_staging` — a full `git clone --bare` of the checkout onto the
-   shared NFS root. Measured on this cluster: 0.7 s for homelab's 116 MB, so
-   this is not the dominant cost, but it is repeated per repository and on every
-   attempt until the store is published.
-2. The remotes fallback loop (`shared_repository.rs:334-346`) runs
-   `git fetch <origin-url> +refs/heads/origin/main:refs/heads/origin/main`
-   against **`https://github.com/…`** — a network round trip guaranteed to fail,
-   because no branch named `origin/main` exists upstream. This is the dominant,
-   user-visible stall, and it is paid once per repository per attempt.
-
-### Pre-existing defect this exposes
-
-Every failure inside clustered provisioning and dispatch is funnelled through
-`ContainerError::Other(anyhow!(…))` and rendered as
-"An internal error occurred. Please try again." The one message that identifies
-this in a single read —
-`shared store … does not resolve target branch 'origin/main'` — never reaches
-the operator; the coordinator's journal is the only copy. "Debug the error" was
-itself made expensive by this.
+From `docs/knowledge-base/grok-executor-integration.md`: *"Backend-only
+compatibility checks leave the UI able to construct saves that the backend
+rejects."* D4 is exactly that.
 
 ## Scope
 
-In scope:
+In scope, all within this repository:
 
-1. Resolve a cluster workspace's target branch in the shared store the way the
-   rest of the codebase resolves target branches: local ref first, then
-   remote-tracking ref.
-2. Make the shared store carry what that resolution needs, by mirroring the
-   registered checkout's remote-tracking refs alongside its heads.
-3. Stop the remotes-fallback loop from constructing a refspec that cannot
-   succeed for a remote-prefixed branch name.
-4. Surface actionable messages for shared-store provisioning failures instead of
-   the generic internal error.
+- Worker-side validation and canonicalisation of `VK_WORKER_EXECUTOR_PROFILES`.
+- Case-insensitive, canonicalising profile matching in the scheduler.
+- A scheduling error that distinguishes cause and names the cluster's supported
+  profiles.
+- Create-mode UI gating of executors no eligible worker can run.
 
-Out of scope (recorded, not fixed here):
+Explicitly out of scope:
 
-- The absent request timeout on `POST /api/workspaces/start` and the absent
-  client-side `AbortSignal`.
-- `WorkerClient::endpoint_for`'s positive-only endpoint cache and missing
-  connect timeout (an unreachable configured endpoint costs the full 30 s client
-  timeout on every cache miss).
-- Rolling back the workspace row when provisioning fails, so a failed create
-  does not leave a half-built workspace behind.
+- **Provisioning Codex credentials on think3/think4**, and the homelab module
+  changes that would accompany them (`codex` in the worker unit's `path`, a
+  credential mechanism paralleling `opClaudeOauthTokenRef`, and flipping
+  `executorProfiles`). Blocked on an unanswered question: whether Codex on
+  think2 authenticates via a ChatGPT device login writing `~/.codex/auth.json`
+  or via `OPENAI_API_KEY`. The two need different Nix plumbing —
+  `clustered-workspace-execution.md` requires secret options to take absolute
+  paths, reject `/nix/store/` paths, and load through systemd credentials.
+- **Auto-de-advertising unavailable executors.** Tempting given the "prove,
+  don't assert" principle, and `get_availability_info()` already exists per
+  executor (`crates/executors/src/executors/codex.rs:264`). Rejected for now:
+  Claude Code on the workers authenticates via the `CLAUDE_CODE_OAUTH_TOKEN`
+  environment variable, not an on-disk credential, so a file-presence probe
+  would report `NotFound` and **silently unschedule the one agent that
+  currently works**. Any availability probe must be advisory (surfaced, not
+  enforced) and is deferred.
+- Coordinator-local execution fallback when no worker supports a profile. This
+  contradicts the placement authority model.
 
 ## Requirements
 
-**R1 — Remote-prefixed target branches resolve in the store.**
-`SharedRepositoryStore::ensure(repo, "origin/main")` succeeds for a repository
-whose checkout has `refs/remotes/origin/main`, and the resulting store resolves
-`origin/main`.
+### R1 — Worker validates its advertised profiles at startup
 
-**R2 — Resolution matches the rest of the codebase.** The store's branch
-resolution is local-then-remote, identical in outcome to
-`GitService::find_branch`. A name that is both a local branch and a remote
-branch resolves to the local one, as `find_branch` does.
+`WorkerConfig::from_env` parses each comma-separated entry as an optional
+`EXECUTOR` or `EXECUTOR:VARIANT` pair and resolves the executor half through
+`BaseCodingAgent::from_str`.
 
-**R3 — The store carries remote-tracking refs.** `ensure` mirrors both
-`refs/heads/*` and `refs/remotes/*` from the registered checkout, so
-`GitService::create_branch(store, …, "origin/main")` and `git worktree add`
-succeed against the store.
+- Unknown executor name → startup error naming the offending value and listing
+  the valid executor names. The worker must not register.
+- Empty or unset variable → startup error. A worker eligible for nothing is a
+  misconfiguration, not a default.
+- Accepted entries are canonicalised to SCREAMING_SNAKE_CASE, preserving the
+  variant verbatim (variants are user-defined and not enumerable).
 
-**R4 — No unsatisfiable network fetch.** The remotes fallback must not fetch
-`+refs/heads/origin/main:refs/heads/origin/main`. For a remote-prefixed target
-branch it fetches the upstream branch under its real upstream name into the
-matching remote-tracking ref, or does not run at all.
+Failing closed at startup is correct here: a worker that cannot be scheduled has
+no useful degraded mode, and the deploy health gate will surface the failure.
 
-**R5 — Actionable failure.** When shared-store provisioning fails, the API
-response names what failed and for which repository, rather than
-"An internal error occurred. Please try again."
+### R2 — Matching is canonicalising, not byte-exact
 
-**R6 — No behaviour change off the cluster path.** Coordinator-local
-(`placement_state = local`) workspaces and installs with clustering disabled are
-untouched — they never construct a `SharedRepositoryStore`.
+`advertises_executor_profile` compares the executor half case-insensitively and
+the variant half case-insensitively. R1 prevents new bad rows, but existing
+registrations in the coordinator's database may already hold lowercase values
+written by the current build; those must keep working across the upgrade without
+an operator touching them.
+
+The existing bare-vs-qualified semantics are preserved exactly: a bare
+advertisement matches any variant of that executor; a qualified advertisement
+pins one variant and is not widened by a bare request.
+
+### R3 — The scheduling error states the cause and the remedy
+
+`SchedulingError::NoEligibleWorkers` is replaced by two distinguishable
+outcomes, decided by whether any worker passes the non-executor eligibility
+checks (online, healthy mount, live lease):
+
+- **At least one healthy worker, none advertising the executor** — report the
+  requested profile plus the sorted set of profiles the healthy workers do
+  advertise. Remedy: change agent, or advertise it on a worker.
+- **No healthy worker at all** — report the worker count and a tally of the
+  reasons they were rejected. Remedy: fix the workers. Naming the executor here
+  would be actively misleading.
+
+The distinction is derived from the existing `IneligibleReason` values, so no
+new eligibility state is introduced.
+
+### R4 — The create-mode picker does not offer unreachable executors
+
+When worker nodes exist, `CreateChatBoxContainer` computes the union of
+executor profiles advertised by *eligible* workers (online + healthy mount;
+lease expiry is a server-side concern and is deliberately not re-implemented in
+the browser) and marks any executor option outside that union as unsupported —
+disabled, with a reason.
+
+`WorkerNode.capabilities` is typed `unknown` in generated TypeScript
+(`#[ts(type = "unknown")]`), so parsing must be defensive: any shape that is not
+a string array yields no constraint. When the parsed union is empty — no
+workers, capabilities absent, or an unrecognised shape — **no gating is applied
+at all**. A UI that hides every agent because it failed to parse a field is
+worse than the 400 it replaces.
+
+This is an affordance, not an authorisation boundary; R3 remains the enforcement
+point.
+
+## Non-goals
+
+- Changing placement, stickiness, dispatch, lease, or mount semantics.
+- Changing the `cluster-protocol` wire format. `WorkerCapabilities` keeps
+  `executor_profiles: Vec<String>`; only the values the worker puts in it become
+  canonical. Registration and heartbeat payloads are covered by the request
+  signature's body digest, so avoiding a shape change avoids a lockstep upgrade.
+- A general worker capability framework.
 
 ## Verification
 
-- Unit tests in `crates/workspace-manager/src/shared_repository.rs` over real
-  temporary git repositories:
-  - `ensure` with a remote-prefixed target branch succeeds and the store
-    resolves it (R1, R3);
-  - a local branch and a remote branch of the same name resolve local-first
-    (R2);
-  - the store created by `ensure` can create the workspace branch and register a
-    worktree from a remote-prefixed base (R3);
-  - `ensure` still fails, with its existing message, for a branch that exists
-    nowhere (no regression in the closing check).
-- `cargo test --workspace`, `cargo clippy -D warnings`, `cargo fmt`.
-- Live re-check on the shared store that `origin/main` resolves after the
-  change.
+- Unit tests in `crates/worker` for R1: unknown executor rejected, empty
+  rejected, mixed-case canonicalised, variant preserved.
+- Unit tests in `crates/services` for R2 and R3: lowercase legacy advertisement
+  matches a canonical request; bare/qualified semantics unchanged; the two
+  error variants are produced in the right circumstances. Existing scheduler
+  tests are updated to use data the running system can actually produce
+  (canonical `CLAUDE_CODE`, requests like `CODEX:DEFAULT`) rather than the
+  current lowercase fixtures.
+- A frontend test for R4 covering: gating applied, unsupported option disabled,
+  and each degenerate capability shape leaving the picker fully enabled.
+- `pnpm run check`, `pnpm run lint`, `cargo test --workspace`,
+  `pnpm run generate-types:check`, `pnpm run format`.
+- Independent Codex review of the diff.
+
+Per `wiki/self-hosted-deployment.md`, local tests do not replace the two-node
+deployment gate. The R1 startup failure mode in particular should be confirmed
+against a real worker before this is relied upon, because it converts a
+misconfiguration that previously produced a running-but-useless worker into a
+service that refuses to start.

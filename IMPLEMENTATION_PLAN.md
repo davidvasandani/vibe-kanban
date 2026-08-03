@@ -1,161 +1,162 @@
-# Implementation Plan — `b72a-internal-error-o`
+# Implementation Plan: Legible Worker Executor Capabilities
 
-Fix clustered workspace creation failing with "An internal error occurred".
-Design: [`SPEC.md`](SPEC.md). Constraints:
-[`PRIOR_KNOWLEDGE.md`](PRIOR_KNOWLEDGE.md).
+Implements `SPEC.md` R1–R4. Ordered so each step compiles and tests green on its
+own; the two Rust layers are independent of each other and of the frontend.
 
-## Before you start
+## Step 0 — Environment
 
-This workspace runs on a **worker** node (think3), not the coordinator. The
-coordinator's journal is not reachable from here, so the diagnosis was built
-from the deployed release marker (`/srv/vk-releases/current/release.json` →
-`293f7017`), the live shared store under
-`/srv/vibe-kanban-shared/cluster/repositories/`, and the source. A Rust
-toolchain is available at `~/.cargo/bin` (`nightly-2025-12-04`); add it to
-`PATH`. `cargo build --workspace --tests` passes on `main` before any change —
-that is the baseline.
+1. `pnpm install --frozen-lockfile` (fresh worktree requirement).
+2. Confirm baseline: `cargo test -p worker -p services`.
 
-Reproduction, without building anything (already run):
+Note for this workspace: the checkout's `.git` points at
+`/srv/src/vibe-kanban/.git/worktrees/vibe-kanban4`, which is not reachable from
+this sandbox, so `git`-based verification (`git diff --check`, diff review
+against a base ref) is unavailable and must be substituted with file-level
+review.
 
-```
-$ git -C /srv/vibe-kanban-shared/cluster/repositories/b2a286a2-… \
-      cat-file -e 'refs/heads/origin/main^{commit}'    # fatal: Not a valid object name
-$ git -C … cat-file -e 'refs/heads/main^{commit}'      # PRESENT
-```
+## Step 1 — Shared profile parsing helper (`crates/executors/src/profile.rs`)
 
-and, on a scratch clone, that adding `+refs/remotes/*:refs/remotes/*` to the
-mirroring fetch makes `origin/main` resolve, `git branch vk/x origin/main`
-succeed, and `git worktree add` produce a worktree on `vk/x`.
+Both the worker (R1) and the scheduler (R2) need the same notion of "split an
+`EXECUTOR[:VARIANT]` string and canonicalise the executor half". Put it once,
+next to `ExecutorProfileId`, rather than duplicating a `split_once(':')` in two
+crates that already both depend on `executors`.
 
-## Step 1 — `GitCli`: fetch more than one refspec in one invocation
+1. Add `pub fn canonical_profile_parts(raw: &str) -> Option<(BaseCodingAgent,
+   Option<&str>)>`: split on the first `':'`, uppercase-and-underscore the
+   executor half (mirroring the existing `de_base_coding_agent_kebab`
+   normalisation so `claude-code` and `claude_code` both resolve), resolve via
+   `BaseCodingAgent::from_str`, return `None` on an unknown executor.
+2. Add `pub fn canonical_profile_string(raw: &str) -> Option<String>` returning
+   `EXECUTOR` or `EXECUTOR:VARIANT` with the executor half canonical and the
+   variant **preserved verbatim** — variants are user-defined and not
+   enumerable, so they must not be case-folded on the way in.
+3. Unit tests: `codex` → `CODEX`; `claude-code:PLAN` → `CLAUDE_CODE:PLAN`;
+   `codex:plan` keeps `plan`; `nope` → `None`; `CURSOR` → `CURSOR_AGENT` (the
+   alias path); empty → `None`.
 
-`crates/git/src/cli.rs`
+Risk: `BaseCodingAgent::from_str` is strum-derived with `serialize_all =
+"SCREAMING_SNAKE_CASE"` and an explicit `CURSOR`/`CURSOR_AGENT` alias. Verify
+the alias resolves through `from_str` and not only through serde before relying
+on it in a test.
 
-- Add `fetch_with_refspecs(&self, repo_path, remote_url, refspecs: &[&str])`,
-  carrying the existing `GIT_TERMINAL_PROMPT=0` env and
-  `classify_cli_error` handling verbatim.
-- Reimplement `fetch_with_refspec` as a one-element delegation so its three
-  existing callers (`git/src/lib.rs:1567`, two tests in
-  `git/tests/git_ops_safety.rs`) are unaffected.
+## Step 2 — R1: worker validates at startup (`crates/worker/src/lib.rs`)
 
-Why one invocation rather than two calls: the mirroring fetch runs inside the
-repository administration lease, and each `git fetch` is a process spawn plus a
-connection to the source.
+1. Add `WorkerConfigError::UnknownExecutorProfile { value: String, valid:
+   String }` with a message naming the bad value and listing valid executor
+   names from `BaseCodingAgent::VARIANTS` (the `VariantNames` derive is already
+   present on `CodingAgent`; confirm the discriminant type also exposes it, and
+   if not, source the list from strum's `VariantNames` on the discriminants).
+2. In `from_lookup`, replace the current `unwrap_or_default().split(',')` chain:
+   map each non-empty trimmed entry through `canonical_profile_string`,
+   collecting the first failure into the new error.
+3. Reject an empty resulting list with `WorkerConfigError::Missing(
+   WORKER_EXECUTOR_PROFILES_ENV)` — unset, blank, and all-whitespace collapse to
+   the same operator-visible mistake.
+4. **Update the existing test** `parses_required_identity_and_coordinator_with_
+   safe_defaults`, which currently omits `VK_WORKER_EXECUTOR_PROFILES` and will
+   now fail. This is intended: the test documented a default that produced a
+   worker eligible for nothing.
+5. New tests: unknown name rejected; empty/whitespace rejected; `codex,
+   claude-code` canonicalises to `["CODEX", "CLAUDE_CODE"]`; `codex:PLAN`
+   preserves the variant; surrounding whitespace tolerated.
 
-## Step 2 — resolve a target branch the way the rest of the codebase does
+## Step 3 — R2: canonicalising match (`crates/services/.../scheduler.rs`)
 
-`crates/workspace-manager/src/shared_repository.rs`
+1. Rewrite `advertises_executor_profile` to compare via
+   `canonical_profile_parts` on both sides: executors must be the same
+   `BaseCodingAgent`; then either the advertisement has no variant (matches any
+   variant of that executor, including a bare request) or both variants are
+   present and `eq_ignore_ascii_case`.
+2. Fall back to the current byte-exact comparison when **either** side fails to
+   canonicalise, so an advertisement for an executor this build does not know
+   still behaves as it does today rather than becoming unmatchable.
+3. Preserve the documented semantics exactly, and keep the existing explanatory
+   comment (it records why bare advertisements match qualified requests — a
+   production incident). Extend it to record the case-folding rationale.
+4. Update the existing fixtures from lowercase `"codex"`/`"claude"` to values
+   the system actually produces (`CODEX`, `CLAUDE_CODE`) and requests of the
+   form `CODEX:DEFAULT`, then **add** a regression test that a legacy lowercase
+   row still matches — that is the upgrade-compatibility guarantee, and it is
+   only meaningful once the rest of the fixtures are realistic.
+5. Keep the prefix-overlap test (`codexfoo`) — canonicalisation must not
+   reintroduce that false match; `codexfoo` simply fails to resolve and falls to
+   the byte-exact path.
 
-- Add `fn resolved_branch_ref(cli, store, branch) -> Result<Option<String>, WorkspaceError>`:
-  try `refs/heads/{branch}`, then `refs/remotes/{branch}`, returning the first
-  whose commit is **proven present** with `commit_exists` (`cat-file -e`) — per
-  the "Prove the objects" rule in `PRIOR_KNOWLEDGE.md`. Local first, so a name
-  that is both a local and a remote branch resolves local, matching
-  `GitService::find_branch` (`crates/git/src/lib.rs:1410-1425`).
-- Reimplement `branch_commit_present` on top of it. Every existing caller
-  (`ensure`, `store_resolves`, `adopt`, `mirror_branch_back`) keeps its current
-  signature and semantics for local branch names.
+## Step 4 — R3: cause-distinguishing error (same file, then call site)
 
-## Step 3 — mirror the checkout's remote-tracking refs into the store
+1. Replace `SchedulingError::NoEligibleWorkers { executor_profile }` with:
+   - `ExecutorUnsupported { executor_profile: String, supported: Vec<String> }`
+   - `NoHealthyWorkers { total: usize, reasons: Vec<(IneligibleReason, usize)> }`
+   Derive `Display` messages that state the remedy, not just the fact.
+2. In `select`, when the filtered iterator is empty, partition the workers once
+   by `eligibility(...)`: if any worker's only failure is `MissingExecutor`,
+   emit `ExecutorUnsupported` with the sorted deduplicated union of those
+   workers' advertised profiles; otherwise emit `NoHealthyWorkers` with a tally.
+   Zero workers registered is `NoHealthyWorkers { total: 0, .. }`.
+3. `IneligibleReason` needs `Display` (or a `fn label()`) for the tally text; it
+   is `Copy + Eq` already.
+4. Call site `crates/server/src/routes/workspaces/create.rs:383` maps the error
+   with `ApiError::BadRequest(error.to_string())` and needs no change — but
+   re-read it to confirm no variant is matched by name anywhere. Grep for
+   `NoEligibleWorkers` across the workspace first; it is currently referenced
+   only in `scheduler.rs`.
+5. Tests: healthy-but-unsupported produces `ExecutorUnsupported` listing the
+   real profiles; all-offline produces `NoHealthyWorkers` with a correct tally;
+   an empty worker list produces `NoHealthyWorkers { total: 0 }`; a mixed
+   population (one offline, one healthy-without-the-executor) prefers
+   `ExecutorUnsupported`, because the actionable remedy is the executor.
 
-`crates/workspace-manager/src/shared_repository.rs`, `publish_and_fetch`
+## Step 5 — R4: create-mode gating (`packages/web-core`)
 
-- Replace the single `+refs/heads/*:refs/heads/*` fetch with
-  `["+refs/heads/*:refs/heads/*", "+refs/remotes/*:refs/remotes/*"]`.
-- Keep it best-effort (the existing `if let Err(e) = … { debug!(…) }`), and keep
-  it inside the lease, after `configure()` and the rename — so
-  `core.sharedRepository=group` is already in effect for every ref file the
-  fetch writes, per `PRIOR_KNOWLEDGE.md`.
+1. New pure helper + colocated Vitest file, e.g.
+   `shared/lib/workerCapabilities.ts`:
+   `clusterSupportedExecutors(workerNodes): Set<string> | null`.
+   - Consider only workers with `status === online && mount_status === healthy`.
+   - Parse `capabilities` defensively — it is `unknown` in generated types.
+     Anything that is not `{ executor_profiles: string[] }` contributes nothing.
+   - Return the canonical executor halves (uppercase, before any `':'`).
+   - Return **`null`** (meaning "no opinion, gate nothing") when there are no
+     worker nodes at all or the union is empty. Encoding this as `null` rather
+     than an empty set is what prevents a parse failure from disabling every
+     agent.
+2. In `CreateChatBoxContainer`, derive the set from the already-fetched
+   `workerNodes` query and pass a disabled/reason flag through to the executor
+   options given to `CreateChatBox`.
+3. Inspect how `executorOptions` from `useExecutorConfig` is consumed by
+   `CreateChatBox` before choosing between filtering the list and adding a
+   `disabled` field. **Prefer disabling with a reason** — silently omitting an
+   agent the user has configured is its own debugging dead end, and the KB's
+   "unsupported ≠ error" guidance argues for a visible status.
+4. Vitest cases: gating applied for a normal cluster; unsupported option
+   disabled; offline/unhealthy workers excluded from the union; and each
+   degenerate shape (no workers, missing `capabilities`, `executor_profiles`
+   absent, non-array, array of non-strings) leaves the picker fully enabled.
 
-This is what makes `GitService::create_branch(store, "vk/…", "origin/main")` and
-the subsequent `git worktree add` work; Step 2 alone would move the failure one
-frame later.
+## Step 6 — Verification
 
-## Step 4 — make the remotes fallback fetch a refspec that can succeed
+1. `cargo test -p executors -p worker -p services`, then
+   `cargo test --workspace`.
+2. `pnpm run generate-types:check` — no Rust type crossing the ts-rs boundary
+   should change (`SchedulingError` is not a `TS` type), so this is a guard
+   against an unintended export, not an expected diff.
+3. `pnpm run check`, `pnpm run lint`.
+4. `pnpm run format` last.
+5. Re-read the full diff for consistency before review.
 
-`crates/workspace-manager/src/shared_repository.rs`, `publish_and_fetch`
+## Step 7 — Review and knowledge capture
 
-- Extract `fn fallback_refspec(remote_name: &str, target_branch: &str) -> Option<String>`:
-  - `target_branch` starting with `"{remote_name}/"` → fetch the upstream branch
-    under its real name into the matching remote-tracking ref:
-    `+refs/heads/{rest}:refs/remotes/{target_branch}`;
-  - otherwise → the current local-to-local form,
-    `+refs/heads/{target_branch}:refs/heads/{target_branch}`.
-- Break out of the remotes loop only when the branch **actually resolves**
-  afterwards, not on `fetch(...).is_ok()`. A zero exit is not evidence that the
-  ref we need now exists.
+1. Independent Codex review of the diff; iterate to no significant findings.
+2. New `docs/knowledge-base/worker-capability-advertisement.md` — the KB has no
+   page on this — following that directory's conventions (`Tags:` line under the
+   H1, `## Verification pattern` section, table row appended to `INDEX.md` with
+   link text excluding `.md`). Cross-reference
+   `wiki/self-hosted-deployment.md` and `clustered-workspace-execution.md`.
 
-Today this loop always builds `+refs/heads/origin/main:refs/heads/origin/main`
-and fires it at `https://github.com/…`; that guaranteed-to-fail network round
-trip, once per repository, is the user-visible stall.
+## Deliberately not done
 
-## Step 5 — stop the failure surfacing as "An internal error occurred"
-
-- `crates/workspace-manager/src/workspace_manager.rs`: add
-  `WorkspaceError::SharedStore { repo_name: String, detail: String }`, whose
-  `Display` names the repository and what failed.
-- `crates/workspace-manager/src/shared_repository.rs`: return it (instead of
-  `PartialCreation`) from `ensure`'s closing "does not resolve target branch"
-  check, and include the branch name.
-- `crates/services/src/services/container.rs`: add
-  `ContainerError::SharedStore(String)` with `#[error("{0}")]`.
-- `crates/local-deployment/src/container.rs`: `map_workspace_manager_error` maps
-  `WorkspaceError::SharedStore` → `ContainerError::SharedStore`.
-- `crates/server/src/error.rs`: add `ApiError::ClusterProvisioning(String)`;
-  extend `From<ContainerError>` with an explicit arm **before** the `other =>`
-  catch-all; render it as
-  `ErrorInfo::with_status(INTERNAL_SERVER_ERROR, "ClusterProvisioningError", msg)`
-  — the same "500 with a real message" shape `ApiError::Worktree` already uses,
-  so it is still logged by the `is_server_error()` branch.
-
-Blast radius is deliberately one error path: only the shared-store failure
-changes what the user sees. Everything else keeps its current mapping.
-
-## Step 6 — tests
-
-`crates/workspace-manager/src/shared_repository.rs`, `mod tests`
-
-Reuse `seed_repo`, `repo_record`; add a `store_with_locks(shared_root)` helper
-built on the `worktree_manager` in-memory pool pattern (`max_connections(1)` on
-`sqlite::memory:` plus the `CREATE TABLE repository_admin_locks` statement),
-because `ensure` — unlike `adopt` — does take the lease.
-
-Fixture: a "checkout" whose `refs/remotes/origin/main` exists, built by cloning
-a seed repo and fetching `+refs/heads/main:refs/remotes/origin/main`, so the
-fixture mirrors what `/srv/src/<repo>` actually looks like.
-
-1. `ensure_provisions_a_remote_prefixed_target_branch` — `ensure(repo, "origin/main")`
-   succeeds; the store resolves `origin/main`; `GitService::create_branch(store,
-   "vk/x", "origin/main")` and `worktree_add` then succeed. (R1, R3)
-2. `branch_resolution_prefers_a_local_branch_over_a_remote_one` — with both
-   `refs/heads/shared` and `refs/remotes/origin/shared` present at different
-   commits, `resolved_branch_ref` returns the local ref. (R2)
-3. `fallback_refspec_targets_the_remote_tracking_namespace` — pure unit test on
-   the helper: `("origin", "origin/main")` →
-   `+refs/heads/main:refs/remotes/origin/main`; `("origin", "main")` →
-   `+refs/heads/main:refs/heads/main`. (R4)
-4. `ensure_still_refuses_a_branch_that_exists_nowhere` — asserts the closing
-   check still fires, and now as `WorkspaceError::SharedStore` naming the repo
-   and branch. (R5, no regression)
-
-The existing `commit_presence_is_proven_not_assumed` test stays green unchanged
-and pins the local-branch behaviour.
-
-## Step 7 — verify
-
-- `cargo test --workspace`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `pnpm run format` (`cargo fmt` + prettier), then `pnpm run check` if pnpm is
-  usable on this node; note it in the PR if it is not (as #174 did).
-- Live re-check on the shared store that `origin/main` resolves once the fix is
-  deployed.
-
-## Not doing (recorded in `SPEC.md`)
-
-- Request/client timeouts on `POST /api/workspaces/start`.
-- `WorkerClient::endpoint_for`'s positive-only cache and missing connect
-  timeout.
-- Rolling back the workspace row when provisioning fails.
-
-Each is a real defect on the same request path, but none of them causes this
-report, and folding them in would make the change unreviewable.
+- Codex enablement on think3/think4 (homelab `modules/vibe-kanban-rebuild.nix`
+  plus `hosts/think/think{3,4}.nix`). Blocked on the Codex auth shape; see
+  `SPEC.md` "out of scope". **This plan does not make Codex runnable** — it makes
+  the failure explain itself and prevents the silent-misconfiguration class.
+- Availability probing to auto-derive profiles; would unschedule Claude Code on
+  these workers, per `PRIOR_KNOWLEDGE.md` guidance 8.
