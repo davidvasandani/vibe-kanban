@@ -279,6 +279,8 @@ export const PERSIST_KEYS = {
   changesSection: 'changes-section',
   // Preview panel sections
   devServerSection: 'dev-server-section',
+  // Server metrics panel section
+  serverMetricsSection: 'server-metrics-section',
   // Terminal panel section
   terminalSection: 'terminal-section',
   // Notes panel section

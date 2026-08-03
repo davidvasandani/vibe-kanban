@@ -26,9 +26,9 @@ export interface MetricsSectionProps {
  *
  * Deliberately *not* `CollapsibleSectionHeader` itself: that component owns
  * its expanded state and persists it under its own `vibe.ui.collapsible.*`
- * localStorage prefix, whereas the drawer's section state belongs to
- * `useMetricsDrawerStore` alongside the rest of the panel's view preferences
- * (FR-13). Keeping it controlled also keeps these views props-only.
+ * localStorage prefix, which is already spent on the enclosing sidebar
+ * section. These per-panel toggles are owned by
+ * `ServerMetricsSectionContainer` instead, which keeps these views props-only.
  */
 export function MetricsSection({
   panelId,

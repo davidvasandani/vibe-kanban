@@ -1,12 +1,7 @@
 import { useTranslation } from 'react-i18next';
 import type { ProcessSample } from 'shared/types';
 
-import {
-  formatBytes,
-  formatCount,
-  formatPercent,
-  NO_READING,
-} from './format';
+import { formatBytes, formatCount, formatPercent, NO_READING } from './format';
 import { MetricsSection } from './MetricsSection';
 
 export const PROCESSES_PANEL_ID = 'processes';

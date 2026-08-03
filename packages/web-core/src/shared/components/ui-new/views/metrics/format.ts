@@ -30,7 +30,8 @@ export function formatBytes(value: bigint | number | null | undefined): string {
     magnitude /= 1024;
     unit += 1;
   }
-  const digits = unit === 0 ? 0 : magnitude >= 100 ? 0 : magnitude >= 10 ? 1 : 2;
+  const digits =
+    unit === 0 ? 0 : magnitude >= 100 ? 0 : magnitude >= 10 ? 1 : 2;
   return `${sign}${magnitude.toFixed(digits)} ${BYTE_UNITS[unit]}`;
 }
 
@@ -54,9 +55,7 @@ export function formatPercent(
 }
 
 /** A plain count, e.g. a thread count or a core count. */
-export function formatCount(
-  value: bigint | number | null | undefined
-): string {
+export function formatCount(value: bigint | number | null | undefined): string {
   const count = toNumber(value);
   if (count === null) return NO_READING;
   return String(count);
