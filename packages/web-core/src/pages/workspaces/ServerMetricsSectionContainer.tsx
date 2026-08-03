@@ -396,4 +396,9 @@ function NodeDetail({
       <ProcessesPanel
         processes={latest?.processes ?? null}
         expanded={panelExpanded(PROCESSES_PANEL_ID)}
-        onToggl
+        onToggle={onTogglePanel}
+        stale={stale}
+      />
+    </div>
+  );
+}
