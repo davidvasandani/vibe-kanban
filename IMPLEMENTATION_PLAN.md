@@ -35,10 +35,10 @@ change.
   "args": [
     "-y",
     "github:davidvasandani/Gmail-MCP-Server#030da3492753222a41645a9f343466d151c63f3c",
-    "--tool-prefix=YOUR_TOOL_PREFIX"
+    "--tool-prefix=YOUR_PREFIX_"
   ],
   "env": {
-    "GMAIL_CREDENTIALS_PATH": "YOUR_CREDENTIALS_PATH"
+    "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/credentials.json"
   }
 }
 ```

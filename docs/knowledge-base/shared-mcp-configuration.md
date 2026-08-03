@@ -2,7 +2,7 @@
 
 Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`,
 `c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`, `d893-fix-slack-mcp`,
-`067cb434-mcp-tools`
+`067cb434-mcp-tools`, `4daf-gmail-mcp`
 
 Vibe Kanban derives shared MCP settings from each base executor's native config
 file. There is no separate registry: the native files remain the source consumed
@@ -71,9 +71,30 @@ effect on what the `command`/`args` actually install. When an entry points at a
 fork or any non-obvious build, keep the two in sync deliberately and assert it —
 see [forked-mcp-server-packaging](forked-mcp-server-packaging.md).
 
-The backend exposes this catalog through `/api/mcp-config/default`, but the
-current shared MCP settings UI does not render catalog suggestions. Treat catalog
-availability and UI discoverability as separate capabilities when scoping work.
+The backend exposes this catalog through `/api/mcp-config/default`. The settings
+UI **does** now render it as a "Popular servers" tile grid
+(`McpSettingsSection.tsx`, driven by `preconfiguredMcpServers()`); an earlier
+version of this page said otherwise, which was true when written and is no longer.
+Catalog availability and UI discoverability remain separate capabilities when
+scoping work — just verify which one is missing rather than assuming.
+
+A template can be instantiated more than once; see
+[multi-instance-catalog-templates](multi-instance-catalog-templates.md) for the
+identifier-allocation rules, the `servers` XOR `conflicts` taken-names trap, and
+why every per-instance value needs its own placeholder.
+
+Two placeholder rules that documentation, not code, has to enforce — nothing
+validates that a `YOUR_*` value was replaced:
+
+- **Path placeholders are absolute.** Env values are copied verbatim into agent
+  config and servers spawn without a shell, so `~` is never expanded; a `~/…`
+  value resolves against the agent's cwd, which is a task worktree.
+- **A placeholder models its own shape**, including trailing separators.
+
+Prefer a credentials *path* over a token in `env` where the tool supports it: VK
+writes config rather than holding secrets, so an `env` token lands in plaintext in
+every assigned agent's global config, and the encrypted gateway below is
+HTTP-only.
 
 Catalog presence also does not materialize an MCP server into an executor's
 native configuration. Codex discovers servers from the `config.toml` belonging

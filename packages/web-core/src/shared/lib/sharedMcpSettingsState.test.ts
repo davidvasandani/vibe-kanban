@@ -12,9 +12,11 @@ import {
   removedServerNames,
   resolveConflictVariant,
   sharedMcpSnapshot,
+  takenServerNames,
   testKey,
   testTargetsForDraft,
 } from './sharedMcpSettingsState';
+import type { SharedMcpDraftState } from './sharedMcpSettingsState';
 
 const readResponse = (): SharedMcpReadResponse => ({
   profiles: [],
@@ -96,7 +98,9 @@ describe('shared MCP settings state', () => {
       // Reusing a name is worse than an error: `setServer` de-duplicates by
       // name, so the new server would replace the existing one silently.
       const existing = ['gmail', 'gmail_2', 'gmail_3', 'gmail_4'];
-      expect(existing).not.toContain(nextAvailableServerName('gmail', existing));
+      expect(existing).not.toContain(
+        nextAvailableServerName('gmail', existing)
+      );
     });
 
     it('generates identifiers the backend will accept', () => {
@@ -113,6 +117,33 @@ describe('shared MCP settings state', () => {
           taken.push(name);
         }
       }
+    });
+
+    it('treats a conflicting name as taken', () => {
+      // A name whose definitions diverge across agents lives in `conflicts`,
+      // not `servers`. Allocating `gmail_2` while an unresolved `gmail_2`
+      // conflict exists would bind the new definition to that conflict and
+      // drop the native entry it was still arbitrating.
+      const draft = {
+        servers: [
+          {
+            name: 'gmail',
+            definition: {
+              transport: 'stdio' as const,
+              value: { command: 'npx' },
+              representable_in_form: true,
+            },
+            assignments: [BaseCodingAgent.CLAUDE_CODE],
+          },
+        ],
+        conflicts: [
+          { name: 'gmail_2', reason: 'differs', variants: [] },
+        ] as unknown as SharedMcpDraftState['conflicts'],
+      };
+      expect(takenServerNames(draft)).toEqual(['gmail', 'gmail_2']);
+      expect(nextAvailableServerName('gmail', takenServerNames(draft))).toBe(
+        'gmail_3'
+      );
     });
 
     it('yields a distinct server each time a template is added repeatedly', () => {

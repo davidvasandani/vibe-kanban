@@ -131,10 +131,10 @@ authorised and nothing else.
   "args": [
     "-y",
     "github:davidvasandani/Gmail-MCP-Server#030da3492753222a41645a9f343466d151c63f3c",
-    "--tool-prefix=YOUR_TOOL_PREFIX"
+    "--tool-prefix=YOUR_PREFIX_"
   ],
   "env": {
-    "GMAIL_CREDENTIALS_PATH": "YOUR_CREDENTIALS_PATH"
+    "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/credentials.json"
   }
 }
 ```
@@ -383,7 +383,7 @@ the docs page — the same cross-file coupling note the Slack entry carries.
 | User adds the template before creating a Google Cloud OAuth client; "Test connection" reports `failed` and looks like a broken connector | Docs lead with the prerequisite; the server's own stderr names the missing file, and the diagnostic surfaces in the test result |
 | Keys file present but per-account consent never run — connector tests green, fails at first tool call | Documented as a two-step setup with the consent step given equal weight |
 | Fork pin goes stale because Renovate cannot see it | Recorded explicitly in `AGENTS.md`; no fake automation |
-| User forgets a distinct `--tool-prefix` and one instance silently shadows the other | Placeholder is `YOUR_TOOL_PREFIX` so an unedited entry is visibly wrong; docs state the consequence |
+| User forgets a distinct `--tool-prefix` and one instance silently shadows the other | Placeholder is `YOUR_PREFIX_` so an unedited entry is visibly wrong; docs state the consequence |
 | User points two instances at one `GMAIL_CREDENTIALS_PATH` | Both read the same mailbox — confusing, not destructive; docs call it out |
 | 28 tools × 3 instances = 84 tools degrades agent performance | Existing "Limit MCP Servers" guidance applies; `--scopes` narrowing documented as the lever |
 | Auto-suffixed `gmail_2` is opaque next to a renamed `gmail_personal` | The server editor opens immediately after adding, with the name field editable |

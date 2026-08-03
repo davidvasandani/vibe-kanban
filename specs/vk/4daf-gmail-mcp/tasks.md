@@ -8,7 +8,7 @@ after Phase 1. Docs (Phase 4) depend on both being settled.
 
 ## Phase 1: Setup
 
-- [ ] T001 Put the toolchain on `PATH` and install dependencies:
+- [x] T001 Put the toolchain on `PATH` and install dependencies:
       `export PATH="$HOME/.cargo/bin:$PATH"`, `corepack enable pnpm`,
       `pnpm install --frozen-lockfile`. Confirm `cargo --version` and
       `pnpm --version` answer. Every later verification fails without this, for
@@ -16,26 +16,26 @@ after Phase 1. Docs (Phase 4) depend on both being settled.
 
 ## Phase 2: Core — Slice A (catalog entry)
 
-- [ ] T002 Add the `gmail` server entry to `crates/executors/default_mcp.json`
+- [x] T002 Add the `gmail` server entry to `crates/executors/default_mcp.json`
       as a sibling of `slack`. Full 40-hex commit SHA in the install spec;
-      `--tool-prefix=YOUR_TOOL_PREFIX` in `args`; `GMAIL_CREDENTIALS_PATH:
-      "YOUR_CREDENTIALS_PATH"` in `env`; **no** `GMAIL_OAUTH_PATH`. Exact shape
+      `--tool-prefix=YOUR_PREFIX_` in `args`; `GMAIL_CREDENTIALS_PATH:
+      "/absolute/path/to/credentials.json"` in `env`; **no** `GMAIL_OAUTH_PATH`. Exact shape
       in `contracts/README.md` C-2.
-- [ ] T003 Add the `meta.gmail` block to the same file's `meta` object — `name`,
+- [x] T003 Add the `meta.gmail` block to the same file's `meta` object — `name`,
       `description`, `url` pointing at the fork. No `icon` key (clarification
       C5). The `url`'s `owner/repo` must match the install spec's; T005 asserts
       it. (Same file as T002 — serial with it.)
 
 ## Phase 2: Core — Slice B (multi-instance)
 
-- [ ] T004 [P] Add the exported pure function `nextAvailableServerName(key,
+- [x] T004 [P] Add the exported pure function `nextAvailableServerName(key,
       existing)` to `packages/web-core/src/shared/lib/sharedMcpSettingsState.ts`,
       beside `preconfiguredMcpServers`. Contract and behaviour table in
       `contracts/README.md` C-1. Separator is `_`, not a space or parenthesis.
 
 ## Phase 3: Wiring
 
-- [ ] T005 Add Rust tests to `crates/executors/src/mcp_config.rs` `mod tests`,
+- [x] T005 Add Rust tests to `crates/executors/src/mcp_config.rs` `mod tests`,
       beside the Slack tests (depends on T002, T003):
       - a `GMAIL_MCP_FORK_REVISION` module constant holding the pinned SHA, so
         the pin has one named home;
@@ -55,7 +55,7 @@ after Phase 1. Docs (Phase 4) depend on both being settled.
       Do **not** add a SHA-256 constant or a `pinned-artifacts.yml` job — see
       `research.md` R3.
 
-- [ ] T006 Wire `nextAvailableServerName` into `addPreconfigured` at
+- [x] T006 Wire `nextAvailableServerName` into `addPreconfigured` at
       `packages/web-core/src/shared/dialogs/settings/settings/McpSettingsSection.tsx:609-627`
       (depends on T004). Allocate against `draft.servers.map(s => s.name)`
       **before** calling `setServer`. Add `draft.servers` to the `useCallback`
@@ -63,14 +63,14 @@ after Phase 1. Docs (Phase 4) depend on both being settled.
       one name twice, and `setServer` de-duplicates by name, so the collision
       destroys the first instance silently rather than erroring.
 
-- [ ] T007 Stop disabling the catalog tile in the same file at `:1104-1121`
+- [x] T007 Stop disabling the catalog tile in the same file at `:1104-1121`
       (depends on T006). Keep computing `added` — it still drives the check mark
       and dimmed styling — but drop `disabled={added}` and the `cursor-default`
       branch of the `cn(...)` call. Only "looks added" survives; "is inert" goes.
 
 ## Phase 4: Validation
 
-- [ ] T008 [P] Add TypeScript tests to
+- [x] T008 [P] Add TypeScript tests to
       `packages/web-core/src/shared/lib/sharedMcpSettingsState.test.ts`
       (depends on T004): the five `nextAvailableServerName` cases from
       `contracts/README.md` C-1 including the gap case (`['gmail','gmail_3']` →
@@ -78,7 +78,7 @@ after Phase 1. Docs (Phase 4) depend on both being settled.
       `/^[a-zA-Z0-9_-]+$/`; and "adding a template twice yields two distinct
       draft servers".
 
-- [ ] T009 [P] Add the **Gmail connector** section to
+- [x] T009 [P] Add the **Gmail connector** section to
       `docs/integrations/mcp-server-configuration.mdx`, after the Slack section
       (depends on T002, T003). Mintlify conventions, British spelling, second
       person. Must cover, in order:
@@ -101,11 +101,11 @@ after Phase 1. Docs (Phase 4) depend on both being settled.
          that a present-but-unconsented account tests **green** and fails at
          first use — the two setup steps carry equal weight.
 
-- [ ] T010 [P] Add a line to the **Popular MCP Servers** intro in the same doc
+- [x] T010 [P] Add a line to the **Popular MCP Servers** intro in the same doc
       noting a template can now be added more than once (depends on T007) — a
       user-visible behaviour change.
 
-- [ ] T011 [P] Add a Gmail bullet to **Dependencies** in `AGENTS.md`, after the
+- [x] T011 [P] Add a Gmail bullet to **Dependencies** in `AGENTS.md`, after the
       Slack one: the pin is a fork **commit SHA** outside Renovate's reach and is
       bumped **by hand**, moving the SHA in `default_mcp.json`, the
       `GMAIL_MCP_FORK_REVISION` constant in `crates/executors/src/mcp_config.rs`,
@@ -116,15 +116,15 @@ after Phase 1. Docs (Phase 4) depend on both being settled.
 
 ## Phase 5: Verification
 
-- [ ] T012 `cargo test -p executors gmail` (depends on T005).
-- [ ] T013 `cargo test -p executors` — no Slack or adapter regressions.
-- [ ] T014 `pnpm --filter @vibe/web-core test` (depends on T008). The package is
+- [x] T012 `cargo test -p executors gmail` (depends on T005).
+- [x] T013 `cargo test -p executors` — no Slack or adapter regressions.
+- [x] T014 `pnpm --filter @vibe/web-core test` (depends on T008). The package is
       `@vibe/web-core`, not `@vibe-kanban/web-core`; its `test` script is
       `vitest run`.
-- [ ] T015 `pnpm run check` — frontend plus all Rust workspaces.
-- [ ] T016 `pnpm run lint`.
-- [ ] T017 `pnpm run format` — required before completing the task.
-- [ ] T018 Confirm `pnpm run generate-types:check` reports **no** diff. No Rust
+- [x] T015 `pnpm run check` — frontend plus all Rust workspaces.
+- [x] T016 `pnpm run lint`.
+- [x] T017 `pnpm run format` — required before completing the task.
+- [x] T018 Confirm `pnpm run generate-types:check` reports **no** diff. No Rust
       type changed, so a diff means something unintended happened — investigate
       rather than committing a regenerated file.
 

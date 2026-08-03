@@ -54,6 +54,7 @@ import {
   removedServerNames,
   resolveConflictVariant,
   sharedMcpSnapshot,
+  takenServerNames,
   testKey,
   testTargetsForDraft,
   type SharedMcpDraftServer,
@@ -572,9 +573,11 @@ export function McpSettingsSection() {
       const result = await McpServerDialog.show({
         codec,
         profiles,
-        existingNames: draft.servers
-          .map((s) => s.name)
-          .filter((n) => n !== server?.name),
+        // Conflicts included: renaming onto a conflicting name collides just as
+        // destructively as renaming onto another server's name.
+        existingNames: takenServerNames(draft).filter(
+          (n) => n !== server?.name
+        ),
         initial: server
           ? {
               name: server.name,
@@ -597,7 +600,7 @@ export function McpSettingsSection() {
         assignments: result.assignments,
       });
     },
-    [draft.servers, invalidateServerCheck, profiles, setServer]
+    [draft, invalidateServerCheck, profiles, setServer]
   );
 
   const removeServer = useCallback((name: string) => {
@@ -626,13 +629,15 @@ export function McpSettingsSection() {
       // server per mailbox), so the catalog key is only a starting point. Allocate
       // against the current draft: `setServer` de-duplicates by name, so reusing a
       // taken name would silently replace that server instead of adding one.
-      const name = nextAvailableServerName(
-        key,
-        draft.servers.map((server) => server.name)
-      );
+      //
+      // Conflicting servers count as taken even though they are not in
+      // `draft.servers`: the backend puts a name in `servers` XOR `conflicts`, so
+      // reusing a conflict's name would attach this new definition to an
+      // unresolved conflict and drop the native entry it was still arbitrating.
+      const name = nextAvailableServerName(key, takenServerNames(draft));
       setServer({ name, definition, assignments });
     },
-    [draft.servers, profiles, setServer]
+    [draft, profiles, setServer]
   );
 
   const disconnectGateway = useCallback(

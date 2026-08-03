@@ -48,12 +48,35 @@ catalog template, given the identifiers already present in the draft.
 4. **Separator is `_`.** Not a space, not `(n)`. Those are rejected by the
    validator or silently rewritten by `suggested_server_identifier`.
 
-**Caller contract.** `addPreconfigured`
-(`McpSettingsSection.tsx:609-627`) must pass the names from the current
-**draft** — the same source the tile's `added` flag reads — so that an unsaved
-instance still reserves its name. As a `useCallback`, it must list
-`draft.servers` in its dependency array (or use the functional update form), or
-it closes over a stale list and hands out one name twice.
+**Caller contract.** Callers must pass `takenServerNames(draft)` (C-1a), never
+`draft.servers.map(...)` alone. As a `useCallback`, `addPreconfigured` must list
+`draft` in its dependency array (or use the functional update form), or it closes
+over a stale list and hands out one name twice.
+
+---
+
+## C-1a. `takenServerNames` (internal, TypeScript)
+
+**Location**: `packages/web-core/src/shared/lib/sharedMcpSettingsState.ts`
+
+```ts
+export function takenServerNames(state: SharedMcpDraftState): string[];
+```
+
+Returns every name the draft has spoken for: `state.servers` **plus**
+`state.conflicts`.
+
+The union is the whole point. `reconcile_snapshots` routes a name whose
+definitions diverge across agents into `conflicts` *instead of* `servers`, and
+`draftFromSharedRead` preserves that split — so `draft.servers` is **not** the
+set of taken names. Allocating a name that matches an unresolved conflict binds a
+fresh definition to that conflict; on save, `plan_servers_for_executor` then
+removes the name from every executor missing from the new server's assignments,
+deleting the native entry the conflict was still arbitrating.
+
+Consumed by `addPreconfigured` (allocation) and `openDialog` (the rename
+dialog's `existingNames` validation). Both are covered by the "treats a
+conflicting name as taken" test.
 
 ---
 
@@ -67,9 +90,9 @@ it closes over a stale list and hands out one name twice.
   "args": [
     "-y",
     "github:davidvasandani/Gmail-MCP-Server#030da3492753222a41645a9f343466d151c63f3c",
-    "--tool-prefix=YOUR_TOOL_PREFIX"
+    "--tool-prefix=YOUR_PREFIX_"
   ],
-  "env": { "GMAIL_CREDENTIALS_PATH": "YOUR_CREDENTIALS_PATH" }
+  "env": { "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/credentials.json" }
 },
 "meta": {
   "gmail": {

@@ -321,6 +321,13 @@ fn is_stdio(s: &Map<String, Value>) -> bool {
     !is_http_server(s) && s.get("command").is_some()
 }
 
+/// Splits the presentation-only `meta` block off the server map.
+///
+/// `preserve_order` is enabled workspace-wide, which makes `Map::remove` a
+/// *swap*-remove: it moves the map's last entry into the vacated slot. That is
+/// harmless only because `meta` is the last key in `default_mcp.json`. Keep new
+/// catalog entries **above** `meta`, or the appended entry will silently take
+/// `meta`'s position in every generated agent config.
 fn extract_meta(mut obj: ServerMap) -> (ServerMap, Option<Value>) {
     let meta = obj.remove("meta");
     (obj, meta)
@@ -749,10 +756,17 @@ mod tests {
     /// workflow, and that asymmetry is deliberate: Slack pins a *release asset*,
     /// whose bytes GitHub lets a maintainer replace under an existing tag, so a
     /// recorded digest re-checked on a schedule is the only available control. A
-    /// git commit is content-addressed — npm resolves this SHA to exactly one
-    /// tree at install time, on every machine — so the pin already *is* the
-    /// integrity record. Re-checking it daily would assert that a hash equals
-    /// itself.
+    /// git commit is content-addressed, so this SHA resolves to exactly one tree
+    /// on every machine and cannot be re-pointed. Recording a digest of it and
+    /// re-checking that daily would assert that a hash equals itself.
+    ///
+    /// Scope, precisely: the SHA pins **this repository's source**, not the
+    /// dependency closure. A `github:` install runs the package's `prepare`
+    /// script, which resolves its own dependencies from npm at install time, so
+    /// what executes is not bit-reproducible — arguably less so than Slack's
+    /// statically linked, digest-checked binary. The argument for no audit job
+    /// is that auditing an immutable pin is a no-op, not that this delivery
+    /// mechanism is stronger overall.
     ///
     /// Renovate cannot follow a bare SHA on a fork with no releases, so this pin
     /// is bumped by hand; `AGENTS.md` records that. A custom manager here would
@@ -769,15 +783,23 @@ mod tests {
         assert_eq!(value["gmail"]["command"], serde_json::json!("npx"));
         assert_eq!(
             value["gmail"]["args"],
-            serde_json::json!(["-y", GMAIL_MCP_INSTALL_SPEC, "--tool-prefix=YOUR_TOOL_PREFIX"])
+            serde_json::json!(["-y", GMAIL_MCP_INSTALL_SPEC, "--tool-prefix=YOUR_PREFIX_"])
         );
         // A path, not a token: the refresh token stays in the Gmail server's own
         // credentials file and never reaches an agent's config. `GMAIL_OAUTH_PATH`
         // is deliberately absent — the OAuth client is per Google Cloud project,
         // not per mailbox, so every instance shares its default.
+        //
+        // The placeholder is absolute on purpose. Env values are copied verbatim
+        // into agents' native config and the server spawns without a shell, so a
+        // `~/…` value is never expanded — it would resolve against the agent's
+        // cwd (a task worktree) and drop a refresh token inside the user's repo.
+        // The `--tool-prefix` placeholder keeps its trailing `_` for the same
+        // class of reason: a user who mirrors its shape without one gets
+        // `mysearch_emails` instead of `my_search_emails`.
         assert_eq!(
             value["gmail"]["env"],
-            serde_json::json!({ "GMAIL_CREDENTIALS_PATH": "YOUR_CREDENTIALS_PATH" })
+            serde_json::json!({ "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/credentials.json" })
         );
         assert_eq!(value["meta"]["gmail"]["name"], serde_json::json!("Gmail"));
         assert_eq!(
@@ -821,8 +843,9 @@ mod tests {
                 && commit_ish
                     .chars()
                     .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-            "gmail pin {commit_ish} must be a full 40-character lowercase commit SHA; \
-             an abbreviated SHA or a tag can be re-pointed"
+            "gmail pin {commit_ish} must be a full 40-character lowercase commit SHA. \
+             A branch, tag, or abbreviated SHA can be re-pointed; lowercase is \
+             required so this pin has exactly one spelling to compare against"
         );
 
         // The UI links users to `meta.gmail.url`; it must be the repository the
@@ -844,7 +867,7 @@ mod tests {
         assert_eq!(codex["gmail"]["command"], serde_json::json!("npx"));
         assert_eq!(
             codex["gmail"]["env"],
-            serde_json::json!({ "GMAIL_CREDENTIALS_PATH": "YOUR_CREDENTIALS_PATH" })
+            serde_json::json!({ "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/credentials.json" })
         );
         assert_eq!(opencode["gmail"]["type"], serde_json::json!("local"));
         assert_eq!(
@@ -853,14 +876,14 @@ mod tests {
                 "npx",
                 "-y",
                 GMAIL_MCP_INSTALL_SPEC,
-                "--tool-prefix=YOUR_TOOL_PREFIX"
+                "--tool-prefix=YOUR_PREFIX_"
             ])
         );
         // Opencode calls the stdio environment field `environment`; losing this
         // rename is what makes a credential-bearing entry silently unusable.
         assert_eq!(
             opencode["gmail"]["environment"],
-            serde_json::json!({ "GMAIL_CREDENTIALS_PATH": "YOUR_CREDENTIALS_PATH" })
+            serde_json::json!({ "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/credentials.json" })
         );
     }
 

@@ -83,6 +83,22 @@ export function preconfiguredMcpServers(
  * `setServer` de-duplicates by name, so a collision replaces the earlier server
  * rather than reporting a conflict.
  */
+/**
+ * Every logical server name the draft has spoken for.
+ *
+ * A name lives in `servers` **or** `conflicts`, never both: the backend routes a
+ * name whose definitions diverge across agents into `conflicts` instead of
+ * `servers`. So `draft.servers` alone is not the set of taken names, and reusing
+ * a conflicting name would silently bind a new definition to a conflict the user
+ * has not resolved yet.
+ */
+export function takenServerNames(state: SharedMcpDraftState): string[] {
+  return [
+    ...state.servers.map((server) => server.name),
+    ...state.conflicts.map((conflict) => conflict.name),
+  ];
+}
+
 export function nextAvailableServerName(
   key: string,
   existing: readonly string[]
