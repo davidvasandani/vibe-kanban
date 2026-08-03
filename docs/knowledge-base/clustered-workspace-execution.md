@@ -1,6 +1,6 @@
 # Clustered workspace execution and shared-storage safety
 
-Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`
+Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`
 
 ## Keep authority central and process ownership local
 
@@ -200,6 +200,95 @@ whether it helps or hurts:
 
 Distinguish *not applicable* from *broken*, and never satisfy a dangling pointer
 with a local directory that happens to match.
+
+## The store must serve every name the picker can offer
+
+A shared bare store is only useful if it serves the branch names the product
+actually produces. `git::get_all_branches` names remote-tracking branches
+`origin/main` and local ones `main`, and the create screen defaults a repository
+with no configured `default_target_branch` — most of them — to the literal string
+`origin/main`. The *default* target branch is therefore remote-prefixed, and a
+store resolving only `refs/heads/<name>` can never serve it. Resolve a target
+branch local-then-remote: the same order and outcome as
+`GitService::find_branch`, which is what accepted the user's choice in the first
+place. A consumer that handles every case except the producer's default is
+broken for almost every user.
+
+Spell the two namespaces out rather than delegating to git's bare-name revision
+precedence — that precedence also accepts `refs/tags/<name>`, so a tag named
+`main` would satisfy a target branch, which `find_branch` never does.
+
+`clone --bare` of the coordinator's checkout carries `refs/heads/*` and **no**
+`refs/remotes/*`, so the store must also mirror the checkout's remote-tracking
+refs, or `create_branch` and `git worktree add` fail one frame after the resolver
+succeeds. Mirror them *from the checkout*, never by giving the store its own
+`origin` fetch refspec: `origin` in the store points at the forge, so the store
+would hold a second, differently-fresh `origin/main`. The checkout is what the
+picker read, so copying it makes the set of branches a user can pick and the set
+the store can serve the same set by construction.
+
+## `git fetch` is atomic across its refspecs
+
+One refused refspec discards the writes of all of them. For a repository with
+linked worktrees this is the steady state, not a corner: `git fetch` refuses
+`+refs/heads/*:refs/heads/*` with `refusing to fetch into branch '<b>' checked
+out at <path>` whenever a worktree holds a branch the refspec would update, and
+aborts the whole command (exit 128) having written nothing — even when the update
+would have been a no-op.
+
+So mirroring several namespaces must be several invocations, each failing on its
+own. Batched, the namespace you needed is silently discarded by a refusal in one
+you did not, and the symptom is a feature that works for the first workspace of a
+repository and quietly stops for every later one.
+
+## A copy of something that moves is not evidence of freshness
+
+A cheap-path guard that returns early because "the store already has the branch"
+must mean a **local head**. A remote-tracking ref mirrors a branch that advances
+upstream, so accepting one there freezes the store at whatever commit it first
+learned: every later workspace branches from a stale base while the picker shows
+the current one, silently.
+
+The same distinction governs guard/mutation agreement. A repair that writes
+`ref: refs/heads/<b>` into a worktree's HEAD must be gated on `refs/heads/<b>`
+existing; gated on the wider predicate it re-links a live worktree onto an unborn
+branch, and the `git reset` that follows clears the index instead of rebuilding
+it — every tracked file in someone's work-in-progress reads as deleted while the
+repair reports success. Whenever a predicate is widened, re-check every caller
+that pairs it with a write: the guard and the mutation must agree on what
+"present" means.
+
+## A recovery fetch that cannot succeed is worse than none
+
+Sending `+refs/heads/origin/main:refs/heads/origin/main` to a forge is a
+guaranteed failure — upstream has no branch called `origin/main` — paid on the
+user's request with no timeout anywhere in the stack. A remote-prefixed target
+names a branch upstream knows by another name: ask for
+`+refs/heads/main:refs/remotes/origin/main`, and only of the remote whose name
+prefixes the target. Asking the others sends the local-to-local form, and a
+remote holding a branch literally named `upstream/main` lands it as a *local*
+head in the shared store, where local-first resolution then prefers it forever,
+at the wrong commit, on every node.
+
+Judge such a fetch by whether the branch is present afterwards, not by its exit
+status — and never discard its error. The refusal that follows asserts the branch
+does not exist; if the only attempt to obtain it never ran, that assertion
+misdirects the investigation the message exists to shorten.
+
+## A generic error is a defect, not a presentation choice
+
+Cluster provisioning failures reached the user as `ContainerError::Other` →
+`ApiError::Container` → "An internal error occurred. Please try again.", leaving
+the diagnosis only in the coordinator's journal — a host the workers cannot read.
+Diagnosing one then costs filesystem forensics across nodes instead of one log
+line.
+
+Give the failure a variant carrying the repository and branch through to a
+response that keeps its message, following `ApiError::Worktree` (a 500, so the
+`is_server_error()` branch still logs it). Scope the widening to that one failure
+— unclassified internal errors stay generic — and bound what you relay: a git
+subprocess's combined output is partly remote-controlled, so take the first
+meaningful line and cap it rather than piping a transcript into a JSON body.
 
 ## Verification pattern
 

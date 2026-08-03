@@ -453,6 +453,15 @@ impl GitCli {
         Ok(())
     }
     /// Fetch a branch to the given remote using native git authentication.
+    ///
+    /// One refspec per invocation, deliberately. `git fetch` is atomic across
+    /// its refspecs: if any one of them is refused — notably
+    /// `refusing to fetch into branch '<b>' checked out at ...`, which a
+    /// repository with linked worktrees hits routinely — the whole command
+    /// aborts and *nothing* is written, including the refspecs that would have
+    /// succeeded. A caller mirroring several namespaces must therefore issue
+    /// them separately and handle each failure on its own, or a refusal in one
+    /// silently discards the others.
     pub fn fetch_with_refspec(
         &self,
         repo_path: &Path,

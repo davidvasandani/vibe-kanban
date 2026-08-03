@@ -635,6 +635,12 @@ impl LocalContainerService {
                     detail
                 ))
             }
+            // Kept out of `Other` on purpose: `Other` is rendered to the user as
+            // a generic internal error, and this is the one provisioning failure
+            // whose text is the diagnosis.
+            err @ WorkspaceError::SharedStore { .. } => {
+                ContainerError::SharedStore(err.to_string())
+            }
             WorkspaceError::InvalidSharedRoot(path) => {
                 ContainerError::Other(anyhow!("Invalid shared workspace root: {}", path.display()))
             }
