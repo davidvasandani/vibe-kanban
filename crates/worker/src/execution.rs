@@ -16,6 +16,7 @@ use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use executors::{
     actions::{Executable, ExecutorAction},
     env::{ExecutionEnv, RepoContext},
+    profile::ExecutorProfile,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -182,6 +183,14 @@ impl ExecutionSupervisor {
             &self.path_authority,
         )?;
         let action: WorkerAction = serde_json::from_value(dispatch.action.clone())?;
+        // Refuse at admission rather than inside the turn: a malformed profile
+        // would otherwise fail at spawn, after the job record exists and the
+        // user is waiting on an agent that was never going to start.
+        let executor_profile: Option<ExecutorProfile> = dispatch
+            .executor_profile_config
+            .clone()
+            .map(serde_json::from_value)
+            .transpose()?;
         if matches!(&action, WorkerAction::Command(action) if action.program.trim().is_empty()) {
             return Err(ExecutionError::EmptyProgram);
         }
@@ -216,6 +225,7 @@ impl ExecutionSupervisor {
             action,
             working_directory,
             dispatch.environment,
+            executor_profile,
             dispatch.timeout_seconds,
         ));
         Ok(DispatchAccepted {
@@ -397,6 +407,7 @@ async fn run_job(
     action: WorkerAction,
     working_directory: PathBuf,
     environment: std::collections::BTreeMap<String, String>,
+    executor_profile: Option<ExecutorProfile>,
     timeout_seconds: Option<u64>,
 ) {
     set_state(&job, JobState::Starting, ExecutionEventPayload::Starting).await;
@@ -423,7 +434,11 @@ async fn run_job(
                 RepoContext::new(working_directory.clone(), repo_names),
                 false,
                 String::new(),
-            );
+            )
+            // The worker holds only the embedded default profiles, so a
+            // user-defined variant is resolvable here only because the
+            // coordinator sent its definition.
+            .with_executor_profile(executor_profile);
             env.vars.extend(environment);
             action
                 .spawn(
@@ -723,6 +738,7 @@ mod tests {
             workspace_path: workspace.to_string_lossy().into_owned(),
             working_directory: ".".into(),
             executor_profile: "fixture".into(),
+            executor_profile_config: None,
             action: json!({"program": "/bin/sh", "args": ["-c", script]}),
             environment: BTreeMap::new(),
             run_reason: "test".into(),

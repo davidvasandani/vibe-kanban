@@ -10,7 +10,7 @@ use crate::{
     approvals::ExecutorApprovalService,
     env::ExecutionEnv,
     executors::{BaseCodingAgent, ExecutorError, SpawnedChild, StandardCodingAgentExecutor},
-    profile::{ExecutorConfig, ExecutorConfigs},
+    profile::ExecutorConfig,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -58,14 +58,7 @@ impl Executable for ReviewRequest {
     ) -> Result<SpawnedChild, ExecutorError> {
         let effective_dir = self.effective_dir(current_dir);
 
-        let profile_id = self.executor_config.profile_id();
-        let mut agent = ExecutorConfigs::get_cached()
-            .get_coding_agent(&profile_id)
-            .ok_or(ExecutorError::UnknownExecutorType(profile_id.to_string()))?;
-
-        if self.executor_config.has_overrides() {
-            agent.apply_overrides(&self.executor_config);
-        }
+        let mut agent = env.resolve_coding_agent(&self.executor_config)?;
         agent.use_approvals(approvals.clone());
 
         agent

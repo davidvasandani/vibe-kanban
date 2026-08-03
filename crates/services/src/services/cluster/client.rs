@@ -492,6 +492,7 @@ mod tests {
             workspace_path: "/shared/workspace".into(),
             working_directory: "/shared/workspace".into(),
             executor_profile: "codex".into(),
+            executor_profile_config: None,
             action: serde_json::json!({}),
             environment: BTreeMap::new(),
             run_reason: "test".into(),

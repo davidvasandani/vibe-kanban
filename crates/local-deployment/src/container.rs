@@ -53,6 +53,7 @@ use executors::{
         McpRefreshErrorCategory, McpRefreshHandle, McpRefreshResult, McpRefreshSignal,
         McpRefreshStatus,
     },
+    profile::{ExecutorConfig, ExecutorConfigs, ExecutorProfile},
 };
 use futures::{FutureExt, StreamExt, TryStreamExt, stream::select};
 use git::GitService;
@@ -374,6 +375,33 @@ async fn reap_all_warm_entries(registry: &WarmRegistry) {
         let _ = command::kill_process_group(&mut child).await;
         tracing::info!("Reaped warm app-server for session {session_id} on shutdown");
     }
+}
+
+/// The profile definition to dispatch alongside `config`: exactly the one
+/// variant the request names, resolved against this coordinator's profiles.
+///
+/// One variant rather than the executor's whole profile, because that is all the
+/// worker needs to run this job, and a dispatch is not a reason to copy the
+/// operator's other configurations onto another host.
+///
+/// Overrides carried on the request are deliberately *not* applied here: the
+/// worker applies them itself, from the action it already receives, so applying
+/// them on both sides would double them.
+///
+/// `None` when the profile does not resolve here either. That is not this
+/// function's failure to report — the coordinator refuses such a request through
+/// its own resolution path, and inventing an error here would duplicate it.
+fn dispatched_executor_profile(config: &ExecutorConfig) -> Option<ExecutorProfile> {
+    let profile_id = config.profile_id();
+    let variant = profile_id
+        .variant
+        .clone()
+        .unwrap_or_else(|| "DEFAULT".into());
+    let agent = ExecutorConfigs::get_cached().get_coding_agent(&profile_id)?;
+    Some(ExecutorProfile {
+        recently_used_models: None,
+        configurations: HashMap::from([(variant, agent)]),
+    })
 }
 
 #[derive(Clone)]
@@ -2901,18 +2929,27 @@ impl ContainerService for LocalContainerService {
         environment.insert("VK_WORKSPACE_ID".into(), workspace.id.to_string());
         environment.insert("VK_WORKSPACE_BRANCH".into(), workspace.branch.clone());
 
-        let executor_profile = match executor_action.typ() {
+        let executor_config = match executor_action.typ() {
             ExecutorActionType::CodingAgentInitialRequest(request) => {
-                request.executor_config.profile_id().to_string()
+                Some(&request.executor_config)
             }
             ExecutorActionType::CodingAgentFollowUpRequest(request) => {
-                request.executor_config.profile_id().to_string()
+                Some(&request.executor_config)
             }
-            ExecutorActionType::ReviewRequest(request) => {
-                request.executor_config.profile_id().to_string()
-            }
-            ExecutorActionType::ScriptRequest(_) => "script".into(),
+            ExecutorActionType::ReviewRequest(request) => Some(&request.executor_config),
+            ExecutorActionType::ScriptRequest(_) => None,
         };
+        let executor_profile = executor_config
+            .map(|config| config.profile_id().to_string())
+            .unwrap_or_else(|| "script".into());
+        // Send the definition, not just the name. A variant is user-defined data
+        // that lives only here; a worker holds the embedded defaults, which
+        // define DEFAULT and nothing else.
+        let executor_profile_config = executor_config
+            .and_then(dispatched_executor_profile)
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(anyhow::Error::from)?;
         let action = serde_json::to_value(executor_action).map_err(anyhow::Error::from)?;
         let run_reason = serde_json::to_value(&execution_process.run_reason)
             .map_err(anyhow::Error::from)?
@@ -2931,6 +2968,11 @@ impl ContainerService for LocalContainerService {
             "worker_node_id": worker_node_id,
             "workspace_path": workspace_path,
             "executor_profile": executor_profile,
+            // Part of the request's identity: the worker treats a dispatch with
+            // a different digest as a different request. A profile edited
+            // between two dispatches of the same execution must not be deduped
+            // into the first one's definition.
+            "executor_profile_config": executor_profile_config,
             "action": action,
             "environment": environment,
             "run_reason": run_reason,
@@ -2954,6 +2996,7 @@ impl ContainerService for LocalContainerService {
             workspace_path: workspace_path.clone(),
             working_directory: workspace_path,
             executor_profile,
+            executor_profile_config,
             action,
             environment,
             run_reason,
