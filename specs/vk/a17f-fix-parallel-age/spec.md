@@ -1,7 +1,7 @@
 # Feature Specification: Reliable Parallel Sub-Agent Pipeline
 
 **Feature dir**: `specs/vk/a17f-fix-parallel-age/`
-**Status**: Draft
+**Status**: Implemented
 **Task**: `vk/a17f-fix-parallel-age`
 
 ## Summary
@@ -82,17 +82,17 @@ answer instead of the promised multi-provider result.
 
 ## Acceptance Criteria
 
-- [ ] Bundled prompt tests require concurrency, exact initial prompt delivery,
+- [x] Bundled prompt tests require concurrency, exact initial prompt delivery,
       retained workspace-reading tools, and an explicit prohibition on
       disabling all tools.
-- [ ] Follow-up prompt tests require fresh concurrent children, original prompt
+- [x] Follow-up prompt tests require fresh concurrent children, original prompt
       plus prior synthesis, bounded rounds, and failure isolation.
-- [ ] Focused tests prove the exact legacy default upgrades.
-- [ ] Focused tests prove a one-byte-customized file and a deleted known file
+- [x] Focused tests prove the exact legacy default upgrades.
+- [x] Focused tests prove a one-byte-customized file and a deleted known file
       remain unchanged.
-- [ ] The bundled pipeline parses with the existing four stage IDs.
-- [ ] Repository formatting and focused Rust tests pass.
-- [ ] Independent Codex review finds no significant unresolved issue.
+- [x] The bundled pipeline parses with the existing four stage IDs.
+- [x] Repository formatting and focused Rust tests pass.
+- [x] Independent Codex review finds no significant unresolved issue.
 
 ## Open Questions
 

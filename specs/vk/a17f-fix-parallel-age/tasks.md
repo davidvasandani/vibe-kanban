@@ -35,14 +35,14 @@ this worktree to avoid conflicts.
 
 ## Layer 4 — Verification
 
-- [ ] T007 Run focused pipeline service tests. Depends on T005 and T006.
-- [ ] T008 Run repository formatting and relevant crate checks, then inspect the
+- [x] T007 Run focused pipeline service tests. Depends on T005 and T006.
+- [x] T008 Run repository formatting and relevant crate checks, then inspect the
   diff for unrelated changes. Depends on T007.
 
 ## Layer 5 — Review and knowledge
 
-- [ ] T009 Run independent Codex review, fix confirmed significant findings,
+- [x] T009 Run independent Codex review, fix confirmed significant findings,
   and repeat focused verification/review until clean. Depends on T008.
-- [ ] T010 Record reusable prompt-contract and exact-default-refresh knowledge,
+- [x] T010 Record reusable prompt-contract and exact-default-refresh knowledge,
   update the knowledge-base index, and commit the knowledge-base changes.
   Depends on T009.
