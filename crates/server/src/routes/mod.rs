@@ -7,6 +7,7 @@ pub mod approvals;
 pub mod aws;
 pub mod browser_sessions;
 pub mod cli_tools;
+pub mod cluster_metrics;
 pub mod config;
 pub mod containers;
 pub mod filesystem;

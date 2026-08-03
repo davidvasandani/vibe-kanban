@@ -34,6 +34,11 @@ pub fn admin_router() -> Router<DeploymentImpl> {
     Router::new()
         .route("/worker-nodes", get(list_workers))
         .route("/worker-nodes/{worker_node_id}", patch(set_draining))
+        // Read-only monitoring, mounted here so it inherits the same relay
+        // request-signature, response-signing and origin middleware. Note that
+        // unlike `list_workers` above, nothing behind these routes calls
+        // `expire_heartbeats`.
+        .merge(crate::routes::cluster_metrics::router())
 }
 
 pub fn worker_router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {

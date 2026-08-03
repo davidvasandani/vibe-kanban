@@ -18,6 +18,7 @@ git = { path = "../git" }
 git-host = { path = "../git-host" }
 db = { path = "../db" }
 services = { path = "../services" }
+node-metrics = { path = "../node-metrics" }
 worktree-manager = { path = "../worktree-manager" }
 workspace-manager = { path = "../workspace-manager" }
 embedded-ssh = { path = "../embedded-ssh" }
@@ -57,6 +58,7 @@ strip-ansi-escapes = "0.2.1"
 thiserror = { workspace = true }
 os_info = "3.12.0"
 futures-util = "0.3"
+json-patch = "2.0"
 http = "1"
 base64 = "0.22"
 mime_guess = "2.0"

@@ -5622,6 +5622,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "node-metrics"
+version = "0.1.43"
+dependencies = [
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "ts-rs 11.0.1",
+ "uuid",
+]
+
+[[package]]
 name = "nodrop"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9080,8 +9095,10 @@ dependencies = [
  "git",
  "git-host",
  "http",
+ "json-patch 2.0.0",
  "local-deployment",
  "mime_guess",
+ "node-metrics",
  "os_info",
  "preview-proxy",
  "rand 0.8.5",
@@ -9155,6 +9172,7 @@ dependencies = [
  "json-patch 2.0.0",
  "mime_guess",
  "moka",
+ "node-metrics",
  "notify",
  "notify-debouncer-full",
  "notify-rust",
@@ -12999,6 +13017,7 @@ dependencies = [
  "command-group",
  "ed25519-dalek",
  "executors",
+ "node-metrics",
  "portable-pty 0.9.0",
  "reqwest 0.13.2",
  "serde",
@@ -13008,6 +13027,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "utils",

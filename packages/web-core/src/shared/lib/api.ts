@@ -88,6 +88,7 @@ import {
   Workspace,
   WorkspacePlacement,
   WorkerNode,
+  ClusterMetricsSnapshot,
   StartReviewRequest,
   ReviewError,
   GitRemote,
@@ -2129,6 +2130,28 @@ export const workerNodesApi = {
       }
     );
     return handleApiResponse<WorkerNode>(response);
+  },
+};
+
+/**
+ * Cluster metrics (read-only).
+ *
+ * The snapshot route is the fallback for the `/api/cluster/metrics/ws` stream.
+ * It is host-aware: the answer describes the cluster of whichever host the
+ * request was routed to, which is why the cache key must carry the same scope
+ * (see `clusterMetricsKeys`).
+ */
+export const clusterMetricsApi = {
+  snapshot: async (
+    hostId?: string | null,
+    options?: RequestInit
+  ): Promise<ClusterMetricsSnapshot> => {
+    const response = await makeHostAwareRequest(
+      '/api/cluster/metrics',
+      hostId,
+      options
+    );
+    return handleApiResponse<ClusterMetricsSnapshot>(response);
   },
 };
 

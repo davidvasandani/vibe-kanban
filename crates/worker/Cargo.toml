@@ -17,6 +17,7 @@ cluster-protocol = { path = "../cluster-protocol" }
 command-group = { version = "5.0", features = ["with-tokio"] }
 ed25519-dalek = "2.2.0"
 executors = { path = "../executors" }
+node-metrics = { path = "../node-metrics" }
 portable-pty = "0.9"
 reqwest = { workspace = true }
 serde = { workspace = true }
@@ -33,3 +34,4 @@ ws-bridge = { path = "../ws-bridge" }
 
 [dev-dependencies]
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

@@ -8,6 +8,8 @@ use cluster_protocol::{
     TerminalOutputBatch, TerminalResize,
 };
 use ed25519_dalek::{Signer, SigningKey};
+use futures::StreamExt;
+use node_metrics::SampleBatch;
 use reqwest::{Client, Method, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -37,7 +39,28 @@ pub enum WorkerClientError {
         requested_after: u64,
         earliest_available: u64,
     },
+    /// The worker answered `404`: its build predates the route. Distinct from
+    /// [`WorkerClientError::Rejected`] so a caller can report
+    /// `NotImplemented` rather than `Unreachable` — one is a version skew, the
+    /// other is a fault, and conflating them makes an old worker look broken.
+    #[error("worker does not implement {path}")]
+    NotImplemented { path: String },
+    /// The reply exceeded the caller's explicit cap. Buffering it would let a
+    /// misbehaving worker size the coordinator's heap.
+    #[error("worker response exceeded {limit} bytes")]
+    ResponseTooLarge { limit: usize },
+    #[error("worker response could not be decoded: {0}")]
+    MalformedResponse(String),
 }
+
+/// Far below the client's 30s default: metrics are polled on a 2s tick, so a
+/// node that has not answered in 5s has already missed its slot.
+const METRICS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A full `after=0` fetch is ~150 samples with one process table, which is
+/// well under a megabyte in practice. The cap exists so a misbehaving worker
+/// cannot size the coordinator's heap, not to constrain honest replies.
+const MAX_METRICS_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct WorkerHealth {
@@ -289,6 +312,53 @@ impl WorkerClient {
         decode(response).await
     }
 
+    /// Host metrics with `sequence > after`.
+    ///
+    /// Same shape as [`WorkerClient::inventory`] — a signed bodyless `GET` —
+    /// with three deliberate differences, all of them consequences of running
+    /// on a 2s tick rather than on demand:
+    ///
+    /// - **A 5s per-request timeout**, not the client's 30s default. A hung
+    ///   node must not stall the polls queued behind it.
+    /// - **The cursor is inside the signed target**, so a captured signature
+    ///   cannot be replayed against a different `after`.
+    /// - **An explicit response cap**, applied while streaming rather than
+    ///   after buffering.
+    ///
+    /// There is deliberately **no nonce header**: `require_signature` on the
+    /// worker never consults one for a bodyless route, and sending a header the
+    /// peer does not check would be security theatre. See analysis E2.
+    pub async fn metrics(
+        &self,
+        worker_node_id: Uuid,
+        after: u64,
+    ) -> Result<SampleBatch, WorkerClientError> {
+        let path = "/v1/metrics";
+        let signed_target = format!("{path}?after={after}");
+        let endpoint = self.endpoint_for(worker_node_id).await?;
+        let url = endpoint.join(&signed_target)?;
+        let response = self
+            // A fresh envelope per call: the worker rejects anything outside a
+            // ±30s drift window, so a cached one starts failing within half a
+            // minute of being built.
+            .signed(
+                self.http.get(url).timeout(METRICS_REQUEST_TIMEOUT),
+                Method::GET,
+                &signed_target,
+                &[],
+            )
+            .send()
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(WorkerClientError::NotImplemented {
+                path: path.to_owned(),
+            });
+        }
+        let body = capped_body(response, MAX_METRICS_RESPONSE_BYTES).await?;
+        serde_json::from_slice(&body)
+            .map_err(|error| WorkerClientError::MalformedResponse(error.to_string()))
+    }
+
     async fn post<T: DeserializeOwned>(
         &self,
         worker_node_id: Uuid,
@@ -401,6 +471,43 @@ async fn decode<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, W
         .and_then(|body| body.error)
         .unwrap_or_else(|| "unspecified worker error".into());
     Err(WorkerClientError::Rejected { status, message })
+}
+
+/// Buffer a response body, refusing to exceed `limit`.
+///
+/// The check is applied *while* streaming and against the advertised
+/// `Content-Length` first, so an oversized reply is abandoned rather than
+/// allocated and then rejected.
+async fn capped_body(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, WorkerClientError> {
+    let status = response.status();
+    if !status.is_success() {
+        let message = response
+            .json::<WorkerErrorBody>()
+            .await
+            .ok()
+            .and_then(|body| body.error)
+            .unwrap_or_else(|| "unspecified worker error".into());
+        return Err(WorkerClientError::Rejected { status, message });
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(WorkerClientError::ResponseTooLarge { limit });
+    }
+    let mut buffer = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if buffer.len() + chunk.len() > limit {
+            return Err(WorkerClientError::ResponseTooLarge { limit });
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+    Ok(buffer)
 }
 
 fn validate_event_batch(batch: &EventBatch) -> Result<(), WorkerClientError> {

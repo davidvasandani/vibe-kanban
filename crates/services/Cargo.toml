@@ -18,6 +18,7 @@ git = { path = "../git" }
 git-host = { path = "../git-host" }
 executors = { path = "../executors" }
 db = { path = "../db" }
+node-metrics = { path = "../node-metrics" }
 worktree-manager = { path = "../worktree-manager" }
 tokio = { workspace = true }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -29,7 +30,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "sqlite", "sqlite-preupdate-hook", "chrono", "uuid"] }
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1.0", features = ["v4", "serde"] }
+uuid = { version = "1.0", features = ["v4", "v5", "serde"] }
 ts-rs = { workspace = true }
 dirs = "5.0"
 async-trait = { workspace = true }
