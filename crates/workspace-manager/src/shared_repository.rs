@@ -343,15 +343,15 @@ impl SharedRepositoryStore {
         // differently-fresh notion of `origin/main`.
         //
         // Two invocations, not one, and this is load-bearing rather than
-        // stylistic. `git fetch` is atomic across its refspecs, and the heads
-        // mirror is *routinely* refused: once any workspace exists, the store
-        // has a worktree checked out on `vk/…`, and `mirror_branch_back` has
-        // pushed that same branch into the checkout, so the heads refspec hits
-        // `refusing to fetch into branch '…' checked out at …` and aborts the
-        // whole command. Batched, that refusal would silently discard the
-        // remote-tracking mirror — the one this change exists to add — for every
-        // repository that already has a workspace. Separately, each namespace
-        // fails on its own and the other still lands.
+        // stylistic. `git fetch` is atomic across its refspecs, so one refused
+        // refspec discards the writes of every other. The heads refspec is
+        // refused whenever the store has a worktree checked out on a branch the
+        // checkout also holds — `refusing to fetch into branch '…' checked out
+        // at …` — which is reached through `heal_cluster_worktree`, since that
+        // path calls `ensure` with the *workspace* branch and so mirrors `vk/…`
+        // back into the checkout. Batched, that refusal would silently discard
+        // the remote-tracking mirror, the one this change exists to add.
+        // Separately, each namespace fails on its own and the other still lands.
         //
         // Additive: force-update, never `--prune`. These namespaces are shared
         // by every workspace of this repository on every node.
@@ -409,7 +409,7 @@ impl SharedRepositoryStore {
                         repo = %repo.name,
                         "could not fetch '{target_branch}' from remote '{name}': {e}"
                     );
-                    fetch_failures.push(format!("{name}: {e}"));
+                    fetch_failures.push(format!("{name}: {}", Self::summarize(&e.to_string())));
                 }
                 // A zero exit is not evidence that the ref we need now exists;
                 // ask the store.
@@ -447,6 +447,28 @@ impl SharedRepositoryStore {
                     )
                 },
             }),
+        }
+    }
+
+    /// Reduce a git failure to one bounded line fit for an API response body.
+    ///
+    /// `GitCliError::CommandFailed` carries the subprocess's combined output
+    /// verbatim, and that string is partly remote-controlled — a forge can emit
+    /// arbitrary `remote:` lines, and a credential helper writes its own
+    /// diagnostics to stderr. Since this text now reaches the user rather than
+    /// only the log, take the first meaningful line and cap it: an operator
+    /// needs the reason, not a transcript, and an error body is the wrong place
+    /// to relay unbounded third-party output.
+    fn summarize(message: &str) -> String {
+        const LIMIT: usize = 200;
+        let line = message
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("no output");
+        match line.char_indices().nth(LIMIT) {
+            Some((cut, _)) => format!("{}…", &line[..cut]),
+            None => line.to_string(),
         }
     }
 
@@ -1503,6 +1525,21 @@ mod tests {
                 .unwrap(),
             "and the rule being matched agrees"
         );
+    }
+
+    #[test]
+    fn a_git_failure_is_reduced_to_one_bounded_line() {
+        assert_eq!(
+            SharedRepositoryStore::summarize(
+                "\n  fatal: could not read Username for 'https://github.com'\n--- stderr\nremote: lots\n"
+            ),
+            "fatal: could not read Username for 'https://github.com'"
+        );
+        assert_eq!(SharedRepositoryStore::summarize("   \n\n"), "no output");
+        let long = "x".repeat(500);
+        let summarized = SharedRepositoryStore::summarize(&long);
+        assert!(summarized.ends_with('\u{2026}'));
+        assert_eq!(summarized.chars().count(), 201);
     }
 
     #[test]

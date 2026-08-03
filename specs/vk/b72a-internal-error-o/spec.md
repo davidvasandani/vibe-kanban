@@ -99,13 +99,21 @@ fetch trying to recover the missing branch — a long unexplained wait.
   deliberately leaves the local case alone — closing it means taking the
   administration lease on every `ensure`, which is a different change with a
   different risk profile.
-- **The heads mirror is refused once any workspace exists.** `git fetch` will
-  not write `refs/heads/vk/…` while a worktree has it checked out, so
-  `+refs/heads/*:refs/heads/*` fails in the steady state. That is pre-existing
-  (#174 shipped it) and is why the two mirrors must be separate invocations —
-  see [`analysis.md`](analysis.md) R1. Making the heads mirror itself work is
-  out of scope, and force-updating a branch a live workspace is sitting on would
-  need its own design.
+- **The heads mirror is refused once a workspace branch reaches the checkout.**
+  `git fetch` will not write `refs/heads/vk/…` while a worktree has it checked
+  out, so `+refs/heads/*:refs/heads/*` fails wholesale for that repository. It is
+  reached via `heal_cluster_worktree`, which calls `ensure` with the workspace
+  branch and so mirrors `vk/…` back into the checkout. Pre-existing (#174 shipped
+  it) and the reason the two mirrors must be separate invocations — see
+  [`analysis.md`](analysis.md) R1.
+
+  The residual hole this leaves: a target branch that exists **only** in the
+  coordinator's checkout (created locally, never pushed) cannot reach the store
+  once that repository is in the refused state, because the heads mirror dies and
+  the fallback loop skips `vk-registered` — the one remote that has it. The
+  mitigation, deliberately not taken here to keep this change reviewable, is a
+  *targeted* `+refs/heads/{target}:refs/heads/{target}` from `repo.path`: a
+  refspec that never matches the `vk/…` names cannot trigger the refusal.
 
 ## Acceptance Criteria
 
