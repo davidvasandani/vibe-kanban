@@ -46,7 +46,13 @@ vi.mock('@/shared/lib/localApiTransport', () => ({
   openLocalApiWebSocket: mocks.openWebSocket,
 }));
 
+import { WorkspacesSidebar } from '@vibe/ui/components/WorkspacesSidebar';
+import { CollapsibleSectionHeader } from '@vibe/ui/components/CollapsibleSectionHeader';
+
 import { ServerMetricsSectionContainer } from './ServerMetricsSectionContainer';
+
+/** Mirrors `PERSIST_KEYS.serverMetricsSection`. */
+const METRICS_PERSIST_KEY = 'server-metrics-section';
 
 /** A socket that connects but never delivers `Ready`, so REST stays in play. */
 class SilentWebSocket {
@@ -128,16 +134,8 @@ let container: HTMLDivElement;
 let root: Root;
 let queryClient: QueryClient;
 
-async function renderContainer(props: { expanded?: boolean } = {}) {
-  await act(async () => {
-    root.render(
-      <QueryClientProvider client={queryClient}>
-        <ServerMetricsSectionContainer {...props} />
-      </QueryClientProvider>
-    );
-  });
-  // Let the REST fallback settle: the query resolves over several microtask
-  // turns before React commits its data.
+/** Let the REST fallback settle: several microtask turns before React commits. */
+async function flush() {
   for (let i = 0; i < 5; i += 1) {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -145,7 +143,48 @@ async function renderContainer(props: { expanded?: boolean } = {}) {
   }
 }
 
+/**
+ * Renders the section where it actually lives: the `metricsSlot` of the left
+ * workspaces sidebar, wrapped in the same `CollapsibleSectionHeader` the
+ * container mounts it under.
+ */
+async function renderSidebar({ expanded = true }: { expanded?: boolean } = {}) {
+  await act(async () => {
+    root.render(
+      <QueryClientProvider client={queryClient}>
+        <WorkspacesSidebar
+          workspaces={[]}
+          totalWorkspacesCount={0}
+          selectedWorkspaceId={null}
+          onSelectWorkspace={() => undefined}
+          searchQuery=""
+          onSearchChange={() => undefined}
+          metricsSlot={
+            <CollapsibleSectionHeader
+              title="Server Metrics"
+              persistKey={METRICS_PERSIST_KEY}
+              defaultExpanded={expanded}
+            >
+              <ServerMetricsSectionContainer />
+            </CollapsibleSectionHeader>
+          }
+        />
+      </QueryClientProvider>
+    );
+  });
+  await flush();
+}
+
+function metricsSlot() {
+  return container.querySelector(
+    '[data-testid="workspaces-sidebar-metrics-slot"]'
+  );
+}
+
 beforeEach(() => {
+  // `CollapsibleSectionHeader` remembers its own open state; without this a
+  // test that expanded the section would decide the next test's default.
+  window.localStorage.clear();
   mocks.snapshot.mockReset();
   mocks.openWebSocket.mockReset();
   mocks.openWebSocket.mockImplementation(() =>
@@ -166,7 +205,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('ServerMetricsSectionContainer', () => {
+describe('ServerMetricsSectionContainer in the workspaces sidebar', () => {
   it('renders one entry per node', async () => {
     mocks.snapshot.mockResolvedValue(
       snapshotOf(
@@ -184,7 +223,7 @@ describe('ServerMetricsSectionContainer', () => {
       )
     );
 
-    await renderContainer();
+    await renderSidebar();
 
     const entries = container.querySelectorAll('[data-testid="metrics-node"]');
     expect(entries).toHaveLength(3);
@@ -222,7 +261,7 @@ describe('ServerMetricsSectionContainer', () => {
         snapshotOf(node({ availability, latest: null, history: [] }))
       );
 
-      await renderContainer();
+      await renderSidebar();
 
       const badge = container.querySelector(
         '[data-testid="metrics-node-availability"]'
@@ -254,7 +293,7 @@ describe('ServerMetricsSectionContainer', () => {
       )
     );
 
-    await renderContainer();
+    await renderSidebar();
 
     const badge = container.querySelector(
       '[data-testid="metrics-node-availability"]'
@@ -287,7 +326,7 @@ describe('ServerMetricsSectionContainer', () => {
       )
     );
 
-    await renderContainer();
+    await renderSidebar();
 
     const readings = container.querySelector(
       '[data-testid="metrics-node-readings"]'
@@ -323,7 +362,7 @@ describe('ServerMetricsSectionContainer', () => {
       )
     );
 
-    await renderContainer();
+    await renderSidebar();
 
     expect(
       container.querySelector('[data-testid="metrics-node-detail"]')
@@ -352,18 +391,44 @@ describe('ServerMetricsSectionContainer', () => {
     expect(iface?.textContent).toContain('— ↓ / — ↑');
   });
 
+  it('mounts in the sidebar metrics slot, directly above the archive footer', async () => {
+    mocks.snapshot.mockResolvedValue(snapshotOf(node()));
+
+    await renderSidebar();
+
+    const slot = metricsSlot();
+    expect(slot).not.toBeNull();
+    expect(
+      slot?.querySelector('[data-testid="server-metrics-section"]')
+    ).not.toBeNull();
+    // Nothing between the section and the fixed footer holding the toggle.
+    expect(slot?.nextElementSibling?.textContent).toContain(
+      'common:workspaces.viewArchive'
+    );
+  });
+
   it('opens no socket and issues no request while the section is collapsed', async () => {
     mocks.snapshot.mockResolvedValue(snapshotOf(node()));
 
-    await renderContainer({ expanded: false });
+    await renderSidebar({ expanded: false });
 
+    // Collapsed unmounts the body, so nothing is there to collect.
+    expect(
+      container.querySelector('[data-testid="server-metrics-section"]')
+    ).toBeNull();
     expect(mocks.openWebSocket).not.toHaveBeenCalled();
     expect(mocks.snapshot).not.toHaveBeenCalled();
 
-    // Expanding is what opens it.
-    await renderContainer({ expanded: true });
+    // Expanding the section is what opens it.
+    const header = metricsSlot()?.querySelector('button');
+    await act(async () => {
+      header?.click();
+    });
+    await flush();
+
     expect(mocks.openWebSocket).toHaveBeenCalledTimes(1);
     expect(mocks.openWebSocket).toHaveBeenCalledWith('/api/cluster/metrics/ws');
+    expect(mocks.snapshot).toHaveBeenCalled();
   });
 
   it('keeps rendering the other nodes when one node is malformed', async () => {
@@ -386,7 +451,7 @@ describe('ServerMetricsSectionContainer', () => {
       .spyOn(console, 'error')
       .mockImplementation(() => undefined);
 
-    await renderContainer();
+    await renderSidebar();
 
     consoleError.mockRestore();
 

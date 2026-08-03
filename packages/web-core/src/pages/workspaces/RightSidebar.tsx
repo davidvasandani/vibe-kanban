@@ -6,7 +6,6 @@ import { ProcessListContainer } from './ProcessListContainer';
 import { PreviewControlsContainer } from './PreviewControlsContainer';
 import { BrowserControlsContainer } from './BrowserControlsContainer';
 import { GitPanelContainer } from './GitPanelContainer';
-import { ServerMetricsSectionContainer } from './ServerMetricsSectionContainer';
 import { TerminalPanelContainer } from '@/shared/components/TerminalPanelContainer';
 import { WorkspaceNotesContainer } from './WorkspaceNotesContainer';
 import { useDiffs } from '@/shared/stores/useWorkspaceDiffStore';
@@ -74,10 +73,6 @@ export const RightSidebar = memo(function RightSidebar({
     PERSIST_KEYS.gitPanelRepositories,
     true
   );
-  const [serverMetricsExpanded] = usePersistedExpanded(
-    PERSIST_KEYS.serverMetricsSection,
-    false
-  );
   const [terminalExpanded] = usePersistedExpanded(
     PERSIST_KEYS.terminalSection,
     false
@@ -131,18 +126,6 @@ export const RightSidebar = memo(function RightSidebar({
             repos={repos}
           />
         ),
-        actions: [],
-      },
-      {
-        // The section body is unmounted while collapsed, which is what keeps
-        // a closed section from holding the metrics socket open.
-        title: t('common:sections.serverMetrics', {
-          defaultValue: 'Server Metrics',
-        }),
-        persistKey: PERSIST_KEYS.serverMetricsSection,
-        visible: true,
-        expanded: serverMetricsExpanded,
-        content: <ServerMetricsSectionContainer />,
         actions: [],
       },
       {
@@ -238,7 +221,6 @@ export const RightSidebar = memo(function RightSidebar({
     repos,
     diffs,
     gitExpanded,
-    serverMetricsExpanded,
     terminalExpanded,
     notesExpanded,
     changesExpanded,
