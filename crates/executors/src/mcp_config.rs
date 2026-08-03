@@ -741,6 +741,129 @@ mod tests {
         );
     }
 
+    /// Fork revision the bundled Gmail connector installs. Bumping it means
+    /// moving the spec in `default_mcp.json` and the revision named in
+    /// `docs/integrations/mcp-server-configuration.mdx` in the same change.
+    ///
+    /// Unlike the Slack pin there is no companion digest constant and no audit
+    /// workflow, and that asymmetry is deliberate: Slack pins a *release asset*,
+    /// whose bytes GitHub lets a maintainer replace under an existing tag, so a
+    /// recorded digest re-checked on a schedule is the only available control. A
+    /// git commit is content-addressed — npm resolves this SHA to exactly one
+    /// tree at install time, on every machine — so the pin already *is* the
+    /// integrity record. Re-checking it daily would assert that a hash equals
+    /// itself.
+    ///
+    /// Renovate cannot follow a bare SHA on a fork with no releases, so this pin
+    /// is bumped by hand; `AGENTS.md` records that. A custom manager here would
+    /// match the pin and then never propose a successor, which is worse than no
+    /// manager because it looks like coverage.
+    const GMAIL_MCP_FORK_REVISION: &str = "030da3492753222a41645a9f343466d151c63f3c";
+    const GMAIL_MCP_INSTALL_SPEC: &str =
+        "github:davidvasandani/Gmail-MCP-Server#030da3492753222a41645a9f343466d151c63f3c";
+
+    #[test]
+    fn gmail_preconfigured_server_matches_the_documented_stdio_contract() {
+        let value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+
+        assert_eq!(value["gmail"]["command"], serde_json::json!("npx"));
+        assert_eq!(
+            value["gmail"]["args"],
+            serde_json::json!(["-y", GMAIL_MCP_INSTALL_SPEC, "--tool-prefix=YOUR_TOOL_PREFIX"])
+        );
+        // A path, not a token: the refresh token stays in the Gmail server's own
+        // credentials file and never reaches an agent's config. `GMAIL_OAUTH_PATH`
+        // is deliberately absent — the OAuth client is per Google Cloud project,
+        // not per mailbox, so every instance shares its default.
+        assert_eq!(
+            value["gmail"]["env"],
+            serde_json::json!({ "GMAIL_CREDENTIALS_PATH": "YOUR_CREDENTIALS_PATH" })
+        );
+        assert_eq!(value["meta"]["gmail"]["name"], serde_json::json!("Gmail"));
+        assert_eq!(
+            value["meta"]["gmail"]["url"],
+            serde_json::json!("https://github.com/davidvasandani/Gmail-MCP-Server")
+        );
+    }
+
+    /// Splits `github:<owner>/<repo>#<commit-ish>` into its parts, or `None` if
+    /// the spec is not an npm GitHub shorthand carrying an explicit revision.
+    fn parse_github_git_spec(spec: &str) -> Option<(String, String, String)> {
+        let rest = spec.strip_prefix("github:")?;
+        let (owner, rest) = rest.split_once('/')?;
+        let (repo, commit_ish) = rest.split_once('#')?;
+        (!owner.is_empty() && !repo.is_empty() && !commit_ish.is_empty())
+            .then(|| (owner.to_string(), repo.to_string(), commit_ish.to_string()))
+    }
+
+    #[test]
+    fn gmail_preconfigured_server_pins_an_immutable_fork_revision() {
+        let value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        let spec = value["gmail"]["args"][1].as_str().expect("install spec");
+
+        // A mutable reference here is the defect this pin exists to prevent:
+        // the catalog would advertise the fork while installing whatever that
+        // branch happens to point at today.
+        for mutable in ["@latest", "#master", "#main", "refs/heads/", "/archive/"] {
+            assert!(
+                !spec.contains(mutable),
+                "gmail install spec {spec} must not contain the mutable reference {mutable}"
+            );
+        }
+
+        // `parse_github_git_spec` requires a `#<commit-ish>`, so a bare
+        // `github:owner/repo` — which would track the default branch — fails here.
+        let (owner, repo, commit_ish) =
+            parse_github_git_spec(spec).expect("gmail install spec is a pinned GitHub git spec");
+        assert_eq!(commit_ish, GMAIL_MCP_FORK_REVISION);
+        assert!(
+            commit_ish.len() == 40
+                && commit_ish
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "gmail pin {commit_ish} must be a full 40-character lowercase commit SHA; \
+             an abbreviated SHA or a tag can be re-pointed"
+        );
+
+        // The UI links users to `meta.gmail.url`; it must be the repository the
+        // revision is actually installed from.
+        let meta_url = value["meta"]["gmail"]["url"].as_str().expect("meta url");
+        let meta_repo = meta_url
+            .strip_prefix("https://github.com/")
+            .expect("meta url is a GitHub URL")
+            .trim_end_matches('/');
+        assert_eq!(meta_repo, format!("{owner}/{repo}"));
+    }
+
+    #[test]
+    fn gmail_preconfigured_server_adapts_for_codex_and_opencode() {
+        let canonical = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        let codex = apply_adapter(Adapter::Codex, canonical.clone());
+        let opencode = apply_adapter(Adapter::Opencode, canonical);
+
+        assert_eq!(codex["gmail"]["command"], serde_json::json!("npx"));
+        assert_eq!(
+            codex["gmail"]["env"],
+            serde_json::json!({ "GMAIL_CREDENTIALS_PATH": "YOUR_CREDENTIALS_PATH" })
+        );
+        assert_eq!(opencode["gmail"]["type"], serde_json::json!("local"));
+        assert_eq!(
+            opencode["gmail"]["command"],
+            serde_json::json!([
+                "npx",
+                "-y",
+                GMAIL_MCP_INSTALL_SPEC,
+                "--tool-prefix=YOUR_TOOL_PREFIX"
+            ])
+        );
+        // Opencode calls the stdio environment field `environment`; losing this
+        // rename is what makes a credential-bearing entry silently unusable.
+        assert_eq!(
+            opencode["gmail"]["environment"],
+            serde_json::json!({ "GMAIL_CREDENTIALS_PATH": "YOUR_CREDENTIALS_PATH" })
+        );
+    }
+
     #[test]
     fn grok_preconfigured_http_servers_use_the_typeless_native_shape() {
         let grok = CodingAgent::Grok(serde_json::from_value(serde_json::json!({})).unwrap());

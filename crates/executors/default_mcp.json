@@ -56,6 +56,17 @@
       "SLACK_MCP_XOXP_TOKEN": "YOUR_TOKEN"
     }
   },
+  "gmail": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "github:davidvasandani/Gmail-MCP-Server#030da3492753222a41645a9f343466d151c63f3c",
+      "--tool-prefix=YOUR_TOOL_PREFIX"
+    ],
+    "env": {
+      "GMAIL_CREDENTIALS_PATH": "YOUR_CREDENTIALS_PATH"
+    }
+  },
   "meta": {
     "vibe_kanban": {
       "name": "Vibe Kanban",
@@ -97,6 +108,11 @@
       "name": "Slack",
       "description": "Search and read Slack workspace conversations",
       "url": "https://github.com/davidvasandani/slack-mcp-server/"
+    },
+    "gmail": {
+      "name": "Gmail",
+      "description": "Read, search, draft and send Gmail from your agent",
+      "url": "https://github.com/davidvasandani/Gmail-MCP-Server"
     }
   }
 }

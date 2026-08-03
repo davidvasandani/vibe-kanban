@@ -49,6 +49,7 @@ import {
   indexAssignmentTests,
   inputsFromDraft,
   mergeOAuthRefresh,
+  nextAvailableServerName,
   preconfiguredMcpServers,
   removedServerNames,
   resolveConflictVariant,
@@ -621,9 +622,17 @@ export function McpSettingsSection() {
         )
         .slice(0, 1)
         .map((profile) => profile.executor);
-      setServer({ name: key, definition, assignments });
+      // A template may be added more than once (two Slack workspaces, one Gmail
+      // server per mailbox), so the catalog key is only a starting point. Allocate
+      // against the current draft: `setServer` de-duplicates by name, so reusing a
+      // taken name would silently replace that server instead of adding one.
+      const name = nextAvailableServerName(
+        key,
+        draft.servers.map((server) => server.name)
+      );
+      setServer({ name, definition, assignments });
     },
-    [profiles, setServer]
+    [draft.servers, profiles, setServer]
   );
 
   const disconnectGateway = useCallback(
@@ -1101,6 +1110,10 @@ export function McpSettingsSection() {
                 </p>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {catalogServers.map((server) => {
+                    // Marks the template as already used — it dims the tile and
+                    // swaps the icon, but must not disable it: a template can be
+                    // instantiated more than once, and later instances are named
+                    // by `nextAvailableServerName`.
                     const added = draft.servers.some(
                       (draftServer) => draftServer.name === server.key
                     );
@@ -1112,12 +1125,9 @@ export function McpSettingsSection() {
                         onClick={() =>
                           addPreconfigured(server.key, server.entry)
                         }
-                        disabled={added}
                         className={cn(
-                          'flex items-start gap-3 rounded-sm border border-border/50 bg-secondary/30 p-3 text-left transition-colors',
-                          added
-                            ? 'cursor-default opacity-60'
-                            : 'hover:border-border hover:bg-secondary'
+                          'flex items-start gap-3 rounded-sm border border-border/50 bg-secondary/30 p-3 text-left transition-colors hover:border-border hover:bg-secondary',
+                          added && 'opacity-60'
                         )}
                       >
                         <div className="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-sm border border-border bg-secondary">

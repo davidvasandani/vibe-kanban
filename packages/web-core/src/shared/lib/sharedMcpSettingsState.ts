@@ -65,6 +65,35 @@ export function preconfiguredMcpServers(
     });
 }
 
+/**
+ * Picks the identifier for a newly instantiated catalog template, given the
+ * names already in the draft.
+ *
+ * Catalog templates describe a *kind* of server, not one instance of it — a user
+ * may want two Slack workspaces, or a Gmail server per mailbox. Since the
+ * template's own key can only be used once, later instances get `_2`, `_3`, …
+ *
+ * The `_` separator is load-bearing. These names are protocol identifiers
+ * written into agents' native config files, not display labels, and the backend
+ * validates them against `^[a-zA-Z0-9_-]+$` (`is_valid_server_identifier` in
+ * `crates/executors/src/shared_mcp_config.rs`). A space or `(2)` would be
+ * rejected on save, or silently rewritten by `suggested_server_identifier`.
+ *
+ * Returning a name already in `existing` would be worse than an error:
+ * `setServer` de-duplicates by name, so a collision replaces the earlier server
+ * rather than reporting a conflict.
+ */
+export function nextAvailableServerName(
+  key: string,
+  existing: readonly string[]
+): string {
+  const taken = new Set(existing);
+  if (!taken.has(key)) return key;
+  let suffix = 2;
+  while (taken.has(`${key}_${suffix}`)) suffix += 1;
+  return `${key}_${suffix}`;
+}
+
 export function sharedMcpSnapshot(state: SharedMcpDraftState): string {
   return JSON.stringify({
     servers: [...state.servers]

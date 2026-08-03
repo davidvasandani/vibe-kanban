@@ -27,6 +27,8 @@ MCP servers provide additional functionality to coding agents through standardiz
 
 Vibe Kanban provides popular MCP server templates. Add a template, then choose the compatible agents that should receive it.
 
+You can add the same template more than once. The first instance takes the template's own name; later ones are numbered (`gmail`, `gmail_2`, `gmail_3`), and you can rename each to something meaningful. This is how you run one connector against several accounts — two Slack workspaces, or a Gmail server per mailbox.
+
 <Frame>
 <img src="/images/settings-popular-mcp-servers.png" alt="Popular MCP servers including Vibe Kanban, Context7, Playwright, Exa, Chrome DevTools, and Dev Manager" />
 </Frame>
@@ -106,6 +108,121 @@ to confirm the published tarball matches the recorded audit digest. `npx` does
 not enforce this digest when it installs a URL package.
 </Step>
 </Steps>
+
+### Gmail connector
+
+The Gmail template installs a pinned revision of the
+[davidvasandani/Gmail-MCP-Server](https://github.com/davidvasandani/Gmail-MCP-Server)
+fork:
+
+```json
+{
+  "command": "npx",
+  "args": [
+    "-y",
+    "github:davidvasandani/Gmail-MCP-Server#030da3492753222a41645a9f343466d151c63f3c",
+    "--tool-prefix=YOUR_TOOL_PREFIX"
+  ],
+  "env": { "GMAIL_CREDENTIALS_PATH": "YOUR_CREDENTIALS_PATH" }
+}
+```
+
+The pin is a commit SHA, so the installed code cannot change under you. Replace
+both `YOUR_*` placeholders before saving — Vibe Kanban does not check that you
+have.
+
+<Note>
+This entry installs from a Git revision rather than a published package, so `git`
+and network access are required, and the **first** launch compiles the server
+from source (roughly a minute). Later launches reuse the npm cache. Unlike other
+connectors, no credential is stored in your agent's configuration — only the
+*path* to a credentials file that the Gmail server owns.
+</Note>
+
+#### Prerequisites
+
+Setting up Gmail is two steps, and both matter. Missing the first is loud;
+missing the second is quiet.
+
+<Steps>
+<Step title="Create a Google Cloud OAuth client (once)">
+Create an OAuth client of type **Desktop app** in a Google Cloud project with the
+Gmail API enabled, download its JSON, and save it as
+`~/.gmail-mcp/gcp-oauth.keys.json`.
+
+This file identifies the *project*, not a mailbox, so every Gmail instance you
+create shares it. That is why the template does not ask you for its path.
+
+<Warning>
+Without this file the server exits before it finishes starting, so **Test
+connection** reports a failure naming the missing file. That is unfinished setup,
+not a broken connector.
+</Warning>
+</Step>
+
+<Step title="Authorise each mailbox (once per account)">
+Run the server's own `auth` command in a terminal, once per mailbox, with
+`GMAIL_CREDENTIALS_PATH` pointing at where that account's tokens should live.
+Omit `--tool-prefix`; it plays no part in authentication.
+
+```bash
+GMAIL_CREDENTIALS_PATH=~/.gmail-mcp/credentials-personal.json \
+  npx -y github:davidvasandani/Gmail-MCP-Server#030da3492753222a41645a9f343466d151c63f3c auth
+```
+
+Your browser opens for consent, and the refresh token is written to that path.
+Repeat for each mailbox with a different filename.
+
+Narrow the permissions you grant with `--scopes`, for example
+`--scopes=gmail.readonly`. Deleting messages requires the full scope.
+
+<Warning>
+Skipping this step for an account is the quiet failure: the connector still
+**tests green**, because listing tools needs only the OAuth client file. It fails
+the first time the agent actually reads mail.
+</Warning>
+</Step>
+</Steps>
+
+#### Running several mailboxes at once
+
+One server instance serves exactly one mailbox, because it loads a single set of
+credentials. For several mailboxes, add the Gmail template once per account and
+give each instance its own credentials path and its own tool prefix:
+
+| Server name | `GMAIL_CREDENTIALS_PATH` | `--tool-prefix` |
+| --- | --- | --- |
+| `gmail_personal` | `~/.gmail-mcp/credentials-personal.json` | `personal_` |
+| `gmail_work` | `~/.gmail-mcp/credentials-work.json` | `work_` |
+| `gmail_client` | `~/.gmail-mcp/credentials-client.json` | `client_` |
+
+Server names are protocol identifiers, so they may contain only letters, digits,
+underscores and hyphens — `gmail_personal`, not `Gmail (Personal)`.
+
+<Warning>
+Give every instance a **different** `--tool-prefix`. Some agents identify tools
+by their base name across servers, so two instances sharing a prefix leave one
+silently shadowing the other: you see a working `search_emails` that reads the
+wrong mailbox. With distinct prefixes the agent sees `personal_search_emails` and
+`work_search_emails` and can address each mailbox deliberately.
+
+Two instances sharing a `GMAIL_CREDENTIALS_PATH` simply read the same mailbox.
+</Warning>
+
+Each instance contributes 28 tools, so three mailboxes add 84. Assign only the
+instances an agent genuinely needs, and use `--scopes` to keep each one narrow —
+see the tip on limiting MCP servers below.
+
+#### Updating the pin
+
+Renovate cannot track a commit SHA on a fork that publishes no releases, so this
+pin is updated by hand. A bump moves the SHA in
+`crates/executors/default_mcp.json`, the `GMAIL_MCP_FORK_REVISION` constant in
+`crates/executors/src/mcp_config.rs`, and the revision on this page — together.
+
+There is no separate checksum to refresh and no scheduled audit, unlike the Slack
+connector above. A commit SHA is content-addressed, so npm verifies it when it
+installs, on every machine.
 
 ## Adding Custom MCP Servers
 

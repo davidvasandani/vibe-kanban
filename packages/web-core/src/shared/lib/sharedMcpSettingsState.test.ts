@@ -7,6 +7,7 @@ import {
   indexAssignmentTests,
   inputsFromDraft,
   mergeOAuthRefresh,
+  nextAvailableServerName,
   preconfiguredMcpServers,
   removedServerNames,
   resolveConflictVariant,
@@ -66,6 +67,62 @@ describe('shared MCP settings state', () => {
         icon: undefined,
       },
     ]);
+  });
+
+  describe('nextAvailableServerName', () => {
+    it('uses the catalog key when nothing has claimed it', () => {
+      expect(nextAvailableServerName('gmail', [])).toBe('gmail');
+      expect(nextAvailableServerName('gmail', ['slack', 'context7'])).toBe(
+        'gmail'
+      );
+    });
+
+    it('suffixes later instances of the same template', () => {
+      expect(nextAvailableServerName('gmail', ['gmail'])).toBe('gmail_2');
+      expect(nextAvailableServerName('gmail', ['gmail', 'gmail_2'])).toBe(
+        'gmail_3'
+      );
+    });
+
+    it('fills a gap rather than counting instances', () => {
+      // A user who added three and deleted the second should get `gmail_2`
+      // back, not `gmail_4` — the result depends only on what is taken.
+      expect(nextAvailableServerName('gmail', ['gmail', 'gmail_3'])).toBe(
+        'gmail_2'
+      );
+    });
+
+    it('never returns a name that is already taken', () => {
+      // Reusing a name is worse than an error: `setServer` de-duplicates by
+      // name, so the new server would replace the existing one silently.
+      const existing = ['gmail', 'gmail_2', 'gmail_3', 'gmail_4'];
+      expect(existing).not.toContain(nextAvailableServerName('gmail', existing));
+    });
+
+    it('generates identifiers the backend will accept', () => {
+      // Bound to `is_valid_server_identifier` (^[a-zA-Z0-9_-]+$) in
+      // crates/executors/src/shared_mcp_config.rs. A generated name that fails
+      // this is rejected on save, or silently rewritten by
+      // `suggested_server_identifier`.
+      const keys = ['gmail', 'slack', 'chrome_devtools', 'dev-manager'];
+      const taken: string[] = [];
+      for (const key of keys) {
+        for (let i = 0; i < 5; i += 1) {
+          const name = nextAvailableServerName(key, taken);
+          expect(name).toMatch(/^[a-zA-Z0-9_-]+$/);
+          taken.push(name);
+        }
+      }
+    });
+
+    it('yields a distinct server each time a template is added repeatedly', () => {
+      const names: string[] = [];
+      for (let i = 0; i < 3; i += 1) {
+        names.push(nextAvailableServerName('gmail', names));
+      }
+      expect(names).toEqual(['gmail', 'gmail_2', 'gmail_3']);
+      expect(new Set(names).size).toBe(3);
+    });
   });
 
   it('creates stable snapshots independent of assignment order', () => {
