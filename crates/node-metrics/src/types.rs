@@ -318,7 +318,20 @@ mod tests {
             model: Some("Intel(R) Core(TM) i5-8500T CPU @ 2.10GHz".to_string()),
             core_count: Some(6),
             total_busy_percent: Some(12.5),
-            per_core_busy_percent: Some(vec![1.5, 2.5, 3.0]),
+            per_core_busy: Some(vec![
+                CoreBusy {
+                    core: 0,
+                    busy_percent: 1.5,
+                },
+                CoreBusy {
+                    core: 1,
+                    busy_percent: 2.5,
+                },
+                CoreBusy {
+                    core: 2,
+                    busy_percent: 3.0,
+                },
+            ]),
             load_1m: Some(0.31),
             load_5m: Some(1.60),
             load_15m: Some(1.02),

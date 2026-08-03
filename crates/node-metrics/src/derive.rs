@@ -336,7 +336,13 @@ mod tests {
             parse_proc_stat("cpu  100 0 0 300 0\ncpu0 25 0 0 175 0\ncpu3 75 0 0 125 0\n").unwrap();
 
         let busy = derive_cpu_busy(Some(&previous), &current);
-        assert_eq!(busy.total_percent, Some(25.0));
+        // Δtotal = 400 − 200 = 200, Δidle = 300 − 200 = 100: half the elapsed
+        // jiffies were busy. The aggregate line is unaffected by the core set
+        // changing underneath it.
+        assert_eq!(busy.total_percent, Some(50.0));
+        // cpu1 went offline and cpu3 came online, so the vector is the same
+        // length but describes a different set of cores. Deriving cpu3 against
+        // cpu1's counters would invent a reading, so the whole vector drops.
         assert_eq!(busy.per_core, None);
     }
 
@@ -364,7 +370,7 @@ mod tests {
         let stat = parse_proc_stat(STAT).unwrap();
         let busy = derive_cpu_busy(Some(&stat), &stat);
         assert_eq!(busy.total_percent, None);
-        assert_eq!(busy.per_core_percent, None);
+        assert_eq!(busy.per_core, None);
     }
 
     /// The vector is replaced wholesale by consumers, so a changed core count
@@ -377,7 +383,7 @@ mod tests {
             parse_proc_stat("cpu  75 0 0 125 0\ncpu0 40 0 0 60 0\ncpu1 35 0 0 65 0\n").unwrap();
         let busy = derive_cpu_busy(Some(&previous), &current);
         assert_eq!(busy.total_percent, Some(75.0));
-        assert_eq!(busy.per_core_percent, None);
+        assert_eq!(busy.per_core, None);
     }
 
     #[test]

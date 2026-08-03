@@ -62,7 +62,12 @@ function cpuSample(overrides: Partial<HostSample['cpu']> = {}) {
     model: 'Test CPU',
     core_count: 4,
     total_busy_percent: 12.5,
-    per_core_busy_percent: [10, 15, 12, 13],
+    per_core_busy: [
+      { core: 0, busy_percent: 10 },
+      { core: 1, busy_percent: 15 },
+      { core: 2, busy_percent: 12 },
+      { core: 3, busy_percent: 13 },
+    ],
     load_1m: 0.5,
     load_5m: 0.4,
     load_15m: 0.3,
