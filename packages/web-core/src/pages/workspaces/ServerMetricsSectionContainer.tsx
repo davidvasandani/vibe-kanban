@@ -155,15 +155,14 @@ export interface ServerMetricsSectionContainerProps {
    *
    * `CollapsibleSectionHeader` unmounts its children while collapsed, so the
    * default is `true` and the structural guarantee already holds; the prop
-   * exists so a caller that keeps the container mounted can still hold the
-   * socket shut.
+   * exists so a caller that keeps the container mounted — and the tests — can
+   * assert the socket stays shut.
    */
   expanded?: boolean;
 }
 
 /**
- * The "Server Metrics" section of the left workspaces sidebar, rendered into
- * its `metricsSlot` just above the archive footer.
+ * The "Server metrics" section of the workspace right sidebar.
  *
  * Live over `/api/cluster/metrics/ws`, with `/api/cluster/metrics` as the
  * fallback. The fallback is what makes an unhappy socket survivable: a

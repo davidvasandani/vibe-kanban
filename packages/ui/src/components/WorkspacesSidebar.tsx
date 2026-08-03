@@ -86,15 +86,6 @@ export interface WorkspacesSidebarProps {
   hasMoreWorkspaces?: boolean;
   /** Controls rendered beside the search input */
   searchControls?: ReactNode;
-  /**
-   * Content pinned between the workspace list and the archive footer.
-   *
-   * Used by the local app for the server metrics section. Optional, because
-   * remote deployments render this sidebar without one — and because this
-   * component stays presentational: whatever the slot holds (its collapsed
-   * state, its data, its socket) is the caller's business.
-   */
-  metricsSlot?: ReactNode;
   /** Callback for opening workspace actions */
   onOpenWorkspaceActions?: (workspaceId: string) => void;
   /** Persist keys for collapsible sections */
@@ -205,7 +196,6 @@ export function WorkspacesSidebar({
   onLoadMore,
   hasMoreWorkspaces = false,
   searchControls,
-  metricsSlot,
   onOpenWorkspaceActions,
   persistKeys = DEFAULT_PERSIST_KEYS,
   activeRemoteHost = null,
@@ -342,10 +332,7 @@ export function WorkspacesSidebar({
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        // The horizontal axis is pinned: a `visible` axis beside a scrolling
-        // one computes to `auto`, which would add a horizontal scrollbar as
-        // soon as a slot below renders something wider than this narrow rail.
-        className="flex-1 overflow-y-auto overflow-x-hidden py-base"
+        className="flex-1 overflow-y-auto py-base"
       >
         {isLoading ? (
           <div className="flex h-full min-h-[220px] items-center justify-center px-base">
@@ -506,16 +493,6 @@ export function WorkspacesSidebar({
           </div>
         )}
       </div>
-
-      {/* Slot pinned just above the footer (server metrics in the local app) */}
-      {metricsSlot && (
-        <div
-          data-testid="workspaces-sidebar-metrics-slot"
-          className="shrink-0 flex flex-col min-h-0 border-t border-primary overflow-x-hidden"
-        >
-          {metricsSlot}
-        </div>
-      )}
 
       {/* Fixed footer toggle - only show if there are archived workspaces */}
       <div className="border-t border-primary p-base">

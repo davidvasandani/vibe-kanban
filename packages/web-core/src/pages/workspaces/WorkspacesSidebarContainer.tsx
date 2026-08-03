@@ -27,8 +27,6 @@ import {
   WorkspacesSidebar,
   type WorkspacesSidebarPersistKeys,
 } from '@vibe/ui/components/WorkspacesSidebar';
-import { CollapsibleSectionHeader } from '@vibe/ui/components/CollapsibleSectionHeader';
-import { ServerMetricsSectionContainer } from './ServerMetricsSectionContainer';
 import {
   MultiSelectDropdown,
   type MultiSelectDropdownOption,
@@ -280,12 +278,6 @@ export function WorkspacesSidebarContainer({
   const [isAccordionLayout, setAccordionLayout] = usePersistedExpanded(
     PERSIST_KEYS.workspacesSidebarAccordionLayout,
     true
-  );
-  // Collapsed by default: `CollapsibleSectionHeader` unmounts its children
-  // while collapsed, so a closed section holds no metrics socket open.
-  const [serverMetricsExpanded] = usePersistedExpanded(
-    PERSIST_KEYS.serverMetricsSection,
-    false
   );
   const [isSortDialogOpen, setIsSortDialogOpen] = useState(false);
   const [isFilterDialogOpen, setIsFilterDialogOpen] = useState(false);
@@ -678,22 +670,6 @@ export function WorkspacesSidebarContainer({
     </>
   );
 
-  const metricsSlot = (
-    <CollapsibleSectionHeader
-      title={t('common:sections.serverMetrics', {
-        defaultValue: 'Server Metrics',
-      })}
-      persistKey={PERSIST_KEYS.serverMetricsSection}
-      defaultExpanded={serverMetricsExpanded}
-    >
-      {/* Capped so the section can never crowd out the workspace list; the
-          body scrolls on its own once it outgrows the cap. */}
-      <div className="flex w-full min-h-0 max-h-[40vh] border-t overflow-y-auto overflow-x-hidden">
-        <ServerMetricsSectionContainer />
-      </div>
-    </CollapsibleSectionHeader>
-  );
-
   const activeRemoteHost = useMemo(() => {
     if (remoteCloudHosts.length === 0 || !routeHostId) {
       return null;
@@ -731,7 +707,6 @@ export function WorkspacesSidebarContainer({
       onLoadMore={handleLoadMore}
       hasMoreWorkspaces={hasMoreWorkspaces && !isSearching}
       searchControls={searchControls}
-      metricsSlot={metricsSlot}
       onOpenWorkspaceActions={handleOpenWorkspaceActions}
       persistKeys={sidebarPersistKeys}
       activeRemoteHost={activeRemoteHost}
