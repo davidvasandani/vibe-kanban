@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { useJsonPatchWsStream } from '@/shared/hooks/useJsonPatchWsStream';
 import { workspaceSummaryKeys } from '@/shared/hooks/workspaceSummaryKeys';
@@ -88,6 +88,115 @@ function toSidebarWorkspace(
       summary?.pr_number != null ? Number(summary.pr_number) : undefined,
     prUrl: summary?.pr_url ?? undefined,
   };
+}
+
+/**
+ * Per-id memo of the last `toSidebarWorkspace` call, so an unchanged workspace
+ * keeps the same row object across renders.
+ */
+export type RowCache = Map<
+  string,
+  {
+    ws: WorkspaceWithStatus;
+    summary: WorkspaceSummary | undefined;
+    row: SidebarWorkspace;
+  }
+>;
+
+/**
+ * Two `WorkspaceSummary` objects that carry the same values are interchangeable
+ * for rendering. Identity comparison is not enough: the summaries query rebuilds
+ * its `Map` and every object in it on each 15s poll (react-query does no
+ * structural sharing for a `Map`), so an identity check would miss on every row
+ * on every poll and defeat the row cache entirely.
+ */
+function sameSummary(
+  a: WorkspaceSummary | undefined,
+  b: WorkspaceSummary | undefined
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.files_changed === b.files_changed &&
+    a.lines_added === b.lines_added &&
+    a.lines_removed === b.lines_removed &&
+    a.has_pending_approval === b.has_pending_approval &&
+    a.has_running_dev_server === b.has_running_dev_server &&
+    a.has_unseen_turns === b.has_unseen_turns &&
+    a.latest_session_id === b.latest_session_id &&
+    a.latest_process_completed_at === b.latest_process_completed_at &&
+    a.latest_process_status === b.latest_process_status &&
+    a.pr_status === b.pr_status &&
+    a.pr_number === b.pr_number &&
+    a.pr_url === b.pr_url
+  );
+}
+
+/**
+ * Default ordering: pinned first, then newest `created_at`.
+ *
+ * This ordering is a contract, not a convenience — several consumers read it
+ * positionally rather than re-sorting: `WorkspaceSelectionDialog` paginates the
+ * list to 50 without sorting, `getNextWorkspaceId` picks an index-adjacent
+ * workspace after archiving, `CreateModeProvider` takes the head element to seed
+ * project selection, and the remote-web mobile list renders it as-is.
+ *
+ * The cost that mattered was never the sort, it was deriving the key inside the
+ * comparator (`new Date(...)` per comparison, ~2·n·log n times). Keys are
+ * precomputed once per row here instead.
+ */
+function sortSidebarRows(rows: SidebarWorkspace[]): SidebarWorkspace[] {
+  return rows
+    .map((row) => {
+      const ts = Date.parse(row.createdAt);
+      return {
+        row,
+        pinned: row.isPinned === true,
+        ts: Number.isNaN(ts) ? -Infinity : ts,
+      };
+    })
+    .sort((a, b) => {
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      return b.ts - a.ts;
+    })
+    .map(({ row }) => row);
+}
+
+/** Exported for tests; not part of the hook's public surface. */
+export function toSidebarWorkspaces(
+  byId: Record<string, WorkspaceWithStatus> | undefined,
+  summaries: Map<string, WorkspaceSummary>,
+  cache: RowCache
+): SidebarWorkspace[] {
+  if (!byId) {
+    cache.clear();
+    return [];
+  }
+
+  const entries = Object.values(byId);
+  const rows = entries.map((ws) => {
+    const summary = summaries.get(ws.id);
+    const cached = cache.get(ws.id);
+    if (cached && cached.ws === ws && sameSummary(cached.summary, summary)) {
+      return cached.row;
+    }
+    const row = toSidebarWorkspace(ws, summary);
+    cache.set(ws.id, { ws, summary, row });
+    return row;
+  });
+
+  // Prune ids that are no longer in the stream, so the cache cannot grow without
+  // bound as workspaces are created and archived.
+  if (cache.size > entries.length) {
+    const live = new Set(entries.map((ws) => ws.id));
+    for (const id of cache.keys()) {
+      if (!live.has(id)) {
+        cache.delete(id);
+      }
+    }
+  }
+
+  return sortSidebarRows(rows);
 }
 
 export const workspaceKeys = {
@@ -192,37 +301,33 @@ export function useWorkspaces(): UseWorkspacesResult {
       placeholderData: keepPreviousData,
     });
 
-  const workspaces = useMemo(() => {
-    if (!activeData?.workspaces) return [];
-    return Object.values(activeData.workspaces)
-      .sort((a, b) => {
-        // First sort by pinned (pinned first)
-        if (a.pinned !== b.pinned) {
-          return a.pinned ? -1 : 1;
-        }
-        // Then by created_at (newest first)
-        return (
-          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-        );
-      })
-      .map((ws) => toSidebarWorkspace(ws, activeSummaries.get(ws.id)));
-  }, [activeData, activeSummaries]);
+  // Row objects are reused when their inputs are reference-identical, so a
+  // WebSocket patch or a summaries refetch only replaces the rows that actually
+  // changed. Without this every row got a fresh object on every patch and every
+  // 15s poll, which invalidated every downstream filter/sort memo and defeated
+  // `React.memo` on the row component.
+  const activeRowCache = useRef<RowCache>(new Map());
+  const archivedRowCache = useRef<RowCache>(new Map());
 
-  const archivedWorkspaces = useMemo(() => {
-    if (!archivedData?.workspaces) return [];
-    return Object.values(archivedData.workspaces)
-      .sort((a, b) => {
-        // First sort by pinned (pinned first)
-        if (a.pinned !== b.pinned) {
-          return a.pinned ? -1 : 1;
-        }
-        // Then by created_at (newest first)
-        return (
-          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-        );
-      })
-      .map((ws) => toSidebarWorkspace(ws, archivedSummaries.get(ws.id)));
-  }, [archivedData, archivedSummaries]);
+  const workspaces = useMemo(
+    () =>
+      toSidebarWorkspaces(
+        activeData?.workspaces,
+        activeSummaries,
+        activeRowCache.current
+      ),
+    [activeData, activeSummaries]
+  );
+
+  const archivedWorkspaces = useMemo(
+    () =>
+      toSidebarWorkspaces(
+        archivedData?.workspaces,
+        archivedSummaries,
+        archivedRowCache.current
+      ),
+    [archivedData, archivedSummaries]
+  );
 
   // isLoading is true when we haven't received initial data from either stream
   const isLoading = !activeIsInitialized || !archivedIsInitialized;

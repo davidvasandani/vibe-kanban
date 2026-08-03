@@ -14,7 +14,7 @@ mod cli;
 mod validation;
 
 use cli::{ChangeType, StatusDiffEntry, StatusDiffOptions};
-pub use cli::{GitCli, GitCliError, StatusEntry, WorktreeStatus};
+pub use cli::{DiffNumstat, GitCli, GitCliError, StatusEntry, WorktreeStatus, parse_numstat_z};
 pub use utils::path::ALWAYS_SKIP_DIRS;
 pub use validation::is_valid_branch_prefix;
 
@@ -350,6 +350,25 @@ impl GitService {
             .into_iter()
             .map(|e| Self::status_entry_to_diff(&repo, &base_tree, e))
             .collect())
+    }
+
+    /// Aggregate file/line counts vs a base commit.
+    ///
+    /// Much cheaper than `get_diffs` for callers that only want the three
+    /// numbers: `git diff --numstat` produces them directly, so this opens no
+    /// repository, inflates no blob, reads no working-tree file and runs no
+    /// Myers diff. Staging semantics (including untracked files) are identical
+    /// to `get_diffs` because both go through the same temp index.
+    pub fn get_diff_stats(
+        &self,
+        worktree_path: &Path,
+        base_commit: &Commit,
+    ) -> Result<DiffNumstat, GitServiceError> {
+        GitCli::new()
+            .diff_numstat(worktree_path, base_commit)
+            .map_err(|e| {
+                GitServiceError::InvalidRepository(format!("git diff --numstat failed: {e}"))
+            })
     }
 
     /// Returns file paths that differ from base commit, without loading content.

@@ -77,6 +77,62 @@ pub struct StatusDiffOptions {
     pub path_filter: Option<Vec<String>>, // pathspecs to limit diff
 }
 
+/// Aggregate line/file counts from `git diff --numstat`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiffNumstat {
+    pub files_changed: usize,
+    pub lines_added: usize,
+    pub lines_removed: usize,
+}
+
+/// Parse `git diff --numstat -z` output.
+///
+/// With `-z`, git writes `<added>\t<removed>\t` followed by NUL-terminated
+/// path fields (see `show_numstat` in git's `diff.c`). A rename or copy emits an
+/// *empty* field right after the second tab and then two more fields (old name,
+/// new name), so a parser that assumes one field per record miscounts renames.
+/// Binary files report `-` for both counts.
+pub fn parse_numstat_z(output: &[u8]) -> DiffNumstat {
+    fn parse_count(raw: &[u8]) -> Option<usize> {
+        if raw == b"-" {
+            // Binary file: git reports no line counts.
+            return Some(0);
+        }
+        std::str::from_utf8(raw).ok()?.parse().ok()
+    }
+
+    let mut stats = DiffNumstat::default();
+    let mut fields = output.split(|b| *b == 0);
+
+    while let Some(field) = fields.next() {
+        if field.is_empty() {
+            continue;
+        }
+
+        let mut parts = field.splitn(3, |b| *b == b'\t');
+        let (Some(added), Some(removed), Some(rest)) = (parts.next(), parts.next(), parts.next())
+        else {
+            // Not a `<added>\t<removed>\t…` record; skip rather than miscount.
+            continue;
+        };
+        let (Some(added), Some(removed)) = (parse_count(added), parse_count(removed)) else {
+            continue;
+        };
+
+        if rest.is_empty() {
+            // Rename/copy: consume the old and new name fields.
+            let _ = fields.next();
+            let _ = fields.next();
+        }
+
+        stats.files_changed += 1;
+        stats.lines_added += added;
+        stats.lines_removed += removed;
+    }
+
+    stats
+}
+
 impl GitCli {
     pub fn new() -> Self {
         Self {}
@@ -273,14 +329,16 @@ impl GitCli {
         Ok(!out.is_empty())
     }
 
-    /// Diff status vs a base branch using a temporary index (always includes untracked).
-    /// Path filter limits the reported paths.
-    pub fn diff_status(
+    /// Build a throwaway index seeded from `HEAD` and stage every changed and
+    /// untracked path into it, so a subsequent `git diff --cached <base>` sees
+    /// working-tree state (including untracked files) as if it were committed.
+    ///
+    /// Returns the `TempDir` alongside the env overrides; the caller must keep it
+    /// alive for as long as the index is needed — dropping it deletes the index.
+    fn stage_worktree_into_temp_index(
         &self,
         worktree_path: &Path,
-        base_commit: &Commit,
-        opts: StatusDiffOptions,
-    ) -> Result<Vec<StatusDiffEntry>, GitCliError> {
+    ) -> Result<(tempfile::TempDir, Vec<(OsString, OsString)>), GitCliError> {
         // Create a temp index file
         let tmp_dir = tempfile::TempDir::new()
             .map_err(|e| GitCliError::CommandFailed(format!("temp dir create failed: {e}")))?;
@@ -322,6 +380,49 @@ impl GitCli {
             ];
             self.git_with_stdin(worktree_path, args, Some(&envs), &input)?;
         }
+
+        Ok((tmp_dir, envs))
+    }
+
+    /// Aggregate line/file counts vs a base commit, without materialising any
+    /// diff content. Same staging semantics as [`Self::diff_status`] — the temp
+    /// index is what makes untracked and unstaged changes count — but it stops at
+    /// `--numstat`, so no blob is inflated and no working-tree file is read.
+    pub fn diff_numstat(
+        &self,
+        worktree_path: &Path,
+        base_commit: &Commit,
+    ) -> Result<DiffNumstat, GitCliError> {
+        let (_tmp_dir, envs) = self.stage_worktree_into_temp_index(worktree_path)?;
+
+        // Same pathspec excludes `diff_status` applies, so the two paths cannot
+        // disagree about which files count.
+        let args = Self::apply_default_excludes(vec![
+            OsString::from("-c"),
+            OsString::from("core.quotepath=false"),
+            OsString::from("diff"),
+            OsString::from("--cached"),
+            OsString::from("-M"),
+            OsString::from("--numstat"),
+            OsString::from("-z"),
+            OsString::from(base_commit.to_string()),
+        ]);
+        // Read raw bytes: `-z` output can carry non-UTF-8 paths, and the lossy
+        // `String` helpers would corrupt the NUL-delimited framing.
+        let out = self.git_impl(worktree_path, args, Some(&envs), None)?;
+        Ok(parse_numstat_z(&out))
+    }
+
+    /// Diff status vs a base branch using a temporary index (always includes untracked).
+    /// Path filter limits the reported paths.
+    pub fn diff_status(
+        &self,
+        worktree_path: &Path,
+        base_commit: &Commit,
+        opts: StatusDiffOptions,
+    ) -> Result<Vec<StatusDiffEntry>, GitCliError> {
+        let (_tmp_dir, envs) = self.stage_worktree_into_temp_index(worktree_path)?;
+
         // git diff --cached
         let mut args: Vec<OsString> = vec![
             "-c".into(),
@@ -1038,6 +1139,117 @@ impl GitCli {
             .iter()
             .map(|d| OsString::from(format!(":(glob,exclude)**/{d}/")))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod numstat_tests {
+    use super::{DiffNumstat, parse_numstat_z};
+
+    fn stats(files: usize, added: usize, removed: usize) -> DiffNumstat {
+        DiffNumstat {
+            files_changed: files,
+            lines_added: added,
+            lines_removed: removed,
+        }
+    }
+
+    #[test]
+    fn parses_a_single_modified_file() {
+        assert_eq!(parse_numstat_z(b"3\t1\tsrc/main.rs\0"), stats(1, 3, 1));
+    }
+
+    #[test]
+    fn parses_multiple_records() {
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(b"3\t1\tsrc/main.rs");
+        input.push(0);
+        input.extend_from_slice(b"10\t0\tsrc/new.rs");
+        input.push(0);
+        assert_eq!(parse_numstat_z(&input), stats(2, 13, 1));
+    }
+
+    #[test]
+    fn added_and_deleted_files_are_ordinary_records() {
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(b"42\t0\tadded.txt");
+        input.push(0);
+        input.extend_from_slice(b"0\t17\tdeleted.txt");
+        input.push(0);
+        assert_eq!(parse_numstat_z(&input), stats(2, 42, 17));
+    }
+
+    /// With `-z`, a rename emits an empty field after the counts and then the old
+    /// and new names as two further fields. A parser that assumes one field per
+    /// record would count the two name fields as extra changed files.
+    #[test]
+    fn a_rename_counts_as_one_file_and_consumes_both_name_fields() {
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(b"2\t1\t");
+        input.push(0);
+        input.extend_from_slice(b"old/name.rs");
+        input.push(0);
+        input.extend_from_slice(b"new/name.rs");
+        input.push(0);
+        assert_eq!(parse_numstat_z(&input), stats(1, 2, 1));
+    }
+
+    #[test]
+    fn a_rename_followed_by_a_normal_record_stays_aligned() {
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(b"2\t1\t");
+        input.push(0);
+        input.extend_from_slice(b"old.rs");
+        input.push(0);
+        input.extend_from_slice(b"new.rs");
+        input.push(0);
+        input.extend_from_slice(b"5\t5\tother.rs");
+        input.push(0);
+        assert_eq!(parse_numstat_z(&input), stats(2, 7, 6));
+    }
+
+    #[test]
+    fn binary_files_count_as_changed_with_no_lines() {
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(b"-\t-\tassets/logo.png");
+        input.push(0);
+        input.extend_from_slice(b"4\t2\tsrc/main.rs");
+        input.push(0);
+        assert_eq!(parse_numstat_z(&input), stats(2, 4, 2));
+    }
+
+    #[test]
+    fn handles_paths_with_spaces_and_tabs_in_the_name() {
+        // `splitn(3, '\t')` means a tab inside the path stays part of the path
+        // rather than being mistaken for a field separator.
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(b"1\t2\tdir/with space/and\ttab.txt");
+        input.push(0);
+        assert_eq!(parse_numstat_z(&input), stats(1, 1, 2));
+    }
+
+    #[test]
+    fn handles_non_utf8_paths() {
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(b"1\t0\t");
+        input.extend_from_slice(&[0xff, 0xfe, 0x80]);
+        input.push(0);
+        assert_eq!(parse_numstat_z(&input), stats(1, 1, 0));
+    }
+
+    #[test]
+    fn empty_and_malformed_input_yields_no_stats() {
+        assert_eq!(parse_numstat_z(b""), stats(0, 0, 0));
+        assert_eq!(parse_numstat_z(b"\0\0\0"), stats(0, 0, 0));
+        // No tabs at all: not a numstat record.
+        assert_eq!(parse_numstat_z(b"garbage\0"), stats(0, 0, 0));
+        // Non-numeric counts are skipped rather than counted as zero-line changes.
+        assert_eq!(parse_numstat_z(b"x\ty\tfile.txt\0"), stats(0, 0, 0));
+    }
+
+    #[test]
+    fn tolerates_a_missing_trailing_nul() {
+        assert_eq!(parse_numstat_z(b"1\t1\tfile.txt"), stats(1, 1, 1));
     }
 }
 /// Parsed entry from `git status --porcelain`

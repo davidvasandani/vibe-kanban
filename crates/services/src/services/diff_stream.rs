@@ -11,7 +11,10 @@ use std::{
 
 use db::{
     DBService,
-    models::{workspace::Workspace, workspace_repo::WorkspaceRepo},
+    models::{
+        workspace::Workspace,
+        workspace_repo::{RepoWithTargetBranch, WorkspaceRepo},
+    },
 };
 use executors::logs::utils::ConversationPatch;
 use futures::StreamExt;
@@ -39,7 +42,62 @@ pub struct DiffStats {
     pub lines_removed: usize,
 }
 
+impl DiffStats {
+    fn add(&mut self, other: &DiffStats) {
+        self.files_changed += other.files_changed;
+        self.lines_added += other.lines_added;
+        self.lines_removed += other.lines_removed;
+    }
+}
+
+/// Diff stats for a single repo of a workspace.
+///
+/// `None` means the stats could not be computed — worktree missing, base branch
+/// unresolvable, git error — which is *not* the same as "no changes". Uses
+/// `get_diff_stats` (`git diff --numstat`) rather than `get_diffs`, so no blob is
+/// inflated, no working-tree file is read and no Myers diff runs; only the three
+/// numbers are produced.
+async fn repo_diff_stats(
+    git: &GitService,
+    container_ref: &str,
+    workspace_branch: &str,
+    repo_with_branch: &RepoWithTargetBranch,
+) -> Option<DiffStats> {
+    let worktree_path = PathBuf::from(container_ref).join(&repo_with_branch.repo.name);
+
+    let base_commit = tokio::task::spawn_blocking({
+        let git = git.clone();
+        let repo_path = repo_with_branch.repo.path.clone();
+        let workspace_branch = workspace_branch.to_string();
+        let target_branch = repo_with_branch.target_branch.clone();
+        move || git.get_base_commit(&repo_path, &workspace_branch, &target_branch)
+    })
+    .await
+    .ok()?
+    .ok()?;
+
+    let numstat = tokio::task::spawn_blocking({
+        let git = git.clone();
+        move || git.get_diff_stats(&worktree_path, &base_commit)
+    })
+    .await
+    .ok()?
+    .ok()?;
+
+    Some(DiffStats {
+        files_changed: numstat.files_changed,
+        lines_added: numstat.lines_added,
+        lines_removed: numstat.lines_removed,
+    })
+}
+
 /// Computes diff stats for a workspace by comparing against target branches.
+///
+/// Lenient: a repo whose stats cannot be computed is skipped, so the result may
+/// be a partial sum. This preserves the long-standing contract of this function.
+/// Callers that cache the result must use [`compute_diff_stats_strict`] instead —
+/// a git probe that errors is not a clean worktree, and persisting a failure as
+/// `0/0/0` reports a confident wrong answer.
 pub async fn compute_diff_stats(
     pool: &SqlitePool,
     git: &GitService,
@@ -53,42 +111,55 @@ pub async fn compute_diff_stats(
             .ok()?;
 
     let mut stats = DiffStats::default();
-
-    for repo_with_branch in workspace_repos {
-        let worktree_path = PathBuf::from(container_ref).join(&repo_with_branch.repo.name);
-        let repo_path = repo_with_branch.repo.path.clone();
-
-        let base_commit_result = tokio::task::spawn_blocking({
-            let git = git.clone();
-            let repo_path = repo_path.clone();
-            let workspace_branch = workspace.branch.clone();
-            let target_branch = repo_with_branch.target_branch.clone();
-            move || git.get_base_commit(&repo_path, &workspace_branch, &target_branch)
-        })
-        .await;
-
-        let base_commit = match base_commit_result {
-            Ok(Ok(commit)) => commit,
-            _ => continue,
-        };
-
-        let diffs_result = tokio::task::spawn_blocking({
-            let git = git.clone();
-            let worktree = worktree_path.clone();
-            move || git.get_diffs(&worktree, &base_commit, None)
-        })
-        .await;
-
-        if let Ok(Ok(diffs)) = diffs_result {
-            for diff in diffs {
-                stats.files_changed += 1;
-                stats.lines_added += diff.additions.unwrap_or(0);
-                stats.lines_removed += diff.deletions.unwrap_or(0);
-            }
+    for repo_with_branch in &workspace_repos {
+        if let Some(repo_stats) =
+            repo_diff_stats(git, container_ref, &workspace.branch, repo_with_branch).await
+        {
+            stats.add(&repo_stats);
         }
     }
 
     Some(stats)
+}
+
+/// Like [`compute_diff_stats`], but returns `None` when the result would be a
+/// fabricated zero rather than a measurement, so a caller that caches the value
+/// can leave the field absent instead of reporting a confident "0 files changed".
+///
+/// `None` is returned when the workspace has no repo rows at all (nothing was
+/// measured, which is not the same as "measured, found nothing") and when every
+/// repo's probe failed. A *partial* failure still returns the sum of the repos
+/// that did succeed — matching [`compute_diff_stats`] — because losing the badge
+/// entirely for a multi-repo workspace with one unresolvable base branch is worse
+/// than showing a slightly low number.
+pub async fn compute_diff_stats_strict(
+    pool: &SqlitePool,
+    git: &GitService,
+    workspace: &Workspace,
+) -> Option<DiffStats> {
+    let container_ref = workspace.container_ref.as_ref()?;
+
+    let workspace_repos =
+        WorkspaceRepo::find_repos_with_target_branch_for_workspace(pool, workspace.id)
+            .await
+            .ok()?;
+
+    if workspace_repos.is_empty() {
+        return None;
+    }
+
+    let mut stats = DiffStats::default();
+    let mut any_succeeded = false;
+    for repo_with_branch in &workspace_repos {
+        if let Some(repo_stats) =
+            repo_diff_stats(git, container_ref, &workspace.branch, repo_with_branch).await
+        {
+            stats.add(&repo_stats);
+            any_succeeded = true;
+        }
+    }
+
+    any_succeeded.then_some(stats)
 }
 
 /// Maximum cumulative diff bytes to stream before omitting content (200MB)

@@ -112,27 +112,34 @@ pub async fn get_workspace_summaries(
     // 6. Get PR status for each workspace
     let pr_statuses = PullRequest::get_latest_for_workspaces(pool, archived).await?;
 
-    // 7. Compute diff stats for each workspace (in parallel)
-    let diff_futures: Vec<_> = workspaces
-        .iter()
-        .map(|ws| {
-            let workspace = ws.clone();
-            let deployment = deployment.clone();
-            async move {
-                if workspace.container_ref.is_some() {
-                    compute_workspace_diff_stats(&deployment, &workspace)
-                        .await
-                        .map(|stats| (workspace.id, stats))
-                } else {
-                    None
-                }
-            }
+    // 7. Read cached diff stats and schedule a background refresh of stale ones.
+    //
+    // This request must never wait on git. Computing these three numbers walks
+    // every workspace's worktree with `git`, which on a shared NFS mount cost
+    // ~5.7s for 132 workspaces — repeated by the client's 15s poll forever,
+    // whether or not anything changed. So we serve what the last refresh produced
+    // and schedule the next one. Workspaces with no entry yet report `None`,
+    // which every consumer already renders identically to `0`.
+    let diff_cache = deployment.workspace_diff_stats();
+    let workspace_ids: Vec<Uuid> = workspaces.iter().map(|ws| ws.id).collect();
+    let diff_stats: HashMap<Uuid, DiffStats> = diff_cache
+        .snapshot(&workspace_ids)
+        .await
+        .into_iter()
+        .map(|(id, stats)| {
+            (
+                id,
+                DiffStats {
+                    files_changed: stats.files_changed,
+                    lines_added: stats.lines_added,
+                    lines_removed: stats.lines_removed,
+                },
+            )
         })
         .collect();
-
-    let diff_results: Vec<Option<(Uuid, DiffStats)>> =
-        futures_util::future::join_all(diff_futures).await;
-    let diff_stats: HashMap<Uuid, DiffStats> = diff_results.into_iter().flatten().collect();
+    diff_cache
+        .refresh_stale(pool, deployment.git(), &workspaces)
+        .await;
 
     // 8. Assemble response
     let summaries: Vec<WorkspaceSummary> = workspaces
@@ -166,23 +173,4 @@ pub async fn get_workspace_summaries(
     Ok(ResponseJson(ApiResponse::success(
         WorkspaceSummaryResponse { summaries },
     )))
-}
-
-/// Compute diff stats for a workspace.
-pub async fn compute_workspace_diff_stats(
-    deployment: &DeploymentImpl,
-    workspace: &Workspace,
-) -> Option<DiffStats> {
-    let stats = services::services::diff_stream::compute_diff_stats(
-        &deployment.db().pool,
-        deployment.git(),
-        workspace,
-    )
-    .await?;
-
-    Some(DiffStats {
-        files_changed: stats.files_changed,
-        lines_added: stats.lines_added,
-        lines_removed: stats.lines_removed,
-    })
 }

@@ -29,6 +29,7 @@ use services::services::{
     queued_message::QueuedMessageService,
     remote_client::RemoteClient,
     repo::RepoService,
+    workspace_diff_stats::WorkspaceDiffStatsCache,
 };
 use sqlx::Error as SqlxError;
 use thiserror::Error;
@@ -103,6 +104,11 @@ pub trait Deployment: Clone + Send + Sync + 'static {
     fn events(&self) -> &EventService;
 
     fn file_search_cache(&self) -> &Arc<FileSearchCache>;
+
+    /// Cached per-workspace diff stats for the workspaces sidebar. Reads are
+    /// in-memory; refreshes happen in the background. Nothing reachable through
+    /// this handle blocks a request on git or filesystem work.
+    fn workspace_diff_stats(&self) -> &Arc<WorkspaceDiffStatsCache>;
 
     fn approvals(&self) -> &Approvals;
 

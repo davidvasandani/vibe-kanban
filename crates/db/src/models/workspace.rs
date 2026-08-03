@@ -824,7 +824,11 @@ impl Workspace {
                 ) IN ('failed','killed') THEN 1 ELSE 0 END AS "is_errored!: i64"
 
             FROM workspaces w
-            ORDER BY w.updated_at DESC"#
+            WHERE ($1 IS NULL OR w.archived = $1)
+            ORDER BY w.updated_at DESC
+            LIMIT COALESCE($2, -1)"#,
+            archived,
+            limit
         )
         .fetch_all(pool)
         .await?;
@@ -851,14 +855,7 @@ impl Workspace {
                 is_running: rec.is_running != 0,
                 is_errored: rec.is_errored != 0,
             })
-            // Apply archived filter if provided
-            .filter(|ws| archived.is_none_or(|a| ws.workspace.archived == a))
             .collect();
-
-        // Apply limit if provided (already sorted by updated_at DESC from query)
-        if let Some(lim) = limit {
-            workspaces.truncate(lim as usize);
-        }
 
         for ws in &mut workspaces {
             if ws.workspace.name.is_none()
@@ -983,6 +980,106 @@ mod tests {
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         pool
+    }
+
+    /// `find_all_with_status` used to select every row and then filter `archived`
+    /// and truncate to `limit` in Rust. Both are now pushed into SQL, where the
+    /// `archived` bind is referenced twice (`$1 IS NULL OR w.archived = $1`) and
+    /// the limit goes through `LIMIT COALESCE($2, -1)`. Neither is obviously
+    /// correct by inspection, so pin all three filter cases and the limit here.
+    #[tokio::test]
+    async fn find_all_with_status_filters_and_limits_in_sql() {
+        let pool = test_pool().await;
+
+        let mut active_ids = Vec::new();
+        for i in 0..3 {
+            let ws = Workspace::create(
+                &pool,
+                &CreateWorkspace {
+                    branch: format!("vk/active-{i}"),
+                    name: Some(format!("active-{i}")),
+                },
+                Uuid::new_v4(),
+            )
+            .await
+            .unwrap();
+            active_ids.push(ws.id);
+        }
+
+        let mut archived_ids = Vec::new();
+        for i in 0..2 {
+            let ws = Workspace::create(
+                &pool,
+                &CreateWorkspace {
+                    branch: format!("vk/archived-{i}"),
+                    name: Some(format!("archived-{i}")),
+                },
+                Uuid::new_v4(),
+            )
+            .await
+            .unwrap();
+            Workspace::set_archived(&pool, ws.id, true).await.unwrap();
+            archived_ids.push(ws.id);
+        }
+
+        let ids = |rows: Vec<super::WorkspaceWithStatus>| -> Vec<Uuid> {
+            rows.into_iter().map(|r| r.workspace.id).collect()
+        };
+
+        // archived = false -> only the active ones.
+        let actives = ids(Workspace::find_all_with_status(&pool, Some(false), None)
+            .await
+            .unwrap());
+        assert_eq!(actives.len(), 3);
+        for id in &active_ids {
+            assert!(actives.contains(id), "missing active {id}");
+        }
+        for id in &archived_ids {
+            assert!(!actives.contains(id), "archived {id} leaked into actives");
+        }
+
+        // archived = true -> only the archived ones.
+        let archiveds = ids(Workspace::find_all_with_status(&pool, Some(true), None)
+            .await
+            .unwrap());
+        assert_eq!(archiveds.len(), 2);
+        for id in &archived_ids {
+            assert!(archiveds.contains(id), "missing archived {id}");
+        }
+
+        // None -> no filter at all, i.e. the `$1 IS NULL` branch.
+        let all = ids(Workspace::find_all_with_status(&pool, None, None)
+            .await
+            .unwrap());
+        assert_eq!(all.len(), 5);
+
+        // Ordering is `updated_at DESC`, and the limit must respect it rather
+        // than returning an arbitrary subset.
+        let ordered = ids(Workspace::find_all_with_status(&pool, None, None)
+            .await
+            .unwrap());
+        let limited = ids(Workspace::find_all_with_status(&pool, None, Some(2))
+            .await
+            .unwrap());
+        assert_eq!(limited, ordered[..2].to_vec());
+
+        // A limit larger than the row count is not an error.
+        assert_eq!(
+            ids(Workspace::find_all_with_status(&pool, None, Some(99))
+                .await
+                .unwrap())
+            .len(),
+            5
+        );
+
+        // A limit combined with a filter applies to the filtered set.
+        assert_eq!(
+            ids(Workspace::find_all_with_status(&pool, Some(false), Some(1))
+                .await
+                .unwrap())
+            .len(),
+            1
+        );
     }
 
     #[tokio::test]

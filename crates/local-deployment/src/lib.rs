@@ -32,6 +32,7 @@ use services::services::{
     queued_message::QueuedMessageService,
     remote_client::{RemoteClient, RemoteClientError},
     repo::RepoService,
+    workspace_diff_stats::WorkspaceDiffStatsCache,
 };
 use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -64,6 +65,7 @@ pub struct LocalDeployment {
     filesystem: FilesystemService,
     events: EventService,
     file_search_cache: Arc<FileSearchCache>,
+    workspace_diff_stats: Arc<WorkspaceDiffStatsCache>,
     approvals: Approvals,
     queued_message_service: QueuedMessageService,
     remote_client: Result<RemoteClient, RemoteClientNotConfigured>,
@@ -332,6 +334,12 @@ impl Deployment for LocalDeployment {
 
         let file_search_cache = Arc::new(FileSearchCache::new());
 
+        // Diff stats are invalidated off the same SQLite-hook patch stream the
+        // browser cleanup watcher uses. The stream is lossy, so `REFRESH_AFTER`
+        // in the cache is the correctness backstop, not this watcher.
+        let workspace_diff_stats = Arc::new(WorkspaceDiffStatsCache::new());
+        workspace_diff_stats.spawn_invalidation_watcher(events.msg_store().clone());
+
         let pty = PtyService::new();
         let relay_hosts = match remote_client.clone().ok() {
             Some(remote_client) => Some(Arc::new(
@@ -370,6 +378,7 @@ impl Deployment for LocalDeployment {
             filesystem,
             events,
             file_search_cache,
+            workspace_diff_stats,
             approvals,
             queued_message_service,
             remote_client,
@@ -440,6 +449,10 @@ impl Deployment for LocalDeployment {
 
     fn file_search_cache(&self) -> &Arc<FileSearchCache> {
         &self.file_search_cache
+    }
+
+    fn workspace_diff_stats(&self) -> &Arc<WorkspaceDiffStatsCache> {
+        &self.workspace_diff_stats
     }
 
     fn approvals(&self) -> &Approvals {

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { useCallback, useMemo, useRef } from 'react';
+import { memo, useCallback, useMemo, useRef } from 'react';
 import {
   PlusIcon,
   ArrowLeftIcon,
@@ -41,6 +41,61 @@ export interface WorkspacesSidebarWorkspace {
     | 'indeterminate';
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
 }
+
+interface SidebarWorkspaceRowProps {
+  workspace: WorkspacesSidebarWorkspace;
+  isActive: boolean;
+  onSelectWorkspace: (id: string) => void;
+  onOpenWorkspaceActions?: (workspaceId: string) => void;
+  /** Compact presentation, used by the archive list. */
+  summary?: boolean;
+}
+
+/**
+ * Memoised row. The sidebar renders up to a page of these, and the workspace
+ * list re-renders on every WebSocket patch and every summaries poll, so an
+ * unmemoised row meant re-rendering every visible workspace whenever any one of
+ * them changed.
+ *
+ * Two things make the memo actually bite, and both must hold: `workspace` is a
+ * reference-stable object (`useWorkspaces` reuses row objects whose inputs are
+ * unchanged), and the click handler takes the id rather than being a fresh
+ * per-row closure.
+ */
+const SidebarWorkspaceRow = memo(function SidebarWorkspaceRow({
+  workspace,
+  isActive,
+  onSelectWorkspace,
+  onOpenWorkspaceActions,
+  summary = false,
+}: SidebarWorkspaceRowProps) {
+  const handleClick = useCallback(
+    () => onSelectWorkspace(workspace.id),
+    [onSelectWorkspace, workspace.id]
+  );
+
+  return (
+    <WorkspaceSummary
+      summary={summary}
+      name={workspace.name}
+      workspaceId={workspace.id}
+      filesChanged={workspace.filesChanged}
+      linesAdded={workspace.linesAdded}
+      linesRemoved={workspace.linesRemoved}
+      isActive={isActive}
+      isRunning={workspace.isRunning}
+      isPinned={workspace.isPinned}
+      hasPendingApproval={workspace.hasPendingApproval}
+      hasRunningDevServer={workspace.hasRunningDevServer}
+      hasUnseenActivity={workspace.hasUnseenActivity}
+      latestProcessCompletedAt={workspace.latestProcessCompletedAt}
+      latestProcessStatus={workspace.latestProcessStatus}
+      prStatus={workspace.prStatus}
+      onOpenWorkspaceActions={onOpenWorkspaceActions}
+      onClick={handleClick}
+    />
+  );
+});
 
 export interface WorkspacesSidebarPersistKeys {
   raisedHand: string;
@@ -151,24 +206,12 @@ function WorkspaceList({
   return (
     <>
       {workspaces.map((workspace) => (
-        <WorkspaceSummary
+        <SidebarWorkspaceRow
           key={workspace.id}
-          name={workspace.name}
-          workspaceId={workspace.id}
-          filesChanged={workspace.filesChanged}
-          linesAdded={workspace.linesAdded}
-          linesRemoved={workspace.linesRemoved}
+          workspace={workspace}
           isActive={selectedWorkspaceId === workspace.id}
-          isRunning={workspace.isRunning}
-          isPinned={workspace.isPinned}
-          hasPendingApproval={workspace.hasPendingApproval}
-          hasRunningDevServer={workspace.hasRunningDevServer}
-          hasUnseenActivity={workspace.hasUnseenActivity}
-          latestProcessCompletedAt={workspace.latestProcessCompletedAt}
-          latestProcessStatus={workspace.latestProcessStatus}
-          prStatus={workspace.prStatus}
+          onSelectWorkspace={onSelectWorkspace}
           onOpenWorkspaceActions={onOpenWorkspaceActions}
-          onClick={() => onSelectWorkspace(workspace.id)}
         />
       ))}
     </>
@@ -352,25 +395,13 @@ export function WorkspacesSidebar({
               </span>
             ) : (
               archivedWorkspaces.map((workspace) => (
-                <WorkspaceSummary
+                <SidebarWorkspaceRow
                   summary
                   key={workspace.id}
-                  name={workspace.name}
-                  workspaceId={workspace.id}
-                  filesChanged={workspace.filesChanged}
-                  linesAdded={workspace.linesAdded}
-                  linesRemoved={workspace.linesRemoved}
+                  workspace={workspace}
                   isActive={selectedWorkspaceId === workspace.id}
-                  isRunning={workspace.isRunning}
-                  isPinned={workspace.isPinned}
-                  hasPendingApproval={workspace.hasPendingApproval}
-                  hasRunningDevServer={workspace.hasRunningDevServer}
-                  hasUnseenActivity={workspace.hasUnseenActivity}
-                  latestProcessCompletedAt={workspace.latestProcessCompletedAt}
-                  latestProcessStatus={workspace.latestProcessStatus}
-                  prStatus={workspace.prStatus}
+                  onSelectWorkspace={onSelectWorkspace}
                   onOpenWorkspaceActions={handleOpenWorkspaceActions}
-                  onClick={() => onSelectWorkspace(workspace.id)}
                 />
               ))
             )}
@@ -470,24 +501,12 @@ export function WorkspacesSidebar({
               />
             )}
             {workspaces.map((workspace) => (
-              <WorkspaceSummary
+              <SidebarWorkspaceRow
                 key={workspace.id}
-                name={workspace.name}
-                workspaceId={workspace.id}
-                filesChanged={workspace.filesChanged}
-                linesAdded={workspace.linesAdded}
-                linesRemoved={workspace.linesRemoved}
+                workspace={workspace}
                 isActive={selectedWorkspaceId === workspace.id}
-                isRunning={workspace.isRunning}
-                isPinned={workspace.isPinned}
-                hasPendingApproval={workspace.hasPendingApproval}
-                hasRunningDevServer={workspace.hasRunningDevServer}
-                hasUnseenActivity={workspace.hasUnseenActivity}
-                latestProcessCompletedAt={workspace.latestProcessCompletedAt}
-                latestProcessStatus={workspace.latestProcessStatus}
-                prStatus={workspace.prStatus}
+                onSelectWorkspace={onSelectWorkspace}
                 onOpenWorkspaceActions={handleOpenWorkspaceActions}
-                onClick={() => onSelectWorkspace(workspace.id)}
               />
             ))}
           </div>

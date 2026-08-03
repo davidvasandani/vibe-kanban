@@ -1,224 +1,237 @@
-# Prior knowledge — `b72a-internal-error-o`
+# Prior Knowledge: Workspace List Load/Sort Cost (`d49f-loading-workspac`)
 
-Task: clustered workspace creation returns "An internal error occurred. Please
-try again." Distilled from the knowledge bases this workspace can reach:
+The project knowledge base is populated. This repository carries **two**
+knowledge bases and both were searched:
 
-- `vibe-kanban/wiki/` (19 pages + `INDEX.md`)
-- `vibe-kanban/docs/knowledge-base/` (22 pages + `INDEX.md`)
-- `homelab/knowledge-base/` (12 pages + `index.md`)
+- `docs/knowledge-base/` (21 pages, `INDEX.md`) — the current one; task ids
+  match `specs/vk/*`.
+- `wiki/` (19 pages, `INDEX.md`) — an earlier generation, still authoritative
+  for frontend and lifecycle topics.
 
-Constraints marked **[H]** are hazards that change the design rather than
-merely constrain it.
+## Most relevant pages
 
-## The page that identifies the bug
+| Page | Why |
+| --- | --- |
+| `wiki/workspace-carousel-view.md` | Directly documents the 15 s summaries repoll + identity-churn problem this task fixes, and names the other consumer of the diff-stat fields (`diffStatsOverride`) |
+| `wiki/browser-session-control-arbiter.md` | The exact precedent for driving cache invalidation off the SQLite-hook event stream, incl. the `Weak`-handle rule and "broadcast lag can drop events → TTL is the backstop" |
+| `docs/knowledge-base/clustered-workspace-execution.md` | Which node may touch a worktree; NFS-loss = indeterminate, not idle |
+| `docs/knowledge-base/workspace-directory-reclamation.md` | Absent-vs-stat-failed, "a git probe that errors is not a clean repo", and the two divergent worktree-cleanliness definitions |
+| `docs/knowledge-base/mcp-oauth-connect.md` | The repo's in-memory-cache idiom: TTL **plus** an explicit capacity cap |
+| `docs/knowledge-base/collapsing-repeated-log-entries.md` | Unbounded in-memory accumulation has already burned this repo; byte-identical output for existing consumers |
+| `docs/knowledge-base/issue-status-side-effects.md` | Level-triggered beats edge-triggered for derived state |
+| `docs/knowledge-base/worktree-formatting-prerequisites.md` | Fresh-worktree verification order and CI change-filter completeness |
+| `docs/knowledge-base/interrupted-worktree-recovery.md` | Keep the decision a small pure helper with a truth-table test; a backstop that never runs is not a backstop |
+| `docs/knowledge-base/mcp-connectivity-testing.md` | Bounded fan-out with per-probe timeouts; key invalidation on the exact id, never a composed string |
+| `docs/knowledge-base/active-mcp-refresh.md` | A stale background task must not overwrite a newer value |
+| `wiki/kanban-items-state-and-activity-grouping.md` | Which workspace signals are semantic vs display-gated |
+| `wiki/electric-sync-fallback.md` | Cached-config/stable-callback traps; "degradation is not an error" |
 
-### `wiki/create-mode-repo-branch-defaulting.md`
+## Hard constraints extracted for this task
 
-**[H] Target branch names carry the remote prefix.** Verbatim:
+### The 15 s repoll and identity churn are already documented
 
-> **Branch names carry the remote prefix.** `repoApi.getBranches` →
-> `GET /api/repos/{id}/branches` → `git::get_all_branches` returns `GitBranch`
-> whose `name` is `origin/main` for remote-tracking branches and `main` for
-> local ones (`is_remote` distinguishes them). So a default of "origin/main"
-> must match the literal string `origin/main`, not `main`.
+1. **This is a known, recorded problem.** `wiki/workspace-carousel-view.md`:
+   "Workspace summaries repoll every 15s and the WS stream patches often, so the
+   sort input changes identity frequently with *equal content*." The carousel
+   worked around it with an `arraysEqual` content comparison rather than fixing
+   the source. Stabilising row identity (spec F2) removes the *cause*; the
+   carousel's content compare stays correct either way, so the two do not
+   conflict — but do not "simplify" that workaround away as part of this task,
+   because the WS stream still patches with equal content for other reasons.
 
-**[H] The default that actually applies is `origin/main`.** The
-`resolveDefaultBranch` fallback order is
-`configured default_target_branch -> origin/main -> origin/master ->
-the is_current branch -> the first branch -> null`, and:
+2. **A debounce whose timer is re-armed in effect cleanup can starve forever**
+   (same page). Applies to the spec's F4 search debounce: let an armed timer
+   survive unrelated re-renders and read its target from a ref, rather than
+   clearing and re-arming on every dep change.
 
-> **`repo.default_target_branch` is NULL at registration.** It is only set via
-> repo settings (`ReposSettingsSection`), so for most repos the built-in
-> `origin/main` default is what actually applies.
+3. **`diffStatsOverride` is the second consumer of these fields.** The carousel
+   feeds chat-box stats from workspace summaries "instead of the diff store —
+   otherwise columns show a false '0 files changed'". Verified in source: the
+   readers are `WorkspaceCarouselColumn.tsx:158`, `KanbanContainer.tsx:683`,
+   `IssueWorkspacesSectionContainer.tsx:95`, `ProjectRightSidebarContainer.tsx:407`
+   and `packages/remote-web/.../hosts.$hostId.workspaces.tsx:109`. All of them
+   either `?? 0` or gate on `!== undefined`, and the sidebar badge itself is
+   `hasChanges = filesChanged !== undefined && filesChanged > 0`
+   (`packages/ui/src/components/WorkspaceSummary.tsx:81`). **So `None` renders
+   identically to `0`** — a cold cache is invisible, not a regression. This is
+   what makes the stale-while-revalidate design safe without an API change.
 
-Consequence for this task: any code that consumes a `target_branch` must
-resolve it local-first-then-remote. `SharedRepositoryStore::branch_commit_present`
-asks only for `refs/heads/{branch}`, so it can never satisfy the default. This
-page is the reason the failure looks intermittent — it is deterministic per
-branch selection.
+### Event-driven invalidation: copy the existing watcher, keep the backstop
 
-Also recorded there, and relevant to *not* over-fixing: there is a dormant
-second selector (`useRepoBranchSelection.ts` / `RepoBranchSelector.tsx`) with
-divergent defaults and **no importers**. Do not touch it; reconciling it is a
-separate task.
+4. **The precedent exists and should be reused verbatim in shape.**
+   `wiki/browser-session-control-arbiter.md`: "Execution-completion and
+   workspace-archival cleanup subscribe to the existing SQLite-hook JSON-patch
+   stream (`EventService` msg store) rather than threading the browser service
+   into `LocalContainerService` finalization." The implementation to model on is
+   `BrowserSessionService::spawn_cleanup_watcher`
+   (`crates/services/src/services/browser/mod.rs:622-682`): take
+   `Arc<MsgStore>`, `Arc::downgrade` the inner state, `tokio::spawn`, and match
+   on `/workspaces/{uuid}` and `/execution_processes/{uuid}` patch paths.
 
-## Rules the fix must obey
+5. **The stream is lossy — a TTL backstop is what makes it safe.** Same page:
+   "Broadcast lag can drop events — the lease TTL and idle sweep are the
+   backstop, which is what makes this design safe." Confirmed in source: the
+   watcher handles `RecvError::Lagged(_)` by `continue`, i.e. dropped events are
+   simply skipped. **`REFRESH_AFTER` is therefore not an optimisation knob, it is
+   the correctness backstop** — it must stay short enough to be a real safety
+   net and must never be made conditional on having seen an event.
 
-### `docs/knowledge-base/clustered-workspace-execution.md`
+6. **Hold only a `Weak` between ticks.** "The sweeper holds only a `Weak` to the
+   service between ticks (a strong clone in the loop leaks the service forever —
+   same class of bug as the keep-warm poll loop)."
 
-Tagged `957e-clustered-vibe-k`, `19a4-git-worktrees-br` — the page written by
-the change that introduced the defective code. Four rules from
-"A worktree is only as portable as the repository behind it" bind this task:
+7. **Level-triggered over edge-triggered**, from
+   `docs/knowledge-base/issue-status-side-effects.md`: "This is deliberately
+   **level-triggered**, not tied to the status-change event. The same comparison
+   runs after Electric updates, fallback snapshots, reconnects, and provider
+   remounts, so temporary disconnection does not lose the side effect." The
+   `refresh_stale` sweep is the level-triggered half; invalidation is only the
+   latency optimisation.
 
-> - **Assert structure, not spelling.** …
-> - **Existence proves nothing.** A same-named local directory is not the
->   repository. On these hosts `/srv/src/<repo>` exists on workers too, holding
->   a different clone — a resolver that accepts it binds the workspace to
->   unrelated history.
-> - **Prove the objects.** `git rev-parse` echoes any well-formed 40-hex string
->   whether or not the repository holds it. Use `git cat-file -e <rev>^{commit}`
->   before treating a branch as present.
-> - **Check level-triggered.** …
+8. **A stale refresh must not clobber a fresher value.**
+   `docs/knowledge-base/active-mcp-refresh.md`: the container "removes it only
+   when that exact execution finishes, preventing an older cleanup task from
+   removing a newer control", and "a write lock serializes request, failure, and
+   confirmation transitions; readers therefore see either the previous complete
+   server vector or the replacement vector." Applied: a refresh that began before
+   an `invalidate` must not write its result over the invalidation, and a reader
+   must never see a torn `DiffStats`. Store the whole struct atomically and
+   compare-before-write against the invalidation generation.
 
-**[H] "Prove the objects" constrains the fix directly.** Broadening resolution
-from `refs/heads/{b}` to also accept `refs/remotes/{b}` must keep using
-`commit_exists` (`cat-file -e`), not `rev-parse`. Do not "simplify" the new
-resolver to `rev-parse --verify`.
+9. **Key the cache on the workspace UUID, never a composed string.**
+   `docs/knowledge-base/mcp-connectivity-testing.md`: "Match invalidation by the
+   result's exact `server_name`, not a serialized-key prefix, because
+   user-controlled names may contain the key delimiter." Repo and branch names
+   are user-controlled here.
 
-**[H] Store configuration is clone-time, not after-the-fact.**
+### Cluster / NFS: what the coordinator may do to a worktree
 
-> create the store `core.sharedRepository=group` **at clone time** (setting it
-> afterwards leaves every object and directory git already created at the
-> cloning process's umask), and disable automatic maintenance before the first
-> worktree is registered. `git gc --auto` fires opportunistically on ordinary
-> commands and prunes worktrees, so without `gc.auto=0` and
-> `gc.worktreePruneExpire=never` a routine `git status` on a worker can
-> unregister a different workspace.
+10. **Reading is allowed; administration is not.**
+    `docs/knowledge-base/clustered-workspace-execution.md`: "Workers may run
+    ordinary Git commands inside their assigned worktree, but only the
+    coordinator may add, remove, prune, or reclaim worktrees and delete shared
+    branches." Diff-stat computation is an ordinary read, and the coordinator is
+    already authoritative for SQLite and worktree administration — so serving
+    summaries centrally stays within the model. Worth flagging in the plan: the
+    existing temp-index pipeline runs `git add -A`, which writes **loose objects
+    into the shared object store** even though the index itself is a `/tmp` file.
+    That is pre-existing behaviour; this task reduces its frequency rather than
+    removing it, and removing it (`git add -N` + a non-`--cached` diff) is a
+    follow-up, not a drive-by.
 
-So the fix must not reorder `configure()` relative to the clone/rename, and must
-not add refs to the store before `core.sharedRepository=group` is in effect.
+11. **An error is not a zero.**
+    `docs/knowledge-base/workspace-directory-reclamation.md`: "A git probe that
+    errors is not a clean repo", and "`Path::exists()` returns `false` for both
+    'absent' and 'stat failed' — use `try_exists()`, which distinguishes them."
+    Reinforced by `clustered-workspace-execution.md`: "An offline or unreachable
+    worker means the workspace is indeterminate, not idle" and "An existing path
+    does not prove that NFS is mounted." **Therefore the cache must not store a
+    failed computation as `0/0/0`** — leave the entry absent so the field stays
+    `None`. Today's code does the opposite (`compute_diff_stats` `continue`s past
+    a failed repo and returns a zeroed struct), which is why cleaned-up
+    workspaces currently report a confident "0 files changed".
 
-**Single-writer administration.** Only the coordinator may add/remove/prune
-worktrees or delete shared branches, serialized per repository with *fenced*
-ownership. The extra ref mirroring therefore belongs inside the existing
-administration lease in `publish_and_fetch`, not in a new unfenced code path.
+12. **A worktree can vanish under a cached entry.** Same page: cleanup ends with
+    a "**repo-wide** `git worktree prune`, so one workspace's cleanup can drop
+    other live workspaces' admin entries", and "The worktree base dir lives under
+    `/var/tmp`, so OS temp reaping removes working trees while admin entries and
+    `container_ref`s survive". So `worktree_deleted` and `container_ref` are
+    advisory, not authoritative — they are a cheap *skip* filter, never proof that
+    a cached number is still valid. The TTL covers the rest.
 
-**[H] Mirror additively; never prune.** "When a namespace is consolidated,
-re-derive the blast radius of everything that touches it rather than inheriting
-the old conclusion." `refs/remotes/*` in the store is repository-wide and shared
-by every workspace of that repo on every node, so the mirroring fetch must not
-carry `--prune` / `+refs/remotes/*:refs/remotes/*` semantics that delete. A
-force-update refspec without `--prune` is additive; keep it that way.
+13. **Do not run a dev server against the shared host to test this.** Same page:
+    "`cleanup_orphan_workspaces` **always** sweeps the default base dir even when
+    an override is configured, and with a non-matching DB it will classify every
+    live worktree there as an orphan." Verification against the live coordinator
+    must stay read-only HTTP (`POST /workspaces/summaries` latency measurement),
+    which is how the numbers in `SPEC.md` were taken.
 
-### `homelab/knowledge-base/cloudflare-access-service-token-live-enablement.md`
+### Preserving the meaning of the numbers
 
-**[H] `origin/main` in a derived clone can mean the wrong thing.** Verbatim:
+14. **The untracked-files trap in the `--numstat` switch.**
+    `docs/knowledge-base/workspace-directory-reclamation.md` records two
+    divergent cleanliness definitions: the porcelain path "counts **staged and
+    untracked**", while `GitService::is_worktree_clean` uses
+    `include_untracked(false)` and "**misses untracked files entirely**". A bare
+    `git diff --numstat <base>` is the second kind. The switch is only
+    behaviour-preserving because it keeps the existing temp-index preparation
+    (`read-tree HEAD` → `status --porcelain -z` → `add -A` with
+    `GIT_INDEX_FILE`) and changes **only** the final command to
+    `diff --cached -M --numstat`. Dropping the temp index to "simplify" would
+    silently stop counting untracked files.
 
-> **Gotcha that ate a full apply cycle:** `git clone /srv/src/homelab /tmp/x &&
-> git checkout origin/main` resolves `origin/main` to the *clone's* origin —
-> i.e. `/srv/src/homelab`'s **local** `main`, which git-projects may not have
-> advanced yet — not GitHub's main.
+15. **First occurrence must stay byte-identical for existing consumers.**
+    `docs/knowledge-base/collapsing-repeated-log-entries.md`. The cross-check
+    test (numstat aggregate vs `get_diffs` aggregate) is the enforcement.
 
-This is the trap the fix must not fall into, and it decides *how* the store
-learns about `origin/main`:
+### Bounded caches and background work
 
-- **Wrong:** give the store its own `origin` fetch refspec and let it populate
-  `refs/remotes/origin/*` from the clone source. `configure()` retargets
-  `origin` at the forge, so that would be a second, differently-fresh notion of
-  `origin/main`.
-- **Right (chosen):** copy the *registered checkout's* `refs/remotes/*`
-  verbatim. `git clone --bare` puts the source's branches in `refs/heads/*` and
-  creates no `refs/remotes/*` at all, so there is nothing stale to shadow. The
-  store then means exactly what the branch picker meant when it offered
-  `origin/main` — both read the same checkout — and is as fresh as that
-  checkout's last fetch, no more and no less.
+16. **TTL *and* a hard capacity cap.** `docs/knowledge-base/mcp-oauth-connect.md`:
+    "module-local `LazyLock<RwLock<HashMap<Uuid, PendingFlow>>>`, 10-min TTL
+    pruned on access" and "**Pending state and token files are bounded.** At most
+    256 unexpired flows are retained." The moka cache must carry both.
+17. **Unbounded in-memory growth has already caused an OOM here.**
+    `docs/knowledge-base/collapsing-repeated-log-entries.md`: "Never render an
+    unbounded tick string… repeatedly building progressively larger replacement
+    patches can exhaust the server's memory."
+18. **Retain-on-error must be bounded**
+    (`workspace-directory-reclamation.md`): "Without it, retain-on-error means
+    retain-forever." Applied: a workspace whose refresh keeps failing must not
+    keep a permanently pinned entry or a permanently held `inflight` marker —
+    clear `inflight` in a guard/`finally`-equivalent, not on the success path.
+19. **Bounded fan-out with explicit caps is established practice**
+    (`mcp-connectivity-testing.md`, `aws-sso-profile-management.md`,
+    `cli-tool-oauth-login.md`): "probes concurrently (`futures::future::join_all`),
+    each probe wrapped in `tokio::time::timeout`", "cap concurrent role
+    requests", `kill_on_drop`. Note the deliberate deviation to record in the
+    plan: the git work runs inside `spawn_blocking`, which **cannot** be
+    cancelled by `tokio::time::timeout` — a timeout would release the semaphore
+    permit while the thread stayed stuck on NFS. The semaphore itself (permit
+    held for the whole blocking call) plus the `inflight` dedupe is the bound.
+20. **Never make the request wait on slow work**
+    (`docs/knowledge-base/remote-external-integrations.md`): "an ack must never
+    wait on the DB or an outbound API call. Ack immediately and do the work in
+    `tokio::spawn`." That is precisely the stale-while-revalidate shape.
 
-### `docs/knowledge-base/workspace-directory-reclamation.md`
+### Verification and CI
 
-**[H] "I could not tell" must not become "there is nothing here".**
+21. **`pnpm install --frozen-lockfile` before anything else in a fresh
+    worktree**, and "Do not assume `node_modules/.bin/prettier` exists at the
+    repository root" (`worktree-formatting-prerequisites.md`).
+22. **Change filters must cover new files.** Same page: "Also include the checker
+    and its test paths in CI change filters. Adding a test command to a filtered
+    job is insufficient if changes to the tested files do not trigger that job."
+    Verified in `.github/workflows/test.yml:41-92`: every path this task touches
+    (`crates/db`, `crates/deployment`, `crates/git`, `crates/local-deployment`,
+    `crates/server`, `crates/services`, `packages/ui`, `packages/web-core`) is
+    already covered, so **no filter change is needed** — but this was checked, not
+    assumed.
+23. **The SQLx offline cache is committed and CI enforces it.** Verified in
+    source (the knowledge base only documents the *remote*/Postgres flow):
+    `crates/db/.sqlx` is tracked (388 files) and `.github/workflows/test.yml:147`
+    runs `npm run prepare-db:check`. Changing the `find_all_with_status` SQL
+    **requires** re-running `pnpm run prepare-db` and committing the result, or
+    CI fails.
+24. **A perf test that passes before the fix proves nothing**
+    (`workspace-directory-reclamation.md`): "Pair it with a control run on the
+    unfixed code." The `SPEC.md` table is that control run.
+25. **Keep the decision logic a pure helper with a truth-table test**
+    (`interrupted-worktree-recovery.md`) — i.e. "should this workspace be
+    refreshed?" and the sort comparator both belong in testable pure functions.
+26. **A backstop needs something to trigger it** (same page): "the backstop needs
+    a next startup to happen at all." Here the trigger is the client's own 15 s
+    poll calling `refresh_stale`. If no client is connected, nothing refreshes —
+    which is correct and desirable, but means the cache is only ever as fresh as
+    the last poll, and a test must not assume a self-driving timer exists.
 
-> `Path::exists()` returns `false` for both "absent" and "stat failed" — use
-> `try_exists()`, which distinguishes them. A git probe that errors is not a
-> clean repo.
+## Gaps the knowledge base did not cover (closed from source for this task)
 
-and
-
-> the fail-safe direction is **not** consistent across the codebase … When
-> adding a new decision, match the safe sibling.
-
-For this task the safe sibling is the existing `commit_exists`, which already
-treats `GitCliError::CommandFailed` as "absent" and propagates every other
-error. The new local-then-remote resolver must reuse it rather than inventing a
-second probe with a different fail direction — the two ref forms must fail the
-same way as one another and as the code they replace.
-
-### `wiki/browser-session-control-arbiter.md` — how errors reach the UI
-
-> `ApiError` responses carry only a message string.
-
-The typed serde-tagged payload that page describes exists because MCP tools and
-the frontend *parse* browser-session errors back. Nothing parses a provisioning
-failure; a human reads it. So the right precedent here is the plainer one
-already in `error.rs` — `ApiError::Worktree`, rendered as
-`with_status(INTERNAL_SERVER_ERROR, "WorktreeError", "Worktree operation failed:
-{err}")` — a 500 that still carries a real message. Follow that shape and leave
-the global envelope alone.
-
-**Failed dispatch must terminalise its job.** Recorded as a rule; relevant to
-the out-of-scope note about leaving half-built workspaces behind.
-
-### `docs/knowledge-base/interrupted-worktree-recovery.md` and the repair rules
-
-"Repair a broken worktree; never recreate it", and *refuse rather than guess*:
-refuse when the branch's commits cannot be proven present. The fix must not
-weaken `adopt()`'s refusal — broadening branch resolution changes what counts as
-"present", so `adopt` must keep proving the *workspace* branch (always a local
-`vk/…` name), and the change must not make a remote-tracking ref look like a
-valid adoption target.
-
-## Deployment / operations
-
-### `wiki/self-hosted-deployment.md` and `homelab/modules/vibe-kanban-rebuild.nix`
-
-- Merging to `main` is sufficient to ship: think2 (`clusterRole = "coordinator"`)
-  polls the repo, builds a pinned worktree, publishes an immutable release under
-  `/srv/vk-releases/build-<id>` with a self-describing `release.json.sha`, flips
-  `current` atomically, restarts the services and health-gates the result.
-- `workerEndpoints` on think2 lists think3/think4; the coordinator pushes
-  `current` to them, so a merged fix reaches all three nodes without manual
-  steps. Confirmed live: `/srv/vk-releases/current/release.json` on think3 reads
-  `{"sha": "293f70174fb…", "built_at": "2026-08-02T16:44:49Z"}` — i.e. the
-  failing release is #174, which is what the user was running at 21:09.
-- **[H]** Services must not run from the source checkout; do not add anything
-  that writes into `/srv/src/<repo>` on the deploy host beyond what already
-  exists (`mirror_branch_back`'s courtesy push is pre-existing and stays
-  best-effort).
-
-### `homelab/knowledge-base/cloudflare-access-service-token-live-enablement.md`
-
-Only tangentially relevant, but records that the homelab CI apply job is
-unpinned and its preflight curls vibe-kanban's Caddy on think2 — a reminder that
-this cluster's nodes are not interchangeable. Not affected by this change.
-
-## Testing conventions
-
-- Rust unit tests live beside the code in `#[cfg(test)] mod tests`;
-  `crates/workspace-manager/src/shared_repository.rs` already has a suite that
-  builds **real** temporary git repositories via `seed_repo` / `repo_record` /
-  `store_for`, and `crates/worktree-manager/src/worktree_manager.rs` shows the
-  in-memory `repository_admin_locks` pool pattern (`max_connections(1)` on
-  `sqlite::memory:` plus a hand-written `CREATE TABLE`) needed to exercise the
-  administration lease. Reuse both rather than inventing new harnesses.
-- `seed_repo` sets `user.email`/`user.name` locally because *CI and this
-  cluster's worker accounts have no global git identity* — any new fixture repo
-  must do the same.
-- Verification gate: `pnpm run check`, `cargo test --workspace`,
-  `cargo clippy -D warnings`, `pnpm run format`. #174 added
-  `crates/{workspace-manager,worktree-manager,worker,cluster-protocol}` to the
-  CI backend path filter, so changes in these crates now actually trigger the
-  backend job.
-- **[H] A repro that also passes before the fix proves nothing**
-  (`workspace-directory-reclamation.md`): run the new tests against unmodified
-  `main` and confirm they fail.
-- **[H] Do not run a dev server to verify on this host** — but not for the
-  reason `workspace-directory-reclamation.md` gives. That page's orphan-sweep
-  hazard is **inert here**: `container.rs:1153` calls
-  `cleanup_orphan_workspaces(!container.cluster_config.enabled)` and
-  `workspace_manager.rs:778` early-returns when `allow_reclamation` is false, so
-  with clustering enabled the sweep never reclaims. Verified in the source, not
-  inherited. The real reason is contention: a second server on this node would
-  compete for the same shared root, the same SQLite repository administration
-  leases, and the same live worktrees. Verify with unit tests over temporary
-  repositories and read-only probes of the live store instead. (Task 19a4
-  reached the same conclusion; recording it here so the next reader does not
-  re-derive it from the more alarming KB page.)
-- `clustered-workspace-execution.md` is explicit that unit tests are not the
-  whole gate: "Passing local tests does not replace that deployment gate."
-  The deployment exercise is the coordinator's, post-merge.
-
-## Nothing found on
-
-No page covers how `ApiError` collapses cluster failures into the generic
-"An internal error occurred" message, or the ergonomics of error surfacing for
-clustered provisioning. That gap is why this task's diagnosis was expensive and
-is worth recording at stage 12.
+- `EventService` / `MsgStore` semantics — undocumented in the KB; read from
+  `crates/services/src/services/events.rs` and
+  `crates/services/src/services/browser/mod.rs:622`. Findings folded into
+  constraints 4–6 above and worth writing back in stage 5.
+- Local SQLite migration conventions and the `.sqlx` CI check — only the remote
+  Postgres flow was documented; see constraint 23.
+- `worktree_deleted` semantics — undocumented; see constraint 12.
+- The consumer set for the summaries payload — undocumented; enumerated in
+  constraint 3.

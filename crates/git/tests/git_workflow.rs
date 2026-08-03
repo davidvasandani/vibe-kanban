@@ -372,6 +372,83 @@ fn worktree_diff_permission_only_change() {
     assert_eq!(d.old_content, d.new_content);
 }
 
+/// `get_diff_stats` is a cheap replacement for aggregating `get_diffs`, used by
+/// the workspaces sidebar. It must agree on the file count and — for text files —
+/// on the line counts, and it must still see staged and untracked content, which
+/// is what the shared temp-index preparation is for. A bare
+/// `git diff --numstat <base>` would silently miss the untracked file below.
+#[test]
+fn diff_stats_agree_with_aggregated_get_diffs() {
+    let td = TempDir::new().unwrap();
+    let repo_path = init_repo_main(&td);
+    let s = GitService::new();
+
+    write_file(&repo_path, "tracked.txt", "one\ntwo\nthree\n");
+    write_file(
+        &repo_path,
+        "renamed_from.txt",
+        "alpha\nbeta\ngamma\ndelta\n",
+    );
+    add_path(&repo_path, ".");
+    let _ = s.commit(&repo_path, "baseline").unwrap();
+    create_branch(&repo_path, "feature");
+
+    // A tracked modification, a rename, and an untracked new file.
+    write_file(&repo_path, "tracked.txt", "one\ntwo\nthree\nfour\n");
+    std::fs::rename(
+        repo_path.join("renamed_from.txt"),
+        repo_path.join("renamed_to.txt"),
+    )
+    .unwrap();
+    write_file(&repo_path, "untracked.txt", "u1\nu2\n");
+    // A binary file: numstat reports `-`, and `get_diffs` reports no line counts.
+    std::fs::write(repo_path.join("blob.bin"), [0u8, 1, 2, 3, 0, 5]).unwrap();
+
+    let base_commit = s.get_base_commit(&repo_path, "feature", "main").unwrap();
+
+    let diffs = s.get_diffs(&repo_path, &base_commit, None).unwrap();
+    let expected_files = diffs.len();
+    let expected_added: usize = diffs.iter().map(|d| d.additions.unwrap_or(0)).sum();
+    let expected_removed: usize = diffs.iter().map(|d| d.deletions.unwrap_or(0)).sum();
+
+    let stats = s.get_diff_stats(&repo_path, &base_commit).unwrap();
+
+    assert_eq!(
+        stats.files_changed, expected_files,
+        "numstat and get_diffs must count the same changed files"
+    );
+    assert_eq!(stats.lines_added, expected_added);
+    assert_eq!(stats.lines_removed, expected_removed);
+
+    // The untracked file must be part of that count, i.e. the temp index is doing
+    // its job. Guards against "simplifying" the staging step away.
+    let paths: Vec<String> = diffs.iter().map(GitService::diff_path).collect();
+    assert!(
+        paths.iter().any(|p| p == "untracked.txt"),
+        "untracked files must be counted; got {paths:?}"
+    );
+    assert!(stats.files_changed >= 4, "got {stats:?} for {paths:?}");
+}
+
+#[test]
+fn diff_stats_are_zero_for_a_clean_worktree() {
+    let td = TempDir::new().unwrap();
+    let repo_path = init_repo_main(&td);
+    let s = GitService::new();
+
+    write_file(&repo_path, "a.txt", "a\n");
+    add_path(&repo_path, ".");
+    let _ = s.commit(&repo_path, "baseline").unwrap();
+    create_branch(&repo_path, "feature");
+
+    let base_commit = s.get_base_commit(&repo_path, "feature", "main").unwrap();
+    let stats = s.get_diff_stats(&repo_path, &base_commit).unwrap();
+
+    assert_eq!(stats.files_changed, 0);
+    assert_eq!(stats.lines_added, 0);
+    assert_eq!(stats.lines_removed, 0);
+}
+
 #[test]
 fn squash_merge_libgit2_sets_author_without_user() {
     // Verify merge_changes (libgit2 path) uses fallback author when no config exists

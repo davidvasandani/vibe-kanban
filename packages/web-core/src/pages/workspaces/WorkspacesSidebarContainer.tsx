@@ -5,6 +5,7 @@ import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useUserContext } from '@/shared/hooks/useUserContext';
 import { useScratch } from '@/shared/hooks/useScratch';
+import { useDebouncedCallback } from '@/shared/hooks/useDebouncedCallback';
 import { useAllOrganizationProjects } from '@/shared/hooks/useAllOrganizationProjects';
 import { useUserOrganizations } from '@/shared/hooks/useUserOrganizations';
 import { ScratchType, type DraftWorkspaceData } from 'shared/types';
@@ -20,7 +21,6 @@ import {
   type WorkspaceSortBy,
   type WorkspaceSortOrder,
 } from '@/shared/stores/useUiPreferencesStore';
-import type { Workspace } from '@/shared/hooks/useWorkspaces';
 import { CommandBarDialog } from '@/shared/dialogs/command-bar/CommandBarDialog';
 import { SettingsDialog } from '@/shared/dialogs/settings/SettingsDialog';
 import {
@@ -54,6 +54,7 @@ import {
   XIcon,
 } from '@phosphor-icons/react';
 import { useRemoteCloudHostsAppBarModel } from '@/shared/hooks/useRemoteCloudHosts';
+import { sortWorkspaces } from './workspaceSidebarSort';
 
 export type WorkspaceLayoutMode = 'flat' | 'accordion';
 
@@ -61,6 +62,7 @@ export type WorkspaceLayoutMode = 'flat' | 'accordion';
 const DRAFT_WORKSPACE_ID = '00000000-0000-0000-0000-000000000001';
 
 const PAGE_SIZE = 50;
+const SEARCH_DEBOUNCE_MS = 150;
 const NO_PROJECT_ID = '__no_project__';
 const DEFAULT_WORKSPACE_SORT = {
   sortBy: 'updated_at' as WorkspaceSortBy,
@@ -232,26 +234,6 @@ function WorkspacesFilterDialog({
   );
 }
 
-function toTimestamp(value: string | undefined): number | null {
-  if (!value) {
-    return null;
-  }
-
-  const timestamp = new Date(value).getTime();
-  return Number.isNaN(timestamp) ? null : timestamp;
-}
-
-function getWorkspaceSortTimestamp(
-  workspace: Workspace,
-  sortBy: WorkspaceSortBy
-): number | null {
-  if (sortBy === 'updated_at') {
-    return toTimestamp(workspace.latestProcessCompletedAt);
-  }
-
-  return toTimestamp(workspace.createdAt);
-}
-
 export function WorkspacesSidebarContainer({
   onScrollToBottom = () => {},
 }: WorkspacesSidebarContainerProps) {
@@ -270,7 +252,22 @@ export function WorkspacesSidebarContainer({
   const { hosts: remoteCloudHosts } = useRemoteCloudHostsAppBarModel();
   const { hostId: routeHostId } = useParams({ strict: false });
   const setMobileActiveTab = useUiPreferencesStore((s) => s.setMobileActiveTab);
+  // The input is driven by `searchQuery` so typing stays responsive; the filter
+  // memos read `debouncedSearchQuery`, so a burst of keystrokes causes one
+  // filter+sort+render pass rather than one per character.
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
+  const { debounced: publishSearchQuery } = useDebouncedCallback(
+    (value: string) => setDebouncedSearchQuery(value),
+    SEARCH_DEBOUNCE_MS
+  );
+  const handleSearchChange = useCallback(
+    (value: string) => {
+      setSearchQuery(value);
+      publishSearchQuery(value);
+    },
+    [publishSearchQuery]
+  );
   const [showArchive, setShowArchive] = usePersistedExpanded(
     PERSIST_KEYS.workspacesSidebarArchived,
     false
@@ -398,10 +395,10 @@ export function WorkspacesSidebarContainer({
   // Reset display limit when search, filter, or sort state changes
   useEffect(() => {
     setDisplayLimit(PAGE_SIZE);
-  }, [searchQuery, showArchive, workspaceFilters, workspaceSort]);
+  }, [debouncedSearchQuery, showArchive, workspaceFilters, workspaceSort]);
 
-  const searchLower = searchQuery.toLowerCase();
-  const isSearching = searchQuery.length > 0;
+  const searchLower = debouncedSearchQuery.toLowerCase();
+  const isSearching = debouncedSearchQuery.length > 0;
 
   // Apply sidebar filters (project + PR), then search
   const filteredActiveWorkspaces = useMemo(() => {
@@ -478,50 +475,35 @@ export function WorkspacesSidebarContainer({
     searchLower,
   ]);
 
-  const sortWorkspaces = useCallback(
-    (workspaces: Workspace[]) =>
-      [...workspaces].sort((a, b) => {
-        // Always keep pinned workspaces at the top.
-        if (a.isPinned !== b.isPinned) {
-          return a.isPinned ? -1 : 1;
-        }
-
-        const aTimestamp = getWorkspaceSortTimestamp(a, workspaceSort.sortBy);
-        const bTimestamp = getWorkspaceSortTimestamp(b, workspaceSort.sortBy);
-
-        // Workspaces without the selected timestamp are always sorted first.
-        if (aTimestamp === null && bTimestamp === null) {
-          return a.name.localeCompare(b.name);
-        }
-        if (aTimestamp === null) {
-          return -1;
-        }
-        if (bTimestamp === null) {
-          return 1;
-        }
-
-        if (aTimestamp === bTimestamp) {
-          return a.name.localeCompare(b.name);
-        }
-
-        return workspaceSort.sortOrder === 'asc'
-          ? aTimestamp - bTimestamp
-          : bTimestamp - aTimestamp;
-      }),
-    [workspaceSort.sortBy, workspaceSort.sortOrder]
-  );
-
+  // Sort keys are precomputed per row rather than derived inside the comparator;
+  // see `workspaceSidebarSort.ts`.
   const sortedActiveWorkspaces = useMemo(
-    () => sortWorkspaces(filteredActiveWorkspaces),
-    [filteredActiveWorkspaces, sortWorkspaces]
+    () =>
+      sortWorkspaces(
+        filteredActiveWorkspaces,
+        workspaceSort.sortBy,
+        workspaceSort.sortOrder
+      ),
+    [filteredActiveWorkspaces, workspaceSort.sortBy, workspaceSort.sortOrder]
   );
 
   const sortedArchivedWorkspaces = useMemo(
-    () => sortWorkspaces(filteredArchivedWorkspaces),
-    [filteredArchivedWorkspaces, sortWorkspaces]
+    () =>
+      sortWorkspaces(
+        filteredArchivedWorkspaces,
+        workspaceSort.sortBy,
+        workspaceSort.sortOrder
+      ),
+    [filteredArchivedWorkspaces, workspaceSort.sortBy, workspaceSort.sortOrder]
   );
 
-  // Apply pagination (only when not searching)
+  // Apply pagination (only when not searching).
+  //
+  // Deliberately left bypassed while searching. Paginating search results looks
+  // like an easy win, but the accordion layout groups *after* pagination, so a
+  // matching workspace ranked 51st would silently vanish from "Needs Attention",
+  // and with every section collapsed the container does not scroll, so nothing
+  // would trigger a load-more. The debounce below is what makes typing cheap.
   const paginatedActiveWorkspaces = useMemo(
     () =>
       isSearching
@@ -694,7 +676,7 @@ export function WorkspacesSidebarContainer({
       selectedWorkspaceId={selectedWorkspaceId ?? null}
       onSelectWorkspace={handleSelectWorkspace}
       searchQuery={searchQuery}
-      onSearchChange={setSearchQuery}
+      onSearchChange={handleSearchChange}
       onAddWorkspace={handleAddWorkspace}
       isCreateMode={isCreateMode}
       draftTitle={persistedDraftTitle}

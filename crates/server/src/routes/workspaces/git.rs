@@ -247,6 +247,14 @@ pub async fn merge_workspace(
         });
     }
 
+    // A merge empties the diff against base. Archiving would also emit a
+    // `workspaces` patch, but a pinned workspace is not archived, so invalidate
+    // here rather than relying on that.
+    deployment
+        .workspace_diff_stats()
+        .invalidate(workspace.id)
+        .await;
+
     if !workspace.pinned
         && let Err(e) = deployment.container().archive_workspace(workspace.id).await
     {
@@ -530,6 +538,14 @@ pub async fn change_target_branch(
 
     WorkspaceRepo::update_target_branch(pool, workspace.id, repo_id, &new_target_branch).await?;
 
+    // Moving the target branch moves the merge base, so cached diff stats are not
+    // merely stale but wrong. This write lands in `workspace_repos`, which the
+    // event stream does not hook, so it must be invalidated explicitly.
+    deployment
+        .workspace_diff_stats()
+        .invalidate(workspace.id)
+        .await;
+
     let status =
         deployment
             .git()
@@ -778,6 +794,13 @@ pub async fn rebase_workspace(
         };
     }
 
+    // Rewrites history against the target branch without touching the
+    // `workspaces` row, so the event watcher would not see it.
+    deployment
+        .workspace_diff_stats()
+        .invalidate(workspace.id)
+        .await;
+
     deployment
         .track_if_analytics_allowed(
             "task_attempt_rebased",
@@ -812,6 +835,13 @@ pub async fn abort_workspace_conflicts(
 
     deployment.git().abort_conflicts(&worktree_path)?;
 
+    // Rewrites the worktree without touching the `workspaces` row, so the event
+    // watcher would not see it.
+    deployment
+        .workspace_diff_stats()
+        .invalidate(workspace.id)
+        .await;
+
     Ok(ResponseJson(ApiResponse::success(())))
 }
 
@@ -835,6 +865,13 @@ pub async fn continue_workspace_rebase(
     let worktree_path = workspace_path.join(&repo.name);
 
     deployment.git().continue_rebase(&worktree_path)?;
+
+    // Rewrites the worktree without touching the `workspaces` row, so the event
+    // watcher would not see it.
+    deployment
+        .workspace_diff_stats()
+        .invalidate(workspace.id)
+        .await;
 
     Ok(ResponseJson(ApiResponse::success(())))
 }
