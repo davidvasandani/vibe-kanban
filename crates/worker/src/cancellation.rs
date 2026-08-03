@@ -258,6 +258,7 @@ mod tests {
             workspace_path: workspace.to_string_lossy().into_owned(),
             working_directory: ".".into(),
             executor_profile: "fixture".into(),
+            executor_profile_config: None,
             action: json!({
                 "program": "/bin/sh",
                 "args": ["-c", format!("sleep 60 & echo $! > '{}'; wait", pid_file.display())]
