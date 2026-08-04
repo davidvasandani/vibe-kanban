@@ -184,6 +184,11 @@ and the worker must authorize the execution ID and canonical workspace path
 against that assignment. Retries are idempotent and cannot create a second
 process for one execution.
 
+Placement intent is explicit at every boundary: automatic scheduling,
+coordinator-local execution, and a requested worker are distinct choices. A
+null or omitted value must not be overloaded to mean more than one of them, and
+contradictory choices are rejected before placement state is mutated.
+
 Remote liveness and terminal state require worker evidence. A timeout,
 disconnect, missing handle, or expired lease is not proof that a process
 completed or was killed; expose interruption or indeterminacy and preserve the
@@ -335,12 +340,13 @@ overflow does not make them unreachable.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.21.0 (adds stable process ownership and evidence-backed soft
+**Version**: 0.22.0 (adds stable process ownership and evidence-backed soft
 restart handoffs — control-plane disconnect is not process death, ownership
 includes the complete I/O/monitoring lifecycle, replay is ordered and explicit
 about gaps, mutation authority is single-generation, and only hard shutdown
-terminates all managed children; 0.20.0 added explicit flexible-panel space and scroll ownership;
-0.19.0 added one-convention-per-concept — reuse the existing
+terminates all managed children; 0.21.0 made cluster placement intent explicit and unambiguous;
+0.20.0 added explicit flexible-panel space and scroll ownership; 0.19.0 added
+one-convention-per-concept — reuse the existing
 resolution rule rather than re-deriving it, accept the producer's default value,
 and report failures with the fact that identifies them instead of a generic
 internal error; also makes writes into a consolidated shared namespace additive
