@@ -21,6 +21,26 @@ pub fn process_log_file_path_in_root(root: &Path, session_id: Uuid, process_id: 
         .join(format!("{}.jsonl", process_id))
 }
 
+/// Materialized normalized log for a finished process: the settled
+/// conversation entries derived from that process's raw log.
+///
+/// Beside the raw log deliberately — it is a derived view of that exact file,
+/// and sharing the session directory means the existing cleanup removes both
+/// together rather than leaving a cache describing logs that are gone.
+pub fn process_normalized_log_file_path(session_id: Uuid, process_id: Uuid) -> PathBuf {
+    process_normalized_log_file_path_in_root(&asset_dir(), session_id, process_id)
+}
+
+pub fn process_normalized_log_file_path_in_root(
+    root: &Path,
+    session_id: Uuid,
+    process_id: Uuid,
+) -> PathBuf {
+    resolve_process_logs_session_dir(root, session_id)
+        .join("processes")
+        .join(format!("{}.normalized.jsonl", process_id))
+}
+
 /// Raw (unstructured) log file that a detached process writes its
 /// stdout/stderr to directly, so its output survives a server restart.
 /// Used for dev servers, which are left running across restarts.

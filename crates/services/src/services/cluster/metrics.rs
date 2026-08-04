@@ -830,7 +830,7 @@ mod tests {
                 model: None,
                 core_count: Some(4),
                 total_busy_percent: Some(12.5),
-                per_core_busy_percent: None,
+                per_core_busy: None,
                 load_1m: None,
                 load_5m: None,
                 load_15m: None,
