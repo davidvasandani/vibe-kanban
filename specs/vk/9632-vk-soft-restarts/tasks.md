@@ -35,4 +35,4 @@ The analysis stage narrowed implementation to the existing production architectu
 
 - [x] T016 Run formatting, worker tests/checks, web-core tests/typecheck/lint, diff checks, and Nix parse/evaluation; record exact results in `verification.md`.
 - [x] T017 Run independent Codex CLI review, fix confirmed significant findings, and repeat until clean; record results in `review.md`.
-- [ ] T018 Update and commit the project knowledge base, tagged `vk/9632-vk-soft-restarts`, and refresh `docs/knowledge-base/INDEX.md`.
+- [x] T018 Update and commit the project knowledge base, tagged `vk/9632-vk-soft-restarts`, and refresh `docs/knowledge-base/INDEX.md`.

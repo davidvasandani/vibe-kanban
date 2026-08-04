@@ -39,5 +39,6 @@ Recommended first drill after bootstrap:
 ## Review and knowledge
 
 Independent Codex reviews of both repository commits report no significant
-findings after confirmed issues were fixed. Knowledge-base capture remains for
-stage 12.
+findings after confirmed issues were fixed. Reusable soft-restart knowledge is
+recorded in `docs/knowledge-base/soft-restart-worker-drain.md` and indexed with
+the task tag `vk/9632-vk-soft-restarts`.
