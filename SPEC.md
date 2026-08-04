@@ -1,52 +1,41 @@
-# Right Drawer Expand to Available Space
-
-## Summary
-
-Update the workspace right drawer so its visible sections are top-justified and
-expanded section bodies can use the drawer's remaining vertical space. The
-drawer must not impose the current artificial per-section maximum height.
+# Technical Spec: Coordinator Placement Option
 
 ## Problem
 
-Each right-drawer section is currently constrained by
-`max-h-[max(50vh,400px)]`. This prevents an expanded section from growing into
-otherwise unused drawer space and can create unnecessary nested scrolling.
-
-## Desired behavior
-
-- Visible section headers remain stacked from the top of the right drawer.
-- Collapsed sections consume only their header height.
-- Expanded sections share the vertical space left after visible headers and
-  intrinsically sized non-collapsible content.
-- A single expanded section may grow to fill all available remaining space.
-- Multiple expanded sections divide the available space without any fixed or
-  viewport-derived maximum height.
-- When expanded content needs more room than its allocated share, that
-  section's body scrolls without forcing headers out of view.
-- Existing visibility, persisted expansion state, actions, borders, and content
-  rendering remain unchanged.
+In clustered deployments, the workspace creation form offers automatic placement and individual worker nodes, but it does not offer the coordinator. Operators therefore cannot deliberately run a new workspace on the coordinator even though coordinator-local execution remains a supported placement state.
 
 ## Scope
 
-The change is limited to the Vibe Kanban web UI's workspace right drawer. No
-other service or homelab deployment configuration needs modification.
+This change is limited to the Vibe Kanban service. It updates the workspace-creation contract, coordinator placement handling, and the create-workspace UI. It does not alter worker registration, scheduling weights, cluster deployment topology, or any other homelab service.
+
+## Required behavior
+
+1. The **Run on** selector shows a **Coordinator** option alongside **Automatic placement** and eligible worker nodes.
+2. Selecting **Coordinator** sends an explicit coordinator-placement intent. It must not be represented as automatic placement, because automatic placement remains free to select a worker.
+3. When coordinator placement is requested in cluster mode, creation retains the workspace's initial `local` placement and starts it through the existing coordinator-local execution path. The worker scheduler is not invoked.
+4. Existing clients that omit the new intent preserve current behavior: `requested_worker_node_id = null` means automatic worker scheduling, while a worker UUID means manual worker placement.
+5. A request must not specify both coordinator placement and a worker UUID. The server rejects that ambiguous request with a clear bad-request response.
+6. Non-clustered installations continue to use local execution without regression.
+7. The selector continues to distinguish unavailable worker nodes and does not make their existing state rules less strict.
+
+## Technical approach
+
+- Add an additive, default-false `run_on_coordinator` field to the create-and-start workspace request.
+- In clustered workspace creation, branch before worker selection: validate that coordinator intent and a worker UUID are mutually exclusive; retain the initial local placement for coordinator intent; otherwise execute the existing scheduler/reservation flow unchanged.
+- Add a stable coordinator sentinel value only in UI state, translating it to `run_on_coordinator: true` and `requested_worker_node_id: null` at the API boundary.
+- Add focused backend tests for coordinator placement and conflicting intent, plus frontend coverage for rendering and request serialization.
+- Regenerate shared TypeScript types from the Rust source rather than editing generated output manually.
 
 ## Acceptance criteria
 
-1. No right-drawer section wrapper uses the existing
-   `max-h-[max(50vh,400px)]` constraint or an equivalent artificial cap.
-2. The section stack occupies the drawer height and distributes spare vertical
-   space among expanded sections.
-3. Collapsed headers remain compact and top-justified.
-4. Overflowing content remains independently scrollable inside its expanded
-   section.
-5. Automated coverage verifies the flex sizing behavior, including the
-   expanded and collapsed wrapper states.
-6. Relevant frontend formatting, type checks, lint, and focused tests pass.
+- The screenshot's **Run on** menu includes **Coordinator**.
+- A workspace created with that option has `placement_state = local`, no worker node, and starts successfully on the coordinator.
+- Automatic and explicit-worker selections behave exactly as before.
+- Conflicting coordinator/worker intent returns HTTP 400 and does not partially reserve a placement.
+- Relevant Rust and frontend tests, type generation checks, formatting, and lint/type checks pass.
 
-## Non-goals
+## Risks and mitigations
 
-- Changing which right-drawer sections are shown.
-- Changing default or persisted expansion state.
-- Redesigning section content or headers.
-- Modifying another service or deployment configuration.
+- **Ambiguous null semantics:** keep automatic placement as the existing null worker value and carry coordinator intent in a separate explicit boolean.
+- **Partial creation on invalid input:** validate mutual exclusivity before scheduler or placement mutation.
+- **Generated-type drift:** regenerate with the repository command and verify the generated-types check.

@@ -517,7 +517,8 @@
     },
     "worker": {
       "label": "실행 위치",
-      "automatic": "자동 배치"
+      "automatic": "자동 배치",
+      "coordinator": "코디네이터"
     },
     "repoPicker": {
       "actions": {

@@ -1,39 +1,14 @@
-# Implementation Plan: Right Drawer Expand to Available Space
+# Implementation Plan: Coordinator Placement Option
 
-1. Inspect the shared `CollapsibleSectionHeader` contract and the workspace
-   `RightSidebar` composition to identify which element owns expansion state
-   and which element participates in flex sizing.
-2. Extend `CollapsibleSectionHeader` with a narrowly scoped opt-in layout mode
-   that makes its root grow and shrink while expanded, but remain intrinsically
-   sized while collapsed. Preserve current behavior for every existing caller.
-3. Convert the right drawer and section stack into a bounded full-height flex
-   column, remove the per-section viewport-derived maximum height, and opt its
-   sections into the new flexible expansion mode.
-4. Keep the section body as the overflow owner and add the minimum-height
-   constraints required for nested flex scrolling.
-5. Add focused component tests proving the opt-in root classes change correctly
-   across expanded and collapsed states and that legacy callers retain their
-   default layout behavior.
-6. Run formatting, focused tests, frontend type checking, and relevant lint.
-7. Run the required independent Codex diff review; address confirmed findings
-   and repeat verification until no significant findings remain.
-8. Record any reusable right-drawer/flex-layout knowledge in the Vibe Kanban
-   wiki, add this task id to the page, refresh its index, and commit the
-   knowledge-base update separately before handoff.
-
-## Expected files
-
-- `packages/ui/src/components/CollapsibleSectionHeader.tsx`
-- `packages/ui/src/components/CollapsibleSectionHeader.test.tsx` (new)
-- `packages/web-core/src/pages/workspaces/RightSidebar.tsx`
-- `wiki/right-drawer-flexible-sections.md` (if implementation confirms reusable
-  guidance)
-- `wiki/INDEX.md` (if a knowledge page is added)
-
-## Verification
-
-- Focused Vitest component test for `CollapsibleSectionHeader`.
-- Relevant workspace/package TypeScript check.
-- Relevant ESLint invocation or repository lint command.
-- `pnpm run format` as required by repository guidance.
-- Independent Codex review of the final implementation diff.
+1. Inspect the workspace creation request, placement scheduler boundary, UI selector, and existing tests to identify the narrowest additive contract.
+2. Add an explicit coordinator-placement field to the Rust request model with backward-compatible deserialization and regenerate the TypeScript API types.
+3. Refactor clustered creation placement into a testable decision path that:
+   - rejects simultaneous coordinator and worker intent;
+   - leaves the initial placement local for coordinator intent;
+   - preserves scheduler selection and reservation for automatic and manual worker intent.
+4. Add backend tests covering coordinator-local selection, contradictory input, automatic scheduling, and explicit worker behavior at the changed boundary.
+5. Add **Coordinator** to the create form's **Run on** selector and serialize its selection as explicit coordinator intent with no worker UUID.
+6. Add frontend tests for option visibility and payload mapping, using a small pure helper if that keeps the behavior independently testable.
+7. Regenerate shared types and run focused Rust/frontend tests, formatting, type checks, generated-type checks, lint, and broader checks in proportion to the touched code.
+8. Run an independent Codex diff review, address confirmed findings, and repeat verification until no significant findings remain.
+9. Record reusable clustered-placement knowledge in the project knowledge base, tag it with this task identifier, refresh the index, and commit the knowledge-base update separately as required.

@@ -28,6 +28,11 @@ import { CreateModeRepoPickerBar } from './CreateModeRepoPickerBar';
 import { ModelSelectorContainer } from '@/shared/components/ModelSelectorContainer';
 import { workerNodesApi } from '@/shared/lib/api';
 import {
+  AUTOMATIC_PLACEMENT,
+  COORDINATOR_PLACEMENT,
+  serializeWorkspacePlacement,
+} from '@/shared/lib/workspacePlacement';
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -85,7 +90,7 @@ export function CreateChatBoxContainer({
   const [hasInitializedStep, setHasInitializedStep] = useState(false);
   const [isSelectingRepos, setIsSelectingRepos] = useState(true);
   const [requestedWorkerNodeId, setRequestedWorkerNodeId] =
-    useState('automatic');
+    useState(AUTOMATIC_PLACEMENT);
   const { data: workerNodes = [] } = useQuery({
     queryKey: ['workerNodes'],
     queryFn: workerNodesApi.list,
@@ -269,8 +274,7 @@ export function CreateChatBoxContainer({
           }
         : null,
       attachment_ids: getAttachmentIds(),
-      requested_worker_node_id:
-        requestedWorkerNodeId === 'automatic' ? null : requestedWorkerNodeId,
+      ...serializeWorkspacePlacement(requestedWorkerNodeId),
     };
     const linkToIssue = linkedIssue
       ? {
@@ -363,8 +367,11 @@ export function CreateChatBoxContainer({
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="automatic">
+                          <SelectItem value={AUTOMATIC_PLACEMENT}>
                             {t('createMode.worker.automatic')}
+                          </SelectItem>
+                          <SelectItem value={COORDINATOR_PLACEMENT}>
+                            {t('createMode.worker.coordinator')}
                           </SelectItem>
                           {workerNodes.map((worker) => {
                             const eligible =
