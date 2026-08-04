@@ -1,71 +1,92 @@
-# Feature Specification: Concatenate Repeating Lines
+# Feature Specification: Restore Linked Workspace Breadcrumbs
 
 **Feature dir**: `specs/vk/a5f8-concat-repeating/`
-**Status**: Draft
+**Status**: Clarified
 
 ## Summary
 
-Compact uninterrupted runs of the same Codex review command in Vibe Kanban's
-conversation history. Repeated review passes currently consume most of the
-visible transcript—particularly on mobile—making meaningful reasoning and
-results difficult to find. One row with a compact repeat marker should retain
-the progress signal without the visual flood.
+Restore the full breadcrumb trail on linked workspace pages so users retain
+project and issue context even when asynchronously loaded collections observe
+the workspace relationship before they observe the linked project or issue.
 
 ## User Stories
 
-- As a user monitoring a long-running task, I want consecutive review passes
-  summarized in one line so that meaningful progress remains visible.
-- As a mobile user, I want repeated tool rows to consume minimal height so that
-  I can navigate the conversation without excessive scrolling.
-- As a user diagnosing a failed review pass, I want failures and interruptions
-  to remain distinct so that compaction does not misrepresent execution state.
+- As a user working in a project-linked workspace, I want to see the project,
+  issue when applicable, and workspace hierarchy so I know where the session
+  belongs.
+- As a user navigating between a workspace and its source project or issue, I
+  want resolved breadcrumb entries to be actionable so I can return directly to
+  the relevant board context.
+- As a user during synchronization or after a stale link, I want the header to
+  represent loading or unavailability truthfully rather than silently dropping
+  the linked hierarchy or displaying an internal identifier.
 
 ## Functional Requirements
 
-- FR-1: The system must represent an uninterrupted run of identical
-  `codex review --uncommitted` commands as one visible conversation row. Shell
-  wrapping or an absolute path to the `codex` executable does not change
-  eligibility after the command is normalized for display.
-- FR-2: The visible row must indicate later successful repetitions with a
-  compact marker.
-- FR-3: Repeat markers must remain bounded in size for arbitrarily long runs.
-- FR-4: The first occurrence must retain its existing visible representation.
-- FR-5: A changed command or any intervening visible entry must end the current
-  run.
-- FR-6: A failed, denied, timed-out, or otherwise unsuccessful occurrence must
-  remain visibly unsuccessful and must end successful-repeat reuse.
-- FR-7: Updates belonging to an older occurrence must not overwrite the newest
-  occurrence represented by a shared row.
-- FR-8: Streaming updates for one occurrence must update that occurrence rather
-  than incrementing the repeat count.
-- FR-9: The behavior must be consistent for all supported Codex event formats.
-- FR-10: Commands outside the eligible review-command scope must retain their
-  existing one-row-per-execution behavior.
+- FR-1: A workspace with a linked project must display a breadcrumb containing
+  the human-readable project name followed by the workspace label once the
+  project identity has been resolved.
+- FR-2: A workspace with both a linked project and linked issue must display the
+  human-readable project name, issue `simple_id`, and workspace label in that
+  order once both identities have been resolved.
+- FR-3: A linked entity's temporary absence from an asynchronously loaded
+  collection must not be treated as proof that the relationship is absent or
+  permanently unavailable.
+- FR-4: The system must distinguish initial loading, resolved identity, and
+  confirmed unavailability for linked breadcrumb entities.
+- FR-5: The full linked trail must be deferred while required human-readable
+  identity is still being resolved; a misleading partial hierarchy must not be
+  shown.
+- FR-6: A resolved project breadcrumb must navigate to the linked project, and a
+  resolved issue breadcrumb must navigate to the linked issue in that project.
+- FR-7: Internal project and issue UUIDs must be used only for lookup and
+  navigation and must never be rendered as breadcrumb labels.
+- FR-8: A confirmed unavailable issue must retain its hierarchy position with
+  the existing non-actionable `Issue unavailable` label.
+- FR-8a: A confirmed unavailable project must retain its hierarchy position
+  with a non-actionable `Project unavailable` label followed by the workspace
+  label. If the workspace also names an issue, its resolved or unavailable
+  position remains between those two entries.
+- FR-9: Unlinked workspaces and project-page navbar behavior must remain
+  unchanged.
+- FR-10: Desktop and mobile navbar layouts must consume the same prepared
+  breadcrumb state.
+- FR-11: Automated tests must cover collection misses followed by authoritative
+  resolution, confirmed absence, resolved label order, click behavior, and UUID
+  non-disclosure.
 
 ## Out of Scope
 
-- Non-adjacent deduplication.
-- Frontend-only hiding of existing rows.
-- Compaction of arbitrary shell commands.
-- Persisted raw-log rewriting.
-- Changes to deployment configuration or any service outside Vibe Kanban.
+- Redesigning navbar layout or breadcrumb styling.
+- Changing how workspaces are linked to projects or issues.
+- Changing synchronization infrastructure or entity identifier generation.
+- Changing services outside Vibe Kanban or its deployment configuration.
+- Introducing a user-facing UUID fallback.
 
 ## Acceptance Criteria
 
-- [x] Three adjacent successful `codex review --uncommitted` executions produce
-      one visible command row with two repetition ticks.
-- [x] Ten total adjacent successful occurrences use a counted marker rather
-      than nine individually allocated ticks.
-- [x] An intervening assistant, thinking, tool, system, or error entry causes a
-      later identical command to appear on a new row.
-- [x] A changed review command appears on a new row.
-- [x] Two identical non-review commands remain two rows.
-- [x] A failed repeat remains visibly failed without a success tick and a later
-      matching command starts a new run.
-- [x] Repeated updates for the same command ID neither create another row nor
-      increment the count.
-- [x] Direct app-server and legacy Codex protocol fixtures exhibit equivalent
-      behavior.
+- [ ] A project-linked workspace no longer falls back to only its workspace
+  title when the project collection temporarily lacks the linked project.
+- [ ] A resolved issue-linked workspace produces `Project / ISSUE-ID /
+  Workspace` in focused tests.
+- [ ] Resolved project and issue entries invoke navigation with their linked
+  UUIDs.
+- [ ] Loading does not produce a partial linked hierarchy.
+- [ ] Confirmed unavailable issue behavior remains explicit and non-actionable.
+- [ ] Confirmed unavailable project behavior is explicit and non-actionable
+  rather than collapsing to only the workspace title.
+- [ ] No tested state renders a project or issue UUID as a label.
+- [ ] Unlinked workspace and project-page behavior remains unchanged.
+- [ ] Relevant formatting, tests, type checks, and lint checks pass.
+
+## Clarifications
+
+- C1: A confirmed stale/deleted project is represented by a non-actionable
+  `Project unavailable` breadcrumb. This preserves the known relationship
+  hierarchy and distinguishes confirmed absence from an unlinked workspace.
+- C2: An authoritative detail-request error is a settled unavailable state for
+  this bounded navbar resolution attempt; normal query retry policy may recover
+  it later, but the navbar must not remain indefinitely hidden.
 
 ## Open Questions
 

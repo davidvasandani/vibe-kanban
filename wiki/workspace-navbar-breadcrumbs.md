@@ -53,7 +53,23 @@ to the unavailable state only for a confirmed miss or an exhausted request
 error. This keeps independent shape cursors from producing a false unavailable
 breadcrumb without leaving the navbar hidden forever on request failure.
 
+The project level has the same cross-shape race. `useAllOrganizationProjects`
+aggregates one Electric project collection per organization, while the selected
+workspace relationship arrives through a separate source. A completed aggregate
+that does not yet contain `workspace.project_id` is therefore not proof that the
+project relationship disappeared. Keep the aggregate as the fast path, then use
+the authenticated project-detail endpoint by UUID as the authoritative fallback.
+
+Model project resolution explicitly as `loading`, `resolved`, or `unavailable`,
+parallel to issue resolution. While project detail is loading, defer the linked
+trail. A resolved project uses its human-readable name and UUID-backed navigation.
+A settled miss or exhausted request error renders a non-actionable
+`Project unavailable` crumb instead of collapsing to only the workspace title or
+displaying the project UUID. Project and issue resolution can run concurrently;
+the builder defers the whole hierarchy while either required identity is loading.
+
 ## Contributed by
 
 - 6c5c-bread-crumbs-sho
 - vk/719f-vk-workspace-iss
+- vk/f195-bread-crumbs-are

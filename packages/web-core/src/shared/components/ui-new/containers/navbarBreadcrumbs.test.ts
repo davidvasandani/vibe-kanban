@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   buildWorkspaceBreadcrumbs,
   UNAVAILABLE_ISSUE_BREADCRUMB_LABEL,
+  UNAVAILABLE_PROJECT_BREADCRUMB_LABEL,
 } from './navbarBreadcrumbs';
 
 describe('buildWorkspaceBreadcrumbs', () => {
@@ -13,14 +14,17 @@ describe('buildWorkspaceBreadcrumbs', () => {
 
     const breadcrumbs = buildWorkspaceBreadcrumbs({
       shouldResolve: true,
-      project: { name: 'Project Alpha' },
+      projectState: {
+        kind: 'resolved',
+        label: 'Project Alpha',
+        onClick: onProjectClick,
+      },
       workspaceLabel: 'Workspace One',
       issueState: {
         kind: 'resolved',
         label: 'ALPHA-123',
         onClick: () => goToProjectIssue(linkedProjectId, linkedIssueId),
       },
-      onProjectClick,
     });
 
     expect(breadcrumbs?.map((item) => item.label)).toEqual([
@@ -44,10 +48,13 @@ describe('buildWorkspaceBreadcrumbs', () => {
   it('defers linked issue breadcrumbs while the issue label is loading', () => {
     const breadcrumbs = buildWorkspaceBreadcrumbs({
       shouldResolve: true,
-      project: { name: 'Project Alpha' },
+      projectState: {
+        kind: 'resolved',
+        label: 'Project Alpha',
+        onClick: vi.fn(),
+      },
       workspaceLabel: 'Workspace One',
       issueState: { kind: 'loading' },
-      onProjectClick: vi.fn(),
     });
 
     expect(breadcrumbs).toBeUndefined();
@@ -63,10 +70,13 @@ describe('buildWorkspaceBreadcrumbs', () => {
   it('builds unavailable linked issue breadcrumbs without issue navigation', () => {
     const breadcrumbs = buildWorkspaceBreadcrumbs({
       shouldResolve: true,
-      project: { name: 'Project Alpha' },
+      projectState: {
+        kind: 'resolved',
+        label: 'Project Alpha',
+        onClick: vi.fn(),
+      },
       workspaceLabel: 'Workspace One',
       issueState: { kind: 'unavailable' },
-      onProjectClick: vi.fn(),
     });
 
     expect(breadcrumbs?.map((item) => item.label)).toEqual([
@@ -90,10 +100,13 @@ describe('buildWorkspaceBreadcrumbs', () => {
   it('preserves unlinked workspace breadcrumbs', () => {
     const breadcrumbs = buildWorkspaceBreadcrumbs({
       shouldResolve: true,
-      project: { name: 'Project Alpha' },
+      projectState: {
+        kind: 'resolved',
+        label: 'Project Alpha',
+        onClick: vi.fn(),
+      },
       workspaceLabel: 'Workspace One',
       issueState: { kind: 'none' },
-      onProjectClick: vi.fn(),
     });
 
     expect(breadcrumbs?.map((item) => item.label)).toEqual([
@@ -106,16 +119,48 @@ describe('buildWorkspaceBreadcrumbs', () => {
   it('does not build workspace breadcrumbs when resolution is inapplicable', () => {
     const breadcrumbs = buildWorkspaceBreadcrumbs({
       shouldResolve: false,
-      project: { name: 'Project Alpha' },
+      projectState: {
+        kind: 'resolved',
+        label: 'Project Alpha',
+        onClick: vi.fn(),
+      },
       workspaceLabel: 'Workspace One',
       issueState: {
         kind: 'resolved',
         label: 'ALPHA-123',
         onClick: vi.fn(),
       },
-      onProjectClick: vi.fn(),
     });
 
     expect(breadcrumbs).toBeUndefined();
+  });
+
+  it('defers breadcrumbs while the project label is loading', () => {
+    const breadcrumbs = buildWorkspaceBreadcrumbs({
+      shouldResolve: true,
+      projectState: { kind: 'loading' },
+      workspaceLabel: 'Workspace One',
+      issueState: { kind: 'none' },
+    });
+
+    expect(breadcrumbs).toBeUndefined();
+  });
+
+  it('builds unavailable project breadcrumbs without project navigation', () => {
+    const breadcrumbs = buildWorkspaceBreadcrumbs({
+      shouldResolve: true,
+      projectState: { kind: 'unavailable' },
+      workspaceLabel: 'Workspace One',
+      issueState: { kind: 'none' },
+    });
+
+    expect(breadcrumbs?.map((item) => item.label)).toEqual([
+      UNAVAILABLE_PROJECT_BREADCRUMB_LABEL,
+      'Workspace One',
+    ]);
+    expect(breadcrumbs?.[0]?.onClick).toBeUndefined();
+    expect(breadcrumbs?.some((item) => item.label === 'project-uuid-123')).toBe(
+      false
+    );
   });
 });

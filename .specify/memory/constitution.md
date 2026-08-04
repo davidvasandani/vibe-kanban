@@ -51,11 +51,18 @@ Extend existing machinery instead of forking it. Before adding a code path,
 search for one that already does the job (git history, the knowledge base, the
 crate's `AGENTS.md`) and build on it.
 
-### VII. Workspace breadcrumbs preserve issue identity
+### VII. Workspace breadcrumbs preserve hierarchy and identity
+Any linked workspace breadcrumb MUST preserve every known level of its hierarchy:
+project, issue when present, then workspace. A collection snapshot that has not
+yet observed a linked entity is not proof that the relationship disappeared;
+loading and confirmed absence are distinct states, and an authoritative detail
+lookup is required before declaring a linked entity unavailable.
+
 Any workspace breadcrumb that represents or links through an issue MUST display
 the issue ID. The ID is the stable cross-view reference for task identity, so it
 must remain visible even when the workspace title, issue title, or responsive
-layout is shortened.
+layout is shortened. Internal UUIDs are lookup and routing keys, never fallback
+labels.
 
 ### VIII. Managed tools are pinned, verified, and user-owned
 Managed CLI catalog entries are a supply-chain boundary. Each tool must have a
@@ -299,7 +306,9 @@ environment values.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.19.0 (adds one-convention-per-concept — reuse the existing
+**Version**: 0.20.0 (strengthens workspace breadcrumb hierarchy across async
+collection races and prohibits UUID fallback labels; 0.19.0 added
+one-convention-per-concept — reuse the existing
 resolution rule rather than re-deriving it, accept the producer's default value,
 and report failures with the fact that identifies them instead of a generic
 internal error; also makes writes into a consolidated shared namespace additive

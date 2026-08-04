@@ -1,30 +1,22 @@
-# Data Model: Concatenate Repeating Lines
+# Data Model: Breadcrumb Resolution State
 
-All state is process-local inside one Codex log-normalization stream.
+No persisted model changes.
 
-## `RepeatedCommand`
+## Project state
 
-- `entry_index: usize` — original normalized row shared by the run.
-- `command: String` — exact normalized eligible command used for equality.
-- `count: usize` — total occurrences represented by the row, including the
-  first.
-- `latest_call_id: String` — only this lifecycle may replace the shared row.
-- `latest_completed: bool` — true only after the latest occurrence succeeds;
-  required before the next occurrence can reuse the row.
+- `loading`: linked project relationship exists; identity resolution is active.
+- `resolved`: human-readable project name plus project navigation action.
+- `unavailable`: resolution settled without a displayable project; render a
+  fixed non-actionable label.
 
-## `CommandState` addition
+## Issue state
 
-- `repeat_count: usize` — total occurrences represented by this command's
-  visible row. Defaults to one and is copied into every streamed/completed
-  replacement so the marker is stable.
+Existing states remain:
 
-## State transitions
+- `none`: no linked issue relationship.
+- `loading`: linked issue identity resolution is active.
+- `resolved`: issue `simple_id` plus issue navigation action.
+- `unavailable`: fixed non-actionable issue label.
 
-- `none -> active(count=1, incomplete)` on the first eligible command.
-- `active(success) -> active(count+1, incomplete)` on an adjacent identical
-  eligible command with a new call ID.
-- `active(incomplete) -> active(success)` on successful owner completion.
-- `active(incomplete) -> active(failed)` on unsuccessful owner completion;
-  the row is failed and a future call allocates a new row.
-- Any changed/intervening command fails the adjacency/equality guard and starts
-  a new tracker at count one.
+The builder returns no trail while either required entity is loading. Otherwise
+it emits project, optional issue, and workspace entries in hierarchy order.

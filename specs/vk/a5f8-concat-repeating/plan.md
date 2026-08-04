@@ -1,95 +1,67 @@
-# Implementation Plan: Concatenate Repeating Lines
+# Implementation Plan: Restore Linked Workspace Breadcrumbs
 
 **Spec**: `./spec.md`
-**Status**: Draft
+**Status**: Ready
 
 ## Technical Context
 
-The change is confined to Rust in
-`crates/executors/src/executors/codex/normalize_logs.rs`. That module consumes
-both `codex_app_server_protocol` item notifications and legacy
-`codex_protocol::EventMsg` events, and writes normalized JSON patches through a
-shared `EntryIndexProvider` into `MsgStore`.
-
-No storage migration, public API/type change, frontend change, deployment
-change, or new dependency is required.
+The change is in the React/TypeScript shared frontend. `NavbarContainer.tsx`
+resolves remote entities using Electric-backed collections and TanStack Query;
+`packages/ui/src/components/Navbar.tsx` renders prepared breadcrumb items for
+both local and remote web consumers. The remote Rust server already exposes
+authenticated `GET /v1/projects/{project_id}` and `GET /v1/issues/{issue_id}`
+routes, so no backend or generated-type change is needed.
 
 ## Architecture & Approach
 
-### Shared repeat state
-
-Extend `LogState` with one optional `RepeatedCommand` value. It records the
-original normalized entry index and display command, number of total
-occurrences, latest call ID, whether that latest occurrence completed
-successfully, and the last successful normalized-entry snapshot.
-
-### Eligibility and display
-
-Add a predicate for the normalized `codex review --uncommitted` operation. It
-accepts the existing shell-unwrapped display form, including an absolute path to
-the `codex` executable, but rejects other arguments and arbitrary repeated
-commands.
-
-Add `repeat_ticks(total_count)` with the established threshold: up to eight
-repetitions render inline ticks; larger runs render `✓ ×N`. `CommandState`
-carries its current repeat count, while rendering excludes the in-flight
-occurrence until it succeeds.
-
-### Lifecycle
-
-Centralize command start and completion behavior in `LogState` helpers used by
-both protocol branches:
-
-1. On an eligible new call ID, reuse the tracked index only when the command is
-   identical, the latest occurrence succeeded, and the shared entry index shows
-   no intervening allocation.
-2. Store every in-flight call in `commands` for ID-based routing, while marking
-   the newest call ID as owner of the shared row.
-3. Streaming updates for that same ID replace the shared row without changing
-   the repeat count.
-4. Completion updates repeat ownership only for its latest call ID; older calls
-   still complete their distinct rows. Success arms the next repeat. Failure
-   restores the prior successful aggregate and moves the failed call to a new
-   row before disarming reuse.
-5. Non-eligible commands keep the existing fresh-index path.
-
-The current Codex normalizer does not reset its `EntryIndexProvider` during a
-session, so no additional reset hook is required.
+1. Add `getProject(projectId)` beside `getIssue(issueId)` in
+   `packages/web-core/src/shared/lib/remoteApi.ts`. It uses the existing project
+   detail route and the established null-on-404/throw-on-other-error convention.
+2. Cover the helper in `remoteApi.test.ts` using the same authenticated-fetch
+   test harness as `getIssue`.
+3. In `NavbarContainer.tsx`, keep the all-organization project collection as the
+   primary source. Once it is ready and misses the linked project, start a
+   TanStack Query keyed by the project UUID for authoritative detail resolution.
+4. Derive a project state: collection/detail loading defers the trail; a found
+   project supplies its name and project navigation callback; settled absence or
+   request failure supplies an unavailable project state.
+5. Generalize `navbarBreadcrumbs.ts` from a nullable project object to explicit
+   project `loading`/`resolved`/`unavailable` state, analogous to its issue
+   state. This preserves hierarchy without manufacturing an identity.
+6. Extend `navbarBreadcrumbs.test.ts` for loading and unavailable project cases
+   while preserving existing issue and unlinked coverage.
 
 ## Data Model
 
-See `./data-model.md`.
+See `./data-model.md`. No persisted data changes.
 
 ## Contracts
 
-See `./contracts/normalized-patch-stream.md`.
+See `./contracts/project-detail.md`. The server contract already exists; this
+feature adds only a typed frontend consumer.
 
 ## Research Notes
 
-See `./research.md`.
+See `./research.md`. No dependency is added.
 
 ## Constitution Check
 
-- Principle II: focused fixtures cover adjacency, status, ownership, marker
-  bounds, and both protocol formats.
-- Principles III and VI: reuse the existing server-normalizer compaction
-  pattern and make the smallest command-specific extension.
-- Principle IX: equality, adjacency, completion, latest-owner, and bounded-marker
-  invariants are explicit.
-- Constraints: no generated files, dependency, remote mutation, destructive
-  operation, or external service are involved; `pnpm run format` will run.
+- II: focused pure-builder and API-helper tests check behavior.
+- III/VI: the plan reuses the existing project detail endpoint, query library,
+  issue fallback pattern, and presentational navbar.
+- IV: data resolution remains in web-core; packages/ui receives prepared items.
+- VII: async collection absence is not treated as relationship absence, and
+  UUIDs remain lookup/navigation values only.
+- XIV: validation uses the lockfile-defined frontend toolchain.
+- XXI: project detail follows the existing `getIssue` resolution/error rule.
 
-No constitution deviation is planned.
+No constitution deviation or open question remains.
 
 ## Risks & Dependencies
 
-- Different protocol formats may provide differently wrapped command strings.
-  The predicate uses the same shell-unwrapped representation already exposed in
-  `ActionType::CommandRun`, and fixtures cover both paths.
-- Late events could overwrite a newer repeat. Latest-call ownership prevents
-  stale replacement.
-- A generic compactor could hide meaningful repeated shell work. Eligibility is
-  deliberately limited to the reported review operation.
-- Reusing one row necessarily exposes only the newest occurrence's detailed
-  result. This matches existing Grok compaction and is limited to review passes
-  whose visible flood is the reported defect.
+- Query retry behavior can keep `isLoading` false while a retry is scheduled;
+  explicit state derivation must settle to unavailable without hiding forever.
+- Project and issue fallbacks can run concurrently; their state must combine
+  deterministically and avoid rendering a partial trail.
+- `Project unavailable / Workspace` requires at least two breadcrumb items so it
+  remains compatible with the builder's existing non-singleton rule.

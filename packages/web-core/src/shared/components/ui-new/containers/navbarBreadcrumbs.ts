@@ -1,6 +1,12 @@
 import type { NavbarBreadcrumbItem } from '@vibe/ui/components/Navbar';
 
 export const UNAVAILABLE_ISSUE_BREADCRUMB_LABEL = 'Issue unavailable';
+export const UNAVAILABLE_PROJECT_BREADCRUMB_LABEL = 'Project unavailable';
+
+export type WorkspaceBreadcrumbProjectState =
+  | { kind: 'loading' }
+  | { kind: 'resolved'; label: string; onClick: () => void }
+  | { kind: 'unavailable' };
 
 export type WorkspaceBreadcrumbIssueState =
   | { kind: 'none' }
@@ -10,25 +16,29 @@ export type WorkspaceBreadcrumbIssueState =
 
 interface BuildWorkspaceBreadcrumbsOptions {
   shouldResolve: boolean;
-  project: { name: string } | null | undefined;
+  projectState: WorkspaceBreadcrumbProjectState;
   workspaceLabel: string;
   issueState: WorkspaceBreadcrumbIssueState;
-  onProjectClick: () => void;
 }
 
 export function buildWorkspaceBreadcrumbs({
   shouldResolve,
-  project,
+  projectState,
   workspaceLabel,
   issueState,
-  onProjectClick,
 }: BuildWorkspaceBreadcrumbsOptions): NavbarBreadcrumbItem[] | undefined {
-  if (!shouldResolve || !project || issueState.kind === 'loading') {
+  if (
+    !shouldResolve ||
+    projectState.kind === 'loading' ||
+    issueState.kind === 'loading'
+  ) {
     return undefined;
   }
 
   const items: NavbarBreadcrumbItem[] = [
-    { label: project.name, onClick: onProjectClick },
+    projectState.kind === 'resolved'
+      ? { label: projectState.label, onClick: projectState.onClick }
+      : { label: UNAVAILABLE_PROJECT_BREADCRUMB_LABEL },
   ];
 
   if (issueState.kind === 'resolved') {

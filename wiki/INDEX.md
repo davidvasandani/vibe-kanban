@@ -128,11 +128,11 @@ contributed to it.
   (optional-controlled state needs an internal fallback; don't render a
   no-op `<button>` — use a non-interactive tile).
 - [workspace-navbar-breadcrumbs.md](workspace-navbar-breadcrumbs.md) — How
-  workspace breadcrumbs preserve linked issue identity across asynchronous
-  shape states: relationship truth vs loaded rows, cross-shape cursor races,
-  authoritative issue-detail fallback, `simple_id` vs UUID, the
-  none/loading/resolved/unavailable state model, and the pure-builder testing
-  seam.
+  workspace breadcrumbs preserve linked project and issue identity across
+  asynchronous shape states: relationship truth vs loaded rows, cross-shape
+  cursor races, authoritative project/issue detail fallbacks, human-readable
+  labels vs UUIDs, explicit loading/resolved/unavailable state models, and the
+  pure-builder testing seam.
 - [workspace-carousel-view.md](workspace-carousel-view.md) — Rendering N
   live workspace chats at once (the carousel view): the prop-driven chat
   stack (`ExecutionProcessesProvider` + `WorkspacesMainContainer`, no
