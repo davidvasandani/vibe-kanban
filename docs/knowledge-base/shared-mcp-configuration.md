@@ -85,12 +85,24 @@ safer than generating the whole TOML file. Use immutable deployment paths and
 put environment-specific private endpoints in deployment configuration, not in
 the global product catalog.
 
+Cluster-wide MCP commands must be immutable deployment artifacts. Do not point
+worker configuration at generated files in a source checkout: worker nodes may
+deliberately lack both that checkout and its build user. Build the stdio client
+as a Nix package with a committed dependency lock, then write its store path to
+every coordinator and worker's native Codex configuration.
+
 Configuration alone is not proof of availability. Diagnose the complete
 boundary in order: configured server names for the launch identity, app-server
 startup/handshake status, registered tool counts, and the worker that actually
 owns the workspace process. Historical workspace rows may be insufficient once
 their process or worker-affinity record has been removed, so retain or surface
 startup failures and server-status snapshots while the session is live.
+
+Browser traffic inspection should be a first-class bounded tool rather than an
+instruction to run arbitrary page code. Capture request, response, and failure
+metadata at session creation, cap the in-memory buffer, default reads to
+`fetch`/`xhr`, and support read-and-clear. Avoid collecting request or response
+bodies and headers by default because those commonly contain credentials.
 
 Catalog changes do not rewrite native executor files that were saved from an
 older bundled template. If a later immutable pin makes those files appear to
