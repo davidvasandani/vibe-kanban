@@ -1,7 +1,8 @@
 # Shared MCP configuration
 
 Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`,
-`c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`, `d893-fix-slack-mcp`
+`c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`, `d893-fix-slack-mcp`,
+`067cb434-mcp-tools`
 
 Vibe Kanban derives shared MCP settings from each base executor's native config
 file. There is no separate registry: the native files remain the source consumed
@@ -73,6 +74,23 @@ see [forked-mcp-server-packaging](forked-mcp-server-packaging.md).
 The backend exposes this catalog through `/api/mcp-config/default`, but the
 current shared MCP settings UI does not render catalog suggestions. Treat catalog
 availability and UI discoverability as separate capabilities when scoping work.
+
+Catalog presence also does not materialize an MCP server into an executor's
+native configuration. Codex discovers servers from the `config.toml` belonging
+to the exact identity and `CODEX_HOME` that launch `codex app-server`. For a
+deployment-owned server, seed that native configuration under the service
+identity before Vibe Kanban starts. `codex mcp add <name> -- <command>` is an
+idempotent named-table update: it preserves unrelated Codex settings and is
+safer than generating the whole TOML file. Use immutable deployment paths and
+put environment-specific private endpoints in deployment configuration, not in
+the global product catalog.
+
+Configuration alone is not proof of availability. Diagnose the complete
+boundary in order: configured server names for the launch identity, app-server
+startup/handshake status, registered tool counts, and the worker that actually
+owns the workspace process. Historical workspace rows may be insufficient once
+their process or worker-affinity record has been removed, so retain or surface
+startup failures and server-status snapshots while the session is live.
 
 Catalog changes do not rewrite native executor files that were saved from an
 older bundled template. If a later immutable pin makes those files appear to
