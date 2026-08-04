@@ -63,7 +63,7 @@ See `./research.md`. No new dependency is needed.
 - Equal `basis-0 flex-1` shares can make content shorter than its intrinsic size;
   `min-h-0` and body overflow are required to prevent the content from forcing
   its section larger.
-- The non-collapsible Issue section is always expanded and therefore joins the
-  same pool, preventing it from starving other sections.
+- The non-collapsible Issue section remains intrinsic so its compact content
+  does not consume an equal share and starve flexible sections.
 - Shared UI changes affect local and remote frontends, but the new behavior is
   opt-in and only enabled by the workspace right drawer.

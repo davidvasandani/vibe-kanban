@@ -14,10 +14,10 @@ Contract when `false` or omitted:
 
 Contract when `true`:
 
-- An expanded (or non-collapsible) section root grows and shrinks as an equal
-  participant in its parent's remaining vertical space.
-- A collapsed section root uses intrinsic header height and does not grow or
-  shrink.
+- An expanded collapsible section root grows and shrinks as an equal participant
+  in its parent's remaining vertical space.
+- A collapsed or non-collapsible section root uses intrinsic height and does not
+  grow or shrink.
 - Expansion state, persistence, actions, and rendered children retain their
   existing behavior.
 
