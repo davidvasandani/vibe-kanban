@@ -47,22 +47,32 @@ export function useMcpRefresh(
 ) {
   const api = options.api ?? sessionsApi;
   const pollIntervalMs = options.pollIntervalMs ?? 2000;
-  const sessionKey = workspaceId && sessionId ? `${workspaceId}:${sessionId}` : null;
+  const sessionKey =
+    workspaceId && sessionId ? `${workspaceId}:${sessionId}` : null;
   const activeSessionKeyRef = useRef(sessionKey);
   activeSessionKeyRef.current = sessionKey;
 
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isReconcilingBusy, setIsReconcilingBusy] = useState(false);
   const [result, setResult] = useState<McpRefreshResult | null>(null);
   const notifiedResultRef = useRef<string | null>(null);
+  const latestOperationRef = useRef(0);
 
   const applyStatus = useCallback(
     (
       expectedSessionKey: string,
+      operation: number,
       nextResult: McpRefreshResult | null,
       notify: boolean
     ) => {
-      if (activeSessionKeyRef.current !== expectedSessionKey) return false;
+      if (
+        activeSessionKeyRef.current !== expectedSessionKey ||
+        latestOperationRef.current !== operation
+      ) {
+        return false;
+      }
       setResult(nextResult);
+      setIsReconcilingBusy(false);
       if (notify && nextResult) {
         const notificationKey = `${nextResult.generation}:${nextResult.status}`;
         if (notifiedResultRef.current !== notificationKey) {
@@ -78,8 +88,9 @@ export function useMcpRefresh(
   const readCanonicalStatus = useCallback(
     async (expectedSessionKey: string, notify: boolean) => {
       if (!workspaceId || !sessionId) return null;
+      const operation = ++latestOperationRef.current;
       const nextResult = await api.getMcpRefreshStatus(workspaceId, sessionId);
-      applyStatus(expectedSessionKey, nextResult, notify);
+      applyStatus(expectedSessionKey, operation, nextResult, notify);
       return nextResult;
     },
     [api, applyStatus, sessionId, workspaceId]
@@ -88,6 +99,7 @@ export function useMcpRefresh(
   useEffect(() => {
     setResult(null);
     setIsRefreshing(false);
+    setIsReconcilingBusy(false);
     notifiedResultRef.current = null;
     if (!sessionKey) return;
 
@@ -97,30 +109,69 @@ export function useMcpRefresh(
   }, [readCanonicalStatus, sessionKey]);
 
   useEffect(() => {
-    if (!sessionKey || result?.status !== 'pending_next_turn') return;
-    const timer = window.setInterval(() => {
-      void readCanonicalStatus(sessionKey, true).catch(() => {
+    if (
+      !sessionKey ||
+      (result?.status !== 'pending_next_turn' && !isReconcilingBusy)
+    ) {
+      return;
+    }
+    let cancelled = false;
+    let timer: number;
+    const poll = async () => {
+      await readCanonicalStatus(sessionKey, true).catch(() => {
         // Keep the last confirmed state; a later poll may recover.
       });
-    }, pollIntervalMs);
-    return () => window.clearInterval(timer);
-  }, [pollIntervalMs, readCanonicalStatus, result?.status, sessionKey]);
+      if (!cancelled) {
+        timer = window.setTimeout(poll, pollIntervalMs);
+      }
+    };
+    timer = window.setTimeout(poll, pollIntervalMs);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    isReconcilingBusy,
+    pollIntervalMs,
+    readCanonicalStatus,
+    result?.status,
+    sessionKey,
+  ]);
 
   const refresh = useCallback(async () => {
     if (!workspaceId || !sessionId || !sessionKey || isRefreshing) return;
     setIsRefreshing(true);
+    const operation = ++latestOperationRef.current;
     try {
       const nextResult = await api.refreshMcpTools(workspaceId, sessionId);
-      if (!applyStatus(sessionKey, nextResult, true)) return;
       if (nextResult.status === 'busy') {
-        await readCanonicalStatus(sessionKey, false);
+        if (
+          activeSessionKeyRef.current !== sessionKey ||
+          latestOperationRef.current !== operation
+        ) {
+          return;
+        }
+        notifyResult(nextResult);
+        setIsRefreshing(false);
+        setIsReconcilingBusy(true);
+        await readCanonicalStatus(sessionKey, false).catch(() => {
+          // The serialized status poll will keep reconciling this busy view.
+        });
+        return;
       }
+      applyStatus(sessionKey, operation, nextResult, true);
     } catch {
-      if (activeSessionKeyRef.current === sessionKey) {
+      if (
+        activeSessionKeyRef.current === sessionKey &&
+        latestOperationRef.current === operation
+      ) {
         toast.error('MCP refresh failed.');
       }
     } finally {
-      if (activeSessionKeyRef.current === sessionKey) {
+      if (
+        activeSessionKeyRef.current === sessionKey &&
+        latestOperationRef.current === operation
+      ) {
         setIsRefreshing(false);
       }
     }
@@ -163,7 +214,7 @@ export function useMcpRefresh(
   }, [result]);
 
   return {
-    isRefreshing,
+    isRefreshing: isRefreshing || isReconcilingBusy,
     refresh,
     result,
     tooltip,

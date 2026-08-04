@@ -16,6 +16,10 @@ vi.mock('sonner', () => ({
   },
 }));
 
+vi.mock('@/shared/lib/api', () => ({
+  sessionsApi: {},
+}));
+
 function refreshResult(
   status: McpRefreshStatus,
   generation = 1n
@@ -54,7 +58,7 @@ function Harness() {
 
 async function renderHook() {
   await act(async () => {
-    root.render(<Harness />);
+    root.render(React.createElement(Harness));
   });
 }
 
@@ -133,5 +137,76 @@ describe('useMcpRefresh', () => {
     });
 
     expect(current.result).toBeNull();
+  });
+
+  it('does not let an older same-session hydration overwrite a refresh', async () => {
+    let resolveHydration: (value: McpRefreshResult | null) => void = () => {};
+    api.getMcpRefreshStatus.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveHydration = resolve;
+        })
+    );
+    api.refreshMcpTools.mockResolvedValue(
+      refreshResult('pending_next_turn', 2n)
+    );
+
+    await renderHook();
+    await act(async () => {
+      await current.refresh();
+    });
+    expect(current.result?.status).toBe('pending_next_turn');
+
+    await act(async () => {
+      resolveHydration(null);
+    });
+
+    expect(current.result?.status).toBe('pending_next_turn');
+    expect(current.result?.generation).toBe(2n);
+  });
+
+  it('waits for a slow status poll before scheduling another one', async () => {
+    let resolvePoll: (value: McpRefreshResult | null) => void = () => {};
+    api.getMcpRefreshStatus
+      .mockResolvedValueOnce(refreshResult('pending_next_turn'))
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolvePoll = resolve;
+          })
+      );
+
+    await renderHook();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(api.getMcpRefreshStatus).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolvePoll(refreshResult('refreshed'));
+    });
+
+    expect(current.result?.status).toBe('refreshed');
+  });
+
+  it('keeps the control locked when busy reconciliation temporarily fails', async () => {
+    api.refreshMcpTools.mockResolvedValue(refreshResult('busy'));
+    api.getMcpRefreshStatus
+      .mockResolvedValueOnce(null)
+      .mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValueOnce(refreshResult('pending_next_turn'));
+
+    await renderHook();
+    await act(async () => {
+      await current.refresh();
+    });
+
+    expect(current.result).toBeNull();
+    expect(current.isRefreshing).toBe(true);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(current.result?.status).toBe('pending_next_turn');
   });
 });
