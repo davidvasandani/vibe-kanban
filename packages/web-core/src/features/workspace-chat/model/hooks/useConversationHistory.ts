@@ -32,6 +32,7 @@ export interface UseConversationHistoryResult {
   releaseEarlierHistory: () => void;
 }
 import {
+  HISTORY_FETCH_CONCURRENCY,
   MAX_RECENT_HISTORY_PROCESSES,
   MIN_INITIAL_ENTRIES,
   REMAINING_BATCH_SIZE,
@@ -39,6 +40,8 @@ import {
 import {
   getRecentProcessIdsToRetain,
   getUnloadedHistoricProcesses,
+  loadProcessesInOrder,
+  type LoadedProcessEntries,
 } from '../conversation-history-paging';
 
 export const useConversationHistory = ({
@@ -278,43 +281,42 @@ export const useConversationHistory = ({
     [loadRunningAndEmit]
   );
 
+  // Build the keyed store the rest of the hook works in from an ordered fetch
+  // result. Kept separate so ordering lives in one tested place.
+  const toExecutionProcessState = (
+    loaded: LoadedProcessEntries<PatchType>[]
+  ): ExecutionProcessStateStore => {
+    const state: ExecutionProcessStateStore = {};
+    for (const { process, entries } of loaded) {
+      state[process.id] = {
+        executionProcess: process,
+        entries: entries.map((e, idx) => patchWithKey(e, process.id, idx)),
+      };
+    }
+    return state;
+  };
+
   const loadHistoricEntries = useCallback(
     async (maxEntries?: number): Promise<ExecutionProcessStateStore> => {
-      const localDisplayedExecutionProcesses: ExecutionProcessStateStore = {};
+      if (!executionProcesses?.current) return {};
 
-      if (!executionProcesses?.current) return localDisplayedExecutionProcesses;
+      const historicProcesses = [...executionProcesses.current]
+        .reverse()
+        .filter((process) => process.status !== ExecutionProcessStatus.running);
 
-      for (const executionProcess of [
-        ...executionProcesses.current,
-      ].reverse()) {
-        if (executionProcess.status === ExecutionProcessStatus.running)
-          continue;
-
-        let entries: PatchType[];
-        try {
-          entries =
-            await loadEntriesForHistoricExecutionProcess(executionProcess);
-        } catch {
-          continue;
-        }
-        const entriesWithKey = entries.map((e, idx) =>
-          patchWithKey(e, executionProcess.id, idx)
-        );
-
-        localDisplayedExecutionProcesses[executionProcess.id] = {
-          executionProcess,
-          entries: entriesWithKey,
-        };
-
-        if (
+      const { loaded } = await loadProcessesInOrder(
+        historicProcesses,
+        loadEntriesForHistoricExecutionProcess,
+        // Unchanged threshold: only agent and review turns count towards it,
+        // which is what `flattenEntries` selects. Script processes inside the
+        // window are still loaded — they are rendered as their own rows.
+        (soFar) =>
           maxEntries != null &&
-          flattenEntries(localDisplayedExecutionProcesses).length > maxEntries
-        ) {
-          break;
-        }
-      }
+          flattenEntries(toExecutionProcessState(soFar)).length > maxEntries,
+        HISTORY_FETCH_CONCURRENCY
+      );
 
-      return localDisplayedExecutionProcesses;
+      return toExecutionProcessState(loaded);
     },
     [executionProcesses]
   );
@@ -335,41 +337,23 @@ export const useConversationHistory = ({
       batch: ExecutionProcessStateStore;
       failedProcessCount: number;
     }> => {
-      const batch: ExecutionProcessStateStore = {};
-      let loadedEntryCount = 0;
-      let failedProcessCount = 0;
-
       const unloadedProcesses = getUnloadedHistoricProcesses(
         executionProcesses.current,
         new Set(Object.keys(displayedExecutionProcesses.current))
       );
-      for (const executionProcess of unloadedProcesses) {
-        let entries: PatchType[];
-        try {
-          entries =
-            await loadEntriesForHistoricExecutionProcess(executionProcess);
-        } catch (error) {
-          console.error(
-            `Failed to load historic logs for process ${executionProcess.id}`,
-            error
-          );
-          failedProcessCount += 1;
-          continue;
-        }
-        const entriesWithKey = entries.map((e, idx) =>
-          patchWithKey(e, executionProcess.id, idx)
-        );
 
-        batch[executionProcess.id] = {
-          executionProcess,
-          entries: entriesWithKey,
-        };
+      const { loaded, failedProcessCount } = await loadProcessesInOrder(
+        unloadedProcesses,
+        loadEntriesForHistoricExecutionProcess,
+        // This batch counts every loaded entry, not just the conversational
+        // ones — unchanged from when this loop was serial.
+        (soFar) =>
+          soFar.reduce((total, { entries }) => total + entries.length, 0) >=
+          batchSize,
+        HISTORY_FETCH_CONCURRENCY
+      );
 
-        loadedEntryCount += entriesWithKey.length;
-        if (loadedEntryCount >= batchSize) break;
-      }
-
-      return { batch, failedProcessCount };
+      return { batch: toExecutionProcessState(loaded), failedProcessCount };
     },
     []
   );

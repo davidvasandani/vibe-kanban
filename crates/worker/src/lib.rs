@@ -223,7 +223,6 @@ pub async fn run_with_drain(
         MetricsSampler::spawn(&metrics, rx)
     };
     let worker_node_id = config.worker_node_id;
-    let terminals = terminal::TerminalService::new(path_authority.clone());
     let health_supervisor = supervisor.clone();
     let health_admission_draining = admission_draining.clone();
     let router = Router::new()
@@ -238,7 +237,7 @@ pub async fn run_with_drain(
                 ))
             }),
         )
-        .merge(worker_api::router(&config, supervisor, metrics.clone(), terminals).await?);
+        .merge(worker_api::router(&config, supervisor, metrics.clone()).await?);
     let listener = TcpListener::bind(config.listen_addr).await?;
     tracing::info!(
         worker_node_id = %config.worker_node_id,
