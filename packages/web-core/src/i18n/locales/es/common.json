@@ -517,7 +517,8 @@
     },
     "worker": {
       "label": "Ejecutar en",
-      "automatic": "Colocación automática"
+      "automatic": "Colocación automática",
+      "coordinator": "Coordinador"
     },
     "repoPicker": {
       "actions": {

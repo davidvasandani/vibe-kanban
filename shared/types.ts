@@ -890,6 +890,10 @@ export type GetPrCommentsQuery = { repo_id: string, };
 
 export type CreateAndStartWorkspaceRequest = { name: string | null, repos: Array<WorkspaceRepoInput>, linked_issue: LinkedIssueInfo | null, executor_config: ExecutorConfig, prompt: string, attachment_ids: Array<string> | null, 
 /**
+ * Explicitly retain coordinator-local placement in cluster mode.
+ */
+run_on_coordinator: boolean, 
+/**
  * Optional manual placement override. `None` uses automatic scheduling.
  */
 requested_worker_node_id: string | null, };
