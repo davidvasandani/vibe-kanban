@@ -1,16 +1,8 @@
-# Implementation Plan: Legacy MCP Identifier Migration
+# Implementation Plan: Firecrawl Browser MCP Smoke Test
 
-1. Extend the constitution and VAS MCP specification with collision-safe legacy
-   identifier migration requirements.
-2. Model migration candidates from native snapshots without mutating files on
-   read.
-3. Return safe identifiers and preserved display labels to the shared settings
-   editor only when the migration is unambiguous across profiles.
-4. Make save atomically rename legacy native keys across assigned profiles and
-   update display-label metadata; reject collisions before any write.
-5. Add focused tests for `Atlassian Rovo`, credentials/assignment preservation,
-   collisions, conflicts, and Codex-native output.
-6. Update reusable knowledge, run formatting and focused Rust tests, then iterate
-   independent Codex review until clean.
-7. Commit, publish, merge, deploy, and verify the coordinator no longer stores
-   the legacy Atlassian key.
+1. Inspect the active tool catalog for the configured Firecrawl browser MCP and identify its page-navigation operation.
+2. Invoke that MCP operation with `https://admin13.parpos.com/`, without credentials or follow-up interactions.
+3. Validate the returned status, final URL, and visible page evidence; if invocation fails, preserve the exact failure boundary (tool unavailable, connection failure, navigation failure, or target response).
+4. Review the repository diff to confirm it contains only this task's specification and plan artifacts.
+5. Run an independent Codex CLI review of the diff, address confirmed significant findings, and repeat review until it reports none.
+6. Report the smoke-test outcome and review status to the user.
