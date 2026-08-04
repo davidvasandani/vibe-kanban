@@ -37,6 +37,7 @@ interface CollapsibleSectionHeaderProps {
   headerExtra?: ReactNode;
   children?: ReactNode;
   className?: string;
+  fillAvailableSpace?: boolean;
 }
 
 export function CollapsibleSectionHeader({
@@ -48,6 +49,7 @@ export function CollapsibleSectionHeader({
   headerExtra,
   children,
   className,
+  fillAvailableSpace = false,
 }: CollapsibleSectionHeaderProps) {
   const [expanded, setExpanded] = useState(() =>
     getInitialExpanded(persistKey, defaultExpanded)
@@ -126,7 +128,17 @@ export function CollapsibleSectionHeader({
   );
 
   return (
-    <div className={cn('flex flex-col h-full min-h-0', className)}>
+    <div
+      className={cn(
+        'flex flex-col',
+        fillAvailableSpace
+          ? isExpanded
+            ? 'flex-1 min-h-0'
+            : 'flex-none h-auto'
+          : 'h-full min-h-0',
+        className
+      )}
+    >
       <div className="">
         {collapsible ? (
           <button
