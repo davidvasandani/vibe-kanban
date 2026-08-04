@@ -20,6 +20,7 @@ import { RemoteIssueLink } from './RemoteIssueLink';
 import {
   buildWorkspaceBreadcrumbs,
   type WorkspaceBreadcrumbIssueState,
+  type WorkspaceBreadcrumbProjectState,
 } from './navbarBreadcrumbs';
 import { AppBarUserPopoverContainer } from './AppBarUserPopoverContainer';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
@@ -45,7 +46,7 @@ import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useCurrentAppDestination } from '@/shared/hooks/useCurrentAppDestination';
 import { getRemoteAuthDegradedMessage } from '@/shared/lib/auth/remoteAuthDegraded';
 import { isIPad, isStandaloneWebApp } from '@/shared/lib/platform';
-import { getIssue } from '@/shared/lib/remoteApi';
+import { getIssue, getProject } from '@/shared/lib/remoteApi';
 
 /**
  * Check if a NavbarItem is a divider
@@ -231,6 +232,19 @@ export function NavbarContainer({
     { enabled: shouldResolveIssueBreadcrumb }
   );
   const linkedProject = allProjects.find((p) => p.id === linkedProjectId);
+  const shouldFetchLinkedProject =
+    shouldResolveBreadcrumbData &&
+    !isProjectsLoading &&
+    !linkedProject &&
+    !!linkedProjectId;
+  const { data: fetchedLinkedProject, isLoading: isFetchedProjectLoading } =
+    useQuery({
+      queryKey: ['navbar-linked-project', linkedProjectId],
+      queryFn: () => getProject(linkedProjectId!),
+      enabled: shouldFetchLinkedProject,
+    });
+  const resolvedLinkedProject =
+    linkedProject ?? fetchedLinkedProject ?? undefined;
   const linkedIssue = useMemo(() => {
     if (!linkedIssueId) return undefined;
     return projectIssues.find((issue) => issue.id === linkedIssueId);
@@ -248,13 +262,41 @@ export function NavbarContainer({
     });
   const resolvedLinkedIssue = linkedIssue ?? fetchedLinkedIssue ?? undefined;
   const isWaitingForProjectBreadcrumb =
-    shouldResolveBreadcrumbData && !linkedProject && isProjectsLoading;
+    shouldResolveBreadcrumbData &&
+    (isProjectsLoading ||
+      (shouldFetchLinkedProject && isFetchedProjectLoading));
   const isWaitingForIssueBreadcrumb =
     shouldResolveIssueBreadcrumb &&
     (isProjectIssuesLoading ||
       (shouldFetchLinkedIssue && isFetchedIssueLoading));
   const isWaitingForBreadcrumbData =
     isWaitingForProjectBreadcrumb || isWaitingForIssueBreadcrumb;
+  const projectBreadcrumbState =
+    useMemo((): WorkspaceBreadcrumbProjectState => {
+      if (
+        isProjectsLoading ||
+        (shouldFetchLinkedProject && isFetchedProjectLoading)
+      ) {
+        return { kind: 'loading' };
+      }
+
+      if (resolvedLinkedProject?.name) {
+        return {
+          kind: 'resolved',
+          label: resolvedLinkedProject.name,
+          onClick: () => appNavigation.goToProject(linkedProjectId!),
+        };
+      }
+
+      return { kind: 'unavailable' };
+    }, [
+      isProjectsLoading,
+      shouldFetchLinkedProject,
+      isFetchedProjectLoading,
+      resolvedLinkedProject?.name,
+      appNavigation,
+      linkedProjectId,
+    ]);
   const issueBreadcrumbState = useMemo((): WorkspaceBreadcrumbIssueState => {
     if (!shouldResolveIssueBreadcrumb || !linkedIssueId || !linkedProjectId) {
       return { kind: 'none' };
@@ -297,22 +339,18 @@ export function NavbarContainer({
       selectedWorkspace?.name || selectedWorkspace?.branch || '';
 
     return buildWorkspaceBreadcrumbs({
-      shouldResolve:
-        shouldResolveBreadcrumbData && !isWaitingForProjectBreadcrumb,
-      project: linkedProject,
+      shouldResolve: shouldResolveBreadcrumbData,
+      projectState: projectBreadcrumbState,
       workspaceLabel,
       issueState: issueBreadcrumbState,
-      onProjectClick: () => appNavigation.goToProject(linkedProjectId),
     });
   }, [
     shouldResolveBreadcrumbData,
     linkedProjectId,
-    linkedProject,
-    isWaitingForProjectBreadcrumb,
+    projectBreadcrumbState,
     issueBreadcrumbState,
     selectedWorkspace?.name,
     selectedWorkspace?.branch,
-    appNavigation,
   ]);
 
   // Mobile-specific callbacks

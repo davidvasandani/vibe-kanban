@@ -1,60 +1,41 @@
-# Tasks: Concatenate Repeating Lines
+# Tasks: Restore Linked Workspace Breadcrumbs
 
 **Plan**: `./plan.md`
 
-Tasks are dependency-ordered. Tasks marked **[P]** touch independent files and
-may run together within their layer.
+## Phase 1: Resolution primitives
 
-## Layer 1 — Repeat model and lifecycle
+- [x] T001 Add typed `getProject` detail resolution in
+  `packages/web-core/src/shared/lib/remoteApi.ts`.
+- [x] T002 [P] Generalize explicit project breadcrumb states and unavailable
+  label in
+  `packages/web-core/src/shared/components/ui-new/containers/navbarBreadcrumbs.ts`.
 
-- [x] T001 Add bounded repeat-marker rendering, eligible-command recognition,
-  `RepeatedCommand`, and per-command repeat count to
-  `crates/executors/src/executors/codex/normalize_logs.rs`.
-- [x] T002 Add shared command-start allocation and latest-owner completion
-  helpers to `crates/executors/src/executors/codex/normalize_logs.rs`. Depends
-  on T001.
+## Phase 2: Focused contracts
 
-## Layer 2 — Protocol integration
+- [x] T003 Add success and confirmed-miss `getProject` tests in
+  `packages/web-core/src/shared/lib/remoteApi.test.ts` (depends on T001).
+- [x] T004 [P] Add project loading, resolved, and unavailable builder tests in
+  `packages/web-core/src/shared/components/ui-new/containers/navbarBreadcrumbs.test.ts`
+  (depends on T002).
 
-- [x] T003 Route direct app-server `CommandExecution` start/completion through
-  the shared lifecycle helpers in
-  `crates/executors/src/executors/codex/normalize_logs.rs`. Depends on T002.
-- [x] T004 Route legacy `ExecCommandBegin`/`ExecCommandEnd` through the shared
-  lifecycle helpers in
-  `crates/executors/src/executors/codex/normalize_logs.rs`. Depends on T003.
+## Phase 3: Container integration
 
-## Layer 3 — Regression coverage
+- [x] T005 Wire collection-first/project-detail-fallback state resolution into
+  `packages/web-core/src/shared/components/ui-new/containers/NavbarContainer.tsx`
+  (depends on T001, T002).
 
-- [x] T005 Add focused direct-protocol tests for adjacent compaction, tick
-  bounds, streaming updates, changed/intervening commands, non-review commands,
-  and failed runs in
-  `crates/executors/src/executors/codex/normalize_logs.rs`. Depends on T004.
-- [x] T006 Add equivalent legacy-protocol coverage and patch-operation/index
-  assertions in `crates/executors/src/executors/codex/normalize_logs.rs`.
-  Depends on T005.
+## Phase 4: Verification
 
-## Layer 4 — Verification
+- [x] T006 Run formatter and focused Vitest tests for
+  `packages/web-core/src/shared/lib/remoteApi.test.ts` and
+  `packages/web-core/src/shared/components/ui-new/containers/navbarBreadcrumbs.test.ts`
+  (depends on T003, T004, T005).
+- [x] T007 Run relevant frontend type and lint checks (depends on T006).
+- [x] T008 Run independent Codex diff review, address confirmed findings, and
+  repeat affected verification until no significant findings remain (depends on
+  T007).
 
-- [x] T007 Install locked dependencies with
-  `pnpm install --frozen-lockfile`, run focused executor tests, and inspect
-  failures. Depends on T006.
-- [x] T008 Run `pnpm run format`, broader Rust checks/tests appropriate to the
-  executor-only change, and inspect the diff for unrelated changes. Depends on
-  T007.
+## Phase 5: Knowledge capture
 
-## Layer 5 — Independent review and knowledge
-
-- [x] T009 Run an independent Codex diff review, address confirmed significant
-  findings, rerun validation, and repeat until clean. Depends on T008.
-- [x] T010 [P] Update
-  `docs/knowledge-base/collapsing-repeated-log-entries.md`,
-  `docs/knowledge-base/claude-log-normalization.md` or a Codex-specific page as
-  appropriate, and `docs/knowledge-base/INDEX.md`, tagging reusable knowledge
-  with `a5f8-concat-repeating`; commit the knowledge-base update. Depends on
-  T009.
-
-## Parallel Execution Notes
-
-The implementation and its tests share one Rust module and are intentionally
-serial. The final knowledge update is file-independent from code but waits for
-review so it records what actually shipped.
+- [x] T009 Update `wiki/workspace-navbar-breadcrumbs.md` and, only if its summary
+  changes, `wiki/INDEX.md`; commit the knowledge-base update (depends on T008).
