@@ -1,76 +1,52 @@
-# Technical Spec: Provide Bubblewrap to Cluster Worker Agents
-
-Task id: `8475-bubblewrap-missi`
+# Right Drawer Expand to Available Space
 
 ## Summary
 
-Add Nixpkgs `bubblewrap` to the systemd `PATH` of the Vibe Kanban cluster
-worker service. Agent processes launched by `vibe-kanban-worker` inherit that
-unit environment; making `bwrap` available there satisfies Codex's Linux
-sandbox prerequisite on worker nodes.
+Update the workspace right drawer so its visible sections are top-justified and
+expanded section bodies can use the drawer's remaining vertical space. The
+drawer must not impose the current artificial per-section maximum height.
 
 ## Problem
 
-The regular and development Vibe Kanban services already include `bubblewrap`
-in their Nix `path`, but `vibe-kanban-worker.service` does not. Codex sessions
-dispatched to worker nodes therefore report that bubblewrap cannot be found on
-`PATH` and fall back to a bundled copy. This produces a visible runtime error
-and makes the worker execution environment inconsistent with the coordinator.
+Each right-drawer section is currently constrained by
+`max-h-[max(50vh,400px)]`. This prevents an expanded section from growing into
+otherwise unused drawer space and can create unnecessary nested scrolling.
+
+## Desired behavior
+
+- Visible section headers remain stacked from the top of the right drawer.
+- Collapsed sections consume only their header height.
+- Expanded sections share the vertical space left after visible headers and
+  intrinsically sized non-collapsible content.
+- A single expanded section may grow to fill all available remaining space.
+- Multiple expanded sections divide the available space without any fixed or
+  viewport-derived maximum height.
+- When expanded content needs more room than its allocated share, that
+  section's body scrolls without forcing headers out of view.
+- Existing visibility, persisted expansion state, actions, borders, and content
+  rendering remain unchanged.
 
 ## Scope
 
-- Update only `homelab/modules/vibe-kanban-rebuild.nix`, the deployment module
-  governing clustered Vibe Kanban workers.
-- Add `bubblewrap` to `systemd.services.vibe-kanban-worker.path`.
-- Add or extend an evaluation-level regression check proving the rendered
-  worker service path contains the Nixpkgs bubblewrap package.
-- Update Vibe Kanban deployment knowledge only if the result is reusable.
+The change is limited to the Vibe Kanban web UI's workspace right drawer. No
+other service or homelab deployment configuration needs modification.
 
-## Out of Scope
+## Acceptance criteria
 
-- Changes to any service other than Vibe Kanban.
-- Changes to the Vibe Kanban application or executor source.
-- Installing bubblewrap globally or changing the host-wide package set.
-- Changing Codex sandbox behavior, flags, permissions, or fallback logic.
-- Deploying or switching a live NixOS host.
+1. No right-drawer section wrapper uses the existing
+   `max-h-[max(50vh,400px)]` constraint or an equivalent artificial cap.
+2. The section stack occupies the drawer height and distributes spare vertical
+   space among expanded sections.
+3. Collapsed headers remain compact and top-justified.
+4. Overflowing content remains independently scrollable inside its expanded
+   section.
+5. Automated coverage verifies the flex sizing behavior, including the
+   expanded and collapsed wrapper states.
+6. Relevant frontend formatting, type checks, lint, and focused tests pass.
 
-## Requirements
+## Non-goals
 
-1. On a host configured with `services.vibe-kanban-rebuild.clusterRole =
-   "worker"`, `vibe-kanban-worker.service` must have `bwrap` on `PATH`.
-2. Existing worker tools and service hardening must remain unchanged.
-3. Standalone and coordinator behavior must remain unchanged.
-4. The package must come from the pinned Nixpkgs input, matching the existing
-   Vibe Kanban service declarations.
-5. A repository check must fail if bubblewrap is later removed from the worker
-   service path.
-
-## Design
-
-Insert `bubblewrap` into the existing `with pkgs; [ ... ]` list assigned to
-`systemd.services.vibe-kanban-worker.path`. NixOS converts that package list
-into the unit's generated executable search path, which is inherited by the
-worker daemon and the agent subprocesses it launches. No new option is needed:
-all cluster worker nodes require the same sandbox prerequisite.
-
-Validation should evaluate the module's worker configuration and inspect the
-rendered service path or generated unit environment. A lightweight static
-assertion is acceptable only if the repository's existing module-test style
-does not support isolated evaluation of this service.
-
-## Acceptance Criteria
-
-- The worker unit path contains the `bubblewrap` package alongside its current
-  tools.
-- Relevant Nix formatting/evaluation or repository checks pass.
-- The diff contains no unrelated service changes.
-- Independent review reports no significant findings.
-
-## Risks and Mitigations
-
-- **Wrong execution boundary:** Installing on the coordinator does not help a
-  remote worker. The change targets the worker unit that launches Codex.
-- **Unnecessary global exposure:** A host-wide package would broaden scope. The
-  package is confined to the service path.
-- **Regression by list drift:** A focused check documents and enforces the
-  worker runtime dependency.
+- Changing which right-drawer sections are shown.
+- Changing default or persisted expansion state.
+- Redesigning section content or headers.
+- Modifying another service or deployment configuration.
