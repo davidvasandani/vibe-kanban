@@ -15,7 +15,7 @@ The request contract lives in Rust (`crates/db/src/models/requests.rs`) and is e
 4. In cluster mode, keep the existing scheduler/reservation path for automatic and worker intent. For coordinator intent, skip scheduler/reservation so the workspace's initial `local` placement remains authoritative and the existing container start path executes locally.
 5. In standalone mode, retain the existing local path. Coordinator intent is accepted; contradictory intent is still rejected consistently at the request boundary.
 6. In `CreateChatBoxContainer.tsx`, add a coordinator UI-state sentinel and map UI state to the two contract fields at submit time. Keep worker eligibility and selector visibility behavior unchanged.
-7. Extract the frontend mapping into a small pure function for inexpensive exhaustive unit coverage; add a rendered component test if the surface's test harness can be assembled without duplicating the create-mode application.
+7. Extract the frontend mapping into a small pure function for inexpensive exhaustive unit coverage. The create container has no existing rendered-component harness, so avoid duplicating the create-mode application solely for this selector.
 8. Regenerate `shared/types.ts`, format, and verify the touched Rust and TypeScript surfaces.
 
 ## Data Model

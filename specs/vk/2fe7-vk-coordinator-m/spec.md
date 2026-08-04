@@ -35,13 +35,13 @@ Allow users of a clustered Vibe Kanban deployment to deliberately create a works
 
 ## Acceptance Criteria
 
-- [ ] The **Run on** menu renders **Automatic placement**, **Coordinator**, and the existing registered worker choices.
-- [ ] Creating with **Coordinator** results in a local placement with no worker ID and starts through coordinator-local execution.
-- [ ] Creating with **Automatic placement** continues to select an eligible worker.
-- [ ] Creating with an explicit worker continues to reserve that worker.
-- [ ] A request containing both coordinator intent and a worker ID returns a clear bad-request error before placement changes.
-- [ ] A request from an older client that omits coordinator intent behaves exactly as before.
-- [ ] Focused backend and rendered frontend tests cover the new choice and unchanged placement modes.
+- [x] The **Run on** menu renders **Automatic placement**, **Coordinator**, and the existing registered worker choices.
+- [x] Creating with **Coordinator** results in a local placement with no worker ID and starts through coordinator-local execution.
+- [x] Creating with **Automatic placement** continues to select an eligible worker.
+- [x] Creating with an explicit worker continues to reserve that worker.
+- [x] A request containing both coordinator intent and a worker ID returns a clear bad-request error before placement changes.
+- [x] A request from an older client that omits coordinator intent behaves exactly as before.
+- [x] Focused backend and frontend contract tests cover the new choice and unchanged placement modes. This surface had no existing rendered-component harness to extend.
 
 ## Open Questions
 
