@@ -1,6 +1,6 @@
 # Clustered workspace execution and shared-storage safety
 
-Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`, `8475-bubblewrap-missi`
+Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`, `8475-bubblewrap-missi`, `2fe7-vk-coordinator-m`
 
 ## Keep authority central and process ownership local
 
@@ -21,6 +21,25 @@ Persist the worker ID on both the workspace and execution job. Never infer
 affinity from the currently selected UI host, and never retry a dispatch on a
 different worker. Dispatch is idempotent by coordinator execution ID so a lost
 response cannot start a duplicate agent.
+
+## Keep placement intent explicit
+
+Automatic scheduling, coordinator-local execution, and an explicit worker are
+three distinct placement choices. Do not overload a null worker ID to mean both
+automatic and coordinator: once cluster mode uses null for automatic
+scheduling, a deliberate coordinator choice needs its own request intent.
+
+Resolve those wire fields into one closed internal intent before creating the
+workspace. Reject contradictory coordinator-plus-worker input before any
+workspace or placement mutation. Coordinator intent should retain the initial
+`local` placement and reuse the existing local execution lifecycle; the
+coordinator is not a synthetic worker and must not acquire worker-only lease,
+mount-health, or capability semantics.
+
+When an additive request field is serde-defaulted for old JSON clients, remember
+that Rust struct literals do not receive serde defaults. Search every direct
+initializer across the workspace (including MCP or CLI crates), regenerate the
+TypeScript contract, and type-check all frontend creation paths.
 
 ## Treat a shared mount as a capability, not a directory
 
