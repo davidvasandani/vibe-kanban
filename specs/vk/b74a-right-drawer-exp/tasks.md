@@ -27,16 +27,16 @@ agent as required by the workspace instructions.
 
 - [x] T004 Run repository formatting, the focused Vitest test, UI/web-core type
       checks, and relevant lint (depends on T002, T003; no file intended).
-- [ ] T005 Run independent Codex review of the implementation diff, address all
+- [x] T005 Run independent Codex review of the implementation diff, address all
       confirmed significant findings, and repeat checks as needed (depends on
       T004; findings may change the files from T001-T003).
 
 ## Phase 4: Knowledge capture
 
-- [ ] T006 Distill the reusable flex-panel layout rule into
-      `wiki/right-drawer-flexible-sections.md` and refresh `wiki/INDEX.md`
+- [x] T006 Distill the reusable flex-panel layout rule into
+      `wiki/flexible-collapsible-panel-stacks.md` and refresh `wiki/INDEX.md`
       (depends on T005).
-- [ ] T007 Commit the knowledge-base changes before task handoff (depends on
+- [x] T007 Commit the knowledge-base changes before task handoff (depends on
       T006; changes Git history only).
 
 ## Dependency graph
