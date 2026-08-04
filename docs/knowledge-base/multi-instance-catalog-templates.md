@@ -80,7 +80,7 @@ instances of one server with unprefixed tools do not degrade gracefully: one
 silently shadows the other, and the user sees a working `search_emails` reading
 the wrong mailbox.
 
-Where a tool offers a disambiguator (Gmail's `--tool-prefix` / 
+Where a tool offers a disambiguator (Gmail's `--tool-prefix` /
 `GMAIL_MCP_TOOL_PREFIX`), it belongs in the shipped entry as a required
 placeholder. Two details that are easy to get wrong:
 
