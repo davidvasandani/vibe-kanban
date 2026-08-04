@@ -72,7 +72,7 @@ describe('CollapsibleSectionHeader flexible sizing', () => {
     expect(sectionRoot().classList).not.toContain('flex-none');
   });
 
-  it('lets a non-collapsible flexible section participate in available space', () => {
+  it('keeps a non-collapsible section at its intrinsic height', () => {
     act(() => {
       root.render(
         <CollapsibleSectionHeader
@@ -85,7 +85,9 @@ describe('CollapsibleSectionHeader flexible sizing', () => {
       );
     });
 
-    expect(sectionRoot().classList).toContain('flex-1');
+    expect(sectionRoot().classList).toContain('flex-none');
+    expect(sectionRoot().classList).toContain('h-auto');
+    expect(sectionRoot().classList).not.toContain('flex-1');
     expect(container.querySelector('button')).toBeNull();
     expect(sectionRoot().textContent).toContain('Issue content');
   });

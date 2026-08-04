@@ -10,9 +10,9 @@ This directly reflects the request that expanded items be allowed to expand to
 give content space, removes the arbitrary cap, and yields deterministic behavior
 regardless of content length.
 
-The always-expanded non-collapsible Issue section participates in the same
-flexible pool when visible; otherwise its content could intrinsically consume
-the drawer and starve collapsible siblings.
+The non-collapsible Issue section remains intrinsically sized when visible. It
+has no expand/collapse interaction and its compact content should not receive an
+equal share that would leave blank space while flexible siblings are cramped.
 
 ## Remaining open questions
 

@@ -132,7 +132,7 @@ export function CollapsibleSectionHeader({
       className={cn(
         'flex flex-col',
         fillAvailableSpace
-          ? isExpanded
+          ? collapsible && isExpanded
             ? 'flex-1 min-h-0'
             : 'flex-none h-auto'
           : 'h-full min-h-0',

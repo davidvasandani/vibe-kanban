@@ -14,9 +14,10 @@ cannot reliably put expanded/collapsed flex classes on an outer wrapper.
 
 For stacks that need this behavior, opt into `fillAvailableSpace`:
 
-- expanded or non-collapsible: `flex-1 min-h-0`, so all open sections receive
-  equal zero-basis shares and may shrink;
-- collapsed: `flex-none h-auto`, so only the header consumes height;
+- expanded and collapsible: `flex-1 min-h-0`, so interactive open sections
+  receive equal zero-basis shares and may shrink;
+- collapsed or non-collapsible: `flex-none h-auto`, so the section consumes only
+  its intrinsic height;
 - omitted: the primitive retains its legacy `h-full min-h-0` behavior for
   unrelated callers.
 
@@ -48,8 +49,9 @@ create a horizontal scroll surface.
 ## Verification
 
 Rendered-DOM coverage should assert the shared primitive's opt-in expanded,
-collapsed, non-collapsible, and default root classes. Also inspect the feature
-composition for a complete `min-h-0` chain and the absence of fixed height caps.
+collapsed, intrinsic non-collapsible, and default root classes. Also inspect the
+feature composition for a complete `min-h-0` chain and the absence of fixed
+height caps.
 
 ## Contributed by
 
