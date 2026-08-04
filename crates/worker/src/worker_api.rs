@@ -24,10 +24,11 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::path_authority::PathAuthority;
 use crate::{
     WorkerConfig, cancellation,
     execution::{ExecutionError, ExecutionSupervisor},
-    path_authority::PathAuthority,
     preview::PreviewService,
     terminal::TerminalService,
 };
@@ -89,16 +90,16 @@ pub async fn router(
     config: &WorkerConfig,
     supervisor: ExecutionSupervisor,
     metrics: Arc<MetricsSampler>,
+    terminals: TerminalService,
 ) -> anyhow::Result<Router> {
     let coordinator_key = load_verifying_key(&config.coordinator_public_key_file).await?;
-    let path_authority = PathAuthority::new(&config.shared_root)?;
     let state = WorkerApiState {
         supervisor,
         worker_node_id: config.worker_node_id,
         coordinator_id: config.coordinator_id,
         coordinator_key,
         seen_nonces: Arc::new(Mutex::new(HashMap::new())),
-        terminals: TerminalService::new(path_authority),
+        terminals,
         preview: PreviewService::new(),
         metrics,
     };
@@ -531,6 +532,10 @@ impl IntoResponse for WorkerApiError {
             Self::Execution(ExecutionError::DigestConflict { .. }) => {
                 (StatusCode::CONFLICT, "execution digest conflict".into())
             }
+            Self::Execution(ExecutionError::Draining) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "worker is draining for a release handoff".into(),
+            ),
             Self::Execution(error) => (StatusCode::BAD_REQUEST, error.to_string()),
         };
         (status, Json(serde_json::json!({"error": message}))).into_response()

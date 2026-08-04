@@ -59,6 +59,8 @@ import { WorkspacesSidebarContainer } from '@/pages/workspaces/WorkspacesSidebar
 import { WorkspacesSidebarReopenTag } from '@vibe/ui/components/WorkspacesSidebar';
 import { useRemoteCloudHostsAppBarModel } from '@/shared/hooks/useRemoteCloudHosts';
 import { CloudShutdownExportBanner } from '@/shared/components/CloudShutdownExportBanner';
+import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
+import { shouldShowRestartBanner } from './restartVisibility';
 
 export function SharedAppLayout() {
   const appNavigation = useAppNavigation();
@@ -80,6 +82,11 @@ export function SharedAppLayout() {
   const { hosts: remoteCloudHosts } = useRemoteCloudHostsAppBarModel();
   const { hostId: routeHostId } = useParams({ strict: false });
   const navigate = useNavigate();
+  const { isWorkspacesListLoading, isServerConnected } = useWorkspaceContext();
+  const showRestartBanner = shouldShowRestartBanner(
+    isWorkspacesListLoading,
+    isServerConnected
+  );
 
   // Register CMD+K shortcut globally for all routes under SharedAppLayout
   useCommandBarShortcut(() => CommandBarDialog.show());
@@ -321,6 +328,16 @@ export function SharedAppLayout() {
               )
         )}
       >
+        {showRestartBanner && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="pointer-events-none fixed left-1/2 top-3 z-[100] -translate-x-1/2 rounded-md border border-border bg-secondary px-3 py-2 text-sm text-normal shadow-lg"
+          >
+            Vibe Kanban is restarting. Keeping your current view while
+            reconnecting…
+          </div>
+        )}
         {!isMobile && (
           <>
             {showCloudShutdownBanner && (

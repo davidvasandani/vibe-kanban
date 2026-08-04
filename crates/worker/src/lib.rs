@@ -1,4 +1,12 @@
-use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use axum::{Json, Router, routing::get};
 use node_metrics::{MetricsSampler, types::SamplerConfig};
@@ -162,13 +170,37 @@ fn parse<T: FromStr>(name: &'static str, value: String) -> Result<T, WorkerConfi
 struct Health {
     status: &'static str,
     worker_node_id: Uuid,
+    active_execution_count: u32,
+    admission_draining: bool,
+    drain_safe: bool,
+}
+
+impl Health {
+    fn new(worker_node_id: Uuid, active_execution_count: u32, admission_draining: bool) -> Self {
+        Self {
+            status: "ok",
+            worker_node_id,
+            active_execution_count,
+            admission_draining,
+            drain_safe: admission_draining && active_execution_count == 0,
+        }
+    }
 }
 
 pub async fn run(config: WorkerConfig, shutdown: CancellationToken) -> anyhow::Result<()> {
+    run_with_drain(config, shutdown, Arc::new(AtomicBool::new(false))).await
+}
+
+pub async fn run_with_drain(
+    config: WorkerConfig,
+    shutdown: CancellationToken,
+    admission_draining: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
     let path_authority = path_authority::PathAuthority::new(&config.shared_root)?;
-    let supervisor = execution::ExecutionSupervisor::with_recovery(
-        path_authority,
+    let supervisor = execution::ExecutionSupervisor::with_recovery_and_drain(
+        path_authority.clone(),
         recovery::RecoveryStore::new(&config.state_dir).await?,
+        admission_draining.clone(),
     )
     .await?;
     let coordinator_task = tokio::spawn(server::registration_loop(
@@ -191,17 +223,22 @@ pub async fn run(config: WorkerConfig, shutdown: CancellationToken) -> anyhow::R
         MetricsSampler::spawn(&metrics, rx)
     };
     let worker_node_id = config.worker_node_id;
+    let terminals = terminal::TerminalService::new(path_authority.clone());
+    let health_supervisor = supervisor.clone();
+    let health_admission_draining = admission_draining.clone();
     let router = Router::new()
         .route(
             "/health",
             get(move || async move {
-                Json(Health {
-                    status: "ok",
+                let active_execution_count = health_supervisor.active_execution_count().await;
+                Json(Health::new(
                     worker_node_id,
-                })
+                    active_execution_count,
+                    health_admission_draining.load(Ordering::Acquire),
+                ))
             }),
         )
-        .merge(worker_api::router(&config, supervisor, metrics.clone()).await?);
+        .merge(worker_api::router(&config, supervisor, metrics.clone(), terminals).await?);
     let listener = TcpListener::bind(config.listen_addr).await?;
     tracing::info!(
         worker_node_id = %config.worker_node_id,
@@ -256,6 +293,19 @@ mod tests {
             "0.0.0.0:8086".parse::<std::net::SocketAddr>().unwrap()
         );
         assert_eq!(config.shared_root, PathBuf::from("/srv/vibe-kanban-shared"));
+    }
+
+    #[test]
+    fn health_is_drain_safe_only_without_owned_work() {
+        let worker_node_id = Uuid::new_v4();
+        assert!(!Health::new(worker_node_id, 0, false).drain_safe);
+        assert!(Health::new(worker_node_id, 0, true).drain_safe);
+        assert!(!Health::new(worker_node_id, 1, true).drain_safe);
+
+        let json = serde_json::to_value(Health::new(worker_node_id, 2, true)).unwrap();
+        assert_eq!(json["active_execution_count"], 2);
+        assert_eq!(json["admission_draining"], true);
+        assert_eq!(json["drain_safe"], false);
     }
 
     #[test]
