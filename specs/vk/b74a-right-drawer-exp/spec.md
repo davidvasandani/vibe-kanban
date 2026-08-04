@@ -1,7 +1,7 @@
 # Feature Specification: Right Drawer Expand to Available Space
 
 **Feature dir**: `specs/vk/b74a-right-drawer-exp/`
-**Status**: Draft
+**Status**: Complete
 
 ## Summary
 
@@ -44,17 +44,17 @@ access to the other section headers.
 
 ## Acceptance Criteria
 
-- [ ] The right drawer contains no artificial per-section maximum-height cap.
-- [ ] With one expanded section, it can fill the remaining drawer height.
-- [ ] With multiple expanded sections, each can grow and shrink within the
+- [x] The right drawer contains no artificial per-section maximum-height cap.
+- [x] With one expanded section, it can fill the remaining drawer height.
+- [x] With multiple expanded sections, each can grow and shrink within the
       remaining drawer height.
-- [ ] Collapsing a section returns it to header-only intrinsic height and makes
+- [x] Collapsing a section returns it to header-only intrinsic height and makes
       that space available to expanded siblings.
-- [ ] Overflowing section content scrolls independently without scrolling its
+- [x] Overflowing section content scrolls independently without scrolling its
       header out of view.
-- [ ] Automated component coverage proves expanded, collapsed, and default
+- [x] Automated component coverage proves expanded, collapsed, and default
       shared-component sizing behavior.
-- [ ] Relevant frontend checks and formatting pass.
+- [x] Relevant frontend checks and formatting pass.
 
 ## Open Questions
 
