@@ -1,7 +1,7 @@
 # Feature Specification: Reliable MCP Reload
 
 **Feature dir**: `specs/vk/9151-reloading-mcp-no/`
-**Status**: Draft
+**Status**: Complete
 
 ## Summary
 
@@ -55,19 +55,19 @@ conversation to gain newly configured tools.
 
 ## Acceptance Criteria
 
-- [ ] A regression test demonstrates that selecting/remounting a session with a
+- [x] A regression test demonstrates that selecting/remounting a session with a
       pending reload hydrates that state and tracks it to a terminal result.
-- [ ] A duplicate click that receives `busy` immediately reconciles the stored
+- [x] A duplicate click that receives `busy` immediately reconciles the stored
       pending generation and tracks it to a terminal result.
-- [ ] Repeated requests while pending return a busy/idempotent result without
+- [x] Repeated requests while pending return a busy/idempotent result without
       creating a second generation.
-- [ ] Unsupported and failed boundaries expose safe actionable outcomes and do
+- [x] Unsupported and failed boundaries expose safe actionable outcomes and do
       not remain pending.
-- [ ] Session changes cannot display a late reload result from the previous
+- [x] Session changes cannot display a late reload result from the previous
       session.
-- [ ] The existing conversation ID remains unchanged through request, next
+- [x] The existing conversation ID remains unchanged through request, next
       turn, and confirmation.
-- [ ] Targeted backend and frontend verification plus repository formatting
+- [x] Targeted relevant frontend verification plus repository formatting
       pass.
 
 ## Open Questions

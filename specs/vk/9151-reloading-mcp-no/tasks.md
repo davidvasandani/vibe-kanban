@@ -33,14 +33,14 @@
   any failures (depends on T005).
 - [x] T007 Run repository formatting and inspect the diff for unrelated changes
   (depends on T006).
-- [ ] T008 Update
+- [x] T008 Update
   `docs/knowledge-base/active-mcp-refresh.md` and
   `docs/knowledge-base/INDEX.md` with task `9151-reloading-mcp-no` and the
   canonical client reconciliation rule (depends on T009).
 - [x] T009 Run an independent Codex review, address confirmed findings, and
   repeat verification/review until no significant findings remain (depends on
   T006, T007).
-- [ ] T010 Commit the knowledge-base update after implementation and review are
+- [x] T010 Commit the knowledge-base update after implementation and review are
   complete (depends on T009).
 
 ## Dependency order

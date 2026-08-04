@@ -1,6 +1,6 @@
 # Active MCP refresh
 
-Contributing task: `8c27-refresh-mcp-tool`
+Contributing tasks: `8c27-refresh-mcp-tool`, `9151-reloading-mcp-no`
 
 Active-session MCP refresh is an executor capability, not an independent
 connectivity test. VK queues the vendor's live reload operation, keeps the
@@ -44,6 +44,23 @@ The coordinator is process-local and session-keyed. A write lock serializes
 request, failure, and confirmation transitions; readers therefore see either
 the previous complete server vector or the replacement vector. Duplicate
 pending requests return retryable `busy` without advancing generation.
+
+## Browser reconciliation
+
+The backend coordinator is authoritative across browser mounts. A chat
+component must hydrate the selected session from the status endpoint rather
+than assuming that empty component-local state means no refresh exists. A
+duplicate POST's `busy` result is a transient projection; it is never the
+canonical stored state. After `busy`, keep the control locked and reconcile the
+status endpoint until the stored pending or terminal generation is available.
+
+Order asynchronous reads within one session as well as across session changes.
+An initial hydration response can otherwise arrive after a reload POST and
+erase its pending generation. Serialize status polling: interval-based requests
+that overlap can continually supersede one another when the endpoint is slower
+than the interval. Schedule the next poll only after the current read settles,
+and use an operation token so stale request cleanup cannot unlock a newer
+same-session request after an A → B → A navigation sequence.
 
 Public failures are allow-listed category/message/remediation tuples. Never pass
 through executor errors, commands, environment values, authenticated URLs, or
