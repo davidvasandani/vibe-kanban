@@ -1,6 +1,6 @@
 # Clustered workspace execution and shared-storage safety
 
-Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`
+Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`, `8475-bubblewrap-missi`
 
 ## Keep authority central and process ownership local
 
@@ -8,6 +8,14 @@ The coordinator remains authoritative for SQLite records, workspace placement,
 Git worktree administration, approvals, and user-facing execution state. A
 worker owns only the processes assigned to its sticky workspace: spawning,
 ordered event delivery, cancellation, terminal sessions, and preview traffic.
+
+That process ownership includes runtime prerequisites. Cluster worker agents
+inherit the environment of `vibe-kanban-worker.service`, not the coordinator's
+application unit or an operator's login shell. Host-provided executables needed
+by an agent (for example Codex's `bwrap` sandbox helper) therefore belong in the
+worker unit's Nix `path`, with an evaluated-module assertion on that exact unit.
+Installing the package only for the coordinator or globally does not express or
+reliably satisfy the worker execution contract.
 
 Persist the worker ID on both the workspace and execution job. Never infer
 affinity from the currently selected UI host, and never retry a dispatch on a
