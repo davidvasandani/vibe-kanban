@@ -294,11 +294,11 @@ moving only a PID or child handle does not transfer ownership.
 
 Every replacement boundary is an evidence-backed handoff. Commands that may be
 retried after an uncertain response are idempotent under a stable execution
-identity. Execution output and terminal-state events are monotonically ordered, acknowledged,
-replayable within an explicit bound, and expose gaps rather than hiding them.
-A new control-plane generation becomes ready only after compatibility is
-negotiated and authoritative process state is reconciled. At most one
-generation holds mutation authority at a time.
+identity. Execution output and terminal-state events are monotonically ordered,
+acknowledged, replayable within an explicit bound, and expose gaps rather than
+hiding them. A new control-plane generation becomes ready only after
+compatibility is negotiated and authoritative process state is reconciled. At
+most one generation holds mutation authority at a time.
 
 Soft detach and hard shutdown are different operations. Soft detach preserves
 managed processes and their streams under the stable owner. Hard shutdown is
@@ -334,6 +334,26 @@ Existing external keys are never silently normalized during read, and
 display-only metadata is not injected into client-native definitions unless
 that client explicitly defines such a field.
 
+### XXV. Credentials are scoped at the narrowest decision boundary
+Secret selection follows the resource an external command will actually access,
+not merely the workspace, host, or service that launches it. When one workspace
+can address resources in multiple authorization domains, a single ambient token
+is not an acceptable substitute for command-time selection.
+
+Secrets remain in runtime-only credential stores outside the Nix store,
+database, shared workspace, prompts, logs, and distributed action payloads.
+Long-lived server environments carry only non-secret routing metadata. The
+selected credential is introduced at the final child-process boundary and only
+for that child. Unknown resources preserve the established fallback behavior;
+a known resource whose configured credential cannot be read fails explicitly
+and secret-safely rather than silently using another identity.
+
+Credential routing has one parser and one precedence rule shared by every
+consumer. Explicit command targets outrank inferred repository context. Parsing
+is host-strict and rejects malformed or lookalike destinations. Tests use fake
+credentials and fake executables, exercise every workspace process boundary,
+and prove that serialized cluster messages contain no secret material.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -355,7 +375,10 @@ that client explicitly defines such a field.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.23.0 (adds external-config identity vs presentation: stable,
+**Version**: 0.24.0 (adds narrowest-boundary credential scoping — select secrets
+for the resource at command time, keep values runtime-only and out of cluster
+payloads, and share one strict routing rule across process boundaries; 0.23.0
+added external-config identity vs presentation: stable,
 protocol-safe wire keys, separate friendly labels, pre-write collision safety,
 and no silent native-key migration or definition metadata injection; 0.22.0
 added stable process ownership and evidence-backed soft
