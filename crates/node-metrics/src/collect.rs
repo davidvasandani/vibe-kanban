@@ -77,7 +77,7 @@ mod platform {
     use crate::{
         derive::{self, ProcessKey},
         parse,
-        redact::redact_command,
+        redact::redact_argv,
         types::{FilesystemSample, ProcessSample},
     };
 
@@ -175,7 +175,7 @@ mod platform {
                     model: cpu_info.model,
                     core_count,
                     total_busy_percent: busy.total_percent,
-                    per_core_busy_percent: busy.per_core_percent,
+                    per_core_busy: busy.per_core,
                     load_1m: load.map(|l| l.one),
                     load_5m: load.map(|l| l.five),
                     load_15m: load.map(|l| l.fifteen),
@@ -276,9 +276,13 @@ mod platform {
                     .ok()
                     .as_deref()
                     .and_then(parse::parse_cmdline)
+                    // Redact the argument *vector*, never a joined string: an
+                    // argument may contain spaces, and joining first lets
+                    // `--password "correct horse battery"` past the masker one
+                    // word at a time.
                     // A kernel thread has an empty cmdline; its `comm` in
                     // brackets is the conventional rendering.
-                    .map(|raw| redact_command(&raw))
+                    .map(|argv| redact_argv(&argv))
                     .unwrap_or_else(|| format!("[{}]", stat.name));
 
                 samples.push(ProcessSample {
@@ -496,7 +500,7 @@ mod tests {
 
         assert_eq!(collected.sample.interval_ms, None);
         assert_eq!(collected.sample.cpu.total_busy_percent, None);
-        assert_eq!(collected.sample.cpu.per_core_busy_percent, None);
+        assert_eq!(collected.sample.cpu.per_core_busy, None);
         for network in collected.sample.networks.iter().flatten() {
             assert_eq!(network.rx_bytes_per_second, None);
             assert_eq!(network.tx_bytes_per_second, None);
