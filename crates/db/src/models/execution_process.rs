@@ -371,6 +371,18 @@ impl ExecutionProcess {
         .await
     }
 
+    pub async fn find_running_coding_agents_by_workspace(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        Self::find_running_by_workspace_and_run_reason(
+            pool,
+            workspace_id,
+            &ExecutionProcessRunReason::CodingAgent,
+        )
+        .await
+    }
+
     /// Find running dev servers for a specific workspace (across all sessions)
     pub async fn find_running_dev_servers_by_workspace(
         pool: &SqlitePool,

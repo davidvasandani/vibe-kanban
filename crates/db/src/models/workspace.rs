@@ -171,6 +171,42 @@ impl WorkspacePlacement {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Reassign an already-provisioned clustered workspace to a selected
+    /// worker. The caller must stop workspace-owned processes first. The
+    /// compare-and-set prevents two affinity operations from silently
+    /// overwriting each other after either one awaited process cancellation.
+    pub async fn reassign(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        expected_worker_node_id: Option<Uuid>,
+        worker_node_id: Uuid,
+        requested_worker_node_id: Option<Uuid>,
+        reason: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET worker_node_id = ?,
+                placement_state = 'ready',
+                placed_at = datetime('now', 'subsec'),
+                placement_reason = ?,
+                requested_worker_node_id = ?,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?
+              AND placement_state != 'local'
+              AND worker_node_id IS ?
+            "#,
+        )
+        .bind(worker_node_id)
+        .bind(reason)
+        .bind(requested_worker_node_id)
+        .bind(workspace_id)
+        .bind(expected_worker_node_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn transition(
         pool: &SqlitePool,
         workspace_id: Uuid,
