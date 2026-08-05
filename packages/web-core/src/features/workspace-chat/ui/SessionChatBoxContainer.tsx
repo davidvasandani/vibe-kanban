@@ -190,7 +190,6 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   const {
     isRefreshing: isRefreshingMcp,
     refresh: handleRefreshMcpTools,
-    result: mcpRefreshResult,
     tooltip: mcpRefreshTooltip,
   } = useMcpRefresh(workspaceId, sessionId);
   const queryClient = useQueryClient();
@@ -852,9 +851,9 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
               icon: ArrowsClockwiseIcon,
               label: 'Refresh MCP tools',
               tooltip: mcpRefreshTooltip,
-              disabled:
-                isRefreshingMcp ||
-                mcpRefreshResult?.status === 'pending_next_turn',
+              // Pending stays clickable: duplicate POSTs are idempotent and
+              // let the hook reconcile the canonical generation after `busy`.
+              disabled: isRefreshingMcp,
               onClick: handleRefreshMcpTools,
             },
           ]
@@ -884,7 +883,6 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
       handleToolbarAction,
       handleRefreshMcpTools,
       isRefreshingMcp,
-      mcpRefreshResult?.status,
       mcpRefreshTooltip,
       sessionId,
       workspaceId,

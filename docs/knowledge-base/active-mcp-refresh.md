@@ -53,6 +53,11 @@ than assuming that empty component-local state means no refresh exists. A
 duplicate POST's `busy` result is a transient projection; it is never the
 canonical stored state. After `busy`, keep the control locked and reconcile the
 status endpoint until the stored pending or terminal generation is available.
+Canonical `pending_next_turn` is different: keep its toolbar action clickable
+so a user's repeated click reaches the idempotent POST, receives explicit
+already-in-progress feedback, and re-runs canonical reconciliation. Disabling a
+native button for the whole pending lifetime makes the control appear broken
+and bypasses the recovery path.
 
 Order asynchronous reads within one session as well as across session changes.
 An initial hydration response can otherwise arrive after a reload POST and

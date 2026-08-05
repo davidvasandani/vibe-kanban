@@ -89,6 +89,7 @@ describe('useMcpRefresh', () => {
 
     await renderHook();
     expect(current.result?.status).toBe('pending_next_turn');
+    expect(current.isRefreshing).toBe(false);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(100);
