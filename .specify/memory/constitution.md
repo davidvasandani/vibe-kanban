@@ -278,6 +278,26 @@ scoped to the failure being surfaced — a blanket unwrapping of every internal
 error is not the remedy, and messages remain free of secrets, tokens, and
 environment values.
 
+### XXII. Credentials are scoped at the narrowest decision boundary
+Secret selection follows the resource an external command will actually access,
+not merely the workspace, host, or service that launches it. When one workspace
+can address resources in multiple authorization domains, a single ambient token
+is not an acceptable substitute for command-time selection.
+
+Secrets remain in runtime-only credential stores outside the Nix store,
+database, shared workspace, prompts, logs, and distributed action payloads.
+Long-lived server environments carry only non-secret routing metadata. The
+selected credential is introduced at the final child-process boundary and only
+for that child. Unknown resources preserve the established fallback behavior;
+a known resource whose configured credential cannot be read fails explicitly
+and secret-safely rather than silently using another identity.
+
+Credential routing has one parser and one precedence rule shared by every
+consumer. Explicit command targets outrank inferred repository context. Parsing
+is host-strict and rejects malformed or lookalike destinations. Tests use fake
+credentials and fake executables, exercise every workspace process boundary,
+and prove that serialized cluster messages contain no secret material.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -299,7 +319,10 @@ environment values.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.19.0 (adds one-convention-per-concept — reuse the existing
+**Version**: 0.20.0 (adds narrowest-boundary credential scoping — select secrets
+for the resource at command time, keep values runtime-only and out of cluster
+payloads, and share one strict routing rule across process boundaries; 0.19.0
+added one-convention-per-concept — reuse the existing
 resolution rule rather than re-deriving it, accept the producer's default value,
 and report failures with the fact that identifies them instead of a generic
 internal error; also makes writes into a consolidated shared namespace additive
