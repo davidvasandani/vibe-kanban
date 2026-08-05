@@ -2,7 +2,7 @@
 
 Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`,
 `c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`, `d893-fix-slack-mcp`,
-`067cb434-mcp-tools`, `4daf-gmail-mcp`
+`067cb434-mcp-tools`, `4daf-gmail-mcp`, `vk/a5f8-concat-repeating`
 
 Vibe Kanban derives shared MCP settings from each base executor's native config
 file. There is no separate registry: the native files remain the source consumed
@@ -26,6 +26,30 @@ per-profile outcomes and can partially succeed; successful native writes remain
 committed if a later profile fails. Individual file writes are staged and then
 renamed into place, and the previous version is retained beside the config file
 with a `.bak` suffix for independent recovery.
+
+## Identifier and display-label boundary
+
+An MCP server's native configuration key is a protocol identifier, not its
+human-readable name. Shared identifiers must match `^[a-zA-Z0-9_-]+$` and stay
+stable across reconciliation, writes, testing, authentication, refresh, and UI
+state. Friendly names are optional `display_name` metadata; render the label
+first with identifier fallback, but key every operational action by identifier.
+
+Catalog object keys are preferred identifiers and `meta.<key>.name` values are
+display labels. If an unsafe key must be suggested as a safe identifier, use the
+shared normalizer (for example, `Atlassian Rovo` becomes `atlassian_rovo`) and
+reject collisions with both configured servers and unresolved conflicts. Never
+silently normalize native keys during reads or inject display-only fields into
+an external client's native MCP definition.
+
+Display labels live in the versioned host-local
+`mcp-display-labels.json` sidecar, not in native agent files, so they do not
+participate in definition equality or fingerprints. Reads continue when the
+sidecar is unavailable but return a scoped metadata diagnostic. Saves can
+replace malformed metadata, stage replacements safely, prune only labels for
+identifiers absent from all native profiles, and update labels only for servers
+whose relevant native writes succeeded (with label-only saves allowed when no
+native rewrite is needed).
 
 ## Compatibility
 
