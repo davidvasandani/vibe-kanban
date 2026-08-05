@@ -22,7 +22,7 @@ use executors::{
         SharedMcpTestRequest, SharedMcpTestTarget, SharedMcpWriteRequest, SharedMcpWriteResponse,
         SharedMcpWriteStatus, canonical_definition, load_native_snapshots, load_shared_mcp_config,
         persist_display_labels, plan_servers_for_executor, validate_server_identifiers,
-        validate_write_request,
+        validate_write_request_against_snapshots,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -415,7 +415,7 @@ async fn update_shared_mcp_servers(
     if let Err(message) = hydrate_gateway_capabilities(&mut payload, &snapshots) {
         return Ok(ResponseJson(ApiResponse::error(&message)));
     }
-    if let Err(message) = validate_write_request(&payload) {
+    if let Err(message) = validate_write_request_against_snapshots(&payload, &snapshots) {
         return Ok(ResponseJson(ApiResponse::error(&message)));
     }
     let mut outcomes = Vec::new();
