@@ -206,3 +206,27 @@ would mislead the next person into thinking a UI surface still needs building.
   records that some clients dedupe tools by base name.
 - Pinning a **git commit SHA** rather than a release asset or registry version,
   and the reasoning about which integrity layer that removes the need for.
+# VAS-356 Addendum: Cluster MCP runtime connectivity
+
+The knowledge bases are populated. Relevant pages were found in both the Vibe
+Kanban repository and the shared homelab repository.
+
+- `docs/knowledge-base/active-mcp-refresh.md`: Codex reload acknowledgement is
+  only a queue acknowledgement; the next turn's `mcpServerStatus/list` is the
+  authoritative inventory. Connectivity failures must remain explicit rather
+  than being mistaken for persistence failures.
+- `docs/knowledge-base/workspace-environment-inheritance.md`: values required by
+  child processes must be injected at the execution boundary. Reserved `VK_*`
+  process-owned variables take precedence, and diagnostics must never print the
+  complete environment.
+- `homelab/docs/knowledge/nftables-service-port-scoping.md`: think1 has its broad
+  NixOS firewall disabled, so the dedicated nftables base chain is the active
+  enforcement mechanism. Accepts must precede the targeted drop, and widening
+  one port must not accidentally widen adjacent protected ports.
+- `homelab/apps/firecrawl-browser-service/README.md`: port 3410 was intentionally
+  restricted to think2 for the Cloudflare connector. VK workers are a new,
+  explicitly authorized consumer and must be enumerated as source addresses.
+
+Implementation consequence: derive both worker URL environment variables from
+the same Nix option, and split the nftables rule so only 3410 gains the VK worker
+sources while 8189/8190 retain their existing two-host allowlist.

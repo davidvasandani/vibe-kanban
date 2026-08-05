@@ -154,3 +154,11 @@ Non-workspace administrative/login PTYs do not inherit this configuration.
   cluster dispatch payloads.
 - Existing installations with no mapping behave exactly as before.
 - All relevant tests and independent review pass.
+# VAS-356 Addendum: Cluster-safe MCP runtime connectivity
+
+MCP definitions can persist successfully while worker-hosted Codex cannot reach
+their backends. VK workers must expose `worker.coordinatorUrl` as
+`VIBE_BACKEND_URL`, and think1 must admit the configured VK workers to
+Firecrawl TCP 3410 without widening logmein ports 8189/8190. Acceptance requires
+evaluated worker environments, exact nftables scope, focused checks, and
+post-deploy live MCP initialization from a worker.
