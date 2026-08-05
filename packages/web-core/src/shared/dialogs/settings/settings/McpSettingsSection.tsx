@@ -656,14 +656,10 @@ export function McpSettingsSection() {
       // `draft.servers`: the backend puts a name in `servers` XOR `conflicts`, so
       // reusing a conflict's name would attach this new definition to an
       // unresolved conflict and drop the native entry it was still arbitrating.
-      const name = nextAvailableServerName(
-        identifier,
-        takenServerNames(draft)
-      );
+      const name = nextAvailableServerName(identifier, takenServerNames(draft));
       setServer({
         name,
-        displayName:
-          displayName && displayName !== name ? displayName : null,
+        displayName: displayName && displayName !== name ? displayName : null,
         definition,
         assignments,
       });
