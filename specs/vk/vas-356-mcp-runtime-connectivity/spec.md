@@ -1,6 +1,6 @@
 # Feature Specification: Cluster-safe MCP runtime connectivity
 
-**Task:** VAS-356  
+**Task:** VAS-356
 **Scope:** Vibe Kanban worker runtime and explicitly authorized Firecrawl ingress
 
 ## User problem

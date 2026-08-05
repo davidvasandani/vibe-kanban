@@ -20,5 +20,5 @@
 ## Layer 4 — documentation and delivery
 
 - [x] T007 Update reusable knowledge and its index.
-- [ ] T008 Commit repository changes separately.
-- [ ] T009 Publish and merge PRs in dependency-safe order.
+- [x] T008 Commit repository changes separately.
+- [x] T009 Publish and merge PRs in dependency-safe order.
