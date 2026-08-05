@@ -319,7 +319,22 @@ between the bounded container and that owner permits shrinking (`min-height: 0`
 or its equivalent). Headers and controls stay outside the content scroller so
 overflow does not make them unreachable.
 
-### XXIV. Credentials are scoped at the narrowest decision boundary
+### XXIV. External config identity is not presentation
+Keys written into an external tool's configuration are protocol identifiers,
+not display labels. They obey the strictest supported consumer's identifier
+grammar and remain stable across read, merge, conflict resolution, write,
+testing, authentication, and live refresh. Human-readable names are separate,
+optional metadata; presentation renders the label with identifier fallback,
+while every operational lookup uses the identifier.
+
+Catalog object keys are preferred wire identifiers and catalog metadata names
+are display labels. Derived identifiers use one shared normalization rule and
+collisions are resolved or rejected before any external file is written.
+Existing external keys are never silently normalized during read, and
+display-only metadata is not injected into client-native definitions unless
+that client explicitly defines such a field.
+
+### XXV. Credentials are scoped at the narrowest decision boundary
 Secret selection follows the resource an external command will actually access,
 not merely the workspace, host, or service that launches it. When one workspace
 can address resources in multiple authorization domains, a single ambient token
@@ -360,9 +375,12 @@ and prove that serialized cluster messages contain no secret material.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.23.0 (adds narrowest-boundary credential scoping — select secrets
+**Version**: 0.24.0 (adds narrowest-boundary credential scoping — select secrets
 for the resource at command time, keep values runtime-only and out of cluster
-payloads, and share one strict routing rule across process boundaries; 0.22.0
+payloads, and share one strict routing rule across process boundaries; 0.23.0
+added external-config identity vs presentation: stable,
+protocol-safe wire keys, separate friendly labels, pre-write collision safety,
+and no silent native-key migration or definition metadata injection; 0.22.0
 added stable process ownership and evidence-backed soft
 restart handoffs — control-plane disconnect is not process death, ownership
 includes the complete I/O/monitoring lifecycle, replay is ordered and explicit
