@@ -261,7 +261,8 @@
     "selectAttempt": "Select an attempt to view execution processes.",
     "started": "Started: {{date}}",
     "copyLogs": "로그 복사",
-    "logsCopied": "복사됨!"
+    "logsCopied": "복사됨!",
+    "outputIncomplete": "할당된 워커에서 일부 출력을 복구하지 못했습니다. 표시된 로그가 불완전할 수 있습니다."
   },
   "rebase": {
     "common": {

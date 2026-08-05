@@ -12,6 +12,7 @@ import {
   WrenchIcon,
   KeyIcon,
   ListChecksIcon,
+  HardDrivesIcon,
 } from '@phosphor-icons/react';
 import type { Icon } from '@phosphor-icons/react';
 import { useParams } from '@tanstack/react-router';
@@ -29,6 +30,7 @@ import { AwsSettingsSection } from './AwsSettingsSection';
 import { JiraSyncSettingsSection } from './JiraSyncSettingsSection';
 import { SlackSettingsSection } from './SlackSettingsSection';
 import { PipelinesSettingsSection } from './PipelinesSettingsSection';
+import { WorkersSettingsSection } from './WorkersSettingsSection';
 
 export type SettingsSectionType =
   | 'general'
@@ -40,6 +42,7 @@ export type SettingsSectionType =
   | 'cli-tools'
   | 'aws'
   | 'pipelines'
+  | 'workers'
   | 'relay'
   | 'attachments'
   | 'jira-sync'
@@ -59,6 +62,7 @@ export type SettingsSectionInitialState = {
   'cli-tools': undefined;
   aws: undefined;
   pipelines: undefined;
+  workers: undefined;
   relay: { hostId?: string } | undefined;
   attachments: undefined;
   'jira-sync': { organizationId?: string; projectId?: string } | undefined;
@@ -79,6 +83,7 @@ export const SETTINGS_SECTION_DEFINITIONS: SettingsSectionDefinition[] = [
   { id: 'cli-tools', icon: WrenchIcon, group: 'host' },
   { id: 'aws', icon: KeyIcon, group: 'host' },
   { id: 'pipelines', icon: ListChecksIcon, group: 'host' },
+  { id: 'workers', icon: HardDrivesIcon, group: 'host' },
   { id: 'organizations', icon: BuildingsIcon, group: 'universal' },
   { id: 'remote-projects', icon: CloudIcon, group: 'universal' },
   { id: 'relay', icon: BroadcastIcon, group: 'universal' },
@@ -142,6 +147,8 @@ export function renderSettingsSection(
       return <AwsSettingsSection />;
     case 'pipelines':
       return <PipelinesSettingsSection />;
+    case 'workers':
+      return <WorkersSettingsSection />;
     case 'relay':
       return (
         <RelaySettingsSectionContent

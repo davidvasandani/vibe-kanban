@@ -70,10 +70,37 @@ fn generate_types_content() -> String {
         db::models::scratch::UpdateScratch::decl(),
         db::models::workspace::Workspace::decl(),
         db::models::workspace::WorkspaceWithStatus::decl(),
+        db::models::workspace::WorkspacePlacement::decl(),
+        db::models::workspace::WorkspacePlacementState::decl(),
+        db::models::worker_node::WorkerNode::decl(),
+        db::models::worker_node::WorkerNodeStatus::decl(),
+        db::models::worker_node::WorkerMountStatus::decl(),
+        // Cluster metrics. `node-metrics` is a leaf crate with no database or
+        // HTTP dependency; the coordinator-side aggregation types that wrap it
+        // live in `services`.
+        node_metrics::CpuSample::decl(),
+        // Referenced by `CpuSample::per_core_busy`. Omitting it emits a
+        // TypeScript file naming a type it never declares — which fails `tsc`
+        // rather than `generate-types`, so the break surfaces far from its
+        // cause.
+        node_metrics::CoreBusy::decl(),
+        node_metrics::MemorySample::decl(),
+        node_metrics::FilesystemSample::decl(),
+        node_metrics::NetworkSample::decl(),
+        node_metrics::ProcessSample::decl(),
+        node_metrics::HostSample::decl(),
+        node_metrics::SampleBatch::decl(),
+        node_metrics::NodeRole::decl(),
+        node_metrics::NodeMetricsAvailability::decl(),
+        services::services::cluster::NodeHealth::decl(),
+        services::services::cluster::MetricsNode::decl(),
+        services::services::cluster::ClusterMetricsSnapshot::decl(),
         db::models::session::Session::decl(),
         db::models::execution_process::ExecutionProcess::decl(),
         db::models::execution_process::ExecutionProcessStatus::decl(),
         db::models::execution_process::ExecutionProcessRunReason::decl(),
+        db::models::execution_worker_job::ExecutionWorkerJob::decl(),
+        db::models::execution_worker_job::ExecutionWorkerDispatchState::decl(),
         db::models::execution_process_repo_state::ExecutionProcessRepoState::decl(),
         db::models::merge::Merge::decl(),
         db::models::merge::DirectMerge::decl(),
@@ -167,6 +194,7 @@ fn generate_types_content() -> String {
         services::services::cli_tools::CliToolStatus::decl(),
         services::services::aws_sso::AwsSsoProfile::decl(),
         services::services::aws_sso::AwsAuthStatus::decl(),
+        services::services::aws_sso::AwsSsoAuthScope::decl(),
         services::services::aws_sso::AwsSsoProfileStatus::decl(),
         services::services::aws_sso::AwsSsoSession::decl(),
         services::services::aws_sso::AwsSsoAccount::decl(),

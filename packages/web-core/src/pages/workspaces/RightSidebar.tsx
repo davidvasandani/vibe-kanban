@@ -6,6 +6,7 @@ import { ProcessListContainer } from './ProcessListContainer';
 import { PreviewControlsContainer } from './PreviewControlsContainer';
 import { BrowserControlsContainer } from './BrowserControlsContainer';
 import { GitPanelContainer } from './GitPanelContainer';
+import { ServerMetricsSectionContainer } from './ServerMetricsSectionContainer';
 import { TerminalPanelContainer } from '@/shared/components/TerminalPanelContainer';
 import { WorkspaceNotesContainer } from './WorkspaceNotesContainer';
 import { useDiffs } from '@/shared/stores/useWorkspaceDiffStore';
@@ -73,6 +74,10 @@ export const RightSidebar = memo(function RightSidebar({
     PERSIST_KEYS.gitPanelRepositories,
     true
   );
+  const [serverMetricsExpanded] = usePersistedExpanded(
+    PERSIST_KEYS.serverMetricsSection,
+    false
+  );
   const [terminalExpanded] = usePersistedExpanded(
     PERSIST_KEYS.terminalSection,
     false
@@ -126,6 +131,18 @@ export const RightSidebar = memo(function RightSidebar({
             repos={repos}
           />
         ),
+        actions: [],
+      },
+      {
+        // The section body is unmounted while collapsed, which is what keeps
+        // a closed section from holding the metrics socket open.
+        title: t('common:sections.serverMetrics', {
+          defaultValue: 'Server Metrics',
+        }),
+        persistKey: PERSIST_KEYS.serverMetricsSection,
+        visible: true,
+        expanded: serverMetricsExpanded,
+        content: <ServerMetricsSectionContainer />,
         actions: [],
       },
       {
@@ -221,6 +238,7 @@ export const RightSidebar = memo(function RightSidebar({
     repos,
     diffs,
     gitExpanded,
+    serverMetricsExpanded,
     terminalExpanded,
     notesExpanded,
     changesExpanded,
@@ -236,33 +254,24 @@ export const RightSidebar = memo(function RightSidebar({
   ]);
 
   return (
-    <div className="h-full border-l bg-secondary overflow-y-auto">
-      <div className="divide-y border-b">
+    <div className="h-full min-h-0 border-l bg-secondary overflow-x-hidden overflow-y-auto">
+      <div className="flex h-full min-h-0 flex-col divide-y border-b">
         {sections
           .filter((section) => section.visible)
           .map((section) => (
-            <div
+            <CollapsibleSectionHeader
               key={section.persistKey}
-              className="max-h-[max(50vh,400px)] flex flex-col overflow-hidden"
+              title={section.title}
+              persistKey={section.persistKey}
+              defaultExpanded={section.expanded}
+              collapsible={section.collapsible ?? true}
+              actions={section.actions}
+              fillAvailableSpace
             >
-              <CollapsibleSectionHeader
-                title={section.title}
-                persistKey={section.persistKey}
-                defaultExpanded={section.expanded}
-                collapsible={section.collapsible ?? true}
-                actions={section.actions}
-              >
-                <div
-                  className={`flex flex-1 border-t w-full overflow-auto ${
-                    (section.collapsible ?? true)
-                      ? 'min-h-[200px]'
-                      : 'min-h-[1px]'
-                  }`}
-                >
-                  {section.content}
-                </div>
-              </CollapsibleSectionHeader>
-            </div>
+              <div className="flex min-h-0 flex-1 border-t w-full overflow-auto">
+                {section.content}
+              </div>
+            </CollapsibleSectionHeader>
           ))}
       </div>
     </div>

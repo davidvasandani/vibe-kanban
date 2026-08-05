@@ -515,6 +515,11 @@
       "repoStep": "Sur quels dépôts voulez-vous travailler ?",
       "chatStep": "Sur quoi voulez-vous travailler ?"
     },
+    "worker": {
+      "label": "Exécuter sur",
+      "automatic": "Placement automatique",
+      "coordinator": "Coordinateur"
+    },
     "repoPicker": {
       "actions": {
         "recent": "Récents",

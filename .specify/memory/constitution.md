@@ -75,6 +75,12 @@ session identity, cancellation, failures, and credential redaction must remain
 correct. Extend the shared executor, log-normalization, profile, and MCP
 abstractions before introducing agent-specific parallel machinery.
 
+Normalized-log compaction must preserve protocol lifecycle identity and patch
+ordering. Repeated events may share a visible entry only when semantic equality,
+adjacency, and completion state are proven; failures stay visible, stale event
+updates cannot overwrite newer occurrences, and compact indicators remain
+bounded under arbitrarily long streams.
+
 ### X. Dialogs hold provisional state; containers hold confirmed state
 Settings dialogs and edit modals own a private snapshot of the data they mutate.
 On open, the dialog is seeded from the current saved state (or blank for "add").
@@ -171,7 +177,184 @@ identifies failures by stable configured identifier. Configuration comparisons,
 logs, diagnostics, and API results never expose environment values, tokens,
 authorization material, authenticated URLs, or secret-bearing command arguments.
 
-### XVIII. Bundled defaults upgrade without claiming user files
+### XVIII. Distributed execution is affinity-bound and evidence-backed
+Workspace process ownership MUST be explicit, persisted, and stable. A
+coordinator may dispatch work only to the worker assigned to that workspace,
+and the worker must authorize the execution ID and canonical workspace path
+against that assignment. Retries are idempotent and cannot create a second
+process for one execution.
+
+Placement intent is explicit at every boundary: automatic scheduling,
+coordinator-local execution, and a requested worker are distinct choices. A
+null or omitted value must not be overloaded to mean more than one of them, and
+contradictory choices are rejected before placement state is mutated.
+
+Remote liveness and terminal state require worker evidence. A timeout,
+disconnect, missing handle, or expired lease is not proof that a process
+completed or was killed; expose interruption or indeterminacy and preserve the
+workspace until reconciliation establishes safety. Ordered event streams carry
+monotonic cursors and make replay gaps visible. Shared Git worktree
+administration remains single-owner and serialized even when ordinary commands
+run on several nodes.
+
+### XIX. Observability is a read-only surface
+Metrics, telemetry, and diagnostic sampling exist to be *looked at*. They are
+never evidence.
+
+No observability path may write scheduling, liveness, lease, eligibility, or
+lifecycle state, and no lifecycle decision may read from one. A node that fails
+to report metrics is not offline; a node that reports them is not healthy. The
+existing evidence channel remains the only authority on both questions.
+
+Absence is typed, never fabricated. Unreachable, unsupported, not-implemented,
+and stale are distinct statuses carrying their reason, and each renders as
+itself. A zero that means "no reading" is prohibited — a failed read is not a
+measurement, and a UI that shows `0%` for a dead host is a defect.
+
+Live streams are bounded and self-correcting. Retention is a fixed-size window
+whose memory does not grow with uptime, and no emitted payload may grow with
+elapsed time. A patch stream is an optimisation over a periodic full snapshot,
+never a replacement for one: a dropped message, a replay gap, or a change in the
+member set forces a resnapshot rather than interpolation. Every streamed
+collection is keyed by stable identity — never by array position — so that
+membership changing mid-stream cannot make a `replace` land on the wrong row.
+
+Sampling tasks terminate. A background sampler holds only a weak reference to
+its owner, re-checks each tick that a consumer still exists, exits when none
+does, and never holds a lock across an await.
+
+Host introspection is secret-hostile by default. Process environments are never
+read. Anything derived from a process command line is redacted at the point of
+collection — before it is stored, transmitted, or logged — so that an
+unredacted value never exists outside the sampler. Redaction errs toward
+removing too much: an over-redacted command is cosmetic, an under-redacted one
+is a disclosure.
+
+### XX. Cross-node paths are node-identical and structurally verified
+Any absolute path written into shared storage that another node must later
+resolve MUST resolve to the same object on every node, and that property MUST be
+asserted by the code that records it — never left to an operator convention, a
+documentation note, or a naming coincidence.
+
+Three rules follow. **Verify structure, not spelling:** assert that a resolved
+target lies within the shared root, never that its text lacks a known-bad prefix.
+**A same-named local directory is not the target:** existence proves nothing, and
+a resolver that accepts a local path merely because it exists is a defect, not a
+fallback — the shared-mount rule applied to every recorded path. **Both ends of a
+two-sided pointer are repaired and re-probed together;** a zero exit from a repair
+command is not verification, and an object a path claims to reference is proven
+present, never assumed.
+
+Enforcement is level-triggered. A check that runs only where the path is first
+written is an edge trigger and will stall silently; the same assertion runs at
+startup, at placement, and before use, enumerating every violation in one pass
+with an actionable remedy rather than aborting on the first. A one-off migration
+with no recurring check is a comment, not a control.
+
+Where a shared namespace is consolidated, its blast radius is re-derived rather
+than inherited: an operation that was safe while it touched one node's metadata
+is not automatically safe once every node's metadata lives in one place.
+Writes into such a namespace are **additive by default**: an operation that
+deletes or prunes entries there needs an argument for why every other holder of
+the namespace, on every node, is unaffected.
+
+### XXI. One convention per concept, and failures say what failed
+A value that already has a resolution rule in this codebase is resolved by that
+rule everywhere it is consumed. Re-deriving the rule at a new call site — a
+second string format, a narrower lookup, an extra normalisation — is a defect
+even when it passes its own tests, because the two definitions will disagree on
+exactly the inputs the original rule exists to handle. Find the existing
+resolver, call it, or match its outcome exactly and say so in a comment naming
+it.
+
+Consumers must accept the full domain the producer emits. Where a producer is
+user-facing (a picker, an API request body, a config field), the domain includes
+its *default* value, and the default is the case most likely to reach
+production — a consumer that handles every case except the default is broken for
+almost every user.
+
+A failure that a maintainer could act on must reach the operator with the fact
+that identifies it. Collapsing a specific, diagnosable failure into a generic
+message ("an internal error occurred") is a defect in its own right: it converts
+a one-line diagnosis into an investigation, and it does so precisely when the
+system is already failing. Server errors keep their status but carry a message
+naming what failed and which entity it failed for. Widening an error channel is
+scoped to the failure being surfaced — a blanket unwrapping of every internal
+error is not the remedy, and messages remain free of secrets, tokens, and
+environment values.
+
+### XXII. Process lifetime follows the stable owner
+Managed coding-agent and execution-helper processes MUST have one explicit
+owner for their complete lifetime. A control-plane client disconnect, HTTP
+server replacement, dropped in-memory handle, timeout, or missing observation
+is not evidence that a managed process exited and MUST NOT implicitly cancel or
+terminalise it. Ownership includes the process group, input channel, ordered
+output capture, exit watcher, cancellation state, and cleanup responsibility;
+moving only a PID or child handle does not transfer ownership.
+
+Every replacement boundary is an evidence-backed handoff. Commands that may be
+retried after an uncertain response are idempotent under a stable execution
+identity. Execution output and terminal-state events are monotonically ordered,
+acknowledged, replayable within an explicit bound, and expose gaps rather than
+hiding them. A new control-plane generation becomes ready only after
+compatibility is negotiated and authoritative process state is reconciled. At
+most one generation holds mutation authority at a time.
+
+Soft detach and hard shutdown are different operations. Soft detach preserves
+managed processes and their streams under the stable owner. Hard shutdown is
+explicit, retains process-group cleanup and work-preservation rules, and is the
+only application lifecycle operation allowed to terminate all managed
+children. Recovery for a genuinely lost owner remains fail-safe: unverifiable
+state is interrupted or indeterminate, never silently completed or adopted.
+
+### XXIII. Flexible panels have one explicit space and scroll owner
+Panel stacks that divide bounded space MUST express that division at the
+component that owns expanded/collapsed state. Expanded panels may grow and
+shrink into available space; collapsed panels remain intrinsically sized.
+Avoid viewport-derived or arbitrary per-panel height caps when the containing
+layout already defines the available height.
+
+Nested flex scroll regions identify one overflow owner, and every flex ancestor
+between the bounded container and that owner permits shrinking (`min-height: 0`
+or its equivalent). Headers and controls stay outside the content scroller so
+overflow does not make them unreachable.
+
+### XXIV. External config identity is not presentation
+Keys written into an external tool's configuration are protocol identifiers,
+not display labels. They obey the strictest supported consumer's identifier
+grammar and remain stable across read, merge, conflict resolution, write,
+testing, authentication, and live refresh. Human-readable names are separate,
+optional metadata; presentation renders the label with identifier fallback,
+while every operational lookup uses the identifier.
+
+Catalog object keys are preferred wire identifiers and catalog metadata names
+are display labels. Derived identifiers use one shared normalization rule and
+collisions are resolved or rejected before any external file is written.
+Existing external keys are never silently normalized during read, and
+display-only metadata is not injected into client-native definitions unless
+that client explicitly defines such a field.
+
+### XXV. Credentials are scoped at the narrowest decision boundary
+Secret selection follows the resource an external command will actually access,
+not merely the workspace, host, or service that launches it. When one workspace
+can address resources in multiple authorization domains, a single ambient token
+is not an acceptable substitute for command-time selection.
+
+Secrets remain in runtime-only credential stores outside the Nix store,
+database, shared workspace, prompts, logs, and distributed action payloads.
+Long-lived server environments carry only non-secret routing metadata. The
+selected credential is introduced at the final child-process boundary and only
+for that child. Unknown resources preserve the established fallback behavior;
+a known resource whose configured credential cannot be read fails explicitly
+and secret-safely rather than silently using another identity.
+
+Credential routing has one parser and one precedence rule shared by every
+consumer. Explicit command targets outrank inferred repository context. Parsing
+is host-strict and rejects malformed or lookalike destinations. Tests use fake
+credentials and fake executables, exercise every workspace process boundary,
+and prove that serialized cluster messages contain no secret material.
+
+### XXVI. Bundled defaults upgrade without claiming user files
 Bundled defaults copied into user-editable storage remain user-owned after
 seeding. A release may automatically refresh a bundled file only when the
 on-disk bytes are known to be an unmodified previously shipped default.
@@ -205,6 +388,25 @@ read capabilities—rather than checking only stage names or keywords.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.15.0 (adds user-preserving bundled-default upgrades and
-prompt-workflow contract coverage in principle XVIII; 0.14.0 added confirmed,
-atomic live-capability principle XVII)
+**Version**: 0.25.0 (adds user-preserving bundled-default upgrades and prompt-workflow contract coverage; 0.24.0 added narrowest-boundary credential scoping — select secrets
+for the resource at command time, keep values runtime-only and out of cluster
+payloads, and share one strict routing rule across process boundaries; 0.23.0
+added external-config identity vs presentation: stable,
+protocol-safe wire keys, separate friendly labels, pre-write collision safety,
+and no silent native-key migration or definition metadata injection; 0.22.0
+added stable process ownership and evidence-backed soft
+restart handoffs — control-plane disconnect is not process death, ownership
+includes the complete I/O/monitoring lifecycle, replay is ordered and explicit
+about gaps, mutation authority is single-generation, and only hard shutdown
+terminates all managed children; 0.21.0 made cluster placement intent explicit and unambiguous;
+0.20.0 added explicit flexible-panel space and scroll ownership; 0.19.0 added
+one-convention-per-concept — reuse the existing
+resolution rule rather than re-deriving it, accept the producer's default value,
+and report failures with the fact that identifies them instead of a generic
+internal error; also makes writes into a consolidated shared namespace additive
+by default; 0.18.0 added cross-node path portability — node-identical shared
+paths, structural rather than textual assertions, no same-named-local fallback,
+two-sided pointer repair, level-triggered enforcement, and re-derived blast
+radius for consolidated namespaces; 0.17.0 added observability as a read-only
+surface; 0.16.0 added affinity-bound, evidence-backed distributed execution)
+

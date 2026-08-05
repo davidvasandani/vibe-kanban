@@ -37,7 +37,8 @@ export interface WorkspacesSidebarWorkspace {
     | 'completed'
     | 'failed'
     | 'killed'
-    | 'interrupted';
+    | 'interrupted'
+    | 'indeterminate';
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
 }
 

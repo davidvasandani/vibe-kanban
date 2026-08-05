@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 
 use axum::{Json, extract::State, response::Json as ResponseJson};
+use chrono::Utc;
 use db::models::{
     requests::{
         CreateAndStartWorkspaceRequest, CreateAndStartWorkspaceResponse, CreateWorkspaceApiRequest,
     },
-    workspace::{CreateWorkspace, Workspace},
+    worker_node::WorkerNode,
+    workspace::{CreateWorkspace, Workspace, WorkspacePlacement},
 };
 use deployment::Deployment;
 use services::services::container::ContainerService;
@@ -232,7 +234,11 @@ pub async fn create_and_start_workspace(
         executor_config,
         prompt,
         attachment_ids,
+        run_on_coordinator,
+        requested_worker_node_id,
     } = payload;
+
+    let placement_intent = PlacementIntent::resolve(run_on_coordinator, requested_worker_node_id)?;
 
     let mut workspace_prompt = normalize_prompt(&prompt).ok_or_else(|| {
         ApiError::BadRequest(
@@ -355,6 +361,39 @@ pub async fn create_and_start_workspace(
     }
 
     let workspace = managed_workspace.workspace.clone();
+
+    if deployment.cluster_config().enabled && placement_intent != PlacementIntent::Coordinator {
+        let workers = WorkerNode::fetch_all(&deployment.db().pool).await?;
+        let executor_profile = executor_config.profile_id().to_string();
+        let requested_worker_node_id = placement_intent.requested_worker_node_id();
+        let selected = deployment
+            .worker_scheduler()
+            .select(
+                &workers,
+                &executor_profile,
+                requested_worker_node_id,
+                Utc::now(),
+            )
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        let reserved = WorkspacePlacement::reserve(
+            &deployment.db().pool,
+            workspace.id,
+            selected.id,
+            requested_worker_node_id,
+            None,
+            Some(if requested_worker_node_id.is_some() {
+                "manual worker selection"
+            } else {
+                "automatic scheduler selection"
+            }),
+        )
+        .await?;
+        if !reserved {
+            return Err(ApiError::BadRequest(
+                "Workspace placement was already assigned or could not be reserved".into(),
+            ));
+        }
+    }
     tracing::info!("Created workspace {}", workspace.id);
 
     let execution_process = deployment
@@ -381,6 +420,36 @@ pub async fn create_and_start_workspace(
     )))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlacementIntent {
+    Automatic,
+    Coordinator,
+    Worker(Uuid),
+}
+
+impl PlacementIntent {
+    fn resolve(
+        run_on_coordinator: bool,
+        requested_worker_node_id: Option<Uuid>,
+    ) -> Result<Self, ApiError> {
+        match (run_on_coordinator, requested_worker_node_id) {
+            (true, Some(_)) => Err(ApiError::BadRequest(
+                "run_on_coordinator cannot be combined with requested_worker_node_id".into(),
+            )),
+            (true, None) => Ok(Self::Coordinator),
+            (false, Some(worker_node_id)) => Ok(Self::Worker(worker_node_id)),
+            (false, None) => Ok(Self::Automatic),
+        }
+    }
+
+    fn requested_worker_node_id(self) -> Option<Uuid> {
+        match self {
+            Self::Worker(worker_node_id) => Some(worker_node_id),
+            Self::Automatic | Self::Coordinator => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -388,9 +457,38 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ImportedIssueAttachment, compose_prompt_with_project_context,
+        ImportedIssueAttachment, PlacementIntent, compose_prompt_with_project_context,
         rewrite_imported_issue_attachments_markdown,
     };
+
+    #[test]
+    fn placement_intent_distinguishes_all_valid_choices() {
+        let worker_id = Uuid::new_v4();
+
+        assert_eq!(
+            PlacementIntent::resolve(false, None).unwrap(),
+            PlacementIntent::Automatic
+        );
+        assert_eq!(
+            PlacementIntent::resolve(true, None).unwrap(),
+            PlacementIntent::Coordinator
+        );
+        assert_eq!(
+            PlacementIntent::resolve(false, Some(worker_id)).unwrap(),
+            PlacementIntent::Worker(worker_id)
+        );
+    }
+
+    #[test]
+    fn placement_intent_rejects_coordinator_with_worker() {
+        let error = PlacementIntent::resolve(true, Some(Uuid::new_v4())).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("run_on_coordinator cannot be combined")
+        );
+    }
 
     #[test]
     fn project_context_empty_leaves_prompt_unchanged() {

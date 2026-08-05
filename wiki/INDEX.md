@@ -89,7 +89,9 @@ contributed to it.
   and the gotchas — remote-prefixed branch names (`origin/main`, not `main`),
   `get_all_branches` sorting current-first (so `branches[0]` ≠ mainline),
   NULL-at-registration `default_target_branch`, and the dormant importer-less
-  `useRepoBranchSelection`/`RepoBranchSelector` stack with divergent defaults.
+  `useRepoBranchSelection`/`RepoBranchSelector` stack with divergent defaults —
+  plus the contract this places on every *backend* consumer of `target_branch`:
+  resolve local-then-remote, never normalise the prefix away.
 - [kanban-issue-panel-sections.md](kanban-issue-panel-sections.md) — The
   issue detail/create panel (`KanbanIssuePanel.tsx`): section order is owned
   by the `packages/ui` component (containers only supply render props), the
@@ -144,3 +146,7 @@ contributed to it.
   layout state and physical-device detection combine as a visibility truth
   table, and where to keep the policy without changing desktop drag/snap
   behavior or the presentational UI component.
+- [flexible-collapsible-panel-stacks.md](flexible-collapsible-panel-stacks.md)
+  — How bounded vertical panel stacks let expanded collapsibles share remaining
+  height: expansion-owned flex participation, the complete `min-h-0` chain,
+  content-scroll ownership, and the outer short-window header-scroll fallback.

@@ -18,13 +18,31 @@ import type {
 export interface UseConversationHistoryResult {
   /** Whether the conversation only has a single coding agent turn (no follow-ups) */
   isFirstTurn: boolean;
-  /** Whether background batches are still loading older history entries */
-  isLoadingHistory: boolean;
+  /** Whether completed processes exist before the currently loaded window. */
+  hasEarlierHistory: boolean;
+  /** Whether an explicitly requested older batch is loading. */
+  isLoadingEarlier: boolean;
+  /** Recoverable failure from the most recent older-history request. */
+  loadEarlierError: string | null;
+  /** Load one bounded batch of older completed processes. */
+  loadEarlier: () => Promise<void>;
+  /** Whether explicitly loaded older history can be released at the tail. */
+  hasEvictableHistory: boolean;
+  /** Release older batches while retaining the recent tail and live process. */
+  releaseEarlierHistory: () => void;
 }
 import {
+  HISTORY_FETCH_CONCURRENCY,
+  MAX_RECENT_HISTORY_PROCESSES,
   MIN_INITIAL_ENTRIES,
   REMAINING_BATCH_SIZE,
 } from '@/shared/hooks/useConversationHistory/constants';
+import {
+  getRecentProcessIdsToRetain,
+  getUnloadedHistoricProcesses,
+  loadProcessesInOrder,
+  type LoadedProcessEntries,
+} from '../conversation-history-paging';
 
 export const useConversationHistory = ({
   onTimelineUpdated,
@@ -46,7 +64,12 @@ export const useConversationHistory = ({
   const previousStatusMapRef = useRef<Map<string, ExecutionProcessStatus>>(
     new Map()
   );
-  const [isLoadingHistoryState, setIsLoadingHistory] = useState(false);
+  const scopeGenerationRef = useRef(0);
+  const loadEarlierInFlightRef = useRef(false);
+  const [hasEarlierHistory, setHasEarlierHistory] = useState(false);
+  const [isLoadingEarlier, setIsLoadingEarlier] = useState(false);
+  const [loadEarlierError, setLoadEarlierError] = useState<string | null>(null);
+  const [hasEvictableHistory, setHasEvictableHistory] = useState(false);
 
   // Derive whether this is the first turn (no follow-up processes exist)
   const isFirstTurn = useMemo(() => {
@@ -103,7 +126,7 @@ export const useConversationHistory = ({
       url = `/api/execution-processes/${executionProcess.id}/normalized-logs/ws`;
     }
 
-    return new Promise<PatchType[]>((resolve) => {
+    return new Promise<PatchType[]>((resolve, reject) => {
       const controller = streamJsonPatchEntries<PatchType>(url, {
         onFinished: (allEntries) => {
           controller.close();
@@ -115,7 +138,7 @@ export const useConversationHistory = ({
             err
           );
           controller.close();
-          resolve([]);
+          reject(err);
         },
       });
     });
@@ -258,82 +281,155 @@ export const useConversationHistory = ({
     [loadRunningAndEmit]
   );
 
+  // Build the keyed store the rest of the hook works in from an ordered fetch
+  // result. Kept separate so ordering lives in one tested place.
+  const toExecutionProcessState = (
+    loaded: LoadedProcessEntries<PatchType>[]
+  ): ExecutionProcessStateStore => {
+    const state: ExecutionProcessStateStore = {};
+    for (const { process, entries } of loaded) {
+      state[process.id] = {
+        executionProcess: process,
+        entries: entries.map((e, idx) => patchWithKey(e, process.id, idx)),
+      };
+    }
+    return state;
+  };
+
   const loadHistoricEntries = useCallback(
     async (maxEntries?: number): Promise<ExecutionProcessStateStore> => {
-      const localDisplayedExecutionProcesses: ExecutionProcessStateStore = {};
+      if (!executionProcesses?.current) return {};
 
-      if (!executionProcesses?.current) return localDisplayedExecutionProcesses;
+      const historicProcesses = [...executionProcesses.current]
+        .reverse()
+        .filter((process) => process.status !== ExecutionProcessStatus.running);
 
-      for (const executionProcess of [
-        ...executionProcesses.current,
-      ].reverse()) {
-        if (executionProcess.status === ExecutionProcessStatus.running)
-          continue;
-
-        const entries =
-          await loadEntriesForHistoricExecutionProcess(executionProcess);
-        const entriesWithKey = entries.map((e, idx) =>
-          patchWithKey(e, executionProcess.id, idx)
-        );
-
-        localDisplayedExecutionProcesses[executionProcess.id] = {
-          executionProcess,
-          entries: entriesWithKey,
-        };
-
-        if (
+      const { loaded } = await loadProcessesInOrder(
+        historicProcesses,
+        loadEntriesForHistoricExecutionProcess,
+        // Unchanged threshold: only agent and review turns count towards it,
+        // which is what `flattenEntries` selects. Script processes inside the
+        // window are still loaded — they are rendered as their own rows.
+        (soFar) =>
           maxEntries != null &&
-          flattenEntries(localDisplayedExecutionProcesses).length > maxEntries
-        ) {
-          break;
-        }
-      }
+          flattenEntries(toExecutionProcessState(soFar)).length > maxEntries,
+        HISTORY_FETCH_CONCURRENCY
+      );
 
-      return localDisplayedExecutionProcesses;
+      return toExecutionProcessState(loaded);
     },
     [executionProcesses]
   );
 
-  const loadRemainingEntriesInBatches = useCallback(
-    async (batchSize: number): Promise<boolean> => {
-      if (!executionProcesses?.current) return false;
+  const hasUnloadedHistoricProcesses = useCallback((): boolean => {
+    return (
+      getUnloadedHistoricProcesses(
+        executionProcesses.current,
+        new Set(Object.keys(displayedExecutionProcesses.current))
+      ).length > 0
+    );
+  }, []);
 
-      let anyUpdated = false;
-      for (const executionProcess of [
-        ...executionProcesses.current,
-      ].reverse()) {
-        const current = displayedExecutionProcesses.current;
-        if (
-          current[executionProcess.id] ||
-          executionProcess.status === ExecutionProcessStatus.running
-        )
-          continue;
+  const loadEarlierBatch = useCallback(
+    async (
+      batchSize: number
+    ): Promise<{
+      batch: ExecutionProcessStateStore;
+      failedProcessCount: number;
+    }> => {
+      const unloadedProcesses = getUnloadedHistoricProcesses(
+        executionProcesses.current,
+        new Set(Object.keys(displayedExecutionProcesses.current))
+      );
 
-        const entries =
-          await loadEntriesForHistoricExecutionProcess(executionProcess);
-        const entriesWithKey = entries.map((e, idx) =>
-          patchWithKey(e, executionProcess.id, idx)
-        );
+      const { loaded, failedProcessCount } = await loadProcessesInOrder(
+        unloadedProcesses,
+        loadEntriesForHistoricExecutionProcess,
+        // This batch counts every loaded entry, not just the conversational
+        // ones — unchanged from when this loop was serial.
+        (soFar) =>
+          soFar.reduce((total, { entries }) => total + entries.length, 0) >=
+          batchSize,
+        HISTORY_FETCH_CONCURRENCY
+      );
 
-        mergeIntoDisplayed((state) => {
-          state[executionProcess.id] = {
-            executionProcess,
-            entries: entriesWithKey,
-          };
-        });
-
-        if (
-          flattenEntries(displayedExecutionProcesses.current).length > batchSize
-        ) {
-          anyUpdated = true;
-          break;
-        }
-        anyUpdated = true;
-      }
-      return anyUpdated;
+      return { batch: toExecutionProcessState(loaded), failedProcessCount };
     },
-    [executionProcesses]
+    []
   );
+
+  const loadEarlier = useCallback(async (): Promise<void> => {
+    if (loadEarlierInFlightRef.current || !hasUnloadedHistoricProcesses()) {
+      return;
+    }
+
+    const generation = scopeGenerationRef.current;
+    loadEarlierInFlightRef.current = true;
+    setIsLoadingEarlier(true);
+    setLoadEarlierError(null);
+
+    try {
+      const { batch, failedProcessCount } =
+        await loadEarlierBatch(REMAINING_BATCH_SIZE);
+      if (generation !== scopeGenerationRef.current) return;
+
+      mergeIntoDisplayed((state) => {
+        Object.assign(state, batch);
+      });
+      if (Object.keys(batch).length > 0) setHasEvictableHistory(true);
+      emitEntries(displayedExecutionProcesses.current, 'historic', false);
+      setHasEarlierHistory(hasUnloadedHistoricProcesses());
+      if (failedProcessCount > 0) {
+        setLoadEarlierError('Some earlier messages could not be loaded');
+      }
+    } catch (error) {
+      if (generation !== scopeGenerationRef.current) return;
+      setLoadEarlierError(
+        error instanceof Error
+          ? error.message
+          : 'Unable to load earlier messages'
+      );
+    } finally {
+      if (generation === scopeGenerationRef.current) {
+        loadEarlierInFlightRef.current = false;
+        setIsLoadingEarlier(false);
+      }
+    }
+  }, [emitEntries, hasUnloadedHistoricProcesses, loadEarlierBatch]);
+
+  const releaseEarlierHistory = useCallback(() => {
+    if (!hasEvictableHistory || loadEarlierInFlightRef.current) return;
+
+    const loadedConversationEntryCounts = new Map(
+      Object.values(displayedExecutionProcesses.current).map((processState) => [
+        processState.executionProcess.id,
+        flattenEntries({
+          [processState.executionProcess.id]: processState,
+        }).length,
+      ])
+    );
+    const retainedIds = getRecentProcessIdsToRetain(
+      executionProcesses.current,
+      loadedConversationEntryCounts,
+      MIN_INITIAL_ENTRIES,
+      MAX_RECENT_HISTORY_PROCESSES
+    );
+    let removedAny = false;
+
+    mergeIntoDisplayed((state) => {
+      for (const processId of Object.keys(state)) {
+        if (retainedIds.has(processId)) continue;
+        delete state[processId];
+        removedAny = true;
+      }
+    });
+
+    setHasEvictableHistory(false);
+    setHasEarlierHistory(hasUnloadedHistoricProcesses());
+    if (removedAny) {
+      emitEntries(displayedExecutionProcesses.current, 'historic', false);
+    }
+  }, [emitEntries, hasEvictableHistory, hasUnloadedHistoricProcesses]);
 
   const ensureProcessVisible = useCallback((p: ExecutionProcess) => {
     mergeIntoDisplayed((state) => {
@@ -381,11 +477,17 @@ export const useConversationHistory = ({
   }, [idListKey, executionProcessesRaw, emitEntries, isLoading, isConnected]);
 
   useEffect(() => {
+    scopeGenerationRef.current += 1;
     displayedExecutionProcesses.current = {};
     loadedInitialEntries.current = false;
     emittedEmptyInitialRef.current = false;
     streamingProcessIdsRef.current.clear();
     previousStatusMapRef.current.clear();
+    loadEarlierInFlightRef.current = false;
+    setHasEarlierHistory(false);
+    setIsLoadingEarlier(false);
+    setLoadEarlierError(null);
+    setHasEvictableHistory(false);
     emitEntries(displayedExecutionProcesses.current, 'initial', true);
   }, [scopeKey, emitEntries]);
 
@@ -412,16 +514,7 @@ export const useConversationHistory = ({
         Object.assign(state, allInitialEntries);
       });
       emitEntries(displayedExecutionProcesses.current, 'initial', false);
-
-      setIsLoadingHistory(true);
-      while (
-        !cancelled &&
-        (await loadRemainingEntriesInBatches(REMAINING_BATCH_SIZE))
-      ) {
-        if (cancelled) return;
-        emitEntries(displayedExecutionProcesses.current, 'historic', false);
-      }
-      if (!cancelled) setIsLoadingHistory(false);
+      setHasEarlierHistory(hasUnloadedHistoricProcesses());
     })();
     return () => {
       cancelled = true;
@@ -431,7 +524,7 @@ export const useConversationHistory = ({
     idListKey,
     isLoading,
     loadHistoricEntries,
-    loadRemainingEntriesInBatches,
+    hasUnloadedHistoricProcesses,
     emitEntries,
   ]); // include idListKey so new processes trigger reload
 
@@ -497,7 +590,12 @@ export const useConversationHistory = ({
       let anyUpdated = false;
 
       for (const process of processesToReload) {
-        const entries = await loadEntriesForHistoricExecutionProcess(process);
+        let entries: PatchType[];
+        try {
+          entries = await loadEntriesForHistoricExecutionProcess(process);
+        } catch {
+          continue;
+        }
         if (entries.length === 0) continue;
 
         const entriesWithKey = entries.map((e, idx) =>
@@ -536,5 +634,13 @@ export const useConversationHistory = ({
     }
   }, [scopeKey, idListKey, executionProcessesRaw]);
 
-  return { isFirstTurn, isLoadingHistory: isLoadingHistoryState };
+  return {
+    isFirstTurn,
+    hasEarlierHistory,
+    isLoadingEarlier,
+    loadEarlierError,
+    loadEarlier,
+    hasEvictableHistory,
+    releaseEarlierHistory,
+  };
 };

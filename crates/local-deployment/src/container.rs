@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -8,7 +8,13 @@ use std::{
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
+use cluster_protocol::{
+    CancellationPhase, CancellationRequest, EventAcknowledgement, ExecutionDispatch,
+    ExecutionEventPayload, InteractionRequest, InteractionResponse, PROTOCOL_VERSION,
+    PersistencePolicy, RequestAuthority, TerminalState,
+};
 use command_group::AsyncGroupChild;
 use db::{
     DBService,
@@ -18,12 +24,14 @@ use db::{
             ExecutionContext, ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus,
         },
         execution_process_repo_state::ExecutionProcessRepoState,
+        execution_worker_job::{ExecutionWorkerDispatchState, ExecutionWorkerJob},
         project::Project,
         repo::Repo,
         scratch::{DraftFollowUpData, Scratch, ScratchType},
         session::{Session, SessionError},
         task::Task,
-        workspace::Workspace,
+        worker_node::{WorkerMountStatus, WorkerNode, WorkerNodeStatus},
+        workspace::{Workspace, WorkspacePlacement, WorkspacePlacementState},
         workspace_repo::WorkspaceRepo,
     },
 };
@@ -45,6 +53,7 @@ use executors::{
         McpRefreshErrorCategory, McpRefreshHandle, McpRefreshResult, McpRefreshSignal,
         McpRefreshStatus,
     },
+    profile::{ExecutorConfig, ExecutorConfigs, ExecutorProfile},
 };
 use futures::{FutureExt, StreamExt, TryStreamExt, stream::select};
 use git::GitService;
@@ -52,6 +61,7 @@ use serde_json::json;
 use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
+    cluster::{ClusterConfig, WorkerClient},
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{ContainerError, ContainerRef, ContainerService},
     diff_stream::{self, DiffStreamHandle},
@@ -62,15 +72,22 @@ use services::services::{
     remote_client::{RemoteClient, RemoteClientError},
     remote_sync,
 };
+use sha2::{Digest, Sha256};
 use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_util::io::ReaderStream;
 use utils::{
+    approvals::{ApprovalOutcome, ApprovalRequest},
     log_msg::LogMsg,
     msg_store::MsgStore,
     text::{git_branch_id, short_uuid, truncate_to_char_boundary},
+    worktree_linkage::WorktreeLinkage,
 };
 use uuid::Uuid;
-use workspace_manager::{RepoWorkspaceInput, WorkspaceError, WorkspaceManager};
+use workspace_manager::{
+    AdoptOutcome, RepoWorkspaceInput, SharedRepositoryStore, SharedWorkspacePaths, WorkspaceError,
+    WorkspaceManager,
+};
+use worktree_manager::RepositoryAdminLockManager;
 
 use crate::{command, copy};
 
@@ -81,6 +98,56 @@ const WORKSPACE_TOUCH_DEBOUNCE: Duration = Duration::from_mins(2);
 /// exactly as before (Constitution IV — do not enable a runtime path we cannot
 /// observe E2E here). See `specs/vk/826e-coding-agent-war/`.
 const KEEP_WARM_ENV: &str = "VK_KEEP_WARM_AGENTS";
+
+fn push_worker_bytes(store: &MsgStore, encoded: &str, stderr: bool) {
+    let message = match BASE64_STANDARD.decode(encoded) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => {
+            store.push(LogMsg::Stderr(format!(
+                "Worker returned invalid base64 output: {error}"
+            )));
+            return;
+        }
+    };
+    if stderr {
+        store.push(LogMsg::Stderr(message));
+    } else {
+        store.push_stdout(message);
+    }
+}
+
+async fn mark_remote_execution_indeterminate(
+    db: &DBService,
+    execution_id: Uuid,
+) -> Result<(), ContainerError> {
+    ExecutionWorkerJob::update_state(
+        &db.pool,
+        execution_id,
+        ExecutionWorkerDispatchState::Indeterminate,
+        None,
+        Some(Utc::now()),
+    )
+    .await?;
+    ExecutionProcess::update_completion(
+        &db.pool,
+        execution_id,
+        ExecutionProcessStatus::Indeterminate,
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+fn worker_cleanup_evidence_safe(
+    worker: &WorkerNode,
+    has_unsafe_jobs: bool,
+    now: DateTime<Utc>,
+) -> bool {
+    worker.status == WorkerNodeStatus::Online
+        && worker.mount_status == WorkerMountStatus::Healthy
+        && worker.lease_expires_at.is_some_and(|lease| lease > now)
+        && !has_unsafe_jobs
+}
 
 /// A warm app-server with no active turn for longer than this is proactively
 /// reaped so an abandoned-but-not-closed attempt cannot pin a process forever
@@ -310,6 +377,33 @@ async fn reap_all_warm_entries(registry: &WarmRegistry) {
     }
 }
 
+/// The profile definition to dispatch alongside `config`: exactly the one
+/// variant the request names, resolved against this coordinator's profiles.
+///
+/// One variant rather than the executor's whole profile, because that is all the
+/// worker needs to run this job, and a dispatch is not a reason to copy the
+/// operator's other configurations onto another host.
+///
+/// Overrides carried on the request are deliberately *not* applied here: the
+/// worker applies them itself, from the action it already receives, so applying
+/// them on both sides would double them.
+///
+/// `None` when the profile does not resolve here either. That is not this
+/// function's failure to report — the coordinator refuses such a request through
+/// its own resolution path, and inventing an error here would duplicate it.
+fn dispatched_executor_profile(config: &ExecutorConfig) -> Option<ExecutorProfile> {
+    let profile_id = config.profile_id();
+    let variant = profile_id
+        .variant
+        .clone()
+        .unwrap_or_else(|| "DEFAULT".into());
+    let agent = ExecutorConfigs::get_cached().get_coding_agent(&profile_id)?;
+    Some(ExecutorProfile {
+        recently_used_models: None,
+        configurations: HashMap::from([(variant, agent)]),
+    })
+}
+
 #[derive(Clone)]
 pub struct LocalContainerService {
     db: DBService,
@@ -344,9 +438,84 @@ pub struct LocalContainerService {
     queued_message_service: QueuedMessageService,
     notification_service: NotificationService,
     remote_client: Option<RemoteClient>,
+    cluster_config: ClusterConfig,
+    repository_admin_locks: RepositoryAdminLockManager,
+    worker_client: Option<WorkerClient>,
 }
 
 impl LocalContainerService {
+    fn route_worker_interaction(
+        &self,
+        execution_id: Uuid,
+        worker_node_id: Uuid,
+        interaction: InteractionRequest,
+    ) {
+        let Some(client) = self.worker_client.clone() else {
+            tracing::error!(%execution_id, "Cannot route worker interaction without a worker client");
+            return;
+        };
+        let Some(coordinator_id) = self.cluster_config.coordinator_id else {
+            tracing::error!(%execution_id, "Cannot route worker interaction without coordinator identity");
+            return;
+        };
+        let approvals = self.approvals.clone();
+        tokio::spawn(async move {
+            let mut request = ApprovalRequest::new(interaction.prompt, execution_id);
+            request.id = interaction.interaction_id.to_string();
+            if let Some(expires_at) = interaction.expires_at {
+                request.timeout_at = expires_at;
+            }
+            let is_question = interaction.kind == "question";
+            let Ok((_, waiter)) = approvals.create_with_waiter(request, is_question).await else {
+                tracing::error!(%execution_id, interaction_id = %interaction.interaction_id, "Failed to register worker interaction");
+                return;
+            };
+            let mut outcome = waiter.await;
+            let deadline = interaction.expires_at;
+            loop {
+                if matches!(
+                    interaction.disconnect_policy,
+                    cluster_protocol::DisconnectPolicy::FailClosed
+                ) && deadline.is_some_and(|deadline| Utc::now() >= deadline)
+                {
+                    outcome = ApprovalOutcome::Denied {
+                        reason: Some(
+                            "coordinator could not deliver approval before timeout".into(),
+                        ),
+                    };
+                }
+                let response = InteractionResponse {
+                    authority: RequestAuthority {
+                        protocol_version: PROTOCOL_VERSION,
+                        coordinator_id,
+                        worker_node_id,
+                        correlation_id: execution_id,
+                        issued_at: Utc::now(),
+                        nonce: Uuid::new_v4().to_string(),
+                    },
+                    execution_id,
+                    interaction_id: interaction.interaction_id,
+                    response: serde_json::to_string(&outcome)
+                        .expect("approval outcome must serialize"),
+                };
+                match client.respond_interaction(worker_node_id, &response).await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        tracing::warn!(%execution_id, interaction_id = %interaction.interaction_id, "Worker interaction response failed; retrying: {error}");
+                        if matches!(
+                            interaction.disconnect_policy,
+                            cluster_protocol::DisconnectPolicy::Timeout
+                        ) && deadline.is_some_and(|deadline| Utc::now() >= deadline)
+                        {
+                            outcome = ApprovalOutcome::TimedOut;
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        });
+    }
+
     fn register_mcp_refresh_control(
         &self,
         session_id: Uuid,
@@ -416,6 +585,8 @@ impl LocalContainerService {
         approvals: Approvals,
         queued_message_service: QueuedMessageService,
         remote_client: Option<RemoteClient>,
+        cluster_config: ClusterConfig,
+        worker_client: Option<WorkerClient>,
     ) -> Self {
         let child_store = Arc::new(RwLock::new(HashMap::new()));
         let cancellation_tokens = Arc::new(RwLock::new(HashMap::new()));
@@ -427,8 +598,11 @@ impl LocalContainerService {
         let mcp_refresh_controls = Arc::new(RwLock::new(HashMap::new()));
         let workspace_touch_times = Arc::new(RwLock::new(HashMap::new()));
         let notification_service = NotificationService::new(config.clone());
+        let repository_admin_locks =
+            RepositoryAdminLockManager::new(db.pool.clone(), Duration::from_mins(5))
+                .expect("static repository lock lease must be valid");
 
-        let container = LocalContainerService {
+        LocalContainerService {
             db,
             workspace_manager,
             child_store,
@@ -450,11 +624,14 @@ impl LocalContainerService {
             queued_message_service,
             notification_service,
             remote_client,
-        };
+            cluster_config,
+            repository_admin_locks,
+            worker_client,
+        }
+    }
 
-        container.spawn_workspace_cleanup();
-
-        container
+    pub fn start_cleanup_tasks(&self) {
+        self.spawn_workspace_cleanup();
     }
 
     fn map_workspace_manager_error(err: WorkspaceError) -> ContainerError {
@@ -479,6 +656,22 @@ impl LocalContainerService {
                 repo_name
             )),
             WorkspaceError::PartialCreation(msg) => ContainerError::Other(anyhow!(msg)),
+            WorkspaceError::WorktreeNotPortable { repo_name, detail } => {
+                ContainerError::Other(anyhow!(
+                    "Repository '{}' has a worktree other nodes cannot use: {}",
+                    repo_name,
+                    detail
+                ))
+            }
+            // Kept out of `Other` on purpose: `Other` is rendered to the user as
+            // a generic internal error, and this is the one provisioning failure
+            // whose text is the diagnosis.
+            err @ WorkspaceError::SharedStore { .. } => {
+                ContainerError::SharedStore(err.to_string())
+            }
+            WorkspaceError::InvalidSharedRoot(path) => {
+                ContainerError::Other(anyhow!("Invalid shared workspace root: {}", path.display()))
+            }
         }
     }
 
@@ -501,6 +694,12 @@ impl LocalContainerService {
             .map(|wr| (wr.repo_id, wr.target_branch.clone()))
             .collect();
 
+        // Resolve, once and here, which Git directory administers this
+        // workspace's worktrees. Every caller — create, ensure, cleanup, diff —
+        // goes through this function, so the decision is made in one place
+        // rather than re-derived (and eventually disagreed about) per call site.
+        let store = self.shared_repository_store_for(workspace_id).await?;
+
         let workspace_inputs: Vec<RepoWorkspaceInput> = repositories
             .iter()
             .map(|repo| {
@@ -511,11 +710,108 @@ impl LocalContainerService {
                         workspace_id
                     ))
                 })?;
-                Ok(RepoWorkspaceInput::new(repo.clone(), target_branch))
+                Ok(match &store {
+                    Some(store) => RepoWorkspaceInput::shared(
+                        repo.clone(),
+                        target_branch,
+                        store.path_for(repo.id),
+                    ),
+                    None => RepoWorkspaceInput::new(repo.clone(), target_branch),
+                })
             })
             .collect::<Result<_, ContainerError>>()?;
 
         Ok((repositories, workspace_inputs))
+    }
+
+    /// Best-effort repair of one cluster worktree that predates the shared
+    /// store.
+    ///
+    /// Deliberately never fails the caller. Every outcome is either a no-op
+    /// (the common case, once healed), a repair, or a refusal that leaves the
+    /// worktree exactly as it was — and a workspace that cannot be healed is
+    /// still better served by the ordinary `ensure` path reporting its own
+    /// error than by this one masking it.
+    async fn heal_cluster_worktree(
+        &self,
+        store: &SharedRepositoryStore,
+        workspace_dir: &Path,
+        input: &RepoWorkspaceInput,
+        branch: &str,
+    ) {
+        let worktree_path = workspace_dir.join(&input.repo.name);
+        // The store must hold the workspace's branch before anything is
+        // re-pointed at it, or adoption would refuse — correctly, but for a
+        // reason we can fix here by fetching from the checkout that still has
+        // it.
+        if let Err(e) = store.ensure(&input.repo, branch).await {
+            tracing::warn!(
+                repo = %input.repo.name,
+                "could not prepare the shared store while healing {}: {e}",
+                worktree_path.display()
+            );
+            return;
+        }
+        match store.adopt(&input.repo, &worktree_path, branch).await {
+            Ok(AdoptOutcome::AlreadyPortable) => {}
+            Ok(AdoptOutcome::Adopted { common_dir }) => tracing::info!(
+                repo = %input.repo.name,
+                "re-linked {} to {}",
+                worktree_path.display(),
+                common_dir.display()
+            ),
+            Ok(AdoptOutcome::Skipped { reason }) => tracing::info!(
+                repo = %input.repo.name,
+                "left {} alone: {reason}",
+                worktree_path.display()
+            ),
+            Err(e) => tracing::warn!(
+                repo = %input.repo.name,
+                "could not re-link {}: {e}",
+                worktree_path.display()
+            ),
+        }
+    }
+
+    /// The shared repository store this workspace's worktrees belong to, or
+    /// `None` when they belong to the operator's registered checkout.
+    ///
+    /// `None` for every workspace when clustering is disabled, and for a
+    /// `Local` placement when it is enabled — `Local` is a valid terminal state
+    /// meaning "runs on the coordinator", which is what every workspace created
+    /// before clustering has. Every other placement state, `Cleaning` included,
+    /// belongs to the store: a clustered workspace's registrations live there,
+    /// so cleaning it up against the registered checkout would delete the
+    /// directory while unregistering nothing.
+    async fn shared_repository_store_for(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Option<SharedRepositoryStore>, ContainerError> {
+        if !self.cluster_config.enabled {
+            return Ok(None);
+        }
+        let Some(placement) = WorkspacePlacement::find(&self.db.pool, workspace_id).await? else {
+            return Ok(None);
+        };
+        // Exhaustive on purpose: a new placement state must be a compile error
+        // here, not a silent fallthrough to the registered checkout.
+        let uses_shared_store = match placement.placement_state {
+            WorkspacePlacementState::Local => false,
+            WorkspacePlacementState::Reserved
+            | WorkspacePlacementState::Provisioning
+            | WorkspacePlacementState::Ready
+            | WorkspacePlacementState::Failed
+            | WorkspacePlacementState::Cleaning => true,
+        };
+        if !uses_shared_store {
+            return Ok(None);
+        }
+        let store = SharedRepositoryStore::new(
+            &self.cluster_config.shared_root,
+            self.repository_admin_locks.clone(),
+        )
+        .map_err(Self::map_workspace_manager_error)?;
+        Ok(Some(store))
     }
 
     async fn get_child_from_store(&self, id: &Uuid) -> Option<Arc<RwLock<AsyncGroupChild>>> {
@@ -743,11 +1039,21 @@ impl LocalContainerService {
         };
         let workspace_dir = PathBuf::from(container_ref);
 
-        let repositories = WorkspaceRepo::find_repos_for_workspace(&self.db.pool, workspace.id)
-            .await
-            .unwrap_or_default();
+        // Resolve through the same seam creation used, so a clustered
+        // workspace's registrations are removed from the store that holds them.
+        let workspace_inputs = match self.workspace_repo_inputs(workspace.id).await {
+            Ok((_, inputs)) => inputs,
+            Err(e) => {
+                tracing::warn!(
+                    "Could not resolve repositories for workspace {}: {}",
+                    workspace.id,
+                    e
+                );
+                Vec::new()
+            }
+        };
 
-        if repositories.is_empty() {
+        if workspace_inputs.is_empty() {
             tracing::warn!(
                 "No repositories found for workspace {}, cleaning up workspace directory only",
                 workspace.id
@@ -758,7 +1064,7 @@ impl LocalContainerService {
                 tracing::warn!("Failed to remove workspace directory: {}", e);
             }
         } else {
-            WorkspaceManager::cleanup_workspace(&workspace_dir, &repositories)
+            WorkspaceManager::cleanup_workspace(&workspace_dir, &workspace_inputs)
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!(
@@ -790,6 +1096,13 @@ impl LocalContainerService {
             expired_workspaces.len()
         );
         for workspace in &expired_workspaces {
+            if !self.cluster_workspace_cleanup_safe(workspace).await? {
+                tracing::info!(
+                    workspace_id = %workspace.id,
+                    "Retaining expired clustered workspace because worker ownership is active or uncertain"
+                );
+                continue;
+            }
             // Never auto-delete a workspace whose worktree still holds pending
             // work. Archival accelerates expiry to 1h (vs 72h), so an archived
             // workspace with uncommitted or untracked changes could otherwise be
@@ -814,9 +1127,50 @@ impl LocalContainerService {
                     continue;
                 }
             }
+            if self.cluster_config.enabled {
+                let placement = WorkspacePlacement::find(&self.db.pool, workspace.id).await?;
+                if placement
+                    .as_ref()
+                    .and_then(|value| value.worker_node_id)
+                    .is_some()
+                    && !WorkspacePlacement::begin_cleanup(&self.db.pool, workspace.id, Utc::now())
+                        .await?
+                {
+                    tracing::info!(
+                        workspace_id = %workspace.id,
+                        "Retaining clustered workspace because cleanup ownership changed before reclamation"
+                    );
+                    continue;
+                }
+            }
             self.cleanup_workspace(workspace).await;
         }
         Ok(())
+    }
+
+    async fn cluster_workspace_cleanup_safe(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<bool, DeploymentError> {
+        if !self.cluster_config.enabled {
+            return Ok(true);
+        }
+        let Some(placement) = WorkspacePlacement::find(&self.db.pool, workspace.id).await? else {
+            return Ok(false);
+        };
+        let Some(worker_node_id) = placement.worker_node_id else {
+            return Ok(placement.placement_state == WorkspacePlacementState::Local);
+        };
+        let Some(worker) = WorkerNode::find_by_id(&self.db.pool, worker_node_id).await? else {
+            return Ok(false);
+        };
+        let has_unsafe_jobs =
+            ExecutionWorkerJob::has_unsafe_for_workspace(&self.db.pool, workspace.id).await?;
+        Ok(worker_cleanup_evidence_safe(
+            &worker,
+            has_unsafe_jobs,
+            Utc::now(),
+        ))
     }
 
     fn spawn_workspace_cleanup(&self) {
@@ -824,7 +1178,7 @@ impl LocalContainerService {
         tokio::spawn(async move {
             container
                 .workspace_manager
-                .cleanup_orphan_workspaces()
+                .cleanup_orphan_workspaces(!container.cluster_config.enabled)
                 .await;
 
             let mut cleanup_interval =
@@ -1561,6 +1915,249 @@ impl LocalContainerService {
         map.insert(id, store);
     }
 
+    async fn track_worker_msgs_in_store(
+        &self,
+        execution_process: &ExecutionProcess,
+        worker_node_id: Uuid,
+    ) -> Result<(), ContainerError> {
+        let client = self.worker_client.clone().ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster worker client is not configured"))
+        })?;
+        let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
+        })?;
+        let execution_id = execution_process.id;
+        let store = Arc::new(MsgStore::new());
+        self.msg_stores
+            .write()
+            .await
+            .insert(execution_id, store.clone());
+        let db = self.db.clone();
+        let container = self.clone();
+        let handle = tokio::spawn(async move {
+            let mut cursor = 0_u64;
+            let mut retry_delay = Duration::from_millis(100);
+            loop {
+                let batch = match client.events(worker_node_id, execution_id, cursor).await {
+                    Ok(batch) => {
+                        retry_delay = Duration::from_millis(100);
+                        batch
+                    }
+                    Err(services::services::cluster::WorkerClientError::ReplayGap { .. }) => {
+                        let _ = ExecutionWorkerJob::mark_output_incomplete(&db.pool, execution_id)
+                            .await;
+                        let _ = ExecutionWorkerJob::update_state(
+                            &db.pool,
+                            execution_id,
+                            ExecutionWorkerDispatchState::Indeterminate,
+                            None,
+                            Some(Utc::now()),
+                        )
+                        .await;
+                        let _ = ExecutionProcess::update_completion(
+                            &db.pool,
+                            execution_id,
+                            ExecutionProcessStatus::Indeterminate,
+                            None,
+                        )
+                        .await;
+                        store.push(LogMsg::Stderr(
+                            "Worker output replay gap; execution state is indeterminate".into(),
+                        ));
+                        // Remove before finishing so a client that subscribes
+                        // after this point re-derives from disk instead of
+                        // attaching to a store whose live broadcast will never
+                        // carry another message (see the terminal arm below
+                        // for the full explanation).
+                        container.msg_stores.write().await.remove(&execution_id);
+                        store.push_finished();
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            execution_id = %execution_id,
+                            worker_node_id = %worker_node_id,
+                            "Worker event poll failed; retrying: {error}"
+                        );
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
+                        continue;
+                    }
+                };
+
+                let mut terminal = None;
+                for event in batch.events {
+                    cursor = event.sequence;
+                    match event.payload {
+                        ExecutionEventPayload::Stdout { data_base64 } => {
+                            push_worker_bytes(&store, &data_base64, false);
+                        }
+                        ExecutionEventPayload::Stderr { data_base64 } => {
+                            push_worker_bytes(&store, &data_base64, true);
+                        }
+                        ExecutionEventPayload::Structured { json } => {
+                            if let Ok(message) = serde_json::from_str::<LogMsg>(&json) {
+                                store.push(message);
+                            } else {
+                                store.push_stdout(format!("{json}\n"));
+                            }
+                        }
+                        ExecutionEventPayload::Completed(evidence) => {
+                            terminal = Some((
+                                ExecutionWorkerDispatchState::Completed,
+                                ExecutionProcessStatus::Completed,
+                                evidence,
+                            ));
+                        }
+                        ExecutionEventPayload::Failed(evidence) => {
+                            terminal = Some((
+                                ExecutionWorkerDispatchState::Failed,
+                                ExecutionProcessStatus::Failed,
+                                evidence,
+                            ));
+                        }
+                        ExecutionEventPayload::Killed(evidence) => {
+                            terminal = Some((
+                                ExecutionWorkerDispatchState::Killed,
+                                ExecutionProcessStatus::Killed,
+                                evidence,
+                            ));
+                        }
+                        ExecutionEventPayload::Interrupted(evidence) => {
+                            terminal = Some((
+                                ExecutionWorkerDispatchState::Interrupted,
+                                ExecutionProcessStatus::Interrupted,
+                                evidence,
+                            ));
+                        }
+                        ExecutionEventPayload::Indeterminate { reason } => {
+                            store.push(LogMsg::Stderr(format!(
+                                "Worker reported an indeterminate execution: {reason}"
+                            )));
+                            let _ = ExecutionWorkerJob::update_state(
+                                &db.pool,
+                                execution_id,
+                                ExecutionWorkerDispatchState::Indeterminate,
+                                None,
+                                Some(Utc::now()),
+                            )
+                            .await;
+                            let _ = ExecutionProcess::update_completion(
+                                &db.pool,
+                                execution_id,
+                                ExecutionProcessStatus::Indeterminate,
+                                None,
+                            )
+                            .await;
+                            container.msg_stores.write().await.remove(&execution_id);
+                            store.push_finished();
+                            return;
+                        }
+                        ExecutionEventPayload::InteractionRequested(interaction) => {
+                            container.route_worker_interaction(
+                                execution_id,
+                                worker_node_id,
+                                interaction,
+                            );
+                        }
+                        ExecutionEventPayload::Accepted
+                        | ExecutionEventPayload::Starting
+                        | ExecutionEventPayload::InteractionAcknowledged { .. }
+                        | ExecutionEventPayload::Preview(_) => {}
+                    }
+                }
+
+                if cursor > 0 {
+                    let _ = ExecutionWorkerJob::acknowledge_sequence(
+                        &db.pool,
+                        execution_id,
+                        cursor as i64,
+                        batch.latest_available as i64,
+                    )
+                    .await;
+                    let acknowledgement = EventAcknowledgement {
+                        authority: RequestAuthority {
+                            protocol_version: PROTOCOL_VERSION,
+                            coordinator_id,
+                            worker_node_id,
+                            correlation_id: execution_id,
+                            issued_at: Utc::now(),
+                            nonce: Uuid::new_v4().to_string(),
+                        },
+                        execution_id,
+                        highest_contiguous_sequence: cursor,
+                    };
+                    if let Err(error) = client.acknowledge(worker_node_id, &acknowledgement).await {
+                        tracing::warn!(%execution_id, "Worker event acknowledgement failed: {error}");
+                    }
+                }
+
+                if let Some((worker_state, process_state, evidence)) = terminal {
+                    let evidence_json = serde_json::to_value(&evidence).ok();
+                    let _ = ExecutionWorkerJob::update_state(
+                        &db.pool,
+                        execution_id,
+                        worker_state,
+                        evidence_json.as_ref(),
+                        Some(evidence.observed_at),
+                    )
+                    .await;
+                    let exit_code = evidence.exit_code.map(i64::from);
+                    if !ExecutionProcess::was_stopped(&db.pool, execution_id).await {
+                        let _ = ExecutionProcess::update_completion(
+                            &db.pool,
+                            execution_id,
+                            process_state,
+                            exit_code,
+                        )
+                        .await;
+                    }
+                    container.finalize_remote_execution(execution_id).await;
+                    // Remove from the map before pushing Finished. Historic
+                    // replay (`stream_normalized_logs`) reads a resident store
+                    // via `history_plus_stream()`, which chains the buffered
+                    // history onto a *live* broadcast subscription. A late
+                    // subscriber's history replay includes this store's past
+                    // `Finished` entry, but the filter used by that replay
+                    // path drops non-JsonPatch entries — so the sentinel is
+                    // discarded and the replay falls through to the live half,
+                    // which never yields again for a store nothing will ever
+                    // push to. Removing the store here ensures any later
+                    // subscriber instead falls back to the on-disk/materialized
+                    // log path, which terminates correctly.
+                    container.msg_stores.write().await.remove(&execution_id);
+                    store.push_finished();
+                    break;
+                }
+
+                if batch.latest_available <= cursor {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        });
+        self.add_exit_monitor_handle(execution_id, handle).await;
+        Ok(())
+    }
+
+    async fn finalize_remote_execution(&self, execution_id: Uuid) {
+        let Ok(ctx) = ExecutionProcess::load_context(&self.db.pool, execution_id).await else {
+            tracing::warn!(%execution_id, "Could not load remote execution context for finalization");
+            return;
+        };
+        if ctx.execution_process.status == ExecutionProcessStatus::Completed {
+            if let Err(error) = self.try_commit_changes(&ctx).await {
+                tracing::error!(%execution_id, "Remote execution commit failed: {error}");
+            }
+            if let Err(error) = self.try_start_next_action(&ctx).await {
+                tracing::error!(%execution_id, "Remote execution next action failed: {error}");
+            }
+        }
+        if self.should_finalize(&ctx) {
+            self.finalize_task(&ctx).await;
+        }
+        self.update_after_head_commits(execution_id).await;
+    }
+
     /// Create a live diff log stream for ongoing attempts for WebSocket
     /// Returns a stream that owns the filesystem watcher - when dropped, watcher is cleaned up
     async fn create_live_diff_stream(
@@ -2131,6 +2728,10 @@ impl ContainerService for LocalContainerService {
     }
 
     async fn create(&self, workspace: &Workspace) -> Result<ContainerRef, ContainerError> {
+        if self.cluster_config.enabled {
+            return create_cluster_workspace(self, workspace).await;
+        }
+
         let label = workspace.name.as_deref().unwrap_or("workspace");
         let workspace_dir_name =
             LocalContainerService::dir_name_from_workspace(&workspace.id, label);
@@ -2188,13 +2789,69 @@ impl ContainerService for LocalContainerService {
             WorkspaceManager::get_workspace_base_dir().join(&workspace_dir_name)
         };
 
-        WorkspaceManager::ensure_workspace_exists(
-            &workspace_dir,
-            &workspace_inputs,
-            &workspace.branch,
-        )
-        .await
-        .map_err(Self::map_workspace_manager_error)?;
+        // Enabling clustering must not change how coordinator-local workspaces
+        // behave. `Local` is a terminal, valid placement — it is what every
+        // workspace created before clustering has, and what "Automatic
+        // placement" yields when no worker is chosen — so it takes the same
+        // unfenced local path it took before. Only a workspace actually placed
+        // on a worker lives on shared storage and needs the fenced path.
+        let cluster_placement = if self.cluster_config.enabled {
+            let placement = WorkspacePlacement::find(&self.db.pool, workspace.id)
+                .await?
+                .ok_or_else(|| ContainerError::Other(anyhow!("Workspace placement is missing")))?;
+            Some(placement.placement_state)
+        } else {
+            None
+        };
+
+        match cluster_placement {
+            Some(state) if state != WorkspacePlacementState::Local => {
+                if state != WorkspacePlacementState::Ready {
+                    return Err(ContainerError::Other(anyhow!(
+                        "Cluster workspace is not ready (state: {:?})",
+                        state
+                    )));
+                }
+                // Heal before ensuring. A workspace created before this change
+                // has worktrees pointing at the coordinator's own checkout, and
+                // `ensure_workspace_exists_fenced` now administers them in the
+                // shared store — where that branch does not yet exist. Left
+                // alone it would take the "branch missing" arm, fail to repair
+                // linkage it cannot see, and fall through to destructive
+                // recreation, deleting exactly the work this change exists to
+                // rescue. Adoption re-links the worktree first, so `ensure`
+                // then finds a healthy worktree on the expected branch and does
+                // nothing.
+                if let Some(store) = self.shared_repository_store_for(workspace.id).await? {
+                    for input in &workspace_inputs {
+                        self.heal_cluster_worktree(
+                            &store,
+                            &workspace_dir,
+                            input,
+                            &workspace.branch,
+                        )
+                        .await;
+                    }
+                }
+                WorkspaceManager::ensure_workspace_exists_fenced(
+                    &workspace_dir,
+                    &workspace_inputs,
+                    &workspace.branch,
+                    &self.repository_admin_locks,
+                )
+                .await
+                .map_err(Self::map_workspace_manager_error)?;
+            }
+            _ => {
+                WorkspaceManager::ensure_workspace_exists(
+                    &workspace_dir,
+                    &workspace_inputs,
+                    &workspace.branch,
+                )
+                .await
+                .map_err(Self::map_workspace_manager_error)?;
+            }
+        }
 
         if workspace.container_ref.is_none() {
             Workspace::update_container_ref(
@@ -2243,6 +2900,189 @@ impl ContainerService for LocalContainerService {
         }
 
         Ok(true)
+    }
+
+    async fn dispatch_execution(
+        &self,
+        workspace: &Workspace,
+        execution_process: &ExecutionProcess,
+        executor_action: &ExecutorAction,
+    ) -> Result<(), ContainerError> {
+        if !self.cluster_config.enabled {
+            return self
+                .start_execution_inner(workspace, execution_process, executor_action)
+                .await;
+        }
+
+        let placement = WorkspacePlacement::find(&self.db.pool, workspace.id)
+            .await?
+            .ok_or_else(|| ContainerError::Other(anyhow!("Workspace placement is missing")))?;
+        // A coordinator-local workspace executes locally whether or not this
+        // node is a cluster coordinator. Without this, turning clustering on
+        // made every pre-existing workspace unrunnable.
+        if placement.placement_state == WorkspacePlacementState::Local {
+            return self
+                .start_execution_inner(workspace, execution_process, executor_action)
+                .await;
+        }
+        if placement.placement_state != WorkspacePlacementState::Ready {
+            return Err(ContainerError::Other(anyhow!(
+                "Cluster workspace is not ready for execution (state: {:?})",
+                placement.placement_state
+            )));
+        }
+        let worker_node_id = placement.worker_node_id.ok_or_else(|| {
+            ContainerError::Other(anyhow!("Ready cluster workspace has no assigned worker"))
+        })?;
+        let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
+        })?;
+        let client = self.worker_client.as_ref().ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster worker client is not configured"))
+        })?;
+        let workspace_path = workspace.container_ref.clone().ok_or_else(|| {
+            ContainerError::Other(anyhow!("Container ref not found for workspace"))
+        })?;
+
+        let mut environment = BTreeMap::new();
+        environment.extend(self.resolve_org_env_vars(workspace).await);
+        environment.insert("VK_WORKSPACE_ID".into(), workspace.id.to_string());
+        environment.insert("VK_WORKSPACE_BRANCH".into(), workspace.branch.clone());
+
+        let executor_config = match executor_action.typ() {
+            ExecutorActionType::CodingAgentInitialRequest(request) => {
+                Some(&request.executor_config)
+            }
+            ExecutorActionType::CodingAgentFollowUpRequest(request) => {
+                Some(&request.executor_config)
+            }
+            ExecutorActionType::ReviewRequest(request) => Some(&request.executor_config),
+            ExecutorActionType::ScriptRequest(_) => None,
+        };
+        let executor_profile = executor_config
+            .map(|config| config.profile_id().to_string())
+            .unwrap_or_else(|| "script".into());
+        // Send the definition, not just the name. A variant is user-defined data
+        // that lives only here; a worker holds the embedded defaults, which
+        // define DEFAULT and nothing else.
+        let executor_profile_config = executor_config
+            .and_then(dispatched_executor_profile)
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(anyhow::Error::from)?;
+        let action = serde_json::to_value(executor_action).map_err(anyhow::Error::from)?;
+        let run_reason = serde_json::to_value(&execution_process.run_reason)
+            .map_err(anyhow::Error::from)?
+            .as_str()
+            .unwrap_or("unknown")
+            .to_owned();
+        let persistence = if execution_process.run_reason.is_persistent() {
+            PersistencePolicy::Persistent
+        } else {
+            PersistencePolicy::Ordinary
+        };
+        let digest_material = serde_json::to_vec(&json!({
+            "execution_id": execution_process.id,
+            "workspace_id": workspace.id,
+            "session_id": execution_process.session_id,
+            "worker_node_id": worker_node_id,
+            "workspace_path": workspace_path,
+            "executor_profile": executor_profile,
+            // Part of the request's identity: the worker treats a dispatch with
+            // a different digest as a different request. A profile edited
+            // between two dispatches of the same execution must not be deduped
+            // into the first one's definition.
+            "executor_profile_config": executor_profile_config,
+            "action": action,
+            "environment": environment,
+            "run_reason": run_reason,
+            "persistence": persistence,
+        }))
+        .map_err(anyhow::Error::from)?;
+        let request_digest = format!("sha256:{:x}", Sha256::digest(digest_material));
+        let authority = RequestAuthority {
+            protocol_version: PROTOCOL_VERSION,
+            coordinator_id,
+            worker_node_id,
+            correlation_id: execution_process.id,
+            issued_at: Utc::now(),
+            nonce: Uuid::new_v4().to_string(),
+        };
+        let dispatch = ExecutionDispatch {
+            authority,
+            execution_id: execution_process.id,
+            workspace_id: workspace.id,
+            session_id: execution_process.session_id,
+            workspace_path: workspace_path.clone(),
+            working_directory: workspace_path,
+            executor_profile,
+            executor_profile_config,
+            action,
+            environment,
+            run_reason,
+            timeout_seconds: None,
+            persistence,
+            request_digest: request_digest.clone(),
+        };
+
+        ExecutionWorkerJob::create_pending(
+            &self.db.pool,
+            execution_process.id,
+            worker_node_id,
+            &request_digest,
+        )
+        .await?;
+        let accepted = match client.dispatch(worker_node_id, &dispatch).await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                let evidence = serde_json::json!({
+                    "reason": "worker dispatch failed",
+                    "error": error.to_string(),
+                });
+                ExecutionWorkerJob::update_state(
+                    &self.db.pool,
+                    execution_process.id,
+                    ExecutionWorkerDispatchState::Failed,
+                    Some(&evidence),
+                    Some(Utc::now()),
+                )
+                .await?;
+                return Err(ContainerError::Other(anyhow!(error)));
+            }
+        };
+        if accepted.execution_id != execution_process.id
+            || accepted.request_digest != request_digest
+        {
+            let evidence = serde_json::json!({
+                "reason": "worker returned mismatched dispatch acceptance",
+            });
+            ExecutionWorkerJob::update_state(
+                &self.db.pool,
+                execution_process.id,
+                ExecutionWorkerDispatchState::Failed,
+                Some(&evidence),
+                Some(Utc::now()),
+            )
+            .await?;
+            return Err(ContainerError::Other(anyhow!(
+                "Worker returned mismatched dispatch acceptance"
+            )));
+        }
+        if !ExecutionWorkerJob::record_acceptance(
+            &self.db.pool,
+            execution_process.id,
+            accepted.worker_job_id,
+            accepted.last_sequence as i64,
+        )
+        .await?
+        {
+            return Err(ContainerError::Other(anyhow!(
+                "Execution worker job was not pending during acceptance"
+            )));
+        }
+        self.track_worker_msgs_in_store(execution_process, worker_node_id)
+            .await?;
+        Ok(())
     }
 
     async fn start_execution_inner(
@@ -2531,6 +3371,93 @@ impl ContainerService for LocalContainerService {
         // process has no running turn so it is not the `child` below — reap it
         // by session key. Idempotent no-op when there is none.
         self.reap_warm_server(&execution_process.session_id).await;
+
+        if let Some(worker_job) =
+            ExecutionWorkerJob::find_by_execution_id(&self.db.pool, execution_process.id).await?
+        {
+            let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
+                ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
+            })?;
+            let client = self.worker_client.as_ref().ok_or_else(|| {
+                ContainerError::Other(anyhow!("Cluster worker client is not configured"))
+            })?;
+            let request = CancellationRequest {
+                authority: RequestAuthority {
+                    protocol_version: PROTOCOL_VERSION,
+                    coordinator_id,
+                    worker_node_id: worker_job.worker_node_id,
+                    correlation_id: execution_process.id,
+                    issued_at: Utc::now(),
+                    nonce: Uuid::new_v4().to_string(),
+                },
+                execution_id: execution_process.id,
+                graceful_timeout_seconds: 5,
+                terminate_timeout_seconds: 5,
+            };
+            match client.cancel(worker_job.worker_node_id, &request).await {
+                Ok(response)
+                    if matches!(
+                        response.phase,
+                        CancellationPhase::Confirmed | CancellationPhase::AlreadyTerminal
+                    ) && response.terminal.is_some() =>
+                {
+                    let evidence = response.terminal.expect("guarded above");
+                    let (worker_state, process_state) = match evidence.state {
+                        TerminalState::Completed => (
+                            ExecutionWorkerDispatchState::Completed,
+                            ExecutionProcessStatus::Completed,
+                        ),
+                        TerminalState::Failed => (
+                            ExecutionWorkerDispatchState::Failed,
+                            ExecutionProcessStatus::Failed,
+                        ),
+                        TerminalState::Killed => (
+                            ExecutionWorkerDispatchState::Killed,
+                            ExecutionProcessStatus::Killed,
+                        ),
+                        TerminalState::Interrupted => (
+                            ExecutionWorkerDispatchState::Interrupted,
+                            ExecutionProcessStatus::Interrupted,
+                        ),
+                    };
+                    let evidence_json = serde_json::to_value(&evidence).ok();
+                    ExecutionWorkerJob::update_state(
+                        &self.db.pool,
+                        execution_process.id,
+                        worker_state,
+                        evidence_json.as_ref(),
+                        Some(evidence.observed_at),
+                    )
+                    .await?;
+                    ExecutionProcess::update_completion(
+                        &self.db.pool,
+                        execution_process.id,
+                        process_state,
+                        evidence.exit_code.map(i64::from),
+                    )
+                    .await?;
+                }
+                Ok(response) => {
+                    tracing::warn!(
+                        execution_id = %execution_process.id,
+                        phase = ?response.phase,
+                        "Worker did not confirm a terminal state after cancellation"
+                    );
+                    mark_remote_execution_indeterminate(&self.db, execution_process.id).await?;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        execution_id = %execution_process.id,
+                        "Remote cancellation could not be confirmed: {error}"
+                    );
+                    mark_remote_execution_indeterminate(&self.db, execution_process.id).await?;
+                }
+            }
+            if let Some(store) = self.msg_stores.write().await.remove(&execution_process.id) {
+                store.push_finished();
+            }
+            return Ok(());
+        }
 
         let Some(child) = self.get_child_from_store(&execution_process.id).await else {
             // No in-memory handle: the process may have been adopted from a
@@ -2907,6 +3834,146 @@ impl ContainerService for LocalContainerService {
         Ok(())
     }
 }
+
+/// Fail unless every worktree in `workspace_dir` is backed by a repository that
+/// resolves inside `shared_root`.
+///
+/// Enumerates all of them and reports every violation, rather than stopping at
+/// the first: an operator fixing a multi-repository workspace needs the whole
+/// list, not one entry at a time. `Indeterminate` counts as a violation here
+/// because this runs before a workspace is advertised as ready, and "could not
+/// tell" is not a basis for telling a user their workspace works.
+fn assert_worktrees_are_portable(
+    shared_root: &Path,
+    workspace_dir: &Path,
+    inputs: &[RepoWorkspaceInput],
+) -> Result<(), ContainerError> {
+    let mut violations = Vec::new();
+    for input in inputs {
+        let worktree_path = workspace_dir.join(&input.repo.name);
+        let status = WorktreeLinkage::probe(&worktree_path, shared_root);
+        if !status.is_portable() {
+            violations.push(format!("{}: {}", input.repo.name, status.describe()));
+        }
+    }
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(ContainerError::Other(anyhow!(
+        "worktrees are not usable from other nodes: {}",
+        violations.join("; ")
+    )))
+}
+
+async fn create_cluster_workspace(
+    service: &LocalContainerService,
+    workspace: &Workspace,
+) -> Result<ContainerRef, ContainerError> {
+    let placement = WorkspacePlacement::find(&service.db.pool, workspace.id)
+        .await?
+        .ok_or_else(|| ContainerError::Other(anyhow!("Workspace placement is missing")))?;
+    if placement.placement_state != WorkspacePlacementState::Reserved
+        || placement.worker_node_id.is_none()
+    {
+        return Err(ContainerError::Other(anyhow!(
+            "Workspace must have a reserved worker before provisioning"
+        )));
+    }
+    if !WorkspacePlacement::transition(
+        &service.db.pool,
+        workspace.id,
+        WorkspacePlacementState::Reserved,
+        WorkspacePlacementState::Provisioning,
+        None,
+    )
+    .await?
+    {
+        return Err(ContainerError::Other(anyhow!(
+            "Workspace placement changed before provisioning"
+        )));
+    }
+
+    let result = async {
+        let paths = SharedWorkspacePaths::new(&service.cluster_config.shared_root)
+            .map_err(LocalContainerService::map_workspace_manager_error)?;
+        paths.create_base_dirs().await?;
+        let workspace_dir = paths.workspace_dir(workspace.id);
+        let (repositories, workspace_inputs) = service.workspace_repo_inputs(workspace.id).await?;
+
+        // Materialise the shared store for every repository *before* any
+        // worktree is created from it. Without this the worktree would be
+        // created from the coordinator's own checkout and record a path no
+        // worker can resolve — the defect this exists to close.
+        let store = service
+            .shared_repository_store_for(workspace.id)
+            .await?
+            .ok_or_else(|| {
+                ContainerError::Other(anyhow!(
+                    "Cluster provisioning requires a shared repository store"
+                ))
+            })?;
+        for input in &workspace_inputs {
+            store
+                .ensure(&input.repo, &input.target_branch)
+                .await
+                .map_err(LocalContainerService::map_workspace_manager_error)?;
+        }
+
+        let created_workspace = WorkspaceManager::create_workspace_fenced(
+            &workspace_dir,
+            &workspace_inputs,
+            &workspace.branch,
+            &service.repository_admin_locks,
+        )
+        .await
+        .map_err(LocalContainerService::map_workspace_manager_error)?;
+
+        // Assert portability before this workspace can be advertised as ready.
+        // A workspace whose worktrees a worker cannot use must fail loudly here,
+        // not silently several minutes into an agent's first turn.
+        assert_worktrees_are_portable(
+            paths.root(),
+            &created_workspace.workspace_dir,
+            &workspace_inputs,
+        )?;
+
+        service
+            .copy_files_and_images(&created_workspace.workspace_dir, workspace)
+            .await?;
+        LocalContainerService::create_workspace_config_files(
+            &created_workspace.workspace_dir,
+            &repositories,
+        )
+        .await?;
+        let container_ref = created_workspace
+            .workspace_dir
+            .to_string_lossy()
+            .to_string();
+        Workspace::update_container_ref(&service.db.pool, workspace.id, &container_ref).await?;
+        Ok::<_, ContainerError>(container_ref)
+    }
+    .await;
+
+    let (next, reason) = match &result {
+        Ok(_) => (WorkspacePlacementState::Ready, None),
+        Err(error) => (WorkspacePlacementState::Failed, Some(error.to_string())),
+    };
+    let transitioned = WorkspacePlacement::transition(
+        &service.db.pool,
+        workspace.id,
+        WorkspacePlacementState::Provisioning,
+        next,
+        reason.as_deref(),
+    )
+    .await?;
+    if !transitioned && result.is_ok() {
+        return Err(ContainerError::Other(anyhow!(
+            "Workspace provisioning completed but ready state could not be persisted"
+        )));
+    }
+    result
+}
+
 fn success_exit_status() -> std::process::ExitStatus {
     #[cfg(unix)]
     {
@@ -2938,6 +4005,93 @@ mod queued_follow_up_tests {
             skipped_cleanup_action(false),
             SkippedCleanupAction::Finalize
         );
+    }
+}
+
+#[cfg(test)]
+mod worker_event_tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+    use utils::{log_msg::LogMsg, msg_store::MsgStore};
+
+    use super::push_worker_bytes;
+
+    #[test]
+    fn worker_output_is_forwarded_to_msg_store_in_received_order() {
+        let store = MsgStore::new();
+        push_worker_bytes(&store, &BASE64_STANDARD.encode("first"), false);
+        push_worker_bytes(&store, &BASE64_STANDARD.encode("second"), true);
+        push_worker_bytes(&store, &BASE64_STANDARD.encode("third"), false);
+
+        assert!(matches!(store.get_history().as_slice(), [
+            LogMsg::Stdout(first),
+            LogMsg::Stderr(second),
+            LogMsg::Stdout(third),
+        ] if first == "first" && second == "second" && third == "third"));
+    }
+
+    #[test]
+    fn invalid_worker_output_is_explicitly_reported() {
+        let store = MsgStore::new();
+        push_worker_bytes(&store, "not-base64", false);
+        assert!(matches!(
+            store.get_history().as_slice(),
+            [LogMsg::Stderr(message)] if message.contains("invalid base64")
+        ));
+    }
+}
+
+#[cfg(test)]
+mod cluster_cleanup_tests {
+    use chrono::{Duration, Utc};
+    use db::models::worker_node::{WorkerMountStatus, WorkerNode, WorkerNodeStatus};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::worker_cleanup_evidence_safe;
+
+    fn worker(status: WorkerNodeStatus, lease_offset_seconds: i64) -> WorkerNode {
+        let now = Utc::now();
+        WorkerNode {
+            id: Uuid::new_v4(),
+            hostname: "think3".into(),
+            status,
+            worker_version: "1".into(),
+            vibe_version: "1".into(),
+            capabilities: json!({}).into(),
+            resource_snapshot: json!({}).into(),
+            labels: json!({}).into(),
+            mount_status: WorkerMountStatus::Healthy,
+            mount_message: None,
+            last_heartbeat_at: Some(now),
+            lease_expires_at: Some(now + Duration::seconds(lease_offset_seconds)),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn cleanup_requires_current_worker_evidence_and_no_unsafe_jobs() {
+        let now = Utc::now();
+        assert!(worker_cleanup_evidence_safe(
+            &worker(WorkerNodeStatus::Online, 30),
+            false,
+            now
+        ));
+        assert!(!worker_cleanup_evidence_safe(
+            &worker(WorkerNodeStatus::Offline, 30),
+            false,
+            now
+        ));
+        assert!(!worker_cleanup_evidence_safe(
+            &worker(WorkerNodeStatus::Online, -1),
+            false,
+            now
+        ));
+        assert!(!worker_cleanup_evidence_safe(
+            &worker(WorkerNodeStatus::Online, 30),
+            true,
+            now
+        ));
     }
 }
 

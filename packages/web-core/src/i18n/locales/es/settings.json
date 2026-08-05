@@ -44,7 +44,9 @@
         "slack": "Slack",
         "slackDesc": "Conexión del espacio de trabajo de Slack",
         "pipelines": "Pipelines",
-        "pipelinesDesc": "Pipeline TOML files and defaults"
+        "pipelinesDesc": "Pipeline TOML files and defaults",
+        "workers": "Trabajadores del clúster",
+        "workersDesc": "Estado de los trabajadores, almacenamiento y programación"
       }
     },
     "general": {
@@ -419,6 +421,8 @@
         "description": "Configure this MCP server and assign it to agents.",
         "name": "Nombre",
         "namePlaceholder": "p. ej. mi_servidor",
+        "displayName": "Nombre para mostrar",
+        "displayNamePlaceholder": "p. ej. Atlassian Rovo",
         "transport": "Transporte",
         "command": "Comando",
         "args": "Argumentos",
@@ -735,6 +739,19 @@
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
     },
+    "workers": {
+      "title": "Trabajadores del clúster",
+      "description": "Estado de los trabajadores, almacenamiento compartido, capacidad y estado de programación.",
+      "loading": "Cargando trabajadores…",
+      "loadError": "No se pudieron cargar los trabajadores del clúster.",
+      "empty": "Todavía no se ha registrado ningún trabajador.",
+      "schedulable": "Programable",
+      "unschedulable": "No programable",
+      "active": "Ejecuciones activas",
+      "load": "Carga",
+      "drain": "Drenar",
+      "resume": "Reanudar la programación"
+    },
     "attachments": {
       "title": "Archivos adjuntos",
       "description": "Estado del almacenamiento de archivos adjuntos para esta implementación.",
@@ -796,6 +813,13 @@
       "empty": "Aún no hay perfiles SSO configurados. Añade uno para habilitar el acceso a AWS en esta máquina.",
       "cliMissing": "La CLI de AWS no está disponible en esta máquina. Instálala desde la sección Herramientas de CLI para comprobar el estado e iniciar sesión.",
       "readOnly": "perfil default · solo lectura",
+      "scope": {
+        "session": "Sesión de SSO",
+        "legacy": "URL de inicio de SSO heredada",
+        "profiles": "{{count}} perfil",
+        "profiles_other": "{{count}} perfiles"
+      },
+      "manageProfiles": "Gestionar perfiles ({{count}})",
       "actions": {
         "add": "Añadir perfil",
         "refresh": "Actualizar estados",

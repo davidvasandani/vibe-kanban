@@ -1,4 +1,6 @@
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path};
+
+mod build_revision;
 
 fn main() {
     // Load .env from the workspace root
@@ -11,6 +13,10 @@ fn main() {
     println!("cargo:rerun-if-env-changed=POSTHOG_API_ENDPOINT");
     println!("cargo:rerun-if-env-changed=VK_SHARED_API_BASE");
     println!("cargo:rerun-if-env-changed=SENTRY_DSN");
+    println!(
+        "cargo:rerun-if-env-changed={}",
+        build_revision::BUILD_GIT_SHA_ENV
+    );
     if env_file.exists() {
         println!("cargo:rerun-if-changed={}", env_file.display());
     }
@@ -29,15 +35,9 @@ fn main() {
             }
         }
     }
-    let git_sha = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(&workspace_root)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let explicit_sha = std::env::var(build_revision::BUILD_GIT_SHA_ENV).ok();
+    let git_sha = build_revision::select_short_sha(explicit_sha.as_deref(), &workspace_root)
+        .unwrap_or_else(|error| panic!("invalid build provenance: {error}"));
     if let Some(sha) = git_sha {
         println!("cargo:rustc-env=VK_GIT_SHA={}", sha);
     }

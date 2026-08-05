@@ -40,6 +40,16 @@ they must not contradict the selected layout. Specs that alter layout-specific
 chrome must identify the owning layout signal and validate mismatches between
 layout state and environment detection.
 
+### VII. Bundled executable entries install what they advertise
+Bundled catalog entries that cause a user's machine to execute third-party or
+forked code must make provenance explicit and testable. The executable source
+must match the advertised metadata, use an immutable reviewed version instead of
+a moving branch or `latest` when a fork or non-obvious build is required, and
+record the verification or audit control that keeps the pin honest. Specs that
+change such entries must update the catalog, source constants, dependency
+automation, and user documentation together, or record a deliberate exception
+with its threat, detection path, and reopening trigger.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -49,4 +59,4 @@ layout state and environment detection.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.4.0
+**Version**: 0.5.0

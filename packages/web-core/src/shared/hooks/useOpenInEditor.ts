@@ -24,10 +24,15 @@ export function useOpenInEditor(
       const { editorType, filePath } = options ?? {};
 
       try {
+        const placement =
+          appRuntime === 'local'
+            ? await workspacesApi.getPlacement(workspaceId).catch(() => null)
+            : null;
+        const targetHostId = placement?.worker_node_id ?? hostId;
         const response =
-          appRuntime === 'local' && hostId
+          appRuntime === 'local' && targetHostId
             ? await relayApi.openRemoteWorkspaceInEditor({
-                host_id: hostId,
+                host_id: targetHostId,
                 workspace_id: workspaceId,
                 editor_type: editorType ?? null,
                 file_path: filePath ?? null,

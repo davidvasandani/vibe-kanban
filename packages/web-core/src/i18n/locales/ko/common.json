@@ -515,6 +515,11 @@
       "repoStep": "어떤 리포지토리에서 작업하시겠어요?",
       "chatStep": "무엇을 작업하시겠어요?"
     },
+    "worker": {
+      "label": "실행 위치",
+      "automatic": "자동 배치",
+      "coordinator": "코디네이터"
+    },
     "repoPicker": {
       "actions": {
         "recent": "최근",

@@ -9,6 +9,7 @@ use axum::{
 use db::models::{
     execution_process::{ExecutionProcess, ExecutionProcessStatus},
     execution_process_repo_state::ExecutionProcessRepoState,
+    execution_worker_job::ExecutionWorkerJob,
 };
 use deployment::Deployment;
 use futures_util::{StreamExt, TryStreamExt};
@@ -39,6 +40,15 @@ async fn get_execution_process_by_id(
     State(_deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<ExecutionProcess>>, ApiError> {
     Ok(ResponseJson(ApiResponse::success(execution_process)))
+}
+
+async fn get_execution_worker_job(
+    State(deployment): State<DeploymentImpl>,
+    Extension(execution_process): Extension<ExecutionProcess>,
+) -> Result<ResponseJson<ApiResponse<Option<ExecutionWorkerJob>>>, ApiError> {
+    let job = ExecutionWorkerJob::find_by_execution_id(&deployment.db().pool, execution_process.id)
+        .await?;
+    Ok(ResponseJson(ApiResponse::success(job)))
 }
 
 async fn stream_raw_logs_ws(
@@ -140,11 +150,19 @@ async fn stream_normalized_logs_ws(
     State(deployment): State<DeploymentImpl>,
     Path(exec_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| async move {
-        let stream = deployment
-            .container()
-            .stream_normalized_logs(&exec_id)
-            .await;
+    ws.on_upgrade(move |mut socket| async move {
+        let stream = tokio::select! {
+            stream = deployment.container().stream_normalized_logs(&exec_id) => stream,
+            inbound = socket.recv() => {
+                tracing::debug!(
+                    execution_id = %exec_id,
+                    ?inbound,
+                    "normalized logs WS closed before historical replay started"
+                );
+                let _ = socket.close().await;
+                return;
+            }
+        };
 
         match stream {
             Some(stream) => {
@@ -288,6 +306,7 @@ pub(super) fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/", get(get_execution_process_by_id))
         .route("/stop", post(stop_execution_process))
         .route("/repo-states", get(get_execution_process_repo_states))
+        .route("/worker-job", get(get_execution_worker_job))
         .route("/raw-logs/ws", get(stream_raw_logs_ws))
         .route("/normalized-logs/ws", get(stream_normalized_logs_ws))
         .layer(from_fn_with_state(

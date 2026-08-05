@@ -70,7 +70,36 @@ which preserves the submit guard's "every repo has a branch" invariant.
   current branch, not `origin/main`. If you touch branch defaults, know this
   divergent logic exists; reconciling or deleting it is a separate task.
 
+## What the backend owes this default
+
+The prefix is not a frontend detail. Every backend consumer of `target_branch`
+must resolve it **local branch first, then remote-tracking branch** — the order
+`GitService::find_branch` and `check_branch_exists` already implement, and the
+one `check_branch_exists` used to accept the user's choice at
+`ManagedWorkspace::add_repository`. A consumer that resolves only
+`refs/heads/<name>` rejects the default, i.e. almost every workspace.
+
+This has been shipped broken once. `SharedRepositoryStore::ensure` (added by
+`19a4-git-worktrees-br`) asked for `refs/heads/{branch}` alone, and since the
+shared bare store is a `clone --bare` of the checkout — `refs/heads/*` and no
+`refs/remotes/*` — `origin/main` matched nothing. Every clustered workspace
+created with the default branch failed with a generic "An internal error
+occurred", and it looked intermittent because it is deterministic *per branch
+selection*: the default always failed, a hand-picked local branch always worked.
+
+Two rules follow for anyone adding such a consumer:
+
+- **Do not normalise the prefix away.** `origin/main` and a local `main` can be
+  different commits, and the user picked the remote one. Stripping it in the
+  picker would also break the exact-`name` match against `get_all_branches`.
+- **Give the consumer the refs, not a special case.** The fix was to mirror the
+  checkout's `refs/remotes/*` into the store so `create_branch` and
+  `git worktree add` resolve the same name the picker offered. See
+  [`docs/knowledge-base/clustered-workspace-execution.md`](../docs/knowledge-base/clustered-workspace-execution.md).
+
 ## Contributed by
 
 - `vk/c59f-default-to-origi` — default the create-mode repo picker to
   `origin/main`; introduced `resolveDefaultBranch` and documented this seam.
+- `vk/b72a-internal-error-o` — recorded the backend consumer contract after the
+  shared repository store shipped a second, narrower resolution rule.

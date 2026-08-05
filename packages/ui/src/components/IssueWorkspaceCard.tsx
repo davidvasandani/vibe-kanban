@@ -48,7 +48,8 @@ export interface WorkspaceWithStats {
     | 'completed'
     | 'failed'
     | 'killed'
-    | 'interrupted';
+    | 'interrupted'
+    | 'indeterminate';
 }
 
 export interface IssueWorkspaceCardProps {
@@ -151,7 +152,8 @@ export function IssueWorkspaceCard({
   const isFailed =
     workspace.latestProcessStatus === 'failed' ||
     workspace.latestProcessStatus === 'killed' ||
-    workspace.latestProcessStatus === 'interrupted';
+    workspace.latestProcessStatus === 'interrupted' ||
+    workspace.latestProcessStatus === 'indeterminate';
   const hasLiveStatusIndicator =
     hasRunningDevServer ||
     isFailed ||

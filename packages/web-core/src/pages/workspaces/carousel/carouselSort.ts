@@ -22,7 +22,8 @@ export function stoppedAbnormally(ws: SidebarWorkspace): boolean {
       ws.latestProcessStatus === 'killed' ||
       // Interrupted runs surface a resume action in the chat; they need a
       // human just like failures do.
-      ws.latestProcessStatus === 'interrupted')
+      ws.latestProcessStatus === 'interrupted' ||
+      ws.latestProcessStatus === 'indeterminate')
   );
 }
 

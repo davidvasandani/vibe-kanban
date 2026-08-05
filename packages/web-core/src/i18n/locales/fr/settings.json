@@ -44,7 +44,9 @@
         "slack": "Slack",
         "slackDesc": "Connexion à l'espace de travail Slack",
         "pipelines": "Pipelines",
-        "pipelinesDesc": "Pipeline TOML files and defaults"
+        "pipelinesDesc": "Pipeline TOML files and defaults",
+        "workers": "Workers du cluster",
+        "workersDesc": "État des workers, stockage et planification"
       }
     },
     "general": {
@@ -415,6 +417,8 @@
         "description": "Configure this MCP server and assign it to agents.",
         "name": "Nom",
         "namePlaceholder": "p. ex. mon_serveur",
+        "displayName": "Nom d’affichage",
+        "displayNamePlaceholder": "p. ex. Atlassian Rovo",
         "transport": "Transport",
         "command": "Commande",
         "args": "Arguments",
@@ -735,6 +739,19 @@
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
     },
+    "workers": {
+      "title": "Workers du cluster",
+      "description": "État des workers, stockage partagé, capacité et état de planification.",
+      "loading": "Chargement des workers…",
+      "loadError": "Impossible de charger les workers du cluster.",
+      "empty": "Aucun worker ne s'est encore enregistré.",
+      "schedulable": "Planifiable",
+      "unschedulable": "Non planifiable",
+      "active": "Exécutions actives",
+      "load": "Charge",
+      "drain": "Drainer",
+      "resume": "Reprendre la planification"
+    },
     "attachments": {
       "title": "Pièces jointes",
       "description": "État du stockage des pièces jointes pour ce déploiement.",
@@ -796,6 +813,13 @@
       "empty": "Aucun profil SSO configuré pour l'instant. Ajoutez-en un pour activer l'accès AWS sur cette machine.",
       "cliMissing": "La CLI AWS n'est pas disponible sur cette machine. Installez-la depuis la section Outils CLI pour vérifier l'état et vous connecter.",
       "readOnly": "profil default · lecture seule",
+      "scope": {
+        "session": "Session SSO",
+        "legacy": "URL de démarrage SSO héritée",
+        "profiles": "{{count}} profil",
+        "profiles_other": "{{count}} profils"
+      },
+      "manageProfiles": "Gérer les profils ({{count}})",
       "actions": {
         "add": "Ajouter un profil",
         "refresh": "Actualiser les états",

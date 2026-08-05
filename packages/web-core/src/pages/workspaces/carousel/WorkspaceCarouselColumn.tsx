@@ -1,6 +1,6 @@
 import { Component, useCallback, useRef } from 'react';
 import type { FocusEvent, ReactNode } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
   ArrowSquareOutIcon,
@@ -15,7 +15,8 @@ import { useWorkspaceRecord } from '@/shared/hooks/useWorkspaceRecord';
 import { useWorkspaceSessions } from '@/shared/hooks/useWorkspaceSessions';
 import { useWorkspaceRepo } from '@/shared/hooks/useWorkspaceRepo';
 import { workspaceSummaryKeys } from '@/shared/hooks/workspaceSummaryKeys';
-import { workspacesApi } from '@/shared/lib/api';
+import { workerNodesApi, workspacesApi } from '@/shared/lib/api';
+import { WorkspacePlacementState } from 'shared/types';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { ExecutionProcessesProvider } from '@/shared/providers/ExecutionProcessesProvider';
 import { WorkspacesMainContainer } from '@/pages/workspaces/WorkspacesMainContainer';
@@ -66,6 +67,32 @@ function StatusBadge({ workspace }: { workspace: SidebarWorkspace }) {
       {icon}
       {t(`workspaces.carousel.status.${status}`)}
     </span>
+  );
+}
+
+function PlacementLabel({ workspaceId }: { workspaceId: string }) {
+  const { data: placement } = useQuery({
+    queryKey: ['workspacePlacement', workspaceId],
+    queryFn: () => workspacesApi.getPlacement(workspaceId),
+  });
+  const { data: workers = [] } = useQuery({
+    queryKey: ['workerNodes'],
+    queryFn: workerNodesApi.list,
+    enabled: Boolean(placement?.worker_node_id),
+  });
+
+  if (
+    !placement ||
+    placement.placement_state === WorkspacePlacementState.local
+  ) {
+    return null;
+  }
+  const worker = workers.find(({ id }) => id === placement.worker_node_id);
+  const node = worker?.hostname ?? placement.worker_node_id?.slice(0, 8);
+  return (
+    <div className="truncate text-xs text-low">
+      {node ?? 'Unassigned'} · {placement.placement_state}
+    </div>
   );
 }
 
@@ -215,6 +242,7 @@ export function WorkspaceCarouselColumn({
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm text-normal">{workspace.name}</div>
           <div className="truncate text-xs text-low">{workspace.branch}</div>
+          <PlacementLabel workspaceId={workspace.id} />
         </div>
         <StatusBadge workspace={workspace} />
         <button

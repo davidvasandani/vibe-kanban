@@ -1,4 +1,5 @@
 import { useMemo, useCallback, useState, useEffect } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { useDropzone } from 'react-dropzone';
 import { useCreateMode } from '@/features/create-mode/model/useCreateMode';
@@ -15,11 +16,29 @@ import {
   toPrettyCase,
   splitMessageToTitleDescription,
 } from '@/shared/lib/string';
-import type { BaseCodingAgent, Repo } from 'shared/types';
+import {
+  WorkerMountStatus,
+  WorkerNodeStatus,
+  type BaseCodingAgent,
+  type Repo,
+} from 'shared/types';
 import { CreateChatBox } from '@vibe/ui/components/CreateChatBox';
 import { SettingsDialog } from '@/shared/dialogs/settings/SettingsDialog';
 import { CreateModeRepoPickerBar } from './CreateModeRepoPickerBar';
 import { ModelSelectorContainer } from '@/shared/components/ModelSelectorContainer';
+import { workerNodesApi } from '@/shared/lib/api';
+import {
+  AUTOMATIC_PLACEMENT,
+  COORDINATOR_PLACEMENT,
+  serializeWorkspacePlacement,
+} from '@/shared/lib/workspacePlacement';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@vibe/ui/components/Select';
 
 function getRepoDisplayName(repo: Repo) {
   return repo.display_name || repo.name;
@@ -70,6 +89,13 @@ export function CreateChatBoxContainer({
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
   const [hasInitializedStep, setHasInitializedStep] = useState(false);
   const [isSelectingRepos, setIsSelectingRepos] = useState(true);
+  const [requestedWorkerNodeId, setRequestedWorkerNodeId] =
+    useState(AUTOMATIC_PLACEMENT);
+  const { data: workerNodes = [] } = useQuery({
+    queryKey: ['workerNodes'],
+    queryFn: workerNodesApi.list,
+    refetchInterval: 10_000,
+  });
 
   useEffect(() => {
     if (!hasInitialValue || hasInitializedStep) return;
@@ -248,6 +274,7 @@ export function CreateChatBoxContainer({
           }
         : null,
       attachment_ids: getAttachmentIds(),
+      ...serializeWorkspacePlacement(requestedWorkerNodeId),
     };
     const linkToIssue = linkedIssue
       ? {
@@ -285,6 +312,7 @@ export function CreateChatBoxContainer({
     clearAttachments,
     clearDraft,
     linkedIssue,
+    requestedWorkerNodeId,
   ]);
 
   // Determine error to display
@@ -327,87 +355,124 @@ export function CreateChatBoxContainer({
               </h2>
 
               <div className="flex justify-center @container">
-                <CreateChatBox
-                  editor={{
-                    value: message,
-                    onChange: setMessage,
-                  }}
-                  renderEditor={({
-                    value,
-                    onChange,
-                    onCmdEnter,
-                    disabled,
-                    repoIds,
-                    repoId,
-                    executor,
-                    onPasteFiles,
-                    localAttachments,
-                  }) => (
-                    <WYSIWYGEditor
-                      placeholder="Describe the task..."
-                      value={value}
-                      onChange={onChange}
-                      onCmdEnter={onCmdEnter}
-                      disabled={disabled}
-                      className="min-h-double max-h-[50vh] overflow-y-auto"
-                      repoIds={repoIds}
-                      repoId={repoId}
-                      executor={executor}
-                      autoFocus
-                      onPasteFiles={onPasteFiles}
-                      localAttachments={localAttachments}
-                      sendShortcut={effectiveSendShortcut}
-                    />
+                <div className="flex w-full flex-col gap-half">
+                  {workerNodes.length > 0 && (
+                    <div className="flex items-center justify-end gap-half text-xs text-low">
+                      <span>{t('createMode.worker.label')}</span>
+                      <Select
+                        value={requestedWorkerNodeId}
+                        onValueChange={setRequestedWorkerNodeId}
+                      >
+                        <SelectTrigger className="h-8 w-48">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={AUTOMATIC_PLACEMENT}>
+                            {t('createMode.worker.automatic')}
+                          </SelectItem>
+                          <SelectItem value={COORDINATOR_PLACEMENT}>
+                            {t('createMode.worker.coordinator')}
+                          </SelectItem>
+                          {workerNodes.map((worker) => {
+                            const eligible =
+                              worker.status === WorkerNodeStatus.online &&
+                              worker.mount_status === WorkerMountStatus.healthy;
+                            return (
+                              <SelectItem
+                                key={worker.id}
+                                value={worker.id}
+                                disabled={!eligible}
+                              >
+                                {worker.hostname}
+                              </SelectItem>
+                            );
+                          })}
+                        </SelectContent>
+                      </Select>
+                    </div>
                   )}
-                  agentIcon={
-                    <AgentIcon
-                      agent={effectiveExecutor}
-                      className="size-icon-xl"
-                    />
-                  }
-                  onSend={handleSubmit}
-                  isSending={createWorkspace.isPending}
-                  disabled={!hasSelectedRepos}
-                  executor={{
-                    selected: effectiveExecutor,
-                    options: executorOptions,
-                    onChange: handleExecutorChange,
-                  }}
-                  formatExecutorLabel={toPrettyCase}
-                  error={displayError}
-                  repoIds={repos.map((r) => r.id)}
-                  repoId={repoId}
-                  modelSelector={
-                    effectiveExecutor ? (
-                      <ModelSelectorContainer
-                        agent={effectiveExecutor}
-                        workspaceId={undefined}
-                        onAdvancedSettings={handleCustomise}
-                        presets={variantOptions}
-                        selectedPreset={selectedVariant}
-                        onPresetSelect={handlePresetSelect}
-                        onOverrideChange={setExecutorOverrides}
-                        executorConfig={executorConfig}
-                        presetOptions={presetOptions}
+                  <CreateChatBox
+                    editor={{
+                      value: message,
+                      onChange: setMessage,
+                    }}
+                    renderEditor={({
+                      value,
+                      onChange,
+                      onCmdEnter,
+                      disabled,
+                      repoIds,
+                      repoId,
+                      executor,
+                      onPasteFiles,
+                      localAttachments,
+                    }) => (
+                      <WYSIWYGEditor
+                        placeholder="Describe the task..."
+                        value={value}
+                        onChange={onChange}
+                        onCmdEnter={onCmdEnter}
+                        disabled={disabled}
+                        className="min-h-double max-h-[50vh] overflow-y-auto"
+                        repoIds={repoIds}
+                        repoId={repoId}
+                        executor={executor}
+                        autoFocus
+                        onPasteFiles={onPasteFiles}
+                        localAttachments={localAttachments}
+                        sendShortcut={effectiveSendShortcut}
                       />
-                    ) : undefined
-                  }
-                  onPasteFiles={uploadFiles}
-                  localAttachments={localAttachments}
-                  dropzone={{ getRootProps, getInputProps, isDragActive }}
-                  onEditRepos={() => setIsSelectingRepos(true)}
-                  repoSummaryLabel={repoSummaryLabel}
-                  repoSummaryTitle={repoSummaryTitle}
-                  linkedIssue={
-                    linkedIssue?.simpleId
-                      ? {
-                          simpleId: linkedIssue.simpleId,
-                          title: linkedIssue.title ?? '',
-                          onRemove: clearLinkedIssue,
-                        }
-                      : null
-                  }
-                />
+                    )}
+                    agentIcon={
+                      <AgentIcon
+                        agent={effectiveExecutor}
+                        className="size-icon-xl"
+                      />
+                    }
+                    onSend={handleSubmit}
+                    isSending={createWorkspace.isPending}
+                    disabled={!hasSelectedRepos}
+                    executor={{
+                      selected: effectiveExecutor,
+                      options: executorOptions,
+                      onChange: handleExecutorChange,
+                    }}
+                    formatExecutorLabel={toPrettyCase}
+                    error={displayError}
+                    repoIds={repos.map((r) => r.id)}
+                    repoId={repoId}
+                    modelSelector={
+                      effectiveExecutor ? (
+                        <ModelSelectorContainer
+                          agent={effectiveExecutor}
+                          workspaceId={undefined}
+                          onAdvancedSettings={handleCustomise}
+                          presets={variantOptions}
+                          selectedPreset={selectedVariant}
+                          onPresetSelect={handlePresetSelect}
+                          onOverrideChange={setExecutorOverrides}
+                          executorConfig={executorConfig}
+                          presetOptions={presetOptions}
+                        />
+                      ) : undefined
+                    }
+                    onPasteFiles={uploadFiles}
+                    localAttachments={localAttachments}
+                    dropzone={{ getRootProps, getInputProps, isDragActive }}
+                    onEditRepos={() => setIsSelectingRepos(true)}
+                    repoSummaryLabel={repoSummaryLabel}
+                    repoSummaryTitle={repoSummaryTitle}
+                    linkedIssue={
+                      linkedIssue?.simpleId
+                        ? {
+                            simpleId: linkedIssue.simpleId,
+                            title: linkedIssue.title ?? '',
+                            onRemove: clearLinkedIssue,
+                          }
+                        : null
+                    }
+                  />
+                </div>
               </div>
             </>
           )}
