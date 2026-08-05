@@ -1042,9 +1042,14 @@ pub fn plan_servers_for_executor(
     for server in &request.servers {
         if server.assignments.contains(&executor) {
             if !server.native_overrides.contains_key(&executor)
-                && current
-                    .get(&server.name)
-                    .is_some_and(|entry| canonical_definition(entry) == server.definition)
+                && current.get(&server.name).is_some_and(|entry| {
+                    if server.name == "slack"
+                        && is_legacy_bundled_slack_definition(&canonical_definition(entry))
+                    {
+                        return false;
+                    }
+                    canonical_definition_for_server(&server.name, entry) == server.definition
+                })
             {
                 continue;
             }
@@ -1652,6 +1657,7 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         let request = SharedMcpWriteRequest {
             servers: vec![SharedMcpServerInput {
                 name: "firecrawl-browser".to_string(),
+                display_name: None,
                 definition: canonical_definition(&unchanged),
                 assignments: vec![BaseCodingAgent::ClaudeCode],
                 native_overrides: HashMap::new(),
@@ -1670,6 +1676,33 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         assert_eq!(next["firecrawl-browser"], unchanged);
         assert_eq!(next.get("deleted"), None);
         assert_eq!(affected, vec!["deleted"]);
+    }
+
+    #[test]
+    fn unrelated_save_still_migrates_the_legacy_slack_template() {
+        let legacy = slack_json_entry_with_spec("xoxp-test", "slack-mcp-server@latest");
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "slack".to_string(),
+                display_name: None,
+                definition: canonical_definition_for_server("slack", &legacy),
+                assignments: vec![BaseCodingAgent::ClaudeCode],
+                native_overrides: HashMap::new(),
+            }],
+            resolved_conflicts: Vec::new(),
+            removed_servers: vec!["deleted".to_string()],
+        };
+        let current = HashMap::from([
+            ("slack".to_string(), legacy),
+            ("deleted".to_string(), json!({"command": "remove-me"})),
+        ]);
+
+        let (next, affected) =
+            plan_servers_for_executor(BaseCodingAgent::ClaudeCode, &current, &request).unwrap();
+
+        assert_eq!(next["slack"], slack_json_entry("xoxp-test"));
+        assert_eq!(next.get("deleted"), None);
+        assert_eq!(affected, vec!["slack", "deleted"]);
     }
 
     #[test]
@@ -1874,6 +1907,7 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         let legacy_entry = json!({"command":"npx", "args":["atlassian-rovo"]});
         let legacy = SharedMcpServerInput {
             name: "Atlassian Rovo".to_string(),
+            display_name: Some("Atlassian Rovo".to_string()),
             definition: canonical_definition(&legacy_entry),
             assignments: vec![BaseCodingAgent::ClaudeCode],
             native_overrides: HashMap::new(),
