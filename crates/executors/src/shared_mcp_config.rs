@@ -862,6 +862,13 @@ pub fn plan_servers_for_executor(
     let mut affected = Vec::new();
     for server in &request.servers {
         if server.assignments.contains(&executor) {
+            if !server.native_overrides.contains_key(&executor)
+                && current
+                    .get(&server.name)
+                    .is_some_and(|entry| canonical_definition(entry) == server.definition)
+            {
+                continue;
+            }
             let mut entry = materialize_definition(
                 executor,
                 &server.definition,
@@ -1408,6 +1415,36 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         assert_eq!(next["other"], json!({"command":"keep"}));
         assert_eq!(next["shared"], json!({"command":"npx"}));
         assert_eq!(affected, vec!["shared"]);
+    }
+
+    #[test]
+    fn deleting_one_server_does_not_rematerialize_unchanged_servers() {
+        let unchanged = json!({
+            "command": "npx",
+            "args": ["firecrawl-browser"],
+            "custom_native_field": true
+        });
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "firecrawl-browser".to_string(),
+                definition: canonical_definition(&unchanged),
+                assignments: vec![BaseCodingAgent::ClaudeCode],
+                native_overrides: HashMap::new(),
+            }],
+            resolved_conflicts: Vec::new(),
+            removed_servers: vec!["deleted".to_string()],
+        };
+        let current = HashMap::from([
+            ("firecrawl-browser".to_string(), unchanged.clone()),
+            ("deleted".to_string(), json!({"command": "remove-me"})),
+        ]);
+
+        let (next, affected) =
+            plan_servers_for_executor(BaseCodingAgent::ClaudeCode, &current, &request).unwrap();
+
+        assert_eq!(next["firecrawl-browser"], unchanged);
+        assert_eq!(next.get("deleted"), None);
+        assert_eq!(affected, vec!["deleted"]);
     }
 
     #[test]
