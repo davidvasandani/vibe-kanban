@@ -75,3 +75,10 @@ task granularity after constitution/spec clarification.
    - Distill reusable command-time credential-routing and cluster deployment
      lessons into the project knowledge base, update its index, tag this task,
      and commit the knowledge-base update before handoff.
+# VAS-356 Addendum Plan: Cluster MCP runtime connectivity
+
+1. Derive `VIBE_BACKEND_URL` from the worker coordinator option.
+2. Grant think3/think4 access to Firecrawl TCP 3410 only.
+3. Add evaluated environment and firewall invariants to homelab CI.
+4. Validate Nix evaluation, review both diffs independently, update knowledge,
+   and merge the Vibe documentation and homelab deployment PRs.
