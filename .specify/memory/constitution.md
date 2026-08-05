@@ -319,6 +319,21 @@ between the bounded container and that owner permits shrinking (`min-height: 0`
 or its equivalent). Headers and controls stay outside the content scroller so
 overflow does not make them unreachable.
 
+### XXIV. External config identity is not presentation
+Keys written into an external tool's configuration are protocol identifiers,
+not display labels. They obey the strictest supported consumer's identifier
+grammar and remain stable across read, merge, conflict resolution, write,
+testing, authentication, and live refresh. Human-readable names are separate,
+optional metadata; presentation renders the label with identifier fallback,
+while every operational lookup uses the identifier.
+
+Catalog object keys are preferred wire identifiers and catalog metadata names
+are display labels. Derived identifiers use one shared normalization rule and
+collisions are resolved or rejected before any external file is written.
+Existing external keys are never silently normalized during read, and
+display-only metadata is not injected into client-native definitions unless
+that client explicitly defines such a field.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -340,7 +355,10 @@ overflow does not make them unreachable.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.22.0 (adds stable process ownership and evidence-backed soft
+**Version**: 0.23.0 (adds external-config identity vs presentation: stable,
+protocol-safe wire keys, separate friendly labels, pre-write collision safety,
+and no silent native-key migration or definition metadata injection; 0.22.0
+added stable process ownership and evidence-backed soft
 restart handoffs — control-plane disconnect is not process death, ownership
 includes the complete I/O/monitoring lifecycle, replay is ordered and explicit
 about gaps, mutation authority is single-generation, and only hard shutdown

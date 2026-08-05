@@ -1,95 +1,102 @@
-# Implementation Plan: Concatenate Repeating Lines
+# Implementation Plan: MCP Identifier and Display-Label Separation
 
 **Spec**: `./spec.md`
-**Status**: Draft
+**Status**: Ready for tasks
 
 ## Technical Context
 
-The change is confined to Rust in
-`crates/executors/src/executors/codex/normalize_logs.rs`. That module consumes
-both `codex_app_server_protocol` item notifications and legacy
-`codex_protocol::EventMsg` events, and writes normalized JSON patches through a
-shared `EntryIndexProvider` into `MsgStore`.
-
-No storage migration, public API/type change, frontend change, deployment
-change, or new dependency is required.
+- Backend: Rust 2024, serde/serde_json, Tokio, ts-rs in
+  `crates/executors/src/shared_mcp_config.rs` and server config routes.
+- Frontend: React/TypeScript in `packages/web-core`, shared generated contracts
+  in `shared/types.ts`.
+- Storage: coding-agent-native files remain executable source of truth; a small
+  Vibe Kanban-owned JSON sidecar stores display labels only.
+- Constraints: no new dependency, no generated-file hand edits, no changes
+  outside the Vibe Kanban service, and all identifiers validated before writes.
 
 ## Architecture & Approach
 
-### Shared repeat state
+### 1. Backend label metadata
 
-Extend `LogState` with one optional `RepeatedCommand` value. It records the
-original normalized entry index and display command, number of total
-occurrences, latest call ID, whether that latest occurrence completed
-successfully, and the last successful normalized-entry snapshot.
+Add a private label-store module adjacent to shared MCP logic. Resolve its path
+from the existing platform config directory with an overridable path seam for
+tests. Reads are tolerant and return an empty map plus a scoped diagnostic on
+failure. Writes validate/normalize labels, create the app directory, write a
+same-directory temporary file with restrictive permissions, then rename.
 
-### Eligibility and display
+Decorate `SharedMcpServer` and `SharedMcpConflict` after native grouping. Labels
+never enter `canonical_definition`, fingerprints, native sources, assignment
+identity, gateway identity, or materialization.
 
-Add a predicate for the normalized `codex review --uncommitted` operation. It
-accepts the existing shell-unwrapped display form, including an absolute path to
-the `codex` executable, but rejects other arguments and arbitrary repeated
-commands.
+### 2. Write ordering
 
-Add `repeat_ticks(total_count)` with the established threshold: up to eight
-repetitions render inline ticks; larger runs render `✓ ×N`. `CommandState`
-carries its current repeat count, while rendering excludes the in-flight
-occurrence until it succeeds.
+Extend inputs with optional display metadata and validate identifiers,
+duplicates, assignments, compatibility, and label shape before writes. Keep the
+existing per-profile native-write loop. If no native write succeeds, do not
+change labels. If at least one succeeds (including a partial result), converge
+the sidecar to the labels associated with servers known to exist after the
+planned successful writes; surface a sidecar failure as a specific failed
+outcome/status without rolling back already committed native files.
 
-### Lifecycle
+### 3. Frontend identity separation
 
-Centralize command start and completion behavior in `LogState` helpers used by
-both protocol branches:
+Extend `SharedMcpDraftServer`, conversions, snapshots, JSON mode, conflict
+promotion, and OAuth-refresh merge with `displayName`. Catalog parsing continues
+to expose key/name; Add sends key as identifier and metadata name as label.
 
-1. On an eligible new call ID, reuse the tracked index only when the command is
-   identical, the latest occurrence succeeded, and the shared entry index shows
-   no intervening allocation.
-2. Store every in-flight call in `commands` for ID-based routing, while marking
-   the newest call ID as owner of the shared row.
-3. Streaming updates for that same ID replace the shared row without changing
-   the repeat count.
-4. Completion updates repeat ownership only for its latest call ID; older calls
-   still complete their distinct rows. Success arms the next repeat. Failure
-   restores the prior successful aggregate and moves the failed call to a new
-   row before disarming reuse.
-5. Non-eligible commands keep the existing fresh-index path.
+Extract frontend identifier helpers with parity tests against Rust cases.
+`McpServerDialog` gets distinct Identifier and Display name fields. Unsafe
+existing names seed the normalized candidate and preserve the original name as
+label; the outer settings container retains the original identifier for removal
+when the confirmed rename lands. Collision detection remains exact by identifier.
 
-The current Codex normalizer does not reset its `EntryIndexProvider` during a
-session, so no additional reset hook is required.
+Cards render the friendly label as primary text and a monospace identifier as
+secondary text when different. Audit every callback/state map so tests, OAuth,
+gateway disconnect, refresh, edit/delete, checked-time, copy, and debug actions
+continue to use `server.name`.
+
+### 4. Tests and generated types
+
+Backend tests cover normalization, label-store serialization/errors/atomic
+replacement, DTO compatibility, decoration, pre-write collision rejection,
+partial-failure ordering, and native materialization without label fields.
+Frontend tests cover catalog mapping, draft/snapshot/JSON/OAuth merge, conflict
+promotion, legacy unsafe edit seeding, collisions, and operational identifiers.
+Regenerate `shared/types.ts`, then run focused suites and repository checks.
 
 ## Data Model
 
-See `./data-model.md`.
+See [`data-model.md`](data-model.md).
 
 ## Contracts
 
-See `./contracts/normalized-patch-stream.md`.
+See [`contracts.md`](contracts.md).
 
 ## Research Notes
 
-See `./research.md`.
+See [`research.md`](research.md). No new dependency is introduced.
 
 ## Constitution Check
 
-- Principle II: focused fixtures cover adjacency, status, ownership, marker
-  bounds, and both protocol formats.
-- Principles III and VI: reuse the existing server-normalizer compaction
-  pattern and make the smallest command-specific extension.
-- Principle IX: equality, adjacency, completion, latest-owner, and bounded-marker
-  invariants are explicit.
-- Constraints: no generated files, dependency, remote mutation, destructive
-  operation, or external service are involved; `pnpm run format` will run.
+- II: explicit backend/frontend contract tests and acceptance exercise.
+- III/VI: extends the existing shared MCP read/write pipeline and catalog split.
+- X: rename/label edits remain modal-local until submit and outer Save.
+- XIII: native vendor files retain atomic guest-editor behavior; labels live in
+  app-owned metadata and never alter unrelated native fields.
+- XVII: live refresh remains keyed by stable configured identifier.
+- XXI: normalization has one named contract and parity fixtures.
+- XXII: wire identity and presentation are separate; collisions precede writes;
+  no silent native-key migration or definition metadata injection.
 
-No constitution deviation is planned.
+No constitution deviation is required.
 
 ## Risks & Dependencies
 
-- Different protocol formats may provide differently wrapped command strings.
-  The predicate uses the same shell-unwrapped representation already exposed in
-  `ActionType::CommandRun`, and fixtures cover both paths.
-- Late events could overwrite a newer repeat. Latest-call ownership prevents
-  stale replacement.
-- A generic compactor could hide meaningful repeated shell work. Eligibility is
-  deliberately limited to the reported review operation.
-- Reusing one row necessarily exposes only the newest occurrence's detailed
-  result. This matches existing Grok compaction and is limited to review passes
-  whose visible flood is the reported defect.
+- Sidecar/native writes cannot be one filesystem transaction; truthful partial
+  outcomes and reload from native truth mitigate this.
+- A stale sidecar can outlive manual native edits; absent identifiers are ignored
+  on read and pruned only during successful Save.
+- Rename can affect OAuth identity. It is explicit and the UI must warn; gateway
+  capability preservation remains URL-aware but tests must cover it.
+- Shared type changes affect local and remote web consumers; full generated-type
+  and frontend checks are required.

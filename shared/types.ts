@@ -618,17 +618,17 @@ export type SharedMcpAuthMode = "shared_gateway" | "agent_native" | "explicit_he
 
 export type SharedMcpCompatibility = { executor: BaseCodingAgent, compatible: boolean, reason: string | null, };
 
-export type SharedMcpServer = { name: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, source_kind: SharedMcpSourceKind, native_sources: Array<NativeMcpSource>, compatibility: Array<SharedMcpCompatibility>, auth_mode: SharedMcpAuthMode, gateway_status: string | null, };
+export type SharedMcpServer = { name: string, display_name: string | null, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, source_kind: SharedMcpSourceKind, native_sources: Array<NativeMcpSource>, compatibility: Array<SharedMcpCompatibility>, auth_mode: SharedMcpAuthMode, gateway_status: string | null, };
 
 export type SharedMcpConflictVariant = { variant_id: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, native_sources: Array<NativeMcpSource>, };
 
-export type SharedMcpConflict = { name: string, variants: Array<SharedMcpConflictVariant>, message: string, };
+export type SharedMcpConflict = { name: string, display_name: string | null, variants: Array<SharedMcpConflictVariant>, message: string, };
 
 export type SharedMcpProfileError = { executor: BaseCodingAgent, config_path: string | null, error: string, };
 
-export type SharedMcpReadResponse = { profiles: Array<SharedMcpProfile>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, preconfigured: JsonValue, read_errors: Array<SharedMcpProfileError>, };
+export type SharedMcpReadResponse = { profiles: Array<SharedMcpProfile>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, preconfigured: JsonValue, read_errors: Array<SharedMcpProfileError>, metadata_error: string | null, };
 
-export type SharedMcpServerInput = { name: string, definition: McpServerDefinition, assignments: Array<BaseCodingAgent>, native_overrides: { [key in BaseCodingAgent]?: JsonValue }, };
+export type SharedMcpServerInput = { name: string, display_name: string | null, definition: McpServerDefinition, assignments: Array<BaseCodingAgent>, native_overrides: { [key in BaseCodingAgent]?: JsonValue }, };
 
 export type SharedMcpConflictResolution = { name: string, };
 
@@ -640,7 +640,7 @@ export type SharedMcpProfileWriteStatus = "success" | "skipped" | "failed";
 
 export type SharedMcpProfileWriteOutcome = { executor: BaseCodingAgent, config_path: string | null, status: SharedMcpProfileWriteStatus, affected_servers: Array<string>, message: string | null, error: string | null, };
 
-export type SharedMcpWriteResponse = { status: SharedMcpWriteStatus, outcomes: Array<SharedMcpProfileWriteOutcome>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, };
+export type SharedMcpWriteResponse = { status: SharedMcpWriteStatus, outcomes: Array<SharedMcpProfileWriteOutcome>, metadata_error: string | null, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, };
 
 export type SharedMcpTestTarget = { server_name: string, executor: BaseCodingAgent, };
 

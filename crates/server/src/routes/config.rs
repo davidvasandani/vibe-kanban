@@ -21,7 +21,7 @@ use executors::{
         SharedMcpProfileWriteOutcome, SharedMcpProfileWriteStatus, SharedMcpReadResponse,
         SharedMcpTestRequest, SharedMcpTestTarget, SharedMcpWriteRequest, SharedMcpWriteResponse,
         SharedMcpWriteStatus, canonical_definition, load_native_snapshots, load_shared_mcp_config,
-        plan_servers_for_executor, reconcile_snapshots, validate_server_identifiers,
+        persist_display_labels, plan_servers_for_executor, validate_server_identifiers,
         validate_write_request,
     },
 };
@@ -418,10 +418,11 @@ async fn update_shared_mcp_servers(
     if let Err(message) = validate_write_request(&payload) {
         return Ok(ResponseJson(ApiResponse::error(&message)));
     }
-
     let mut outcomes = Vec::new();
     let mut any_success = false;
     let mut any_failed = false;
+    let mut any_native_changes = false;
+    let mut successfully_written_identifiers = std::collections::HashSet::new();
 
     for snapshot in &snapshots {
         let Ok((planned_servers, affected_servers)) =
@@ -442,6 +443,7 @@ async fn update_shared_mcp_servers(
             });
             continue;
         }
+        any_native_changes = true;
 
         let Some(config_path) = snapshot.config_path.as_ref() else {
             any_failed = true;
@@ -460,6 +462,7 @@ async fn update_shared_mcp_servers(
         {
             Ok(message) => {
                 any_success = true;
+                successfully_written_identifiers.extend(affected_servers.iter().cloned());
                 outcomes.push(SharedMcpProfileWriteOutcome {
                     executor: snapshot.profile.executor,
                     config_path: snapshot.profile.config_path.clone(),
@@ -483,7 +486,30 @@ async fn update_shared_mcp_servers(
         }
     }
 
-    let mut fresh = reconcile_snapshots(load_native_snapshots().await);
+    let mut fresh = load_shared_mcp_config().await;
+    let existing_identifiers = fresh
+        .servers
+        .iter()
+        .map(|server| server.name.clone())
+        .chain(fresh.conflicts.iter().map(|conflict| conflict.name.clone()))
+        .collect::<std::collections::HashSet<_>>();
+    let metadata_error = if any_success || !any_failed {
+        persist_display_labels(
+            &payload,
+            &existing_identifiers,
+            any_native_changes.then_some(&successfully_written_identifiers),
+        )
+        .await
+        .err()
+    } else {
+        None
+    };
+    if metadata_error.is_some() {
+        any_failed = true;
+    }
+    if metadata_error.is_none() {
+        fresh = load_shared_mcp_config().await;
+    }
     attach_gateway_status(&_deployment, &mut fresh).await;
     let status = if any_failed && any_success {
         SharedMcpWriteStatus::PartialFailure
@@ -496,6 +522,7 @@ async fn update_shared_mcp_servers(
     Ok(ResponseJson(ApiResponse::success(SharedMcpWriteResponse {
         status,
         outcomes,
+        metadata_error,
         servers: fresh.servers,
         conflicts: fresh.conflicts,
     })))

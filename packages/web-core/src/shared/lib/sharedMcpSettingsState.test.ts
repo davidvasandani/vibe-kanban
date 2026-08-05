@@ -4,6 +4,7 @@ import type { SharedMcpReadResponse } from 'shared/types';
 import {
   definitionFromEntry,
   draftFromSharedRead,
+  draftServersFromInputs,
   indexAssignmentTests,
   inputsFromDraft,
   mergeOAuthRefresh,
@@ -23,6 +24,7 @@ const readResponse = (): SharedMcpReadResponse => ({
   servers: [
     {
       name: 'tools',
+      display_name: 'Tools for Humans',
       definition: {
         transport: 'stdio',
         value: { command: 'npx' },
@@ -41,11 +43,14 @@ const readResponse = (): SharedMcpReadResponse => ({
       source_kind: 'single_profile',
       native_sources: [],
       compatibility: [],
+      auth_mode: 'none',
+      gateway_status: null,
     },
   ],
   conflicts: [],
   preconfigured: {},
   read_errors: [],
+  metadata_error: null,
 });
 
 describe('shared MCP settings state', () => {
@@ -188,6 +193,7 @@ describe('shared MCP settings state', () => {
     expect(inputsFromDraft(draft)).toEqual([
       {
         name: 'tools',
+        display_name: 'Tools for Humans',
         definition: {
           transport: 'stdio',
           value: { command: 'npx' },
@@ -197,6 +203,14 @@ describe('shared MCP settings state', () => {
         native_overrides: {},
       },
     ]);
+  });
+
+  it('round-trips display labels through JSON-mode inputs', () => {
+    const inputs = inputsFromDraft(draftFromSharedRead(readResponse()));
+    expect(draftServersFromInputs(inputs)[0]).toMatchObject({
+      name: 'tools',
+      displayName: 'Tools for Humans',
+    });
   });
 
   it('keys tests by server and assignment', () => {

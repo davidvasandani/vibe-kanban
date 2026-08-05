@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
@@ -86,6 +86,8 @@ pub struct SharedMcpCompatibility {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SharedMcpServer {
     pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub definition: McpServerDefinition,
     pub assignments: Vec<SharedMcpAssignment>,
     pub source_kind: SharedMcpSourceKind,
@@ -106,6 +108,8 @@ pub struct SharedMcpConflictVariant {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SharedMcpConflict {
     pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub variants: Vec<SharedMcpConflictVariant>,
     pub message: String,
 }
@@ -124,11 +128,14 @@ pub struct SharedMcpReadResponse {
     pub conflicts: Vec<SharedMcpConflict>,
     pub preconfigured: Value,
     pub read_errors: Vec<SharedMcpProfileError>,
+    pub metadata_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SharedMcpServerInput {
     pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub definition: McpServerDefinition,
     pub assignments: Vec<BaseCodingAgent>,
     #[serde(default)]
@@ -179,6 +186,7 @@ pub struct SharedMcpProfileWriteOutcome {
 pub struct SharedMcpWriteResponse {
     pub status: SharedMcpWriteStatus,
     pub outcomes: Vec<SharedMcpProfileWriteOutcome>,
+    pub metadata_error: Option<String>,
     pub servers: Vec<SharedMcpServer>,
     pub conflicts: Vec<SharedMcpConflict>,
 }
@@ -307,7 +315,175 @@ pub async fn load_native_snapshots() -> Vec<NativeProfileSnapshot> {
 }
 
 pub async fn load_shared_mcp_config() -> SharedMcpReadResponse {
-    reconcile_snapshots(load_native_snapshots().await)
+    let mut response = reconcile_snapshots(load_native_snapshots().await);
+    let labels = match load_display_labels().await {
+        Ok(labels) => labels,
+        Err(error) => {
+            tracing::warn!(%error, "MCP display labels are unavailable");
+            response.metadata_error = Some(error);
+            BTreeMap::new()
+        }
+    };
+    attach_display_labels(&mut response, &labels);
+    response
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SharedMcpDisplayLabels {
+    #[serde(default = "display_label_store_version")]
+    version: u8,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+}
+
+fn display_label_store_version() -> u8 {
+    1
+}
+
+fn display_labels_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("vibe-kanban")
+        .join("mcp-display-labels.json")
+}
+
+async fn load_display_labels_from(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let content = match tokio::fs::read(path).await {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(format!("failed to read MCP display labels: {error}")),
+    };
+    let store: SharedMcpDisplayLabels = serde_json::from_slice(&content)
+        .map_err(|error| format!("failed to parse MCP display labels: {error}"))?;
+    if store.version != display_label_store_version() {
+        return Err(format!(
+            "unsupported MCP display-label store version {}",
+            store.version
+        ));
+    }
+    Ok(store.labels)
+}
+
+async fn load_display_labels() -> Result<BTreeMap<String, String>, String> {
+    load_display_labels_from(&display_labels_path()).await
+}
+
+fn normalized_display_name(identifier: &str, display_name: Option<&str>) -> Option<String> {
+    display_name
+        .map(str::trim)
+        .filter(|label| !label.is_empty() && *label != identifier)
+        .map(str::to_string)
+}
+
+fn attach_display_labels(response: &mut SharedMcpReadResponse, labels: &BTreeMap<String, String>) {
+    for server in &mut response.servers {
+        server.display_name = labels.get(&server.name).cloned();
+    }
+    for conflict in &mut response.conflicts {
+        conflict.display_name = labels.get(&conflict.name).cloned();
+    }
+}
+
+async fn write_display_labels_to(
+    path: &Path,
+    labels: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "MCP display-label path has no parent directory".to_string())?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|error| format!("failed to create MCP display-label directory: {error}"))?;
+    let store = SharedMcpDisplayLabels {
+        version: display_label_store_version(),
+        labels: labels.clone(),
+    };
+    let content = serde_json::to_vec_pretty(&store)
+        .map_err(|error| format!("failed to serialize MCP display labels: {error}"))?;
+    let staged = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
+    tokio::fs::write(&staged, content)
+        .await
+        .map_err(|error| format!("failed to stage MCP display labels: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))
+            .await
+            .map_err(|error| format!("failed to protect MCP display labels: {error}"))?;
+    }
+    // Windows rename does not replace an existing destination. Move the old
+    // sidecar to a backup first, restoring it if installing the staged file
+    // fails, so a transient replacement error cannot discard existing labels.
+    #[cfg(windows)]
+    let backup = if tokio::fs::metadata(path).await.is_ok() {
+        let backup = path.with_extension(format!("json.{}.bak", uuid::Uuid::new_v4()));
+        tokio::fs::rename(path, &backup)
+            .await
+            .map_err(|error| format!("failed to preserve old MCP display labels: {error}"))?;
+        Some(backup)
+    } else {
+        None
+    };
+    if let Err(error) = tokio::fs::rename(&staged, path).await {
+        let _ = tokio::fs::remove_file(&staged).await;
+        #[cfg(windows)]
+        if let Some(backup) = &backup {
+            if let Err(restore_error) = tokio::fs::rename(backup, path).await {
+                return Err(format!(
+                    "failed to replace MCP display labels: {error}; failed to restore prior labels: {restore_error}"
+                ));
+            }
+        }
+        return Err(format!("failed to replace MCP display labels: {error}"));
+    }
+    #[cfg(windows)]
+    if let Some(backup) = backup {
+        let _ = tokio::fs::remove_file(backup).await;
+    }
+    Ok(())
+}
+
+pub async fn persist_display_labels(
+    request: &SharedMcpWriteRequest,
+    existing_identifiers: &HashSet<String>,
+    updatable_identifiers: Option<&HashSet<String>>,
+) -> Result<(), String> {
+    let current = load_display_labels().await.unwrap_or_else(|error| {
+        tracing::warn!(%error, "replacing unavailable MCP display-label metadata");
+        BTreeMap::new()
+    });
+    let labels = merged_display_labels(
+        current,
+        request,
+        existing_identifiers,
+        updatable_identifiers,
+    );
+    write_display_labels_to(&display_labels_path(), &labels).await
+}
+
+fn merged_display_labels(
+    mut labels: BTreeMap<String, String>,
+    request: &SharedMcpWriteRequest,
+    existing_identifiers: &HashSet<String>,
+    updatable_identifiers: Option<&HashSet<String>>,
+) -> BTreeMap<String, String> {
+    labels.retain(|identifier, _| existing_identifiers.contains(identifier));
+    for server in &request.servers {
+        if !existing_identifiers.contains(&server.name)
+            || updatable_identifiers.is_some_and(|identifiers| !identifiers.contains(&server.name))
+        {
+            continue;
+        }
+        match normalized_display_name(&server.name, server.display_name.as_deref()) {
+            Some(label) => {
+                labels.insert(server.name.clone(), label);
+            }
+            None => {
+                labels.remove(&server.name);
+            }
+        }
+    }
+    labels
 }
 
 pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpReadResponse {
@@ -379,6 +555,7 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
                 .collect::<Vec<_>>();
             servers.push(SharedMcpServer {
                 name,
+                display_name: None,
                 definition: definition.clone(),
                 assignments,
                 source_kind: if native_sources.len() > 1 {
@@ -417,6 +594,7 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
                 .collect();
             conflicts.push(SharedMcpConflict {
                 name: name.clone(),
+                display_name: None,
                 variants,
                 message: format!(
                     "MCP server `{name}` has different definitions across assigned profiles"
@@ -431,6 +609,7 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
         conflicts,
         preconfigured: PRECONFIGURED_MCP_SERVERS.clone(),
         read_errors,
+        metadata_error: None,
     }
 }
 
@@ -1287,6 +1466,7 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         let request = SharedMcpWriteRequest {
             servers: vec![SharedMcpServerInput {
                 name: "slack".to_string(),
+                display_name: None,
                 definition,
                 assignments: vec![
                     BaseCodingAgent::Codex,
@@ -1392,6 +1572,7 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         let request = SharedMcpWriteRequest {
             servers: vec![SharedMcpServerInput {
                 name: "shared".to_string(),
+                display_name: None,
                 definition: canonical_definition(&json!({"command":"npx"})),
                 assignments: vec![BaseCodingAgent::ClaudeCode],
                 native_overrides: HashMap::new(),
@@ -1415,6 +1596,7 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         let request = SharedMcpWriteRequest {
             servers: vec![SharedMcpServerInput {
                 name: "shared".to_string(),
+                display_name: None,
                 definition: canonical_definition(&json!({"command":"npx"})),
                 assignments: vec![BaseCodingAgent::Gemini],
                 native_overrides: HashMap::new(),
@@ -1458,6 +1640,7 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         let request = SharedMcpWriteRequest {
             servers: vec![SharedMcpServerInput {
                 name: "tools".to_string(),
+                display_name: None,
                 definition: response.servers[0].definition.clone(),
                 assignments: vec![BaseCodingAgent::ClaudeCode],
                 native_overrides: HashMap::new(),
@@ -1502,12 +1685,76 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         assert_eq!(suggested_server_identifier("Vibe Kanban"), "vibe_kanban");
         assert_eq!(suggested_server_identifier("vibe...kanban"), "vibe_kanban");
         assert_eq!(suggested_server_identifier("工具"), "mcp_server");
+        assert_eq!(
+            suggested_server_identifier("  Rovo...Cloud!  "),
+            "rovo_cloud"
+        );
+    }
+
+    #[tokio::test]
+    async fn display_labels_round_trip_without_entering_native_definitions() {
+        let path = std::env::temp_dir().join(format!(
+            "vibe-kanban-mcp-labels-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let labels = BTreeMap::from([("atlassian_rovo".to_string(), "Atlassian Rovo".to_string())]);
+        write_display_labels_to(&path, &labels).await.unwrap();
+        assert_eq!(load_display_labels_from(&path).await.unwrap(), labels);
+
+        let mut response = reconcile_snapshots(vec![snapshot(
+            BaseCodingAgent::ClaudeCode,
+            HashMap::from([(
+                "atlassian_rovo".to_string(),
+                json!({"url": "https://rovo.example/mcp"}),
+            )]),
+        )]);
+        attach_display_labels(&mut response, &labels);
+        assert_eq!(
+            response.servers[0].display_name.as_deref(),
+            Some("Atlassian Rovo")
+        );
+        assert!(
+            response.servers[0]
+                .definition
+                .value
+                .get("display_name")
+                .is_none()
+        );
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[test]
+    fn display_label_merge_preserves_unresolved_existing_servers() {
+        let current = BTreeMap::from([
+            ("conflicted".to_string(), "Friendly Conflict".to_string()),
+            ("removed".to_string(), "Removed".to_string()),
+        ]);
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "updated".to_string(),
+                display_name: Some("Updated Label".to_string()),
+                definition: canonical_definition(&json!({"command":"npx"})),
+                assignments: vec![BaseCodingAgent::ClaudeCode],
+                native_overrides: HashMap::new(),
+            }],
+            removed_servers: vec!["removed".to_string()],
+            resolved_conflicts: Vec::new(),
+        };
+        let existing = HashSet::from(["conflicted".to_string(), "updated".to_string()]);
+        assert_eq!(
+            merged_display_labels(current, &request, &existing, None),
+            BTreeMap::from([
+                ("conflicted".to_string(), "Friendly Conflict".to_string()),
+                ("updated".to_string(), "Updated Label".to_string()),
+            ])
+        );
     }
 
     #[test]
     fn duplicate_identifiers_are_rejected_after_the_user_repairs_them() {
         let server = |name: &str| SharedMcpServerInput {
             name: name.to_string(),
+            display_name: None,
             definition: canonical_definition(&json!({"command":"npx"})),
             assignments: vec![BaseCodingAgent::ClaudeCode],
             native_overrides: HashMap::new(),
@@ -1528,6 +1775,7 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         let request = SharedMcpWriteRequest {
             servers: vec![SharedMcpServerInput {
                 name: "Vibe Kanban".to_string(),
+                display_name: Some("Vibe Kanban".to_string()),
                 definition: canonical_definition(&json!({"command":"npx"})),
                 assignments: vec![BaseCodingAgent::ClaudeCode],
                 native_overrides: HashMap::new(),
