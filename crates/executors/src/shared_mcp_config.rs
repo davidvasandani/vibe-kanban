@@ -1109,10 +1109,54 @@ fn preserve_gateway_capability(
 }
 
 pub fn validate_write_request(request: &SharedMcpWriteRequest) -> Result<(), String> {
-    validate_server_identifiers(request.servers.iter().map(|server| server.name.as_str()))?;
+    validate_write_request_with(request, |_| false)
+}
 
+pub fn validate_write_request_against_snapshots(
+    request: &SharedMcpWriteRequest,
+    snapshots: &[NativeProfileSnapshot],
+) -> Result<(), String> {
+    validate_write_request_with(request, |server| unchanged_legacy_server(server, snapshots))
+}
+
+fn unchanged_legacy_server(
+    server: &SharedMcpServerInput,
+    snapshots: &[NativeProfileSnapshot],
+) -> bool {
+    server.native_overrides.is_empty()
+        && server.assignments.iter().all(|executor| {
+            snapshots
+                .iter()
+                .any(|snapshot| snapshot.profile.executor == *executor)
+        })
+        && snapshots.iter().all(|snapshot| {
+            let assigned = server.assignments.contains(&snapshot.profile.executor);
+            match (assigned, snapshot.servers.get(&server.name)) {
+                (true, Some(entry)) => {
+                    canonical_definition_for_server(&server.name, entry) == server.definition
+                }
+                (false, None) => true,
+                _ => false,
+            }
+        })
+}
+
+fn validate_write_request_with(
+    request: &SharedMcpWriteRequest,
+    allow_invalid_identifier: impl Fn(&SharedMcpServerInput) -> bool,
+) -> Result<(), String> {
     let mut names = HashSet::new();
     for server in &request.servers {
+        if !is_valid_server_identifier(&server.name) && !allow_invalid_identifier(server) {
+            return Err(format!(
+                "Invalid MCP server identifier `{}`: identifiers must match \
+                 ^[a-zA-Z0-9_-]+$. Use `{}` as the identifier and keep `{}` \
+                 as the display label.",
+                server.name,
+                suggested_server_identifier(&server.name),
+                server.name
+            ));
+        }
         if !names.insert(server.name.clone()) {
             return Err(format!("MCP server `{}` is duplicated", server.name));
         }
@@ -1823,5 +1867,32 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         let error = validate_write_request(&request).unwrap_err();
         assert!(error.contains("^[a-zA-Z0-9_-]+$"));
         assert!(error.contains("Use `vibe_kanban`"));
+    }
+
+    #[test]
+    fn unchanged_legacy_identifier_does_not_block_an_unrelated_save() {
+        let legacy_entry = json!({"command":"npx", "args":["atlassian-rovo"]});
+        let legacy = SharedMcpServerInput {
+            name: "Atlassian Rovo".to_string(),
+            definition: canonical_definition(&legacy_entry),
+            assignments: vec![BaseCodingAgent::ClaudeCode],
+            native_overrides: HashMap::new(),
+        };
+        let request = SharedMcpWriteRequest {
+            servers: vec![legacy.clone()],
+            removed_servers: vec!["deleted".to_string()],
+            resolved_conflicts: Vec::new(),
+        };
+        let snapshots = vec![snapshot(
+            BaseCodingAgent::ClaudeCode,
+            HashMap::from([("Atlassian Rovo".to_string(), legacy_entry)]),
+        )];
+
+        assert!(validate_write_request_against_snapshots(&request, &snapshots).is_ok());
+
+        let mut changed = request;
+        changed.servers[0].definition = canonical_definition(&json!({"command":"different"}));
+        let error = validate_write_request_against_snapshots(&changed, &snapshots).unwrap_err();
+        assert!(error.contains("Use `atlassian_rovo`"));
     }
 }
