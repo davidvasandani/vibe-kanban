@@ -808,17 +808,21 @@ pub(crate) async fn update_mcp_servers_in_config(
     mcpc: &McpConfig,
     new_servers: HashMap<String, Value>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    validate_server_identifiers(new_servers.keys().map(String::as_str))?;
-
     // Ensure parent directory exists
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).await?;
     }
     // Read existing config (JSON or TOML depending on agent)
     let mut config = read_agent_config(config_path, mcpc).await?;
+    let current_servers = get_mcp_servers_from_config_path(&config, &mcpc.servers_path);
+
+    // Existing native configs may predate identifier validation. Permit those
+    // keys only while their definitions remain exactly unchanged, so an
+    // unrelated edit can be saved without allowing new invalid identifiers.
+    validate_changed_server_identifiers(&current_servers, &new_servers)?;
 
     // Get the current server count for comparison
-    let old_servers = get_mcp_servers_from_config_path(&config, &mcpc.servers_path).len();
+    let old_servers = current_servers.len();
 
     // Set the MCP servers using the correct attribute path
     set_mcp_servers_in_config_path(&mut config, &mcpc.servers_path, &new_servers)?;
@@ -838,6 +842,15 @@ pub(crate) async fn update_mcp_servers_in_config(
     };
 
     Ok(message)
+}
+
+fn validate_changed_server_identifiers(
+    current_servers: &HashMap<String, Value>,
+    new_servers: &HashMap<String, Value>,
+) -> Result<(), String> {
+    validate_server_identifiers(new_servers.iter().filter_map(|(name, definition)| {
+        (current_servers.get(name) != Some(definition)).then_some(name.as_str())
+    }))
 }
 
 /// Helper function to get MCP servers from config using a path
@@ -1160,5 +1173,24 @@ mod tests {
         let mut config = serde_json::json!({});
         let err = set_mcp_servers_in_config_path(&mut config, &[], &servers("srv"));
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn unchanged_legacy_identifier_does_not_block_native_config_write() {
+        let current = servers("Atlassian Rovo");
+        let mut next = current.clone();
+        next.insert(
+            "deleted-replacement".to_string(),
+            serde_json::json!({ "command": "new" }),
+        );
+
+        assert!(validate_changed_server_identifiers(&current, &next).is_ok());
+
+        next.insert(
+            "Atlassian Rovo".to_string(),
+            serde_json::json!({ "command": "changed" }),
+        );
+        let error = validate_changed_server_identifiers(&current, &next).unwrap_err();
+        assert!(error.contains("Use `atlassian_rovo`"));
     }
 }
