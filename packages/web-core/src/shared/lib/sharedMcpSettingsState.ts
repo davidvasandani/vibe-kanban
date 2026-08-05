@@ -13,6 +13,7 @@ import type {
 
 export type SharedMcpDraftServer = {
   name: string;
+  displayName: string | null;
   definition: McpServerDefinition;
   assignments: BaseCodingAgent[];
 };
@@ -128,6 +129,7 @@ export function draftFromSharedRead(
   return {
     servers: response.servers.map((server) => ({
       name: server.name,
+      displayName: server.display_name,
       definition: server.definition,
       assignments: server.assignments.map((assignment) => assignment.executor),
     })),
@@ -142,10 +144,22 @@ export function inputsFromDraft(
     .filter((server) => server.definition.transport !== 'unknown')
     .map((server) => ({
       name: server.name,
+      display_name: server.displayName,
       definition: server.definition,
       assignments: server.assignments,
       native_overrides: {},
     }));
+}
+
+export function draftServersFromInputs(
+  servers: SharedMcpServerInput[]
+): SharedMcpDraftServer[] {
+  return servers.map((server) => ({
+    name: server.name,
+    displayName: server.display_name,
+    definition: server.definition,
+    assignments: server.assignments,
+  }));
 }
 
 export function removedServerNames(
@@ -182,6 +196,7 @@ export function resolveConflictVariant(
     );
   const server: SharedMcpDraftServer = {
     name: conflict.name,
+    displayName: conflict.display_name,
     definition: variant.definition,
     assignments: Array.from(
       new Set(
