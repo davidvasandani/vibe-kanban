@@ -1,7 +1,8 @@
 # Shared MCP configuration
 
 Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`,
-`c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`, `d893-fix-slack-mcp`
+`c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`, `d893-fix-slack-mcp`,
+`067cb434-mcp-tools`, `4daf-gmail-mcp`
 
 Vibe Kanban derives shared MCP settings from each base executor's native config
 file. There is no separate registry: the native files remain the source consumed
@@ -70,9 +71,59 @@ effect on what the `command`/`args` actually install. When an entry points at a
 fork or any non-obvious build, keep the two in sync deliberately and assert it —
 see [forked-mcp-server-packaging](forked-mcp-server-packaging.md).
 
-The backend exposes this catalog through `/api/mcp-config/default`, but the
-current shared MCP settings UI does not render catalog suggestions. Treat catalog
-availability and UI discoverability as separate capabilities when scoping work.
+The backend exposes this catalog through `/api/mcp-config/default`. The settings
+UI **does** now render it as a "Popular servers" tile grid
+(`McpSettingsSection.tsx`, driven by `preconfiguredMcpServers()`); an earlier
+version of this page said otherwise, which was true when written and is no longer.
+Catalog availability and UI discoverability remain separate capabilities when
+scoping work — just verify which one is missing rather than assuming.
+
+A template can be instantiated more than once; see
+[multi-instance-catalog-templates](multi-instance-catalog-templates.md) for the
+identifier-allocation rules, the `servers` XOR `conflicts` taken-names trap, and
+why every per-instance value needs its own placeholder.
+
+Two placeholder rules that documentation, not code, has to enforce — nothing
+validates that a `YOUR_*` value was replaced:
+
+- **Path placeholders are absolute.** Env values are copied verbatim into agent
+  config and servers spawn without a shell, so `~` is never expanded; a `~/…`
+  value resolves against the agent's cwd, which is a task worktree.
+- **A placeholder models its own shape**, including trailing separators.
+
+Prefer a credentials *path* over a token in `env` where the tool supports it: VK
+writes config rather than holding secrets, so an `env` token lands in plaintext in
+every assigned agent's global config, and the encrypted gateway below is
+HTTP-only.
+
+Catalog presence also does not materialize an MCP server into an executor's
+native configuration. Codex discovers servers from the `config.toml` belonging
+to the exact identity and `CODEX_HOME` that launch `codex app-server`. For a
+deployment-owned server, seed that native configuration under the service
+identity before Vibe Kanban starts. `codex mcp add <name> -- <command>` is an
+idempotent named-table update: it preserves unrelated Codex settings and is
+safer than generating the whole TOML file. Use immutable deployment paths and
+put environment-specific private endpoints in deployment configuration, not in
+the global product catalog.
+
+Cluster-wide MCP commands must be immutable deployment artifacts. Do not point
+worker configuration at generated files in a source checkout: worker nodes may
+deliberately lack both that checkout and its build user. Build the stdio client
+as a Nix package with a committed dependency lock, then write its store path to
+every coordinator and worker's native Codex configuration.
+
+Configuration alone is not proof of availability. Diagnose the complete
+boundary in order: configured server names for the launch identity, app-server
+startup/handshake status, registered tool counts, and the worker that actually
+owns the workspace process. Historical workspace rows may be insufficient once
+their process or worker-affinity record has been removed, so retain or surface
+startup failures and server-status snapshots while the session is live.
+
+Browser traffic inspection should be a first-class bounded tool rather than an
+instruction to run arbitrary page code. Capture request, response, and failure
+metadata at session creation, cap the in-memory buffer, default reads to
+`fetch`/`xhr`, and support read-and-clear. Avoid collecting request or response
+bodies and headers by default because those commonly contain credentials.
 
 Catalog changes do not rewrite native executor files that were saved from an
 older bundled template. If a later immutable pin makes those files appear to

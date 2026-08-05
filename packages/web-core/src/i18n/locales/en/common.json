@@ -534,7 +534,8 @@
     },
     "worker": {
       "label": "Run on",
-      "automatic": "Automatic placement"
+      "automatic": "Automatic placement",
+      "coordinator": "Coordinator"
     },
     "repoPicker": {
       "actions": {

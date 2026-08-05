@@ -36,6 +36,9 @@ pub struct CreateAndStartWorkspaceRequest {
     pub executor_config: ExecutorConfig,
     pub prompt: String,
     pub attachment_ids: Option<Vec<Uuid>>,
+    /// Explicitly retain coordinator-local placement in cluster mode.
+    #[serde(default)]
+    pub run_on_coordinator: bool,
     /// Optional manual placement override. `None` uses automatic scheduling.
     pub requested_worker_node_id: Option<Uuid>,
 }

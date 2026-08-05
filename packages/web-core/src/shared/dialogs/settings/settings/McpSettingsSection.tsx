@@ -49,10 +49,12 @@ import {
   indexAssignmentTests,
   inputsFromDraft,
   mergeOAuthRefresh,
+  nextAvailableServerName,
   preconfiguredMcpServers,
   removedServerNames,
   resolveConflictVariant,
   sharedMcpSnapshot,
+  takenServerNames,
   testKey,
   testTargetsForDraft,
   type SharedMcpDraftServer,
@@ -571,9 +573,11 @@ export function McpSettingsSection() {
       const result = await McpServerDialog.show({
         codec,
         profiles,
-        existingNames: draft.servers
-          .map((s) => s.name)
-          .filter((n) => n !== server?.name),
+        // Conflicts included: renaming onto a conflicting name collides just as
+        // destructively as renaming onto another server's name.
+        existingNames: takenServerNames(draft).filter(
+          (n) => n !== server?.name
+        ),
         initial: server
           ? {
               name: server.name,
@@ -596,7 +600,7 @@ export function McpSettingsSection() {
         assignments: result.assignments,
       });
     },
-    [draft.servers, invalidateServerCheck, profiles, setServer]
+    [draft, invalidateServerCheck, profiles, setServer]
   );
 
   const removeServer = useCallback((name: string) => {
@@ -621,9 +625,19 @@ export function McpSettingsSection() {
         )
         .slice(0, 1)
         .map((profile) => profile.executor);
-      setServer({ name: key, definition, assignments });
+      // A template may be added more than once (two Slack workspaces, one Gmail
+      // server per mailbox), so the catalog key is only a starting point. Allocate
+      // against the current draft: `setServer` de-duplicates by name, so reusing a
+      // taken name would silently replace that server instead of adding one.
+      //
+      // Conflicting servers count as taken even though they are not in
+      // `draft.servers`: the backend puts a name in `servers` XOR `conflicts`, so
+      // reusing a conflict's name would attach this new definition to an
+      // unresolved conflict and drop the native entry it was still arbitrating.
+      const name = nextAvailableServerName(key, takenServerNames(draft));
+      setServer({ name, definition, assignments });
     },
-    [profiles, setServer]
+    [draft, profiles, setServer]
   );
 
   const disconnectGateway = useCallback(
@@ -1101,6 +1115,10 @@ export function McpSettingsSection() {
                 </p>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {catalogServers.map((server) => {
+                    // Marks the template as already used — it dims the tile and
+                    // swaps the icon, but must not disable it: a template can be
+                    // instantiated more than once, and later instances are named
+                    // by `nextAvailableServerName`.
                     const added = draft.servers.some(
                       (draftServer) => draftServer.name === server.key
                     );
@@ -1112,12 +1130,9 @@ export function McpSettingsSection() {
                         onClick={() =>
                           addPreconfigured(server.key, server.entry)
                         }
-                        disabled={added}
                         className={cn(
-                          'flex items-start gap-3 rounded-sm border border-border/50 bg-secondary/30 p-3 text-left transition-colors',
-                          added
-                            ? 'cursor-default opacity-60'
-                            : 'hover:border-border hover:bg-secondary'
+                          'flex items-start gap-3 rounded-sm border border-border/50 bg-secondary/30 p-3 text-left transition-colors hover:border-border hover:bg-secondary',
+                          added && 'opacity-60'
                         )}
                       >
                         <div className="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-sm border border-border bg-secondary">

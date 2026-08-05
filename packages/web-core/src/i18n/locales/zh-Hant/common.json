@@ -517,7 +517,8 @@
     },
     "worker": {
       "label": "執行於",
-      "automatic": "自動分配"
+      "automatic": "自動分配",
+      "coordinator": "協調器"
     },
     "repoPicker": {
       "actions": {

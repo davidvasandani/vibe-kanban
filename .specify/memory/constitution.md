@@ -184,6 +184,11 @@ and the worker must authorize the execution ID and canonical workspace path
 against that assignment. Retries are idempotent and cannot create a second
 process for one execution.
 
+Placement intent is explicit at every boundary: automatic scheduling,
+coordinator-local execution, and a requested worker are distinct choices. A
+null or omitted value must not be overloaded to mean more than one of them, and
+contradictory choices are rejected before placement state is mutated.
+
 Remote liveness and terminal state require worker evidence. A timeout,
 disconnect, missing handle, or expired lease is not proof that a process
 completed or was killed; expose interruption or indeterminacy and preserve the
@@ -278,6 +283,42 @@ scoped to the failure being surfaced — a blanket unwrapping of every internal
 error is not the remedy, and messages remain free of secrets, tokens, and
 environment values.
 
+### XXII. Process lifetime follows the stable owner
+Managed coding-agent and execution-helper processes MUST have one explicit
+owner for their complete lifetime. A control-plane client disconnect, HTTP
+server replacement, dropped in-memory handle, timeout, or missing observation
+is not evidence that a managed process exited and MUST NOT implicitly cancel or
+terminalise it. Ownership includes the process group, input channel, ordered
+output capture, exit watcher, cancellation state, and cleanup responsibility;
+moving only a PID or child handle does not transfer ownership.
+
+Every replacement boundary is an evidence-backed handoff. Commands that may be
+retried after an uncertain response are idempotent under a stable execution
+identity. Execution output and terminal-state events are monotonically ordered, acknowledged,
+replayable within an explicit bound, and expose gaps rather than hiding them.
+A new control-plane generation becomes ready only after compatibility is
+negotiated and authoritative process state is reconciled. At most one
+generation holds mutation authority at a time.
+
+Soft detach and hard shutdown are different operations. Soft detach preserves
+managed processes and their streams under the stable owner. Hard shutdown is
+explicit, retains process-group cleanup and work-preservation rules, and is the
+only application lifecycle operation allowed to terminate all managed
+children. Recovery for a genuinely lost owner remains fail-safe: unverifiable
+state is interrupted or indeterminate, never silently completed or adopted.
+
+### XXIII. Flexible panels have one explicit space and scroll owner
+Panel stacks that divide bounded space MUST express that division at the
+component that owns expanded/collapsed state. Expanded panels may grow and
+shrink into available space; collapsed panels remain intrinsically sized.
+Avoid viewport-derived or arbitrary per-panel height caps when the containing
+layout already defines the available height.
+
+Nested flex scroll regions identify one overflow owner, and every flex ancestor
+between the bounded container and that owner permits shrinking (`min-height: 0`
+or its equivalent). Headers and controls stay outside the content scroller so
+overflow does not make them unreachable.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -299,7 +340,13 @@ environment values.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.19.0 (adds one-convention-per-concept — reuse the existing
+**Version**: 0.22.0 (adds stable process ownership and evidence-backed soft
+restart handoffs — control-plane disconnect is not process death, ownership
+includes the complete I/O/monitoring lifecycle, replay is ordered and explicit
+about gaps, mutation authority is single-generation, and only hard shutdown
+terminates all managed children; 0.21.0 made cluster placement intent explicit and unambiguous;
+0.20.0 added explicit flexible-panel space and scroll ownership; 0.19.0 added
+one-convention-per-concept — reuse the existing
 resolution rule rather than re-deriving it, accept the producer's default value,
 and report failures with the fact that identifies them instead of a generic
 internal error; also makes writes into a consolidated shared namespace additive
