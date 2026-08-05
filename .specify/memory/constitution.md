@@ -354,6 +354,19 @@ is host-strict and rejects malformed or lookalike destinations. Tests use fake
 credentials and fake executables, exercise every workspace process boundary,
 and prove that serialized cluster messages contain no secret material.
 
+### XXVI. Bundled defaults upgrade without claiming user files
+Bundled defaults copied into user-editable storage remain user-owned after
+seeding. A release may automatically refresh a bundled file only when the
+on-disk bytes are known to be an unmodified previously shipped default.
+Customized files, unrecognized versions, and ambiguous state are preserved.
+Deleted defaults stay deleted unless the product's established empty-directory
+reset behavior is explicitly invoked.
+
+Prompt-driven bundled workflows are executable contracts, not illustrative
+copy. Their regression tests preserve requirements that affect safety and
+completion—such as concurrency, bounded retries, prompt delivery, and required
+read capabilities—rather than checking only stage names or keywords.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -375,7 +388,7 @@ and prove that serialized cluster messages contain no secret material.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.24.0 (adds narrowest-boundary credential scoping — select secrets
+**Version**: 0.25.0 (adds user-preserving bundled-default upgrades and prompt-workflow contract coverage; 0.24.0 added narrowest-boundary credential scoping — select secrets
 for the resource at command time, keep values runtime-only and out of cluster
 payloads, and share one strict routing rule across process boundaries; 0.23.0
 added external-config identity vs presentation: stable,
@@ -396,3 +409,4 @@ paths, structural rather than textual assertions, no same-named-local fallback,
 two-sided pointer repair, level-triggered enforcement, and re-derived blast
 radius for consolidated namespaces; 0.17.0 added observability as a read-only
 surface; 0.16.0 added affinity-bound, evidence-backed distributed execution)
+

@@ -1,84 +1,22 @@
-# Implementation Plan: GitHub Fine-Grained PAT Routing
+# Implementation Plan
 
-Task id: `5e29-vk-github-fine-g`
+1. Inspect the composed-pipeline contract, bundled asset seeding behavior, and
+   focused tests to define the smallest compatible change.
+2. Refresh the `Parallel Sub-Agents` prompts so fan-out is genuinely
+   concurrent, every provider receives the task before execution, read tools
+   remain available under a read-only policy, failures are isolated, and later
+   rounds start fresh children with both original and synthesized context.
+3. Extend bundled seeding with a narrowly scoped legacy-content refresh:
+   replace the on-disk parallel pipeline only when it byte-for-byte matches the
+   previously shipped default, preserving every customized copy.
+4. Add regression tests for the prompt contract and for both unmodified-default
+   upgrade and customized-file preservation.
+5. Run formatting and focused Rust tests, then the broader checks warranted by
+   the touched backend module.
+6. Run an independent Codex diff review, address confirmed findings, and repeat
+   verification until no significant findings remain.
+7. Record reusable bundle-refresh and prompt-orchestration knowledge in the
+   project knowledge base, update its index, and commit the knowledge-base
+   changes as required by the task pipeline.
 
-This initial plan follows `SPEC.md` and the constraints distilled in the
-workspace-level `PRIOR_KNOWLEDGE.md`. SpecKit planning may refine file names and
-task granularity after constitution/spec clarification.
 
-1. **Inventory execution and deployment boundaries**
-   - Trace the effective `PATH` and environment for local managed executions,
-     setup/cleanup scripts, dev servers, workspace PTYs, cluster dispatch, and
-     worker-side spawn.
-   - Identify how `vibe-kanban-rebuild.nix` provisions runtime-only 1Password
-     credentials and which identities run coordinator/worker processes.
-   - Confirm the packaged absolute path of the real `gh` binary on each node.
-
-2. **Define the non-secret routing contract**
-   - Specify an owner-normalized manifest format mapping GitHub owner to a
-     node-local credential path.
-   - Add validation for owner syntax, case-insensitive duplicates, absolute
-     runtime paths, and `/nix/store` rejection.
-   - Define environment keys for the manifest and wrapper path as reserved,
-     execution-owned configuration.
-
-3. **Implement and test the `gh` router**
-   - Build a small wrapper/helper that parses explicit `-R`/`--repo` targets,
-     otherwise resolves the effective Git remote and parses GitHub.com SSH or
-     HTTPS URLs.
-   - Match configured owners case-insensitively, read only the selected token,
-     set `GH_TOKEN` for the child, and exec real `gh` by absolute path.
-   - Preserve caller authentication when no configured owner matches; emit
-     secret-safe configuration errors for a matched owner with an invalid
-     credential.
-   - Test argument variants and precedence, remote selection/URL parsing,
-     recursion prevention, fallback, empty/missing credentials, and token
-     selection with a fake `gh` binary.
-
-4. **Provision runtime credentials in Nix**
-   - Add `githubOrgTokens` options to `vibe-kanban-rebuild.nix` using the
-     established runtime credential and 1Password conventions.
-   - Materialize owner-specific token files and a non-secret manifest with
-     restrictive ownership/modes, without interpolating secrets into the Nix
-     store, unit environment, or workspace.
-   - Install/configure the router on coordinator and worker roles, and ensure
-     rotation/restart behavior is deterministic.
-   - Add Nix assertions or evaluation tests for invalid and disabled configs.
-
-5. **Inject routing into every workspace process path**
-   - Add the non-secret router configuration at the common local execution
-     boundary before Vibe Kanban-owned workspace/session variables.
-   - Pass the same configuration to workspace PTYs while leaving login and
-     other non-workspace PTYs unchanged.
-   - Ensure worker execution uses node-local paths and cluster action payloads
-     contain no PAT values.
-   - Add process-boundary tests for managed execution and PTY precedence.
-
-6. **Document operator configuration and behavior**
-   - Document owner matching, explicit `--repo` precedence, supported remote
-     forms, fallback behavior, credential rotation, and troubleshooting.
-   - Include a Nix example containing only 1Password/runtime references, never
-     real token-shaped values.
-
-7. **Verify in increasing scope**
-   - Run focused wrapper/unit/process tests and Nix evaluation checks.
-   - Install dependencies if required, format the Vibe Kanban repo, then run
-     generated-type checks (if relevant), `pnpm run check`, lint, and targeted
-     Rust tests.
-   - Confirm with repository searches that no PAT content or token-shaped test
-     secret entered tracked files and that dispatched payload types contain no
-     credential field.
-
-8. **Review and knowledge capture**
-   - Run the required independent Codex diff review, fix confirmed significant
-     findings, and repeat until clean.
-   - Distill reusable command-time credential-routing and cluster deployment
-     lessons into the project knowledge base, update its index, tag this task,
-     and commit the knowledge-base update before handoff.
-# VAS-356 Addendum Plan: Cluster MCP runtime connectivity
-
-1. Derive `VIBE_BACKEND_URL` from the worker coordinator option.
-2. Grant think3/think4 access to Firecrawl TCP 3410 only.
-3. Add evaluated environment and firewall invariants to homelab CI.
-4. Validate Nix evaluation, review both diffs independently, update knowledge,
-   and merge the Vibe documentation and homelab deployment PRs.
