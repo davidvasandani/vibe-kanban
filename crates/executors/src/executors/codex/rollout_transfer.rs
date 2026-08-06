@@ -299,11 +299,14 @@ impl CodexRolloutStore {
                     RolloutTransferError::Io(error)
                 }
             })?;
-            fs::remove_file(&tmp)?;
             let digest = sha256_file(&destination, CODEX_ROLLOUT_MAX_FILE_BYTES)?;
             if digest != entry.sha256 {
+                if paths_are_same_file(&tmp, &destination) {
+                    fs::remove_file(&destination)?;
+                }
                 return Err(RolloutTransferError::ChecksumMismatch(entry.thread_id));
             }
+            fs::remove_file(&tmp)?;
             Ok(())
         })() {
             let _ = fs::remove_file(&tmp);
@@ -514,6 +517,21 @@ impl CodexRolloutStore {
         validate_relative(relative)?;
         Ok(self.sessions_root.join(relative))
     }
+}
+
+#[cfg(unix)]
+fn paths_are_same_file(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    match (fs::metadata(left), fs::metadata(right)) {
+        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn paths_are_same_file(_left: &Path, _right: &Path) -> bool {
+    false
 }
 
 fn ensure_no_symlink_components(root: &Path, relative: &Path) -> Result<(), RolloutTransferError> {
