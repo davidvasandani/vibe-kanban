@@ -770,17 +770,20 @@ pub async fn update_workspace_affinity(
                     "Codex session transfer requires a source worker placement".into(),
                 )
             })?;
-            let session_info = CodingAgentTurn::find_latest_session_info(
-                pool,
-                process.session_id,
-            )
-            .await?
-            .ok_or_else(|| {
+            let source_turn = CodingAgentTurn::find_by_execution_process_id(pool, process.id)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::Conflict(
+                        "Codex session transfer source execution has no coding-agent turn".into(),
+                    )
+                })?;
+            let source_thread_id = source_turn.agent_session_id.ok_or_else(|| {
                 ApiError::Conflict(
-                    "Codex session transfer source has no persisted thread identity".into(),
+                    "Codex session transfer source execution has no persisted thread identity"
+                        .into(),
                 )
             })?;
-            let leaf_thread_id = Uuid::parse_str(&session_info.session_id).map_err(|_| {
+            let leaf_thread_id = Uuid::parse_str(&source_thread_id).map_err(|_| {
                 ApiError::Conflict(format!(
                     "Codex session transfer source thread identity is invalid for execution {}",
                     process.id

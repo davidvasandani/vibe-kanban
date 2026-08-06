@@ -105,7 +105,7 @@ pub async fn router(
         .and_then(|home| CodexRolloutStore::new(home).ok())
         .map(Arc::new);
     if let Some(store) = codex_rollouts.clone() {
-        spawn_rollout_cleanup(store, supervisor.clone());
+        spawn_rollout_cleanup(store);
     }
     let state = WorkerApiState {
         supervisor,
@@ -121,12 +121,16 @@ pub async fn router(
     Ok(build_router(state))
 }
 
-fn spawn_rollout_cleanup(store: Arc<CodexRolloutStore>, supervisor: ExecutionSupervisor) {
+fn spawn_rollout_cleanup(store: Arc<CodexRolloutStore>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(6 * 60 * 60));
         loop {
             interval.tick().await;
-            let allow_verified_removal = supervisor.active_execution_count().await == 0;
+            // This worker cannot prove that an idle persisted session or a
+            // recoverable coordinator operation no longer references a rollout.
+            // It may clean partials locally, but verified deletion requires
+            // coordinator-supplied reference proof that is not yet available.
+            let allow_verified_removal = false;
             let store = store.clone();
             match tokio::task::spawn_blocking(move || {
                 store.cleanup_expired(SystemTime::now(), allow_verified_removal)
