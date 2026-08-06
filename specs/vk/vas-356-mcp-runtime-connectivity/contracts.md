@@ -1,5 +1,13 @@
 # Contracts
 
+## Deployment ownership contract
+
+- Vibe Kanban settings exclusively own MCP server identifiers and definitions.
+- Nix may supply commands, environment, and routes but performs no native MCP
+  table mutation.
+- The focused homelab check rejects `codex mcp add` anywhere in the Vibe Kanban
+  rebuild module.
+
 ## Worker environment contract
 
 For `clusterRole = "worker"`, the evaluated service environment contains:

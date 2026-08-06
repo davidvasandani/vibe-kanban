@@ -19,3 +19,11 @@ no actionable correctness regression. Targeted checks compiled the protocol,
 executor, worker, and local-deployment crates; focused scoped-home and config
 reader tests passed. Network-listener tests were not rerun in the review sandbox
 because that environment denied local socket creation.
+
+## Settings-only authority follow-up
+
+Independent review confirmed that the homelab change removes startup mutation
+while retaining runtime command availability. Documentation review found one
+remaining sentence that instructed deployments to write worker-native MCP
+configuration; it was corrected to require PATH exposure with settings-owned
+definitions. The repeated review found no actionable issue.

@@ -1,5 +1,15 @@
 # Research: Cluster-safe MCP runtime connectivity
 
+## Settings-only authority follow-up
+
+The previous rollout established that exact MCP definitions can be dispatched
+securely and isolated per execution. There is therefore no remaining runtime
+need for Nix to write `vibe_kanban` into coordinator Codex configuration. The
+existing definition survives removal of the startup command because removing an
+add/update command does not delete native state. Keeping the executable on PATH
+preserves the runtime dependency while separating definition ownership from
+package ownership.
+
 ## Evidence
 
 - Codex runs with `HOME=/var/lib/vibe-kanban` and reads the expected global

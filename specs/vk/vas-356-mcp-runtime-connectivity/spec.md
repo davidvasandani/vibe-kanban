@@ -80,3 +80,29 @@ stale worker-local backend port and Firecrawl rejects worker source addresses.
 - The serialized snapshot is limited to 1 MiB. MCP definitions are normally a
   few kilobytes; this leaves ample room while remaining far below the signed
   request body's broader transport ceiling.
+
+## Follow-up: one settings authority for all MCPs
+
+### User story
+
+As an operator, I want every MCP definition—including `vibe_kanban`—managed in
+Vibe Kanban settings so a restart cannot mutate or partially replace agent
+configuration behind the settings UI.
+
+### Functional requirements
+
+- **FR-13:** Vibe Kanban settings are the sole authority for all MCP server
+  definitions.
+- **FR-14:** The Vibe Kanban deployment must not execute native MCP add/remove
+  commands during service startup.
+- **FR-15:** Deployment remains responsible for immutable executable
+  availability, service environment, and network connectivity.
+- **FR-16:** A focused invariant rejects future MCP definition seeding from the
+  Vibe Kanban Nix module.
+
+### Acceptance criteria
+
+- Restarting the coordinator or workers does not add or rewrite an MCP table.
+- Existing settings-owned `vibe_kanban` and Firecrawl definitions persist.
+- New remote executions receive those definitions through the existing scoped
+  snapshot mechanism.

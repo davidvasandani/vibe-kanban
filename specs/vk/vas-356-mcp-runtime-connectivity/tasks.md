@@ -51,3 +51,14 @@
       `docs/knowledge-base/INDEX.md`.
 - [x] T018 Commit, publish, and merge Vibe Kanban and homelab PRs in rollout
       order.
+
+## Settings-only authority follow-up
+
+- [x] T019 Remove the remaining native MCP startup mutation from the Vibe
+      Kanban Nix module while retaining runtime packages.
+- [x] T020 [P] Generalize the focused homelab invariant to reject all native MCP
+      add commands.
+- [x] T021 [P] Update knowledge to establish settings-only definition ownership.
+- [x] T022 Run Nix parse/evaluation, focused invariants, and diff checks.
+- [x] T023 Run independent Codex review and address significant findings.
+- [ ] T024 Commit, publish, merge, and verify deployment.

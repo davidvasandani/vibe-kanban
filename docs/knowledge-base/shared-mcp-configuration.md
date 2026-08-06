@@ -122,19 +122,19 @@ HTTP-only.
 
 Catalog presence also does not materialize an MCP server into an executor's
 native configuration. Codex discovers servers from the `config.toml` belonging
-to the exact identity and `CODEX_HOME` that launch `codex app-server`. For a
-deployment-owned server, seed that native configuration under the service
-identity before Vibe Kanban starts. `codex mcp add <name> -- <command>` is an
-idempotent named-table update: it preserves unrelated Codex settings and is
-safer than generating the whole TOML file. Use immutable deployment paths and
-put environment-specific private endpoints in deployment configuration, not in
-the global product catalog.
+to the exact identity and `CODEX_HOME` that launch `codex app-server`. Vibe
+Kanban settings are the sole definition authority: deployments install immutable
+commands and supply environment/network prerequisites, but must not run `codex
+mcp add` or otherwise mutate native MCP tables during startup. Remote workers
+receive the selected settings-owned definitions through authenticated,
+execution-scoped snapshots.
 
 Cluster-wide MCP commands must be immutable deployment artifacts. Do not point
 worker configuration at generated files in a source checkout: worker nodes may
 deliberately lack both that checkout and its build user. Build the stdio client
-as a Nix package with a committed dependency lock, then write its store path to
-every coordinator and worker's native Codex configuration.
+as a Nix package with a committed dependency lock, expose its stable command on
+each executor service's PATH, and let settings own the definition that invokes
+that command.
 
 Configuration alone is not proof of availability. Diagnose the complete
 boundary in order: configured server names for the launch identity, app-server

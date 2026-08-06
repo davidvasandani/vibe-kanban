@@ -19,6 +19,14 @@
    merging would preserve stale deployment-local definitions.
 7. **What payload bound applies?** The serialized MCP snapshot is capped at 1
    MiB, well below the signed request ceiling and far above expected config size.
+8. **What happens to the existing `vibe_kanban` definition?** Removing startup
+   seeding is non-destructive and leaves the settings-visible native definition
+   intact. Fresh deployments expose the bundled executable/template but require
+   explicit settings assignment.
+9. **What may Nix still own?** Executable PATH entries, service environment, and
+   network connectivity. It may not mutate native MCP definitions.
+10. **How broad is the invariant?** It rejects every `codex mcp add` invocation
+    in the Vibe Kanban module, not only known identifiers.
 
 ## Open questions
 

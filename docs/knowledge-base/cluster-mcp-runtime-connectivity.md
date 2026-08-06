@@ -43,9 +43,9 @@ executor, avoid logging its contents, and remove the scoped home when the job
 ends. A worker without an existing Codex home must still be able to start when
 authentication is supplied through its environment.
 
-Do not also seed the same settings-managed MCP through `codex mcp add` during
-service startup. That creates a second authority and can silently replace the
-authenticated definition with an incomplete one.
+Do not seed any MCP through `codex mcp add` during service startup. Settings own
+every definition, including `vibe_kanban`; startup mutation creates a second
+authority and can silently replace a complete definition with an incomplete one.
 
 ## Widen only the required service port
 

@@ -1,4 +1,16 @@
-# Coordinator option in workspace “Run on” selector
+# Technical specifications
+
+## VAS-356: settings own every MCP definition
+
+Vibe Kanban settings are the sole authority for all MCP definitions, including
+`vibe_kanban`. Nix may install MCP executables and provide service environment
+or network access, but must not invoke `codex mcp add`, remove, or otherwise
+mutate native MCP tables during startup. Existing saved settings remain intact,
+and remote workers receive selected definitions through the authenticated,
+execution-scoped snapshot mechanism. The homelab invariant must reject any
+future native MCP seeding in the Vibe Kanban module.
+
+## Coordinator option in workspace “Run on” selector
 
 ## Problem
 

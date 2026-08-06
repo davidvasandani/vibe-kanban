@@ -1,5 +1,17 @@
 # Technical Plan: Cluster-safe MCP runtime connectivity
 
+## Settings-only authority follow-up
+
+Remove the coordinator `preStart` mutation that invokes `codex mcp add
+vibe_kanban`, retain the bundled executable on the service path, and generalize
+the focused homelab invariant to reject any native MCP-add command. No protocol
+or data-model change is needed because the authenticated execution-scoped
+snapshot already transports settings-owned definitions to workers.
+
+Validate with Nix parse/evaluation, the focused connectivity invariant, source
+fallback coverage, clean diffs, and independent review. Update knowledge to
+retire the obsolete deployment-seeding recommendation.
+
 ## Design
 
 The worker unit already owns the authoritative coordinator URL. Add
