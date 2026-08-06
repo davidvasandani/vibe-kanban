@@ -278,31 +278,45 @@ scoped to the failure being surfaced — a blanket unwrapping of every internal
 error is not the remedy, and messages remain free of secrets, tokens, and
 environment values.
 
-### XXII. Executor continuation artifacts move by manifest, never by home copy
+### XXII. Affinity migration is a single owned lifecycle transition
+An executing process is never transferred between nodes. Changing affinity
+while work is active means terminating the old execution with the established
+stop/cancellation protocol, committing the new placement, and creating at most
+one new continuation execution. The coordinator owns that full transition; a
+browser or worker may request it but must not assemble it from independent
+stop, placement, and follow-up mutations.
 
-An executor's home directory is a mixed-trust boundary containing immutable
-continuation artifacts beside mutable databases, credentials, configuration,
-caches, and logs. Cross-node continuation transfers MUST select only the
-immutable artifacts required for the named continuation, describe them in an
-operation-bound manifest, and verify identity, size, digest, file type,
-permissions, ownership, and structural destination containment before the
-continuation can influence lifecycle state. Copying or synchronizing the whole
-executor home is prohibited.
+The transition is serialized per workspace and revalidates both liveness and
+target eligibility at execution time. A missing worker response is not evidence
+that stop succeeded, and affinity cannot change until terminal evidence meets
+the existing lifecycle contract. Duplicate requests, retries, and lost HTTP
+responses cannot create duplicate continuations.
 
-Transfer completion is positive durable evidence, not the existence of a path.
-The coordinator records the authorized workspace, execution, source, target,
-leaf identity, manifest digest, and target verification before stopping the
-source or changing affinity. Retries reuse identical verified content and
-reject conflicts; they never overwrite a different artifact for the same
-identity. Missing, corrupt, oversized, unauthorized, indeterminate, or
-partially staged lineage leaves the source execution and placement unchanged.
+Outcomes name the last durable boundary reached. If stop fails, placement is
+unchanged. If placement succeeds but continuation creation fails, the workspace
+remains stopped on the new affinity and the operator is told exactly that; the
+system must not roll back into a node that may still own process state or claim
+the migration completed. Product-owned continuation prompts are versioned in
+source and preserve the user's prior session context rather than fabricating a
+new task.
 
-Artifact readers, writers, and cleaners never follow symlinks, accept absolute
-caller paths, or log contents. Every byte/count/depth/time dimension is bounded.
-Temporary partials are operation-scoped and removable; verified artifacts have
-an explicit age-based retention policy that protects active and recoverable
-operations. Failures expose a safe, specific transfer category while prompts,
-tokens, environment values, rollout bodies, and other secrets remain opaque.
+### XXIII. Executor continuation artifacts move by manifest, never by home copy
+
+An executor home mixes immutable continuation artifacts with mutable databases,
+credentials, configuration, caches, and logs. Cross-node continuation transfer
+MUST select only artifacts required for the named continuation, bind them to an
+operation manifest, and verify identity, size, digest, regular-file type,
+permissions, ownership, and structural containment before stopping the source
+or changing affinity. Copying the complete executor home is prohibited.
+
+Transfer completion is durable positive evidence, never path existence. Retries
+reuse identical verified content and reject conflicts rather than overwriting.
+Missing, corrupt, oversized, unauthorized, indeterminate, or partial lineage
+leaves source execution and placement unchanged. Readers, writers, and cleaners
+never follow symlinks, accept caller absolute paths, or log contents; all byte,
+count, depth, and time dimensions are bounded. Partials are operation-scoped,
+and verified artifacts have age-based retention that protects every active or
+recoverable reference.
 
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
@@ -325,9 +339,11 @@ tokens, environment values, rollout bodies, and other secrets remain opaque.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.20.0 (adds manifest-only executor continuation artifact transfer,
+**Version**: 0.21.0 (adds manifest-only executor continuation artifact transfer,
 durable pre-lifecycle verification, conflict-refusing retries, and bounded,
-secret-safe retention; 0.19.0 added one-convention-per-concept — reuse the existing
+secret-safe retention; 0.20.0 added coordinator-owned, serialized affinity migration with
+truthful durable-boundary outcomes and at-most-once continuation; 0.19.0 added
+one-convention-per-concept — reuse the existing
 resolution rule rather than re-deriving it, accept the producer's default value,
 and report failures with the fact that identifies them instead of a generic
 internal error; also makes writes into a consolidated shared namespace additive

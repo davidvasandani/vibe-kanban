@@ -1,6 +1,17 @@
 import type { PatchTypeWithKey } from './types';
 
 export const MIN_INITIAL_ENTRIES = 10;
+/**
+ * How many completed processes to fetch at once when building a history
+ * window.
+ *
+ * Each fetch makes the server reload a whole raw log and rerun the vendor
+ * normalizer, so this bounds concurrent work on the server as much as it
+ * bounds sockets in the browser. Small enough not to stampede a coordinator
+ * that is also proxying live agent output; large enough that opening a long
+ * conversation is not the sum of every turn in the window.
+ */
+export const HISTORY_FETCH_CONCURRENCY = 5;
 export const REMAINING_BATCH_SIZE = 50;
 export const MAX_RECENT_HISTORY_PROCESSES = 20;
 

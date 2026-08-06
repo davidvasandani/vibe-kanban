@@ -9,6 +9,7 @@ import type {
   WorkspaceSummary,
   WorkspaceSummaryResponse,
   ApiResponse,
+  WorkspaceAffinitySummary,
 } from 'shared/types';
 
 // UI-specific workspace type for sidebar display
@@ -39,6 +40,7 @@ export interface SidebarWorkspace {
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
   prNumber?: number;
   prUrl?: string;
+  serverAffinity?: WorkspaceAffinitySummary;
 }
 
 // Keep the old export name for backwards compatibility
@@ -87,6 +89,7 @@ function toSidebarWorkspace(
     prNumber:
       summary?.pr_number != null ? Number(summary.pr_number) : undefined,
     prUrl: summary?.pr_url ?? undefined,
+    serverAffinity: summary?.affinity,
   };
 }
 

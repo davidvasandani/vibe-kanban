@@ -7,6 +7,8 @@ import { PreviewControlsContainer } from './PreviewControlsContainer';
 import { BrowserControlsContainer } from './BrowserControlsContainer';
 import { GitPanelContainer } from './GitPanelContainer';
 import { ServerMetricsSectionContainer } from './ServerMetricsSectionContainer';
+import { ServerAffinitySectionContainer } from './ServerAffinitySectionContainer';
+import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { TerminalPanelContainer } from '@/shared/components/TerminalPanelContainer';
 import { WorkspaceNotesContainer } from './WorkspaceNotesContainer';
 import { useDiffs } from '@/shared/stores/useWorkspaceDiffStore';
@@ -34,6 +36,7 @@ type SectionDef = {
   collapsible?: boolean;
   content: React.ReactNode;
   actions: SectionAction[];
+  headerExtra?: React.ReactNode;
 };
 
 export interface RightSidebarProps {
@@ -53,6 +56,10 @@ export const RightSidebar = memo(function RightSidebar({
   const diffs = useDiffs();
   const isTerminalVisible = useUiPreferencesStore((s) => s.isTerminalVisible);
   const { expandTerminal, isTerminalExpanded } = useLogsPanel();
+  const { activeWorkspaces } = useWorkspaceContext();
+  const selectedWorkspaceSummary = activeWorkspaces.find(
+    (workspace) => workspace.id === selectedWorkspace?.id
+  );
 
   const [changesExpanded] = usePersistedExpanded(
     PERSIST_KEYS.changesSection,
@@ -76,6 +83,10 @@ export const RightSidebar = memo(function RightSidebar({
   );
   const [serverMetricsExpanded] = usePersistedExpanded(
     PERSIST_KEYS.serverMetricsSection,
+    false
+  );
+  const [serverAffinityExpanded] = usePersistedExpanded(
+    PERSIST_KEYS.serverAffinitySection,
     false
   );
   const [terminalExpanded] = usePersistedExpanded(
@@ -131,6 +142,31 @@ export const RightSidebar = memo(function RightSidebar({
             repos={repos}
           />
         ),
+        actions: [],
+      },
+      {
+        title: t('common:sections.serverAffinity', {
+          defaultValue: 'Server Affinity',
+        }),
+        persistKey: PERSIST_KEYS.serverAffinitySection,
+        visible: !!selectedWorkspace,
+        expanded: serverAffinityExpanded,
+        headerExtra: selectedWorkspaceSummary?.serverAffinity ? (
+          <span className="max-w-28 truncate text-sm text-low">
+            {selectedWorkspaceSummary.serverAffinity.worker_hostname ??
+              selectedWorkspaceSummary.serverAffinity
+                .requested_worker_hostname ??
+              t(
+                `common:workspaces.serverAffinity.${selectedWorkspaceSummary.serverAffinity.kind}`
+              )}
+          </span>
+        ) : null,
+        content: selectedWorkspace ? (
+          <ServerAffinitySectionContainer
+            workspaceId={selectedWorkspace.id}
+            isRunning={selectedWorkspaceSummary?.isRunning ?? false}
+          />
+        ) : null,
         actions: [],
       },
       {
@@ -239,6 +275,9 @@ export const RightSidebar = memo(function RightSidebar({
     diffs,
     gitExpanded,
     serverMetricsExpanded,
+    serverAffinityExpanded,
+    selectedWorkspaceSummary?.isRunning,
+    selectedWorkspaceSummary?.serverAffinity,
     terminalExpanded,
     notesExpanded,
     changesExpanded,
@@ -254,33 +293,25 @@ export const RightSidebar = memo(function RightSidebar({
   ]);
 
   return (
-    <div className="h-full border-l bg-secondary overflow-y-auto">
-      <div className="divide-y border-b">
+    <div className="h-full min-h-0 border-l bg-secondary overflow-x-hidden overflow-y-auto">
+      <div className="flex h-full min-h-0 flex-col divide-y border-b">
         {sections
           .filter((section) => section.visible)
           .map((section) => (
-            <div
+            <CollapsibleSectionHeader
               key={section.persistKey}
-              className="max-h-[max(50vh,400px)] flex flex-col overflow-hidden"
+              title={section.title}
+              persistKey={section.persistKey}
+              defaultExpanded={section.expanded}
+              collapsible={section.collapsible ?? true}
+              actions={section.actions}
+              headerExtra={section.headerExtra}
+              fillAvailableSpace
             >
-              <CollapsibleSectionHeader
-                title={section.title}
-                persistKey={section.persistKey}
-                defaultExpanded={section.expanded}
-                collapsible={section.collapsible ?? true}
-                actions={section.actions}
-              >
-                <div
-                  className={`flex flex-1 border-t w-full overflow-auto ${
-                    (section.collapsible ?? true)
-                      ? 'min-h-[200px]'
-                      : 'min-h-[1px]'
-                  }`}
-                >
-                  {section.content}
-                </div>
-              </CollapsibleSectionHeader>
-            </div>
+              <div className="flex min-h-0 flex-1 border-t w-full overflow-auto">
+                {section.content}
+              </div>
+            </CollapsibleSectionHeader>
           ))}
       </div>
     </div>

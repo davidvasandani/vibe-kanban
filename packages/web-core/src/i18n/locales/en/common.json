@@ -194,6 +194,22 @@
         "name": "Name"
       },
       "columnError": "This chat failed to render. Open the full view instead."
+    },
+    "serverAffinity": {
+      "local": "Local",
+      "worker": "Worker",
+      "unassigned": "Unassigned",
+      "current": "Current server",
+      "runOn": "Run on",
+      "automatic": "Automatic placement",
+      "unavailable": "Unavailable",
+      "localDescription": "This Vibe Kanban instance runs workspaces locally.",
+      "confirmTitle": "Migrate the running task?",
+      "confirmMessage": "Vibe Kanban will stop the current task, change its server affinity, and start it again with a managed continuation prompt.",
+      "confirmAction": "Stop, migrate, and restart",
+      "updated": "Server affinity updated",
+      "updateFailed": "Failed to update server affinity",
+      "restartFailed": "Affinity changed, but the task could not be restarted"
     }
   },
   "fileTree": {
@@ -218,7 +234,8 @@
     "other": "Other",
     "devServerPreview": "Dev Server Preview",
     "terminal": "Terminal",
-    "notes": "Notes"
+    "notes": "Notes",
+    "serverAffinity": "Server Affinity"
   },
   "notes": {
     "placeholder": "Add notes about this workspace...",
@@ -534,7 +551,8 @@
     },
     "worker": {
       "label": "Run on",
-      "automatic": "Automatic placement"
+      "automatic": "Automatic placement",
+      "coordinator": "Coordinator"
     },
     "repoPicker": {
       "actions": {

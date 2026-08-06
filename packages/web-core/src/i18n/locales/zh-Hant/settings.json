@@ -417,6 +417,8 @@
         "description": "Configure this MCP server and assign it to agents.",
         "name": "名稱",
         "namePlaceholder": "例如 my_server",
+        "displayName": "顯示名稱",
+        "displayNamePlaceholder": "例如 Atlassian Rovo",
         "transport": "傳輸方式",
         "command": "指令",
         "args": "引數",
