@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     parse::{NetCounters, ProcStat},
-    types::NetworkSample,
+    types::{CoreBusy, NetworkSample},
 };
 
 /// A process's identity. PIDs are reused within minutes on a busy host, so
@@ -43,7 +43,8 @@ pub struct Counters {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CpuBusy {
     pub total_percent: Option<f32>,
-    pub per_core_percent: Option<Vec<f32>>,
+    /// One entry per online core, tagged with its kernel index.
+    pub per_core: Option<Vec<CoreBusy>>,
 }
 
 /// Elapsed milliseconds between two captures, or `None` if that is not a usable
@@ -64,26 +65,44 @@ pub fn elapsed_ms(previous: Option<DateTime<Utc>>, current: DateTime<Utc>) -> Op
 /// or when they moved backwards (a suspend/resume or a counter reset). The
 /// per-core vector is all-or-nothing: it is replaced wholesale by consumers, so
 /// a half-derived vector would silently misalign core indices.
+///
+/// Cores are paired by their **kernel index**, not by position: a CPU going
+/// offline while another comes online keeps the line count identical while
+/// shifting every position, and zipping those would attribute one core's delta
+/// to another.
 pub fn derive_cpu_busy(previous: Option<&ProcStat>, current: &ProcStat) -> CpuBusy {
     let Some(previous) = previous else {
         return CpuBusy::default();
     };
 
-    let per_core_percent = (!current.per_core.is_empty()
-        && previous.per_core.len() == current.per_core.len())
-    .then(|| {
-        previous
+    let same_cores = previous.per_core.len() == current.per_core.len()
+        && previous
             .per_core
             .iter()
             .zip(current.per_core.iter())
-            .map(|(before, after)| busy_percent(before.total, before.idle, after))
-            .collect::<Option<Vec<f32>>>()
-    })
-    .flatten();
+            .all(|(before, after)| before.index == after.index);
+
+    let per_core = (!current.per_core.is_empty() && same_cores)
+        .then(|| {
+            previous
+                .per_core
+                .iter()
+                .zip(current.per_core.iter())
+                .map(|(before, after)| {
+                    busy_percent(before.times.total, before.times.idle, &after.times).map(
+                        |busy_percent| CoreBusy {
+                            core: after.index,
+                            busy_percent,
+                        },
+                    )
+                })
+                .collect::<Option<Vec<CoreBusy>>>()
+        })
+        .flatten();
 
     CpuBusy {
         total_percent: busy_percent(previous.total.total, previous.total.idle, &current.total),
-        per_core_percent,
+        per_core,
     }
 }
 
@@ -155,6 +174,11 @@ fn rate_per_second(previous: Option<u64>, current: u64, elapsed_ms: Option<u64>)
 ///
 /// Capped at `core_count × 100`: a threaded process legitimately exceeds 100%,
 /// but not the machine.
+///
+/// A zero `elapsed_ms` or `ticks_per_second` is `None`, not a number. Both
+/// would divide by zero, and `f64::min` returns the *non*-NaN operand — so
+/// without this guard a process that used no CPU at all would be reported at
+/// the ceiling, 600% on a six-core box.
 pub fn derive_process_cpu(
     previous_ticks: Option<u64>,
     current_ticks: u64,
@@ -164,7 +188,7 @@ pub fn derive_process_cpu(
 ) -> Option<f32> {
     let delta = current_ticks.checked_sub(previous_ticks?)?;
     let elapsed_ms = elapsed_ms?;
-    if ticks_per_second == 0 {
+    if ticks_per_second == 0 || elapsed_ms == 0 {
         return None;
     }
     let seconds = elapsed_ms as f64 / 1000.0;
@@ -214,7 +238,7 @@ mod tests {
         let current = parse_proc_stat(STAT).unwrap();
         let busy = derive_cpu_busy(None, &current);
         assert_eq!(busy.total_percent, None);
-        assert_eq!(busy.per_core_percent, None);
+        assert_eq!(busy.per_core, None);
 
         let mut degraded = Vec::new();
         let networks = derive_networks(
@@ -247,10 +271,13 @@ mod tests {
 
         let total = busy.total_percent.expect("total busy");
         assert!((0.0..=100.0).contains(&total), "implausible {total}");
-        let per_core = busy.per_core_percent.expect("per core busy");
+        let per_core = busy.per_core.expect("per core busy");
         assert_eq!(per_core.len(), 6);
         for core in per_core {
-            assert!((0.0..=100.0).contains(&core), "implausible {core}");
+            assert!(
+                (0.0..=100.0).contains(&core.busy_percent),
+                "implausible {core:?}"
+            );
         }
     }
 
@@ -261,7 +288,62 @@ mod tests {
         let current = parse_proc_stat("cpu  75 0 0 125 0\ncpu0 75 0 0 125 0\n").unwrap();
         let busy = derive_cpu_busy(Some(&previous), &current);
         assert_eq!(busy.total_percent, Some(75.0));
-        assert_eq!(busy.per_core_percent, Some(vec![75.0]));
+        assert_eq!(
+            busy.per_core,
+            Some(vec![CoreBusy {
+                core: 0,
+                busy_percent: 75.0
+            }])
+        );
+    }
+
+    /// The kernel index travels with the reading, so a host whose cpu1 is
+    /// offline reports cpu2's utilisation *as* cpu2 rather than as whatever
+    /// happens to sit at index 1.
+    #[test]
+    fn per_core_readings_carry_the_kernel_core_index() {
+        let previous =
+            parse_proc_stat("cpu  0 0 0 200 0\ncpu0 0 0 0 100 0\ncpu2 0 0 0 100 0\n").unwrap();
+        let current =
+            parse_proc_stat("cpu  100 0 0 300 0\ncpu0 25 0 0 175 0\ncpu2 75 0 0 125 0\n").unwrap();
+
+        let per_core = derive_cpu_busy(Some(&previous), &current)
+            .per_core
+            .expect("per core busy");
+        assert_eq!(
+            per_core,
+            vec![
+                CoreBusy {
+                    core: 0,
+                    busy_percent: 25.0
+                },
+                CoreBusy {
+                    core: 2,
+                    busy_percent: 75.0
+                },
+            ]
+        );
+    }
+
+    /// One core going offline while another comes online keeps the *count*
+    /// identical and shifts every position. Pairing by position would charge
+    /// cpu1's delta to cpu3.
+    #[test]
+    fn per_core_is_dropped_when_the_core_set_changes_without_changing_size() {
+        let previous =
+            parse_proc_stat("cpu  0 0 0 200 0\ncpu0 0 0 0 100 0\ncpu1 0 0 0 100 0\n").unwrap();
+        let current =
+            parse_proc_stat("cpu  100 0 0 300 0\ncpu0 25 0 0 175 0\ncpu3 75 0 0 125 0\n").unwrap();
+
+        let busy = derive_cpu_busy(Some(&previous), &current);
+        // Δtotal = 400 − 200 = 200, Δidle = 300 − 200 = 100: half the elapsed
+        // jiffies were busy. The aggregate line is unaffected by the core set
+        // changing underneath it.
+        assert_eq!(busy.total_percent, Some(50.0));
+        // cpu1 went offline and cpu3 came online, so the vector is the same
+        // length but describes a different set of cores. Deriving cpu3 against
+        // cpu1's counters would invent a reading, so the whole vector drops.
+        assert_eq!(busy.per_core, None);
     }
 
     /// A suspend/resume or a hot-unplugged core makes the counters move
@@ -288,7 +370,7 @@ mod tests {
         let stat = parse_proc_stat(STAT).unwrap();
         let busy = derive_cpu_busy(Some(&stat), &stat);
         assert_eq!(busy.total_percent, None);
-        assert_eq!(busy.per_core_percent, None);
+        assert_eq!(busy.per_core, None);
     }
 
     /// The vector is replaced wholesale by consumers, so a changed core count
@@ -301,7 +383,7 @@ mod tests {
             parse_proc_stat("cpu  75 0 0 125 0\ncpu0 40 0 0 60 0\ncpu1 35 0 0 65 0\n").unwrap();
         let busy = derive_cpu_busy(Some(&previous), &current);
         assert_eq!(busy.total_percent, Some(75.0));
-        assert_eq!(busy.per_core_percent, None);
+        assert_eq!(busy.per_core, None);
     }
 
     #[test]

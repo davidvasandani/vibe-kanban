@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -67,6 +70,8 @@ pub enum ExecutionError {
     Journal(#[from] JournalError),
     #[error("execution {0} was not found")]
     NotFound(Uuid),
+    #[error("worker is draining for a release handoff")]
+    Draining,
     #[error("workspace contains a worktree this node cannot use: {detail}")]
     WorktreeUnusable { detail: String },
     #[error(transparent)]
@@ -79,6 +84,8 @@ pub struct ExecutionSupervisor {
     jobs: Arc<RwLock<HashMap<Uuid, Arc<WorkerJob>>>>,
     journal_capacity: usize,
     recovery_store: Option<RecoveryStore>,
+    admission_draining: Arc<AtomicBool>,
+    admitting: Arc<AtomicU32>,
 }
 
 pub struct WorkerJob {
@@ -95,6 +102,14 @@ pub struct WorkerJob {
     interactions: Arc<InteractionBroker>,
 }
 
+struct ExecutionAdmission(Arc<AtomicU32>);
+
+impl Drop for ExecutionAdmission {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 impl ExecutionSupervisor {
     pub fn new(path_authority: PathAuthority) -> Self {
         Self::with_journal_capacity(path_authority, DEFAULT_JOURNAL_CAPACITY)
@@ -106,6 +121,8 @@ impl ExecutionSupervisor {
             jobs: Arc::new(RwLock::new(HashMap::new())),
             journal_capacity,
             recovery_store: None,
+            admission_draining: Arc::new(AtomicBool::new(false)),
+            admitting: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -113,11 +130,26 @@ impl ExecutionSupervisor {
         path_authority: PathAuthority,
         recovery_store: RecoveryStore,
     ) -> Result<Self, ExecutionError> {
+        Self::with_recovery_and_drain(
+            path_authority,
+            recovery_store,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+    }
+
+    pub async fn with_recovery_and_drain(
+        path_authority: PathAuthority,
+        recovery_store: RecoveryStore,
+        admission_draining: Arc<AtomicBool>,
+    ) -> Result<Self, ExecutionError> {
         let supervisor = Self {
             path_authority,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             journal_capacity: DEFAULT_JOURNAL_CAPACITY,
             recovery_store: Some(recovery_store.clone()),
+            admission_draining,
+            admitting: Arc::new(AtomicU32::new(0)),
         };
         for mut summary in recovery_store.load().await? {
             let evidence = match summary.terminal.clone() {
@@ -173,6 +205,14 @@ impl ExecutionSupervisor {
             }
             return Ok(existing.accepted().await);
         }
+        if self.admission_draining.load(Ordering::Acquire) {
+            return Err(ExecutionError::Draining);
+        }
+        self.admitting.fetch_add(1, Ordering::AcqRel);
+        let admission = ExecutionAdmission(self.admitting.clone());
+        if self.admission_draining.load(Ordering::Acquire) {
+            return Err(ExecutionError::Draining);
+        }
 
         let workspace_path = self
             .path_authority
@@ -217,6 +257,7 @@ impl ExecutionSupervisor {
             interactions: Arc::new(InteractionBroker::default()),
         });
         jobs.insert(dispatch.execution_id, job.clone());
+        drop(admission);
         drop(jobs);
         job.persist().await;
 
@@ -264,14 +305,14 @@ impl ExecutionSupervisor {
     }
 
     pub async fn active_execution_count(&self) -> u32 {
-        self.jobs
-            .read()
-            .await
-            .values()
-            .filter(|job| job.state.try_read().is_ok_and(|state| !state.is_terminal()))
-            .count()
-            .try_into()
-            .unwrap_or(u32::MAX)
+        let jobs = self.jobs.read().await.values().cloned().collect::<Vec<_>>();
+        let mut active = 0_u32;
+        for job in jobs {
+            if job.is_active_for_drain().await {
+                active = active.saturating_add(1);
+            }
+        }
+        active.saturating_add(self.admitting.load(Ordering::Acquire))
     }
 
     pub async fn acknowledge(
@@ -337,6 +378,22 @@ impl ExecutionSupervisor {
 }
 
 impl WorkerJob {
+    async fn is_active_for_drain(&self) -> bool {
+        if !self.state.read().await.is_terminal() {
+            return true;
+        }
+
+        // Quarantine is a terminal protocol state, but reconciliation may put a
+        // still-running process there without cancelling it. Fail closed when
+        // process liveness cannot be observed so release activation never kills
+        // work merely because its coordinator record was quarantined.
+        let mut child = self.child.lock().await;
+        match child.as_mut() {
+            Some(child) => !matches!(child.try_wait(), Ok(Some(_))),
+            None => false,
+        }
+    }
+
     async fn accepted(&self) -> DispatchAccepted {
         DispatchAccepted {
             execution_id: self.execution_id,
@@ -838,6 +895,107 @@ mod tests {
             .flatten()
             .collect::<Vec<_>>();
         assert!(String::from_utf8_lossy(&output).starts_with("/fixture/bin"));
+    }
+
+    #[tokio::test]
+    async fn active_count_is_authoritative_drain_evidence() {
+        let (_temp, supervisor, workspace) = fixture();
+        assert_eq!(supervisor.active_execution_count().await, 0);
+
+        let request = dispatch(&workspace, "drain", "sleep 0.2");
+        supervisor.dispatch(request).await.unwrap();
+        assert_eq!(supervisor.active_execution_count().await, 1);
+
+        for _ in 0..100 {
+            if supervisor.active_execution_count().await == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(supervisor.active_execution_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn quarantined_live_process_remains_active_drain_evidence() {
+        let (_temp, supervisor, workspace) = fixture();
+        let request = dispatch(&workspace, "quarantined-live", "sleep 0.2");
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+
+        for _ in 0..100 {
+            if supervisor.job(execution_id).await.unwrap().state().await == JobState::Running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        supervisor.quarantine(execution_id).await.unwrap();
+        assert_eq!(supervisor.active_execution_count().await, 1);
+
+        for _ in 0..100 {
+            if supervisor.active_execution_count().await == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(supervisor.active_execution_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn drain_refuses_new_dispatch_but_keeps_idempotent_retries() {
+        let (temp, _fixture_supervisor, workspace) = fixture();
+        let draining = Arc::new(AtomicBool::new(false));
+        let supervisor = ExecutionSupervisor::with_recovery_and_drain(
+            PathAuthority::new(temp.path().join("shared")).unwrap(),
+            RecoveryStore::new(temp.path().join("state")).await.unwrap(),
+            draining.clone(),
+        )
+        .await
+        .unwrap();
+        let accepted = dispatch(&workspace, "accepted-before-drain", "sleep 0.2");
+        supervisor.dispatch(accepted.clone()).await.unwrap();
+
+        draining.store(true, Ordering::Release);
+        assert!(supervisor.dispatch(accepted).await.is_ok());
+        assert!(matches!(
+            supervisor
+                .dispatch(dispatch(&workspace, "new-during-drain", "true"))
+                .await,
+            Err(ExecutionError::Draining)
+        ));
+    }
+
+    #[tokio::test]
+    async fn coordinator_polling_gap_does_not_interrupt_owned_execution() {
+        let (_temp, supervisor, workspace) = fixture();
+        let request = dispatch(
+            &workspace,
+            "coordinator-restart",
+            "printf before; sleep 0.1; printf after",
+        );
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+
+        // Simulate the coordinator being absent: no events or acknowledgements
+        // are requested while the worker-owned process continues to run.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        assert_eq!(summary.state, JobState::Completed);
+        let output = supervisor
+            .events(execution_id, 0)
+            .await
+            .unwrap()
+            .events
+            .into_iter()
+            .filter_map(|event| match event.payload {
+                ExecutionEventPayload::Stdout { data_base64 } => {
+                    BASE64_STANDARD.decode(data_base64).ok()
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(String::from_utf8(output).unwrap(), "beforeafter");
     }
 
     #[tokio::test]

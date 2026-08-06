@@ -7,7 +7,13 @@ import type {
 import { Meter } from '@vibe/ui/components/Meter';
 
 import { cn } from '@/shared/lib/utils';
-import { formatPercent, formatTimestamp, ratioPercent } from './format';
+import {
+  formatLoad,
+  formatPercent,
+  formatTimestamp,
+  ratioPercent,
+} from './format';
+import { MetricsRow } from './MetricsSection';
 
 export interface NodeStripProps {
   node: MetricsNode;
@@ -223,6 +229,19 @@ export function NodeStrip({ node, selected, onSelect }: NodeStripProps) {
           label={t('metrics.memory.title', { defaultValue: 'Memory' })}
           value={memoryPercent}
           valueText={formatPercent(memoryPercent)}
+        />
+        {/*
+         * A row rather than a Meter: load average is unbounded, so there is no
+         * honest denominator to fill a 0..100 bar with. Saturation is load
+         * relative to core count, which the CPU panel spells out; here the
+         * three windows are shown raw so a rising or falling trend is visible
+         * without expanding the node.
+         */}
+        <MetricsRow
+          label={t('metrics.cpu.loadShort', { defaultValue: 'Load' })}
+          value={`${formatLoad(readings?.cpu.load_1m)} / ${formatLoad(
+            readings?.cpu.load_5m
+          )} / ${formatLoad(readings?.cpu.load_15m)}`}
         />
       </span>
     </button>

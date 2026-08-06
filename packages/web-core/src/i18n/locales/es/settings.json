@@ -421,6 +421,8 @@
         "description": "Configure this MCP server and assign it to agents.",
         "name": "Nombre",
         "namePlaceholder": "p. ej. mi_servidor",
+        "displayName": "Nombre para mostrar",
+        "displayNamePlaceholder": "p. ej. Atlassian Rovo",
         "transport": "Transporte",
         "command": "Comando",
         "args": "Argumentos",

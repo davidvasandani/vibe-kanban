@@ -58,15 +58,33 @@ pub struct CpuSample {
     pub core_count: Option<u32>,
     /// `1 − Δidle/Δtotal`. `None` until a predecessor exists.
     pub total_busy_percent: Option<f32>,
-    /// One entry per `cpuN`, ordered by core index — the one place a position
-    /// is meaningful, because core 3 is core 3. Replaced wholesale, never
-    /// patched per element, so a core count change cannot misalign it.
-    pub per_core_busy_percent: Option<Vec<f32>>,
+    /// One entry per **online** core, each tagged with the kernel's own `cpuN`
+    /// index.
+    ///
+    /// Tagged rather than positional because `/proc/stat` omits offline CPUs:
+    /// with cpu1 offline the second entry is cpu2, and a reader labelling by
+    /// array position would show cpu2's utilisation as "core 1". Replaced
+    /// wholesale, never patched per element, so a core count change cannot
+    /// misalign it.
+    pub per_core_busy: Option<Vec<CoreBusy>>,
     pub load_1m: Option<f32>,
     pub load_5m: Option<f32>,
     pub load_15m: Option<f32>,
     pub frequency_mhz: Option<u32>,
     pub temperature_celsius: Option<f32>,
+}
+
+/// One core's derived busy percentage, tagged with the index the kernel gave
+/// it.
+///
+/// A plain struct rather than a bare `f32` in a positional array: the label a
+/// reader puts on the value is part of the reading, and on a host with an
+/// offline CPU the position and the index disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct CoreBusy {
+    /// The `N` of `cpuN`.
+    pub core: u32,
+    pub busy_percent: f32,
 }
 
 /// Every field is `Option`: an unreadable `/proc/meminfo` yields `None`
@@ -300,7 +318,20 @@ mod tests {
             model: Some("Intel(R) Core(TM) i5-8500T CPU @ 2.10GHz".to_string()),
             core_count: Some(6),
             total_busy_percent: Some(12.5),
-            per_core_busy_percent: Some(vec![1.5, 2.5, 3.0]),
+            per_core_busy: Some(vec![
+                CoreBusy {
+                    core: 0,
+                    busy_percent: 1.5,
+                },
+                CoreBusy {
+                    core: 1,
+                    busy_percent: 2.5,
+                },
+                CoreBusy {
+                    core: 2,
+                    busy_percent: 3.0,
+                },
+            ]),
             load_1m: Some(0.31),
             load_5m: Some(1.60),
             load_15m: Some(1.02),

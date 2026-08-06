@@ -1964,6 +1964,12 @@ impl LocalContainerService {
                         store.push(LogMsg::Stderr(
                             "Worker output replay gap; execution state is indeterminate".into(),
                         ));
+                        // Remove before finishing so a client that subscribes
+                        // after this point re-derives from disk instead of
+                        // attaching to a store whose live broadcast will never
+                        // carry another message (see the terminal arm below
+                        // for the full explanation).
+                        container.msg_stores.write().await.remove(&execution_id);
                         store.push_finished();
                         break;
                     }
@@ -2043,6 +2049,7 @@ impl LocalContainerService {
                                 None,
                             )
                             .await;
+                            container.msg_stores.write().await.remove(&execution_id);
                             store.push_finished();
                             return;
                         }
@@ -2106,6 +2113,19 @@ impl LocalContainerService {
                         .await;
                     }
                     container.finalize_remote_execution(execution_id).await;
+                    // Remove from the map before pushing Finished. Historic
+                    // replay (`stream_normalized_logs`) reads a resident store
+                    // via `history_plus_stream()`, which chains the buffered
+                    // history onto a *live* broadcast subscription. A late
+                    // subscriber's history replay includes this store's past
+                    // `Finished` entry, but the filter used by that replay
+                    // path drops non-JsonPatch entries — so the sentinel is
+                    // discarded and the replay falls through to the live half,
+                    // which never yields again for a store nothing will ever
+                    // push to. Removing the store here ensures any later
+                    // subscriber instead falls back to the on-disk/materialized
+                    // log path, which terminates correctly.
+                    container.msg_stores.write().await.remove(&execution_id);
                     store.push_finished();
                     break;
                 }
@@ -3431,7 +3451,7 @@ impl ContainerService for LocalContainerService {
                     mark_remote_execution_indeterminate(&self.db, execution_process.id).await?;
                 }
             }
-            if let Some(store) = self.msg_stores.read().await.get(&execution_process.id) {
+            if let Some(store) = self.msg_stores.write().await.remove(&execution_process.id) {
                 store.push_finished();
             }
             return Ok(());
