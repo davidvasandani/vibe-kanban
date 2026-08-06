@@ -13,6 +13,7 @@ import type {
 
 export type SharedMcpDraftServer = {
   name: string;
+  displayName: string | null;
   definition: McpServerDefinition;
   assignments: BaseCodingAgent[];
 };
@@ -65,6 +66,51 @@ export function preconfiguredMcpServers(
     });
 }
 
+/**
+ * Picks the identifier for a newly instantiated catalog template, given the
+ * names already in the draft.
+ *
+ * Catalog templates describe a *kind* of server, not one instance of it — a user
+ * may want two Slack workspaces, or a Gmail server per mailbox. Since the
+ * template's own key can only be used once, later instances get `_2`, `_3`, …
+ *
+ * The `_` separator is load-bearing. These names are protocol identifiers
+ * written into agents' native config files, not display labels, and the backend
+ * validates them against `^[a-zA-Z0-9_-]+$` (`is_valid_server_identifier` in
+ * `crates/executors/src/shared_mcp_config.rs`). A space or `(2)` would be
+ * rejected on save, or silently rewritten by `suggested_server_identifier`.
+ *
+ * Returning a name already in `existing` would be worse than an error:
+ * `setServer` de-duplicates by name, so a collision replaces the earlier server
+ * rather than reporting a conflict.
+ */
+/**
+ * Every logical server name the draft has spoken for.
+ *
+ * A name lives in `servers` **or** `conflicts`, never both: the backend routes a
+ * name whose definitions diverge across agents into `conflicts` instead of
+ * `servers`. So `draft.servers` alone is not the set of taken names, and reusing
+ * a conflicting name would silently bind a new definition to a conflict the user
+ * has not resolved yet.
+ */
+export function takenServerNames(state: SharedMcpDraftState): string[] {
+  return [
+    ...state.servers.map((server) => server.name),
+    ...state.conflicts.map((conflict) => conflict.name),
+  ];
+}
+
+export function nextAvailableServerName(
+  key: string,
+  existing: readonly string[]
+): string {
+  const taken = new Set(existing);
+  if (!taken.has(key)) return key;
+  let suffix = 2;
+  while (taken.has(`${key}_${suffix}`)) suffix += 1;
+  return `${key}_${suffix}`;
+}
+
 export function sharedMcpSnapshot(state: SharedMcpDraftState): string {
   return JSON.stringify({
     servers: [...state.servers]
@@ -83,6 +129,7 @@ export function draftFromSharedRead(
   return {
     servers: response.servers.map((server) => ({
       name: server.name,
+      displayName: server.display_name,
       definition: server.definition,
       assignments: server.assignments.map((assignment) => assignment.executor),
     })),
@@ -97,10 +144,22 @@ export function inputsFromDraft(
     .filter((server) => server.definition.transport !== 'unknown')
     .map((server) => ({
       name: server.name,
+      display_name: server.displayName,
       definition: server.definition,
       assignments: server.assignments,
       native_overrides: {},
     }));
+}
+
+export function draftServersFromInputs(
+  servers: SharedMcpServerInput[]
+): SharedMcpDraftServer[] {
+  return servers.map((server) => ({
+    name: server.name,
+    displayName: server.display_name,
+    definition: server.definition,
+    assignments: server.assignments,
+  }));
 }
 
 export function removedServerNames(
@@ -137,6 +196,7 @@ export function resolveConflictVariant(
     );
   const server: SharedMcpDraftServer = {
     name: conflict.name,
+    displayName: conflict.display_name,
     definition: variant.definition,
     assignments: Array.from(
       new Set(

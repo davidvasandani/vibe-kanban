@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -10,13 +13,15 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
 use cluster_protocol::{
     DispatchAccepted, EventBatch, ExecutionDispatch, ExecutionEventPayload, JobState, JobSummary,
-    TerminalEvidence, TerminalState,
+    McpConfigSnapshot, TerminalEvidence, TerminalState,
 };
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use executors::{
-    actions::{Executable, ExecutorAction},
+    actions::{Executable, ExecutorAction, ExecutorActionType},
     env::{ExecutionEnv, RepoContext},
-    profile::ExecutorProfile,
+    executors::{BaseCodingAgent, StandardCodingAgentExecutor},
+    mcp_config::write_coding_agent_mcp_servers_to_path,
+    profile::{ExecutorConfig, ExecutorProfile},
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -51,6 +56,18 @@ enum WorkerAction {
     Executor(ExecutorAction),
 }
 
+fn executor_config_for_action(action: &WorkerAction) -> Option<&ExecutorConfig> {
+    let WorkerAction::Executor(action) = action else {
+        return None;
+    };
+    match action.typ() {
+        ExecutorActionType::CodingAgentInitialRequest(request) => Some(&request.executor_config),
+        ExecutorActionType::CodingAgentFollowUpRequest(request) => Some(&request.executor_config),
+        ExecutorActionType::ReviewRequest(request) => Some(&request.executor_config),
+        ExecutorActionType::ScriptRequest(_) => None,
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ExecutionError {
     #[error("execution {execution_id} was already dispatched with a different request digest")]
@@ -59,6 +76,10 @@ pub enum ExecutionError {
     InvalidAction(#[from] serde_json::Error),
     #[error("execution action program must not be empty")]
     EmptyProgram,
+    #[error("MCP configuration snapshot is invalid for executor {executor}")]
+    InvalidMcpSnapshot { executor: String },
+    #[error("failed to materialize MCP configuration for executor {executor}")]
+    McpMaterialization { executor: String },
     #[error("working directory resolves outside its authorized workspace")]
     WorkingDirectoryOutsideWorkspace,
     #[error(transparent)]
@@ -67,6 +88,8 @@ pub enum ExecutionError {
     Journal(#[from] JournalError),
     #[error("execution {0} was not found")]
     NotFound(Uuid),
+    #[error("worker is draining for a release handoff")]
+    Draining,
     #[error("workspace contains a worktree this node cannot use: {detail}")]
     WorktreeUnusable { detail: String },
     #[error(transparent)]
@@ -79,6 +102,8 @@ pub struct ExecutionSupervisor {
     jobs: Arc<RwLock<HashMap<Uuid, Arc<WorkerJob>>>>,
     journal_capacity: usize,
     recovery_store: Option<RecoveryStore>,
+    admission_draining: Arc<AtomicBool>,
+    admitting: Arc<AtomicU32>,
 }
 
 pub struct WorkerJob {
@@ -95,6 +120,57 @@ pub struct WorkerJob {
     interactions: Arc<InteractionBroker>,
 }
 
+struct PreparedMcpConfig {
+    scoped_home: PathBuf,
+}
+
+impl Drop for PreparedMcpConfig {
+    fn drop(&mut self) {
+        let execution_root = self.scoped_home.parent().unwrap_or(&self.scoped_home);
+        let _ = std::fs::remove_dir_all(execution_root);
+    }
+}
+
+fn prepare_scoped_codex_home(source_home: &Path, scoped_home: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let source_home = match source_home.canonicalize() {
+        Ok(source_home) => Some(source_home),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(execution_root) = scoped_home.parent() {
+        match std::fs::remove_dir_all(execution_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    std::fs::create_dir_all(scoped_home)?;
+    std::fs::set_permissions(scoped_home, std::fs::Permissions::from_mode(0o700))?;
+    let Some(source_home) = source_home else {
+        return Ok(());
+    };
+    let entries = std::fs::read_dir(source_home)?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "config.toml" || name == "config.toml.bak" {
+            continue;
+        }
+        symlink(entry.path(), scoped_home.join(name))?;
+    }
+    Ok(())
+}
+
+struct ExecutionAdmission(Arc<AtomicU32>);
+
+impl Drop for ExecutionAdmission {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 impl ExecutionSupervisor {
     pub fn new(path_authority: PathAuthority) -> Self {
         Self::with_journal_capacity(path_authority, DEFAULT_JOURNAL_CAPACITY)
@@ -106,6 +182,8 @@ impl ExecutionSupervisor {
             jobs: Arc::new(RwLock::new(HashMap::new())),
             journal_capacity,
             recovery_store: None,
+            admission_draining: Arc::new(AtomicBool::new(false)),
+            admitting: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -113,11 +191,26 @@ impl ExecutionSupervisor {
         path_authority: PathAuthority,
         recovery_store: RecoveryStore,
     ) -> Result<Self, ExecutionError> {
+        Self::with_recovery_and_drain(
+            path_authority,
+            recovery_store,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+    }
+
+    pub async fn with_recovery_and_drain(
+        path_authority: PathAuthority,
+        recovery_store: RecoveryStore,
+        admission_draining: Arc<AtomicBool>,
+    ) -> Result<Self, ExecutionError> {
         let supervisor = Self {
             path_authority,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             journal_capacity: DEFAULT_JOURNAL_CAPACITY,
             recovery_store: Some(recovery_store.clone()),
+            admission_draining,
+            admitting: Arc::new(AtomicU32::new(0)),
         };
         for mut summary in recovery_store.load().await? {
             let evidence = match summary.terminal.clone() {
@@ -173,6 +266,14 @@ impl ExecutionSupervisor {
             }
             return Ok(existing.accepted().await);
         }
+        if self.admission_draining.load(Ordering::Acquire) {
+            return Err(ExecutionError::Draining);
+        }
+        self.admitting.fetch_add(1, Ordering::AcqRel);
+        let admission = ExecutionAdmission(self.admitting.clone());
+        if self.admission_draining.load(Ordering::Acquire) {
+            return Err(ExecutionError::Draining);
+        }
 
         let workspace_path = self
             .path_authority
@@ -191,6 +292,18 @@ impl ExecutionSupervisor {
             .clone()
             .map(serde_json::from_value)
             .transpose()?;
+        let prepared_mcp = match &dispatch.mcp_config_snapshot {
+            Some(snapshot) => Some(
+                self.prepare_mcp_snapshot(
+                    dispatch.execution_id,
+                    &action,
+                    executor_profile.as_ref(),
+                    snapshot,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         if matches!(&action, WorkerAction::Command(action) if action.program.trim().is_empty()) {
             return Err(ExecutionError::EmptyProgram);
         }
@@ -217,6 +330,7 @@ impl ExecutionSupervisor {
             interactions: Arc::new(InteractionBroker::default()),
         });
         jobs.insert(dispatch.execution_id, job.clone());
+        drop(admission);
         drop(jobs);
         job.persist().await;
 
@@ -226,6 +340,7 @@ impl ExecutionSupervisor {
             working_directory,
             dispatch.environment,
             executor_profile,
+            prepared_mcp,
             dispatch.timeout_seconds,
         ));
         Ok(DispatchAccepted {
@@ -235,6 +350,76 @@ impl ExecutionSupervisor {
             state: JobState::Accepted,
             last_sequence: 1,
         })
+    }
+
+    async fn prepare_mcp_snapshot(
+        &self,
+        execution_id: Uuid,
+        action: &WorkerAction,
+        profile: Option<&ExecutorProfile>,
+        snapshot: &McpConfigSnapshot,
+    ) -> Result<PreparedMcpConfig, ExecutionError> {
+        snapshot
+            .validate_size()
+            .map_err(|_| ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            })?;
+        let config = executor_config_for_action(action).ok_or_else(|| {
+            ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            }
+        })?;
+        if snapshot.executor != config.executor.to_string() {
+            return Err(ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            });
+        }
+        if config.executor != BaseCodingAgent::Codex {
+            return Err(ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            });
+        }
+        let variant = config.variant.as_deref().unwrap_or("DEFAULT");
+        let agent = profile
+            .and_then(|profile| profile.get_variant(variant))
+            .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            })?;
+        let source_config =
+            agent
+                .default_mcp_config_path()
+                .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                    executor: snapshot.executor.clone(),
+                })?;
+        let source_home =
+            source_config
+                .parent()
+                .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                    executor: snapshot.executor.clone(),
+                })?;
+        let scoped_home = std::env::temp_dir()
+            .join("vibe-kanban")
+            .join("mcp-config")
+            .join(execution_id.to_string())
+            .join("codex");
+        prepare_scoped_codex_home(source_home, &scoped_home).map_err(|_| {
+            ExecutionError::McpMaterialization {
+                executor: snapshot.executor.clone(),
+            }
+        })?;
+        let prepared = PreparedMcpConfig { scoped_home };
+        let servers = snapshot.servers.clone().into_iter().collect();
+        write_coding_agent_mcp_servers_to_path(
+            agent,
+            &source_config,
+            &prepared.scoped_home.join("config.toml"),
+            &servers,
+        )
+        .await
+        .map_err(|_| ExecutionError::McpMaterialization {
+            executor: snapshot.executor.clone(),
+        })?;
+        Ok(prepared)
     }
 
     pub async fn events(
@@ -264,14 +449,14 @@ impl ExecutionSupervisor {
     }
 
     pub async fn active_execution_count(&self) -> u32 {
-        self.jobs
-            .read()
-            .await
-            .values()
-            .filter(|job| job.state.try_read().is_ok_and(|state| !state.is_terminal()))
-            .count()
-            .try_into()
-            .unwrap_or(u32::MAX)
+        let jobs = self.jobs.read().await.values().cloned().collect::<Vec<_>>();
+        let mut active = 0_u32;
+        for job in jobs {
+            if job.is_active_for_drain().await {
+                active = active.saturating_add(1);
+            }
+        }
+        active.saturating_add(self.admitting.load(Ordering::Acquire))
     }
 
     pub async fn acknowledge(
@@ -337,6 +522,22 @@ impl ExecutionSupervisor {
 }
 
 impl WorkerJob {
+    async fn is_active_for_drain(&self) -> bool {
+        if !self.state.read().await.is_terminal() {
+            return true;
+        }
+
+        // Quarantine is a terminal protocol state, but reconciliation may put a
+        // still-running process there without cancelling it. Fail closed when
+        // process liveness cannot be observed so release activation never kills
+        // work merely because its coordinator record was quarantined.
+        let mut child = self.child.lock().await;
+        match child.as_mut() {
+            Some(child) => !matches!(child.try_wait(), Ok(Some(_))),
+            None => false,
+        }
+    }
+
     async fn accepted(&self) -> DispatchAccepted {
         DispatchAccepted {
             execution_id: self.execution_id,
@@ -406,11 +607,25 @@ async fn run_job(
     job: Arc<WorkerJob>,
     action: WorkerAction,
     working_directory: PathBuf,
-    environment: std::collections::BTreeMap<String, String>,
+    mut environment: std::collections::BTreeMap<String, String>,
     executor_profile: Option<ExecutorProfile>,
+    prepared_mcp: Option<PreparedMcpConfig>,
     timeout_seconds: Option<u64>,
 ) {
     set_state(&job, JobState::Starting, ExecutionEventPayload::Starting).await;
+    let inherited_path = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+    if let Some(path) = utils::shell::append_cli_tools_to_path(&inherited_path) {
+        environment.insert("PATH".into(), path.to_string_lossy().into_owned());
+    }
+    if let Some(prepared) = &prepared_mcp {
+        environment.insert(
+            "CODEX_HOME".into(),
+            prepared.scoped_home.to_string_lossy().into_owned(),
+        );
+    }
     let spawned = match action {
         WorkerAction::Command(action) => {
             let mut command = Command::new(action.program);
@@ -739,6 +954,7 @@ mod tests {
             working_directory: ".".into(),
             executor_profile: "fixture".into(),
             executor_profile_config: None,
+            mcp_config_snapshot: None,
             action: json!({"program": "/bin/sh", "args": ["-c", script]}),
             environment: BTreeMap::new(),
             run_reason: "test".into(),
@@ -804,6 +1020,179 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event.payload, ExecutionEventPayload::Stderr { .. }))
         );
+    }
+
+    #[test]
+    fn scoped_codex_homes_share_runtime_assets_but_not_config_files() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let first = temp.path().join("scoped").join("first").join("codex");
+        let second = temp.path().join("scoped").join("second").join("codex");
+        fs::create_dir_all(source.join("skills")).unwrap();
+        fs::write(source.join("auth.json"), "credential").unwrap();
+        fs::write(source.join("config.toml"), "global = true").unwrap();
+
+        prepare_scoped_codex_home(&source, &first).unwrap();
+        prepare_scoped_codex_home(&source, &second).unwrap();
+        fs::write(first.join("config.toml"), "snapshot = 'one'").unwrap();
+        fs::write(second.join("config.toml"), "snapshot = 'two'").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(first.join("auth.json")).unwrap(),
+            "credential"
+        );
+        assert!(first.join("skills").is_dir());
+        assert_eq!(
+            fs::read_to_string(first.join("config.toml")).unwrap(),
+            "snapshot = 'one'"
+        );
+        assert_eq!(
+            fs::read_to_string(second.join("config.toml")).unwrap(),
+            "snapshot = 'two'"
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("config.toml")).unwrap(),
+            "global = true"
+        );
+    }
+
+    #[test]
+    fn scoped_codex_home_can_start_without_a_global_home() {
+        let temp = TempDir::new().unwrap();
+        let missing_source = temp.path().join("missing");
+        let scoped = temp.path().join("scoped").join("codex");
+
+        prepare_scoped_codex_home(&missing_source, &scoped).unwrap();
+
+        assert!(scoped.is_dir());
+    }
+
+    #[tokio::test]
+    async fn raw_command_preserves_dispatched_path() {
+        let (_temp, supervisor, workspace) = fixture();
+        let mut request = dispatch(&workspace, "path", "printf %s \"$PATH\"");
+        request
+            .environment
+            .insert("PATH".into(), "/fixture/bin".into());
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        assert_eq!(summary.state, JobState::Completed);
+
+        let batch = supervisor.events(execution_id, 0).await.unwrap();
+        let output = batch
+            .events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                ExecutionEventPayload::Stdout { data_base64 } => {
+                    BASE64_STANDARD.decode(data_base64).ok()
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(String::from_utf8_lossy(&output).starts_with("/fixture/bin"));
+    }
+
+    #[tokio::test]
+    async fn active_count_is_authoritative_drain_evidence() {
+        let (_temp, supervisor, workspace) = fixture();
+        assert_eq!(supervisor.active_execution_count().await, 0);
+
+        let request = dispatch(&workspace, "drain", "sleep 0.2");
+        supervisor.dispatch(request).await.unwrap();
+        assert_eq!(supervisor.active_execution_count().await, 1);
+
+        for _ in 0..100 {
+            if supervisor.active_execution_count().await == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(supervisor.active_execution_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn quarantined_live_process_remains_active_drain_evidence() {
+        let (_temp, supervisor, workspace) = fixture();
+        let request = dispatch(&workspace, "quarantined-live", "sleep 0.2");
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+
+        for _ in 0..100 {
+            if supervisor.job(execution_id).await.unwrap().state().await == JobState::Running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        supervisor.quarantine(execution_id).await.unwrap();
+        assert_eq!(supervisor.active_execution_count().await, 1);
+
+        for _ in 0..100 {
+            if supervisor.active_execution_count().await == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(supervisor.active_execution_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn drain_refuses_new_dispatch_but_keeps_idempotent_retries() {
+        let (temp, _fixture_supervisor, workspace) = fixture();
+        let draining = Arc::new(AtomicBool::new(false));
+        let supervisor = ExecutionSupervisor::with_recovery_and_drain(
+            PathAuthority::new(temp.path().join("shared")).unwrap(),
+            RecoveryStore::new(temp.path().join("state")).await.unwrap(),
+            draining.clone(),
+        )
+        .await
+        .unwrap();
+        let accepted = dispatch(&workspace, "accepted-before-drain", "sleep 0.2");
+        supervisor.dispatch(accepted.clone()).await.unwrap();
+
+        draining.store(true, Ordering::Release);
+        assert!(supervisor.dispatch(accepted).await.is_ok());
+        assert!(matches!(
+            supervisor
+                .dispatch(dispatch(&workspace, "new-during-drain", "true"))
+                .await,
+            Err(ExecutionError::Draining)
+        ));
+    }
+
+    #[tokio::test]
+    async fn coordinator_polling_gap_does_not_interrupt_owned_execution() {
+        let (_temp, supervisor, workspace) = fixture();
+        let request = dispatch(
+            &workspace,
+            "coordinator-restart",
+            "printf before; sleep 0.1; printf after",
+        );
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+
+        // Simulate the coordinator being absent: no events or acknowledgements
+        // are requested while the worker-owned process continues to run.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        assert_eq!(summary.state, JobState::Completed);
+        let output = supervisor
+            .events(execution_id, 0)
+            .await
+            .unwrap()
+            .events
+            .into_iter()
+            .filter_map(|event| match event.payload {
+                ExecutionEventPayload::Stdout { data_base64 } => {
+                    BASE64_STANDARD.decode(data_base64).ok()
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(String::from_utf8(output).unwrap(), "beforeafter");
     }
 
     #[tokio::test]

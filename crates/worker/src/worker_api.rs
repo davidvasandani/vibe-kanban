@@ -531,6 +531,10 @@ impl IntoResponse for WorkerApiError {
             Self::Execution(ExecutionError::DigestConflict { .. }) => {
                 (StatusCode::CONFLICT, "execution digest conflict".into())
             }
+            Self::Execution(ExecutionError::Draining) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "worker is draining for a release handoff".into(),
+            ),
             Self::Execution(error) => (StatusCode::BAD_REQUEST, error.to_string()),
         };
         (status, Json(serde_json::json!({"error": message}))).into_response()

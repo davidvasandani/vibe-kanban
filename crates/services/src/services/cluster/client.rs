@@ -600,6 +600,7 @@ mod tests {
             working_directory: "/shared/workspace".into(),
             executor_profile: "codex".into(),
             executor_profile_config: None,
+            mcp_config_snapshot: None,
             action: serde_json::json!({}),
             environment: BTreeMap::new(),
             run_reason: "test".into(),

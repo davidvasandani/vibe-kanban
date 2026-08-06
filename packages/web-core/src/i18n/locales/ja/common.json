@@ -108,6 +108,22 @@
     "label": "ラベル"
   },
   "workspaces": {
+    "serverAffinity": {
+      "local": "ローカル",
+      "automatic": "自動配置",
+      "worker": "ワーカー",
+      "unassigned": "未割り当て",
+      "current": "現在のサーバー",
+      "runOn": "実行先",
+      "unavailable": "利用不可",
+      "localDescription": "この Vibe Kanban インスタンスはワークスペースをローカルで実行します。",
+      "confirmTitle": "実行中のタスクを移行しますか？",
+      "confirmMessage": "現在のタスクを停止し、サーバーアフィニティを変更して、管理された継続プロンプトで再開します。",
+      "confirmAction": "停止、移行、再開",
+      "updated": "サーバーアフィニティを更新しました",
+      "updateFailed": "サーバーアフィニティを更新できませんでした",
+      "restartFailed": "アフィニティは変更されましたが、タスクを再開できませんでした"
+    },
     "title": "ワークスペース",
     "searchPlaceholder": "検索...",
     "active": "アクティブ",
@@ -189,6 +205,7 @@
     "nextGitHubComment": "次のコメント付きファイル"
   },
   "sections": {
+    "serverAffinity": "サーバーアフィニティ",
     "changes": "変更",
     "repositories": "リポジトリ",
     "addRepositories": "リポジトリを追加",
@@ -517,7 +534,8 @@
     },
     "worker": {
       "label": "実行先",
-      "automatic": "自動配置"
+      "automatic": "自動配置",
+      "coordinator": "コーディネーター"
     },
     "repoPicker": {
       "actions": {

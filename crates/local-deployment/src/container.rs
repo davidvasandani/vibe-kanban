@@ -12,8 +12,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
 use cluster_protocol::{
     CancellationPhase, CancellationRequest, EventAcknowledgement, ExecutionDispatch,
-    ExecutionEventPayload, InteractionRequest, InteractionResponse, PROTOCOL_VERSION,
-    PersistencePolicy, RequestAuthority, TerminalState,
+    ExecutionEventPayload, InteractionRequest, InteractionResponse, McpConfigSnapshot,
+    PROTOCOL_VERSION, PersistencePolicy, RequestAuthority, TerminalState,
 };
 use command_group::AsyncGroupChild;
 use db::{
@@ -49,6 +49,7 @@ use executors::{
         WarmReuseHandle, WarmReuseSignal,
     },
     logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
+    mcp_config::read_coding_agent_mcp_servers,
     mcp_refresh::{
         McpRefreshErrorCategory, McpRefreshHandle, McpRefreshResult, McpRefreshSignal,
         McpRefreshStatus,
@@ -1964,6 +1965,12 @@ impl LocalContainerService {
                         store.push(LogMsg::Stderr(
                             "Worker output replay gap; execution state is indeterminate".into(),
                         ));
+                        // Remove before finishing so a client that subscribes
+                        // after this point re-derives from disk instead of
+                        // attaching to a store whose live broadcast will never
+                        // carry another message (see the terminal arm below
+                        // for the full explanation).
+                        container.msg_stores.write().await.remove(&execution_id);
                         store.push_finished();
                         break;
                     }
@@ -2043,6 +2050,7 @@ impl LocalContainerService {
                                 None,
                             )
                             .await;
+                            container.msg_stores.write().await.remove(&execution_id);
                             store.push_finished();
                             return;
                         }
@@ -2106,6 +2114,19 @@ impl LocalContainerService {
                         .await;
                     }
                     container.finalize_remote_execution(execution_id).await;
+                    // Remove from the map before pushing Finished. Historic
+                    // replay (`stream_normalized_logs`) reads a resident store
+                    // via `history_plus_stream()`, which chains the buffered
+                    // history onto a *live* broadcast subscription. A late
+                    // subscriber's history replay includes this store's past
+                    // `Finished` entry, but the filter used by that replay
+                    // path drops non-JsonPatch entries — so the sentinel is
+                    // discarded and the replay falls through to the live half,
+                    // which never yields again for a store nothing will ever
+                    // push to. Removing the store here ensures any later
+                    // subscriber instead falls back to the on-disk/materialized
+                    // log path, which terminates correctly.
+                    container.msg_stores.write().await.remove(&execution_id);
                     store.push_finished();
                     break;
                 }
@@ -2950,6 +2971,26 @@ impl ContainerService for LocalContainerService {
             .map(serde_json::to_value)
             .transpose()
             .map_err(anyhow::Error::from)?;
+        let mcp_config_snapshot = if let Some(config) =
+            executor_config.filter(|config| config.executor == BaseCodingAgent::Codex)
+        {
+            let profile_id = config.profile_id();
+            let agent = ExecutorConfigs::get_cached()
+                .get_coding_agent(&profile_id)
+                .ok_or_else(|| anyhow!("executor profile {profile_id} is unavailable"))?;
+            let snapshot = McpConfigSnapshot {
+                executor: config.executor.to_string(),
+                servers: read_coding_agent_mcp_servers(&agent)
+                    .await
+                    .map_err(anyhow::Error::from)?
+                    .into_iter()
+                    .collect(),
+            };
+            snapshot.validate_size().map_err(anyhow::Error::from)?;
+            Some(snapshot)
+        } else {
+            None
+        };
         let action = serde_json::to_value(executor_action).map_err(anyhow::Error::from)?;
         let run_reason = serde_json::to_value(&execution_process.run_reason)
             .map_err(anyhow::Error::from)?
@@ -2973,6 +3014,7 @@ impl ContainerService for LocalContainerService {
             // between two dispatches of the same execution must not be deduped
             // into the first one's definition.
             "executor_profile_config": executor_profile_config,
+            "mcp_config_snapshot": mcp_config_snapshot,
             "action": action,
             "environment": environment,
             "run_reason": run_reason,
@@ -2997,6 +3039,7 @@ impl ContainerService for LocalContainerService {
             working_directory: workspace_path,
             executor_profile,
             executor_profile_config,
+            mcp_config_snapshot,
             action,
             environment,
             run_reason,
@@ -3136,13 +3179,11 @@ impl ContainerService for LocalContainerService {
         // same tool always wins over an app-installed one. PATH is a reserved
         // env name (org vars can't set it), but base the merge on any PATH
         // already in the env so this stays correct if that ever changes.
-        let cli_tools_bin = services::services::cli_tools::cli_tools_bin_dir();
-        if cli_tools_bin.is_dir() {
-            let inherited = env
-                .get("PATH")
-                .map(std::ffi::OsString::from)
-                .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
-            let merged = utils::shell::merge_paths(&inherited, cli_tools_bin.as_os_str());
+        let inherited = env
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+        if let Some(merged) = utils::shell::append_cli_tools_to_path(&inherited) {
             env.insert("PATH", merged.to_string_lossy().into_owned());
         }
 
@@ -3433,7 +3474,7 @@ impl ContainerService for LocalContainerService {
                     mark_remote_execution_indeterminate(&self.db, execution_process.id).await?;
                 }
             }
-            if let Some(store) = self.msg_stores.read().await.get(&execution_process.id) {
+            if let Some(store) = self.msg_stores.write().await.remove(&execution_process.id) {
                 store.push_finished();
             }
             return Ok(());

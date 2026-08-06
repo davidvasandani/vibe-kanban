@@ -56,6 +56,32 @@ The settings page renders catalog rows returned by the server and the routes
 deserialize `CliToolId`, so confirm those paths remain generic before adding
 frontend or route-level special cases.
 
+## Workspace PATH propagation
+
+Installing a tool and exposing it to workspace processes are separate
+boundaries. “Available in a workspace” includes managed agent/script execution
+and interactive workspace terminals; local and clustered variants of both must
+be audited whenever the execution environment changes.
+
+The canonical contract lives in `utils::shell::append_cli_tools_to_path`:
+
+- derive `assets::cli_tools_dir()/bin` on the host that will spawn the child;
+- add it only when that host's directory exists;
+- append it after inherited PATH entries so a machine-provided copy wins;
+- reuse `merge_paths` so custom entries survive and duplicates are removed.
+
+Never send the coordinator's absolute app-data path to a cluster worker. CLI
+Tools is machine-scoped, and worker state is node-local unless a separate
+deployment contract proves otherwise. The worker augments execution and
+terminal environments immediately before spawn; a missing worker-local install
+is a no-op, not a dispatch failure.
+
+Keep workspace-only policy out of generic PTY services. The local PTY service
+also launches machine-scoped managed CLI login flows with a deliberately small
+environment, so local workspace-terminal augmentation belongs in the terminal
+route after the remote-worker branch has been selected.
+
 ## Contributed by
 
 - vk/fc47-atlassian-cli-to
+- vk/b2a2-add-vk-cli-tools

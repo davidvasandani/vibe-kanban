@@ -276,17 +276,42 @@ export enum WorkerNodeStatus { online = "online", offline = "offline", draining 
 
 export enum WorkerMountStatus { healthy = "healthy", missing = "missing", local_fallback = "local_fallback", wrong_filesystem = "wrong_filesystem", probe_not_visible = "probe_not_visible", read_only = "read_only", ownership_mismatch = "ownership_mismatch", io_error = "io_error" }
 
+export type UpdateWorkspaceAffinityRequest = {
+/**
+ * Explicitly move the workspace back to coordinator-local execution.
+ */
+run_on_coordinator: boolean, requested_worker_node_id: string | null, restart_running: boolean, operation_id: string | null, };
+
+export enum WorkspaceAffinityUpdateOutcome { updated = "updated", restarted = "restarted", restart_failed = "restart_failed" }
+
+export type WorkspaceAffinityUpdateResponse = { placement: WorkspacePlacement, outcome: WorkspaceAffinityUpdateOutcome, stopped_execution_id: string | null, started_execution: ExecutionProcess | null, message: string | null, };
+
+export enum WorkspaceAffinityKind { local = "local", automatic = "automatic", worker = "worker", unassigned = "unassigned" }
+
+export type WorkspaceAffinitySummary = { kind: WorkspaceAffinityKind, placement_state: WorkspacePlacementState, worker_node_id: string | null, worker_hostname: string | null, requested_worker_node_id: string | null, requested_worker_hostname: string | null, };
+
 export type CpuSample = { model: string | null, core_count: number | null, 
 /**
  * `1 − Δidle/Δtotal`. `None` until a predecessor exists.
  */
 total_busy_percent: number | null, 
 /**
- * One entry per `cpuN`, ordered by core index — the one place a position
- * is meaningful, because core 3 is core 3. Replaced wholesale, never
- * patched per element, so a core count change cannot misalign it.
+ * One entry per **online** core, each tagged with the kernel's own `cpuN`
+ * index.
+ *
+ * Tagged rather than positional because `/proc/stat` omits offline CPUs:
+ * with cpu1 offline the second entry is cpu2, and a reader labelling by
+ * array position would show cpu2's utilisation as "core 1". Replaced
+ * wholesale, never patched per element, so a core count change cannot
+ * misalign it.
  */
-per_core_busy_percent: Array<number> | null, load_1m: number | null, load_5m: number | null, load_15m: number | null, frequency_mhz: number | null, temperature_celsius: number | null, };
+per_core_busy: Array<CoreBusy> | null, load_1m: number | null, load_5m: number | null, load_15m: number | null, frequency_mhz: number | null, temperature_celsius: number | null, };
+
+export type CoreBusy = { 
+/**
+ * The `N` of `cpuN`.
+ */
+core: number, busy_percent: number, };
 
 export type MemorySample = { total_bytes: bigint | null, available_bytes: bigint | null, 
 /**
@@ -607,17 +632,17 @@ export type SharedMcpAuthMode = "shared_gateway" | "agent_native" | "explicit_he
 
 export type SharedMcpCompatibility = { executor: BaseCodingAgent, compatible: boolean, reason: string | null, };
 
-export type SharedMcpServer = { name: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, source_kind: SharedMcpSourceKind, native_sources: Array<NativeMcpSource>, compatibility: Array<SharedMcpCompatibility>, auth_mode: SharedMcpAuthMode, gateway_status: string | null, };
+export type SharedMcpServer = { name: string, display_name: string | null, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, source_kind: SharedMcpSourceKind, native_sources: Array<NativeMcpSource>, compatibility: Array<SharedMcpCompatibility>, auth_mode: SharedMcpAuthMode, gateway_status: string | null, };
 
 export type SharedMcpConflictVariant = { variant_id: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, native_sources: Array<NativeMcpSource>, };
 
-export type SharedMcpConflict = { name: string, variants: Array<SharedMcpConflictVariant>, message: string, };
+export type SharedMcpConflict = { name: string, display_name: string | null, variants: Array<SharedMcpConflictVariant>, message: string, };
 
 export type SharedMcpProfileError = { executor: BaseCodingAgent, config_path: string | null, error: string, };
 
-export type SharedMcpReadResponse = { profiles: Array<SharedMcpProfile>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, preconfigured: JsonValue, read_errors: Array<SharedMcpProfileError>, };
+export type SharedMcpReadResponse = { profiles: Array<SharedMcpProfile>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, preconfigured: JsonValue, read_errors: Array<SharedMcpProfileError>, metadata_error: string | null, };
 
-export type SharedMcpServerInput = { name: string, definition: McpServerDefinition, assignments: Array<BaseCodingAgent>, native_overrides: { [key in BaseCodingAgent]?: JsonValue }, };
+export type SharedMcpServerInput = { name: string, display_name: string | null, definition: McpServerDefinition, assignments: Array<BaseCodingAgent>, native_overrides: { [key in BaseCodingAgent]?: JsonValue }, };
 
 export type SharedMcpConflictResolution = { name: string, };
 
@@ -629,7 +654,7 @@ export type SharedMcpProfileWriteStatus = "success" | "skipped" | "failed";
 
 export type SharedMcpProfileWriteOutcome = { executor: BaseCodingAgent, config_path: string | null, status: SharedMcpProfileWriteStatus, affected_servers: Array<string>, message: string | null, error: string | null, };
 
-export type SharedMcpWriteResponse = { status: SharedMcpWriteStatus, outcomes: Array<SharedMcpProfileWriteOutcome>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, };
+export type SharedMcpWriteResponse = { status: SharedMcpWriteStatus, outcomes: Array<SharedMcpProfileWriteOutcome>, metadata_error: string | null, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, };
 
 export type SharedMcpTestTarget = { server_name: string, executor: BaseCodingAgent, };
 
@@ -879,6 +904,10 @@ export type GetPrCommentsQuery = { repo_id: string, };
 
 export type CreateAndStartWorkspaceRequest = { name: string | null, repos: Array<WorkspaceRepoInput>, linked_issue: LinkedIssueInfo | null, executor_config: ExecutorConfig, prompt: string, attachment_ids: Array<string> | null, 
 /**
+ * Explicitly retain coordinator-local placement in cluster mode.
+ */
+run_on_coordinator: boolean, 
+/**
  * Optional manual placement override. `None` uses automatic scheduling.
  */
 requested_worker_node_id: string | null, };
@@ -959,7 +988,7 @@ pr_number: bigint | null,
 /**
  * PR URL for this workspace (if any PR exists)
  */
-pr_url: string | null, };
+pr_url: string | null, affinity: WorkspaceAffinitySummary, };
 
 export type WorkspaceSummaryResponse = { summaries: Array<WorkspaceSummary>, };
 
