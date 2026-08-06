@@ -16,17 +16,13 @@ import {
   toPrettyCase,
   splitMessageToTitleDescription,
 } from '@/shared/lib/string';
-import {
-  WorkerMountStatus,
-  WorkerNodeStatus,
-  type BaseCodingAgent,
-  type Repo,
-} from 'shared/types';
+import { type BaseCodingAgent, type Repo } from 'shared/types';
 import { CreateChatBox } from '@vibe/ui/components/CreateChatBox';
 import { SettingsDialog } from '@/shared/dialogs/settings/SettingsDialog';
 import { CreateModeRepoPickerBar } from './CreateModeRepoPickerBar';
 import { ModelSelectorContainer } from '@/shared/components/ModelSelectorContainer';
 import { workerNodesApi } from '@/shared/lib/api';
+import { isWorkerEligible } from '@/shared/lib/workerPlacement';
 import {
   Select,
   SelectContent,
@@ -367,9 +363,7 @@ export function CreateChatBoxContainer({
                             {t('createMode.worker.automatic')}
                           </SelectItem>
                           {workerNodes.map((worker) => {
-                            const eligible =
-                              worker.status === WorkerNodeStatus.online &&
-                              worker.mount_status === WorkerMountStatus.healthy;
+                            const eligible = isWorkerEligible(worker);
                             return (
                               <SelectItem
                                 key={worker.id}

@@ -15,9 +15,9 @@
 
 Chosen because stop, placement, and restart cross several durable boundaries. A browser sequence can be interrupted or retried between calls and create false state or duplicate continuations. The constitution explicitly requires one owner.
 
-### Process-local keyed serialization plus durable restart claim
+### Durable operation claim plus deterministic continuation identity
 
-A keyed lock prevents concurrent requests in one coordinator, but HTTP retry after response loss can arrive after lock release. At-most-once continuation therefore also needs durable evidence. Preferred implementation: add a migration operation/claim row only if no existing execution idempotency field can represent the request; otherwise derive a stable continuation execution ID from a server-issued operation ID returned/accepted by the endpoint. Planning must choose the smallest durable mechanism after inspecting execution creation APIs.
+The implementation uses `workspace_affinity_operations` for one active claim per workspace and result replay by client operation ID. The same operation UUID becomes the continuation execution UUID through `ContainerService::start_execution_with_id`. That closes the response-loss/crash window after process creation: a retry finds the already-created execution instead of starting a second agent. A process-local lock alone was rejected because it cannot survive coordinator restart.
 
 ### Immediate scheduling for automatic affinity
 

@@ -1,7 +1,7 @@
 # Technical Specification: Workspace Server Affinity and Migration
 
-**Task:** `vk/9a64-vk-workspace-aff`  
-**Scope:** Vibe Kanban service only  
+**Task:** `vk/9a64-vk-workspace-aff`
+**Scope:** Vibe Kanban service only
 **Status:** Draft for implementation
 
 ## Objective
@@ -147,7 +147,9 @@ Response SHOULD include the resulting `WorkspacePlacement`, whether a running ta
 
 ## Open Questions for SpecKit Clarification
 
-- Whether `Automatic placement` should immediately reschedule a stopped but already placed workspace, or only clear requested affinity for its next execution.
-- Whether local/coordinator placement should be selectable explicitly or represented only through automatic placement.
-- Which existing session and executor configuration is authoritative when restarting a running workspace with multiple sessions.
-- Whether workspace-wide stop includes active dev servers for this migration workflow.
+Resolved by `specs/vk/9a64-vk-workspace-aff/clarifications.md`:
+
+- Automatic placement immediately selects and persists an eligible worker.
+- The coordinator is informational local placement, not an explicit clustered target.
+- Exactly one running coding-agent execution is required; its session and persisted executor configuration are authoritative.
+- Affinity changes are blocked while dev servers or background helpers run.

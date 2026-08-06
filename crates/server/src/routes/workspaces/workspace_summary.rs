@@ -6,7 +6,8 @@ use db::models::{
     execution_process::{ExecutionProcess, ExecutionProcessStatus},
     merge::MergeStatus,
     pull_request::PullRequest,
-    workspace::Workspace,
+    worker_node::WorkerNode,
+    workspace::{Workspace, WorkspacePlacement, WorkspacePlacementState},
 };
 use deployment::Deployment;
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,42 @@ pub struct WorkspaceSummary {
     pub pr_number: Option<i64>,
     /// PR URL for this workspace (if any PR exists)
     pub pr_url: Option<String>,
+    pub affinity: WorkspaceAffinitySummary,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct WorkspaceAffinitySummary {
+    pub kind: WorkspaceAffinityKind,
+    pub placement_state: WorkspacePlacementState,
+    pub worker_node_id: Option<Uuid>,
+    pub worker_hostname: Option<String>,
+    pub requested_worker_node_id: Option<Uuid>,
+    pub requested_worker_hostname: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[ts(use_ts_enum)]
+pub enum WorkspaceAffinityKind {
+    Local,
+    Automatic,
+    Worker,
+    Unassigned,
+}
+
+fn affinity_kind(placement: Option<&WorkspacePlacement>) -> WorkspaceAffinityKind {
+    let Some(placement) = placement else {
+        return WorkspaceAffinityKind::Local;
+    };
+    if placement.placement_state == WorkspacePlacementState::Local {
+        WorkspaceAffinityKind::Local
+    } else if placement.requested_worker_node_id.is_some() {
+        WorkspaceAffinityKind::Worker
+    } else if placement.worker_node_id.is_some() {
+        WorkspaceAffinityKind::Automatic
+    } else {
+        WorkspaceAffinityKind::Unassigned
+    }
 }
 
 /// Response containing summaries for requested workspaces
@@ -112,7 +149,20 @@ pub async fn get_workspace_summaries(
     // 6. Get PR status for each workspace
     let pr_statuses = PullRequest::get_latest_for_workspaces(pool, archived).await?;
 
-    // 7. Compute diff stats for each workspace (in parallel)
+    // 7. Resolve placement for every row with two bulk reads (never N+1).
+    let placements: HashMap<Uuid, WorkspacePlacement> =
+        WorkspacePlacement::find_all_by_archived(pool, archived)
+            .await?
+            .into_iter()
+            .map(|placement| (placement.workspace_id, placement))
+            .collect();
+    let worker_hostnames: HashMap<Uuid, String> = WorkerNode::fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|worker| (worker.id, worker.hostname))
+        .collect();
+
+    // 8. Compute diff stats for each workspace (in parallel)
     let diff_futures: Vec<_> = workspaces
         .iter()
         .map(|ws| {
@@ -134,7 +184,7 @@ pub async fn get_workspace_summaries(
         futures_util::future::join_all(diff_futures).await;
     let diff_stats: HashMap<Uuid, DiffStats> = diff_results.into_iter().flatten().collect();
 
-    // 8. Assemble response
+    // 9. Assemble response
     let summaries: Vec<WorkspaceSummary> = workspaces
         .iter()
         .map(|ws| {
@@ -144,6 +194,14 @@ pub async fn get_workspace_summaries(
                 .map(|p| pending_approval_eps.contains(&p.execution_process_id))
                 .unwrap_or(false);
             let stats = diff_stats.get(&id);
+            let placement = placements.get(&id);
+            let placement_state = placement
+                .map(|placement| placement.placement_state)
+                .unwrap_or(WorkspacePlacementState::Local);
+            let worker_node_id = placement.and_then(|placement| placement.worker_node_id);
+            let requested_worker_node_id =
+                placement.and_then(|placement| placement.requested_worker_node_id);
+            let kind = affinity_kind(placement);
 
             WorkspaceSummary {
                 workspace_id: id,
@@ -159,6 +217,16 @@ pub async fn get_workspace_summaries(
                 pr_status: pr_statuses.get(&id).map(|pr| pr.pr_status.clone()),
                 pr_number: pr_statuses.get(&id).map(|pr| pr.pr_number),
                 pr_url: pr_statuses.get(&id).map(|pr| pr.pr_url.clone()),
+                affinity: WorkspaceAffinitySummary {
+                    kind,
+                    placement_state,
+                    worker_node_id,
+                    worker_hostname: worker_node_id
+                        .and_then(|worker_id| worker_hostnames.get(&worker_id).cloned()),
+                    requested_worker_node_id,
+                    requested_worker_hostname: requested_worker_node_id
+                        .and_then(|worker_id| worker_hostnames.get(&worker_id).cloned()),
+                },
             }
         })
         .collect();
@@ -166,6 +234,60 @@ pub async fn get_workspace_summaries(
     Ok(ResponseJson(ApiResponse::success(
         WorkspaceSummaryResponse { summaries },
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use db::models::workspace::{WorkspacePlacement, WorkspacePlacementState};
+    use uuid::Uuid;
+
+    use super::{WorkspaceAffinityKind, affinity_kind};
+
+    fn placement(
+        state: WorkspacePlacementState,
+        worker_node_id: Option<Uuid>,
+        requested_worker_node_id: Option<Uuid>,
+    ) -> WorkspacePlacement {
+        WorkspacePlacement {
+            workspace_id: Uuid::new_v4(),
+            worker_node_id,
+            placement_state: state,
+            placed_at: None,
+            placement_reason: None,
+            requested_worker_node_id,
+            placement_constraints: None,
+        }
+    }
+
+    #[test]
+    fn classifies_local_automatic_explicit_and_unassigned_affinity() {
+        let worker_id = Uuid::new_v4();
+        assert_eq!(affinity_kind(None), WorkspaceAffinityKind::Local);
+        assert_eq!(
+            affinity_kind(Some(&placement(
+                WorkspacePlacementState::Ready,
+                Some(worker_id),
+                None,
+            ))),
+            WorkspaceAffinityKind::Automatic
+        );
+        assert_eq!(
+            affinity_kind(Some(&placement(
+                WorkspacePlacementState::Ready,
+                Some(worker_id),
+                Some(worker_id),
+            ))),
+            WorkspaceAffinityKind::Worker
+        );
+        assert_eq!(
+            affinity_kind(Some(&placement(
+                WorkspacePlacementState::Failed,
+                None,
+                None,
+            ))),
+            WorkspaceAffinityKind::Unassigned
+        );
+    }
 }
 
 /// Compute diff stats for a workspace.

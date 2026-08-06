@@ -1,6 +1,6 @@
 # Implementation Plan: Workspace Server Affinity and Migration
 
-**Spec**: `./spec.md`  
+**Spec**: `./spec.md`
 **Status**: Draft
 
 ## Technical Context

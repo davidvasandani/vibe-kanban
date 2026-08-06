@@ -73,7 +73,7 @@ Stopped path:
 
 Running path:
 
-`running → confirmation required` or, when confirmed:  
+`running → confirmation required` or, when confirmed:
 `running → stop evidenced → placement updated → continuation created → restarted`
 
 Partial terminal path:

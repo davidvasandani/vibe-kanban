@@ -87,6 +87,8 @@ import {
   Session,
   Workspace,
   WorkspacePlacement,
+  UpdateWorkspaceAffinityRequest,
+  WorkspaceAffinityUpdateResponse,
   WorkerNode,
   ClusterMetricsSnapshot,
   StartReviewRequest,
@@ -490,6 +492,20 @@ export const workspacesApi = {
       `/api/workspaces/${encodeURIComponent(workspaceId)}/placement`
     );
     return handleApiResponse<WorkspacePlacement>(response);
+  },
+
+  updateAffinity: async (
+    workspaceId: string,
+    data: UpdateWorkspaceAffinityRequest
+  ): Promise<WorkspaceAffinityUpdateResponse> => {
+    const response = await makeRequest(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/affinity`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<WorkspaceAffinityUpdateResponse>(response);
   },
 
   update: async (

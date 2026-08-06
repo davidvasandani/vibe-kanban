@@ -1,6 +1,6 @@
 # Feature Specification: Workspace Server Affinity and Migration
 
-**Feature dir**: `specs/vk/9a64-vk-workspace-aff/`  
+**Feature dir**: `specs/vk/9a64-vk-workspace-aff/`
 **Status**: Draft
 
 ## Summary

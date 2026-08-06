@@ -371,6 +371,40 @@ impl ExecutionProcess {
         .await
     }
 
+    /// Find every running execution for a workspace, including lifecycle and
+    /// persistent processes. Callers that move workspace ownership must use
+    /// this complete view rather than assuming a fixed set of run reasons.
+    pub async fn find_all_running_by_workspace(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, ExecutionProcess>(
+            r#"
+        SELECT
+            ep.id,
+            ep.session_id,
+            ep.run_reason,
+            ep.executor_action,
+            ep.status,
+            ep.exit_code,
+            ep.pgid,
+            ep.dropped,
+            ep.started_at,
+            ep.completed_at,
+            ep.created_at,
+            ep.updated_at
+        FROM execution_processes ep
+        JOIN sessions s ON ep.session_id = s.id
+        WHERE s.workspace_id = ?
+          AND ep.status IN ('running', 'indeterminate')
+        ORDER BY ep.created_at DESC
+        "#,
+        )
+        .bind(workspace_id)
+        .fetch_all(pool)
+        .await
+    }
+
     pub async fn find_running_coding_agents_by_workspace(
         pool: &SqlitePool,
         workspace_id: Uuid,

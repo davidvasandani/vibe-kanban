@@ -1558,6 +1558,28 @@ pub trait ContainerService {
         executor_action: &ExecutorAction,
         run_reason: &ExecutionProcessRunReason,
     ) -> Result<ExecutionProcess, ContainerError> {
+        self.start_execution_with_id(
+            workspace,
+            session,
+            executor_action,
+            run_reason,
+            Uuid::new_v4(),
+        )
+        .await
+    }
+
+    /// Start an execution with a caller-owned durable identity. Lifecycle
+    /// transitions that cross an HTTP retry boundary use this to make process
+    /// creation idempotent instead of creating a second agent after a lost
+    /// response.
+    async fn start_execution_with_id(
+        &self,
+        workspace: &Workspace,
+        session: &Session,
+        executor_action: &ExecutorAction,
+        run_reason: &ExecutionProcessRunReason,
+        execution_process_id: Uuid,
+    ) -> Result<ExecutionProcess, ContainerError> {
         // Create new execution process record
         // Capture current HEAD per repository as the "before" commit for this execution
         let repositories =
@@ -1594,7 +1616,7 @@ pub trait ContainerService {
         let execution_process = ExecutionProcess::create(
             &self.db().pool,
             &create_execution_process,
-            Uuid::new_v4(),
+            execution_process_id,
             &repo_states,
         )
         .await?;
