@@ -66,4 +66,35 @@ Kanban. A fifth independent review covers this follow-up.
 
 ## Pass 5
 
-Pending after cleanup verification.
+The fifth review found two P1 issues. Migration could select a thread from an
+older execution when the active turn had not persisted an ID, and cleanup
+could remove a rollout still referenced by an idle resumable session. Migration
+now reads only the active execution's turn. Workers clean abandoned partials
+but do not delete verified rollouts without coordinator-supplied reference
+proof.
+
+## Passes 6–9
+
+Subsequent reviews found and verified fixes for these recovery cases:
+
+- stale recovery re-verifies already verified target lineage before dispatch;
+- incomplete stale transfers resume idempotent staging rather than attempting
+  final verification prematurely;
+- a failed post-install checksum removes only the destination still sharing
+  the temporary file's inode;
+- the selected target worker is persisted and reused across automatic-affinity
+  retries; and
+- distinct simultaneous `parent_thread_id` and `forked_from_id` metadata is
+  rejected instead of silently omitting ancestry.
+
+The repeated claim that `SessionTransferFailed` leaves an operation claimed
+was rejected again: the inner success response always reaches the outer
+`finish_operation` call.
+
+## Final result
+
+The final Vibe Kanban review reported: “No discrete correctness issue was
+identified that would clearly warrant a code change.” A separate review of
+homelab commit `1feb2d85` found the `CODEX_HOME` pin, private directory, and
+evaluation assertions consistent with the worker service account and reported
+no breaking behavior.

@@ -16,7 +16,7 @@
   (3 tests: direct/ancestor transfer and replay; traversal/symlink/conflict;
   checksum/cycle/oversize).
 - `cargo test -p worker transfer_routes_reject_operation_and_target_substitution`
-  — passed.
+  and `transfer_routes_accept_bodies_above_axum_default_limit` — passed.
 - `cargo test -p db --lib` — passed (9 tests).
 
 ## Deployment validation
@@ -26,11 +26,15 @@ The Vibe Kanban worker module now sets `CODEX_HOME` explicitly to
 `vibe-kanban`, and contains matching evaluation assertions.
 
 `nix-instantiate --eval --strict [--impure] tests/vibe-kanban-cluster.nix`
-cannot complete in this workspace because an existing pinned Nix source-store
-path (`9s8bs867wxx3zx7gllsv6a9jqs25zjy6-...-source`) is absent. Both pure and
-impure attempts fail at the pre-existing `invalidRole` assertion before
-reaching the new assertions.
+cannot complete in this workspace. Attempts encountered the pre-existing
+`invalidRole` assertion while the Nix fetcher cache was unavailable, then an
+unavailable registry/source with network resolution disabled. The failure
+occurs before the new assertions are evaluated.
 
-## Pending final gate
+## Independent review
 
-- Independent Codex diff review and any resulting re-verification.
+- Repeated `codex review --base vk/9a64-vk-workspace-aff` passes drove the
+  recovery and containment fixes recorded in `review.md`; the final pass
+  reported no significant finding.
+- `codex review --commit 1feb2d85` in the homelab repository reported no
+  significant finding.
