@@ -173,6 +173,15 @@ impl CodexRolloutStore {
             });
         }
         let meta = read_canonical_meta(path, thread_id)?;
+        if matches!(
+            (meta.parent_thread_id, meta.forked_from_id),
+            (Some(parent), Some(forked_from)) if parent != forked_from
+        ) {
+            return Err(RolloutTransferError::InvalidMetadata {
+                thread_id,
+                reason: "conflicting parent_thread_id and forked_from_id",
+            });
+        }
         let parent = meta.parent_thread_id.or(meta.forked_from_id);
         if let Some(parent_id) = parent {
             self.resolve_ancestors(parent_id, index, visiting, entries, total)?;
@@ -909,6 +918,30 @@ mod tests {
                 first,
             ),
             Err(RolloutTransferError::Cycle(_))
+        ));
+
+        let conflicting = Uuid::new_v4();
+        let conflicting_path = rollout(source.path(), conflicting, None, "{}");
+        let conflicting_meta = serde_json::json!({
+            "timestamp":"2026-08-06T00:00:00Z",
+            "type":"session_meta",
+            "payload":{
+                "id": conflicting,
+                "parent_thread_id": Uuid::new_v4(),
+                "forked_from_id": Uuid::new_v4()
+            }
+        });
+        fs::write(&conflicting_path, format!("{conflicting_meta}\n{{}}\n")).unwrap();
+        assert!(matches!(
+            source_store.resolve_manifest(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                conflicting,
+            ),
+            Err(RolloutTransferError::InvalidMetadata { .. })
         ));
 
         let direct = Uuid::new_v4();
