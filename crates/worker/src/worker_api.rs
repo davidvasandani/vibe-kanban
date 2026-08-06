@@ -59,7 +59,7 @@ struct WorkerApiState {
     /// view: nothing on this path can influence a lease, a job, or the
     /// worker's liveness (constitution XIX).
     metrics: Arc<MetricsSampler>,
-    codex_rollouts: Arc<CodexRolloutStore>,
+    codex_rollouts: Option<Arc<CodexRolloutStore>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,9 +97,9 @@ pub async fn router(
 ) -> anyhow::Result<Router> {
     let coordinator_key = load_verifying_key(&config.coordinator_public_key_file).await?;
     let path_authority = PathAuthority::new(&config.shared_root)?;
-    let codex_rollouts = Arc::new(CodexRolloutStore::new(
-        codex_home().ok_or_else(|| anyhow::anyhow!("Codex home is unavailable"))?,
-    )?);
+    let codex_rollouts = codex_home()
+        .and_then(|home| CodexRolloutStore::new(home).ok())
+        .map(Arc::new);
     let state = WorkerApiState {
         supervisor,
         worker_node_id: config.worker_node_id,
@@ -265,6 +265,8 @@ async fn codex_manifest(
     }
     state
         .codex_rollouts
+        .as_ref()
+        .ok_or_else(|| WorkerApiError::BadRequest("Codex session storage is unavailable".into()))?
         .resolve_manifest(
             operation_id,
             request.workspace_id,
@@ -298,6 +300,8 @@ async fn codex_artifact(
     }
     state
         .codex_rollouts
+        .as_ref()
+        .ok_or_else(|| WorkerApiError::BadRequest("Codex session storage is unavailable".into()))?
         .read_artifact(&request.manifest, request.thread_id)
         .map(Json)
         .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
@@ -317,6 +321,8 @@ async fn codex_stage(
     }
     state
         .codex_rollouts
+        .as_ref()
+        .ok_or_else(|| WorkerApiError::BadRequest("Codex session storage is unavailable".into()))?
         .stage_artifact(&request.manifest, &request.artifact)
         .map(Json)
         .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
@@ -336,6 +342,8 @@ async fn codex_verify(
     }
     state
         .codex_rollouts
+        .as_ref()
+        .ok_or_else(|| WorkerApiError::BadRequest("Codex session storage is unavailable".into()))?
         .verify_manifest(&request.manifest)
         .map(Json)
         .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
@@ -790,7 +798,9 @@ mod tests {
             terminals: TerminalService::new(PathAuthority::new(temp.path()).expect("shared root")),
             preview: PreviewService::new(),
             metrics: sampler,
-            codex_rollouts: Arc::new(CodexRolloutStore::new(temp.path().join("codex")).unwrap()),
+            codex_rollouts: Some(Arc::new(
+                CodexRolloutStore::new(temp.path().join("codex")).unwrap(),
+            )),
         };
         build_router(state)
     }
