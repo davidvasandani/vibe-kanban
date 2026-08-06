@@ -1,6 +1,6 @@
 # Clustered workspace execution and shared-storage safety
 
-Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`, `8475-bubblewrap-missi`, `2fe7-vk-coordinator-m`
+Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`, `8475-bubblewrap-missi`, `2fe7-vk-coordinator-m`, `eef5-coordinator-miss`
 
 ## Keep authority central and process ownership local
 
@@ -40,6 +40,15 @@ When an additive request field is serde-defaulted for old JSON clients, remember
 that Rust struct literals do not receive serde defaults. Search every direct
 initializer across the workspace (including MCP or CLI crates), regenerate the
 TypeScript contract, and type-check all frontend creation paths.
+
+Affinity changes need the same three-way intent in their durable operation
+identity, not only in the initial HTTP request. Persist the coordinator bit
+beside the nullable worker ID and compare both during idempotent replay;
+otherwise automatic and coordinator requests collapse to the same operation.
+Coordinator recovery also has no worker dispatch record to confirm. Treat a
+persisted local placement as evidence that its placement step committed, and
+allow a guarded local-to-local rewrite so a retry can repair continuation state
+without inventing worker-only lifecycle data.
 
 ## Treat a shared mount as a capability, not a directory
 

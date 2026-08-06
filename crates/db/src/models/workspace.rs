@@ -225,6 +225,39 @@ impl WorkspacePlacement {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Move an already-provisioned clustered workspace back to coordinator
+    /// ownership. The caller must stop workspace-owned processes first. As
+    /// with worker reassignment, the expected worker makes this a compare-and-
+    /// set so concurrent affinity changes cannot overwrite one another. A
+    /// repeated local-to-local write is allowed so durable migration recovery
+    /// can continue after placement committed but before restart creation.
+    pub async fn reassign_to_coordinator(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        expected_worker_node_id: Option<Uuid>,
+        reason: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET worker_node_id = NULL,
+                placement_state = 'local',
+                placed_at = datetime('now', 'subsec'),
+                placement_reason = ?,
+                requested_worker_node_id = NULL,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?
+              AND worker_node_id IS ?
+            "#,
+        )
+        .bind(reason)
+        .bind(workspace_id)
+        .bind(expected_worker_node_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn transition(
         pool: &SqlitePool,
         workspace_id: Uuid,
@@ -1223,6 +1256,48 @@ mod tests {
             .unwrap();
         assert_eq!(reassigned.worker_node_id, Some(replacement_id));
         assert_eq!(reassigned.requested_worker_node_id, Some(replacement_id));
+
+        assert!(
+            WorkspacePlacement::reassign_to_coordinator(
+                &pool,
+                workspace.id,
+                Some(replacement_id),
+                "coordinator affinity update",
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !WorkspacePlacement::reassign_to_coordinator(
+                &pool,
+                workspace.id,
+                Some(worker_id),
+                "stale coordinator update",
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            WorkspacePlacement::reassign_to_coordinator(
+                &pool,
+                workspace.id,
+                None,
+                "coordinator affinity recovery",
+            )
+            .await
+            .unwrap()
+        );
+        let local = WorkspacePlacement::find(&pool, workspace.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(local.worker_node_id, None);
+        assert_eq!(local.requested_worker_node_id, None);
+        assert_eq!(local.placement_state, WorkspacePlacementState::Local);
+        assert_eq!(
+            local.placement_reason.as_deref(),
+            Some("coordinator affinity recovery")
+        );
     }
 
     #[test]

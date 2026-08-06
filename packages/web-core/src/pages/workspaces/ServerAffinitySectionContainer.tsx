@@ -19,8 +19,11 @@ import { workspaceSummaryKeys } from '@/shared/hooks/workspaceSummaryKeys';
 import { isWorkerEligible } from '@/shared/lib/workerPlacement';
 import { useHostId } from '@/shared/providers/HostIdProvider';
 import { useExecutionProcessesContext } from '@/shared/hooks/useExecutionProcessesContext';
-
-const AUTOMATIC = 'automatic';
+import {
+  AUTOMATIC_PLACEMENT,
+  COORDINATOR_PLACEMENT,
+  serializeWorkspacePlacement,
+} from '@/shared/lib/workspacePlacement';
 
 export function ServerAffinitySectionContainer({
   workspaceId,
@@ -42,7 +45,10 @@ export function ServerAffinitySectionContainer({
     queryFn: workerNodesApi.list,
     refetchInterval: 10_000,
   });
-  const currentValue = placement?.requested_worker_node_id ?? AUTOMATIC;
+  const currentValue =
+    placement?.placement_state === WorkspacePlacementState.local
+      ? COORDINATOR_PLACEMENT
+      : (placement?.requested_worker_node_id ?? AUTOMATIC_PLACEMENT);
   const [value, setValue] = useState(currentValue);
   const operationIds = useRef(new Map<string, string>());
 
@@ -89,7 +95,7 @@ export function ServerAffinitySectionContainer({
       operationId?: string;
     }) =>
       workspacesApi.updateAffinity(workspaceId, {
-        requested_worker_node_id: target === AUTOMATIC ? null : target,
+        ...serializeWorkspacePlacement(target),
         restart_running: restart,
         operation_id: restart ? (operationId ?? null) : null,
       }),
@@ -212,8 +218,11 @@ export function ServerAffinitySectionContainer({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={AUTOMATIC}>
+              <SelectItem value={AUTOMATIC_PLACEMENT}>
                 {t('workspaces.serverAffinity.automatic')}
+              </SelectItem>
+              <SelectItem value={COORDINATOR_PLACEMENT}>
+                {t('workspaces.serverAffinity.coordinator')}
               </SelectItem>
               {options.map(({ worker, eligible }) => (
                 <SelectItem
