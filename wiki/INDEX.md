@@ -35,8 +35,9 @@ contributed to it.
 - [managed-cli-tool-catalog.md](managed-cli-tool-catalog.md) — How to extend
   the app-managed CLI catalog: stable wire ids, complete catalog registration,
   immutable artifact URLs and SHA-256 pins, per-platform archive executable
-  paths, generated TypeScript types, generic route/UI behavior, and the focused
-  validation sequence.
+  paths, generated TypeScript types, generic route/UI behavior, focused
+  validation, and host-first PATH propagation across local and clustered
+  workspace process boundaries.
 - [agent-process-lifecycle.md](agent-process-lifecycle.md) — How a coding-agent
   turn ends at the process level: the one-turn-one-`ExecutionProcess` identity
   chain, the implicit app-server marker (`exit_signal: Some` vs `None`, distinct
