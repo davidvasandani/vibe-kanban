@@ -345,6 +345,7 @@ impl CodexRolloutStore {
     fn safe_existing_path(&self, relative: &str) -> Result<PathBuf, RolloutTransferError> {
         let relative = Path::new(relative);
         validate_relative(relative)?;
+        ensure_no_symlink_components(&self.sessions_root, relative)?;
         let path = self.sessions_root.join(relative);
         let meta = fs::symlink_metadata(&path)?;
         if !meta.file_type().is_file()
@@ -361,6 +362,24 @@ impl CodexRolloutStore {
         validate_relative(relative)?;
         Ok(self.sessions_root.join(relative))
     }
+}
+
+fn ensure_no_symlink_components(root: &Path, relative: &Path) -> Result<(), RolloutTransferError> {
+    let mut current = root.to_path_buf();
+    let component_count = relative.components().count();
+    for (index, component) in relative.components().enumerate() {
+        let Component::Normal(part) = component else {
+            return Err(RolloutTransferError::UnsafePath);
+        };
+        current.push(part);
+        let metadata = fs::symlink_metadata(&current)?;
+        if metadata.file_type().is_symlink()
+            || (index + 1 < component_count && !metadata.file_type().is_dir())
+        {
+            return Err(RolloutTransferError::UnsafePath);
+        }
+    }
+    Ok(())
 }
 
 fn read_canonical_meta(path: &Path, expected: Uuid) -> Result<CanonicalMeta, RolloutTransferError> {
@@ -634,6 +653,17 @@ mod tests {
             symlink(&escaped, &date_dir).unwrap();
             assert!(matches!(
                 target_store.stage_artifact(&manifest, &artifact),
+                Err(RolloutTransferError::UnsafePath)
+            ));
+
+            let contained_root = TempDir::new().unwrap();
+            let contained_store = CodexRolloutStore::new(contained_root.path()).unwrap();
+            let inside = contained_root.path().join("sessions/inside");
+            fs::create_dir(&inside).unwrap();
+            fs::write(inside.join("rollout.jsonl"), "{}").unwrap();
+            symlink(&inside, contained_root.path().join("sessions/link")).unwrap();
+            assert!(matches!(
+                contained_store.safe_existing_path("link/rollout.jsonl"),
                 Err(RolloutTransferError::UnsafePath)
             ));
         }

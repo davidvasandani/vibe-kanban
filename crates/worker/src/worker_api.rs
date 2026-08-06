@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{Path, Query, Request, State, ws::WebSocketUpgrade},
+    extract::{DefaultBodyLimit, Path, Query, Request, State, ws::WebSocketUpgrade},
     http::StatusCode,
     middleware::{Next, from_fn_with_state},
     response::{IntoResponse, Response},
@@ -167,6 +167,7 @@ fn build_router(state: WorkerApiState) -> Router {
             post(respond_interaction),
         )
         .route("/v1/executions/{execution_id}/quarantine", post(quarantine))
+        .layer(DefaultBodyLimit::max(MAX_SIGNED_BODY_BYTES))
         .layer(from_fn_with_state(state.clone(), require_signature))
         .with_state(state)
 }
@@ -816,6 +817,10 @@ mod tests {
 
     fn signed_post<T: Serialize>(request_target: &str, payload: &T) -> Request<Body> {
         let body = serde_json::to_vec(payload).unwrap();
+        signed_post_body(request_target, body)
+    }
+
+    fn signed_post_body(request_target: &str, body: Vec<u8>) -> Request<Body> {
         let timestamp = Utc::now().timestamp();
         let digest = BASE64_STANDARD.encode(Sha256::digest(&body));
         let message = format!("{timestamp}.POST.{request_target}.{digest}");
@@ -929,6 +934,21 @@ mod tests {
         assert_eq!(
             status_of(router, signed_post(&correct_path, &payload)).await,
             StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_routes_accept_bodies_above_axum_default_limit() {
+        let temp = TempDir::new().unwrap();
+        let router = metrics_router(
+            &temp,
+            Arc::new(MetricsSampler::new(SamplerConfig::default())),
+        );
+        let path = format!("/v1/session-transfers/{}/stage", Uuid::new_v4());
+        let body = vec![b' '; 3 * 1024 * 1024];
+        assert_eq!(
+            status_of(router, signed_post_body(&path, body)).await,
+            StatusCode::BAD_REQUEST
         );
     }
 
