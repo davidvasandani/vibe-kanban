@@ -9,7 +9,9 @@ use ts_rs::TS;
 
 use crate::{
     executors::{BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor},
-    mcp_config::{McpConfig, PRECONFIGURED_MCP_SERVERS, read_agent_config},
+    mcp_config::{
+        McpConfig, PRECONFIGURED_MCP_SERVERS, default_slack_stdio_launcher, read_agent_config,
+    },
     profile::{ExecutorConfigs, ExecutorProfileId},
 };
 
@@ -605,7 +607,7 @@ pub fn canonical_definition(entry: &Value) -> McpServerDefinition {
 }
 
 fn canonical_definition_for_server(name: &str, entry: &Value) -> McpServerDefinition {
-    let mut definition = canonical_definition(entry);
+    let definition = canonical_definition(entry);
     if name != "slack" || !is_legacy_bundled_slack_definition(&definition) {
         return definition;
     }
@@ -613,33 +615,57 @@ fn canonical_definition_for_server(name: &str, entry: &Value) -> McpServerDefini
     let Some(current_entry) = PRECONFIGURED_MCP_SERVERS.get("slack") else {
         return definition;
     };
-    let current = canonical_definition(current_entry);
-    let Some(env) = definition.value.get("env").cloned() else {
-        return definition;
-    };
+    migrate_bundled_slack_definition(definition, canonical_definition(current_entry))
+}
 
-    definition = current;
-    if let Some(value) = definition.value.as_object_mut() {
+fn migrate_bundled_slack_definition(
+    historical: McpServerDefinition,
+    mut current: McpServerDefinition,
+) -> McpServerDefinition {
+    // The old stdio token is preserved only when migrating between local stdio
+    // launchers. HTTP deployments own the Slack credential at the service and
+    // must never copy it into an agent-readable definition.
+    if current.transport == McpTransportKind::Stdio
+        && let Some(env) = historical.value.get("env").cloned()
+        && let Some(value) = current.value.as_object_mut()
+    {
         value.insert("env".to_string(), env);
     }
-    definition
+    current
 }
 
 fn is_legacy_bundled_slack_definition(definition: &McpServerDefinition) -> bool {
+    // Append-only: once a launcher was shipped, keep recognizing it so a later
+    // catalog pin bump cannot strand existing configs on credential-bearing
+    // stdio. The current catalog launcher is also admitted below without
+    // duplicating its actively managed pin.
+    const HISTORICAL_SLACK_STDIO_LAUNCHERS: &[&str] = &[
+        "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz",
+    ];
+    let pinned_fork = default_slack_stdio_launcher();
     definition.transport == McpTransportKind::Stdio
         && definition.value.get("command").and_then(Value::as_str) == Some("npx")
-        && definition.value.get("args")
-            == Some(&serde_json::json!([
-                "-y",
-                "slack-mcp-server@latest",
-                "--transport",
-                "stdio"
-            ]))
+        && definition.value.get("args").is_some_and(|args| {
+            args == &serde_json::json!(["-y", "slack-mcp-server@latest", "--transport", "stdio"])
+                || pinned_fork.as_ref().is_some_and(|launcher| {
+                    args == &serde_json::json!(["-y", launcher, "--transport", "stdio"])
+                })
+                || HISTORICAL_SLACK_STDIO_LAUNCHERS.iter().any(|launcher| {
+                    args == &serde_json::json!(["-y", launcher, "--transport", "stdio"])
+                })
+        })
         && definition
             .value
             .get("env")
             .and_then(Value::as_object)
             .is_some_and(|env| env.len() == 1 && env.contains_key("SLACK_MCP_XOXP_TOKEN"))
+}
+
+/// Whether a native entry is one of the exact stdio Slack templates shipped by
+/// Vibe Kanban. Callers use this to remove recovery copies that would otherwise
+/// retain the superseded agent-readable XOXP token after HTTP migration.
+pub fn is_historical_bundled_slack_entry(entry: &Value) -> bool {
+    is_legacy_bundled_slack_definition(&canonical_definition(entry))
 }
 
 fn compact_object<const N: usize>(entries: [(&str, Value); N]) -> Value {
@@ -1182,6 +1208,27 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
 
         assert_eq!(response.servers.len(), 0);
         assert_eq!(response.conflicts.len(), 1);
+    }
+
+    #[test]
+    fn pinned_stdio_slack_migrates_to_http_without_the_token() {
+        let historical = canonical_definition(&slack_json_entry("xoxp-must-disappear"));
+        assert!(is_legacy_bundled_slack_definition(&historical));
+
+        let migrated = migrate_bundled_slack_definition(
+            historical,
+            canonical_definition(&json!({
+                "type": "http",
+                "url": "http://172.16.100.102:13080/mcp"
+            })),
+        );
+
+        assert_eq!(migrated.transport, McpTransportKind::Http);
+        assert_eq!(
+            migrated.value,
+            json!({ "url": "http://172.16.100.102:13080/mcp" })
+        );
+        assert!(!serde_json::to_string(&migrated).unwrap().contains("xoxp"));
     }
 
     #[test]

@@ -33,7 +33,7 @@ Vibe Kanban provides popular MCP server templates. Add a template, then choose t
 
 ### Slack connector
 
-The Slack template installs a pinned build of the
+The generic Slack template installs a pinned build of the
 [davidvasandani/slack-mcp-server](https://github.com/davidvasandani/slack-mcp-server)
 fork rather than the upstream npm package, because the fork adds attachment
 retrieval:
@@ -56,15 +56,38 @@ Release **v1.3.0-vk.2** is based on upstream 1.3.0 and includes fork commit
 downloads the server binary for your platform from that same release, verifies
 it against a SHA-256 recorded at build time, caches it, and runs it. A
 verification failure is fatal — the connector never falls back to a different
-build. Paste your Slack user token (`xoxp-…`) in place of `YOUR_TOKEN`.
+build. Paste your Slack user token (`xoxp-…`) in place of `YOUR_TOKEN` when
+using this local stdio form.
 
-The launcher verifies the platform binary, but npm downloads the launcher
+Clustered self-hosted deployments can instead set
+`VIBE_KANBAN_SLACK_MCP_URL` to one operator-hosted Streamable HTTP endpoint.
+When set, Vibe Kanban exposes the bundled Slack definition as URL-only HTTP:
+
+```json
+{
+  "type": "http",
+  "url": "http://172.16.100.102:13080/mcp"
+}
+```
+
+The Slack token then belongs only to the supervised server and is not written
+to agent configuration. Exact saved copies of the previously shipped stdio
+templates reconcile to this HTTP definition; modified or custom `slack` entries
+are left untouched. Migration deliberately drops the old
+`SLACK_MCP_XOXP_TOKEN` instead of turning it into a client header.
+
+For generic stdio installs, the launcher verifies the platform binary, but npm downloads the launcher
 tarball itself without an expected integrity value. A release writer could
 replace that outer asset under the existing tag before the daily audit detects
 it. Vibe Kanban records the expected launcher digest, audits it daily, and opens
 a GitHub issue on failure; this is a detection control, not install-time
 verification. Upgrades still use reviewed new `-vk.<n+1>` tags rather than
 re-uploading an existing asset.
+
+An operator-hosted Nix deployment can close that outer gap by fetching the
+launcher tarball as a fixed-output derivation before passing the verified local
+path to `npx`. The server still uses the same fork tag and platform-binary
+digest checks.
 
 <Note>
 The fork exposes `attachment_get_data`, which takes a `file_id` (the ID shown in
@@ -95,7 +118,8 @@ In the fork, tag the revision and run `scripts/build-release.sh`, then publish
 the binaries, the launcher tarball, and `checksums.txt` as release assets.
 </Step>
 <Step title="Update the pin">
-Change the URL in `crates/executors/default_mcp.json` and the
+Change the URL in `crates/executors/default_mcp.json`, any deployment-owned
+fixed-output URL/hash, and the
 `SLACK_MCP_FORK_TAG` and `SLACK_MCP_LAUNCHER_SHA256` constants in
 `crates/executors/src/mcp_config.rs`, and the version named on this page — all
 in the same change.

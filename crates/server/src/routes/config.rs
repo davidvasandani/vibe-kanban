@@ -14,15 +14,15 @@ use executors::{
     executors::{
         AvailabilityInfo, BaseAgentCapability, BaseCodingAgent, StandardCodingAgentExecutor,
     },
-    mcp_config::{McpConfig, read_agent_config, write_agent_config},
+    mcp_config::{McpConfig, previous_version_backup_path, read_agent_config, write_agent_config},
     mcp_test::{McpServerTestResult, test_mcp_servers},
     profile::{ExecutorConfigs, ExecutorProfileId},
     shared_mcp_config::{
         SharedMcpProfileWriteOutcome, SharedMcpProfileWriteStatus, SharedMcpReadResponse,
         SharedMcpTestRequest, SharedMcpTestTarget, SharedMcpWriteRequest, SharedMcpWriteResponse,
-        SharedMcpWriteStatus, canonical_definition, load_native_snapshots, load_shared_mcp_config,
-        plan_servers_for_executor, reconcile_snapshots, validate_server_identifiers,
-        validate_write_request,
+        SharedMcpWriteStatus, canonical_definition, is_historical_bundled_slack_entry,
+        load_native_snapshots, load_shared_mcp_config, plan_servers_for_executor,
+        reconcile_snapshots, validate_server_identifiers, validate_write_request,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -791,7 +791,15 @@ pub(crate) async fn update_mcp_servers_in_config(
     let mut config = read_agent_config(config_path, mcpc).await?;
 
     // Get the current server count for comparison
-    let old_servers = get_mcp_servers_from_config_path(&config, &mcpc.servers_path).len();
+    let old_servers = get_mcp_servers_from_config_path(&config, &mcpc.servers_path);
+    let old_count = old_servers.len();
+    let removes_bundled_slack_token = old_servers
+        .get("slack")
+        .is_some_and(is_historical_bundled_slack_entry)
+        && new_servers.get("slack").is_some_and(|entry| {
+            canonical_definition(entry).transport
+                == executors::shared_mcp_config::McpTransportKind::Http
+        });
 
     // Set the MCP servers using the correct attribute path
     set_mcp_servers_in_config_path(&mut config, &mcpc.servers_path, &new_servers)?;
@@ -799,8 +807,20 @@ pub(crate) async fn update_mcp_servers_in_config(
     // Write the updated config back to file (JSON or TOML depending on agent)
     write_agent_config(config_path, mcpc, &config).await?;
 
+    if removes_bundled_slack_token {
+        // atomic_write_agent_config normally retains the previous file for
+        // recovery. During this one exact migration that file contains the old
+        // XOXP credential, defeating centralization, so remove it after the new
+        // config has landed successfully.
+        match fs::remove_file(previous_version_backup_path(config_path)).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
     let new_count = new_servers.len();
-    let message = match (old_servers, new_count) {
+    let message = match (old_count, new_count) {
         (0, 0) => "No MCP servers configured".to_string(),
         (0, n) => format!("Added {} MCP server(s)", n),
         (old, new) if old == new => format!("Updated MCP server configuration ({} server(s))", new),
@@ -1133,5 +1153,57 @@ mod tests {
         let mut config = serde_json::json!({});
         let err = set_mcp_servers_in_config_path(&mut config, &[], &servers("srv"));
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn http_slack_migration_does_not_retain_token_in_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "unrelated": true,
+                "mcpServers": {
+                    "slack": {
+                        "command": "npx",
+                        "args": [
+                            "-y",
+                            "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz",
+                            "--transport",
+                            "stdio"
+                        ],
+                        "env": { "SLACK_MCP_XOXP_TOKEN": "xoxp-must-disappear" }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let mcp = McpConfig::new(
+            vec!["mcpServers".to_string()],
+            serde_json::json!({}),
+            serde_json::json!({}),
+            false,
+        );
+
+        update_mcp_servers_in_config(
+            &path,
+            &mcp,
+            HashMap::from([(
+                "slack".to_string(),
+                serde_json::json!({
+                    "type": "http",
+                    "url": "http://172.16.100.102:13080/mcp"
+                }),
+            )]),
+        )
+        .await
+        .unwrap();
+
+        let saved = fs::read_to_string(&path).await.unwrap();
+        assert!(saved.contains("172.16.100.102:13080/mcp"));
+        assert!(!saved.contains("xoxp"));
+        assert!(!previous_version_backup_path(&path).exists());
     }
 }
