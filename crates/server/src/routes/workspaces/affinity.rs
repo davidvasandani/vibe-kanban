@@ -347,6 +347,66 @@ async fn transfer_codex_rollouts(
     transfer
 }
 
+async fn reverify_persisted_codex_rollouts(
+    deployment: &DeploymentImpl,
+    pool: &sqlx::SqlitePool,
+    operation_id: Uuid,
+    workspace_id: Uuid,
+    target_worker_node_id: Uuid,
+) -> Result<(), ApiError> {
+    let manifest_json = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT session_transfer_manifest_json FROM workspace_affinity_operations WHERE operation_id = ? AND workspace_id = ? AND status = 'claimed'",
+    )
+    .bind(operation_id)
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten()
+    .ok_or_else(|| {
+        ApiError::Conflict(
+            "Interrupted Codex migration has no persisted rollout manifest".into(),
+        )
+    })?;
+    let manifest: cluster_protocol::CodexRolloutManifest = serde_json::from_str(&manifest_json)
+        .map_err(|_| ApiError::Conflict("Persisted Codex rollout manifest is invalid".into()))?;
+    if manifest.operation_id != operation_id
+        || manifest.workspace_id != workspace_id
+        || manifest.target_worker_node_id != target_worker_node_id
+    {
+        return Err(ApiError::Conflict(
+            "Persisted Codex rollout manifest does not match the recovering migration".into(),
+        ));
+    }
+    let coordinator_id = deployment.cluster_config().coordinator_id.ok_or_else(|| {
+        ApiError::Conflict("Codex session recovery has no coordinator identity".into())
+    })?;
+    let client = deployment
+        .worker_client()
+        .ok_or_else(|| ApiError::Conflict("Codex session recovery client is unavailable".into()))?;
+    let verification = client
+        .verify_codex_rollouts(
+            target_worker_node_id,
+            &CodexRolloutVerifyRequest {
+                authority: transfer_authority(coordinator_id, target_worker_node_id, operation_id),
+                manifest: manifest.clone(),
+            },
+        )
+        .await
+        .map_err(|error| {
+            ApiError::Conflict(format!(
+                "Interrupted Codex migration could not reverify target rollout lineage: {error}"
+            ))
+        })?;
+    if verification.manifest_sha256 != manifest.manifest_sha256
+        || verification.verified_thread_ids.len() != manifest.entries.len()
+    {
+        return Err(ApiError::Conflict(
+            "Interrupted Codex migration target rollout verification is incomplete".into(),
+        ));
+    }
+    touch_operation(pool, operation_id).await
+}
+
 async fn replay_operation(
     pool: &sqlx::SqlitePool,
     operation_id: Uuid,
@@ -760,6 +820,17 @@ pub async fn update_workspace_affinity(
         return Err(ApiError::Conflict(
             "The current task is running; confirm stop, migrate, and restart".into(),
         ));
+    }
+
+    if resuming_operation_id.is_some() && config.executor == BaseCodingAgent::Codex {
+        reverify_persisted_codex_rollouts(
+            &deployment,
+            pool,
+            operation_id,
+            workspace.id,
+            selected.id,
+        )
+        .await?;
     }
 
     if resuming_operation_id.is_some()
