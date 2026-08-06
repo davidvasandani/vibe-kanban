@@ -52,4 +52,18 @@ that compensation rather than waiting for the lease watchdog.
 
 ## Pass 4
 
-Pending after the third set of fixes and focused verification.
+The fourth independent review reported no significant findings.
+
+## Acceptance follow-up
+
+After the clean pass, a manual acceptance cross-check found that the explicit
+age-based cleanup policy was documented but not yet wired. Transfer receipts
+and a bounded six-hour worker sweep were added: 24-hour partial cleanup always
+runs, while 30-day verified cleanup runs only when the worker has no active
+executions. Native/pre-existing Codex rollouts are never receipted merely for
+matching content, so cleanup considers only artifacts installed by Vibe
+Kanban. A fifth independent review covers this follow-up.
+
+## Pass 5
+
+Pending after cleanup verification.
