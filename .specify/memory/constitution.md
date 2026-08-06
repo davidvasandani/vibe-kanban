@@ -163,6 +163,12 @@ notification path, and concrete condition that reopens the decision. Dependency
 updates move the source pin, integrity record, tests, and documentation in the
 same reviewed change and fail closed rather than substituting another build.
 
+When a bundled entry points to an operator-hosted shared service instead of
+launching locally, the deployment remains responsible for that same immutable
+source and integrity contract. The catalog contains only the network endpoint
+and non-secret headers; upstream credentials stay at the supervised service and
+must never be copied into an agent's native configuration.
+
 ### XVII. Live capability state is confirmed and atomic
 Configuration on disk is not evidence that a running external agent adopted a
 change. Any feature that reports a live tool, connector, or protocol capability

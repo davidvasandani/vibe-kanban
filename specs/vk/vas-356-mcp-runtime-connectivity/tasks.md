@@ -61,4 +61,4 @@
 - [x] T021 [P] Update knowledge to establish settings-only definition ownership.
 - [x] T022 Run Nix parse/evaluation, focused invariants, and diff checks.
 - [x] T023 Run independent Codex review and address significant findings.
-- [ ] T024 Commit, publish, merge, and verify deployment.
+- [x] T024 Commit, publish, merge, and verify deployment.
