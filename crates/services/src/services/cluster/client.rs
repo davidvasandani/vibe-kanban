@@ -4,12 +4,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use cluster_protocol::{
     CancellationRequest, CancellationStatus, CodexRolloutArtifact, CodexRolloutManifest,
     CodexRolloutManifestRequest, CodexRolloutReadRequest, CodexRolloutStageRequest,
-    CodexRolloutStageResult, CodexRolloutVerification, CodexRolloutVerifyRequest,
-    DispatchAccepted, EventAcknowledgement, EventBatch, ExecutionQuiescenceRequest,
-    ExecutionQuiescenceStatus,
-    ExecutionDispatch, InteractionResponse, JobSummary, PreviewHttpRequest, PreviewHttpResponse,
-    QuarantineRequest, TerminalClose, TerminalCreateRequest, TerminalCreated, TerminalInput,
-    TerminalOutputBatch, TerminalResize,
+    CodexRolloutStageResult, CodexRolloutVerification, CodexRolloutVerifyRequest, DispatchAccepted,
+    EventAcknowledgement, EventBatch, ExecutionDispatch, ExecutionQuiescenceRequest,
+    ExecutionQuiescenceStatus, InteractionResponse, JobSummary, PreviewHttpRequest,
+    PreviewHttpResponse, QuarantineRequest, TerminalClose, TerminalCreateRequest, TerminalCreated,
+    TerminalInput, TerminalOutputBatch, TerminalResize,
 };
 use ed25519_dalek::{Signer, SigningKey};
 use futures::StreamExt;
@@ -65,6 +64,8 @@ const METRICS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// well under a megabyte in practice. The cap exists so a misbehaving worker
 /// cannot size the coordinator's heap, not to constrain honest replies.
 const MAX_METRICS_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+// One 32 MiB rollout encoded as base64 plus its small JSON envelope.
+const MAX_CODEX_ARTIFACT_RESPONSE_BYTES: usize = 44 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct WorkerHealth {
@@ -127,8 +128,17 @@ impl WorkerClient {
         worker_node_id: Uuid,
         request: &CodexRolloutReadRequest,
     ) -> Result<CodexRolloutArtifact, WorkerClientError> {
-        let path = format!("/v1/session-transfers/{}/artifact", request.manifest.operation_id);
-        self.post(worker_node_id, &path, request).await
+        let path = format!(
+            "/v1/session-transfers/{}/artifact",
+            request.manifest.operation_id
+        );
+        self.post_capped(
+            worker_node_id,
+            &path,
+            request,
+            MAX_CODEX_ARTIFACT_RESPONSE_BYTES,
+        )
+        .await
     }
 
     pub async fn stage_codex_rollout(
@@ -136,7 +146,10 @@ impl WorkerClient {
         worker_node_id: Uuid,
         request: &CodexRolloutStageRequest,
     ) -> Result<CodexRolloutStageResult, WorkerClientError> {
-        let path = format!("/v1/session-transfers/{}/stage", request.manifest.operation_id);
+        let path = format!(
+            "/v1/session-transfers/{}/stage",
+            request.manifest.operation_id
+        );
         self.post(worker_node_id, &path, request).await
     }
 
@@ -145,7 +158,10 @@ impl WorkerClient {
         worker_node_id: Uuid,
         request: &CodexRolloutVerifyRequest,
     ) -> Result<CodexRolloutVerification, WorkerClientError> {
-        let path = format!("/v1/session-transfers/{}/verify", request.manifest.operation_id);
+        let path = format!(
+            "/v1/session-transfers/{}/verify",
+            request.manifest.operation_id
+        );
         self.post(worker_node_id, &path, request).await
     }
 
@@ -428,6 +444,29 @@ impl WorkerClient {
             &body,
         );
         decode(request.send().await?).await
+    }
+
+    async fn post_capped<T: DeserializeOwned>(
+        &self,
+        worker_node_id: Uuid,
+        path: &str,
+        payload: &impl Serialize,
+        limit: usize,
+    ) -> Result<T, WorkerClientError> {
+        let endpoint = self.endpoint_for(worker_node_id).await?;
+        let body = serde_json::to_vec(payload).expect("protocol payload must serialize");
+        let request = self.signed(
+            self.http
+                .post(endpoint.join(path)?)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone()),
+            Method::POST,
+            path,
+            &body,
+        );
+        let body = capped_body(request.send().await?, limit).await?;
+        serde_json::from_slice(&body)
+            .map_err(|error| WorkerClientError::MalformedResponse(error.to_string()))
     }
 
     async fn endpoint_for(&self, worker_node_id: Uuid) -> Result<Url, WorkerClientError> {

@@ -14,19 +14,19 @@ use chrono::Utc;
 use cluster_protocol::{
     CancellationRequest, CodexRolloutArtifact, CodexRolloutManifestRequest,
     CodexRolloutReadRequest, CodexRolloutStageRequest, CodexRolloutStageResult,
-    CodexRolloutVerification, CodexRolloutVerifyRequest, DispatchAccepted, EventAcknowledgement, EventBatch, ExecutionDispatch,
-    ExecutionQuiescenceRequest, ExecutionQuiescenceStatus,
+    CodexRolloutVerification, CodexRolloutVerifyRequest, DispatchAccepted, EventAcknowledgement,
+    EventBatch, ExecutionDispatch, ExecutionQuiescenceRequest, ExecutionQuiescenceStatus,
     InteractionResponse, JobSummary, PROTOCOL_VERSION, PreviewHttpRequest, PreviewHttpResponse,
     QuarantineRequest, RequestAuthority, TerminalClose, TerminalCreateRequest, TerminalCreated,
     TerminalInput, TerminalOutputBatch, TerminalResize,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
+use executors::executors::codex::{codex_home, rollout_transfer::CodexRolloutStore};
 use node_metrics::{MetricsSampler, SampleBatch};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use executors::executors::codex::{codex_home, rollout_transfer::CodexRolloutStore};
 
 use crate::{
     WorkerConfig, cancellation,
@@ -121,12 +121,30 @@ fn build_router(state: WorkerApiState) -> Router {
     Router::new()
         .route("/v1/jobs", get(inventory))
         .route("/v1/metrics", get(metrics))
-        .route("/v1/session-transfers/{operation_id}/manifest", post(codex_manifest))
-        .route("/v1/session-transfers/{operation_id}/artifact", post(codex_artifact))
-        .route("/v1/session-transfers/{operation_id}/stage", post(codex_stage))
-        .route("/v1/session-transfers/{operation_id}/verify", post(codex_verify))
-        .route("/v1/session-transfers/{operation_id}/quiesce", post(quiesce_execution))
-        .route("/v1/session-transfers/{operation_id}/resume", post(resume_execution))
+        .route(
+            "/v1/session-transfers/{operation_id}/manifest",
+            post(codex_manifest),
+        )
+        .route(
+            "/v1/session-transfers/{operation_id}/artifact",
+            post(codex_artifact),
+        )
+        .route(
+            "/v1/session-transfers/{operation_id}/stage",
+            post(codex_stage),
+        )
+        .route(
+            "/v1/session-transfers/{operation_id}/verify",
+            post(codex_verify),
+        )
+        .route(
+            "/v1/session-transfers/{operation_id}/quiesce",
+            post(quiesce_execution),
+        )
+        .route(
+            "/v1/session-transfers/{operation_id}/resume",
+            post(resume_execution),
+        )
         .route("/v1/terminals", post(create_terminal))
         .route("/v1/terminals/{terminal_id}/output", get(terminal_output))
         .route("/v1/terminals/{terminal_id}/input", post(terminal_input))
@@ -160,12 +178,28 @@ async fn quiesce_execution(
 ) -> Result<Json<ExecutionQuiescenceStatus>, WorkerApiError> {
     validate_authority(&state, &request.authority).await?;
     validate_transfer_authority(&state, operation_id, &request.authority)?;
-    if request.operation_id != operation_id { return Err(WorkerApiError::Forbidden); }
+    if request.operation_id != operation_id {
+        return Err(WorkerApiError::Forbidden);
+    }
     #[cfg(unix)]
-    state.supervisor.set_quiesced(request.execution_id, request.workspace_id, operation_id, true).await?;
+    state
+        .supervisor
+        .set_quiesced(
+            request.execution_id,
+            request.workspace_id,
+            operation_id,
+            true,
+        )
+        .await?;
     #[cfg(not(unix))]
-    return Err(WorkerApiError::BadRequest("session transfer quiescence is unsupported on this worker".into()));
-    Ok(Json(ExecutionQuiescenceStatus { execution_id: request.execution_id, operation_id, quiesced: true }))
+    return Err(WorkerApiError::BadRequest(
+        "session transfer quiescence is unsupported on this worker".into(),
+    ));
+    Ok(Json(ExecutionQuiescenceStatus {
+        execution_id: request.execution_id,
+        operation_id,
+        quiesced: true,
+    }))
 }
 
 async fn resume_execution(
@@ -175,16 +209,32 @@ async fn resume_execution(
 ) -> Result<Json<ExecutionQuiescenceStatus>, WorkerApiError> {
     validate_authority(&state, &request.authority).await?;
     validate_transfer_authority(&state, operation_id, &request.authority)?;
-    if request.operation_id != operation_id { return Err(WorkerApiError::Forbidden); }
+    if request.operation_id != operation_id {
+        return Err(WorkerApiError::Forbidden);
+    }
     #[cfg(unix)]
-    state.supervisor.set_quiesced(request.execution_id, request.workspace_id, operation_id, false).await?;
+    state
+        .supervisor
+        .set_quiesced(
+            request.execution_id,
+            request.workspace_id,
+            operation_id,
+            false,
+        )
+        .await?;
     #[cfg(not(unix))]
-    return Err(WorkerApiError::BadRequest("session transfer quiescence is unsupported on this worker".into()));
-    Ok(Json(ExecutionQuiescenceStatus { execution_id: request.execution_id, operation_id, quiesced: false }))
+    return Err(WorkerApiError::BadRequest(
+        "session transfer quiescence is unsupported on this worker".into(),
+    ));
+    Ok(Json(ExecutionQuiescenceStatus {
+        execution_id: request.execution_id,
+        operation_id,
+        quiesced: false,
+    }))
 }
 
 fn validate_transfer_authority(
-    state: &WorkerApiState,
+    _state: &WorkerApiState,
     operation_id: Uuid,
     authority: &RequestAuthority,
 ) -> Result<(), WorkerApiError> {
@@ -205,10 +255,10 @@ async fn codex_manifest(
     validate_transfer_authority(&state, operation_id, &request.authority)?;
     if request.operation_id != operation_id
         || request.source_worker_node_id != state.worker_node_id
-        || !state.supervisor.authorizes_session_transfer(
-            request.source_execution_id,
-            request.workspace_id,
-        ).await
+        || !state
+            .supervisor
+            .authorizes_session_transfer(request.source_execution_id, request.workspace_id)
+            .await
     {
         return Err(WorkerApiError::Forbidden);
     }
@@ -235,6 +285,13 @@ async fn codex_artifact(
     validate_transfer_authority(&state, operation_id, &request.authority)?;
     if request.manifest.operation_id != operation_id
         || request.manifest.source_worker_node_id != state.worker_node_id
+        || !state
+            .supervisor
+            .authorizes_session_transfer(
+                request.manifest.source_execution_id,
+                request.manifest.workspace_id,
+            )
+            .await
     {
         return Err(WorkerApiError::Forbidden);
     }
@@ -710,6 +767,14 @@ mod tests {
         SigningKey::from_bytes(&[7_u8; 32])
     }
 
+    fn coordinator_id() -> Uuid {
+        Uuid::from_u128(7)
+    }
+
+    fn worker_id() -> Uuid {
+        Uuid::from_u128(8)
+    }
+
     /// The real route table with a hand-built state, so these cases test the
     /// production wiring rather than a parallel router assembled in the test.
     fn metrics_router(temp: &TempDir, sampler: Arc<MetricsSampler>) -> Router {
@@ -717,8 +782,8 @@ mod tests {
             supervisor: ExecutionSupervisor::new(
                 PathAuthority::new(temp.path()).expect("shared root"),
             ),
-            worker_node_id: Uuid::new_v4(),
-            coordinator_id: Uuid::new_v4(),
+            worker_node_id: worker_id(),
+            coordinator_id: coordinator_id(),
             coordinator_key: coordinator_key().verifying_key(),
             seen_nonces: Arc::new(Mutex::new(HashMap::new())),
             terminals: TerminalService::new(PathAuthority::new(temp.path()).expect("shared root")),
@@ -746,6 +811,26 @@ mod tests {
                 BASE64_STANDARD.encode(signature.to_bytes()),
             )
             .body(Body::empty())
+            .expect("request builds")
+    }
+
+    fn signed_post<T: Serialize>(request_target: &str, payload: &T) -> Request<Body> {
+        let body = serde_json::to_vec(payload).unwrap();
+        let timestamp = Utc::now().timestamp();
+        let digest = BASE64_STANDARD.encode(Sha256::digest(&body));
+        let message = format!("{timestamp}.POST.{request_target}.{digest}");
+        let signature = coordinator_key().sign(message.as_bytes());
+        Request::builder()
+            .method("POST")
+            .uri(request_target)
+            .header("content-type", "application/json")
+            .header(TIMESTAMP_HEADER, timestamp.to_string())
+            .header(CONTENT_DIGEST_HEADER, digest)
+            .header(
+                SIGNATURE_HEADER,
+                BASE64_STANDARD.encode(signature.to_bytes()),
+            )
+            .body(Body::from(body))
             .expect("request builds")
     }
 
@@ -800,6 +885,51 @@ mod tests {
         let stale = Utc::now().timestamp() - (MAX_TIMESTAMP_DRIFT_SECONDS + 5);
         let request = signed_get("/v1/metrics?after=0", "/v1/metrics?after=0", stale);
         assert_eq!(status_of(router, request).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn transfer_routes_reject_operation_and_target_substitution() {
+        let temp = TempDir::new().unwrap();
+        let router = metrics_router(
+            &temp,
+            Arc::new(MetricsSampler::new(SamplerConfig::default())),
+        );
+        let operation_id = Uuid::new_v4();
+        let other_operation_id = Uuid::new_v4();
+        let manifest = cluster_protocol::CodexRolloutManifest {
+            operation_id,
+            workspace_id: Uuid::new_v4(),
+            source_execution_id: Uuid::new_v4(),
+            source_worker_node_id: Uuid::new_v4(),
+            target_worker_node_id: Uuid::new_v4(),
+            leaf_thread_id: Uuid::new_v4(),
+            entries: Vec::new(),
+            manifest_sha256: String::new(),
+        };
+        let mut payload = CodexRolloutVerifyRequest {
+            authority: RequestAuthority {
+                protocol_version: PROTOCOL_VERSION,
+                coordinator_id: coordinator_id(),
+                worker_node_id: worker_id(),
+                correlation_id: operation_id,
+                issued_at: Utc::now(),
+                nonce: Uuid::new_v4().to_string(),
+            },
+            manifest: manifest.clone(),
+        };
+        let wrong_operation_path = format!("/v1/session-transfers/{other_operation_id}/verify");
+        assert_eq!(
+            status_of(router.clone(), signed_post(&wrong_operation_path, &payload)).await,
+            StatusCode::BAD_REQUEST
+        );
+
+        payload.authority.nonce = Uuid::new_v4().to_string();
+        payload.authority.issued_at = Utc::now();
+        let correct_path = format!("/v1/session-transfers/{operation_id}/verify");
+        assert_eq!(
+            status_of(router, signed_post(&correct_path, &payload)).await,
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[cfg(target_os = "linux")]
