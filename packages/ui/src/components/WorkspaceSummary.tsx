@@ -92,9 +92,9 @@ export function WorkspaceSummary({
     latestProcessStatus === 'interrupted' ||
     latestProcessStatus === 'indeterminate';
   const affinityLabel = serverAffinity
-    ? serverAffinity.worker_hostname ??
+    ? (serverAffinity.worker_hostname ??
       serverAffinity.requested_worker_hostname ??
-      t(`workspaces.serverAffinity.${serverAffinity.kind}`)
+      t(`workspaces.serverAffinity.${serverAffinity.kind}`))
     : null;
 
   const handleOpenCommandBar = (e: React.MouseEvent) => {
