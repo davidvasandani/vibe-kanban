@@ -13,13 +13,15 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
 use cluster_protocol::{
     DispatchAccepted, EventBatch, ExecutionDispatch, ExecutionEventPayload, JobState, JobSummary,
-    TerminalEvidence, TerminalState,
+    McpConfigSnapshot, TerminalEvidence, TerminalState,
 };
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use executors::{
-    actions::{Executable, ExecutorAction},
+    actions::{Executable, ExecutorAction, ExecutorActionType},
     env::{ExecutionEnv, RepoContext},
-    profile::ExecutorProfile,
+    executors::{BaseCodingAgent, StandardCodingAgentExecutor},
+    mcp_config::write_coding_agent_mcp_servers_to_path,
+    profile::{ExecutorConfig, ExecutorProfile},
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -54,6 +56,18 @@ enum WorkerAction {
     Executor(ExecutorAction),
 }
 
+fn executor_config_for_action(action: &WorkerAction) -> Option<&ExecutorConfig> {
+    let WorkerAction::Executor(action) = action else {
+        return None;
+    };
+    match action.typ() {
+        ExecutorActionType::CodingAgentInitialRequest(request) => Some(&request.executor_config),
+        ExecutorActionType::CodingAgentFollowUpRequest(request) => Some(&request.executor_config),
+        ExecutorActionType::ReviewRequest(request) => Some(&request.executor_config),
+        ExecutorActionType::ScriptRequest(_) => None,
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ExecutionError {
     #[error("execution {execution_id} was already dispatched with a different request digest")]
@@ -62,6 +76,10 @@ pub enum ExecutionError {
     InvalidAction(#[from] serde_json::Error),
     #[error("execution action program must not be empty")]
     EmptyProgram,
+    #[error("MCP configuration snapshot is invalid for executor {executor}")]
+    InvalidMcpSnapshot { executor: String },
+    #[error("failed to materialize MCP configuration for executor {executor}")]
+    McpMaterialization { executor: String },
     #[error("working directory resolves outside its authorized workspace")]
     WorkingDirectoryOutsideWorkspace,
     #[error(transparent)]
@@ -100,6 +118,49 @@ pub struct WorkerJob {
     acknowledged_sequence: Mutex<u64>,
     recovery_store: Option<RecoveryStore>,
     interactions: Arc<InteractionBroker>,
+}
+
+struct PreparedMcpConfig {
+    scoped_home: PathBuf,
+}
+
+impl Drop for PreparedMcpConfig {
+    fn drop(&mut self) {
+        let execution_root = self.scoped_home.parent().unwrap_or(&self.scoped_home);
+        let _ = std::fs::remove_dir_all(execution_root);
+    }
+}
+
+fn prepare_scoped_codex_home(source_home: &Path, scoped_home: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let source_home = match source_home.canonicalize() {
+        Ok(source_home) => Some(source_home),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(execution_root) = scoped_home.parent() {
+        match std::fs::remove_dir_all(execution_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    std::fs::create_dir_all(scoped_home)?;
+    std::fs::set_permissions(scoped_home, std::fs::Permissions::from_mode(0o700))?;
+    let Some(source_home) = source_home else {
+        return Ok(());
+    };
+    let entries = std::fs::read_dir(source_home)?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "config.toml" || name == "config.toml.bak" {
+            continue;
+        }
+        symlink(entry.path(), scoped_home.join(name))?;
+    }
+    Ok(())
 }
 
 struct ExecutionAdmission(Arc<AtomicU32>);
@@ -231,6 +292,18 @@ impl ExecutionSupervisor {
             .clone()
             .map(serde_json::from_value)
             .transpose()?;
+        let prepared_mcp = match &dispatch.mcp_config_snapshot {
+            Some(snapshot) => Some(
+                self.prepare_mcp_snapshot(
+                    dispatch.execution_id,
+                    &action,
+                    executor_profile.as_ref(),
+                    snapshot,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         if matches!(&action, WorkerAction::Command(action) if action.program.trim().is_empty()) {
             return Err(ExecutionError::EmptyProgram);
         }
@@ -267,6 +340,7 @@ impl ExecutionSupervisor {
             working_directory,
             dispatch.environment,
             executor_profile,
+            prepared_mcp,
             dispatch.timeout_seconds,
         ));
         Ok(DispatchAccepted {
@@ -276,6 +350,76 @@ impl ExecutionSupervisor {
             state: JobState::Accepted,
             last_sequence: 1,
         })
+    }
+
+    async fn prepare_mcp_snapshot(
+        &self,
+        execution_id: Uuid,
+        action: &WorkerAction,
+        profile: Option<&ExecutorProfile>,
+        snapshot: &McpConfigSnapshot,
+    ) -> Result<PreparedMcpConfig, ExecutionError> {
+        snapshot
+            .validate_size()
+            .map_err(|_| ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            })?;
+        let config = executor_config_for_action(action).ok_or_else(|| {
+            ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            }
+        })?;
+        if snapshot.executor != config.executor.to_string() {
+            return Err(ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            });
+        }
+        if config.executor != BaseCodingAgent::Codex {
+            return Err(ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            });
+        }
+        let variant = config.variant.as_deref().unwrap_or("DEFAULT");
+        let agent = profile
+            .and_then(|profile| profile.get_variant(variant))
+            .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            })?;
+        let source_config =
+            agent
+                .default_mcp_config_path()
+                .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                    executor: snapshot.executor.clone(),
+                })?;
+        let source_home =
+            source_config
+                .parent()
+                .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                    executor: snapshot.executor.clone(),
+                })?;
+        let scoped_home = std::env::temp_dir()
+            .join("vibe-kanban")
+            .join("mcp-config")
+            .join(execution_id.to_string())
+            .join("codex");
+        prepare_scoped_codex_home(source_home, &scoped_home).map_err(|_| {
+            ExecutionError::McpMaterialization {
+                executor: snapshot.executor.clone(),
+            }
+        })?;
+        let prepared = PreparedMcpConfig { scoped_home };
+        let servers = snapshot.servers.clone().into_iter().collect();
+        write_coding_agent_mcp_servers_to_path(
+            agent,
+            &source_config,
+            &prepared.scoped_home.join("config.toml"),
+            &servers,
+        )
+        .await
+        .map_err(|_| ExecutionError::McpMaterialization {
+            executor: snapshot.executor.clone(),
+        })?;
+        Ok(prepared)
     }
 
     pub async fn events(
@@ -465,6 +609,7 @@ async fn run_job(
     working_directory: PathBuf,
     mut environment: std::collections::BTreeMap<String, String>,
     executor_profile: Option<ExecutorProfile>,
+    prepared_mcp: Option<PreparedMcpConfig>,
     timeout_seconds: Option<u64>,
 ) {
     set_state(&job, JobState::Starting, ExecutionEventPayload::Starting).await;
@@ -474,6 +619,12 @@ async fn run_job(
         .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
     if let Some(path) = utils::shell::append_cli_tools_to_path(&inherited_path) {
         environment.insert("PATH".into(), path.to_string_lossy().into_owned());
+    }
+    if let Some(prepared) = &prepared_mcp {
+        environment.insert(
+            "CODEX_HOME".into(),
+            prepared.scoped_home.to_string_lossy().into_owned(),
+        );
     }
     let spawned = match action {
         WorkerAction::Command(action) => {
@@ -803,6 +954,7 @@ mod tests {
             working_directory: ".".into(),
             executor_profile: "fixture".into(),
             executor_profile_config: None,
+            mcp_config_snapshot: None,
             action: json!({"program": "/bin/sh", "args": ["-c", script]}),
             environment: BTreeMap::new(),
             run_reason: "test".into(),
@@ -868,6 +1020,51 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event.payload, ExecutionEventPayload::Stderr { .. }))
         );
+    }
+
+    #[test]
+    fn scoped_codex_homes_share_runtime_assets_but_not_config_files() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let first = temp.path().join("scoped").join("first").join("codex");
+        let second = temp.path().join("scoped").join("second").join("codex");
+        fs::create_dir_all(source.join("skills")).unwrap();
+        fs::write(source.join("auth.json"), "credential").unwrap();
+        fs::write(source.join("config.toml"), "global = true").unwrap();
+
+        prepare_scoped_codex_home(&source, &first).unwrap();
+        prepare_scoped_codex_home(&source, &second).unwrap();
+        fs::write(first.join("config.toml"), "snapshot = 'one'").unwrap();
+        fs::write(second.join("config.toml"), "snapshot = 'two'").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(first.join("auth.json")).unwrap(),
+            "credential"
+        );
+        assert!(first.join("skills").is_dir());
+        assert_eq!(
+            fs::read_to_string(first.join("config.toml")).unwrap(),
+            "snapshot = 'one'"
+        );
+        assert_eq!(
+            fs::read_to_string(second.join("config.toml")).unwrap(),
+            "snapshot = 'two'"
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("config.toml")).unwrap(),
+            "global = true"
+        );
+    }
+
+    #[test]
+    fn scoped_codex_home_can_start_without_a_global_home() {
+        let temp = TempDir::new().unwrap();
+        let missing_source = temp.path().join("missing");
+        let scoped = temp.path().join("scoped").join("codex");
+
+        prepare_scoped_codex_home(&missing_source, &scoped).unwrap();
+
+        assert!(scoped.is_dir());
     }
 
     #[tokio::test]

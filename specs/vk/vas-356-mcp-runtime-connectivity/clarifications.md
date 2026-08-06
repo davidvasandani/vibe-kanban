@@ -14,6 +14,11 @@
    and `VIBE_BACKEND_URL`.
 5. **Is a Codex version change needed?** No. Direct initialization established
    network/address failures, not a reload-protocol or version failure.
+6. **Replace or merge worker MCP definitions?** Replace the selected executor's
+   MCP section with the coordinator snapshot. The coordinator is authoritative;
+   merging would preserve stale deployment-local definitions.
+7. **What payload bound applies?** The serialized MCP snapshot is capped at 1
+   MiB, well below the signed request ceiling and far above expected config size.
 
 ## Open questions
 

@@ -122,12 +122,35 @@ pub struct ExecutionDispatch {
     /// field existed, keeps its previous behaviour instead of failing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor_profile_config: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_config_snapshot: Option<McpConfigSnapshot>,
     pub action: Value,
     pub environment: BTreeMap<String, String>,
     pub run_reason: String,
     pub timeout_seconds: Option<u64>,
     pub persistence: PersistencePolicy,
     pub request_digest: String,
+}
+
+pub const MAX_MCP_CONFIG_SNAPSHOT_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpConfigSnapshot {
+    pub executor: String,
+    pub servers: BTreeMap<String, Value>,
+}
+
+impl McpConfigSnapshot {
+    pub fn validate_size(&self) -> Result<(), serde_json::Error> {
+        let bytes = serde_json::to_vec(self)?;
+        if bytes.len() > MAX_MCP_CONFIG_SNAPSHOT_BYTES {
+            return Err(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "MCP configuration snapshot exceeds 1 MiB",
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -423,6 +446,7 @@ mod tests {
             working_directory: "/srv/vibe-kanban-shared/workspaces/w/repo".into(),
             executor_profile: "codex".into(),
             executor_profile_config: Some(serde_json::json!({"PLAN": {"CODEX": {}}})),
+            mcp_config_snapshot: None,
             action: serde_json::json!({"type": "coding_agent"}),
             environment: BTreeMap::from([("SAFE".into(), "value".into())]),
             run_reason: "coding_agent".into(),
@@ -459,6 +483,33 @@ mod tests {
 
         let decoded: ExecutionDispatch = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded.executor_profile_config, None);
+        assert_eq!(decoded.mcp_config_snapshot, None);
+    }
+
+    #[test]
+    fn mcp_snapshot_round_trips_and_enforces_bound() {
+        let snapshot = McpConfigSnapshot {
+            executor: "CODEX".into(),
+            servers: BTreeMap::from([(
+                "firecrawl-browser".into(),
+                serde_json::json!({"headers": {"Authorization": "Bearer secret"}}),
+            )]),
+        };
+        snapshot.validate_size().unwrap();
+        assert_eq!(
+            serde_json::from_value::<McpConfigSnapshot>(serde_json::to_value(&snapshot).unwrap())
+                .unwrap(),
+            snapshot
+        );
+
+        let oversized = McpConfigSnapshot {
+            executor: "CODEX".into(),
+            servers: BTreeMap::from([(
+                "large".into(),
+                serde_json::json!({"env": {"VALUE": "x".repeat(MAX_MCP_CONFIG_SNAPSHOT_BYTES)}}),
+            )]),
+        };
+        assert!(oversized.validate_size().is_err());
     }
 
     #[test]
