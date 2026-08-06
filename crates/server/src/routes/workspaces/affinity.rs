@@ -688,7 +688,15 @@ pub async fn update_workspace_affinity(
         stale,
     )) = sqlx::query_as::<
         _,
-        (Uuid, Option<Uuid>, bool, bool, Option<Uuid>, Option<Uuid>, bool),
+        (
+            Uuid,
+            Option<Uuid>,
+            bool,
+            bool,
+            Option<Uuid>,
+            Option<Uuid>,
+            bool,
+        ),
     >(
         r#"SELECT operation_id, requested_worker_node_id, run_on_coordinator,
                   restart_running, source_execution_id, selected_worker_node_id,

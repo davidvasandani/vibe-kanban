@@ -321,6 +321,23 @@ environment, but it must not add, remove, or rewrite native agent MCP tables at
 service startup. Remote workers consume settings-owned definitions through the
 authenticated execution snapshot rather than reconstructing them locally.
 
+### XXV. Executor continuation artifacts move by manifest, never by home copy
+An executor home mixes immutable continuation artifacts with mutable databases,
+credentials, configuration, caches, and logs. Cross-node continuation transfer
+MUST select only artifacts required for the named continuation, bind them to an
+operation manifest, and verify identity, size, digest, regular-file type,
+permissions, ownership, and structural containment before stopping the source
+or changing affinity. Copying the complete executor home is prohibited.
+
+Transfer completion is durable positive evidence, never path existence. Retries
+reuse identical verified content and reject conflicts rather than overwriting.
+Missing, corrupt, oversized, unauthorized, indeterminate, or partial lineage
+leaves source execution and placement unchanged. Readers, writers, and cleaners
+never follow symlinks, accept caller absolute paths, or log contents; all byte,
+count, depth, and time dimensions are bounded. Partials are operation-scoped,
+and verified artifacts have age-based retention that protects every active or
+recoverable reference.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
