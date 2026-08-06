@@ -135,7 +135,7 @@ may run in parallel within their layer.
 
 ## Phase 9: Review and knowledge
 
-- [ ] T028 Run an independent Codex review of the complete diff, address every
+- [x] T028 Run an independent Codex review of the complete diff, address every
   confirmed significant finding, rerun impacted verification, and repeat until
   clean; record it in `specs/vk/c8a9-transfer-codex-r/review.md` (depends T027).
 - [ ] T029 Distill reusable rollout-transfer and pre-lifecycle evidence lessons
