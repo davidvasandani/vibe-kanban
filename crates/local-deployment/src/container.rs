@@ -3156,13 +3156,11 @@ impl ContainerService for LocalContainerService {
         // same tool always wins over an app-installed one. PATH is a reserved
         // env name (org vars can't set it), but base the merge on any PATH
         // already in the env so this stays correct if that ever changes.
-        let cli_tools_bin = services::services::cli_tools::cli_tools_bin_dir();
-        if cli_tools_bin.is_dir() {
-            let inherited = env
-                .get("PATH")
-                .map(std::ffi::OsString::from)
-                .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
-            let merged = utils::shell::merge_paths(&inherited, cli_tools_bin.as_os_str());
+        let inherited = env
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+        if let Some(merged) = utils::shell::append_cli_tools_to_path(&inherited) {
             env.insert("PATH", merged.to_string_lossy().into_owned());
         }
 

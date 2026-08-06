@@ -463,11 +463,18 @@ async fn run_job(
     job: Arc<WorkerJob>,
     action: WorkerAction,
     working_directory: PathBuf,
-    environment: std::collections::BTreeMap<String, String>,
+    mut environment: std::collections::BTreeMap<String, String>,
     executor_profile: Option<ExecutorProfile>,
     timeout_seconds: Option<u64>,
 ) {
     set_state(&job, JobState::Starting, ExecutionEventPayload::Starting).await;
+    let inherited_path = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+    if let Some(path) = utils::shell::append_cli_tools_to_path(&inherited_path) {
+        environment.insert("PATH".into(), path.to_string_lossy().into_owned());
+    }
     let spawned = match action {
         WorkerAction::Command(action) => {
             let mut command = Command::new(action.program);
@@ -861,6 +868,33 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event.payload, ExecutionEventPayload::Stderr { .. }))
         );
+    }
+
+    #[tokio::test]
+    async fn raw_command_preserves_dispatched_path() {
+        let (_temp, supervisor, workspace) = fixture();
+        let mut request = dispatch(&workspace, "path", "printf %s \"$PATH\"");
+        request
+            .environment
+            .insert("PATH".into(), "/fixture/bin".into());
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        assert_eq!(summary.state, JobState::Completed);
+
+        let batch = supervisor.events(execution_id, 0).await.unwrap();
+        let output = batch
+            .events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                ExecutionEventPayload::Stdout { data_base64 } => {
+                    BASE64_STANDARD.decode(data_base64).ok()
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(String::from_utf8_lossy(&output).starts_with("/fixture/bin"));
     }
 
     #[tokio::test]
