@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use axum::{
     Json, Router,
@@ -100,6 +104,9 @@ pub async fn router(
     let codex_rollouts = codex_home()
         .and_then(|home| CodexRolloutStore::new(home).ok())
         .map(Arc::new);
+    if let Some(store) = codex_rollouts.clone() {
+        spawn_rollout_cleanup(store, supervisor.clone());
+    }
     let state = WorkerApiState {
         supervisor,
         worker_node_id: config.worker_node_id,
@@ -112,6 +119,37 @@ pub async fn router(
         codex_rollouts,
     };
     Ok(build_router(state))
+}
+
+fn spawn_rollout_cleanup(store: Arc<CodexRolloutStore>, supervisor: ExecutionSupervisor) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(6 * 60 * 60));
+        loop {
+            interval.tick().await;
+            let allow_verified_removal = supervisor.active_execution_count().await == 0;
+            let store = store.clone();
+            match tokio::task::spawn_blocking(move || {
+                store.cleanup_expired(SystemTime::now(), allow_verified_removal)
+            })
+            .await
+            {
+                Ok(Ok(result)) if result.partials_removed + result.verified_removed > 0 => {
+                    tracing::info!(
+                        partials_removed = result.partials_removed,
+                        verified_removed = result.verified_removed,
+                        "Cleaned expired Codex transfer artifacts"
+                    );
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!("Codex transfer cleanup failed: {error}");
+                }
+                Err(error) => {
+                    tracing::warn!("Codex transfer cleanup task failed: {error}");
+                }
+            }
+        }
+    });
 }
 
 /// Route table and middleware stack, split out so tests exercise the exact

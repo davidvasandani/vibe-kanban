@@ -3,6 +3,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::{Component, Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -11,12 +12,16 @@ use cluster_protocol::{
     CodexRolloutArtifact, CodexRolloutManifest, CodexRolloutManifestEntry, CodexRolloutStageResult,
     CodexRolloutVerification,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
 const MAX_METADATA_LINE_BYTES: u64 = 1024 * 1024;
+const PARTIAL_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+const VERIFIED_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const MAX_CLEANUP_FILES: usize = 100;
+const RECEIPT_DIR: &str = ".vibe-kanban-transfers";
 
 #[derive(Debug, Error)]
 pub enum RolloutTransferError {
@@ -67,9 +72,24 @@ struct CanonicalMeta {
     parent_thread_id: Option<Uuid>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct TransferReceipt {
+    thread_id: Uuid,
+    relative_path: String,
+    sha256: String,
+    last_needed_unix_seconds: u64,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RolloutCleanupResult {
+    pub partials_removed: usize,
+    pub verified_removed: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct CodexRolloutStore {
     sessions_root: PathBuf,
+    receipts_root: PathBuf,
 }
 
 impl CodexRolloutStore {
@@ -79,7 +99,13 @@ impl CodexRolloutStore {
         let sessions_root = sessions
             .canonicalize()
             .map_err(|_| RolloutTransferError::SessionsUnavailable)?;
-        Ok(Self { sessions_root })
+        let receipts_root = sessions_root.join(RECEIPT_DIR);
+        fs::create_dir_all(&receipts_root)?;
+        set_private_directory_permissions(&receipts_root)?;
+        Ok(Self {
+            sessions_root,
+            receipts_root,
+        })
     }
 
     pub fn resolve_manifest(
@@ -231,6 +257,9 @@ impl CodexRolloutStore {
         if destination.exists() {
             let digest = sha256_file(&destination, CODEX_ROLLOUT_MAX_FILE_BYTES)?;
             if fs::metadata(&destination)?.len() == entry.size_bytes && digest == entry.sha256 {
+                if self.receipt_path(entry.thread_id).is_file() {
+                    self.write_receipt(entry)?;
+                }
                 return Ok(CodexRolloutStageResult {
                     thread_id: entry.thread_id,
                     reused: true,
@@ -280,6 +309,7 @@ impl CodexRolloutStore {
             let _ = fs::remove_file(&tmp);
             return Err(error);
         }
+        self.write_receipt(entry)?;
         Ok(CodexRolloutStageResult {
             thread_id: entry.thread_id,
             reused: false,
@@ -309,6 +339,118 @@ impl CodexRolloutStore {
                 .map(|entry| entry.thread_id)
                 .collect(),
         })
+    }
+
+    pub fn cleanup_expired(
+        &self,
+        now: SystemTime,
+        allow_verified_removal: bool,
+    ) -> Result<RolloutCleanupResult, RolloutTransferError> {
+        let mut result = RolloutCleanupResult::default();
+        let mut stack = vec![self.sessions_root.clone()];
+        while let Some(directory) = stack.pop() {
+            for entry in fs::read_dir(directory)? {
+                if result.partials_removed >= MAX_CLEANUP_FILES {
+                    break;
+                }
+                let entry = entry?;
+                let file_type = entry.file_type()?;
+                if file_type.is_symlink() {
+                    continue;
+                }
+                if file_type.is_dir() {
+                    if entry.path() != self.receipts_root {
+                        stack.push(entry.path());
+                    }
+                    continue;
+                }
+                if !file_type.is_file()
+                    || !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".vk-transfer-")
+                    || !entry.file_name().to_string_lossy().ends_with(".partial")
+                {
+                    continue;
+                }
+                let modified = entry.metadata()?.modified()?;
+                if now.duration_since(modified).unwrap_or_default() >= PARTIAL_RETENTION {
+                    fs::remove_file(entry.path())?;
+                    result.partials_removed += 1;
+                }
+            }
+        }
+
+        for entry in fs::read_dir(&self.receipts_root)?.take(MAX_CLEANUP_FILES) {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') && name.ends_with(".partial") {
+                let modified = entry.metadata()?.modified()?;
+                if now.duration_since(modified).unwrap_or_default() >= PARTIAL_RETENTION {
+                    fs::remove_file(entry.path())?;
+                    result.partials_removed += 1;
+                }
+                continue;
+            }
+            if !allow_verified_removal {
+                continue;
+            }
+            let receipt: TransferReceipt = match serde_json::from_reader(File::open(entry.path())?)
+            {
+                Ok(receipt) => receipt,
+                Err(_) => continue,
+            };
+            let last_needed = UNIX_EPOCH + Duration::from_secs(receipt.last_needed_unix_seconds);
+            if now.duration_since(last_needed).unwrap_or_default() < VERIFIED_RETENTION {
+                continue;
+            }
+            let rollout = match self.safe_existing_path(&receipt.relative_path) {
+                Ok(path) => path,
+                Err(_) => continue,
+            };
+            if sha256_file(&rollout, CODEX_ROLLOUT_MAX_FILE_BYTES)? != receipt.sha256 {
+                continue;
+            }
+            fs::remove_file(rollout)?;
+            fs::remove_file(entry.path())?;
+            result.verified_removed += 1;
+        }
+        Ok(result)
+    }
+
+    fn receipt_path(&self, thread_id: Uuid) -> PathBuf {
+        self.receipts_root.join(format!("{thread_id}.json"))
+    }
+
+    fn write_receipt(&self, entry: &CodexRolloutManifestEntry) -> Result<(), RolloutTransferError> {
+        let receipt = TransferReceipt {
+            thread_id: entry.thread_id,
+            relative_path: entry.relative_path.clone(),
+            sha256: entry.sha256.clone(),
+            last_needed_unix_seconds: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        let destination = self.receipt_path(entry.thread_id);
+        let temporary =
+            self.receipts_root
+                .join(format!(".{}-{}.partial", entry.thread_id, Uuid::new_v4()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        set_private_permissions(&file)?;
+        serde_json::to_writer(&mut file, &receipt)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        file.sync_all()?;
+        fs::rename(&temporary, destination)?;
+        Ok(())
     }
 
     fn index_rollouts(&self) -> Result<HashMap<Uuid, PathBuf>, RolloutTransferError> {
@@ -539,8 +681,17 @@ fn set_private_permissions(file: &File) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     file.set_permissions(fs::Permissions::from_mode(0o600))
 }
+#[cfg(unix)]
+fn set_private_directory_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
 #[cfg(not(unix))]
 fn set_private_permissions(_file: &File) -> std::io::Result<()> {
+    Ok(())
+}
+#[cfg(not(unix))]
+fn set_private_directory_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -622,6 +773,37 @@ mod tests {
             vec![parent, leaf]
         );
         assert!(!stale_partial.exists());
+
+        let abandoned_partial = first_destination
+            .parent()
+            .unwrap()
+            .join(".vk-transfer-abandoned.partial");
+        fs::write(&abandoned_partial, "partial").unwrap();
+        let after_partial_retention =
+            SystemTime::now() + PARTIAL_RETENTION + Duration::from_secs(1);
+        let cleanup = target_store
+            .cleanup_expired(after_partial_retention, false)
+            .unwrap();
+        assert_eq!(cleanup.partials_removed, 1);
+        assert_eq!(cleanup.verified_removed, 0);
+
+        let after_verified_retention =
+            SystemTime::now() + VERIFIED_RETENTION + Duration::from_secs(1);
+        assert_eq!(
+            target_store
+                .cleanup_expired(after_verified_retention, false)
+                .unwrap()
+                .verified_removed,
+            0
+        );
+        assert_eq!(
+            target_store
+                .cleanup_expired(after_verified_retention, true)
+                .unwrap()
+                .verified_removed,
+            2
+        );
+        assert!(!first_destination.exists());
     }
 
     #[test]
