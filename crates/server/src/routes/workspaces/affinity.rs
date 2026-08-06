@@ -912,7 +912,30 @@ pub async fn update_workspace_affinity(
         let stopped_execution_id = if changes_effective_target
             && let Some(process) = running.first()
         {
-            mark_source_stop_started(pool, operation_id).await?;
+            if let Err(error) = mark_source_stop_started(pool, operation_id).await {
+                if config.executor == BaseCodingAgent::Codex
+                    && let (Some(source_worker), Some(coordinator_id), Some(client)) = (
+                        claimed_placement.worker_node_id,
+                        deployment.cluster_config().coordinator_id,
+                        deployment.worker_client(),
+                    )
+                {
+                    let resume = ExecutionQuiescenceRequest {
+                        authority: transfer_authority(
+                            coordinator_id,
+                            source_worker,
+                            operation_id,
+                        ),
+                        operation_id,
+                        execution_id: process.id,
+                        workspace_id: workspace.id,
+                    };
+                    let _ = client
+                        .set_execution_quiesced(source_worker, &resume, false)
+                        .await;
+                }
+                return Err(error);
+            }
             if let Err(error) = deployment
                 .container()
                 .stop_execution(process, ExecutionProcessStatus::Killed)

@@ -22,4 +22,14 @@ The review reported three P1 findings:
 
 ## Pass 2
 
-Pending after fixes and focused verification.
+The second review reported one P1 finding:
+
+1. **Confirmed:** after successful target verification, failure of the durable
+   `source_stop_started` write could exit before cancellation while leaving the
+   source quiesced. Fixed by explicitly resuming the source on that boundary;
+   the subsequent cancellation-error path already performs the same
+   compensation.
+
+## Pass 3
+
+Pending after the second fix and focused verification.
