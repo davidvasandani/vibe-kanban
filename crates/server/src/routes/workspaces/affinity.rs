@@ -726,7 +726,20 @@ pub async fn update_workspace_affinity(
         ));
     }
 
-    if resuming_operation_id.is_some() && config.executor == BaseCodingAgent::Codex {
+    let transfer_was_verified = if resuming_operation_id.is_some()
+        && config.executor == BaseCodingAgent::Codex
+    {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT session_transfer_verified_at IS NOT NULL FROM workspace_affinity_operations WHERE operation_id = ? AND status = 'claimed'",
+        )
+        .bind(operation_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(false)
+    } else {
+        false
+    };
+    if transfer_was_verified {
         reverify_persisted_codex_rollouts(
             &deployment,
             pool,
