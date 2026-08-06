@@ -21,8 +21,8 @@ use executors::{
         SharedMcpProfileWriteOutcome, SharedMcpProfileWriteStatus, SharedMcpReadResponse,
         SharedMcpTestRequest, SharedMcpTestTarget, SharedMcpWriteRequest, SharedMcpWriteResponse,
         SharedMcpWriteStatus, canonical_definition, load_native_snapshots, load_shared_mcp_config,
-        plan_servers_for_executor, reconcile_snapshots, validate_server_identifiers,
-        validate_write_request,
+        persist_display_labels, plan_servers_for_executor, validate_server_identifiers,
+        validate_write_request_against_snapshots,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -415,13 +415,14 @@ async fn update_shared_mcp_servers(
     if let Err(message) = hydrate_gateway_capabilities(&mut payload, &snapshots) {
         return Ok(ResponseJson(ApiResponse::error(&message)));
     }
-    if let Err(message) = validate_write_request(&payload) {
+    if let Err(message) = validate_write_request_against_snapshots(&payload, &snapshots) {
         return Ok(ResponseJson(ApiResponse::error(&message)));
     }
-
     let mut outcomes = Vec::new();
     let mut any_success = false;
     let mut any_failed = false;
+    let mut any_native_changes = false;
+    let mut successfully_written_identifiers = std::collections::HashSet::new();
 
     for snapshot in &snapshots {
         let Ok((planned_servers, affected_servers)) =
@@ -442,6 +443,7 @@ async fn update_shared_mcp_servers(
             });
             continue;
         }
+        any_native_changes = true;
 
         let Some(config_path) = snapshot.config_path.as_ref() else {
             any_failed = true;
@@ -460,6 +462,7 @@ async fn update_shared_mcp_servers(
         {
             Ok(message) => {
                 any_success = true;
+                successfully_written_identifiers.extend(affected_servers.iter().cloned());
                 outcomes.push(SharedMcpProfileWriteOutcome {
                     executor: snapshot.profile.executor,
                     config_path: snapshot.profile.config_path.clone(),
@@ -483,7 +486,30 @@ async fn update_shared_mcp_servers(
         }
     }
 
-    let mut fresh = reconcile_snapshots(load_native_snapshots().await);
+    let mut fresh = load_shared_mcp_config().await;
+    let existing_identifiers = fresh
+        .servers
+        .iter()
+        .map(|server| server.name.clone())
+        .chain(fresh.conflicts.iter().map(|conflict| conflict.name.clone()))
+        .collect::<std::collections::HashSet<_>>();
+    let metadata_error = if any_success || !any_failed {
+        persist_display_labels(
+            &payload,
+            &existing_identifiers,
+            any_native_changes.then_some(&successfully_written_identifiers),
+        )
+        .await
+        .err()
+    } else {
+        None
+    };
+    if metadata_error.is_some() {
+        any_failed = true;
+    }
+    if metadata_error.is_none() {
+        fresh = load_shared_mcp_config().await;
+    }
     attach_gateway_status(&_deployment, &mut fresh).await;
     let status = if any_failed && any_success {
         SharedMcpWriteStatus::PartialFailure
@@ -496,6 +522,7 @@ async fn update_shared_mcp_servers(
     Ok(ResponseJson(ApiResponse::success(SharedMcpWriteResponse {
         status,
         outcomes,
+        metadata_error,
         servers: fresh.servers,
         conflicts: fresh.conflicts,
     })))
@@ -781,17 +808,21 @@ pub(crate) async fn update_mcp_servers_in_config(
     mcpc: &McpConfig,
     new_servers: HashMap<String, Value>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    validate_server_identifiers(new_servers.keys().map(String::as_str))?;
-
     // Ensure parent directory exists
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).await?;
     }
     // Read existing config (JSON or TOML depending on agent)
     let mut config = read_agent_config(config_path, mcpc).await?;
+    let current_servers = get_mcp_servers_from_config_path(&config, &mcpc.servers_path);
+
+    // Existing native configs may predate identifier validation. Permit those
+    // keys only while their definitions remain exactly unchanged, so an
+    // unrelated edit can be saved without allowing new invalid identifiers.
+    validate_changed_server_identifiers(&current_servers, &new_servers)?;
 
     // Get the current server count for comparison
-    let old_servers = get_mcp_servers_from_config_path(&config, &mcpc.servers_path).len();
+    let old_servers = current_servers.len();
 
     // Set the MCP servers using the correct attribute path
     set_mcp_servers_in_config_path(&mut config, &mcpc.servers_path, &new_servers)?;
@@ -811,6 +842,15 @@ pub(crate) async fn update_mcp_servers_in_config(
     };
 
     Ok(message)
+}
+
+fn validate_changed_server_identifiers(
+    current_servers: &HashMap<String, Value>,
+    new_servers: &HashMap<String, Value>,
+) -> Result<(), String> {
+    validate_server_identifiers(new_servers.iter().filter_map(|(name, definition)| {
+        (current_servers.get(name) != Some(definition)).then_some(name.as_str())
+    }))
 }
 
 /// Helper function to get MCP servers from config using a path
@@ -1133,5 +1173,24 @@ mod tests {
         let mut config = serde_json::json!({});
         let err = set_mcp_servers_in_config_path(&mut config, &[], &servers("srv"));
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn unchanged_legacy_identifier_does_not_block_native_config_write() {
+        let current = servers("Atlassian Rovo");
+        let mut next = current.clone();
+        next.insert(
+            "deleted-replacement".to_string(),
+            serde_json::json!({ "command": "new" }),
+        );
+
+        assert!(validate_changed_server_identifiers(&current, &next).is_ok());
+
+        next.insert(
+            "Atlassian Rovo".to_string(),
+            serde_json::json!({ "command": "changed" }),
+        );
+        let error = validate_changed_server_identifiers(&current, &next).unwrap_err();
+        assert!(error.contains("Use `atlassian_rovo`"));
     }
 }

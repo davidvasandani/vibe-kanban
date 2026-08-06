@@ -534,7 +534,8 @@
     },
     "worker": {
       "label": "运行于",
-      "automatic": "自动分配"
+      "automatic": "自动分配",
+      "coordinator": "协调器"
     },
     "repoPicker": {
       "actions": {

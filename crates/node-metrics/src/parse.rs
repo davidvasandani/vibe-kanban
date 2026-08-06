@@ -27,12 +27,26 @@ pub struct CpuTimes {
     pub idle: u64,
 }
 
+/// One `cpuN` line: the kernel's own index for the core, plus its counters.
+///
+/// The index is carried rather than implied by position. `/proc/stat` is
+/// written by `for_each_online_cpu`, so an offline CPU has no line at all: with
+/// cpu1 offline the second entry is cpu2, and anything that labels by position
+/// would call it "core 1".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoreTimes {
+    /// The `N` of `cpuN`.
+    pub index: u32,
+    pub times: CpuTimes,
+}
+
 /// The `cpu` and `cpuN` lines of `/proc/stat`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcStat {
     pub total: CpuTimes,
-    /// Ordered by core index, as the file lists them.
-    pub per_core: Vec<CpuTimes>,
+    /// One entry per **online** core, in file order, each tagged with its
+    /// kernel index.
+    pub per_core: Vec<CoreTimes>,
 }
 
 /// Lifetime byte counters for one interface, from `/proc/net/dev`.
@@ -155,8 +169,12 @@ pub fn parse_proc_stat(contents: &str) -> Option<ProcStat> {
         };
         if index.is_empty() {
             total = Some(times);
-        } else if index.chars().all(|c| c.is_ascii_digit()) {
-            per_core.push(times);
+        } else if index.chars().all(|c| c.is_ascii_digit())
+            && let Ok(index) = index.parse::<u32>()
+        {
+            // The index is kept, not just validated: it is the core's identity,
+            // and the file omits offline CPUs.
+            per_core.push(CoreTimes { index, times });
         }
     }
 
@@ -458,22 +476,29 @@ pub fn parse_process_status(contents: &str) -> ProcessStatus {
     status
 }
 
-/// Turn the NUL-separated bytes of `/proc/[pid]/cmdline` into a command line.
+/// Split the NUL-separated bytes of `/proc/[pid]/cmdline` into an argument
+/// vector.
 ///
 /// Returns `None` for an empty cmdline, which means a kernel thread — those
 /// have no command line at all, and the caller falls back to `comm`.
 ///
-/// The result is **not** redacted; [`crate::redact::redact_command`] must run
+/// **The elements, not a joined string.** An argument may contain spaces, and
+/// joining here would destroy the only boundary information the file carries:
+/// [`crate::redact::redact_argv`] would then see `--password correct horse` as
+/// four tokens and mask one of them. Redaction is what joins, once it has
+/// classified each argument whole.
+///
+/// The result is **not** redacted; [`crate::redact::redact_argv`] must run
 /// before the value reaches a [`crate::types::ProcessSample`].
-pub fn parse_cmdline(contents: &str) -> Option<String> {
-    let joined = contents
+pub fn parse_cmdline(contents: &str) -> Option<Vec<String>> {
+    let argv: Vec<String> = contents
         .split('\0')
-        .filter(|argument| !argument.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    // Some processes rewrite argv into a single space-separated blob.
-    let joined = joined.trim();
-    (!joined.is_empty()).then(|| joined.to_string())
+        // Some processes rewrite argv into a single blob with trailing padding;
+        // an all-whitespace element carries nothing.
+        .filter(|argument| !argument.trim().is_empty())
+        .map(str::to_string)
+        .collect();
+    (!argv.is_empty()).then_some(argv)
 }
 
 /// Parse `/etc/passwd` into a uid → name map, so a process owner can be shown
@@ -558,8 +583,29 @@ mod tests {
         // The aggregate is the sum of the cores, give or take rounding in the
         // kernel's own accounting; a wildly different figure means the line
         // split went wrong.
-        let core_total: u64 = stat.per_core.iter().map(|core| core.total).sum();
+        let core_total: u64 = stat.per_core.iter().map(|core| core.times.total).sum();
         assert!(core_total.abs_diff(stat.total.total) < stat.total.total / 100);
+        // A fully online host lists cpu0..cpu5 in order.
+        let indices: Vec<u32> = stat.per_core.iter().map(|core| core.index).collect();
+        assert_eq!(indices, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    /// `/proc/stat` is written by `for_each_online_cpu`, so a host with cpu1
+    /// offline lists cpu0 then cpu2. The index has to be carried, not inferred
+    /// from position, or the second entry is labelled "core 1".
+    #[test]
+    fn proc_stat_keeps_the_kernel_core_index_when_a_cpu_is_offline() {
+        let stat = parse_proc_stat(
+            "cpu  30 0 0 270 0\n\
+             cpu0 10 0 0 90 0\n\
+             cpu2 20 0 0 180 0\n\
+             intr 1 2 3\n",
+        )
+        .unwrap();
+
+        let indices: Vec<u32> = stat.per_core.iter().map(|core| core.index).collect();
+        assert_eq!(indices, vec![0, 2], "the offline cpu1 must not be invented");
+        assert_eq!(stat.per_core[1].times.total, 200);
     }
 
     /// Kernels keep appending columns to the cpu lines. Summing what is present
@@ -795,16 +841,39 @@ mod tests {
     }
 
     #[test]
-    fn cmdline_joins_nul_separated_arguments() {
+    fn cmdline_splits_nul_separated_arguments() {
         assert_eq!(
-            parse_cmdline(PID_CMDLINE).as_deref(),
-            Some("cp /proc/self/cmdline crates/node-metrics/tests/fixtures/pid/cmdline")
+            parse_cmdline(PID_CMDLINE),
+            Some(vec![
+                "cp".to_string(),
+                "/proc/self/cmdline".to_string(),
+                "crates/node-metrics/tests/fixtures/pid/cmdline".to_string(),
+            ])
         );
-        assert_eq!(parse_cmdline("a\0b\0\0c\0").as_deref(), Some("a b c"));
+        assert_eq!(
+            parse_cmdline("a\0b\0\0c\0"),
+            Some(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+        );
         // argv rewritten into one blob, as postgres and nginx do.
         assert_eq!(
-            parse_cmdline("postgres: writer process   \0").as_deref(),
-            Some("postgres: writer process")
+            parse_cmdline("postgres: writer process   \0"),
+            Some(vec!["postgres: writer process   ".to_string()])
+        );
+    }
+
+    /// The boundary is the whole point of returning a vector: an argument
+    /// containing spaces is **one** element, so redaction can mask it whole.
+    /// Joining here is what let a multi-word secret through a word at a time.
+    #[test]
+    fn cmdline_keeps_arguments_containing_spaces_whole() {
+        let argv = parse_cmdline("app\0--password\0correct horse battery\0").unwrap();
+        assert_eq!(
+            argv,
+            vec![
+                "app".to_string(),
+                "--password".to_string(),
+                "correct horse battery".to_string(),
+            ]
         );
     }
 

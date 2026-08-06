@@ -84,6 +84,11 @@ fn generate_types_content() -> String {
         // HTTP dependency; the coordinator-side aggregation types that wrap it
         // live in `services`.
         node_metrics::CpuSample::decl(),
+        // Referenced by `CpuSample::per_core_busy`. Omitting it emits a
+        // TypeScript file naming a type it never declares — which fails `tsc`
+        // rather than `generate-types`, so the break surfaces far from its
+        // cause.
+        node_metrics::CoreBusy::decl(),
         node_metrics::MemorySample::decl(),
         node_metrics::FilesystemSample::decl(),
         node_metrics::NetworkSample::decl(),

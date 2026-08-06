@@ -534,7 +534,8 @@
     },
     "worker": {
       "label": "実行先",
-      "automatic": "自動配置"
+      "automatic": "自動配置",
+      "coordinator": "コーディネーター"
     },
     "repoPicker": {
       "actions": {

@@ -293,34 +293,25 @@ export const RightSidebar = memo(function RightSidebar({
   ]);
 
   return (
-    <div className="h-full border-l bg-secondary overflow-y-auto">
-      <div className="divide-y border-b">
+    <div className="h-full min-h-0 border-l bg-secondary overflow-x-hidden overflow-y-auto">
+      <div className="flex h-full min-h-0 flex-col divide-y border-b">
         {sections
           .filter((section) => section.visible)
           .map((section) => (
-            <div
+            <CollapsibleSectionHeader
               key={section.persistKey}
-              className="max-h-[max(50vh,400px)] flex flex-col overflow-hidden"
+              title={section.title}
+              persistKey={section.persistKey}
+              defaultExpanded={section.expanded}
+              collapsible={section.collapsible ?? true}
+              actions={section.actions}
+              headerExtra={section.headerExtra}
+              fillAvailableSpace
             >
-              <CollapsibleSectionHeader
-                title={section.title}
-                persistKey={section.persistKey}
-                defaultExpanded={section.expanded}
-                collapsible={section.collapsible ?? true}
-                actions={section.actions}
-                headerExtra={section.headerExtra}
-              >
-                <div
-                  className={`flex flex-1 border-t w-full overflow-auto ${
-                    (section.collapsible ?? true)
-                      ? 'min-h-[200px]'
-                      : 'min-h-[1px]'
-                  }`}
-                >
-                  {section.content}
-                </div>
-              </CollapsibleSectionHeader>
-            </div>
+              <div className="flex min-h-0 flex-1 border-t w-full overflow-auto">
+                {section.content}
+              </div>
+            </CollapsibleSectionHeader>
           ))}
       </div>
     </div>
