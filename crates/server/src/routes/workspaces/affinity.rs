@@ -1,5 +1,11 @@
+use std::time::Duration;
+
 use axum::{Extension, Json, extract::State, response::Json as ResponseJson};
 use chrono::Utc;
+use cluster_protocol::{
+    CodexRolloutManifestRequest, CodexRolloutReadRequest, CodexRolloutStageRequest,
+    CodexRolloutVerifyRequest, ExecutionQuiescenceRequest, PROTOCOL_VERSION, RequestAuthority,
+};
 use db::models::{
     coding_agent_turn::CodingAgentTurn,
     execution_process::{ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus},
@@ -14,6 +20,7 @@ use executors::{
     actions::{
         ExecutorAction, ExecutorActionType, coding_agent_follow_up::CodingAgentFollowUpRequest,
     },
+    executors::BaseCodingAgent,
     profile::ExecutorConfig,
 };
 use serde::{Deserialize, Serialize};
@@ -100,6 +107,7 @@ pub enum WorkspaceAffinityUpdateOutcome {
     Updated,
     Restarted,
     RestartFailed,
+    SessionTransferFailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -131,6 +139,272 @@ fn executor_config(process: &ExecutionProcess) -> Result<ExecutorConfig, ApiErro
             process.id
         ))),
     }
+}
+
+fn transfer_authority(
+    coordinator_id: Uuid,
+    worker_node_id: Uuid,
+    operation_id: Uuid,
+) -> RequestAuthority {
+    RequestAuthority {
+        protocol_version: PROTOCOL_VERSION,
+        coordinator_id,
+        worker_node_id,
+        correlation_id: operation_id,
+        issued_at: Utc::now(),
+        nonce: Uuid::new_v4().to_string(),
+    }
+}
+
+struct CodexTransferContext {
+    operation_id: Uuid,
+    workspace_id: Uuid,
+    source_execution_id: Uuid,
+    source_worker_node_id: Uuid,
+    target_worker_node_id: Uuid,
+    leaf_thread_id: Uuid,
+}
+
+async fn transfer_codex_rollouts(
+    deployment: &DeploymentImpl,
+    pool: &sqlx::SqlitePool,
+    context: &CodexTransferContext,
+) -> Result<(), ApiError> {
+    let CodexTransferContext {
+        operation_id,
+        workspace_id,
+        source_execution_id,
+        source_worker_node_id,
+        target_worker_node_id,
+        leaf_thread_id,
+    } = *context;
+    let coordinator_id = deployment.cluster_config().coordinator_id.ok_or_else(|| {
+        ApiError::Conflict("Codex session transfer has no coordinator identity".into())
+    })?;
+    let client = deployment
+        .worker_client()
+        .ok_or_else(|| ApiError::Conflict("Codex session transfer client is unavailable".into()))?;
+    let quiescence = ExecutionQuiescenceRequest {
+        authority: transfer_authority(coordinator_id, source_worker_node_id, operation_id),
+        operation_id,
+        execution_id: source_execution_id,
+        workspace_id,
+    };
+    client
+        .set_execution_quiesced(source_worker_node_id, &quiescence, true)
+        .await
+        .map_err(|error| ApiError::Conflict(format!(
+            "Codex session transfer could not quiesce source execution {source_execution_id}: {error}"
+        )))?;
+
+    let transfer = tokio::time::timeout(Duration::from_secs(120), async {
+        let manifest = client
+            .codex_rollout_manifest(
+                source_worker_node_id,
+                &CodexRolloutManifestRequest {
+                    authority: transfer_authority(
+                        coordinator_id,
+                        source_worker_node_id,
+                        operation_id,
+                    ),
+                    operation_id,
+                    workspace_id,
+                    source_execution_id,
+                    source_worker_node_id,
+                    target_worker_node_id,
+                    leaf_thread_id,
+                },
+            )
+            .await
+            .map_err(|error| ApiError::Conflict(format!(
+                "Codex session transfer could not resolve rollout lineage for thread {leaf_thread_id}: {error}"
+            )))?;
+        let manifest_json = serde_json::to_string(&manifest).map_err(|_| {
+            ApiError::Conflict("Codex session transfer manifest could not be persisted".into())
+        })?;
+        let manifest_recorded = sqlx::query(
+            r#"UPDATE workspace_affinity_operations
+               SET session_transfer_manifest_json = ?,
+                   session_transfer_manifest_sha256 = ?,
+                   updated_at = datetime('now', 'subsec')
+               WHERE operation_id = ? AND status = 'claimed'
+                 AND (session_transfer_manifest_sha256 IS NULL
+                      OR session_transfer_manifest_sha256 = ?)"#,
+        )
+        .bind(&manifest_json)
+        .bind(&manifest.manifest_sha256)
+        .bind(operation_id)
+        .bind(&manifest.manifest_sha256)
+        .execute(pool)
+        .await?;
+        if manifest_recorded.rows_affected() != 1 {
+            return Err(ApiError::Conflict(
+                "Codex session transfer manifest conflicts with the durable operation".into(),
+            ));
+        }
+
+        for entry in &manifest.entries {
+            let artifact = client
+                .codex_rollout_artifact(
+                    source_worker_node_id,
+                    &CodexRolloutReadRequest {
+                        authority: transfer_authority(
+                            coordinator_id,
+                            source_worker_node_id,
+                            operation_id,
+                        ),
+                        manifest: manifest.clone(),
+                        thread_id: entry.thread_id,
+                    },
+                )
+                .await
+                .map_err(|error| ApiError::Conflict(format!(
+                    "Codex session transfer could not read rollout for thread {}: {error}",
+                    entry.thread_id
+                )))?;
+            client
+                .stage_codex_rollout(
+                    target_worker_node_id,
+                    &CodexRolloutStageRequest {
+                        authority: transfer_authority(
+                            coordinator_id,
+                            target_worker_node_id,
+                            operation_id,
+                        ),
+                        manifest: manifest.clone(),
+                        artifact,
+                    },
+                )
+                .await
+                .map_err(|error| ApiError::Conflict(format!(
+                    "Codex session transfer could not stage rollout for thread {}: {error}",
+                    entry.thread_id
+                )))?;
+        }
+        let verification = client
+            .verify_codex_rollouts(
+                target_worker_node_id,
+                &CodexRolloutVerifyRequest {
+                    authority: transfer_authority(
+                        coordinator_id,
+                        target_worker_node_id,
+                        operation_id,
+                    ),
+                    manifest: manifest.clone(),
+                },
+            )
+            .await
+            .map_err(|error| ApiError::Conflict(format!(
+                "Codex session transfer target verification failed for thread {leaf_thread_id}: {error}"
+            )))?;
+        if verification.manifest_sha256 != manifest.manifest_sha256
+            || verification.verified_thread_ids.len() != manifest.entries.len()
+        {
+            return Err(ApiError::Conflict(format!(
+                "Codex session transfer target returned incomplete verification for thread {leaf_thread_id}"
+            )));
+        }
+        let updated = sqlx::query(
+            r#"UPDATE workspace_affinity_operations
+               SET session_transfer_verified_at = datetime('now', 'subsec'),
+                   updated_at = datetime('now', 'subsec')
+               WHERE operation_id = ? AND status = 'claimed'
+                 AND session_transfer_manifest_sha256 = ?"#,
+        )
+        .bind(operation_id)
+        .bind(&manifest.manifest_sha256)
+        .execute(pool)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(ApiError::Conflict(
+                "Codex session transfer verification could not be recorded".into(),
+            ));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| {
+        ApiError::Conflict("Codex session transfer exceeded its 120 second deadline".into())
+    })
+    .and_then(|result| result);
+
+    if transfer.is_err() {
+        let resume = ExecutionQuiescenceRequest {
+            authority: transfer_authority(coordinator_id, source_worker_node_id, operation_id),
+            operation_id,
+            execution_id: source_execution_id,
+            workspace_id,
+        };
+        if let Err(resume_error) = client
+            .set_execution_quiesced(source_worker_node_id, &resume, false)
+            .await
+        {
+            return Err(ApiError::Conflict(format!(
+                "Codex session transfer failed and source execution {source_execution_id} could not be resumed: {resume_error}"
+            )));
+        }
+    }
+    transfer
+}
+
+async fn reverify_persisted_codex_rollouts(
+    deployment: &DeploymentImpl,
+    pool: &sqlx::SqlitePool,
+    operation_id: Uuid,
+    workspace_id: Uuid,
+    target_worker_node_id: Uuid,
+) -> Result<(), ApiError> {
+    let manifest_json = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT session_transfer_manifest_json FROM workspace_affinity_operations WHERE operation_id = ? AND workspace_id = ? AND status = 'claimed'",
+    )
+    .bind(operation_id)
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten()
+    .ok_or_else(|| {
+        ApiError::Conflict(
+            "Interrupted Codex migration has no persisted rollout manifest".into(),
+        )
+    })?;
+    let manifest: cluster_protocol::CodexRolloutManifest = serde_json::from_str(&manifest_json)
+        .map_err(|_| ApiError::Conflict("Persisted Codex rollout manifest is invalid".into()))?;
+    if manifest.operation_id != operation_id
+        || manifest.workspace_id != workspace_id
+        || manifest.target_worker_node_id != target_worker_node_id
+    {
+        return Err(ApiError::Conflict(
+            "Persisted Codex rollout manifest does not match the recovering migration".into(),
+        ));
+    }
+    let coordinator_id = deployment.cluster_config().coordinator_id.ok_or_else(|| {
+        ApiError::Conflict("Codex session recovery has no coordinator identity".into())
+    })?;
+    let client = deployment
+        .worker_client()
+        .ok_or_else(|| ApiError::Conflict("Codex session recovery client is unavailable".into()))?;
+    let verification = client
+        .verify_codex_rollouts(
+            target_worker_node_id,
+            &CodexRolloutVerifyRequest {
+                authority: transfer_authority(coordinator_id, target_worker_node_id, operation_id),
+                manifest: manifest.clone(),
+            },
+        )
+        .await
+        .map_err(|error| {
+            ApiError::Conflict(format!(
+                "Interrupted Codex migration could not reverify target rollout lineage: {error}"
+            ))
+        })?;
+    if verification.manifest_sha256 != manifest.manifest_sha256
+        || verification.verified_thread_ids.len() != manifest.entries.len()
+    {
+        return Err(ApiError::Conflict(
+            "Interrupted Codex migration target rollout verification is incomplete".into(),
+        ));
+    }
+    touch_operation(pool, operation_id).await
 }
 
 async fn replay_operation(
@@ -277,12 +551,13 @@ async fn claim_operation(
     workspace_id: Uuid,
     request: &UpdateWorkspaceAffinityRequest,
     source_execution_id: Option<Uuid>,
+    selected_worker_node_id: Option<Uuid>,
 ) -> Result<(), ApiError> {
     let inserted = sqlx::query(
         r#"INSERT OR IGNORE INTO workspace_affinity_operations
            (operation_id, workspace_id, source_execution_id, requested_worker_node_id,
-            run_on_coordinator, restart_running)
-           VALUES (?, ?, ?, ?, ?, ?)"#,
+            run_on_coordinator, restart_running, selected_worker_node_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(operation_id)
     .bind(workspace_id)
@@ -290,6 +565,7 @@ async fn claim_operation(
     .bind(request.requested_worker_node_id)
     .bind(request.run_on_coordinator)
     .bind(request.restart_running)
+    .bind(selected_worker_node_id)
     .execute(pool)
     .await?;
     if inserted.rows_affected() == 0 {
@@ -401,17 +677,29 @@ pub async fn update_workspace_affinity(
 
     let mut resumed_source_execution_id = None;
     let mut resuming_operation_id = None;
+    let mut resumed_target_worker_id = None;
     if let Some((
         active_operation_id,
         stored_worker_id,
         stored_coordinator,
         stored_restart,
         source_execution_id,
+        selected_worker_node_id,
         stale,
-    )) = sqlx::query_as::<_, (Uuid, Option<Uuid>, bool, bool, Option<Uuid>, bool)>(
+    )) = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Option<Uuid>,
+            bool,
+            bool,
+            Option<Uuid>,
+            Option<Uuid>,
+            bool,
+        ),
+    >(
         r#"SELECT operation_id, requested_worker_node_id, run_on_coordinator,
-                  restart_running,
-                  source_execution_id,
+                  restart_running, source_execution_id, selected_worker_node_id,
                   updated_at <= datetime('now', '-10 minutes')
            FROM workspace_affinity_operations
            WHERE workspace_id = ? AND status = 'claimed'"#,
@@ -436,6 +724,7 @@ pub async fn update_workspace_affinity(
             intent = AffinityIntent::resolve(&request)?;
             resumed_source_execution_id = source_execution_id;
             resuming_operation_id = Some(active_operation_id);
+            resumed_target_worker_id = selected_worker_node_id;
         } else {
             return Err(ApiError::Conflict(
                 "A server affinity migration is already in progress for this workspace".into(),
@@ -518,7 +807,7 @@ pub async fn update_workspace_affinity(
         .as_ref()
         .map(executor_config)
         .transpose()?;
-    let target_worker_node_id = if intent == AffinityIntent::Coordinator {
+    let scheduled_target_worker_node_id = if intent == AffinityIntent::Coordinator {
         None
     } else {
         let workers = WorkerNode::fetch_all(pool).await?;
@@ -538,6 +827,7 @@ pub async fn update_workspace_affinity(
             .map_err(|error| ApiError::BadRequest(error.to_string()))?;
         Some(selected.id)
     };
+    let target_worker_node_id = resumed_target_worker_id.or(scheduled_target_worker_node_id);
     let changes_effective_target = match target_worker_node_id {
         Some(worker_node_id) => placement.worker_node_id != Some(worker_node_id),
         None => placement.placement_state != WorkspacePlacementState::Local,
@@ -546,6 +836,33 @@ pub async fn update_workspace_affinity(
         return Err(ApiError::Conflict(
             "The current task is running; confirm stop, migrate, and restart".into(),
         ));
+    }
+
+    let is_codex = config
+        .as_ref()
+        .is_some_and(|config| config.executor == BaseCodingAgent::Codex);
+    let transfer_was_verified = if resuming_operation_id.is_some() && is_codex {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT session_transfer_verified_at IS NOT NULL FROM workspace_affinity_operations WHERE operation_id = ? AND status = 'claimed'",
+        )
+        .bind(operation_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(false)
+    } else {
+        false
+    };
+    if transfer_was_verified {
+        reverify_persisted_codex_rollouts(
+            &deployment,
+            pool,
+            operation_id,
+            workspace.id,
+            target_worker_node_id.ok_or_else(|| {
+                ApiError::Conflict("Codex migration recovery has no target worker".into())
+            })?,
+        )
+        .await?;
     }
 
     if resuming_operation_id.is_some()
@@ -613,6 +930,7 @@ pub async fn update_workspace_affinity(
             workspace.id,
             &request,
             running.first().map(|process| process.id),
+            target_worker_node_id,
         )
         .await?;
     }
@@ -643,15 +961,114 @@ pub async fn update_workspace_affinity(
             ));
         }
 
+        if changes_effective_target
+            && config
+                .as_ref()
+                .is_some_and(|config| config.executor == BaseCodingAgent::Codex)
+            && let Some(selected_worker_id) = target_worker_node_id
+            && let Some(process) = running.first()
+        {
+            let source_worker_node_id = claimed_placement.worker_node_id.ok_or_else(|| {
+                ApiError::Conflict(
+                    "Codex session transfer requires a source worker placement".into(),
+                )
+            })?;
+            let source_turn = CodingAgentTurn::find_by_execution_process_id(pool, process.id)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::Conflict(
+                        "Codex session transfer source execution has no coding-agent turn".into(),
+                    )
+                })?;
+            let source_thread_id = source_turn.agent_session_id.ok_or_else(|| {
+                ApiError::Conflict(
+                    "Codex session transfer source execution has no persisted thread identity"
+                        .into(),
+                )
+            })?;
+            let leaf_thread_id = Uuid::parse_str(&source_thread_id).map_err(|_| {
+                ApiError::Conflict(format!(
+                    "Codex session transfer source thread identity is invalid for execution {}",
+                    process.id
+                ))
+            })?;
+            if let Err(error) = transfer_codex_rollouts(
+                &deployment,
+                pool,
+                &CodexTransferContext {
+                    operation_id,
+                    workspace_id: workspace.id,
+                    source_execution_id: process.id,
+                    source_worker_node_id,
+                    target_worker_node_id: selected_worker_id,
+                    leaf_thread_id,
+                },
+            )
+            .await
+            {
+                return Ok(WorkspaceAffinityUpdateResponse {
+                    placement: claimed_placement,
+                    outcome: WorkspaceAffinityUpdateOutcome::SessionTransferFailed,
+                    stopped_execution_id: None,
+                    started_execution: None,
+                    message: Some(error.to_string()),
+                });
+            }
+        }
+
         let stopped_execution_id = if changes_effective_target
             && let Some(process) = running.first()
         {
-            mark_source_stop_started(pool, operation_id).await?;
+            if let Err(error) = mark_source_stop_started(pool, operation_id).await {
+                if is_codex
+                    && let (Some(source_worker), Some(coordinator_id), Some(client)) = (
+                        claimed_placement.worker_node_id,
+                        deployment.cluster_config().coordinator_id,
+                        deployment.worker_client(),
+                    )
+                {
+                    let resume = ExecutionQuiescenceRequest {
+                        authority: transfer_authority(
+                            coordinator_id,
+                            source_worker,
+                            operation_id,
+                        ),
+                        operation_id,
+                        execution_id: process.id,
+                        workspace_id: workspace.id,
+                    };
+                    let _ = client
+                        .set_execution_quiesced(source_worker, &resume, false)
+                        .await;
+                }
+                return Err(error);
+            }
             if let Err(error) = deployment
                 .container()
                 .stop_execution(process, ExecutionProcessStatus::Killed)
                 .await
             {
+                if is_codex
+                    && let (Some(source_worker), Some(coordinator_id), Some(client)) = (
+                        claimed_placement.worker_node_id,
+                        deployment.cluster_config().coordinator_id,
+                        deployment.worker_client(),
+                    )
+                {
+                    let resume = ExecutionQuiescenceRequest {
+                        authority: transfer_authority(
+                            coordinator_id,
+                            source_worker,
+                            operation_id,
+                        ),
+                        operation_id,
+                        execution_id: process.id,
+                        workspace_id: workspace.id,
+                    };
+                    let _ = client
+                        .set_execution_quiesced(source_worker, &resume, false)
+                        .await;
+                }
                 // Local teardown marks the row before killing the child. If
                 // the kill then fails, restore an active/unknown state so a
                 // retry cannot migrate while the old process may still live.
@@ -671,6 +1088,27 @@ pub async fn update_workspace_affinity(
                 stopped.status,
                 ExecutionProcessStatus::Running | ExecutionProcessStatus::Indeterminate
             ) {
+                if is_codex
+                    && let (Some(source_worker), Some(coordinator_id), Some(client)) = (
+                        claimed_placement.worker_node_id,
+                        deployment.cluster_config().coordinator_id,
+                        deployment.worker_client(),
+                    )
+                {
+                    let resume = ExecutionQuiescenceRequest {
+                        authority: transfer_authority(
+                            coordinator_id,
+                            source_worker,
+                            operation_id,
+                        ),
+                        operation_id,
+                        execution_id: process.id,
+                        workspace_id: workspace.id,
+                    };
+                    let _ = client
+                        .set_execution_quiesced(source_worker, &resume, false)
+                        .await;
+                }
                 return Err(ApiError::Conflict(
                     "The running task could not be confirmed stopped; affinity is unchanged".into(),
                 ));
