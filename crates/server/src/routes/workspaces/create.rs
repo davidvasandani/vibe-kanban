@@ -428,6 +428,7 @@ enum PlacementIntent {
 }
 
 impl PlacementIntent {
+    #[allow(clippy::result_large_err)]
     fn resolve(
         run_on_coordinator: bool,
         requested_worker_node_id: Option<Uuid>,

@@ -237,6 +237,7 @@ pub async fn get_workspace_summaries(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use db::models::workspace::{WorkspacePlacement, WorkspacePlacementState};
     use uuid::Uuid;

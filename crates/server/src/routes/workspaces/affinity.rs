@@ -53,6 +53,7 @@ pub struct WorkspaceAffinityUpdateResponse {
     pub message: Option<String>,
 }
 
+#[allow(clippy::result_large_err)]
 fn executor_config(process: &ExecutionProcess) -> Result<ExecutorConfig, ApiError> {
     let action = process.executor_action().map_err(|error| {
         ApiError::Conflict(format!(
