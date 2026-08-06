@@ -49,5 +49,5 @@
 
 - [x] T017 Update `docs/knowledge-base/cluster-mcp-runtime-connectivity.md` and
       `docs/knowledge-base/INDEX.md`.
-- [ ] T018 Commit, publish, and merge Vibe Kanban and homelab PRs in rollout
+- [x] T018 Commit, publish, and merge Vibe Kanban and homelab PRs in rollout
       order.
