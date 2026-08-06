@@ -314,6 +314,13 @@ native-config adapter, and preserve unrelated vendor settings. Optional protocol
 fields provide rolling compatibility; presence with invalid content fails closed
 before the child process starts.
 
+### XXIV. MCP definitions have one settings authority
+Vibe Kanban settings own every MCP definition. Deployment configuration may
+install immutable executables, expose network routes, and supply service
+environment, but it must not add, remove, or rewrite native agent MCP tables at
+service startup. Remote workers consume settings-owned definitions through the
+authenticated execution snapshot rather than reconstructing them locally.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -335,7 +342,8 @@ before the child process starts.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.21.0 (adds coordinator-authoritative, bounded remote execution
+**Version**: 0.22.0 (makes Vibe Kanban settings the sole MCP-definition
+authority and limits deployment ownership to runtime prerequisites; 0.21.0 added coordinator-authoritative, bounded remote execution
 configuration snapshots with atomic worker materialization and secret-safe
 failure behavior; 0.20.0 added coordinator-owned, serialized affinity migration with
 truthful durable-boundary outcomes and at-most-once continuation; 0.19.0 added

@@ -1,5 +1,17 @@
 # Implementation plan
 
+## VAS-356: settings-owned MCP definitions
+
+1. Refresh the VAS-356 specification and constitution with the single-authority
+   rule for MCP definitions.
+2. Remove remaining `codex mcp add` startup mutations from the homelab Vibe
+   Kanban module while retaining required runtime packages.
+3. Generalise the focused invariant to reject all native MCP-add commands.
+4. Update knowledge, validate Nix evaluation, and complete independent review.
+5. Commit, publish, merge, and verify the Vibe Kanban rollout.
+
+## Coordinator affinity work
+
 1. Bring the task branch onto the current Vibe Kanban upstream base that
    contains coordinator placement and the Server Affinity feature.
 2. Extend the affinity request and durable operation identity with an explicit
