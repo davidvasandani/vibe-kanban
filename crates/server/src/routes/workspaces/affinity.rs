@@ -1,5 +1,11 @@
+use std::time::Duration;
+
 use axum::{Extension, Json, extract::State, response::Json as ResponseJson};
 use chrono::Utc;
+use cluster_protocol::{
+    CodexRolloutManifestRequest, CodexRolloutReadRequest, CodexRolloutStageRequest,
+    CodexRolloutVerifyRequest, ExecutionQuiescenceRequest, PROTOCOL_VERSION, RequestAuthority,
+};
 use db::models::{
     coding_agent_turn::CodingAgentTurn,
     execution_process::{ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus},
@@ -14,11 +20,8 @@ use executors::{
     actions::{
         ExecutorAction, ExecutorActionType, coding_agent_follow_up::CodingAgentFollowUpRequest,
     },
-    executors::BaseCodingAgent, profile::ExecutorConfig,
-};
-use cluster_protocol::{
-    CodexRolloutManifestRequest, CodexRolloutReadRequest, CodexRolloutStageRequest,
-    CodexRolloutVerifyRequest, ExecutionQuiescenceRequest, PROTOCOL_VERSION, RequestAuthority,
+    executors::BaseCodingAgent,
+    profile::ExecutorConfig,
 };
 use serde::{Deserialize, Serialize};
 use services::services::container::ContainerService;
@@ -95,22 +98,34 @@ fn transfer_authority(
     }
 }
 
-async fn transfer_codex_rollouts(
-    deployment: &DeploymentImpl,
-    pool: &sqlx::SqlitePool,
+struct CodexTransferContext {
     operation_id: Uuid,
     workspace_id: Uuid,
     source_execution_id: Uuid,
     source_worker_node_id: Uuid,
     target_worker_node_id: Uuid,
     leaf_thread_id: Uuid,
+}
+
+async fn transfer_codex_rollouts(
+    deployment: &DeploymentImpl,
+    pool: &sqlx::SqlitePool,
+    context: &CodexTransferContext,
 ) -> Result<(), ApiError> {
+    let CodexTransferContext {
+        operation_id,
+        workspace_id,
+        source_execution_id,
+        source_worker_node_id,
+        target_worker_node_id,
+        leaf_thread_id,
+    } = *context;
     let coordinator_id = deployment.cluster_config().coordinator_id.ok_or_else(|| {
         ApiError::Conflict("Codex session transfer has no coordinator identity".into())
     })?;
-    let client = deployment.worker_client().ok_or_else(|| {
-        ApiError::Conflict("Codex session transfer client is unavailable".into())
-    })?;
+    let client = deployment
+        .worker_client()
+        .ok_or_else(|| ApiError::Conflict("Codex session transfer client is unavailable".into()))?;
     let quiescence = ExecutionQuiescenceRequest {
         authority: transfer_authority(coordinator_id, source_worker_node_id, operation_id),
         operation_id,
@@ -124,7 +139,7 @@ async fn transfer_codex_rollouts(
             "Codex session transfer could not quiesce source execution {source_execution_id}: {error}"
         )))?;
 
-    let transfer = async {
+    let transfer = tokio::time::timeout(Duration::from_secs(120), async {
         let manifest = client
             .codex_rollout_manifest(
                 source_worker_node_id,
@@ -149,7 +164,7 @@ async fn transfer_codex_rollouts(
         let manifest_json = serde_json::to_string(&manifest).map_err(|_| {
             ApiError::Conflict("Codex session transfer manifest could not be persisted".into())
         })?;
-        sqlx::query(
+        let manifest_recorded = sqlx::query(
             r#"UPDATE workspace_affinity_operations
                SET session_transfer_manifest_json = ?,
                    session_transfer_manifest_sha256 = ?,
@@ -164,6 +179,11 @@ async fn transfer_codex_rollouts(
         .bind(&manifest.manifest_sha256)
         .execute(pool)
         .await?;
+        if manifest_recorded.rows_affected() != 1 {
+            return Err(ApiError::Conflict(
+                "Codex session transfer manifest conflicts with the durable operation".into(),
+            ));
+        }
 
         for entry in &manifest.entries {
             let artifact = client
@@ -243,8 +263,12 @@ async fn transfer_codex_rollouts(
             ));
         }
         Ok(())
-    }
-    .await;
+    })
+    .await
+    .map_err(|_| {
+        ApiError::Conflict("Codex session transfer exceeded its 120 second deadline".into())
+    })
+    .and_then(|result| result);
 
     if transfer.is_err() {
         let resume = ExecutionQuiescenceRequest {
@@ -765,12 +789,14 @@ pub async fn update_workspace_affinity(
             if let Err(error) = transfer_codex_rollouts(
                 &deployment,
                 pool,
-                operation_id,
-                workspace.id,
-                process.id,
-                source_worker_node_id,
-                selected.id,
-                leaf_thread_id,
+                &CodexTransferContext {
+                    operation_id,
+                    workspace_id: workspace.id,
+                    source_execution_id: process.id,
+                    source_worker_node_id,
+                    target_worker_node_id: selected.id,
+                    leaf_thread_id,
+                },
             )
             .await
             {
@@ -793,6 +819,27 @@ pub async fn update_workspace_affinity(
                 .stop_execution(process, ExecutionProcessStatus::Killed)
                 .await
             {
+                if config.executor == BaseCodingAgent::Codex
+                    && let (Some(source_worker), Some(coordinator_id), Some(client)) = (
+                        claimed_placement.worker_node_id,
+                        deployment.cluster_config().coordinator_id,
+                        deployment.worker_client(),
+                    )
+                {
+                    let resume = ExecutionQuiescenceRequest {
+                        authority: transfer_authority(
+                            coordinator_id,
+                            source_worker,
+                            operation_id,
+                        ),
+                        operation_id,
+                        execution_id: process.id,
+                        workspace_id: workspace.id,
+                    };
+                    let _ = client
+                        .set_execution_quiesced(source_worker, &resume, false)
+                        .await;
+                }
                 // Local teardown marks the row before killing the child. If
                 // the kill then fails, restore an active/unknown state so a
                 // retry cannot migrate while the old process may still live.

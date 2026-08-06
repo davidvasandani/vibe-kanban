@@ -278,7 +278,7 @@ export enum WorkerMountStatus { healthy = "healthy", missing = "missing", local_
 
 export type UpdateWorkspaceAffinityRequest = { requested_worker_node_id: string | null, restart_running: boolean, operation_id: string | null, };
 
-export enum WorkspaceAffinityUpdateOutcome { updated = "updated", restarted = "restarted", restart_failed = "restart_failed" }
+export enum WorkspaceAffinityUpdateOutcome { updated = "updated", restarted = "restarted", restart_failed = "restart_failed", session_transfer_failed = "session_transfer_failed" }
 
 export type WorkspaceAffinityUpdateResponse = { placement: WorkspacePlacement, outcome: WorkspaceAffinityUpdateOutcome, stopped_execution_id: string | null, started_execution: ExecutionProcess | null, message: string | null, };
 

@@ -117,7 +117,9 @@ impl ExecutionSupervisor {
         execution_id: Uuid,
         workspace_id: Uuid,
     ) -> bool {
-        let Some(job) = self.job(execution_id).await else { return false; };
+        let Some(job) = self.job(execution_id).await else {
+            return false;
+        };
         job.workspace_id == workspace_id && job.state().await == JobState::Running
     }
 
@@ -298,21 +300,32 @@ impl ExecutionSupervisor {
         operation_id: Uuid,
         quiesced: bool,
     ) -> Result<(), ExecutionError> {
-        let job = self.job(execution_id).await.ok_or(ExecutionError::NotFound(execution_id))?;
+        let job = self
+            .job(execution_id)
+            .await
+            .ok_or(ExecutionError::NotFound(execution_id))?;
         if job.workspace_id != workspace_id || job.state().await != JobState::Running {
             return Err(ExecutionError::NotFound(execution_id));
         }
         let mut owner = job.quiesced_by.lock().await;
         if quiesced {
-            if owner.as_ref().is_some_and(|existing| *existing != operation_id) {
+            if owner
+                .as_ref()
+                .is_some_and(|existing| *existing != operation_id)
+            {
                 return Err(ExecutionError::DigestConflict { execution_id });
             }
-            if owner.as_ref() == Some(&operation_id) { return Ok(()); }
+            if owner.as_ref() == Some(&operation_id) {
+                return Ok(());
+            }
         } else if owner.as_ref() != Some(&operation_id) {
             return Err(ExecutionError::DigestConflict { execution_id });
         }
-        let pid = job.child.lock().await.as_ref().and_then(|child| child.inner().id())
-            .ok_or(ExecutionError::NotFound(execution_id))?;
+        let pid = {
+            let mut child = job.child.lock().await;
+            child.as_mut().and_then(|child| child.inner().id())
+        }
+        .ok_or(ExecutionError::NotFound(execution_id))?;
         let signal = if quiesced { "-STOP" } else { "-CONT" };
         let target = format!("-{pid}");
         let status = tokio::process::Command::new("kill")
@@ -320,8 +333,61 @@ impl ExecutionSupervisor {
             .status()
             .await
             .map_err(|_| ExecutionError::NotFound(execution_id))?;
-        if !status.success() { return Err(ExecutionError::NotFound(execution_id)); }
+        if !status.success() {
+            return Err(ExecutionError::NotFound(execution_id));
+        }
         *owner = quiesced.then_some(operation_id);
+        drop(owner);
+        if quiesced {
+            // A coordinator can disappear after SIGSTOP and before its
+            // compensating resume. The lease is deliberately longer than the
+            // coordinator's stale-operation window, giving a retry time to
+            // finish while ensuring an abandoned execution is not frozen
+            // forever.
+            let supervisor = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(15 * 60)).await;
+                let _ = supervisor
+                    .resume_quiesced(execution_id, workspace_id, operation_id)
+                    .await;
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn resume_quiesced(
+        &self,
+        execution_id: Uuid,
+        workspace_id: Uuid,
+        operation_id: Uuid,
+    ) -> Result<(), ExecutionError> {
+        let job = self
+            .job(execution_id)
+            .await
+            .ok_or(ExecutionError::NotFound(execution_id))?;
+        if job.workspace_id != workspace_id || job.state().await != JobState::Running {
+            return Err(ExecutionError::NotFound(execution_id));
+        }
+        let mut owner = job.quiesced_by.lock().await;
+        if owner.as_ref() != Some(&operation_id) {
+            return Err(ExecutionError::DigestConflict { execution_id });
+        }
+        let pid = {
+            let mut child = job.child.lock().await;
+            child.as_mut().and_then(|child| child.inner().id())
+        }
+        .ok_or(ExecutionError::NotFound(execution_id))?;
+        let target = format!("-{pid}");
+        let status = tokio::process::Command::new("kill")
+            .args(["-CONT", "--", &target])
+            .status()
+            .await
+            .map_err(|_| ExecutionError::NotFound(execution_id))?;
+        if !status.success() {
+            return Err(ExecutionError::NotFound(execution_id));
+        }
+        *owner = None;
         Ok(())
     }
 

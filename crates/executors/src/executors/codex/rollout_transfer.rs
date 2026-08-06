@@ -7,9 +7,9 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use cluster_protocol::{
-    CODEX_ROLLOUT_MAX_FILE_BYTES, CODEX_ROLLOUT_MAX_LINEAGE_BYTES,
-    CODEX_ROLLOUT_MAX_LINEAGE_FILES, CodexRolloutArtifact, CodexRolloutManifest,
-    CodexRolloutManifestEntry, CodexRolloutStageResult, CodexRolloutVerification,
+    CODEX_ROLLOUT_MAX_FILE_BYTES, CODEX_ROLLOUT_MAX_LINEAGE_BYTES, CODEX_ROLLOUT_MAX_LINEAGE_FILES,
+    CodexRolloutArtifact, CodexRolloutManifest, CodexRolloutManifestEntry, CodexRolloutStageResult,
+    CodexRolloutVerification,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -27,7 +27,10 @@ pub enum RolloutTransferError {
     #[error("rollout path is not safely contained in the Codex sessions directory")]
     UnsafePath,
     #[error("rollout for thread {thread_id} has invalid canonical metadata: {reason}")]
-    InvalidMetadata { thread_id: Uuid, reason: &'static str },
+    InvalidMetadata {
+        thread_id: Uuid,
+        reason: &'static str,
+    },
     #[error("rollout lineage for thread {0} is cyclic")]
     Cycle(Uuid),
     #[error("rollout {thread_id} exceeds the {limit} byte limit")]
@@ -92,7 +95,13 @@ impl CodexRolloutStore {
         let mut entries = Vec::new();
         let mut visiting = HashSet::new();
         let mut total = 0u64;
-        self.resolve_ancestors(leaf_thread_id, &index, &mut visiting, &mut entries, &mut total)?;
+        self.resolve_ancestors(
+            leaf_thread_id,
+            &index,
+            &mut visiting,
+            &mut entries,
+            &mut total,
+        )?;
         let mut manifest = CodexRolloutManifest {
             operation_id,
             workspace_id,
@@ -124,21 +133,30 @@ impl CodexRolloutStore {
         if visiting.len() > CODEX_ROLLOUT_MAX_LINEAGE_FILES {
             return Err(RolloutTransferError::LineageTooLarge);
         }
-        let path = index.get(&thread_id).ok_or(RolloutTransferError::Missing(thread_id))?;
+        let path = index
+            .get(&thread_id)
+            .ok_or(RolloutTransferError::Missing(thread_id))?;
         let metadata = fs::symlink_metadata(path)?;
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
             return Err(RolloutTransferError::UnsafePath);
         }
         if metadata.len() > CODEX_ROLLOUT_MAX_FILE_BYTES {
-            return Err(RolloutTransferError::FileTooLarge { thread_id, limit: CODEX_ROLLOUT_MAX_FILE_BYTES });
+            return Err(RolloutTransferError::FileTooLarge {
+                thread_id,
+                limit: CODEX_ROLLOUT_MAX_FILE_BYTES,
+            });
         }
         let meta = read_canonical_meta(path, thread_id)?;
         let parent = meta.parent_thread_id.or(meta.forked_from_id);
         if let Some(parent_id) = parent {
             self.resolve_ancestors(parent_id, index, visiting, entries, total)?;
         }
-        *total = total.checked_add(metadata.len()).ok_or(RolloutTransferError::LineageTooLarge)?;
-        if *total > CODEX_ROLLOUT_MAX_LINEAGE_BYTES || entries.len() >= CODEX_ROLLOUT_MAX_LINEAGE_FILES {
+        *total = total
+            .checked_add(metadata.len())
+            .ok_or(RolloutTransferError::LineageTooLarge)?;
+        if *total > CODEX_ROLLOUT_MAX_LINEAGE_BYTES
+            || entries.len() >= CODEX_ROLLOUT_MAX_LINEAGE_FILES
+        {
             return Err(RolloutTransferError::LineageTooLarge);
         }
         let relative_path = self.relative_path(path)?;
@@ -159,7 +177,10 @@ impl CodexRolloutStore {
         thread_id: Uuid,
     ) -> Result<CodexRolloutArtifact, RolloutTransferError> {
         validate_manifest(manifest)?;
-        let entry = manifest.entries.iter().find(|entry| entry.thread_id == thread_id)
+        let entry = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.thread_id == thread_id)
             .ok_or(RolloutTransferError::InvalidManifest)?;
         let path = self.safe_existing_path(&entry.relative_path)?;
         let before = fs::metadata(&path)?;
@@ -167,10 +188,15 @@ impl CodexRolloutStore {
             return Err(RolloutTransferError::SourceChanged(thread_id));
         }
         let mut bytes = Vec::with_capacity(entry.size_bytes as usize);
-        File::open(&path)?.take(CODEX_ROLLOUT_MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+        File::open(&path)?
+            .take(CODEX_ROLLOUT_MAX_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)?;
         let after = fs::metadata(&path)?;
         let digest = sha256_bytes(&bytes);
-        if before.len() != after.len() || bytes.len() as u64 != entry.size_bytes || digest != entry.sha256 {
+        if before.len() != after.len()
+            || bytes.len() as u64 != entry.size_bytes
+            || digest != entry.sha256
+        {
             return Err(RolloutTransferError::SourceChanged(thread_id));
         }
         Ok(CodexRolloutArtifact {
@@ -187,12 +213,17 @@ impl CodexRolloutStore {
         artifact: &CodexRolloutArtifact,
     ) -> Result<CodexRolloutStageResult, RolloutTransferError> {
         validate_manifest(manifest)?;
-        let entry = manifest.entries.iter().find(|entry| entry.thread_id == artifact.thread_id)
+        let entry = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.thread_id == artifact.thread_id)
             .ok_or(RolloutTransferError::InvalidManifest)?;
         if artifact.size_bytes != entry.size_bytes || artifact.sha256 != entry.sha256 {
             return Err(RolloutTransferError::ChecksumMismatch(artifact.thread_id));
         }
-        let bytes = BASE64_STANDARD.decode(&artifact.data_base64).map_err(|_| RolloutTransferError::Encoding)?;
+        let bytes = BASE64_STANDARD
+            .decode(&artifact.data_base64)
+            .map_err(|_| RolloutTransferError::Encoding)?;
         if bytes.len() as u64 != entry.size_bytes || sha256_bytes(&bytes) != entry.sha256 {
             return Err(RolloutTransferError::ChecksumMismatch(artifact.thread_id));
         }
@@ -200,13 +231,22 @@ impl CodexRolloutStore {
         if destination.exists() {
             let digest = sha256_file(&destination, CODEX_ROLLOUT_MAX_FILE_BYTES)?;
             if fs::metadata(&destination)?.len() == entry.size_bytes && digest == entry.sha256 {
-                return Ok(CodexRolloutStageResult { thread_id: entry.thread_id, reused: true, verified_sha256: digest });
+                return Ok(CodexRolloutStageResult {
+                    thread_id: entry.thread_id,
+                    reused: true,
+                    verified_sha256: digest,
+                });
             }
             return Err(RolloutTransferError::TargetConflict(entry.thread_id));
         }
-        let parent = destination.parent().ok_or(RolloutTransferError::UnsafePath)?;
+        let parent = destination
+            .parent()
+            .ok_or(RolloutTransferError::UnsafePath)?;
         create_safe_directories(&self.sessions_root, parent)?;
-        let tmp = parent.join(format!(".vk-transfer-{}-{}.partial", manifest.operation_id, entry.thread_id));
+        let tmp = parent.join(format!(
+            ".vk-transfer-{}-{}.partial",
+            manifest.operation_id, entry.thread_id
+        ));
         let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         set_private_permissions(&file)?;
         if let Err(error) = (|| -> Result<(), RolloutTransferError> {
@@ -214,29 +254,51 @@ impl CodexRolloutStore {
             file.sync_all()?;
             drop(file);
             fs::hard_link(&tmp, &destination).map_err(|error| {
-                if destination.exists() { RolloutTransferError::TargetConflict(entry.thread_id) } else { RolloutTransferError::Io(error) }
+                if destination.exists() {
+                    RolloutTransferError::TargetConflict(entry.thread_id)
+                } else {
+                    RolloutTransferError::Io(error)
+                }
             })?;
             fs::remove_file(&tmp)?;
             let digest = sha256_file(&destination, CODEX_ROLLOUT_MAX_FILE_BYTES)?;
-            if digest != entry.sha256 { return Err(RolloutTransferError::ChecksumMismatch(entry.thread_id)); }
+            if digest != entry.sha256 {
+                return Err(RolloutTransferError::ChecksumMismatch(entry.thread_id));
+            }
             Ok(())
         })() {
             let _ = fs::remove_file(&tmp);
             return Err(error);
         }
-        Ok(CodexRolloutStageResult { thread_id: entry.thread_id, reused: false, verified_sha256: entry.sha256.clone() })
+        Ok(CodexRolloutStageResult {
+            thread_id: entry.thread_id,
+            reused: false,
+            verified_sha256: entry.sha256.clone(),
+        })
     }
 
-    pub fn verify_manifest(&self, manifest: &CodexRolloutManifest) -> Result<CodexRolloutVerification, RolloutTransferError> {
+    pub fn verify_manifest(
+        &self,
+        manifest: &CodexRolloutManifest,
+    ) -> Result<CodexRolloutVerification, RolloutTransferError> {
         validate_manifest(manifest)?;
         for entry in &manifest.entries {
             let path = self.safe_existing_path(&entry.relative_path)?;
-            if fs::metadata(&path)?.len() != entry.size_bytes || sha256_file(&path, CODEX_ROLLOUT_MAX_FILE_BYTES)? != entry.sha256 {
+            if fs::metadata(&path)?.len() != entry.size_bytes
+                || sha256_file(&path, CODEX_ROLLOUT_MAX_FILE_BYTES)? != entry.sha256
+            {
                 return Err(RolloutTransferError::ChecksumMismatch(entry.thread_id));
             }
             read_canonical_meta(&path, entry.thread_id)?;
         }
-        Ok(CodexRolloutVerification { manifest_sha256: manifest.manifest_sha256.clone(), verified_thread_ids: manifest.entries.iter().map(|entry| entry.thread_id).collect() })
+        Ok(CodexRolloutVerification {
+            manifest_sha256: manifest.manifest_sha256.clone(),
+            verified_thread_ids: manifest
+                .entries
+                .iter()
+                .map(|entry| entry.thread_id)
+                .collect(),
+        })
     }
 
     fn index_rollouts(&self) -> Result<HashMap<Uuid, PathBuf>, RolloutTransferError> {
@@ -246,15 +308,25 @@ impl CodexRolloutStore {
             for entry in fs::read_dir(dir)? {
                 let entry = entry?;
                 let ty = entry.file_type()?;
-                if ty.is_symlink() { continue; }
-                if ty.is_dir() { stack.push(entry.path()); continue; }
-                if !ty.is_file() { continue; }
+                if ty.is_symlink() {
+                    continue;
+                }
+                if ty.is_dir() {
+                    stack.push(entry.path());
+                    continue;
+                }
+                if !ty.is_file() {
+                    continue;
+                }
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if let Some(id) = rollout_id_from_name(&name) {
-                    if index.insert(id, entry.path()).is_some() {
-                        return Err(RolloutTransferError::InvalidMetadata { thread_id: id, reason: "duplicate rollout identity" });
-                    }
+                if let Some(id) = rollout_id_from_name(&name)
+                    && index.insert(id, entry.path()).is_some()
+                {
+                    return Err(RolloutTransferError::InvalidMetadata {
+                        thread_id: id,
+                        reason: "duplicate rollout identity",
+                    });
                 }
             }
         }
@@ -263,7 +335,9 @@ impl CodexRolloutStore {
 
     fn relative_path(&self, path: &Path) -> Result<String, RolloutTransferError> {
         let canonical = path.canonicalize()?;
-        let relative = canonical.strip_prefix(&self.sessions_root).map_err(|_| RolloutTransferError::UnsafePath)?;
+        let relative = canonical
+            .strip_prefix(&self.sessions_root)
+            .map_err(|_| RolloutTransferError::UnsafePath)?;
         validate_relative(relative)?;
         Ok(relative.to_string_lossy().into_owned())
     }
@@ -273,7 +347,10 @@ impl CodexRolloutStore {
         validate_relative(relative)?;
         let path = self.sessions_root.join(relative);
         let meta = fs::symlink_metadata(&path)?;
-        if !meta.file_type().is_file() || meta.file_type().is_symlink() || !path.canonicalize()?.starts_with(&self.sessions_root) {
+        if !meta.file_type().is_file()
+            || meta.file_type().is_symlink()
+            || !path.canonicalize()?.starts_with(&self.sessions_root)
+        {
             return Err(RolloutTransferError::UnsafePath);
         }
         Ok(path)
@@ -290,33 +367,54 @@ fn read_canonical_meta(path: &Path, expected: Uuid) -> Result<CanonicalMeta, Rol
     let mut line = String::new();
     BufReader::new(File::open(path)?.take(MAX_METADATA_LINE_BYTES + 1)).read_line(&mut line)?;
     if line.len() as u64 > MAX_METADATA_LINE_BYTES {
-        return Err(RolloutTransferError::InvalidMetadata { thread_id: expected, reason: "metadata line is oversized" });
+        return Err(RolloutTransferError::InvalidMetadata {
+            thread_id: expected,
+            reason: "metadata line is oversized",
+        });
     }
-    let envelope: RolloutEnvelope = serde_json::from_str(&line).map_err(|_| RolloutTransferError::InvalidMetadata { thread_id: expected, reason: "first line is not valid session metadata" })?;
+    let envelope: RolloutEnvelope =
+        serde_json::from_str(&line).map_err(|_| RolloutTransferError::InvalidMetadata {
+            thread_id: expected,
+            reason: "first line is not valid session metadata",
+        })?;
     if envelope.kind != "session_meta" || envelope.payload.id != expected {
-        return Err(RolloutTransferError::InvalidMetadata { thread_id: expected, reason: "canonical thread identity mismatch" });
+        return Err(RolloutTransferError::InvalidMetadata {
+            thread_id: expected,
+            reason: "canonical thread identity mismatch",
+        });
     }
     Ok(envelope.payload)
 }
 
 fn rollout_id_from_name(name: &str) -> Option<Uuid> {
     let stem = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
-    let id = stem.rsplit_once('-').and_then(|_| stem.get(stem.len().checked_sub(36)?..))?;
+    let id = stem
+        .rsplit_once('-')
+        .and_then(|_| stem.get(stem.len().checked_sub(36)?..))?;
     Uuid::parse_str(id).ok()
 }
 
 fn validate_relative(path: &Path) -> Result<(), RolloutTransferError> {
-    if path.as_os_str().is_empty() || path.is_absolute() || path.components().any(|part| !matches!(part, Component::Normal(_))) {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
         return Err(RolloutTransferError::UnsafePath);
     }
     Ok(())
 }
 
 fn create_safe_directories(root: &Path, parent: &Path) -> Result<(), RolloutTransferError> {
-    let relative = parent.strip_prefix(root).map_err(|_| RolloutTransferError::UnsafePath)?;
+    let relative = parent
+        .strip_prefix(root)
+        .map_err(|_| RolloutTransferError::UnsafePath)?;
     let mut current = root.to_path_buf();
     for component in relative.components() {
-        let Component::Normal(part) = component else { return Err(RolloutTransferError::UnsafePath); };
+        let Component::Normal(part) = component else {
+            return Err(RolloutTransferError::UnsafePath);
+        };
         current.push(part);
         match fs::symlink_metadata(&current) {
             Ok(meta) if meta.file_type().is_dir() && !meta.file_type().is_symlink() => {}
@@ -329,17 +427,33 @@ fn create_safe_directories(root: &Path, parent: &Path) -> Result<(), RolloutTran
 }
 
 fn validate_manifest(manifest: &CodexRolloutManifest) -> Result<(), RolloutTransferError> {
-    if manifest.entries.is_empty() || manifest.entries.len() > CODEX_ROLLOUT_MAX_LINEAGE_FILES || manifest.entries.last().map(|entry| entry.thread_id) != Some(manifest.leaf_thread_id) || manifest_digest(manifest) != manifest.manifest_sha256 {
+    if manifest.entries.is_empty()
+        || manifest.entries.len() > CODEX_ROLLOUT_MAX_LINEAGE_FILES
+        || manifest.entries.last().map(|entry| entry.thread_id) != Some(manifest.leaf_thread_id)
+        || manifest_digest(manifest) != manifest.manifest_sha256
+    {
         return Err(RolloutTransferError::InvalidManifest);
     }
     let mut seen = HashSet::new();
     let mut total = 0u64;
-    for entry in &manifest.entries {
+    for (index, entry) in manifest.entries.iter().enumerate() {
         validate_relative(Path::new(&entry.relative_path))?;
-        if !seen.insert(entry.thread_id) || entry.size_bytes > CODEX_ROLLOUT_MAX_FILE_BYTES { return Err(RolloutTransferError::InvalidManifest); }
-        total = total.checked_add(entry.size_bytes).ok_or(RolloutTransferError::InvalidManifest)?;
+        if !seen.insert(entry.thread_id) || entry.size_bytes > CODEX_ROLLOUT_MAX_FILE_BYTES {
+            return Err(RolloutTransferError::InvalidManifest);
+        }
+        let expected_parent = index
+            .checked_sub(1)
+            .map(|parent_index| manifest.entries[parent_index].thread_id);
+        if entry.parent_thread_id != expected_parent {
+            return Err(RolloutTransferError::InvalidManifest);
+        }
+        total = total
+            .checked_add(entry.size_bytes)
+            .ok_or(RolloutTransferError::InvalidManifest)?;
     }
-    if total > CODEX_ROLLOUT_MAX_LINEAGE_BYTES { return Err(RolloutTransferError::InvalidManifest); }
+    if total > CODEX_ROLLOUT_MAX_LINEAGE_BYTES {
+        return Err(RolloutTransferError::InvalidManifest);
+    }
     Ok(())
 }
 
@@ -353,7 +467,9 @@ fn manifest_digest(manifest: &CodexRolloutManifest) -> String {
     hash.update(manifest.leaf_thread_id.as_bytes());
     for entry in &manifest.entries {
         hash.update(entry.thread_id.as_bytes());
-        if let Some(parent) = entry.parent_thread_id { hash.update(parent.as_bytes()); }
+        if let Some(parent) = entry.parent_thread_id {
+            hash.update(parent.as_bytes());
+        }
         hash.update(entry.relative_path.as_bytes());
         hash.update(entry.size_bytes.to_be_bytes());
         hash.update(entry.sha256.as_bytes());
@@ -368,17 +484,26 @@ fn sha256_file(path: &Path, limit: u64) -> Result<String, RolloutTransferError> 
         &mut std::io::Read::by_ref(&mut file).take(limit + 1),
         &mut HashWriter(&mut hash),
     )?;
-    if copied > limit { return Err(RolloutTransferError::LineageTooLarge); }
+    if copied > limit {
+        return Err(RolloutTransferError::LineageTooLarge);
+    }
     Ok(format!("{:x}", hash.finalize()))
 }
 
 struct HashWriter<'a>(&'a mut Sha256);
 impl Write for HashWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { self.0.update(buf); Ok(buf.len()) }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
-fn sha256_bytes(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+fn sha256_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 #[cfg(unix)]
 fn set_private_permissions(file: &File) -> std::io::Result<()> {
@@ -386,11 +511,14 @@ fn set_private_permissions(file: &File) -> std::io::Result<()> {
     file.set_permissions(fs::Permissions::from_mode(0o600))
 }
 #[cfg(not(unix))]
-fn set_private_permissions(_file: &File) -> std::io::Result<()> { Ok(()) }
+fn set_private_permissions(_file: &File) -> std::io::Result<()> {
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
+
     use super::*;
 
     fn rollout(root: &Path, id: Uuid, parent: Option<Uuid>, body: &str) -> PathBuf {
@@ -412,14 +540,48 @@ mod tests {
         rollout(source.path(), leaf, Some(parent), "{}");
         let source_store = CodexRolloutStore::new(source.path()).unwrap();
         let target_store = CodexRolloutStore::new(target.path()).unwrap();
-        let manifest = source_store.resolve_manifest(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), leaf).unwrap();
-        assert_eq!(manifest.entries.iter().map(|entry| entry.thread_id).collect::<Vec<_>>(), vec![parent, leaf]);
+        let manifest = source_store
+            .resolve_manifest(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                leaf,
+            )
+            .unwrap();
+        assert_eq!(
+            manifest
+                .entries
+                .iter()
+                .map(|entry| entry.thread_id)
+                .collect::<Vec<_>>(),
+            vec![parent, leaf]
+        );
         for entry in &manifest.entries {
-            let artifact = source_store.read_artifact(&manifest, entry.thread_id).unwrap();
-            assert!(!target_store.stage_artifact(&manifest, &artifact).unwrap().reused);
-            assert!(target_store.stage_artifact(&manifest, &artifact).unwrap().reused);
+            let artifact = source_store
+                .read_artifact(&manifest, entry.thread_id)
+                .unwrap();
+            assert!(
+                !target_store
+                    .stage_artifact(&manifest, &artifact)
+                    .unwrap()
+                    .reused
+            );
+            assert!(
+                target_store
+                    .stage_artifact(&manifest, &artifact)
+                    .unwrap()
+                    .reused
+            );
         }
-        assert_eq!(target_store.verify_manifest(&manifest).unwrap().verified_thread_ids, vec![parent, leaf]);
+        assert_eq!(
+            target_store
+                .verify_manifest(&manifest)
+                .unwrap()
+                .verified_thread_ids,
+            vec![parent, leaf]
+        );
     }
 
     #[test]
@@ -430,16 +592,110 @@ mod tests {
         rollout(source.path(), leaf, None, "{}");
         let source_store = CodexRolloutStore::new(source.path()).unwrap();
         let target_store = CodexRolloutStore::new(target.path()).unwrap();
-        let manifest = source_store.resolve_manifest(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), leaf).unwrap();
+        let manifest = source_store
+            .resolve_manifest(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                leaf,
+            )
+            .unwrap();
         let artifact = source_store.read_artifact(&manifest, leaf).unwrap();
-        let destination = target.path().join("sessions").join(&manifest.entries[0].relative_path);
+        let destination = target
+            .path()
+            .join("sessions")
+            .join(&manifest.entries[0].relative_path);
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         fs::write(&destination, "different").unwrap();
-        assert!(matches!(target_store.stage_artifact(&manifest, &artifact), Err(RolloutTransferError::TargetConflict(_))));
+        assert!(matches!(
+            target_store.stage_artifact(&manifest, &artifact),
+            Err(RolloutTransferError::TargetConflict(_))
+        ));
 
         let mut traversal = manifest.clone();
         traversal.entries[0].relative_path = "../escape".into();
         traversal.manifest_sha256 = manifest_digest(&traversal);
-        assert!(matches!(target_store.verify_manifest(&traversal), Err(RolloutTransferError::UnsafePath)));
+        assert!(matches!(
+            target_store.verify_manifest(&traversal),
+            Err(RolloutTransferError::UnsafePath)
+        ));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            fs::remove_file(&destination).unwrap();
+            let escaped = target.path().join("escaped");
+            fs::create_dir(&escaped).unwrap();
+            let date_dir = target.path().join("sessions/2026");
+            fs::remove_dir_all(&date_dir).unwrap();
+            symlink(&escaped, &date_dir).unwrap();
+            assert!(matches!(
+                target_store.stage_artifact(&manifest, &artifact),
+                Err(RolloutTransferError::UnsafePath)
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_checksum_mismatch_cycle_and_oversized_source() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        rollout(source.path(), first, Some(second), "{}");
+        rollout(source.path(), second, Some(first), "{}");
+        let source_store = CodexRolloutStore::new(source.path()).unwrap();
+        assert!(matches!(
+            source_store.resolve_manifest(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                first,
+            ),
+            Err(RolloutTransferError::Cycle(_))
+        ));
+
+        let direct = Uuid::new_v4();
+        let path = rollout(source.path(), direct, None, "{}");
+        let manifest = source_store
+            .resolve_manifest(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                direct,
+            )
+            .unwrap();
+        let mut artifact = source_store.read_artifact(&manifest, direct).unwrap();
+        artifact.data_base64 = BASE64_STANDARD.encode(b"tampered");
+        let target_store = CodexRolloutStore::new(target.path()).unwrap();
+        assert!(matches!(
+            target_store.stage_artifact(&manifest, &artifact),
+            Err(RolloutTransferError::ChecksumMismatch(_))
+        ));
+
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(CODEX_ROLLOUT_MAX_FILE_BYTES + 1)
+            .unwrap();
+        assert!(matches!(
+            source_store.resolve_manifest(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                direct,
+            ),
+            Err(RolloutTransferError::FileTooLarge { .. })
+        ));
     }
 }
