@@ -278,6 +278,32 @@ scoped to the failure being surfaced — a blanket unwrapping of every internal
 error is not the remedy, and messages remain free of secrets, tokens, and
 environment values.
 
+### XXII. Executor continuation artifacts move by manifest, never by home copy
+
+An executor's home directory is a mixed-trust boundary containing immutable
+continuation artifacts beside mutable databases, credentials, configuration,
+caches, and logs. Cross-node continuation transfers MUST select only the
+immutable artifacts required for the named continuation, describe them in an
+operation-bound manifest, and verify identity, size, digest, file type,
+permissions, ownership, and structural destination containment before the
+continuation can influence lifecycle state. Copying or synchronizing the whole
+executor home is prohibited.
+
+Transfer completion is positive durable evidence, not the existence of a path.
+The coordinator records the authorized workspace, execution, source, target,
+leaf identity, manifest digest, and target verification before stopping the
+source or changing affinity. Retries reuse identical verified content and
+reject conflicts; they never overwrite a different artifact for the same
+identity. Missing, corrupt, oversized, unauthorized, indeterminate, or
+partially staged lineage leaves the source execution and placement unchanged.
+
+Artifact readers, writers, and cleaners never follow symlinks, accept absolute
+caller paths, or log contents. Every byte/count/depth/time dimension is bounded.
+Temporary partials are operation-scoped and removable; verified artifacts have
+an explicit age-based retention policy that protects active and recoverable
+operations. Failures expose a safe, specific transfer category while prompts,
+tokens, environment values, rollout bodies, and other secrets remain opaque.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -299,7 +325,9 @@ environment values.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.19.0 (adds one-convention-per-concept — reuse the existing
+**Version**: 0.20.0 (adds manifest-only executor continuation artifact transfer,
+durable pre-lifecycle verification, conflict-refusing retries, and bounded,
+secret-safe retention; 0.19.0 added one-convention-per-concept — reuse the existing
 resolution rule rather than re-deriving it, accept the producer's default value,
 and report failures with the fact that identifies them instead of a generic
 internal error; also makes writes into a consolidated shared namespace additive
