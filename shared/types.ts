@@ -276,6 +276,16 @@ export enum WorkerNodeStatus { online = "online", offline = "offline", draining 
 
 export enum WorkerMountStatus { healthy = "healthy", missing = "missing", local_fallback = "local_fallback", wrong_filesystem = "wrong_filesystem", probe_not_visible = "probe_not_visible", read_only = "read_only", ownership_mismatch = "ownership_mismatch", io_error = "io_error" }
 
+export type UpdateWorkspaceAffinityRequest = { requested_worker_node_id: string | null, restart_running: boolean, operation_id: string | null, };
+
+export enum WorkspaceAffinityUpdateOutcome { updated = "updated", restarted = "restarted", restart_failed = "restart_failed" }
+
+export type WorkspaceAffinityUpdateResponse = { placement: WorkspacePlacement, outcome: WorkspaceAffinityUpdateOutcome, stopped_execution_id: string | null, started_execution: ExecutionProcess | null, message: string | null, };
+
+export enum WorkspaceAffinityKind { local = "local", automatic = "automatic", worker = "worker", unassigned = "unassigned" }
+
+export type WorkspaceAffinitySummary = { kind: WorkspaceAffinityKind, placement_state: WorkspacePlacementState, worker_node_id: string | null, worker_hostname: string | null, requested_worker_node_id: string | null, requested_worker_hostname: string | null, };
+
 export type CpuSample = { model: string | null, core_count: number | null, 
 /**
  * `1 − Δidle/Δtotal`. `None` until a predecessor exists.
@@ -974,7 +984,7 @@ pr_number: bigint | null,
 /**
  * PR URL for this workspace (if any PR exists)
  */
-pr_url: string | null, };
+pr_url: string | null, affinity: WorkspaceAffinitySummary, };
 
 export type WorkspaceSummaryResponse = { summaries: Array<WorkspaceSummary>, };
 
