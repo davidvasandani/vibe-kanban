@@ -1,6 +1,6 @@
 # Feature Specification: Transfer Codex Rollout Lineage
 
-**Feature dir**: `specs/vk/c8a9-transfer-codex-r/`  
+**Feature dir**: `specs/vk/c8a9-transfer-codex-r/`
 **Status**: Draft
 
 ## Summary

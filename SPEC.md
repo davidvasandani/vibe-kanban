@@ -1,8 +1,8 @@
 # Technical Specification: Codex Rollout Lineage Transfer
 
-**Task:** `vk/c8a9-transfer-codex-r`  
+**Task:** `vk/c8a9-transfer-codex-r`
 **Scope:** Vibe Kanban service and its governing
-`homelab/modules/vibe-kanban-rebuild.nix` deployment only  
+`homelab/modules/vibe-kanban-rebuild.nix` deployment only
 **Status:** Draft for SpecKit refinement
 
 ## Objective

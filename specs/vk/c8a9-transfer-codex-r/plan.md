@@ -1,6 +1,6 @@
 # Implementation Plan: Transfer Codex Rollout Lineage
 
-**Spec**: `./spec.md`  
+**Spec**: `./spec.md`
 **Status**: Ready for tasks
 
 ## Technical Context
