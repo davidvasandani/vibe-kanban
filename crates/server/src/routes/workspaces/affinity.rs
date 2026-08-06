@@ -481,17 +481,20 @@ async fn claim_operation(
     workspace_id: Uuid,
     request: &UpdateWorkspaceAffinityRequest,
     source_execution_id: Option<Uuid>,
+    selected_worker_node_id: Uuid,
 ) -> Result<(), ApiError> {
     let inserted = sqlx::query(
         r#"INSERT OR IGNORE INTO workspace_affinity_operations
-           (operation_id, workspace_id, source_execution_id, requested_worker_node_id, restart_running)
-           VALUES (?, ?, ?, ?, ?)"#,
+           (operation_id, workspace_id, source_execution_id, requested_worker_node_id,
+            restart_running, selected_worker_node_id)
+           VALUES (?, ?, ?, ?, ?, ?)"#,
     )
     .bind(operation_id)
     .bind(workspace_id)
     .bind(source_execution_id)
     .bind(request.requested_worker_node_id)
     .bind(request.restart_running)
+    .bind(selected_worker_node_id)
     .execute(pool)
     .await?;
     if inserted.rows_affected() == 0 {
@@ -602,15 +605,17 @@ pub async fn update_workspace_affinity(
 
     let mut resumed_source_execution_id = None;
     let mut resuming_operation_id = None;
+    let mut resumed_target_worker_id = None;
     if let Some((
         active_operation_id,
         stored_worker_id,
         stored_restart,
         source_execution_id,
+        selected_worker_node_id,
         stale,
-    )) = sqlx::query_as::<_, (Uuid, Option<Uuid>, bool, Option<Uuid>, bool)>(
+    )) = sqlx::query_as::<_, (Uuid, Option<Uuid>, bool, Option<Uuid>, Option<Uuid>, bool)>(
         r#"SELECT operation_id, requested_worker_node_id, restart_running,
-                  source_execution_id,
+                  source_execution_id, selected_worker_node_id,
                   updated_at <= datetime('now', '-10 minutes')
            FROM workspace_affinity_operations
            WHERE workspace_id = ? AND status = 'claimed'"#,
@@ -633,6 +638,7 @@ pub async fn update_workspace_affinity(
             request = stored_request;
             resumed_source_execution_id = source_execution_id;
             resuming_operation_id = Some(active_operation_id);
+            resumed_target_worker_id = selected_worker_node_id;
         } else {
             return Err(ApiError::Conflict(
                 "A server affinity migration is already in progress for this workspace".into(),
@@ -719,7 +725,8 @@ pub async fn update_workspace_affinity(
             Utc::now(),
         )
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    let changes_effective_worker = placement.worker_node_id != Some(selected.id);
+    let selected_worker_id = resumed_target_worker_id.unwrap_or(selected.id);
+    let changes_effective_worker = placement.worker_node_id != Some(selected_worker_id);
     if changes_effective_worker && !running.is_empty() && !request.restart_running {
         return Err(ApiError::Conflict(
             "The current task is running; confirm stop, migrate, and restart".into(),
@@ -745,7 +752,7 @@ pub async fn update_workspace_affinity(
             pool,
             operation_id,
             workspace.id,
-            selected.id,
+            selected_worker_id,
         )
         .await?;
     }
@@ -815,6 +822,7 @@ pub async fn update_workspace_affinity(
             workspace.id,
             &request,
             running.first().map(|process| process.id),
+            selected_worker_id,
         )
         .await?;
     }
@@ -881,7 +889,7 @@ pub async fn update_workspace_affinity(
                     workspace_id: workspace.id,
                     source_execution_id: process.id,
                     source_worker_node_id,
-                    target_worker_node_id: selected.id,
+                    target_worker_node_id: selected_worker_id,
                     leaf_thread_id,
                 },
             )
@@ -1018,7 +1026,7 @@ pub async fn update_workspace_affinity(
             pool,
             workspace.id,
             placement.worker_node_id,
-            selected.id,
+            selected_worker_id,
             request.requested_worker_node_id,
             if request.requested_worker_node_id.is_some() {
                 "manual worker affinity update"
