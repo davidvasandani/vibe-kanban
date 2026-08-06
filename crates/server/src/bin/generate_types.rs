@@ -75,6 +75,11 @@ fn generate_types_content() -> String {
         db::models::worker_node::WorkerNode::decl(),
         db::models::worker_node::WorkerNodeStatus::decl(),
         db::models::worker_node::WorkerMountStatus::decl(),
+        server::routes::workspaces::affinity::UpdateWorkspaceAffinityRequest::decl(),
+        server::routes::workspaces::affinity::WorkspaceAffinityUpdateOutcome::decl(),
+        server::routes::workspaces::affinity::WorkspaceAffinityUpdateResponse::decl(),
+        server::routes::workspaces::workspace_summary::WorkspaceAffinityKind::decl(),
+        server::routes::workspaces::workspace_summary::WorkspaceAffinitySummary::decl(),
         // Cluster metrics. `node-metrics` is a leaf crate with no database or
         // HTTP dependency; the coordinator-side aggregation types that wrap it
         // live in `services`.

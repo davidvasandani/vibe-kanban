@@ -184,11 +184,6 @@ and the worker must authorize the execution ID and canonical workspace path
 against that assignment. Retries are idempotent and cannot create a second
 process for one execution.
 
-Placement intent is explicit at every boundary: automatic scheduling,
-coordinator-local execution, and a requested worker are distinct choices. A
-null or omitted value must not be overloaded to mean more than one of them, and
-contradictory choices are rejected before placement state is mutated.
-
 Remote liveness and terminal state require worker evidence. A timeout,
 disconnect, missing handle, or expired lease is not proof that a process
 completed or was killed; expose interruption or indeterminacy and preserve the
@@ -283,89 +278,27 @@ scoped to the failure being surfaced — a blanket unwrapping of every internal
 error is not the remedy, and messages remain free of secrets, tokens, and
 environment values.
 
-### XXII. Process lifetime follows the stable owner
-Managed coding-agent and execution-helper processes MUST have one explicit
-owner for their complete lifetime. A control-plane client disconnect, HTTP
-server replacement, dropped in-memory handle, timeout, or missing observation
-is not evidence that a managed process exited and MUST NOT implicitly cancel or
-terminalise it. Ownership includes the process group, input channel, ordered
-output capture, exit watcher, cancellation state, and cleanup responsibility;
-moving only a PID or child handle does not transfer ownership.
+### XXII. Affinity migration is a single owned lifecycle transition
+An executing process is never transferred between nodes. Changing affinity
+while work is active means terminating the old execution with the established
+stop/cancellation protocol, committing the new placement, and creating at most
+one new continuation execution. The coordinator owns that full transition; a
+browser or worker may request it but must not assemble it from independent
+stop, placement, and follow-up mutations.
 
-Every replacement boundary is an evidence-backed handoff. Commands that may be
-retried after an uncertain response are idempotent under a stable execution
-identity. Execution output and terminal-state events are monotonically ordered,
-acknowledged, replayable within an explicit bound, and expose gaps rather than
-hiding them. A new control-plane generation becomes ready only after
-compatibility is negotiated and authoritative process state is reconciled. At
-most one generation holds mutation authority at a time.
+The transition is serialized per workspace and revalidates both liveness and
+target eligibility at execution time. A missing worker response is not evidence
+that stop succeeded, and affinity cannot change until terminal evidence meets
+the existing lifecycle contract. Duplicate requests, retries, and lost HTTP
+responses cannot create duplicate continuations.
 
-Soft detach and hard shutdown are different operations. Soft detach preserves
-managed processes and their streams under the stable owner. Hard shutdown is
-explicit, retains process-group cleanup and work-preservation rules, and is the
-only application lifecycle operation allowed to terminate all managed
-children. Recovery for a genuinely lost owner remains fail-safe: unverifiable
-state is interrupted or indeterminate, never silently completed or adopted.
-
-### XXIII. Flexible panels have one explicit space and scroll owner
-Panel stacks that divide bounded space MUST express that division at the
-component that owns expanded/collapsed state. Expanded panels may grow and
-shrink into available space; collapsed panels remain intrinsically sized.
-Avoid viewport-derived or arbitrary per-panel height caps when the containing
-layout already defines the available height.
-
-Nested flex scroll regions identify one overflow owner, and every flex ancestor
-between the bounded container and that owner permits shrinking (`min-height: 0`
-or its equivalent). Headers and controls stay outside the content scroller so
-overflow does not make them unreachable.
-
-### XXIV. External config identity is not presentation
-Keys written into an external tool's configuration are protocol identifiers,
-not display labels. They obey the strictest supported consumer's identifier
-grammar and remain stable across read, merge, conflict resolution, write,
-testing, authentication, and live refresh. Human-readable names are separate,
-optional metadata; presentation renders the label with identifier fallback,
-while every operational lookup uses the identifier.
-
-Catalog object keys are preferred wire identifiers and catalog metadata names
-are display labels. Derived identifiers use one shared normalization rule and
-collisions are resolved or rejected before any external file is written.
-Existing external keys are never silently normalized during read, and
-display-only metadata is not injected into client-native definitions unless
-that client explicitly defines such a field.
-
-### XXV. Credentials are scoped at the narrowest decision boundary
-Secret selection follows the resource an external command will actually access,
-not merely the workspace, host, or service that launches it. When one workspace
-can address resources in multiple authorization domains, a single ambient token
-is not an acceptable substitute for command-time selection.
-
-Secrets remain in runtime-only credential stores outside the Nix store,
-database, shared workspace, prompts, logs, and distributed action payloads.
-Long-lived server environments carry only non-secret routing metadata. The
-selected credential is introduced at the final child-process boundary and only
-for that child. Unknown resources preserve the established fallback behavior;
-a known resource whose configured credential cannot be read fails explicitly
-and secret-safely rather than silently using another identity.
-
-Credential routing has one parser and one precedence rule shared by every
-consumer. Explicit command targets outrank inferred repository context. Parsing
-is host-strict and rejects malformed or lookalike destinations. Tests use fake
-credentials and fake executables, exercise every workspace process boundary,
-and prove that serialized cluster messages contain no secret material.
-
-### XXVI. Bundled defaults upgrade without claiming user files
-Bundled defaults copied into user-editable storage remain user-owned after
-seeding. A release may automatically refresh a bundled file only when the
-on-disk bytes are known to be an unmodified previously shipped default.
-Customized files, unrecognized versions, and ambiguous state are preserved.
-Deleted defaults stay deleted unless the product's established empty-directory
-reset behavior is explicitly invoked.
-
-Prompt-driven bundled workflows are executable contracts, not illustrative
-copy. Their regression tests preserve requirements that affect safety and
-completion—such as concurrency, bounded retries, prompt delivery, and required
-read capabilities—rather than checking only stage names or keywords.
+Outcomes name the last durable boundary reached. If stop fails, placement is
+unchanged. If placement succeeds but continuation creation fails, the workspace
+remains stopped on the new affinity and the operator is told exactly that; the
+system must not roll back into a node that may still own process state or claim
+the migration completed. Product-owned continuation prompts are versioned in
+source and preserve the user's prior session context rather than fabricating a
+new task.
 
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
@@ -388,18 +321,8 @@ read capabilities—rather than checking only stage names or keywords.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.25.0 (adds user-preserving bundled-default upgrades and prompt-workflow contract coverage; 0.24.0 added narrowest-boundary credential scoping — select secrets
-for the resource at command time, keep values runtime-only and out of cluster
-payloads, and share one strict routing rule across process boundaries; 0.23.0
-added external-config identity vs presentation: stable,
-protocol-safe wire keys, separate friendly labels, pre-write collision safety,
-and no silent native-key migration or definition metadata injection; 0.22.0
-added stable process ownership and evidence-backed soft
-restart handoffs — control-plane disconnect is not process death, ownership
-includes the complete I/O/monitoring lifecycle, replay is ordered and explicit
-about gaps, mutation authority is single-generation, and only hard shutdown
-terminates all managed children; 0.21.0 made cluster placement intent explicit and unambiguous;
-0.20.0 added explicit flexible-panel space and scroll ownership; 0.19.0 added
+**Version**: 0.20.0 (adds coordinator-owned, serialized affinity migration with
+truthful durable-boundary outcomes and at-most-once continuation; 0.19.0 added
 one-convention-per-concept — reuse the existing
 resolution rule rather than re-deriving it, accept the producer's default value,
 and report failures with the fact that identifies them instead of a generic
@@ -409,4 +332,3 @@ paths, structural rather than textual assertions, no same-named-local fallback,
 two-sided pointer repair, level-triggered enforcement, and re-derived blast
 radius for consolidated namespaces; 0.17.0 added observability as a read-only
 surface; 0.16.0 added affinity-bound, evidence-backed distributed execution)
-
