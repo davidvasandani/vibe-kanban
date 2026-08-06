@@ -138,7 +138,7 @@ may run in parallel within their layer.
 - [x] T028 Run an independent Codex review of the complete diff, address every
   confirmed significant finding, rerun impacted verification, and repeat until
   clean; record it in `specs/vk/c8a9-transfer-codex-r/review.md` (depends T027).
-- [ ] T029 Distill reusable rollout-transfer and pre-lifecycle evidence lessons
+- [x] T029 Distill reusable rollout-transfer and pre-lifecycle evidence lessons
   into `docs/knowledge-base/codex-rollout-transfer.md`, refresh
   `docs/knowledge-base/INDEX.md`, tag with `c8a9-transfer-codex-r`, and commit the
   knowledge-base update (depends T028).
