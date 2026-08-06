@@ -18,7 +18,87 @@ use serde_json::{Map, Value};
 use tokio::fs;
 use ts_rs::TS;
 
-use crate::executors::{CodingAgent, ExecutorError};
+use crate::executors::{CodingAgent, ExecutorError, StandardCodingAgentExecutor};
+
+pub fn mcp_servers_from_config(raw_config: &Value, path: &[String]) -> HashMap<String, Value> {
+    let mut current = raw_config;
+    for part in path {
+        let Some(next) = current.get(part) else {
+            return HashMap::new();
+        };
+        current = next;
+    }
+    current
+        .as_object()
+        .map(|servers| {
+            servers
+                .iter()
+                .map(|(name, definition)| (name.clone(), definition.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn set_mcp_servers_in_config(
+    raw_config: &mut Value,
+    path: &[String],
+    servers: &HashMap<String, Value>,
+) -> Result<(), ExecutorError> {
+    if !raw_config.is_object() {
+        *raw_config = serde_json::json!({});
+    }
+    let Some((final_attr, parents)) = path.split_last() else {
+        return Err(ExecutorError::UnknownExecutorType(
+            "MCP servers path is empty".into(),
+        ));
+    };
+    let mut current = raw_config;
+    for part in parents {
+        if current.get(part).is_none() {
+            current
+                .as_object_mut()
+                .expect("config normalized to object")
+                .insert(part.clone(), serde_json::json!({}));
+        }
+        current = current.get_mut(part).expect("inserted config path");
+        if !current.is_object() {
+            *current = serde_json::json!({});
+        }
+    }
+    current
+        .as_object_mut()
+        .expect("config path normalized to object")
+        .insert(final_attr.clone(), serde_json::to_value(servers)?);
+    Ok(())
+}
+
+pub async fn read_coding_agent_mcp_servers(
+    agent: &CodingAgent,
+) -> Result<HashMap<String, Value>, ExecutorError> {
+    let path = agent.default_mcp_config_path().ok_or_else(|| {
+        ExecutorError::UnknownExecutorType("executor has no MCP config path".into())
+    })?;
+    let mcp_config = agent.get_mcp_config();
+    let config = read_agent_config(&path, &mcp_config).await?;
+    Ok(mcp_servers_from_config(&config, &mcp_config.servers_path))
+}
+
+pub async fn write_coding_agent_mcp_servers_to_path(
+    agent: &CodingAgent,
+    source_path: &Path,
+    target_path: &Path,
+    servers: &HashMap<String, Value>,
+) -> Result<(), ExecutorError> {
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(ExecutorError::Io)?;
+    }
+    let mcp_config = agent.get_mcp_config();
+    let mut config = read_agent_config(source_path, &mcp_config).await?;
+    set_mcp_servers_in_config(&mut config, &mcp_config.servers_path, servers)?;
+    write_agent_config(target_path, &mcp_config, &config).await
+}
 
 fn is_jsonc_file(path: &Path) -> bool {
     path.extension()
@@ -112,28 +192,32 @@ pub async fn read_agent_config(
     config_path: &std::path::Path,
     mcp_config: &McpConfig,
 ) -> Result<Value, ExecutorError> {
-    if let Ok(file_content) = fs::read_to_string(config_path).await {
-        if mcp_config.is_toml_config {
-            if file_content.trim().is_empty() {
-                return Ok(serde_json::json!({}));
+    match fs::read_to_string(config_path).await {
+        Ok(file_content) => {
+            if mcp_config.is_toml_config {
+                if file_content.trim().is_empty() {
+                    return Ok(serde_json::json!({}));
+                }
+                let toml_val: toml::Value = toml::from_str(&file_content)?;
+                let json_string = serde_json::to_string(&toml_val)?;
+                Ok(serde_json::from_str(&json_string)?)
+            } else if is_jsonc_file(config_path) {
+                if file_content.trim().is_empty() {
+                    return Ok(serde_json::json!({}));
+                }
+                match jsonc_parser::parse_to_serde_value(&file_content, &ParseOptions::default()) {
+                    Ok(Some(value)) => Ok(value),
+                    Ok(None) => Ok(serde_json::json!({})),
+                    Err(_) => Ok(serde_json::from_str(&file_content)?),
+                }
+            } else {
+                Ok(serde_json::from_str(&file_content)?)
             }
-            let toml_val: toml::Value = toml::from_str(&file_content)?;
-            let json_string = serde_json::to_string(&toml_val)?;
-            Ok(serde_json::from_str(&json_string)?)
-        } else if is_jsonc_file(config_path) {
-            if file_content.trim().is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            match jsonc_parser::parse_to_serde_value(&file_content, &ParseOptions::default()) {
-                Ok(Some(value)) => Ok(value),
-                Ok(None) => Ok(serde_json::json!({})),
-                Err(_) => Ok(serde_json::from_str(&file_content)?),
-            }
-        } else {
-            Ok(serde_json::from_str(&file_content)?)
         }
-    } else {
-        Ok(mcp_config.template.clone())
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(mcp_config.template.clone())
+        }
+        Err(error) => Err(ExecutorError::Io(error)),
     }
 }
 
@@ -565,6 +649,56 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn replacing_mcp_section_preserves_unrelated_native_settings() {
+        let mut config = serde_json::json!({
+            "model": "gpt-5",
+            "mcp_servers": {"old": {"command": "old"}},
+            "projects": {"/workspace": {"trust_level": "trusted"}}
+        });
+        let servers = HashMap::from([(
+            "firecrawl-browser".into(),
+            serde_json::json!({"url": "https://example.invalid/mcp", "headers": {"Authorization": "Bearer secret"}}),
+        )]);
+
+        set_mcp_servers_in_config(&mut config, &["mcp_servers".into()], &servers).unwrap();
+
+        assert_eq!(config["model"], "gpt-5");
+        assert_eq!(config["projects"]["/workspace"]["trust_level"], "trusted");
+        assert!(config["mcp_servers"].get("old").is_none());
+        assert_eq!(
+            mcp_servers_from_config(&config, &["mcp_servers".into()]),
+            servers
+        );
+    }
+
+    #[tokio::test]
+    async fn config_reader_defaults_only_for_missing_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "vk-mcp-read-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).await.unwrap();
+        let mcp = McpConfig::new(
+            vec!["mcp_servers".into()],
+            serde_json::json!({"mcp_servers": {}}),
+            serde_json::json!({}),
+            true,
+        );
+
+        assert_eq!(
+            read_agent_config(&dir.join("missing.toml"), &mcp)
+                .await
+                .unwrap(),
+            mcp.template
+        );
+        assert!(read_agent_config(&dir, &mcp).await.is_err());
+        let _ = fs::remove_dir_all(&dir).await;
+    }
 
     #[test]
     fn default_vibe_kanban_command_is_unchanged_without_override() {

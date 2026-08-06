@@ -12,8 +12,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
 use cluster_protocol::{
     CancellationPhase, CancellationRequest, EventAcknowledgement, ExecutionDispatch,
-    ExecutionEventPayload, InteractionRequest, InteractionResponse, PROTOCOL_VERSION,
-    PersistencePolicy, RequestAuthority, TerminalState,
+    ExecutionEventPayload, InteractionRequest, InteractionResponse, McpConfigSnapshot,
+    PROTOCOL_VERSION, PersistencePolicy, RequestAuthority, TerminalState,
 };
 use command_group::AsyncGroupChild;
 use db::{
@@ -49,6 +49,7 @@ use executors::{
         WarmReuseHandle, WarmReuseSignal,
     },
     logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
+    mcp_config::read_coding_agent_mcp_servers,
     mcp_refresh::{
         McpRefreshErrorCategory, McpRefreshHandle, McpRefreshResult, McpRefreshSignal,
         McpRefreshStatus,
@@ -2970,6 +2971,26 @@ impl ContainerService for LocalContainerService {
             .map(serde_json::to_value)
             .transpose()
             .map_err(anyhow::Error::from)?;
+        let mcp_config_snapshot = if let Some(config) =
+            executor_config.filter(|config| config.executor == BaseCodingAgent::Codex)
+        {
+            let profile_id = config.profile_id();
+            let agent = ExecutorConfigs::get_cached()
+                .get_coding_agent(&profile_id)
+                .ok_or_else(|| anyhow!("executor profile {profile_id} is unavailable"))?;
+            let snapshot = McpConfigSnapshot {
+                executor: config.executor.to_string(),
+                servers: read_coding_agent_mcp_servers(&agent)
+                    .await
+                    .map_err(anyhow::Error::from)?
+                    .into_iter()
+                    .collect(),
+            };
+            snapshot.validate_size().map_err(anyhow::Error::from)?;
+            Some(snapshot)
+        } else {
+            None
+        };
         let action = serde_json::to_value(executor_action).map_err(anyhow::Error::from)?;
         let run_reason = serde_json::to_value(&execution_process.run_reason)
             .map_err(anyhow::Error::from)?
@@ -2993,6 +3014,7 @@ impl ContainerService for LocalContainerService {
             // between two dispatches of the same execution must not be deduped
             // into the first one's definition.
             "executor_profile_config": executor_profile_config,
+            "mcp_config_snapshot": mcp_config_snapshot,
             "action": action,
             "environment": environment,
             "run_reason": run_reason,
@@ -3017,6 +3039,7 @@ impl ContainerService for LocalContainerService {
             working_directory: workspace_path,
             executor_profile,
             executor_profile_config,
+            mcp_config_snapshot,
             action,
             environment,
             run_reason,

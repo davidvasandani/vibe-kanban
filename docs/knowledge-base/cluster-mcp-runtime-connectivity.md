@@ -30,6 +30,23 @@ worker with the exact executable and environment materialized into the agent
 config. A timeout there, paired with a successful coordinator test, is routing
 evidence rather than a Codex reload defect.
 
+## Dispatch settings-owned definitions, not deployment approximations
+
+Deployment bootstrap can make an MCP executable available, but it cannot safely
+reconstruct settings-owned headers or environment secrets. For remote Codex
+executions, snapshot the selected coordinator profile's native MCP server map in
+the authenticated dispatch and materialize it in an execution-scoped Codex home.
+Preserve the worker's shared authentication and runtime assets via symlinks, but
+never overwrite its global `config.toml`: concurrent executions may select
+different definitions. Bound and validate the snapshot, bind it to the selected
+executor, avoid logging its contents, and remove the scoped home when the job
+ends. A worker without an existing Codex home must still be able to start when
+authentication is supplied through its environment.
+
+Do not also seed the same settings-managed MCP through `codex mcp add` during
+service startup. That creates a second authority and can silently replace the
+authenticated definition with an incomplete one.
+
 ## Widen only the required service port
 
 When a dedicated nftables chain protects several adjacent services, split the

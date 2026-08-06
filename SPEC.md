@@ -1,5 +1,42 @@
 # Technical Spec: Expose Vibe Kanban CLI Tools in Workspace Sessions
 
+## VAS-356 Follow-up: Remote MCP Configuration Synchronization
+
+### Problem
+
+The coordinator owns the MCP definitions edited in Vibe Kanban settings, but a
+cluster worker launches the selected coding agent from its own native config
+file. Deployment bootstrap can install an MCP command on a worker, but it cannot
+reproduce settings-owned headers or environment secrets. Consequently the
+worker's Firecrawl stdio client reaches its backend and fails scope bootstrap
+with HTTP 401 even though the coordinator-side MCP definition is authenticated.
+
+### Required behavior
+
+1. A remotely dispatched execution receives the MCP server definitions for its
+   selected executor profile from the coordinator.
+2. The worker materializes those definitions in the selected executor's native
+   MCP config before starting the coding agent, using the existing adapters and
+   atomic config writer.
+3. Headers and environment values are transmitted only inside the existing
+   authenticated, signed coordinator-to-worker dispatch channel and are never
+   logged.
+4. The worker rejects an MCP configuration that does not correspond to the
+   dispatched executor profile or exceeds a conservative size bound.
+5. Local execution and workers receiving an older dispatch without an MCP
+   snapshot retain their current behavior.
+6. Applying a snapshot updates only the MCP server section and preserves other
+   native agent settings.
+
+### Acceptance criteria
+
+- A Codex job dispatched to think3/think4 sees the same Firecrawl definition as
+  coordinator Codex and bootstraps without HTTP 401.
+- Focused tests prove profile selection, protocol round-trip, bounded payloads,
+  native-config preservation, and secret-safe diagnostics.
+- No Firecrawl bearer is copied into Git, the Nix store, or command arguments.
+- No non-Vibe-Kanban service is changed.
+
 ## Summary
 
 Vibe Kanban can install pinned vendor CLI tools into its app-managed CLI tools

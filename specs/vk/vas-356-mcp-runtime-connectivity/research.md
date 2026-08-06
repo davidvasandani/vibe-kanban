@@ -20,3 +20,12 @@
 - **Proxy Firecrawl through a new VK endpoint:** more plumbing than required;
   exact source-address access already matches the cluster topology.
 - **Restart Codex:** does not repair either unreachable backend.
+
+## Follow-up research
+
+`ExecutionDispatch` already carries resolved profile configuration over a signed
+request and covers it in the idempotency digest. `CodingAgent` defines native
+paths and MCP adapters; `read_agent_config`/`write_agent_config` preserve formats
+and write atomically. The worker already depends on `executors`, so shared MCP
+materialization belongs there. Carrying only the MCP map minimizes secret data;
+1 MiB is far above normal maps and far below the 72 MiB signed-body ceiling.
