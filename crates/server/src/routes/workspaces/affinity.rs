@@ -551,12 +551,13 @@ async fn claim_operation(
     workspace_id: Uuid,
     request: &UpdateWorkspaceAffinityRequest,
     source_execution_id: Option<Uuid>,
+    selected_worker_node_id: Option<Uuid>,
 ) -> Result<(), ApiError> {
     let inserted = sqlx::query(
         r#"INSERT OR IGNORE INTO workspace_affinity_operations
            (operation_id, workspace_id, source_execution_id, requested_worker_node_id,
-            run_on_coordinator, restart_running)
-           VALUES (?, ?, ?, ?, ?, ?)"#,
+            run_on_coordinator, restart_running, selected_worker_node_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(operation_id)
     .bind(workspace_id)
@@ -564,6 +565,7 @@ async fn claim_operation(
     .bind(request.requested_worker_node_id)
     .bind(request.run_on_coordinator)
     .bind(request.restart_running)
+    .bind(selected_worker_node_id)
     .execute(pool)
     .await?;
     if inserted.rows_affected() == 0 {
@@ -675,17 +677,21 @@ pub async fn update_workspace_affinity(
 
     let mut resumed_source_execution_id = None;
     let mut resuming_operation_id = None;
+    let mut resumed_target_worker_id = None;
     if let Some((
         active_operation_id,
         stored_worker_id,
         stored_coordinator,
         stored_restart,
         source_execution_id,
+        selected_worker_node_id,
         stale,
-    )) = sqlx::query_as::<_, (Uuid, Option<Uuid>, bool, bool, Option<Uuid>, bool)>(
+    )) = sqlx::query_as::<
+        _,
+        (Uuid, Option<Uuid>, bool, bool, Option<Uuid>, Option<Uuid>, bool),
+    >(
         r#"SELECT operation_id, requested_worker_node_id, run_on_coordinator,
-                  restart_running,
-                  source_execution_id,
+                  restart_running, source_execution_id, selected_worker_node_id,
                   updated_at <= datetime('now', '-10 minutes')
            FROM workspace_affinity_operations
            WHERE workspace_id = ? AND status = 'claimed'"#,
@@ -710,6 +716,7 @@ pub async fn update_workspace_affinity(
             intent = AffinityIntent::resolve(&request)?;
             resumed_source_execution_id = source_execution_id;
             resuming_operation_id = Some(active_operation_id);
+            resumed_target_worker_id = selected_worker_node_id;
         } else {
             return Err(ApiError::Conflict(
                 "A server affinity migration is already in progress for this workspace".into(),
@@ -792,7 +799,7 @@ pub async fn update_workspace_affinity(
         .as_ref()
         .map(executor_config)
         .transpose()?;
-    let target_worker_node_id = if intent == AffinityIntent::Coordinator {
+    let scheduled_target_worker_node_id = if intent == AffinityIntent::Coordinator {
         None
     } else {
         let workers = WorkerNode::fetch_all(pool).await?;
@@ -812,6 +819,7 @@ pub async fn update_workspace_affinity(
             .map_err(|error| ApiError::BadRequest(error.to_string()))?;
         Some(selected.id)
     };
+    let target_worker_node_id = resumed_target_worker_id.or(scheduled_target_worker_node_id);
     let changes_effective_target = match target_worker_node_id {
         Some(worker_node_id) => placement.worker_node_id != Some(worker_node_id),
         None => placement.placement_state != WorkspacePlacementState::Local,
@@ -822,9 +830,10 @@ pub async fn update_workspace_affinity(
         ));
     }
 
-    let transfer_was_verified = if resuming_operation_id.is_some()
-        && config.executor == BaseCodingAgent::Codex
-    {
+    let is_codex = config
+        .as_ref()
+        .is_some_and(|config| config.executor == BaseCodingAgent::Codex);
+    let transfer_was_verified = if resuming_operation_id.is_some() && is_codex {
         sqlx::query_scalar::<_, bool>(
             "SELECT session_transfer_verified_at IS NOT NULL FROM workspace_affinity_operations WHERE operation_id = ? AND status = 'claimed'",
         )
@@ -841,7 +850,9 @@ pub async fn update_workspace_affinity(
             pool,
             operation_id,
             workspace.id,
-            selected.id,
+            target_worker_node_id.ok_or_else(|| {
+                ApiError::Conflict("Codex migration recovery has no target worker".into())
+            })?,
         )
         .await?;
     }
@@ -911,6 +922,7 @@ pub async fn update_workspace_affinity(
             workspace.id,
             &request,
             running.first().map(|process| process.id),
+            target_worker_node_id,
         )
         .await?;
     }
@@ -1000,7 +1012,7 @@ pub async fn update_workspace_affinity(
             && let Some(process) = running.first()
         {
             if let Err(error) = mark_source_stop_started(pool, operation_id).await {
-                if config.executor == BaseCodingAgent::Codex
+                if is_codex
                     && let (Some(source_worker), Some(coordinator_id), Some(client)) = (
                         claimed_placement.worker_node_id,
                         deployment.cluster_config().coordinator_id,
@@ -1028,7 +1040,7 @@ pub async fn update_workspace_affinity(
                 .stop_execution(process, ExecutionProcessStatus::Killed)
                 .await
             {
-                if config.executor == BaseCodingAgent::Codex
+                if is_codex
                     && let (Some(source_worker), Some(coordinator_id), Some(client)) = (
                         claimed_placement.worker_node_id,
                         deployment.cluster_config().coordinator_id,
@@ -1068,7 +1080,7 @@ pub async fn update_workspace_affinity(
                 stopped.status,
                 ExecutionProcessStatus::Running | ExecutionProcessStatus::Indeterminate
             ) {
-                if config.executor == BaseCodingAgent::Codex
+                if is_codex
                     && let (Some(source_worker), Some(coordinator_id), Some(client)) = (
                         claimed_placement.worker_node_id,
                         deployment.cluster_config().coordinator_id,
