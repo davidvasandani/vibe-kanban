@@ -1,6 +1,7 @@
 # Packaging a forked MCP server VK can pin
 
-Contributing tasks: `36d7-use-the-maintain`, `95e9-close-the-unveri`
+Contributing tasks: `36d7-use-the-maintain`, `95e9-close-the-unveri`,
+`967a-migrate-slack-mc`
 
 How to ship a **fork** of a third-party MCP server through
 `crates/executors/default_mcp.json` when the upstream package name is not ours
@@ -138,6 +139,13 @@ inside the current launcher starts too late to protect that launcher itself.
   that should create the incident skips the notification step.
 
 ## Building the artifact
+
+An operator-owned Nix deployment can close the outer-tarball gap that generic
+`npx` installs retain: fetch the launcher URL as a fixed-output derivation, then
+pass the verified store path to `npx`. Keep that deployment URL/hash in the same
+coordinated review as the catalog tag and digest. If an stdio-to-HTTP migration
+recognizes shipped launchers, its historical list is append-only so a later pin
+bump does not strand old credential-bearing native configs.
 
 - `npm pack` on a **scoped** package emits `scope-name-version.tgz`; if the pin
   says otherwise the install 404s. Keep the launcher unscoped so the packed
