@@ -12,7 +12,10 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
 use cluster_protocol::{
-    CancellationRequest, DispatchAccepted, EventAcknowledgement, EventBatch, ExecutionDispatch,
+    CancellationRequest, CodexRolloutArtifact, CodexRolloutManifestRequest,
+    CodexRolloutReadRequest, CodexRolloutStageRequest, CodexRolloutStageResult,
+    CodexRolloutVerification, CodexRolloutVerifyRequest, DispatchAccepted, EventAcknowledgement, EventBatch, ExecutionDispatch,
+    ExecutionQuiescenceRequest, ExecutionQuiescenceStatus,
     InteractionResponse, JobSummary, PROTOCOL_VERSION, PreviewHttpRequest, PreviewHttpResponse,
     QuarantineRequest, RequestAuthority, TerminalClose, TerminalCreateRequest, TerminalCreated,
     TerminalInput, TerminalOutputBatch, TerminalResize,
@@ -23,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
+use executors::executors::codex::{codex_home, rollout_transfer::CodexRolloutStore};
 
 use crate::{
     WorkerConfig, cancellation,
@@ -55,6 +59,7 @@ struct WorkerApiState {
     /// view: nothing on this path can influence a lease, a job, or the
     /// worker's liveness (constitution XIX).
     metrics: Arc<MetricsSampler>,
+    codex_rollouts: Arc<CodexRolloutStore>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +97,9 @@ pub async fn router(
 ) -> anyhow::Result<Router> {
     let coordinator_key = load_verifying_key(&config.coordinator_public_key_file).await?;
     let path_authority = PathAuthority::new(&config.shared_root)?;
+    let codex_rollouts = Arc::new(CodexRolloutStore::new(
+        codex_home().ok_or_else(|| anyhow::anyhow!("Codex home is unavailable"))?,
+    )?);
     let state = WorkerApiState {
         supervisor,
         worker_node_id: config.worker_node_id,
@@ -101,6 +109,7 @@ pub async fn router(
         terminals: TerminalService::new(path_authority),
         preview: PreviewService::new(),
         metrics,
+        codex_rollouts,
     };
     Ok(build_router(state))
 }
@@ -112,6 +121,12 @@ fn build_router(state: WorkerApiState) -> Router {
     Router::new()
         .route("/v1/jobs", get(inventory))
         .route("/v1/metrics", get(metrics))
+        .route("/v1/session-transfers/{operation_id}/manifest", post(codex_manifest))
+        .route("/v1/session-transfers/{operation_id}/artifact", post(codex_artifact))
+        .route("/v1/session-transfers/{operation_id}/stage", post(codex_stage))
+        .route("/v1/session-transfers/{operation_id}/verify", post(codex_verify))
+        .route("/v1/session-transfers/{operation_id}/quiesce", post(quiesce_execution))
+        .route("/v1/session-transfers/{operation_id}/resume", post(resume_execution))
         .route("/v1/terminals", post(create_terminal))
         .route("/v1/terminals/{terminal_id}/output", get(terminal_output))
         .route("/v1/terminals/{terminal_id}/input", post(terminal_input))
@@ -136,6 +151,136 @@ fn build_router(state: WorkerApiState) -> Router {
         .route("/v1/executions/{execution_id}/quarantine", post(quarantine))
         .layer(from_fn_with_state(state.clone(), require_signature))
         .with_state(state)
+}
+
+async fn quiesce_execution(
+    State(state): State<WorkerApiState>,
+    Path(operation_id): Path<Uuid>,
+    Json(request): Json<ExecutionQuiescenceRequest>,
+) -> Result<Json<ExecutionQuiescenceStatus>, WorkerApiError> {
+    validate_authority(&state, &request.authority).await?;
+    validate_transfer_authority(&state, operation_id, &request.authority)?;
+    if request.operation_id != operation_id { return Err(WorkerApiError::Forbidden); }
+    #[cfg(unix)]
+    state.supervisor.set_quiesced(request.execution_id, request.workspace_id, operation_id, true).await?;
+    #[cfg(not(unix))]
+    return Err(WorkerApiError::BadRequest("session transfer quiescence is unsupported on this worker".into()));
+    Ok(Json(ExecutionQuiescenceStatus { execution_id: request.execution_id, operation_id, quiesced: true }))
+}
+
+async fn resume_execution(
+    State(state): State<WorkerApiState>,
+    Path(operation_id): Path<Uuid>,
+    Json(request): Json<ExecutionQuiescenceRequest>,
+) -> Result<Json<ExecutionQuiescenceStatus>, WorkerApiError> {
+    validate_authority(&state, &request.authority).await?;
+    validate_transfer_authority(&state, operation_id, &request.authority)?;
+    if request.operation_id != operation_id { return Err(WorkerApiError::Forbidden); }
+    #[cfg(unix)]
+    state.supervisor.set_quiesced(request.execution_id, request.workspace_id, operation_id, false).await?;
+    #[cfg(not(unix))]
+    return Err(WorkerApiError::BadRequest("session transfer quiescence is unsupported on this worker".into()));
+    Ok(Json(ExecutionQuiescenceStatus { execution_id: request.execution_id, operation_id, quiesced: false }))
+}
+
+fn validate_transfer_authority(
+    state: &WorkerApiState,
+    operation_id: Uuid,
+    authority: &RequestAuthority,
+) -> Result<(), WorkerApiError> {
+    if authority.correlation_id != operation_id {
+        return Err(WorkerApiError::BadRequest(
+            "session transfer authority is not bound to the operation".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn codex_manifest(
+    State(state): State<WorkerApiState>,
+    Path(operation_id): Path<Uuid>,
+    Json(request): Json<CodexRolloutManifestRequest>,
+) -> Result<Json<cluster_protocol::CodexRolloutManifest>, WorkerApiError> {
+    validate_authority(&state, &request.authority).await?;
+    validate_transfer_authority(&state, operation_id, &request.authority)?;
+    if request.operation_id != operation_id
+        || request.source_worker_node_id != state.worker_node_id
+        || !state.supervisor.authorizes_session_transfer(
+            request.source_execution_id,
+            request.workspace_id,
+        ).await
+    {
+        return Err(WorkerApiError::Forbidden);
+    }
+    state
+        .codex_rollouts
+        .resolve_manifest(
+            operation_id,
+            request.workspace_id,
+            request.source_execution_id,
+            request.source_worker_node_id,
+            request.target_worker_node_id,
+            request.leaf_thread_id,
+        )
+        .map(Json)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
+}
+
+async fn codex_artifact(
+    State(state): State<WorkerApiState>,
+    Path(operation_id): Path<Uuid>,
+    Json(request): Json<CodexRolloutReadRequest>,
+) -> Result<Json<CodexRolloutArtifact>, WorkerApiError> {
+    validate_authority(&state, &request.authority).await?;
+    validate_transfer_authority(&state, operation_id, &request.authority)?;
+    if request.manifest.operation_id != operation_id
+        || request.manifest.source_worker_node_id != state.worker_node_id
+    {
+        return Err(WorkerApiError::Forbidden);
+    }
+    state
+        .codex_rollouts
+        .read_artifact(&request.manifest, request.thread_id)
+        .map(Json)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
+}
+
+async fn codex_stage(
+    State(state): State<WorkerApiState>,
+    Path(operation_id): Path<Uuid>,
+    Json(request): Json<CodexRolloutStageRequest>,
+) -> Result<Json<CodexRolloutStageResult>, WorkerApiError> {
+    validate_authority(&state, &request.authority).await?;
+    validate_transfer_authority(&state, operation_id, &request.authority)?;
+    if request.manifest.operation_id != operation_id
+        || request.manifest.target_worker_node_id != state.worker_node_id
+    {
+        return Err(WorkerApiError::Forbidden);
+    }
+    state
+        .codex_rollouts
+        .stage_artifact(&request.manifest, &request.artifact)
+        .map(Json)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
+}
+
+async fn codex_verify(
+    State(state): State<WorkerApiState>,
+    Path(operation_id): Path<Uuid>,
+    Json(request): Json<CodexRolloutVerifyRequest>,
+) -> Result<Json<CodexRolloutVerification>, WorkerApiError> {
+    validate_authority(&state, &request.authority).await?;
+    validate_transfer_authority(&state, operation_id, &request.authority)?;
+    if request.manifest.operation_id != operation_id
+        || request.manifest.target_worker_node_id != state.worker_node_id
+    {
+        return Err(WorkerApiError::Forbidden);
+    }
+    state
+        .codex_rollouts
+        .verify_manifest(&request.manifest)
+        .map(Json)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
 }
 
 async fn proxy_preview_ws(
@@ -579,6 +724,7 @@ mod tests {
             terminals: TerminalService::new(PathAuthority::new(temp.path()).expect("shared root")),
             preview: PreviewService::new(),
             metrics: sampler,
+            codex_rollouts: Arc::new(CodexRolloutStore::new(temp.path().join("codex")).unwrap()),
         };
         build_router(state)
     }
