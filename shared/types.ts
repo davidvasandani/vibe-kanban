@@ -276,7 +276,11 @@ export enum WorkerNodeStatus { online = "online", offline = "offline", draining 
 
 export enum WorkerMountStatus { healthy = "healthy", missing = "missing", local_fallback = "local_fallback", wrong_filesystem = "wrong_filesystem", probe_not_visible = "probe_not_visible", read_only = "read_only", ownership_mismatch = "ownership_mismatch", io_error = "io_error" }
 
-export type UpdateWorkspaceAffinityRequest = { requested_worker_node_id: string | null, restart_running: boolean, operation_id: string | null, };
+export type UpdateWorkspaceAffinityRequest = {
+/**
+ * Explicitly move the workspace back to coordinator-local execution.
+ */
+run_on_coordinator: boolean, requested_worker_node_id: string | null, restart_running: boolean, operation_id: string | null, };
 
 export enum WorkspaceAffinityUpdateOutcome { updated = "updated", restarted = "restarted", restart_failed = "restart_failed" }
 

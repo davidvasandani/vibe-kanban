@@ -202,6 +202,7 @@
       "current": "Current server",
       "runOn": "Run on",
       "automatic": "Automatic placement",
+      "coordinator": "Coordinator",
       "unavailable": "Unavailable",
       "localDescription": "This Vibe Kanban instance runs workspaces locally.",
       "confirmTitle": "Migrate the running task?",

@@ -6,7 +6,7 @@ use db::models::{
     execution_worker_job::{ExecutionWorkerDispatchState, ExecutionWorkerJob},
     session::Session,
     worker_node::WorkerNode,
-    workspace::{Workspace, WorkspacePlacement},
+    workspace::{Workspace, WorkspacePlacement, WorkspacePlacementState},
     workspace_repo::WorkspaceRepo,
 };
 use deployment::Deployment;
@@ -29,10 +29,68 @@ const ABANDONED_OPERATION_MINUTES: i64 = 10;
 
 #[derive(Debug, Clone, Deserialize, TS)]
 pub struct UpdateWorkspaceAffinityRequest {
+    /// Explicitly move the workspace back to coordinator-local execution.
+    #[serde(default)]
+    pub run_on_coordinator: bool,
     pub requested_worker_node_id: Option<Uuid>,
     #[serde(default)]
     pub restart_running: bool,
     pub operation_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AffinityIntent {
+    Automatic,
+    Coordinator,
+    Worker(Uuid),
+}
+
+impl AffinityIntent {
+    #[allow(clippy::result_large_err)]
+    fn resolve(request: &UpdateWorkspaceAffinityRequest) -> Result<Self, ApiError> {
+        match (request.run_on_coordinator, request.requested_worker_node_id) {
+            (true, Some(_)) => Err(ApiError::BadRequest(
+                "run_on_coordinator cannot be combined with requested_worker_node_id".into(),
+            )),
+            (true, None) => Ok(Self::Coordinator),
+            (false, Some(worker_node_id)) => Ok(Self::Worker(worker_node_id)),
+            (false, None) => Ok(Self::Automatic),
+        }
+    }
+
+    fn requested_worker_node_id(self) -> Option<Uuid> {
+        match self {
+            Self::Worker(worker_node_id) => Some(worker_node_id),
+            Self::Automatic | Self::Coordinator => None,
+        }
+    }
+
+    fn matches(self, placement: &WorkspacePlacement) -> bool {
+        match self {
+            Self::Coordinator => placement.placement_state == WorkspacePlacementState::Local,
+            Self::Automatic => {
+                placement.placement_state != WorkspacePlacementState::Local
+                    && placement.worker_node_id.is_some()
+                    && placement.requested_worker_node_id.is_none()
+            }
+            Self::Worker(worker_node_id) => {
+                placement.placement_state != WorkspacePlacementState::Local
+                    && placement.worker_node_id == Some(worker_node_id)
+                    && placement.requested_worker_node_id == Some(worker_node_id)
+            }
+        }
+    }
+}
+
+fn operation_matches_request(
+    stored_worker_id: Option<Uuid>,
+    stored_coordinator: bool,
+    stored_restart: bool,
+    request: &UpdateWorkspaceAffinityRequest,
+) -> bool {
+    stored_worker_id == request.requested_worker_node_id
+        && stored_coordinator == request.run_on_coordinator
+        && stored_restart == request.restart_running
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -88,12 +146,14 @@ async fn replay_operation(
             Option<Uuid>,
             Option<Uuid>,
             bool,
+            bool,
             String,
             Option<String>,
             Option<String>,
         ),
     >(
-        r#"SELECT workspace_id, source_execution_id, requested_worker_node_id, restart_running,
+        r#"SELECT workspace_id, source_execution_id, requested_worker_node_id,
+                  run_on_coordinator, restart_running,
                   status, result_json, error_message
            FROM workspace_affinity_operations WHERE operation_id = ?"#,
     )
@@ -105,6 +165,7 @@ async fn replay_operation(
         stored_workspace_id,
         source_execution_id,
         stored_worker_id,
+        stored_coordinator,
         stored_restart,
         status,
         result,
@@ -114,8 +175,12 @@ async fn replay_operation(
         return Ok(None);
     };
     if stored_workspace_id != workspace_id
-        || stored_worker_id != request.requested_worker_node_id
-        || stored_restart != request.restart_running
+        || !operation_matches_request(
+            stored_worker_id,
+            stored_coordinator,
+            stored_restart,
+            request,
+        )
     {
         return Err(ApiError::BadRequest(
             "Affinity operation id was already used for a different request".into(),
@@ -147,21 +212,26 @@ async fn replay_operation(
                         ApiError::Conflict("Workspace placement was not found".into())
                     })?;
                 let dispatch = ExecutionWorkerJob::find_by_execution_id(pool, operation_id).await?;
-                let restart_confirmed = dispatch.as_ref().is_some_and(|job| {
-                    matches!(
-                        job.dispatch_state,
-                        ExecutionWorkerDispatchState::Accepted
-                            | ExecutionWorkerDispatchState::Starting
-                            | ExecutionWorkerDispatchState::Running
-                            | ExecutionWorkerDispatchState::Completed
-                    )
-                }) && !matches!(
+                let process_is_viable = !matches!(
                     started.status,
                     ExecutionProcessStatus::Failed
                         | ExecutionProcessStatus::Killed
                         | ExecutionProcessStatus::Interrupted
                         | ExecutionProcessStatus::Indeterminate
                 );
+                let restart_confirmed = if request.run_on_coordinator {
+                    process_is_viable
+                } else {
+                    dispatch.as_ref().is_some_and(|job| {
+                        matches!(
+                            job.dispatch_state,
+                            ExecutionWorkerDispatchState::Accepted
+                                | ExecutionWorkerDispatchState::Starting
+                                | ExecutionWorkerDispatchState::Running
+                                | ExecutionWorkerDispatchState::Completed
+                        )
+                    }) && process_is_viable
+                };
                 let restart_conclusively_failed = matches!(
                     started.status,
                     ExecutionProcessStatus::Failed
@@ -210,13 +280,15 @@ async fn claim_operation(
 ) -> Result<(), ApiError> {
     let inserted = sqlx::query(
         r#"INSERT OR IGNORE INTO workspace_affinity_operations
-           (operation_id, workspace_id, source_execution_id, requested_worker_node_id, restart_running)
-           VALUES (?, ?, ?, ?, ?)"#,
+           (operation_id, workspace_id, source_execution_id, requested_worker_node_id,
+            run_on_coordinator, restart_running)
+           VALUES (?, ?, ?, ?, ?, ?)"#,
     )
     .bind(operation_id)
     .bind(workspace_id)
     .bind(source_execution_id)
     .bind(request.requested_worker_node_id)
+    .bind(request.run_on_coordinator)
     .bind(request.restart_running)
     .execute(pool)
     .await?;
@@ -316,6 +388,7 @@ pub async fn update_workspace_affinity(
             "Server affinity is read-only when clustered execution is disabled".into(),
         ));
     }
+    let mut intent = AffinityIntent::resolve(&request)?;
     let pool = &deployment.db().pool;
     let placement = WorkspacePlacement::find(pool, workspace.id)
         .await?
@@ -331,11 +404,13 @@ pub async fn update_workspace_affinity(
     if let Some((
         active_operation_id,
         stored_worker_id,
+        stored_coordinator,
         stored_restart,
         source_execution_id,
         stale,
-    )) = sqlx::query_as::<_, (Uuid, Option<Uuid>, bool, Option<Uuid>, bool)>(
-        r#"SELECT operation_id, requested_worker_node_id, restart_running,
+    )) = sqlx::query_as::<_, (Uuid, Option<Uuid>, bool, bool, Option<Uuid>, bool)>(
+        r#"SELECT operation_id, requested_worker_node_id, run_on_coordinator,
+                  restart_running,
                   source_execution_id,
                   updated_at <= datetime('now', '-10 minutes')
            FROM workspace_affinity_operations
@@ -346,6 +421,7 @@ pub async fn update_workspace_affinity(
     .await?
     {
         let stored_request = UpdateWorkspaceAffinityRequest {
+            run_on_coordinator: stored_coordinator,
             requested_worker_node_id: stored_worker_id,
             restart_running: stored_restart,
             operation_id: Some(active_operation_id),
@@ -357,6 +433,7 @@ pub async fn update_workspace_affinity(
         }
         if stale && stored_restart && source_execution_id.is_some() {
             request = stored_request;
+            intent = AffinityIntent::resolve(&request)?;
             resumed_source_execution_id = source_execution_id;
             resuming_operation_id = Some(active_operation_id);
         } else {
@@ -375,10 +452,7 @@ pub async fn update_workspace_affinity(
         return Ok(ResponseJson(ApiResponse::success(replayed)));
     }
 
-    if resuming_operation_id.is_none()
-        && placement.requested_worker_node_id == request.requested_worker_node_id
-        && placement.worker_node_id.is_some()
-    {
+    if resuming_operation_id.is_none() && intent.matches(&placement) {
         return Ok(ResponseJson(ApiResponse::success(
             WorkspaceAffinityUpdateResponse {
                 placement,
@@ -420,33 +494,55 @@ pub async fn update_workspace_affinity(
     }
 
     let reference_process = if let Some(process) = running.first() {
-        process.clone()
+        Some(process.clone())
+    } else if intent == AffinityIntent::Coordinator {
+        // An idle coordinator migration does not schedule a worker or restart
+        // an execution, so it needs no historical executor configuration.
+        None
     } else {
-        ExecutionProcess::find_latest_by_workspace_and_run_reason(
-            pool,
-            workspace.id,
-            &ExecutionProcessRunReason::CodingAgent,
+        Some(
+            ExecutionProcess::find_latest_by_workspace_and_run_reason(
+                pool,
+                workspace.id,
+                &ExecutionProcessRunReason::CodingAgent,
+            )
+            .await?
+            .ok_or_else(|| {
+                ApiError::Conflict(
+                    "No coding-agent execution exists to determine worker capabilities".into(),
+                )
+            })?,
         )
-        .await?
-        .ok_or_else(|| {
+    };
+    let config = reference_process
+        .as_ref()
+        .map(executor_config)
+        .transpose()?;
+    let target_worker_node_id = if intent == AffinityIntent::Coordinator {
+        None
+    } else {
+        let workers = WorkerNode::fetch_all(pool).await?;
+        let config = config.as_ref().ok_or_else(|| {
             ApiError::Conflict(
                 "No coding-agent execution exists to determine worker capabilities".into(),
             )
-        })?
+        })?;
+        let selected = deployment
+            .worker_scheduler()
+            .select(
+                &workers,
+                &config.profile_id().to_string(),
+                intent.requested_worker_node_id(),
+                Utc::now(),
+            )
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        Some(selected.id)
     };
-    let config = executor_config(&reference_process)?;
-    let workers = WorkerNode::fetch_all(pool).await?;
-    let selected = deployment
-        .worker_scheduler()
-        .select(
-            &workers,
-            &config.profile_id().to_string(),
-            request.requested_worker_node_id,
-            Utc::now(),
-        )
-        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    let changes_effective_worker = placement.worker_node_id != Some(selected.id);
-    if changes_effective_worker && !running.is_empty() && !request.restart_running {
+    let changes_effective_target = match target_worker_node_id {
+        Some(worker_node_id) => placement.worker_node_id != Some(worker_node_id),
+        None => placement.placement_state != WorkspacePlacementState::Local,
+    };
+    if changes_effective_target && !running.is_empty() && !request.restart_running {
         return Err(ApiError::Conflict(
             "The current task is running; confirm stop, migrate, and restart".into(),
         ));
@@ -460,7 +556,7 @@ pub async fn update_workspace_affinity(
             .as_ref()
             .is_none_or(|job| job.dispatch_state == ExecutionWorkerDispatchState::Pending);
         if dispatch_needs_retry {
-            if changes_effective_worker {
+            if changes_effective_target {
                 return Err(ApiError::Conflict(
                     "Interrupted continuation exists before the target placement was committed"
                         .into(),
@@ -547,7 +643,7 @@ pub async fn update_workspace_affinity(
             ));
         }
 
-        let stopped_execution_id = if changes_effective_worker
+        let stopped_execution_id = if changes_effective_target
             && let Some(process) = running.first()
         {
             mark_source_stop_started(pool, operation_id).await?;
@@ -599,19 +695,29 @@ pub async fn update_workspace_affinity(
             None
         };
 
-        let reassigned = WorkspacePlacement::reassign(
-            pool,
-            workspace.id,
-            placement.worker_node_id,
-            selected.id,
-            request.requested_worker_node_id,
-            if request.requested_worker_node_id.is_some() {
-                "manual worker affinity update"
-            } else {
-                "automatic worker affinity update"
-            },
-        )
-        .await?;
+        let reassigned = if let Some(worker_node_id) = target_worker_node_id {
+            WorkspacePlacement::reassign(
+                pool,
+                workspace.id,
+                placement.worker_node_id,
+                worker_node_id,
+                intent.requested_worker_node_id(),
+                if intent.requested_worker_node_id().is_some() {
+                    "manual worker affinity update"
+                } else {
+                    "automatic worker affinity update"
+                },
+            )
+            .await?
+        } else {
+            WorkspacePlacement::reassign_to_coordinator(
+                pool,
+                workspace.id,
+                placement.worker_node_id,
+                "coordinator affinity update",
+            )
+            .await?
+        };
         if !reassigned {
             return Err(ApiError::Conflict(
                 "Workspace placement changed while affinity was being updated; refresh and retry"
@@ -636,6 +742,12 @@ pub async fn update_workspace_affinity(
         // Placement is now committed. Every subsequent failure is partial
         // success and must preserve that fact in the durable response.
         let restart = async {
+            let reference_process = reference_process.as_ref().ok_or_else(|| {
+                ApiError::Conflict("Migration restart has no source execution".into())
+            })?;
+            let config = config.clone().ok_or_else(|| {
+                ApiError::Conflict("Migration restart has no executor configuration".into())
+            })?;
             let session = Session::find_by_id(pool, reference_process.session_id)
                 .await?
                 .ok_or_else(|| ApiError::Conflict("Migration session was not found".into()))?;
@@ -729,5 +841,54 @@ pub async fn update_workspace_affinity(
             }
             Err(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::{AffinityIntent, UpdateWorkspaceAffinityRequest, operation_matches_request};
+
+    fn request(
+        run_on_coordinator: bool,
+        requested_worker_node_id: Option<Uuid>,
+    ) -> UpdateWorkspaceAffinityRequest {
+        UpdateWorkspaceAffinityRequest {
+            run_on_coordinator,
+            requested_worker_node_id,
+            restart_running: false,
+            operation_id: None,
+        }
+    }
+
+    #[test]
+    fn affinity_intent_keeps_automatic_coordinator_and_worker_distinct() {
+        let worker_id = Uuid::new_v4();
+
+        assert_eq!(
+            AffinityIntent::resolve(&request(false, None)).unwrap(),
+            AffinityIntent::Automatic
+        );
+        assert_eq!(
+            AffinityIntent::resolve(&request(true, None)).unwrap(),
+            AffinityIntent::Coordinator
+        );
+        assert_eq!(
+            AffinityIntent::resolve(&request(false, Some(worker_id))).unwrap(),
+            AffinityIntent::Worker(worker_id)
+        );
+        assert!(AffinityIntent::resolve(&request(true, Some(worker_id))).is_err());
+    }
+
+    #[test]
+    fn durable_operation_identity_distinguishes_coordinator_from_automatic() {
+        let automatic = request(false, None);
+        let coordinator = request(true, None);
+
+        assert!(operation_matches_request(None, false, false, &automatic));
+        assert!(!operation_matches_request(None, false, false, &coordinator));
+        assert!(operation_matches_request(None, true, false, &coordinator));
+        assert!(!operation_matches_request(None, true, false, &automatic));
     }
 }
