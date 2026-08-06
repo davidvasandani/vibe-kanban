@@ -45,6 +45,10 @@ eventsource-stream = "0.2"
 walkdir = "2"
 rand = "0.8"
 base64 = "0.22"
+cluster-protocol = { path = "../cluster-protocol" }
+
+[dev-dependencies]
+tempfile = "3"
 jsonc-parser = { version = "0.29", features = ["cst", "serde"] }
 lru = "0.12"
 async-stream = "0.3"

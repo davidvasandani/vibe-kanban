@@ -2,7 +2,11 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use cluster_protocol::{
-    CancellationRequest, CancellationStatus, DispatchAccepted, EventAcknowledgement, EventBatch,
+    CancellationRequest, CancellationStatus, CodexRolloutArtifact, CodexRolloutManifest,
+    CodexRolloutManifestRequest, CodexRolloutReadRequest, CodexRolloutStageRequest,
+    CodexRolloutStageResult, CodexRolloutVerification, CodexRolloutVerifyRequest,
+    DispatchAccepted, EventAcknowledgement, EventBatch, ExecutionQuiescenceRequest,
+    ExecutionQuiescenceStatus,
     ExecutionDispatch, InteractionResponse, JobSummary, PreviewHttpRequest, PreviewHttpResponse,
     QuarantineRequest, TerminalClose, TerminalCreateRequest, TerminalCreated, TerminalInput,
     TerminalOutputBatch, TerminalResize,
@@ -107,6 +111,53 @@ impl WorkerClient {
             }
         }
         unreachable!("bounded dispatch retry returns on final attempt")
+    }
+
+    pub async fn codex_rollout_manifest(
+        &self,
+        worker_node_id: Uuid,
+        request: &CodexRolloutManifestRequest,
+    ) -> Result<CodexRolloutManifest, WorkerClientError> {
+        let path = format!("/v1/session-transfers/{}/manifest", request.operation_id);
+        self.post(worker_node_id, &path, request).await
+    }
+
+    pub async fn codex_rollout_artifact(
+        &self,
+        worker_node_id: Uuid,
+        request: &CodexRolloutReadRequest,
+    ) -> Result<CodexRolloutArtifact, WorkerClientError> {
+        let path = format!("/v1/session-transfers/{}/artifact", request.manifest.operation_id);
+        self.post(worker_node_id, &path, request).await
+    }
+
+    pub async fn stage_codex_rollout(
+        &self,
+        worker_node_id: Uuid,
+        request: &CodexRolloutStageRequest,
+    ) -> Result<CodexRolloutStageResult, WorkerClientError> {
+        let path = format!("/v1/session-transfers/{}/stage", request.manifest.operation_id);
+        self.post(worker_node_id, &path, request).await
+    }
+
+    pub async fn verify_codex_rollouts(
+        &self,
+        worker_node_id: Uuid,
+        request: &CodexRolloutVerifyRequest,
+    ) -> Result<CodexRolloutVerification, WorkerClientError> {
+        let path = format!("/v1/session-transfers/{}/verify", request.manifest.operation_id);
+        self.post(worker_node_id, &path, request).await
+    }
+
+    pub async fn set_execution_quiesced(
+        &self,
+        worker_node_id: Uuid,
+        request: &ExecutionQuiescenceRequest,
+        quiesced: bool,
+    ) -> Result<ExecutionQuiescenceStatus, WorkerClientError> {
+        let action = if quiesced { "quiesce" } else { "resume" };
+        let path = format!("/v1/session-transfers/{}/{action}", request.operation_id);
+        self.post(worker_node_id, &path, request).await
     }
 
     pub async fn events(

@@ -23,6 +23,98 @@ pub struct RequestAuthority {
     pub nonce: String,
 }
 
+pub const CODEX_ROLLOUT_MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
+pub const CODEX_ROLLOUT_MAX_LINEAGE_BYTES: u64 = 128 * 1024 * 1024;
+pub const CODEX_ROLLOUT_MAX_LINEAGE_FILES: usize = 32;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexRolloutManifestRequest {
+    pub authority: RequestAuthority,
+    pub operation_id: Uuid,
+    pub workspace_id: Uuid,
+    pub source_execution_id: Uuid,
+    pub source_worker_node_id: Uuid,
+    pub target_worker_node_id: Uuid,
+    pub leaf_thread_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexRolloutManifest {
+    pub operation_id: Uuid,
+    pub workspace_id: Uuid,
+    pub source_execution_id: Uuid,
+    pub source_worker_node_id: Uuid,
+    pub target_worker_node_id: Uuid,
+    pub leaf_thread_id: Uuid,
+    pub entries: Vec<CodexRolloutManifestEntry>,
+    pub manifest_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexRolloutManifestEntry {
+    pub thread_id: Uuid,
+    pub parent_thread_id: Option<Uuid>,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexRolloutReadRequest {
+    pub authority: RequestAuthority,
+    pub manifest: CodexRolloutManifest,
+    pub thread_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexRolloutArtifact {
+    pub thread_id: Uuid,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub data_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexRolloutStageRequest {
+    pub authority: RequestAuthority,
+    pub manifest: CodexRolloutManifest,
+    pub artifact: CodexRolloutArtifact,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexRolloutStageResult {
+    pub thread_id: Uuid,
+    pub reused: bool,
+    pub verified_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexRolloutVerifyRequest {
+    pub authority: RequestAuthority,
+    pub manifest: CodexRolloutManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexRolloutVerification {
+    pub manifest_sha256: String,
+    pub verified_thread_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionQuiescenceRequest {
+    pub authority: RequestAuthority,
+    pub operation_id: Uuid,
+    pub execution_id: Uuid,
+    pub workspace_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionQuiescenceStatus {
+    pub execution_id: Uuid,
+    pub operation_id: Uuid,
+    pub quiesced: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkerRegistration {
     pub authority: RequestAuthority,

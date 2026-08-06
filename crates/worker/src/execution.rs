@@ -100,6 +100,7 @@ pub struct WorkerJob {
     acknowledged_sequence: Mutex<u64>,
     recovery_store: Option<RecoveryStore>,
     interactions: Arc<InteractionBroker>,
+    quiesced_by: Mutex<Option<Uuid>>,
 }
 
 struct ExecutionAdmission(Arc<AtomicU32>);
@@ -111,6 +112,15 @@ impl Drop for ExecutionAdmission {
 }
 
 impl ExecutionSupervisor {
+    pub async fn authorizes_session_transfer(
+        &self,
+        execution_id: Uuid,
+        workspace_id: Uuid,
+    ) -> bool {
+        let Some(job) = self.job(execution_id).await else { return false; };
+        job.workspace_id == workspace_id && job.state().await == JobState::Running
+    }
+
     pub fn new(path_authority: PathAuthority) -> Self {
         Self::with_journal_capacity(path_authority, DEFAULT_JOURNAL_CAPACITY)
     }
@@ -184,6 +194,7 @@ impl ExecutionSupervisor {
                     acknowledged_sequence: Mutex::new(0),
                     recovery_store: Some(recovery_store.clone()),
                     interactions: Arc::new(InteractionBroker::default()),
+                    quiesced_by: Mutex::new(None),
                 }),
             );
         }
@@ -255,6 +266,7 @@ impl ExecutionSupervisor {
             acknowledged_sequence: Mutex::new(0),
             recovery_store: self.recovery_store.clone(),
             interactions: Arc::new(InteractionBroker::default()),
+            quiesced_by: Mutex::new(None),
         });
         jobs.insert(dispatch.execution_id, job.clone());
         drop(admission);
@@ -276,6 +288,41 @@ impl ExecutionSupervisor {
             state: JobState::Accepted,
             last_sequence: 1,
         })
+    }
+
+    #[cfg(unix)]
+    pub async fn set_quiesced(
+        &self,
+        execution_id: Uuid,
+        workspace_id: Uuid,
+        operation_id: Uuid,
+        quiesced: bool,
+    ) -> Result<(), ExecutionError> {
+        let job = self.job(execution_id).await.ok_or(ExecutionError::NotFound(execution_id))?;
+        if job.workspace_id != workspace_id || job.state().await != JobState::Running {
+            return Err(ExecutionError::NotFound(execution_id));
+        }
+        let mut owner = job.quiesced_by.lock().await;
+        if quiesced {
+            if owner.as_ref().is_some_and(|existing| *existing != operation_id) {
+                return Err(ExecutionError::DigestConflict { execution_id });
+            }
+            if owner.as_ref() == Some(&operation_id) { return Ok(()); }
+        } else if owner.as_ref() != Some(&operation_id) {
+            return Err(ExecutionError::DigestConflict { execution_id });
+        }
+        let pid = job.child.lock().await.as_ref().and_then(|child| child.inner().id())
+            .ok_or(ExecutionError::NotFound(execution_id))?;
+        let signal = if quiesced { "-STOP" } else { "-CONT" };
+        let target = format!("-{pid}");
+        let status = tokio::process::Command::new("kill")
+            .args([signal, "--", &target])
+            .status()
+            .await
+            .map_err(|_| ExecutionError::NotFound(execution_id))?;
+        if !status.success() { return Err(ExecutionError::NotFound(execution_id)); }
+        *owner = quiesced.then_some(operation_id);
+        Ok(())
     }
 
     pub async fn events(
