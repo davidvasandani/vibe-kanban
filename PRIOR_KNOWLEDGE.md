@@ -1,21 +1,30 @@
-# Prior Knowledge: Settings-Owned MCP Definitions
+# Prior Knowledge: Remote MCP Refresh
 
-Relevant project knowledge exists in two pages:
+Sources reviewed: `docs/knowledge-base/active-mcp-refresh.md`,
+`cluster-mcp-runtime-connectivity.md`, and `shared-mcp-configuration.md`.
 
-- `shared-mcp-configuration.md` correctly establishes that catalog presence is
-  distinct from native agent materialization, but its older recommendation to
-  seed deployment-owned definitions conflicts with the now-available
-  authenticated dispatch snapshot mechanism.
-- `cluster-mcp-runtime-connectivity.md` records the newer rule: deployment
-  startup must not create a second authority for a settings-managed definition;
-  workers receive exact definitions in execution-scoped Codex homes.
+- Live refresh is an executor capability. Codex reload acknowledgement means
+  queued, while the next-turn paginated status snapshot is the strongest
+  available adoption evidence. The protocol exposes no inventory generation
+  ID, so never invent restart/reuse or last-known-good facts.
+- The session-keyed coordinator already serializes generations and reports a
+  second pending request as retryable busy. Browser state must reconcile from
+  that backend authority rather than treating component-local state as truth.
+- VAS-356 established coordinator-authoritative, settings-owned MCP snapshots
+  in signed dispatch. Workers materialize them into execution-ID-scoped Codex
+  homes, share authentication/runtime assets through symlinks, leave global
+  `config.toml` untouched, validate size/executor identity, and remove the home
+  at job end.
+- Worker-side testing is required because coordinator persistence/connectivity,
+  live agent adoption, and worker network connectivity are separate boundaries.
+- Shared settings ultimately derive from native executor files; the existing
+  profile resolver and native-shape adapter are the one authoritative read/write
+  convention. Operational identity is the stable native server identifier.
+- Atomic agent-config helpers preserve unrelated vendor configuration. Errors
+  and public status must never include definitions, environment values,
+  authenticated URLs, tokens, or raw subprocess output.
 
-Distilled guidance for this change:
-
-1. Settings should be the single authority for every MCP definition.
-2. Nix owns immutable executable availability and runtime environment only.
-3. Service startup must not mutate native MCP tables.
-4. Remote execution uses the bounded, authenticated snapshot already shipped in
-   VAS-356.
-5. Update the older knowledge page so future work does not reintroduce startup
-   seeding.
+Implication: refresh must reuse the dispatch resolver, route via persisted
+execution-worker affinity, edit the already-live scoped config in place, retain
+the worker's Codex control instead of probing independently, and preserve the
+existing pending-to-confirmed lifecycle.

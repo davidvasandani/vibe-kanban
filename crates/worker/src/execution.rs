@@ -13,14 +13,16 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
 use cluster_protocol::{
     DispatchAccepted, EventBatch, ExecutionDispatch, ExecutionEventPayload, JobState, JobSummary,
-    McpConfigSnapshot, TerminalEvidence, TerminalState,
+    McpConfigSnapshot, TerminalEvidence, TerminalState, WorkerMcpRefreshResult,
+    WorkerMcpRefreshStatus,
 };
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use executors::{
     actions::{Executable, ExecutorAction, ExecutorActionType},
     env::{ExecutionEnv, RepoContext},
-    executors::{BaseCodingAgent, StandardCodingAgentExecutor},
+    executors::{BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor},
     mcp_config::write_coding_agent_mcp_servers_to_path,
+    mcp_refresh::McpRefreshHandle,
     profile::{ExecutorConfig, ExecutorProfile},
 };
 use serde::Deserialize;
@@ -80,6 +82,8 @@ pub enum ExecutionError {
     InvalidMcpSnapshot { executor: String },
     #[error("failed to materialize MCP configuration for executor {executor}")]
     McpMaterialization { executor: String },
+    #[error("Codex MCP status is unavailable")]
+    McpReload,
     #[error("working directory resolves outside its authorized workspace")]
     WorkingDirectoryOutsideWorkspace,
     #[error(transparent)]
@@ -118,10 +122,14 @@ pub struct WorkerJob {
     acknowledged_sequence: Mutex<u64>,
     recovery_store: Option<RecoveryStore>,
     interactions: Arc<InteractionBroker>,
+    mcp_config: Mutex<Option<PreparedMcpConfig>>,
+    mcp_refresh: RwLock<Option<McpRefreshHandle>>,
+    mcp_refresh_claim: Mutex<()>,
 }
 
 struct PreparedMcpConfig {
     scoped_home: PathBuf,
+    agent: CodingAgent,
 }
 
 impl Drop for PreparedMcpConfig {
@@ -245,6 +253,9 @@ impl ExecutionSupervisor {
                     acknowledged_sequence: Mutex::new(0),
                     recovery_store: Some(recovery_store.clone()),
                     interactions: Arc::new(InteractionBroker::default()),
+                    mcp_config: Mutex::new(None),
+                    mcp_refresh: RwLock::new(None),
+                    mcp_refresh_claim: Mutex::new(()),
                 }),
             );
         }
@@ -328,6 +339,9 @@ impl ExecutionSupervisor {
             acknowledged_sequence: Mutex::new(0),
             recovery_store: self.recovery_store.clone(),
             interactions: Arc::new(InteractionBroker::default()),
+            mcp_config: Mutex::new(None),
+            mcp_refresh: RwLock::new(None),
+            mcp_refresh_claim: Mutex::new(()),
         });
         jobs.insert(dispatch.execution_id, job.clone());
         drop(admission);
@@ -407,7 +421,10 @@ impl ExecutionSupervisor {
                 executor: snapshot.executor.clone(),
             }
         })?;
-        let prepared = PreparedMcpConfig { scoped_home };
+        let prepared = PreparedMcpConfig {
+            scoped_home,
+            agent: agent.clone(),
+        };
         let servers = snapshot.servers.clone().into_iter().collect();
         write_coding_agent_mcp_servers_to_path(
             agent,
@@ -420,6 +437,124 @@ impl ExecutionSupervisor {
             executor: snapshot.executor.clone(),
         })?;
         Ok(prepared)
+    }
+
+    pub async fn refresh_mcp(
+        &self,
+        execution_id: Uuid,
+        snapshot: &McpConfigSnapshot,
+    ) -> Result<WorkerMcpRefreshResult, ExecutionError> {
+        snapshot
+            .validate_size()
+            .map_err(|_| ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            })?;
+        let job = self
+            .jobs
+            .read()
+            .await
+            .get(&execution_id)
+            .cloned()
+            .ok_or(ExecutionError::NotFound(execution_id))?;
+        let Ok(_claim) = job.mcp_refresh_claim.try_lock() else {
+            return Ok(WorkerMcpRefreshResult {
+                status: WorkerMcpRefreshStatus::Busy,
+                servers: Vec::new(),
+            });
+        };
+        if job.state().await.is_terminal() {
+            return Ok(WorkerMcpRefreshResult {
+                status: WorkerMcpRefreshStatus::Unsupported,
+                servers: Vec::new(),
+            });
+        }
+        if snapshot.executor != BaseCodingAgent::Codex.to_string() {
+            return Err(ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            });
+        }
+        let (agent, target_config) = {
+            let prepared = job.mcp_config.lock().await;
+            let Some(prepared) = prepared.as_ref() else {
+                return Ok(WorkerMcpRefreshResult {
+                    status: WorkerMcpRefreshStatus::Unsupported,
+                    servers: Vec::new(),
+                });
+            };
+            (
+                prepared.agent.clone(),
+                prepared.scoped_home.join("config.toml"),
+            )
+        };
+        let servers = snapshot.servers.clone().into_iter().collect();
+        if write_coding_agent_mcp_servers_to_path(&agent, &target_config, &target_config, &servers)
+            .await
+            .is_err()
+        {
+            return Ok(WorkerMcpRefreshResult {
+                status: WorkerMcpRefreshStatus::MaterializationFailed,
+                servers: Vec::new(),
+            });
+        }
+        let Some(control) = job.mcp_refresh.read().await.clone() else {
+            return Ok(WorkerMcpRefreshResult {
+                status: WorkerMcpRefreshStatus::ReloadFailed,
+                servers: Vec::new(),
+            });
+        };
+        if control.0.queue_refresh().await.is_err() {
+            return Ok(WorkerMcpRefreshResult {
+                status: WorkerMcpRefreshStatus::ReloadFailed,
+                servers: Vec::new(),
+            });
+        }
+        let servers = match control.0.list_servers().await {
+            Ok(servers) => servers
+                .into_iter()
+                .filter_map(|server| serde_json::to_value(server).ok())
+                .collect(),
+            Err(_) => {
+                return Ok(WorkerMcpRefreshResult {
+                    status: WorkerMcpRefreshStatus::ReloadFailed,
+                    servers: Vec::new(),
+                });
+            }
+        };
+        Ok(WorkerMcpRefreshResult {
+            status: WorkerMcpRefreshStatus::Queued,
+            servers,
+        })
+    }
+
+    pub async fn mcp_status(
+        &self,
+        execution_id: Uuid,
+    ) -> Result<WorkerMcpRefreshResult, ExecutionError> {
+        let job = self
+            .jobs
+            .read()
+            .await
+            .get(&execution_id)
+            .cloned()
+            .ok_or(ExecutionError::NotFound(execution_id))?;
+        let Some(control) = job.mcp_refresh.read().await.clone() else {
+            return Ok(WorkerMcpRefreshResult {
+                status: WorkerMcpRefreshStatus::Unsupported,
+                servers: Vec::new(),
+            });
+        };
+        let servers = control
+            .0
+            .list_servers()
+            .await
+            .map_err(|_| ExecutionError::McpReload)?
+            .into_iter()
+            .filter_map(|server| serde_json::to_value(server).ok())
+            .collect();
+        Ok(WorkerMcpRefreshResult {
+            status: WorkerMcpRefreshStatus::Queued,
+            servers,
+        })
     }
 
     pub async fn events(
@@ -626,6 +761,7 @@ async fn run_job(
             prepared.scoped_home.to_string_lossy().into_owned(),
         );
     }
+    *job.mcp_config.lock().await = prepared_mcp;
     let spawned = match action {
         WorkerAction::Command(action) => {
             let mut command = Command::new(action.program);
@@ -636,7 +772,10 @@ async fn run_job(
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            command.group_spawn().map_err(|error| error.to_string())
+            command
+                .group_spawn()
+                .map(|child| (child, None))
+                .map_err(|error| error.to_string())
         }
         WorkerAction::Executor(action) => {
             // Admission already proved this workspace is enumerable and its
@@ -662,12 +801,12 @@ async fn run_job(
                     &env,
                 )
                 .await
-                .map(|spawned| spawned.child)
+                .map(|mut spawned| (spawned.child, spawned.mcp_refresh.take()))
                 .map_err(|error| error.to_string())
         }
     };
-    let mut child = match spawned {
-        Ok(child) => child,
+    let (mut child, mcp_refresh) = match spawned {
+        Ok(spawned) => spawned,
         Err(error) => {
             finish_failed(&job, None, format!("failed to start process: {error}")).await;
             return;
@@ -678,6 +817,15 @@ async fn run_job(
     *job.child.lock().await = Some(child);
     *job.state.write().await = JobState::Running;
     job.persist().await;
+
+    if let Some(signal) = mcp_refresh {
+        let job = job.clone();
+        tokio::spawn(async move {
+            if let Ok(handle) = signal.await {
+                *job.mcp_refresh.write().await = Some(handle);
+            }
+        });
+    }
 
     let mut stdout_task =
         stdout.map(|stdout| tokio::spawn(stream_output(job.clone(), stdout, false)));
@@ -857,6 +1005,8 @@ async fn finish_status(job: &WorkerJob, status: ExitStatus) {
         _ => (JobState::Failed, ExecutionEventPayload::Failed(evidence)),
     };
     set_state(job, state, payload).await;
+    *job.mcp_refresh.write().await = None;
+    *job.mcp_config.lock().await = None;
 }
 
 async fn finish_failed(job: &WorkerJob, exit_code: Option<i32>, reason: String) {
@@ -873,6 +1023,8 @@ async fn finish_failed(job: &WorkerJob, exit_code: Option<i32>, reason: String) 
         ExecutionEventPayload::Failed(evidence),
     )
     .await;
+    *job.mcp_refresh.write().await = None;
+    *job.mcp_config.lock().await = None;
 }
 
 fn terminal_evidence(

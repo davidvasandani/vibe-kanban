@@ -13,7 +13,8 @@ use chrono::{DateTime, Utc};
 use cluster_protocol::{
     CancellationPhase, CancellationRequest, EventAcknowledgement, ExecutionDispatch,
     ExecutionEventPayload, InteractionRequest, InteractionResponse, McpConfigSnapshot,
-    PROTOCOL_VERSION, PersistencePolicy, RequestAuthority, TerminalState,
+    McpRefreshRequest, PROTOCOL_VERSION, PersistencePolicy, RequestAuthority, TerminalState,
+    WorkerMcpRefreshStatus,
 };
 use command_group::AsyncGroupChild;
 use db::{
@@ -2636,6 +2637,91 @@ impl ContainerService for LocalContainerService {
             return Ok(result);
         }
 
+        // A clustered execution owns both its scoped config and live Codex
+        // control on the assigned worker. Resolve settings again here; the
+        // dispatch-time snapshot is intentionally not reused.
+        let latest_execution =
+            ExecutionProcess::find_by_session_id(&self.db.pool, session_id, false)
+                .await?
+                .into_iter()
+                .rev()
+                .find(|process| process.run_reason == ExecutionProcessRunReason::CodingAgent);
+        if let Some(execution) = latest_execution
+            && let Some(worker_job) =
+                ExecutionWorkerJob::find_by_execution_id(&self.db.pool, execution.id).await?
+        {
+            let Some(profile_id) = profile else {
+                return Ok(self
+                    .mcp_refresh_coordinator
+                    .fail(session_id, McpRefreshErrorCategory::Unsupported)
+                    .await
+                    .unwrap_or(result));
+            };
+            let agent = ExecutorConfigs::get_cached()
+                .get_coding_agent(&profile_id)
+                .ok_or_else(|| anyhow!("executor profile {profile_id} is unavailable"))?;
+            let snapshot = McpConfigSnapshot {
+                executor: BaseCodingAgent::Codex.to_string(),
+                servers: read_coding_agent_mcp_servers(&agent)
+                    .await
+                    .map_err(anyhow::Error::from)?
+                    .into_iter()
+                    .collect(),
+            };
+            snapshot.validate_size().map_err(anyhow::Error::from)?;
+            let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
+                ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
+            })?;
+            let request = McpRefreshRequest {
+                authority: RequestAuthority {
+                    protocol_version: PROTOCOL_VERSION,
+                    coordinator_id,
+                    worker_node_id: worker_job.worker_node_id,
+                    correlation_id: execution.id,
+                    issued_at: Utc::now(),
+                    nonce: Uuid::new_v4().to_string(),
+                },
+                execution_id: execution.id,
+                snapshot,
+            };
+            let worker_result = match self.worker_client.as_ref() {
+                Some(client) => {
+                    client
+                        .refresh_mcp(worker_job.worker_node_id, &request)
+                        .await
+                }
+                None => {
+                    return Ok(self
+                        .mcp_refresh_coordinator
+                        .fail(session_id, McpRefreshErrorCategory::Unsupported)
+                        .await
+                        .unwrap_or(result));
+                }
+            };
+            let failure = match worker_result {
+                Ok(worker_result) => match worker_result.status {
+                    WorkerMcpRefreshStatus::Queued => {
+                        return Ok(result);
+                    }
+                    WorkerMcpRefreshStatus::Busy => McpRefreshErrorCategory::RefreshInProgress,
+                    WorkerMcpRefreshStatus::Unsupported => McpRefreshErrorCategory::Unsupported,
+                    WorkerMcpRefreshStatus::MaterializationFailed => {
+                        McpRefreshErrorCategory::MaterializationFailed
+                    }
+                    WorkerMcpRefreshStatus::ReloadFailed => McpRefreshErrorCategory::ReloadFailed,
+                },
+                Err(services::services::cluster::client::WorkerClientError::NotImplemented {
+                    ..
+                }) => McpRefreshErrorCategory::Unsupported,
+                Err(_) => McpRefreshErrorCategory::ReloadFailed,
+            };
+            return Ok(self
+                .mcp_refresh_coordinator
+                .fail(session_id, failure)
+                .await
+                .unwrap_or(result));
+        }
+
         let control = self
             .mcp_refresh_controls
             .read()
@@ -3102,6 +3188,50 @@ impl ContainerService for LocalContainerService {
             return Err(ContainerError::Other(anyhow!(
                 "Execution worker job was not pending during acceptance"
             )));
+        }
+        if dispatch.mcp_config_snapshot.is_some()
+            && self
+                .mcp_refresh_coordinator
+                .status(execution_process.session_id)
+                .await
+                .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
+        {
+            let client = client.clone();
+            let coordinator = self.mcp_refresh_coordinator.clone();
+            let session_id = execution_process.session_id;
+            let execution_id = execution_process.id;
+            let snapshot = dispatch.mcp_config_snapshot.clone().expect("checked above");
+            tokio::spawn(async move {
+                for _ in 0..30 {
+                    let request = McpRefreshRequest {
+                        authority: RequestAuthority {
+                            protocol_version: PROTOCOL_VERSION,
+                            coordinator_id,
+                            worker_node_id,
+                            correlation_id: execution_id,
+                            issued_at: Utc::now(),
+                            nonce: Uuid::new_v4().to_string(),
+                        },
+                        execution_id,
+                        snapshot: snapshot.clone(),
+                    };
+                    if let Ok(status) = client.mcp_status(worker_node_id, &request).await
+                        && status.status == WorkerMcpRefreshStatus::Queued
+                    {
+                        let servers = status
+                            .servers
+                            .into_iter()
+                            .filter_map(|server| serde_json::from_value(server).ok())
+                            .collect();
+                        coordinator.confirm(session_id, servers).await;
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                coordinator
+                    .fail(session_id, McpRefreshErrorCategory::Timeout)
+                    .await;
+            });
         }
         self.track_worker_msgs_in_store(execution_process, worker_node_id)
             .await?;

@@ -13,9 +13,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
 use cluster_protocol::{
     CancellationRequest, DispatchAccepted, EventAcknowledgement, EventBatch, ExecutionDispatch,
-    InteractionResponse, JobSummary, PROTOCOL_VERSION, PreviewHttpRequest, PreviewHttpResponse,
-    QuarantineRequest, RequestAuthority, TerminalClose, TerminalCreateRequest, TerminalCreated,
-    TerminalInput, TerminalOutputBatch, TerminalResize,
+    InteractionResponse, JobSummary, McpRefreshRequest, PROTOCOL_VERSION, PreviewHttpRequest,
+    PreviewHttpResponse, QuarantineRequest, RequestAuthority, TerminalClose, TerminalCreateRequest,
+    TerminalCreated, TerminalInput, TerminalOutputBatch, TerminalResize, WorkerMcpRefreshResult,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use node_metrics::{MetricsSampler, SampleBatch};
@@ -129,6 +129,11 @@ fn build_router(state: WorkerApiState) -> Router {
         .route("/v1/executions/{execution_id}/events", get(events))
         .route("/v1/executions/{execution_id}/ack", post(acknowledge))
         .route("/v1/executions/{execution_id}/cancel", post(cancel))
+        .route(
+            "/v1/executions/{execution_id}/mcp/refresh",
+            post(refresh_mcp),
+        )
+        .route("/v1/executions/{execution_id}/mcp/status", post(mcp_status))
         .route(
             "/v1/executions/{execution_id}/interactions/{interaction_id}",
             post(respond_interaction),
@@ -311,6 +316,44 @@ async fn dispatch(
     state
         .supervisor
         .dispatch(payload)
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+async fn refresh_mcp(
+    State(state): State<WorkerApiState>,
+    Path(execution_id): Path<Uuid>,
+    Json(payload): Json<McpRefreshRequest>,
+) -> Result<Json<WorkerMcpRefreshResult>, WorkerApiError> {
+    validate_authority(&state, &payload.authority).await?;
+    if payload.execution_id != execution_id {
+        return Err(WorkerApiError::BadRequest(
+            "path execution ID does not match MCP refresh".into(),
+        ));
+    }
+    state
+        .supervisor
+        .refresh_mcp(execution_id, &payload.snapshot)
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+async fn mcp_status(
+    State(state): State<WorkerApiState>,
+    Path(execution_id): Path<Uuid>,
+    Json(payload): Json<McpRefreshRequest>,
+) -> Result<Json<WorkerMcpRefreshResult>, WorkerApiError> {
+    validate_authority(&state, &payload.authority).await?;
+    if payload.execution_id != execution_id || payload.authority.correlation_id != execution_id {
+        return Err(WorkerApiError::BadRequest(
+            "MCP status target mismatch".into(),
+        ));
+    }
+    state
+        .supervisor
+        .mcp_status(execution_id)
         .await
         .map(Json)
         .map_err(Into::into)
