@@ -32,4 +32,24 @@ The second review reported one P1 finding:
 
 ## Pass 3
 
-Pending after the second fix and focused verification.
+The third review reported two findings:
+
+1. **Confirmed (P1):** unconditional rollout-store creation made every worker's
+   startup depend on available writable Codex storage, including non-Codex-only
+   workers. Fixed by making the store optional at startup and returning a
+   specific transfer error only when a transfer route needs unavailable
+   storage.
+2. **Confirmed (P2):** a crash-left deterministic partial caused
+   `create_new` to reject a retry. Fixed by removing only the exact regular,
+   non-symlink partial for the same operation/thread before recreating it;
+   unexpected file types remain a safety error. The idempotency test now seeds
+   this crash artifact.
+
+While applying these fixes, the compensation path was also tightened so an
+owned quiescence can be resumed from nonterminal `Cancelling` or
+`Indeterminate` worker states, and an unconfirmed stop result explicitly tries
+that compensation rather than waiting for the lease watchdog.
+
+## Pass 4
+
+Pending after the third set of fixes and focused verification.

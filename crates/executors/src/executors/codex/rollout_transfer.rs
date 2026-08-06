@@ -247,6 +247,16 @@ impl CodexRolloutStore {
             ".vk-transfer-{}-{}.partial",
             manifest.operation_id, entry.thread_id
         ));
+        match fs::symlink_metadata(&tmp) {
+            Ok(metadata)
+                if metadata.file_type().is_file() && !metadata.file_type().is_symlink() =>
+            {
+                fs::remove_file(&tmp)?;
+            }
+            Ok(_) => return Err(RolloutTransferError::UnsafePath),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         set_private_permissions(&file)?;
         if let Err(error) = (|| -> Result<(), RolloutTransferError> {
@@ -577,6 +587,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![parent, leaf]
         );
+        let first_destination = target
+            .path()
+            .join("sessions")
+            .join(&manifest.entries[0].relative_path);
+        fs::create_dir_all(first_destination.parent().unwrap()).unwrap();
+        let stale_partial = first_destination.parent().unwrap().join(format!(
+            ".vk-transfer-{}-{}.partial",
+            manifest.operation_id, manifest.entries[0].thread_id
+        ));
+        fs::write(&stale_partial, "interrupted").unwrap();
         for entry in &manifest.entries {
             let artifact = source_store
                 .read_artifact(&manifest, entry.thread_id)
@@ -601,6 +621,7 @@ mod tests {
                 .verified_thread_ids,
             vec![parent, leaf]
         );
+        assert!(!stale_partial.exists());
     }
 
     #[test]

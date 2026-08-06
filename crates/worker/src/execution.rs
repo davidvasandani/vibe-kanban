@@ -448,7 +448,11 @@ impl ExecutionSupervisor {
             .job(execution_id)
             .await
             .ok_or(ExecutionError::NotFound(execution_id))?;
-        if job.workspace_id != workspace_id || job.state().await != JobState::Running {
+        let state = job.state().await;
+        if job.workspace_id != workspace_id
+            || (quiesced && state != JobState::Running)
+            || (!quiesced && state.is_terminal())
+        {
             return Err(ExecutionError::NotFound(execution_id));
         }
         let mut owner = job.quiesced_by.lock().await;
@@ -510,7 +514,7 @@ impl ExecutionSupervisor {
             .job(execution_id)
             .await
             .ok_or(ExecutionError::NotFound(execution_id))?;
-        if job.workspace_id != workspace_id || job.state().await != JobState::Running {
+        if job.workspace_id != workspace_id || job.state().await.is_terminal() {
             return Err(ExecutionError::NotFound(execution_id));
         }
         let mut owner = job.quiesced_by.lock().await;

@@ -981,6 +981,27 @@ pub async fn update_workspace_affinity(
                 stopped.status,
                 ExecutionProcessStatus::Running | ExecutionProcessStatus::Indeterminate
             ) {
+                if config.executor == BaseCodingAgent::Codex
+                    && let (Some(source_worker), Some(coordinator_id), Some(client)) = (
+                        claimed_placement.worker_node_id,
+                        deployment.cluster_config().coordinator_id,
+                        deployment.worker_client(),
+                    )
+                {
+                    let resume = ExecutionQuiescenceRequest {
+                        authority: transfer_authority(
+                            coordinator_id,
+                            source_worker,
+                            operation_id,
+                        ),
+                        operation_id,
+                        execution_id: process.id,
+                        workspace_id: workspace.id,
+                    };
+                    let _ = client
+                        .set_execution_quiesced(source_worker, &resume, false)
+                        .await;
+                }
                 return Err(ApiError::Conflict(
                     "The running task could not be confirmed stopped; affinity is unchanged".into(),
                 ));
