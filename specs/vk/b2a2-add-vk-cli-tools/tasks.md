@@ -40,10 +40,10 @@ may run together within their layer.
 
 ## Phase 4: Review and knowledge
 
-- [ ] T009 Run an independent Codex review of the task diff, address confirmed
+- [x] T009 Run an independent Codex review of the task diff, address confirmed
   significant findings in the affected implementation files, and repeat focused
   verification/review until clean. Depends on T008.
-- [ ] T010 Distill reusable workspace-session PATH knowledge into the applicable
+- [x] T010 Distill reusable workspace-session PATH knowledge into the applicable
   project knowledge-base topic, add task id `vk/b2a2-add-vk-cli-tools`, refresh
   the index, and commit the knowledge-base update before handoff. Depends on
   T009.

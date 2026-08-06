@@ -1,7 +1,7 @@
 # Post-Implementation Analysis: CLI Tools in Workspace Sessions
 
 **Task**: `vk/b2a2-add-vk-cli-tools`
-**Result**: Ready for independent review
+**Result**: Independent review passed
 
 ## Coverage Cross-Check
 
@@ -44,3 +44,18 @@ No constitution violation or unresolved gap remains.
 
 No schema, protocol, generated type, dependency, frontend, or deployment change
 was introduced.
+
+## Independent Review
+
+`codex review --commit 8a04ea8f` reported no significant findings. It confirmed
+that the changes derive the managed directory on the execution host, preserve
+PATH ordering and deduplication, no-op safely when absent, and cover the local
+and clustered spawn boundaries. The reviewer also recompiled the affected
+crates.
+
+## Knowledge Base
+
+Updated `wiki/managed-cli-tool-catalog.md` and `wiki/INDEX.md` with the reusable
+workspace PATH and clustered execution-host contract, tagged
+`vk/b2a2-add-vk-cli-tools`. The knowledge-base update was committed separately
+as `a3becd10`.
