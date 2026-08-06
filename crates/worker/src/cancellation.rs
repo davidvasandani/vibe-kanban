@@ -259,6 +259,7 @@ mod tests {
             working_directory: ".".into(),
             executor_profile: "fixture".into(),
             executor_profile_config: None,
+            mcp_config_snapshot: None,
             action: json!({
                 "program": "/bin/sh",
                 "args": ["-c", format!("sleep 60 & echo $! > '{}'; wait", pid_file.display())]

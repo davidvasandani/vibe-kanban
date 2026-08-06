@@ -9,3 +9,13 @@ Codex independently reviewed both repository diffs.
 
 One stale think1 comment claiming think2 was the only admitted LAN source was
 updated proactively after review.
+
+## Authenticated snapshot follow-up
+
+Codex review identified and drove fixes for global-config races, cleanup after
+failed materialization, unreadable-config error masking, relative-home symlink
+targets, and workers without a pre-existing Codex home. The final review found
+no actionable correctness regression. Targeted checks compiled the protocol,
+executor, worker, and local-deployment crates; focused scoped-home and config
+reader tests passed. Network-listener tests were not rerun in the review sandbox
+because that environment denied local socket creation.

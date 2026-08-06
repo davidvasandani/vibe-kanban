@@ -31,3 +31,24 @@ the general NixOS firewall is disabled.
 Merge the homelab Nix change after the Vibe repository documentation/spec commit
 is available. Deploy think1, think3, and think4 through the existing homelab
 rebuild mechanism. Existing Codex sessions then use the normal MCP refresh flow.
+
+## Follow-up design: dispatch-time MCP snapshot
+
+The coordinator reads the selected coding agent's native MCP section through
+the existing adapter and attaches only that server map plus the base executor
+identity to signed `ExecutionDispatch`. The optional snapshot has a 1 MiB
+canonical JSON bound and participates in request digest material.
+
+Reusable extract-and-replace helpers live in
+`crates/executors/src/mcp_config.rs`. Replacement reads the worker native
+config/template, changes only the adapter's MCP path, and uses the existing
+atomic writer. Worker admission validates identity and size, then materializes
+before creating or spawning the job. Absence retains backward compatibility;
+invalid supplied state fails closed.
+
+After synchronization deploys, homelab stops seeding a second Firecrawl
+definition. Immutable client packaging and `VIBE_BACKEND_URL` remain.
+
+This reuses native adapters and atomic writes (VI, XIII), binds authoritative
+configuration to signed idempotent dispatch (XVIII, XXIII), and bounds
+secret-bearing data without logging values (XVII, XXIII).

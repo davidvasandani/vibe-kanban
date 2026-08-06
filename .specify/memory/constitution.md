@@ -300,6 +300,20 @@ the migration completed. Product-owned continuation prompts are versioned in
 source and preserve the user's prior session context rather than fabricating a
 new task.
 
+### XXIII. Remote execution receives authoritative configuration snapshots
+Configuration that affects a remotely owned execution is resolved by the
+coordinator and carried through the authenticated dispatch boundary. A worker
+must not reconstruct settings from deployment defaults, query an unauthenticated
+side channel, or silently continue with stale local state when the coordinator
+supplied a snapshot.
+
+Secret-bearing snapshots are minimal, bounded, included in idempotency checks,
+and never logged or returned in diagnostics. Workers validate that a snapshot
+belongs to the dispatched executor, apply it atomically through the existing
+native-config adapter, and preserve unrelated vendor settings. Optional protocol
+fields provide rolling compatibility; presence with invalid content fails closed
+before the child process starts.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -321,7 +335,9 @@ new task.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.20.0 (adds coordinator-owned, serialized affinity migration with
+**Version**: 0.21.0 (adds coordinator-authoritative, bounded remote execution
+configuration snapshots with atomic worker materialization and secret-safe
+failure behavior; 0.20.0 added coordinator-owned, serialized affinity migration with
 truthful durable-boundary outcomes and at-most-once continuation; 0.19.0 added
 one-convention-per-concept — reuse the existing
 resolution rule rather than re-deriving it, accept the producer's default value,
