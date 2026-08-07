@@ -115,6 +115,7 @@
       "unassigned": "Sin asignar",
       "current": "Servidor actual",
       "runOn": "Ejecutar en",
+      "coordinator": "Coordinador",
       "unavailable": "No disponible",
       "localDescription": "Esta instancia de Vibe Kanban ejecuta los espacios de trabajo localmente.",
       "confirmTitle": "¿Migrar la tarea en ejecución?",

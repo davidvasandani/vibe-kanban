@@ -115,6 +115,7 @@
       "unassigned": "未割り当て",
       "current": "現在のサーバー",
       "runOn": "実行先",
+      "coordinator": "コーディネーター",
       "unavailable": "利用不可",
       "localDescription": "この Vibe Kanban インスタンスはワークスペースをローカルで実行します。",
       "confirmTitle": "実行中のタスクを移行しますか？",

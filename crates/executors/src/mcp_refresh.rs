@@ -31,6 +31,8 @@ pub enum McpRefreshErrorCategory {
     Timeout,
     RefreshInProgress,
     ActiveCall,
+    MaterializationFailed,
+    ReloadFailed,
     Unsupported,
     Internal,
 }
@@ -120,6 +122,16 @@ pub fn safe_executor_error(category: McpRefreshErrorCategory) -> McpRefreshError
             "Retry after the active tool call finishes.",
             true,
         ),
+        McpRefreshErrorCategory::MaterializationFailed => (
+            "Vibe Kanban could not materialize the latest MCP settings.",
+            "Retry. If the problem continues, inspect the worker's secret-safe logs.",
+            true,
+        ),
+        McpRefreshErrorCategory::ReloadFailed => (
+            "Codex could not reload the refreshed MCP configuration.",
+            "Retry after Codex is ready, or continue in a fresh turn.",
+            true,
+        ),
         McpRefreshErrorCategory::Unsupported => (
             "This executor cannot refresh MCP tools in place.",
             "Start the next turn with an executor that supports live MCP refresh.",
@@ -181,6 +193,8 @@ mod tests {
             McpRefreshErrorCategory::Timeout,
             McpRefreshErrorCategory::RefreshInProgress,
             McpRefreshErrorCategory::ActiveCall,
+            McpRefreshErrorCategory::MaterializationFailed,
+            McpRefreshErrorCategory::ReloadFailed,
             McpRefreshErrorCategory::Unsupported,
             McpRefreshErrorCategory::Internal,
         ] {
