@@ -115,6 +115,7 @@
       "unassigned": "未指派",
       "current": "目前伺服器",
       "runOn": "執行於",
+      "coordinator": "協調器",
       "unavailable": "無法使用",
       "localDescription": "此 Vibe Kanban 執行個體在本機執行工作區。",
       "confirmTitle": "遷移執行中的工作？",
