@@ -1308,6 +1308,7 @@ mod tests {
             })),
             mcp_refresh: RwLock::new(Some(McpRefreshHandle(control.clone()))),
             mcp_refresh_claim: Mutex::new(()),
+            quiesced_by: Mutex::new(None),
         });
         supervisor.jobs.write().await.insert(execution_id, job);
 
