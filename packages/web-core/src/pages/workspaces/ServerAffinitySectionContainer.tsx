@@ -110,7 +110,11 @@ export function ServerAffinitySectionContainer({
         queryClient.invalidateQueries({ queryKey: workspaceSummaryKeys.all }),
         queryClient.invalidateQueries({ queryKey: ['executionProcesses'] }),
       ]);
-      if (result.outcome === WorkspaceAffinityUpdateOutcome.restart_failed) {
+      if (
+        result.outcome === WorkspaceAffinityUpdateOutcome.restart_failed ||
+        result.outcome ===
+          WorkspaceAffinityUpdateOutcome.session_transfer_failed
+      ) {
         toast.error(
           result.message ?? t('workspaces.serverAffinity.restartFailed')
         );

@@ -125,6 +125,7 @@ pub struct WorkerJob {
     mcp_config: Mutex<Option<PreparedMcpConfig>>,
     mcp_refresh: RwLock<Option<McpRefreshHandle>>,
     mcp_refresh_claim: Mutex<()>,
+    quiesced_by: Mutex<Option<Uuid>>,
 }
 
 struct PreparedMcpConfig {
@@ -180,6 +181,17 @@ impl Drop for ExecutionAdmission {
 }
 
 impl ExecutionSupervisor {
+    pub async fn authorizes_session_transfer(
+        &self,
+        execution_id: Uuid,
+        workspace_id: Uuid,
+    ) -> bool {
+        let Some(job) = self.job(execution_id).await else {
+            return false;
+        };
+        job.workspace_id == workspace_id && job.state().await == JobState::Running
+    }
+
     pub fn new(path_authority: PathAuthority) -> Self {
         Self::with_journal_capacity(path_authority, DEFAULT_JOURNAL_CAPACITY)
     }
@@ -256,6 +268,7 @@ impl ExecutionSupervisor {
                     mcp_config: Mutex::new(None),
                     mcp_refresh: RwLock::new(None),
                     mcp_refresh_claim: Mutex::new(()),
+                    quiesced_by: Mutex::new(None),
                 }),
             );
         }
@@ -342,6 +355,7 @@ impl ExecutionSupervisor {
             mcp_config: Mutex::new(None),
             mcp_refresh: RwLock::new(None),
             mcp_refresh_claim: Mutex::new(()),
+            quiesced_by: Mutex::new(None),
         });
         jobs.insert(dispatch.execution_id, job.clone());
         drop(admission);
@@ -543,6 +557,109 @@ impl ExecutionSupervisor {
             status: WorkerMcpRefreshStatus::Queued,
             servers,
         })
+    }
+
+    #[cfg(unix)]
+    pub async fn set_quiesced(
+        &self,
+        execution_id: Uuid,
+        workspace_id: Uuid,
+        operation_id: Uuid,
+        quiesced: bool,
+    ) -> Result<(), ExecutionError> {
+        let job = self
+            .job(execution_id)
+            .await
+            .ok_or(ExecutionError::NotFound(execution_id))?;
+        let state = job.state().await;
+        if job.workspace_id != workspace_id
+            || (quiesced && state != JobState::Running)
+            || (!quiesced && state.is_terminal())
+        {
+            return Err(ExecutionError::NotFound(execution_id));
+        }
+        let mut owner = job.quiesced_by.lock().await;
+        if quiesced {
+            if owner
+                .as_ref()
+                .is_some_and(|existing| *existing != operation_id)
+            {
+                return Err(ExecutionError::DigestConflict { execution_id });
+            }
+            if owner.as_ref() == Some(&operation_id) {
+                return Ok(());
+            }
+        } else if owner.as_ref() != Some(&operation_id) {
+            return Err(ExecutionError::DigestConflict { execution_id });
+        }
+        let pid = {
+            let mut child = job.child.lock().await;
+            child.as_mut().and_then(|child| child.inner().id())
+        }
+        .ok_or(ExecutionError::NotFound(execution_id))?;
+        let signal = if quiesced { "-STOP" } else { "-CONT" };
+        let target = format!("-{pid}");
+        let status = tokio::process::Command::new("kill")
+            .args([signal, "--", &target])
+            .status()
+            .await
+            .map_err(|_| ExecutionError::NotFound(execution_id))?;
+        if !status.success() {
+            return Err(ExecutionError::NotFound(execution_id));
+        }
+        *owner = quiesced.then_some(operation_id);
+        drop(owner);
+        if quiesced {
+            // A coordinator can disappear after SIGSTOP and before its
+            // compensating resume. The lease is deliberately longer than the
+            // coordinator's stale-operation window, giving a retry time to
+            // finish while ensuring an abandoned execution is not frozen
+            // forever.
+            let supervisor = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(15 * 60)).await;
+                let _ = supervisor
+                    .resume_quiesced(execution_id, workspace_id, operation_id)
+                    .await;
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn resume_quiesced(
+        &self,
+        execution_id: Uuid,
+        workspace_id: Uuid,
+        operation_id: Uuid,
+    ) -> Result<(), ExecutionError> {
+        let job = self
+            .job(execution_id)
+            .await
+            .ok_or(ExecutionError::NotFound(execution_id))?;
+        if job.workspace_id != workspace_id || job.state().await.is_terminal() {
+            return Err(ExecutionError::NotFound(execution_id));
+        }
+        let mut owner = job.quiesced_by.lock().await;
+        if owner.as_ref() != Some(&operation_id) {
+            return Err(ExecutionError::DigestConflict { execution_id });
+        }
+        let pid = {
+            let mut child = job.child.lock().await;
+            child.as_mut().and_then(|child| child.inner().id())
+        }
+        .ok_or(ExecutionError::NotFound(execution_id))?;
+        let target = format!("-{pid}");
+        let status = tokio::process::Command::new("kill")
+            .args(["-CONT", "--", &target])
+            .status()
+            .await
+            .map_err(|_| ExecutionError::NotFound(execution_id))?;
+        if !status.success() {
+            return Err(ExecutionError::NotFound(execution_id));
+        }
+        *owner = None;
+        Ok(())
     }
 
     pub async fn events(
