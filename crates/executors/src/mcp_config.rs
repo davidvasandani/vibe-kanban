@@ -108,6 +108,20 @@ fn is_jsonc_file(path: &Path) -> bool {
 
 static DEFAULT_MCP_JSON: &str = include_str!("../default_mcp.json");
 
+/// Returns the launcher spec from the checked-in generic Slack stdio template.
+/// Migration recognition reads this source of truth so coordinated pin bumps do
+/// not require a second release URL in Rust.
+pub(crate) fn default_slack_stdio_launcher() -> Option<String> {
+    serde_json::from_str::<Value>(DEFAULT_MCP_JSON)
+        .ok()?
+        .get("slack")?
+        .get("args")?
+        .as_array()?
+        .get(1)?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// Overrides the executable used to launch the bundled Vibe Kanban MCP server
 /// that gets written into launched agents' config files. Lets a self-hosted /
 /// prod deployment point agents at **its own** build (e.g. the co-located
@@ -120,11 +134,16 @@ const MCP_COMMAND_ENV: &str = "VIBE_KANBAN_MCP_COMMAND";
 /// `vibe-kanban-mcp` binary directly needs no extra args (defaults to global
 /// mode), unlike the `npx … --mcp` form where `--mcp` selects the subcommand.
 const MCP_ARGS_ENV: &str = "VIBE_KANBAN_MCP_ARGS";
+/// Optional deployment-owned Streamable HTTP endpoint for the bundled Slack
+/// connector. Self-hosted clusters use one supervised server instead of
+/// putting a Slack token and stdio launcher in every agent config.
+const SLACK_MCP_URL_ENV: &str = "VIBE_KANBAN_SLACK_MCP_URL";
 
 pub static PRECONFIGURED_MCP_SERVERS: LazyLock<Value> = LazyLock::new(|| {
     let mut value =
         serde_json::from_str::<Value>(DEFAULT_MCP_JSON).expect("Failed to parse default MCP JSON");
     apply_vibe_kanban_command_override(&mut value);
+    apply_slack_http_override(&mut value);
     value
 });
 
@@ -155,6 +174,29 @@ fn set_vibe_kanban_command(value: &mut Value, command: &str, args: Vec<String>) 
         entry.insert(
             "args".to_string(),
             Value::Array(args.into_iter().map(Value::String).collect()),
+        );
+    }
+}
+
+fn apply_slack_http_override(value: &mut Value) {
+    let Ok(url) = std::env::var(SLACK_MCP_URL_ENV) else {
+        return;
+    };
+    let url = url.trim();
+    if url.is_empty() {
+        return;
+    }
+    set_slack_http_url(value, url);
+}
+
+/// Replaces the bundled local Slack launcher with a deployment-owned HTTP
+/// endpoint. Rebuild the object rather than removing selected fields so a
+/// future stdio-only field cannot accidentally carry a credential forward.
+fn set_slack_http_url(value: &mut Value, url: &str) {
+    if let Some(servers) = value.as_object_mut() {
+        servers.insert(
+            "slack".to_string(),
+            serde_json::json!({ "type": "http", "url": url }),
         );
     }
 }
@@ -792,6 +834,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn slack_http_override_contains_only_the_shared_endpoint() {
+        let mut value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        set_slack_http_url(&mut value, "http://172.16.100.102:13080/mcp");
+
+        assert_eq!(
+            value["slack"],
+            serde_json::json!({
+                "type": "http",
+                "url": "http://172.16.100.102:13080/mcp"
+            })
+        );
+        let serialized = serde_json::to_string(&value["slack"]).unwrap();
+        assert!(!serialized.contains("SLACK_MCP"));
+        assert!(!serialized.contains("slack-mcp-server"));
+        assert!(!serialized.contains("command"));
+    }
+
     /// Splits `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>`
     /// into its parts, or `None` if the URL is not a GitHub release asset.
     fn parse_github_release_asset(url: &str) -> Option<(String, String, String)> {
@@ -1018,6 +1078,31 @@ mod tests {
         assert_eq!(
             opencode["gmail"]["environment"],
             serde_json::json!({ "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/credentials.json" })
+        );
+    }
+
+    #[test]
+    fn slack_http_override_adapts_for_codex_and_opencode() {
+        let mut canonical = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        set_slack_http_url(&mut canonical, "http://172.16.100.102:13080/mcp");
+        let codex = apply_adapter(Adapter::Codex, canonical.clone());
+        let opencode = apply_adapter(Adapter::Opencode, canonical);
+
+        assert_eq!(
+            codex["slack"],
+            serde_json::json!({ "url": "http://172.16.100.102:13080/mcp" })
+        );
+        assert_eq!(opencode["slack"]["type"], serde_json::json!("remote"));
+        assert_eq!(
+            opencode["slack"]["url"],
+            serde_json::json!("http://172.16.100.102:13080/mcp")
+        );
+        assert!(opencode["slack"].get("command").is_none());
+        assert!(opencode["slack"].get("environment").is_none());
+        assert!(
+            !serde_json::to_string(&opencode["slack"])
+                .unwrap()
+                .contains("Authorization")
         );
     }
 

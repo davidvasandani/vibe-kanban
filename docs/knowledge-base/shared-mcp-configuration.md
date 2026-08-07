@@ -2,7 +2,8 @@
 
 Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`,
 `c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`, `d893-fix-slack-mcp`,
-`067cb434-mcp-tools`, `4daf-gmail-mcp`, `vk/a5f8-concat-repeating`
+`067cb434-mcp-tools`, `4daf-gmail-mcp`, `vk/a5f8-concat-repeating`,
+`967a-migrate-slack-mc`
 
 Vibe Kanban derives shared MCP settings from each base executor's native config
 file. There is no separate registry: the native files remain the source consumed
@@ -158,6 +159,19 @@ the replacement from the current catalog; and preserve the stored credential.
 Do not generally equate a mutable `latest` launcher with a pinned artifact or
 ignore extra fields. Once the user saves, normal shared materialization writes
 the current pinned definition to every assigned native profile.
+
+For a clustered deployment, a catalog environment override can replace the
+bundled Slack stdio launcher with a URL-only Streamable HTTP definition. The
+Slack credential then belongs to the supervised service, never to agent native
+config. HTTP migration must drop the historical token and remove the atomic
+writer's credential-bearing `.bak`; failure to remove that backup is a failed
+migration, not a warning. Historical launcher recognition is append-only across
+pin bumps, while the actively managed launcher is read from the catalog source
+of truth.
+
+Native MCP files are host-local even when workspaces are shared. Every worker
+therefore needs its own exact, atomic convergence step. Replace only absent,
+known historical, or already-current entries; refuse a custom same-name entry.
 
 ## Shared gateway authentication
 
