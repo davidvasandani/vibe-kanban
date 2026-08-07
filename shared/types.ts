@@ -276,7 +276,7 @@ export enum WorkerNodeStatus { online = "online", offline = "offline", draining 
 
 export enum WorkerMountStatus { healthy = "healthy", missing = "missing", local_fallback = "local_fallback", wrong_filesystem = "wrong_filesystem", probe_not_visible = "probe_not_visible", read_only = "read_only", ownership_mismatch = "ownership_mismatch", io_error = "io_error" }
 
-export type UpdateWorkspaceAffinityRequest = {
+export type UpdateWorkspaceAffinityRequest = { 
 /**
  * Explicitly move the workspace back to coordinator-local execution.
  */
@@ -1220,7 +1220,7 @@ export type McpConfig = { servers: { [key in string]?: JsonValue }, servers_path
 
 export type McpRefreshStatus = "pending_next_turn" | "refreshed" | "partially_refreshed" | "busy" | "unsupported" | "failed";
 
-export type McpRefreshErrorCategory = "executable_unavailable" | "process_launch_failed" | "initialize_failed" | "authentication_failed" | "capability_list_failed" | "invalid_capability_schema" | "timeout" | "refresh_in_progress" | "active_call" | "unsupported" | "internal";
+export type McpRefreshErrorCategory = "executable_unavailable" | "process_launch_failed" | "initialize_failed" | "authentication_failed" | "capability_list_failed" | "invalid_capability_schema" | "timeout" | "refresh_in_progress" | "active_call" | "materialization_failed" | "reload_failed" | "unsupported" | "internal";
 
 export type McpRefreshError = { category: McpRefreshErrorCategory, message: string, remediation: string, retryable: boolean, };
 

@@ -2657,18 +2657,34 @@ impl ContainerService for LocalContainerService {
                     .await
                     .unwrap_or(result));
             };
-            let agent = ExecutorConfigs::get_cached()
-                .get_coding_agent(&profile_id)
-                .ok_or_else(|| anyhow!("executor profile {profile_id} is unavailable"))?;
+            let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(&profile_id) else {
+                return Ok(self
+                    .mcp_refresh_coordinator
+                    .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                    .await
+                    .unwrap_or(result));
+            };
+            let servers = match read_coding_agent_mcp_servers(&agent).await {
+                Ok(servers) => servers.into_iter().collect(),
+                Err(_) => {
+                    return Ok(self
+                        .mcp_refresh_coordinator
+                        .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                        .await
+                        .unwrap_or(result));
+                }
+            };
             let snapshot = McpConfigSnapshot {
                 executor: BaseCodingAgent::Codex.to_string(),
-                servers: read_coding_agent_mcp_servers(&agent)
-                    .await
-                    .map_err(anyhow::Error::from)?
-                    .into_iter()
-                    .collect(),
+                servers,
             };
-            snapshot.validate_size().map_err(anyhow::Error::from)?;
+            if snapshot.validate_size().is_err() {
+                return Ok(self
+                    .mcp_refresh_coordinator
+                    .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                    .await
+                    .unwrap_or(result));
+            }
             let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
                 ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
             })?;
@@ -2693,7 +2709,7 @@ impl ContainerService for LocalContainerService {
                 None => {
                     return Ok(self
                         .mcp_refresh_coordinator
-                        .fail(session_id, McpRefreshErrorCategory::Unsupported)
+                        .unsupported(session_id)
                         .await
                         .unwrap_or(result));
                 }
@@ -2703,8 +2719,20 @@ impl ContainerService for LocalContainerService {
                     WorkerMcpRefreshStatus::Queued => {
                         return Ok(result);
                     }
-                    WorkerMcpRefreshStatus::Busy => McpRefreshErrorCategory::RefreshInProgress,
-                    WorkerMcpRefreshStatus::Unsupported => McpRefreshErrorCategory::Unsupported,
+                    WorkerMcpRefreshStatus::Busy => {
+                        return Ok(self
+                            .mcp_refresh_coordinator
+                            .busy(session_id)
+                            .await
+                            .unwrap_or(result));
+                    }
+                    WorkerMcpRefreshStatus::Unsupported => {
+                        return Ok(self
+                            .mcp_refresh_coordinator
+                            .unsupported(session_id)
+                            .await
+                            .unwrap_or(result));
+                    }
                     WorkerMcpRefreshStatus::MaterializationFailed => {
                         McpRefreshErrorCategory::MaterializationFailed
                     }
@@ -2712,7 +2740,13 @@ impl ContainerService for LocalContainerService {
                 },
                 Err(services::services::cluster::client::WorkerClientError::NotImplemented {
                     ..
-                }) => McpRefreshErrorCategory::Unsupported,
+                }) => {
+                    return Ok(self
+                        .mcp_refresh_coordinator
+                        .unsupported(session_id)
+                        .await
+                        .unwrap_or(result));
+                }
                 Err(_) => McpRefreshErrorCategory::ReloadFailed,
             };
             return Ok(self
@@ -3194,7 +3228,10 @@ impl ContainerService for LocalContainerService {
                 .mcp_refresh_coordinator
                 .status(execution_process.session_id)
                 .await
-                .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
+                .is_some_and(|state| {
+                    state.status == McpRefreshStatus::PendingNextTurn
+                        && state.requested_at <= execution_process.started_at
+                })
         {
             let client = client.clone();
             let coordinator = self.mcp_refresh_coordinator.clone();

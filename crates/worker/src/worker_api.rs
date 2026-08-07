@@ -308,7 +308,7 @@ async fn dispatch(
     Json(payload): Json<ExecutionDispatch>,
 ) -> Result<Json<DispatchAccepted>, WorkerApiError> {
     validate_authority(&state, &payload.authority).await?;
-    if payload.execution_id != execution_id {
+    if payload.execution_id != execution_id || payload.authority.correlation_id != execution_id {
         return Err(WorkerApiError::BadRequest(
             "path execution ID does not match dispatch".into(),
         ));
@@ -327,7 +327,7 @@ async fn refresh_mcp(
     Json(payload): Json<McpRefreshRequest>,
 ) -> Result<Json<WorkerMcpRefreshResult>, WorkerApiError> {
     validate_authority(&state, &payload.authority).await?;
-    if payload.execution_id != execution_id {
+    if payload.execution_id != execution_id || payload.authority.correlation_id != execution_id {
         return Err(WorkerApiError::BadRequest(
             "path execution ID does not match MCP refresh".into(),
         ));

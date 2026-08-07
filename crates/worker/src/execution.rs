@@ -508,21 +508,9 @@ impl ExecutionSupervisor {
                 servers: Vec::new(),
             });
         }
-        let servers = match control.0.list_servers().await {
-            Ok(servers) => servers
-                .into_iter()
-                .filter_map(|server| serde_json::to_value(server).ok())
-                .collect(),
-            Err(_) => {
-                return Ok(WorkerMcpRefreshResult {
-                    status: WorkerMcpRefreshStatus::ReloadFailed,
-                    servers: Vec::new(),
-                });
-            }
-        };
         Ok(WorkerMcpRefreshResult {
             status: WorkerMcpRefreshStatus::Queued,
-            servers,
+            servers: Vec::new(),
         })
     }
 
@@ -1071,9 +1059,18 @@ fn signal(_status: &ExitStatus) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs};
+    use std::{
+        collections::BTreeMap,
+        fs,
+        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    };
 
+    use async_trait::async_trait;
     use cluster_protocol::{PROTOCOL_VERSION, PersistencePolicy, RequestAuthority};
+    use executors::mcp_refresh::{
+        McpRefreshControl, McpRefreshErrorCategory, McpServerRefreshSnapshot,
+        McpServerRefreshStatus,
+    };
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -1130,6 +1127,103 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("execution did not finish");
+    }
+
+    #[derive(Default)]
+    struct RefreshFixture {
+        queued: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl McpRefreshControl for RefreshFixture {
+        async fn queue_refresh(&self) -> Result<(), McpRefreshErrorCategory> {
+            self.queued.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(())
+        }
+
+        async fn list_servers(
+            &self,
+        ) -> Result<Vec<McpServerRefreshSnapshot>, McpRefreshErrorCategory> {
+            Ok(vec![McpServerRefreshSnapshot {
+                server_id: "snapshot-b".into(),
+                status: McpServerRefreshStatus::Ready,
+                tool_count: Some(1),
+                resource_count: Some(0),
+                prompt_count: Some(0),
+                restart_occurred: Some(true),
+                error: None,
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_replaces_only_scoped_mcp_snapshot_and_preserves_live_job() {
+        let (_temp, supervisor, _workspace) = fixture();
+        let execution_id = Uuid::new_v4();
+        let scoped_home = std::env::temp_dir()
+            .join("vibe-kanban-worker-refresh-test")
+            .join(execution_id.to_string())
+            .join("codex");
+        fs::create_dir_all(&scoped_home).unwrap();
+        fs::write(
+            scoped_home.join("config.toml"),
+            "model = 'preserved'\n[mcp_servers.snapshot-a]\ncommand = 'old'\n",
+        )
+        .unwrap();
+        fs::write(scoped_home.join("history.jsonl"), "conversation-state").unwrap();
+        let control = Arc::new(RefreshFixture::default());
+        let agent: CodingAgent = serde_json::from_value(json!({"CODEX": {}})).unwrap();
+        let job = Arc::new(WorkerJob {
+            execution_id,
+            worker_job_id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            request_digest: "refresh-fixture".into(),
+            state: RwLock::new(JobState::Running),
+            journal: Mutex::new(EventJournal::new(execution_id, 16).unwrap()),
+            child: Mutex::new(None),
+            cancellation: Mutex::new(()),
+            acknowledged_sequence: Mutex::new(0),
+            recovery_store: None,
+            interactions: Arc::new(InteractionBroker::default()),
+            mcp_config: Mutex::new(Some(PreparedMcpConfig {
+                scoped_home: scoped_home.clone(),
+                agent,
+            })),
+            mcp_refresh: RwLock::new(Some(McpRefreshHandle(control.clone()))),
+            mcp_refresh_claim: Mutex::new(()),
+        });
+        supervisor.jobs.write().await.insert(execution_id, job);
+
+        let result = supervisor
+            .refresh_mcp(
+                execution_id,
+                &McpConfigSnapshot {
+                    executor: BaseCodingAgent::Codex.to_string(),
+                    servers: BTreeMap::from([(
+                        "snapshot-b".into(),
+                        json!({"command": "new", "args": ["--tools-list"]}),
+                    )]),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, WorkerMcpRefreshStatus::Queued);
+        assert_eq!(control.queued.load(AtomicOrdering::SeqCst), 1);
+        let config = fs::read_to_string(scoped_home.join("config.toml")).unwrap();
+        assert!(config.contains("model = \"preserved\""));
+        assert!(config.contains("snapshot-b"));
+        assert!(!config.contains("snapshot-a"));
+        assert_eq!(
+            fs::read_to_string(scoped_home.join("history.jsonl")).unwrap(),
+            "conversation-state"
+        );
+        let status = supervisor.mcp_status(execution_id).await.unwrap();
+        assert_eq!(status.servers[0]["server_id"], "snapshot-b");
+        assert_eq!(
+            supervisor.job(execution_id).await.unwrap().state().await,
+            JobState::Running
+        );
     }
 
     #[tokio::test]
