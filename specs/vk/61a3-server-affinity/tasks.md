@@ -7,10 +7,10 @@ and may run in parallel within their group. Each task names the files it changes
 
 ## Phase 1: Baseline and test seams
 
-- [ ] T001 Reconcile the branch with `origin/main`, preserving task documents
+- [x] T001 Reconcile the branch with `origin/main`, preserving task documents
   in `SPEC.md`, `PRIOR_KNOWLEDGE.md`, `IMPLEMENTATION_PLAN.md`,
   `.specify/memory/constitution.md`, and `specs/vk/61a3-server-affinity/*`
-- [ ] T002 Inspect the reconciled sidebar tests and establish a focused affinity
+- [x] T002 Inspect the reconciled sidebar tests and establish a focused affinity
   label test seam in
   `packages/web-core/src/pages/workspaces/RightSidebar.tsx` and/or a colocated
   `packages/web-core/src/pages/workspaces/RightSidebar.test.tsx` (depends on
@@ -18,26 +18,26 @@ and may run in parallel within their group. Each task names the files it changes
 
 ## Phase 2: UI implementation
 
-- [ ] T003 Implement the summary-backed, bounded collapsed-header server label
+- [x] T003 Implement the summary-backed, bounded collapsed-header server label
   in `packages/web-core/src/pages/workspaces/RightSidebar.tsx` (depends on T002)
-- [ ] T004 [P] Implement the compact responsive two-column body layout in
+- [x] T004 [P] Implement the compact responsive two-column body layout in
   `packages/web-core/src/pages/workspaces/ServerAffinitySectionContainer.tsx`
   (depends on T001)
-- [ ] T005 Add or finish focused regression tests for hostname precedence,
+- [x] T005 Add or finish focused regression tests for hostname precedence,
   absent summary behavior, and disclosure-safe truncation in the selected
   colocated test file (depends on T003; can run in the same layer as T004)
 
 ## Phase 3: Validation and evidence
 
-- [ ] T006 Run formatting over the changed frontend files and task documents;
+- [x] T006 Run formatting over the changed frontend files and task documents;
   accept only scoped formatting changes (depends on T003–T005)
-- [ ] T007 [P] Run focused Vitest coverage for the changed workspace sidebar
+- [x] T007 [P] Run focused Vitest coverage for the changed workspace sidebar
   test file(s) (depends on T006)
-- [ ] T008 [P] Run the frontend TypeScript/check command for the affected
+- [x] T008 [P] Run the frontend TypeScript/check command for the affected
   package(s) (depends on T006)
-- [ ] T009 [P] Run the frontend lint command for the affected package(s)
+- [x] T009 [P] Run the frontend lint command for the affected package(s)
   (depends on T006)
-- [ ] T010 Record commands and results in
+- [x] T010 Record commands and results in
   `specs/vk/61a3-server-affinity/validation.md` (depends on T007–T009)
 
 ## Phase 4: Independent review
