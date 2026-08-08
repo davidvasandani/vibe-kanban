@@ -1,30 +1,78 @@
-# Prior Knowledge: Remote MCP Refresh
+# Prior Knowledge: MCP-Driven Agent Restart
 
-Sources reviewed: `docs/knowledge-base/active-mcp-refresh.md`,
-`cluster-mcp-runtime-connectivity.md`, and `shared-mcp-configuration.md`.
+## Sources consulted
 
-- Live refresh is an executor capability. Codex reload acknowledgement means
-  queued, while the next-turn paginated status snapshot is the strongest
-  available adoption evidence. The protocol exposes no inventory generation
-  ID, so never invent restart/reuse or last-known-good facts.
-- The session-keyed coordinator already serializes generations and reports a
-  second pending request as retryable busy. Browser state must reconcile from
-  that backend authority rather than treating component-local state as truth.
-- VAS-356 established coordinator-authoritative, settings-owned MCP snapshots
-  in signed dispatch. Workers materialize them into execution-ID-scoped Codex
-  homes, share authentication/runtime assets through symlinks, leave global
-  `config.toml` untouched, validate size/executor identity, and remove the home
-  at job end.
-- Worker-side testing is required because coordinator persistence/connectivity,
-  live agent adoption, and worker network connectivity are separate boundaries.
-- Shared settings ultimately derive from native executor files; the existing
-  profile resolver and native-shape adapter are the one authoritative read/write
-  convention. Operational identity is the stable native server identifier.
-- Atomic agent-config helpers preserve unrelated vendor configuration. Errors
-  and public status must never include definitions, environment values,
-  authenticated URLs, tokens, or raw subprocess output.
+- `docs/knowledge-base/active-mcp-refresh.md`
+- `wiki/agent-process-lifecycle.md`
+- `docs/knowledge-base/clustered-workspace-execution.md`
+- `docs/knowledge-base/codex-rollout-transfer.md`
 
-Implication: refresh must reuse the dispatch resolver, route via persisted
-execution-worker affinity, edit the already-live scoped config in place, retain
-the worker's Codex control instead of probing independently, and preserve the
-existing pending-to-confirmed lifecycle.
+## Relevant findings
+
+### Live MCP refresh is not a cross-executor contract
+
+The current refresh design is explicitly executor-owned and Codex-specific.
+Codex’s reload acknowledgment means “queued,” not “adopted,” and the protocol
+does not expose generation or process-restart evidence. Other executors have no
+proven live reload. A cross-executor feature therefore must use Vibe Kanban’s
+common execution lifecycle and a fresh process rather than expanding the live
+reload abstraction.
+
+### A turn and an OS process are currently coupled
+
+One coding-agent turn maps to one `ExecutionProcess` and normally one process
+lifetime. Codex, OpenCode, and ACP expose a turn-completion signal; most other
+agents exit naturally. The exit monitor owns finalization, queued follow-up
+dispatch, process-group reaping, and cleanup. Restart work must integrate with
+that monitor rather than directly replacing child handles.
+
+### Queued follow-up dispatch already solves the ordering boundary
+
+The finalization path already claims and starts queued user follow-ups after a
+turn, including an early-finalization path that must perform the same handoff.
+This is the reusable mechanism for “finish the current turn, then continue.” A
+new restart intent must not race or displace an actual user follow-up, and every
+finalization shortcut must consume it consistently.
+
+The existing queued-message service is process-local, but it is already the
+authoritative handoff used for user-requested work after a running turn. Reusing
+it preserves the established finalization ordering for this UI operation.
+
+### Use the normal follow-up/resume path
+
+Executor-specific `spawn_follow_up` implementations already preserve each
+agent’s conversation identity using its supported resume mechanism. Starting a
+fresh follow-up also rebuilds the launch environment and reads current executor
+profile/MCP settings. This gives the desired behavior without inventing a
+common “restart MCP child” protocol.
+
+### Process ownership remains local
+
+In clustered deployments, the coordinator owns SQLite/session authority while
+the selected worker owns the agent process. Execution-to-worker affinity is
+persisted and dispatch is idempotent by coordinator execution ID. A queued
+restart must preserve affinity and use the normal coordinator dispatch path;
+the coordinator must not attempt to kill or respawn worker-owned children
+directly.
+
+### Conversation transfer has stricter remote-worker constraints
+
+Codex continuation on another worker requires verified rollout lineage. An MCP
+restart should not implicitly migrate affinity. It should continue on the
+current placement so existing follow-up behavior and rollout availability
+remain valid.
+
+## Design implications
+
+1. Rename the user-visible operation from refresh/reload to restart and make it
+   executor-neutral.
+2. For idle sessions, create the continuation immediately through the existing
+   follow-up action path.
+3. For running sessions, leave the current process untouched and use the
+   established queued-follow-up handoff.
+4. Define deterministic precedence between a queued restart and queued user
+   messages; never launch both concurrently.
+5. Treat a fresh execution start as the success boundary. Do not use MCP status
+   listing as proof.
+6. Preserve current worker affinity and normal executor-specific conversation
+   continuation.

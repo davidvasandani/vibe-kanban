@@ -1559,7 +1559,9 @@ impl LocalContainerService {
                                     // Cancellation can win between the status
                                     // check and the take; finalization is then
                                     // the correct fallback.
-                                    None => false,
+                                    None => container
+                                        .queued_message_service
+                                        .has_pending_restart(ctx.session.id),
                                 }
                             }
                             SkippedCleanupAction::Finalize => false,
@@ -1581,20 +1583,25 @@ impl LocalContainerService {
                         .ok()
                         .and_then(|action| action.next_action())
                         .is_some();
-                    let mut started_queued_follow_up = false;
+                    // A pending restart reservation transfers lifecycle ownership
+                    // to the request handler until its confirmation check lands.
+                    let mut started_queued_follow_up = container
+                        .queued_message_service
+                        .has_pending_restart(ctx.session.id);
 
                     // Only execute queued messages if the execution succeeded
                     // If it failed, was killed or interrupted, just clear the queue and finalize
-                    let should_execute_queued = !matches!(
-                        ctx.execution_process.status,
-                        ExecutionProcessStatus::Failed
-                            | ExecutionProcessStatus::Killed
-                            | ExecutionProcessStatus::Interrupted
-                    );
-
                     if let Some(queued_msg) =
                         container.queued_message_service.take_queued(ctx.session.id)
                     {
+                        let should_execute_queued = (queued_msg.restart_agent
+                            && ctx.execution_process.status == ExecutionProcessStatus::Failed)
+                            || !matches!(
+                                ctx.execution_process.status,
+                                ExecutionProcessStatus::Failed
+                                    | ExecutionProcessStatus::Killed
+                                    | ExecutionProcessStatus::Interrupted
+                            );
                         if should_execute_queued {
                             tracing::info!(
                                 "Found queued message for session {}, starting follow-up execution",
@@ -1618,7 +1625,7 @@ impl LocalContainerService {
                             );
                             container.finalize_task(&ctx).await;
                         }
-                    } else {
+                    } else if !started_queued_follow_up {
                         container.finalize_task(&ctx).await;
                     }
 
@@ -1666,23 +1673,12 @@ impl LocalContainerService {
                             ctx.session.id
                         );
 
-                        if let Err(e) =
-                            Scratch::delete(&db.pool, ctx.session.id, &ScratchType::DraftFollowUp)
-                                .await
-                        {
-                            tracing::warn!(
-                                "Failed to delete scratch after consuming queued message: {}",
-                                e
-                            );
-                        }
-
-                        if let Err(e) = container
-                            .start_queued_follow_up(&ctx, &queued_msg.data)
+                        if !container
+                            .start_queued_follow_up_message(&ctx, &queued_msg)
                             .await
                         {
                             tracing::error!(
-                                "Failed to start queued follow-up from setup script completion: {}",
-                                e
+                                "Failed to start queued follow-up from setup script completion"
                             );
                         }
                     }
@@ -2328,6 +2324,9 @@ impl LocalContainerService {
         ctx: &ExecutionContext,
         queued_msg: &services::services::queued_message::QueuedMessage,
     ) -> bool {
+        if queued_msg.restart_agent {
+            self.reap_warm_server(&ctx.session.id).await;
+        }
         if let Err(e) =
             Scratch::delete(&self.db.pool, ctx.session.id, &ScratchType::DraftFollowUp).await
         {

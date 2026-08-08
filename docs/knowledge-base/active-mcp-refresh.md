@@ -1,7 +1,23 @@
 # Active MCP refresh
 
 Contributing tasks: `8c27-refresh-mcp-tool`, `9151-reloading-mcp-no`,
-`cc71-refresh-mcp-shou`
+`cc71-refresh-mcp-shou`, `mcp-agent-restart`
+
+## Executor-neutral restart fallback
+
+When adoption cannot be proven through an executor's live-reload protocol, the
+truthful cross-executor operation is an agent restart, not a refresh. A stopped
+session starts a normal follow-up immediately. A running session requires
+confirmation and embeds a restart marker in the queued message so the exit
+monitor remains the single lifecycle consumer. The marker preserves any queued
+user prompt and reaps a warm app-server before the continuation starts.
+
+The server, not browser process state, owns the confirmation decision. During
+that decision a restart reservation is hidden from ordinary queue consumption;
+the request handler owns finalization until it either cancels the reservation,
+commits it to the exit monitor, or claims it for an immediate start. Reservation
+cleanup is required on every error path. Explicitly killed, interrupted, or
+indeterminate turns discard the restart; a failed turn may still restart.
 
 Active-session MCP refresh is an executor capability, not an independent
 connectivity test. VK queues the vendor's live reload operation, keeps the

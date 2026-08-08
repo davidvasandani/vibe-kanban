@@ -1208,7 +1208,7 @@ data: DraftFollowUpData,
 /**
  * Timestamp when the message was queued
  */
-queued_at: string, };
+queued_at: string, restart_agent: boolean, };
 
 export type QueueStatus = { "status": "empty" } | { "status": "queued", message: QueuedMessage, };
 

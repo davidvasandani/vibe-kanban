@@ -173,8 +173,12 @@ must never be copied into an agent's native configuration.
 Configuration on disk is not evidence that a running external agent adopted a
 change. Any feature that reports a live tool, connector, or protocol capability
 as refreshed MUST receive confirmation from the process that owns that live
-capability set. Unsupported reload paths are reported truthfully rather than
-simulated with an independent probe or whole-session restart.
+capability set. Unsupported in-process reload paths are reported truthfully
+rather than simulated with an independent probe. A product operation may instead
+offer an explicitly named agent restart: it must preserve the logical session,
+use the normal continuation path, and report success only after a fresh process
+has started from the new configuration. It must never label a restart as a live
+refresh.
 
 Capability replacement is generation-based: readers observe one complete old or
 new inventory, never a partially rebuilt set. Refresh coordinates with in-flight
@@ -182,6 +186,11 @@ calls, preserves last known-good capability state on partial failure, and
 identifies failures by stable configured identifier. Configuration comparisons,
 logs, diagnostics, and API results never expose environment values, tokens,
 authorization material, authenticated URLs, or secret-bearing command arguments.
+
+If a restart is requested while a turn is running, the product must obtain an
+explicit user confirmation before queueing the handoff. The current turn is not
+interrupted unless the dialog says so. Exactly one lifecycle consumer owns the
+queued continuation.
 
 ### XVIII. Distributed execution is affinity-bound and evidence-backed
 Workspace process ownership MUST be explicit, persisted, and stable. A
