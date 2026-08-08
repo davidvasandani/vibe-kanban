@@ -1,42 +1,70 @@
-# Refresh MCP Rematerialization
+# Technical Spec: Server Affinity Sidebar Polish (`61a3`)
 
 ## Objective
 
-Refresh MCP for an active remote Codex execution must resolve the coordinator's
-latest settings-owned MCP map, atomically replace only the MCP section in that
-execution's scoped Codex `config.toml`, and then ask the same live Codex process
-to reload. On-disk success alone is never reported as live adoption.
+Polish the existing Server Affinity section in the workspace right sidebar so
+its expanded content follows the sidebar's compact spacing rhythm and its
+collapsed header continues to identify the workspace's current server.
 
-## Contract
+## Scope
 
-- The coordinator resolves the latest session executor/profile with the same
-  cached profile and native MCP reader used by dispatch.
-- Persisted `ExecutionWorkerJob` affinity selects the target worker and exact
-  execution ID.
-- The signed worker request carries a bounded `McpConfigSnapshot` and matching
-  path/body execution identity.
-- The worker serializes refresh per execution, edits only that execution's
-  existing scoped config through the atomic agent-config writer, and invokes
-  `config/mcpServer/reload` only after the write succeeds.
-- Worker outcomes distinguish queued, busy, unsupported, materialization
-  failure, and reload/bootstrap failure without returning definition values.
-- The existing session generation remains pending until Codex status evidence
-  confirms the next active inventory; refreshed and partially refreshed remain
-  process-confirmed outcomes.
+- Vibe Kanban frontend code only.
+- Preserve the existing affinity query, migration/restart flow, placement
+  choices, eligibility rules, and persistence behavior.
+- Do not change any other service or deployment configuration.
 
-## Preservation and isolation
+## Current behavior
 
-The scoped home is not recreated during refresh. Authentication, skills,
-history, session files, symlinked runtime assets, non-MCP config, and the live
-conversation remain intact. Execution-ID paths and per-job claims prevent
-cross-session writes.
+- The expanded Server Affinity body uses a full sidebar padding token and
+  distributes each label/value row across the entire width. The resulting
+  label-to-control gap is visually excessive, particularly for the “Run on”
+  selector.
+- The section header has access to affinity summary data, but the server label
+  must be reliably visible while the section is collapsed, including when the
+  server is represented by a worker hostname, requested hostname, or placement
+  fallback.
 
-## Verification
+## Required behavior
 
-Coverage must prove snapshot A becomes B for additions, updates, disables, and
-removals; unrelated config survives; concurrent execution homes remain
-isolated; overlapping refresh is busy; errors are phase-specific and
-secret-safe; and a worker-side deterministic MCP initialize plus `tools/list`
-sees B without changing conversation identity.
+1. The expanded section uses compact, consistent horizontal and vertical
+   spacing aligned with neighboring right-sidebar controls.
+2. “Current server” and “Run on” remain readable at narrow sidebar widths; the
+   selector occupies the available control column without causing overflow.
+3. When the section is collapsed, the header shows a concise server name/status
+   label on the right of “Server Affinity.”
+4. Header text truncates safely rather than colliding with the disclosure icon.
+5. The collapsed label resolves in this order: assigned worker hostname,
+   requested worker hostname, then the translated placement-kind fallback.
+6. Loading or temporarily absent summary data must not fabricate a server name
+   or break section interaction.
+7. Existing localization and accessibility behavior is retained.
 
-Detailed SpecKit artifacts live in `specs/vk/cc71-refresh-mcp-shou/`.
+## Implementation direction
+
+- Reuse the existing section header extension point and affinity summary data;
+  do not introduce a second network request for the collapsed label.
+- Adjust layout classes in the affinity body using the established design
+  tokens (`p-base`, `gap-half`, `gap-base`, text and width utilities).
+- Keep data/state management in the container and avoid backend/schema changes.
+- Add or update focused frontend tests where the repository's current component
+  test seams allow the collapsed-header label and compact layout contract to be
+  asserted without brittle pixel snapshots.
+
+## Acceptance criteria
+
+- With Server Affinity expanded, labels and values form a compact two-column
+  layout with no oversized blank gap or horizontal overflow at the supported
+  sidebar width.
+- With Server Affinity collapsed, the current server (for example `think4`) is
+  visible in the section header.
+- Long server names truncate cleanly.
+- Automatic, coordinator/local, assigned-worker, requested-worker, loading, and
+  unavailable-summary states preserve meaningful existing fallbacks.
+- Frontend formatting, type checks, linting, and focused tests pass.
+
+## Non-goals
+
+- Scheduler or worker eligibility changes.
+- Affinity migration/restart behavior changes.
+- Server Metrics redesign.
+- Homelab module or deployment changes.

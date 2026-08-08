@@ -1,30 +1,46 @@
-# Prior Knowledge: Remote MCP Refresh
+# Prior Knowledge: Server Affinity Sidebar Polish (`61a3`)
 
-Sources reviewed: `docs/knowledge-base/active-mcp-refresh.md`,
-`cluster-mcp-runtime-connectivity.md`, and `shared-mcp-configuration.md`.
+## Knowledge-base matches
 
-- Live refresh is an executor capability. Codex reload acknowledgement means
-  queued, while the next-turn paginated status snapshot is the strongest
-  available adoption evidence. The protocol exposes no inventory generation
-  ID, so never invent restart/reuse or last-known-good facts.
-- The session-keyed coordinator already serializes generations and reports a
-  second pending request as retryable busy. Browser state must reconcile from
-  that backend authority rather than treating component-local state as truth.
-- VAS-356 established coordinator-authoritative, settings-owned MCP snapshots
-  in signed dispatch. Workers materialize them into execution-ID-scoped Codex
-  homes, share authentication/runtime assets through symlinks, leave global
-  `config.toml` untouched, validate size/executor identity, and remove the home
-  at job end.
-- Worker-side testing is required because coordinator persistence/connectivity,
-  live agent adoption, and worker network connectivity are separate boundaries.
-- Shared settings ultimately derive from native executor files; the existing
-  profile resolver and native-shape adapter are the one authoritative read/write
-  convention. Operational identity is the stable native server identifier.
-- Atomic agent-config helpers preserve unrelated vendor configuration. Errors
-  and public status must never include definitions, environment values,
-  authenticated URLs, tokens, or raw subprocess output.
+### `workspace-affinity-migration.md`
 
-Implication: refresh must reuse the dispatch resolver, route via persisted
-execution-worker affinity, edit the already-live scoped config in place, retain
-the worker's Codex control instead of probing independently, and preserve the
-existing pending-to-confirmed lifecycle.
+- Affinity has two distinct concepts: requested placement policy and resolved
+  worker. UI copy must not conflate an automatic request with an unassigned
+  workspace when automatic placement has already resolved to a worker.
+- Bulk workspace summaries deliberately carry resolved affinity so list and
+  header rendering do not create per-workspace requests.
+- Every memo/cache dependency that renders affinity must update after placement
+  changes. The collapsed-header server label should therefore use the selected
+  workspace summary already consumed by the sidebar.
+- Placement controls share scheduler eligibility rules. This task should leave
+  those rules and the coordinator-owned migration operation untouched.
+
+### `clustered-workspace-execution.md`
+
+- Persisted workspace affinity is authoritative; it must never be inferred from
+  the UI host currently serving the page.
+- The coordinator owns placement records and user-facing execution state while
+  workers own only their assigned processes. A spacing/header-only change must
+  not move placement logic into the client.
+- Unreachable or unhealthy workers can make state uncertain. Existing fallback
+  labels should remain conservative rather than claiming a healthy assignment
+  that summary data does not contain.
+
+## Planning implications
+
+- Use `selectedWorkspaceSummary.serverAffinity` for the collapsed header; do
+  not add a query that remains mounted solely to populate closed-section text.
+- Resolve the display label from assigned hostname, requested hostname, then
+  translated affinity kind, preserving the existing policy/resolution
+  distinction.
+- Keep the change inside the workspace sidebar and affinity container styling.
+- Verify memo dependencies and narrow-width truncation because stale or
+  overflowing header content would violate the existing UI-cache convergence
+  guidance.
+
+## Baseline note
+
+The checked-out branch predates the merged affinity UI, while `origin/main`
+contains it. Implementation planning must first reconcile the branch with the
+current Vibe Kanban baseline so the polish lands on the canonical component
+instead of recreating affinity behavior.

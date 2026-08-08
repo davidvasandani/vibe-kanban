@@ -1,26 +1,47 @@
-# Implementation Plan: Remote MCP Refresh Rematerialization
+# Implementation Plan: Server Affinity Sidebar Polish (`61a3`)
 
-1. Reuse VAS-356's bounded `McpConfigSnapshot` in a signed execution-scoped
-   refresh request and define secret-safe worker phase outcomes.
-2. Retain each remote Codex job's prepared scoped config metadata, live
-   `McpRefreshHandle`, and per-execution refresh claim on `WorkerJob`.
-3. Add a signed worker route that validates execution/snapshot identity,
-   atomically replaces only the scoped MCP section, and calls Codex reload only
-   after materialization succeeds.
-4. Add the coordinator worker-client operation. Resolve the latest profile and
-   settings with the dispatch resolver, find persisted execution-worker
-   affinity, send the fresh snapshot, and map worker phases into the existing
-   session refresh generation.
-5. Preserve local refresh behavior and return unsupported for old workers,
-   terminal/recovered jobs, non-Codex executors, or executions without a safe
-   scoped/live control.
-6. Extend safe public error categories for materialization versus Codex
-   reload/bootstrap, regenerate TypeScript contracts, and retain the existing UI
-   status model.
-7. Test atomic preservation, A-to-B definition changes, isolation, busy claims,
-   phase-safe errors, signed routing, conversation identity, and worker-side MCP
-   initialize plus `tools/list`.
-8. Run format, focused Rust/frontend/generated checks, independent Codex review
-   to no significant findings, then update and commit reusable knowledge.
+1. Reconcile the task branch with the current `origin/main` baseline, which
+   already contains the Server Affinity UI and its summary-backed header data.
+   Preserve all task documentation and resolve only task-relevant conflicts.
+2. Inspect `CollapsibleSectionHeader`, `RightSidebar`, and
+   `ServerAffinitySectionContainer` at the reconciled baseline to confirm the
+   available header slot, disclosure spacing, sidebar width constraints, and
+   existing affinity label precedence.
+3. Refactor the expanded affinity body into a compact grid/two-column layout
+   using design-system spacing tokens. Give the label column a stable compact
+   width and the value/control column the remaining width, with safe `min-w-0`
+   and truncation behavior.
+4. Ensure the collapsed section header renders the current server label from
+   the selected workspace summary using assigned hostname, requested hostname,
+   and translated kind in that order. Constrain it so long names do not overlap
+   actions or the disclosure affordance.
+5. Add focused regression coverage for header-label selection/visibility and,
+   where practical, stable semantic layout classes without pixel snapshots.
+6. Run the focused frontend tests, formatter, TypeScript/frontend checks, and
+   lint relevant to the changed packages. Inspect the resulting diff for scope
+   and generated/unrelated changes.
+7. Run the independent Codex review loop, address confirmed significant
+   findings, and repeat verification until the review is clean.
+8. Distill only genuinely reusable UI knowledge into the project knowledge
+   base, tag it with `61a3`, refresh the index, and commit that knowledge-base
+   update separately before handoff.
 
-No homelab or other service change is required.
+## Dependency and parallelism notes
+
+- Steps 1–2 are prerequisites for all implementation work.
+- Body-spacing work and collapsed-header coverage can be implemented together
+  after the baseline inspection because they touch closely related code and
+  must be reviewed as one responsive layout.
+- Formatting and verification follow implementation; independent review follows
+  a green local verification pass; knowledge distillation follows the final
+  reviewed behavior.
+
+## Expected files
+
+- `packages/web-core/src/pages/workspaces/RightSidebar.tsx`
+- `packages/web-core/src/pages/workspaces/ServerAffinitySectionContainer.tsx`
+- Focused tests colocated with the relevant workspace sidebar code, if absent
+  test seams can be introduced without widening scope
+- Pipeline documents under `specs/vk/61a3-server-affinity/`
+- `docs/knowledge-base/INDEX.md` and one relevant topic page only if reusable
+  knowledge emerges

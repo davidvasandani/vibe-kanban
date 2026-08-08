@@ -344,6 +344,15 @@ count, depth, and time dimensions are bounded. Partials are operation-scoped,
 and verified artifacts have age-based retention that protects every active or
 recoverable reference.
 
+### XXVI. Collapsed controls retain decisive context
+Expandable workspace controls MAY hide detail, but their collapsed affordance
+MUST retain the concise state needed to decide whether to open them. That state
+comes from an existing summary/cache source when one exists; a closed section
+must not stay mounted or issue a private request solely to label its header.
+Header metadata and disclosure actions share a constrained row, so dynamic text
+must have an explicit shrink/truncation boundary and remain distinguishable from
+the control label at the narrowest supported sidebar width.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -365,8 +374,10 @@ recoverable reference.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.22.0 (makes Vibe Kanban settings the sole MCP-definition
-authority and limits deployment ownership to runtime prerequisites; 0.21.0 added coordinator-authoritative, bounded remote execution
+**Version**: 0.23.0 (requires collapsed controls to retain summary-backed,
+responsive decision context; 0.22.0 made Vibe Kanban settings the sole
+MCP-definition authority and limited deployment ownership to runtime
+prerequisites; 0.21.0 added coordinator-authoritative, bounded remote execution
 configuration snapshots with atomic worker materialization and secret-safe
 failure behavior; 0.20.0 added coordinator-owned, serialized affinity migration with
 truthful durable-boundary outcomes and at-most-once continuation; 0.19.0 added
