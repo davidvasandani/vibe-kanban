@@ -6,7 +6,10 @@ use db::models::{scratch::DraftFollowUpData, session::Session};
 use deployment::Deployment;
 use executors::profile::ExecutorConfig;
 use serde::{Deserialize, Serialize};
-use services::services::{container::ContainerService, queued_message::QueueStatus};
+use services::services::{
+    container::ContainerService,
+    queued_message::{QueueStatus, QueuedMessageService},
+};
 use ts_rs::TS;
 use utils::response::ApiResponse;
 
@@ -32,6 +35,28 @@ enum QueueMcpRestartResult {
     ConfirmationRequired,
     Queued,
     Started,
+}
+
+struct RestartReservationGuard {
+    service: QueuedMessageService,
+    session_id: uuid::Uuid,
+    reservation: uuid::Uuid,
+    active: bool,
+}
+
+impl RestartReservationGuard {
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for RestartReservationGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.service
+                .cancel_mcp_restart(self.session_id, self.reservation);
+        }
+    }
 }
 
 async fn queue_mcp_restart(
@@ -60,6 +85,12 @@ async fn queue_mcp_restart(
     let reservation = deployment
         .queued_message_service()
         .reserve_mcp_restart(session.id, data);
+    let mut reservation_guard = RestartReservationGuard {
+        service: deployment.queued_message_service().clone(),
+        session_id: session.id,
+        reservation,
+        active: true,
+    };
 
     let running_result =
         db::models::execution_process::ExecutionProcess::has_running_coding_agent_for_session(
@@ -73,6 +104,7 @@ async fn queue_mcp_restart(
             deployment
                 .queued_message_service()
                 .cancel_mcp_restart(session.id, reservation);
+            reservation_guard.disarm();
             return Err(error.into());
         }
     };
@@ -81,6 +113,7 @@ async fn queue_mcp_restart(
             deployment
                 .queued_message_service()
                 .cancel_mcp_restart(session.id, reservation);
+            reservation_guard.disarm();
             return Ok(ResponseJson(ApiResponse::success(
                 QueueMcpRestartResult::ConfirmationRequired,
             )));
@@ -88,6 +121,7 @@ async fn queue_mcp_restart(
         let queued_at = deployment
             .queued_message_service()
             .commit_mcp_restart(session.id, reservation);
+        reservation_guard.disarm();
         let still_running_result =
             db::models::execution_process::ExecutionProcess::has_running_coding_agent_for_session(
                 &deployment.db().pool,
@@ -112,9 +146,11 @@ async fn queue_mcp_restart(
                 .take_committed_mcp_restart(session.id, queued_at)
         })
     } else {
-        deployment
+        let queued = deployment
             .queued_message_service()
-            .take_mcp_restart(session.id, reservation)
+            .take_mcp_restart(session.id, reservation);
+        reservation_guard.disarm();
+        queued
     };
 
     let result = if let Some(queued) = queued {

@@ -13,11 +13,13 @@ monitor remains the single lifecycle consumer. The marker preserves any queued
 user prompt and reaps a warm app-server before the continuation starts.
 
 The server, not browser process state, owns the confirmation decision. During
-that decision a restart reservation is hidden from ordinary queue consumption;
-the request handler owns finalization until it either cancels the reservation,
-commits it to the exit monitor, or claims it for an immediate start. Reservation
-cleanup is required on every error path. Explicitly killed, interrupted, or
-indeterminate turns discard the restart; a failed turn may still restart.
+that decision a restart reservation is hidden from ordinary queue consumption.
+The exit monitor waits on a race-free notification until the request cancels,
+commits, or claims the reservation, then resumes normal consumption or
+finalization. A request-lifetime drop guard—not an elapsed-time guess—cleans up
+abandoned reservations, and every queue cancellation wakes waiters. Explicitly
+killed or interrupted turns discard the restart; a failed turn may still
+restart.
 
 Active-session MCP refresh is an executor capability, not an independent
 connectivity test. VK queues the vendor's live reload operation, keeps the

@@ -1550,6 +1550,10 @@ impl LocalContainerService {
                             container.queued_message_service.has_queued(ctx.session.id),
                         ) {
                             SkippedCleanupAction::StartQueuedFollowUp => {
+                                container
+                                    .queued_message_service
+                                    .wait_for_restart_resolution(ctx.session.id)
+                                    .await;
                                 match container.queued_message_service.take_queued(ctx.session.id) {
                                     Some(queued_msg) => {
                                         container
@@ -1559,9 +1563,7 @@ impl LocalContainerService {
                                     // Cancellation can win between the status
                                     // check and the take; finalization is then
                                     // the correct fallback.
-                                    None => container
-                                        .queued_message_service
-                                        .has_pending_restart(ctx.session.id),
+                                    None => false,
                                 }
                             }
                             SkippedCleanupAction::Finalize => false,
@@ -1583,11 +1585,11 @@ impl LocalContainerService {
                         .ok()
                         .and_then(|action| action.next_action())
                         .is_some();
-                    // A pending restart reservation transfers lifecycle ownership
-                    // to the request handler until its confirmation check lands.
-                    let mut started_queued_follow_up = container
+                    container
                         .queued_message_service
-                        .has_pending_restart(ctx.session.id);
+                        .wait_for_restart_resolution(ctx.session.id)
+                        .await;
+                    let mut started_queued_follow_up = false;
 
                     // Only execute queued messages if the execution succeeded
                     // If it failed, was killed or interrupted, just clear the queue and finalize

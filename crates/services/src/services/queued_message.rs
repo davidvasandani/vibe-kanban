@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use dashmap::{DashMap, mapref::entry::Entry};
 use db::models::scratch::DraftFollowUpData;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -41,12 +42,14 @@ pub enum QueueStatus {
 #[derive(Clone)]
 pub struct QueuedMessageService {
     queue: Arc<DashMap<Uuid, QueuedMessage>>,
+    restart_resolution: Arc<Notify>,
 }
 
 impl QueuedMessageService {
     pub fn new() -> Self {
         Self {
             queue: Arc::new(DashMap::new()),
+            restart_resolution: Arc::new(Notify::new()),
         }
     }
 
@@ -61,6 +64,7 @@ impl QueuedMessageService {
             remove_on_reservation_cancel: false,
         };
         self.queue.insert(session_id, queued.clone());
+        self.restart_resolution.notify_waiters();
         queued
     }
 
@@ -87,7 +91,7 @@ impl QueuedMessageService {
     }
 
     pub fn commit_mcp_restart(&self, session_id: Uuid, reservation: Uuid) -> Option<DateTime<Utc>> {
-        match self.queue.entry(session_id) {
+        let result = match self.queue.entry(session_id) {
             Entry::Occupied(mut entry) if entry.get().restart_reservation == Some(reservation) => {
                 entry.get_mut().restart_agent = true;
                 entry.get_mut().restart_reservation = None;
@@ -95,7 +99,9 @@ impl QueuedMessageService {
                 Some(entry.get().queued_at)
             }
             _ => None,
-        }
+        };
+        self.restart_resolution.notify_waiters();
+        result
     }
 
     pub fn take_committed_mcp_restart(
@@ -126,10 +132,11 @@ impl QueuedMessageService {
                 entry.get_mut().remove_on_reservation_cancel = false;
             }
         }
+        self.restart_resolution.notify_waiters();
     }
 
     pub fn take_mcp_restart(&self, session_id: Uuid, reservation: Uuid) -> Option<QueuedMessage> {
-        match self.queue.entry(session_id) {
+        let result = match self.queue.entry(session_id) {
             Entry::Occupied(mut entry) if entry.get().restart_reservation == Some(reservation) => {
                 entry.get_mut().restart_agent = true;
                 entry.get_mut().restart_reservation = None;
@@ -137,12 +144,16 @@ impl QueuedMessageService {
                 Some(entry.remove())
             }
             _ => None,
-        }
+        };
+        self.restart_resolution.notify_waiters();
+        result
     }
 
     /// Cancel/remove a queued message for a session
     pub fn cancel_queued(&self, session_id: Uuid) -> Option<QueuedMessage> {
-        self.queue.remove(&session_id).map(|(_, v)| v)
+        let removed = self.queue.remove(&session_id).map(|(_, v)| v);
+        self.restart_resolution.notify_waiters();
+        removed
     }
 
     /// Get the queued message for a session (if any)
@@ -170,6 +181,18 @@ impl QueuedMessageService {
         self.queue
             .get(&session_id)
             .is_some_and(|message| message.restart_reservation.is_some())
+    }
+
+    pub async fn wait_for_restart_resolution(&self, session_id: Uuid) {
+        loop {
+            let notified = self.restart_resolution.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.has_pending_restart(session_id) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Get queue status for frontend display
