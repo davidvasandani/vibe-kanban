@@ -42,9 +42,9 @@ and may run in parallel within their group. Each task names the files it changes
 
 ## Phase 4: Independent review
 
-- [ ] T011 Run the independent Codex diff review and record findings in
+- [x] T011 Run the independent Codex diff review and record findings in
   `specs/vk/61a3-server-affinity/review.md` (depends on T010)
-- [ ] T012 Address every confirmed significant review finding in the affected
+- [x] T012 Address every confirmed significant review finding in the affected
   implementation/tests and rerun T007–T009 until the independent review is
   clean (depends on T011)
 
