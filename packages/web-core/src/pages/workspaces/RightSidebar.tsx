@@ -27,6 +27,7 @@ import {
   CollapsibleSectionHeader,
   type SectionAction,
 } from '@vibe/ui/components/CollapsibleSectionHeader';
+import { getServerAffinityLabel } from './serverAffinityLabel';
 
 type SectionDef = {
   title: string;
@@ -59,6 +60,10 @@ export const RightSidebar = memo(function RightSidebar({
   const { activeWorkspaces } = useWorkspaceContext();
   const selectedWorkspaceSummary = activeWorkspaces.find(
     (workspace) => workspace.id === selectedWorkspace?.id
+  );
+  const serverAffinityLabel = getServerAffinityLabel(
+    selectedWorkspaceSummary?.serverAffinity,
+    (kind) => t(`common:workspaces.serverAffinity.${kind}`)
   );
 
   const [changesExpanded] = usePersistedExpanded(
@@ -151,14 +156,12 @@ export const RightSidebar = memo(function RightSidebar({
         persistKey: PERSIST_KEYS.serverAffinitySection,
         visible: !!selectedWorkspace,
         expanded: serverAffinityExpanded,
-        headerExtra: selectedWorkspaceSummary?.serverAffinity ? (
-          <span className="max-w-28 truncate text-sm text-low">
-            {selectedWorkspaceSummary.serverAffinity.worker_hostname ??
-              selectedWorkspaceSummary.serverAffinity
-                .requested_worker_hostname ??
-              t(
-                `common:workspaces.serverAffinity.${selectedWorkspaceSummary.serverAffinity.kind}`
-              )}
+        headerExtra: serverAffinityLabel ? (
+          <span
+            className="min-w-0 max-w-28 truncate text-sm text-low"
+            title={serverAffinityLabel}
+          >
+            {serverAffinityLabel}
           </span>
         ) : null,
         content: selectedWorkspace ? (
@@ -271,19 +274,16 @@ export const RightSidebar = memo(function RightSidebar({
   }, [
     rightMainPanelMode,
     selectedWorkspace,
+    linkedIssueForWorkspace,
     repos,
     diffs,
     gitExpanded,
     serverMetricsExpanded,
     serverAffinityExpanded,
+    serverAffinityLabel,
     selectedWorkspaceSummary?.isRunning,
-    selectedWorkspaceSummary?.serverAffinity,
     terminalExpanded,
     notesExpanded,
-    changesExpanded,
-    processesExpanded,
-    devServerExpanded,
-    browserExpanded,
     isTerminalVisible,
     isTerminalExpanded,
     hasUpperContent,

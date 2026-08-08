@@ -195,21 +195,21 @@ export function ServerAffinitySectionContainer({
   };
 
   return (
-    <div className="flex w-full flex-col gap-base p-base text-sm">
-      <div className="flex items-center justify-between gap-base">
+    <div className="grid w-full grid-cols-[auto_minmax(0,1fr)] items-center gap-x-base gap-y-half p-base text-sm">
+      <div className="contents">
         <span className="text-low">
           {t('workspaces.serverAffinity.current')}
         </span>
-        <span className="truncate text-normal" title={currentLabel}>
+        <span className="min-w-0 truncate text-normal" title={currentLabel}>
           {currentLabel}
         </span>
       </div>
       {isLocal ? (
-        <p className="text-low">
+        <p className="col-span-2 text-low">
           {t('workspaces.serverAffinity.localDescription')}
         </p>
       ) : (
-        <div className="flex items-center justify-between gap-base">
+        <div className="contents">
           <span className="text-low">
             {t('workspaces.serverAffinity.runOn')}
           </span>
@@ -218,7 +218,7 @@ export function ServerAffinitySectionContainer({
             onValueChange={(target) => void changeAffinity(target)}
             disabled={mutation.isPending}
           >
-            <SelectTrigger className="h-8 min-w-40 max-w-52">
+            <SelectTrigger className="h-8 min-w-0 w-full max-w-52">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
