@@ -108,6 +108,22 @@
     "label": "Libellé"
   },
   "workspaces": {
+    "serverAffinity": {
+      "local": "Local",
+      "automatic": "Placement automatique",
+      "worker": "Nœud de travail",
+      "unassigned": "Non attribué",
+      "current": "Serveur actuel",
+      "runOn": "Exécuter sur",
+      "unavailable": "Indisponible",
+      "localDescription": "Cette instance de Vibe Kanban exécute les espaces de travail localement.",
+      "confirmTitle": "Migrer la tâche en cours ?",
+      "confirmMessage": "Vibe Kanban arrêtera la tâche actuelle, modifiera son affinité serveur et la redémarrera avec une invite de continuation gérée.",
+      "confirmAction": "Arrêter, migrer et redémarrer",
+      "updated": "Affinité serveur mise à jour",
+      "updateFailed": "Échec de la mise à jour de l’affinité serveur",
+      "restartFailed": "L’affinité a changé, mais la tâche n’a pas pu redémarrer"
+    },
     "title": "Espaces de travail",
     "searchPlaceholder": "Rechercher...",
     "active": "Actif",
@@ -189,6 +205,7 @@
     "nextGitHubComment": "Fichier suivant avec commentaires"
   },
   "sections": {
+    "serverAffinity": "Affinité serveur",
     "changes": "Modifications",
     "repositories": "Dépôts",
     "addRepositories": "Ajouter des dépôts",
@@ -517,7 +534,8 @@
     },
     "worker": {
       "label": "Exécuter sur",
-      "automatic": "Placement automatique"
+      "automatic": "Placement automatique",
+      "coordinator": "Coordinateur"
     },
     "repoPicker": {
       "actions": {

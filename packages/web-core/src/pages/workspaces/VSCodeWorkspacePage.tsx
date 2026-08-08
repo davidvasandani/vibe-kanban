@@ -160,6 +160,7 @@ export function VSCodeWorkspacePage() {
         },
         prompt,
         attachment_ids: null,
+        run_on_coordinator: false,
         requested_worker_node_id: null,
       });
 

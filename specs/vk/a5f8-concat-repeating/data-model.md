@@ -1,30 +1,73 @@
-# Data Model: Concatenate Repeating Lines
+# Data Model: MCP Identifier and Display Label
 
-All state is process-local inside one Codex log-normalization stream.
+## Logical shared server
 
-## `RepeatedCommand`
+`SharedMcpServer`
 
-- `entry_index: usize` — original normalized row shared by the run.
-- `command: String` — exact normalized eligible command used for equality.
-- `count: usize` — total occurrences represented by the row, including the
-  first.
-- `latest_call_id: String` — only this lifecycle may replace the shared row.
-- `latest_completed: bool` — true only after the latest occurrence succeeds;
-  required before the next occurrence can reuse the row.
+- `name: String` — protocol identifier/native map key; retained for API
+  compatibility.
+- `display_name: Option<String>` — Vibe Kanban presentation metadata. `None`
+  means render `name`.
+- existing definition, assignments, source, compatibility, auth, and gateway
+  fields are unchanged.
 
-## `CommandState` addition
+`SharedMcpServerInput`
 
-- `repeat_count: usize` — total occurrences represented by this command's
-  visible row. Defaults to one and is copied into every streamed/completed
-  replacement so the marker is stable.
+- `name: String` — submitted protocol identifier.
+- `display_name: Option<String>` — submitted presentation metadata; blank or
+  identical-to-identifier values normalize to `None`.
+- existing definition, assignments, and native overrides are unchanged.
+
+`SharedMcpConflict`
+
+- `name: String` remains the conflicting native identifier.
+- `display_name: Option<String>` is attached from the label store for
+  presentation and carried into a selected variant.
+
+## Label store
+
+Versioned JSON document owned by Vibe Kanban:
+
+```json
+{
+  "version": 1,
+  "labels": {
+    "atlassian_rovo": "Atlassian Rovo"
+  }
+}
+```
+
+Invariants:
+
+- keys are safe protocol identifiers;
+- values are trimmed, non-empty display labels different from their key;
+- labels never affect native definition equality or fingerprints;
+- stale labels for identifiers absent from every native profile are pruned only
+  during a successful shared save, not during read;
+- malformed metadata degrades to a scoped metadata error and does not block
+  otherwise valid native agent configuration writes.
+
+## Frontend draft
+
+`SharedMcpDraftServer`
+
+- `name: string` — protocol identifier.
+- `displayName?: string | null` — presentation label.
+- `definition`, `assignments` unchanged.
+
+The stable key for all maps and actions is `name`. Rendering uses
+`displayName?.trim() || name`.
 
 ## State transitions
 
-- `none -> active(count=1, incomplete)` on the first eligible command.
-- `active(success) -> active(count+1, incomplete)` on an adjacent identical
-  eligible command with a new call ID.
-- `active(incomplete) -> active(success)` on successful owner completion.
-- `active(incomplete) -> active(failed)` on unsuccessful owner completion;
-  the row is failed and a future call allocates a new row.
-- Any changed/intervening command fails the adjacency/equality guard and starts
-  a new tracker at count one.
+1. Native read groups by native identifier.
+2. Label store decorates matching logical servers/conflicts.
+3. Catalog Add creates `{ name: catalog.key, displayName: catalog.name }`.
+4. Unsafe existing Edit proposes a safe `name`, preserves original as
+   `displayName`, and tracks the old name for removal in outer draft comparison.
+5. Identifier and native-definition validation completes before any write;
+   sidecar errors remain scoped metadata failures.
+6. Native profile writes materialize definitions under `name` only.
+7. After one or more relevant native successes, the label sidecar atomically
+   converges to labels for the resulting logical set.
+8. Reload repeats steps 1–2; tests/auth/actions continue to use `name`.

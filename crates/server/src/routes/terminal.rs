@@ -97,7 +97,7 @@ async fn terminal_ws(
         }
     }
 
-    let environment = deployment.container().resolve_org_env_vars(&attempt).await;
+    let mut environment = deployment.container().resolve_org_env_vars(&attempt).await;
 
     let placement = WorkspacePlacement::find(&deployment.db().pool, attempt.id).await?;
     if let Some(worker_node_id) = terminal_worker_id(placement) {
@@ -132,6 +132,14 @@ async fn terminal_ws(
                 )
             })
             .into_response());
+    }
+
+    let inherited_path = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+    if let Some(path) = utils::shell::append_cli_tools_to_path(&inherited_path) {
+        environment.insert("PATH".into(), path.to_string_lossy().into_owned());
     }
 
     Ok(ws

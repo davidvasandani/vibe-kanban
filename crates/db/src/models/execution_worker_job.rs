@@ -83,7 +83,7 @@ impl ExecutionWorkerJob {
         let worker_job_id = execution_process_id;
         sqlx::query(
             r#"
-            INSERT INTO execution_worker_jobs (
+            INSERT OR IGNORE INTO execution_worker_jobs (
                 execution_process_id, worker_node_id, worker_job_id,
                 request_digest, dispatch_state
             ) VALUES (?, ?, ?, ?, 'pending')
@@ -95,9 +95,15 @@ impl ExecutionWorkerJob {
         .bind(request_digest)
         .execute(pool)
         .await?;
-        Self::find_by_execution_id(pool, execution_process_id)
+        let job = Self::find_by_execution_id(pool, execution_process_id)
             .await?
-            .ok_or(sqlx::Error::RowNotFound)
+            .ok_or(sqlx::Error::RowNotFound)?;
+        if job.worker_node_id != worker_node_id || job.request_digest != request_digest {
+            return Err(sqlx::Error::Protocol(
+                "existing worker dispatch does not match the retried request".into(),
+            ));
+        }
+        Ok(job)
     }
 
     pub async fn find_by_execution_id(

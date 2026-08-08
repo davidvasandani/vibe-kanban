@@ -163,6 +163,12 @@ notification path, and concrete condition that reopens the decision. Dependency
 updates move the source pin, integrity record, tests, and documentation in the
 same reviewed change and fail closed rather than substituting another build.
 
+When a bundled entry points to an operator-hosted shared service instead of
+launching locally, the deployment remains responsible for that same immutable
+source and integrity contract. The catalog contains only the network endpoint
+and non-secret headers; upstream credentials stay at the supervised service and
+must never be copied into an agent's native configuration.
+
 ### XVII. Live capability state is confirmed and atomic
 Configuration on disk is not evidence that a running external agent adopted a
 change. Any feature that reports a live tool, connector, or protocol capability
@@ -278,7 +284,67 @@ scoped to the failure being surfaced — a blanket unwrapping of every internal
 error is not the remedy, and messages remain free of secrets, tokens, and
 environment values.
 
-### XXII. Collapsed controls retain decisive context
+### XXII. Affinity migration is a single owned lifecycle transition
+An executing process is never transferred between nodes. Changing affinity
+while work is active means terminating the old execution with the established
+stop/cancellation protocol, committing the new placement, and creating at most
+one new continuation execution. The coordinator owns that full transition; a
+browser or worker may request it but must not assemble it from independent
+stop, placement, and follow-up mutations.
+
+The transition is serialized per workspace and revalidates both liveness and
+target eligibility at execution time. A missing worker response is not evidence
+that stop succeeded, and affinity cannot change until terminal evidence meets
+the existing lifecycle contract. Duplicate requests, retries, and lost HTTP
+responses cannot create duplicate continuations.
+
+Outcomes name the last durable boundary reached. If stop fails, placement is
+unchanged. If placement succeeds but continuation creation fails, the workspace
+remains stopped on the new affinity and the operator is told exactly that; the
+system must not roll back into a node that may still own process state or claim
+the migration completed. Product-owned continuation prompts are versioned in
+source and preserve the user's prior session context rather than fabricating a
+new task.
+
+### XXIII. Remote execution receives authoritative configuration snapshots
+Configuration that affects a remotely owned execution is resolved by the
+coordinator and carried through the authenticated dispatch boundary. A worker
+must not reconstruct settings from deployment defaults, query an unauthenticated
+side channel, or silently continue with stale local state when the coordinator
+supplied a snapshot.
+
+Secret-bearing snapshots are minimal, bounded, included in idempotency checks,
+and never logged or returned in diagnostics. Workers validate that a snapshot
+belongs to the dispatched executor, apply it atomically through the existing
+native-config adapter, and preserve unrelated vendor settings. Optional protocol
+fields provide rolling compatibility; presence with invalid content fails closed
+before the child process starts.
+
+### XXIV. MCP definitions have one settings authority
+Vibe Kanban settings own every MCP definition. Deployment configuration may
+install immutable executables, expose network routes, and supply service
+environment, but it must not add, remove, or rewrite native agent MCP tables at
+service startup. Remote workers consume settings-owned definitions through the
+authenticated execution snapshot rather than reconstructing them locally.
+
+### XXV. Executor continuation artifacts move by manifest, never by home copy
+An executor home mixes immutable continuation artifacts with mutable databases,
+credentials, configuration, caches, and logs. Cross-node continuation transfer
+MUST select only artifacts required for the named continuation, bind them to an
+operation manifest, and verify identity, size, digest, regular-file type,
+permissions, ownership, and structural containment before stopping the source
+or changing affinity. Copying the complete executor home is prohibited.
+
+Transfer completion is durable positive evidence, never path existence. Retries
+reuse identical verified content and reject conflicts rather than overwriting.
+Missing, corrupt, oversized, unauthorized, indeterminate, or partial lineage
+leaves source execution and placement unchanged. Readers, writers, and cleaners
+never follow symlinks, accept caller absolute paths, or log contents; all byte,
+count, depth, and time dimensions are bounded. Partials are operation-scoped,
+and verified artifacts have age-based retention that protects every active or
+recoverable reference.
+
+### XXVI. Collapsed controls retain decisive context
 Expandable workspace controls MAY hide detail, but their collapsed affordance
 MUST retain the concise state needed to decide whether to open them. That state
 comes from an existing summary/cache source when one exists; a closed section
@@ -308,7 +374,14 @@ the control label at the narrowest supported sidebar width.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.19.0 (adds one-convention-per-concept — reuse the existing
+**Version**: 0.23.0 (requires collapsed controls to retain summary-backed,
+responsive decision context; 0.22.0 made Vibe Kanban settings the sole
+MCP-definition authority and limited deployment ownership to runtime
+prerequisites; 0.21.0 added coordinator-authoritative, bounded remote execution
+configuration snapshots with atomic worker materialization and secret-safe
+failure behavior; 0.20.0 added coordinator-owned, serialized affinity migration with
+truthful durable-boundary outcomes and at-most-once continuation; 0.19.0 added
+one-convention-per-concept — reuse the existing
 resolution rule rather than re-deriving it, accept the producer's default value,
 and report failures with the fact that identifies them instead of a generic
 internal error; also makes writes into a consolidated shared namespace additive

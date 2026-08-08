@@ -35,7 +35,7 @@ export function CpuPanel({
   const { t } = useTranslation('common');
   const title = t('metrics.cpu.title', { defaultValue: 'CPU' });
   const total = cpu?.total_busy_percent ?? null;
-  const perCore = cpu?.per_core_busy_percent ?? null;
+  const perCore = cpu?.per_core_busy ?? null;
 
   return (
     <MetricsSection
@@ -102,18 +102,20 @@ export function CpuPanel({
           className="grid grid-cols-2 gap-half"
         >
           {/*
-            Core index is the identity here — core 3 is core 3 — so the
-            position *is* the key, unlike every other list in this drawer.
+            Labelled by the kernel's own core index, not by array position.
+            `/proc/stat` omits offline CPUs rather than zeroing them, so with
+            cpu1 offline the second entry is cpu2 — rendering it as "Core 1"
+            would attribute one core's load to another.
           */}
-          {perCore.map((value, index) => (
+          {perCore.map((entry) => (
             <Meter
-              key={index}
+              key={entry.core}
               label={t('metrics.cpu.core', {
                 defaultValue: 'Core {{index}}',
-                index,
+                index: entry.core,
               })}
-              value={value}
-              valueText={formatPercent(value, 0)}
+              value={entry.busy_percent}
+              valueText={formatPercent(entry.busy_percent, 0)}
             />
           ))}
         </div>
