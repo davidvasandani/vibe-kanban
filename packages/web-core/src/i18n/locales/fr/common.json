@@ -115,6 +115,7 @@
       "unassigned": "Non attribué",
       "current": "Serveur actuel",
       "runOn": "Exécuter sur",
+      "coordinator": "Coordinateur",
       "unavailable": "Indisponible",
       "localDescription": "Cette instance de Vibe Kanban exécute les espaces de travail localement.",
       "confirmTitle": "Migrer la tâche en cours ?",

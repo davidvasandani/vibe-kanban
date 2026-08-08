@@ -232,6 +232,31 @@ pub struct McpConfigSnapshot {
     pub servers: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpRefreshRequest {
+    pub authority: RequestAuthority,
+    pub execution_id: Uuid,
+    pub snapshot: McpConfigSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerMcpRefreshStatus {
+    Queued,
+    Busy,
+    Unsupported,
+    MaterializationFailed,
+    ReloadFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerMcpRefreshResult {
+    pub status: WorkerMcpRefreshStatus,
+    /// Secret-safe typed server snapshots serialized by the worker. Empty for
+    /// non-success outcomes.
+    pub servers: Vec<Value>,
+}
+
 impl McpConfigSnapshot {
     pub fn validate_size(&self) -> Result<(), serde_json::Error> {
         let bytes = serde_json::to_vec(self)?;

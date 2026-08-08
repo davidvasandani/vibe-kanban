@@ -115,6 +115,7 @@
       "unassigned": "할당되지 않음",
       "current": "현재 서버",
       "runOn": "실행 위치",
+      "coordinator": "코디네이터",
       "unavailable": "사용할 수 없음",
       "localDescription": "이 Vibe Kanban 인스턴스는 워크스페이스를 로컬에서 실행합니다.",
       "confirmTitle": "실행 중인 작업을 마이그레이션할까요?",

@@ -1,6 +1,7 @@
 # Active MCP refresh
 
-Contributing tasks: `8c27-refresh-mcp-tool`, `9151-reloading-mcp-no`
+Contributing tasks: `8c27-refresh-mcp-tool`, `9151-reloading-mcp-no`,
+`cc71-refresh-mcp-shou`
 
 Active-session MCP refresh is an executor capability, not an independent
 connectivity test. VK queues the vendor's live reload operation, keeps the
@@ -71,3 +72,24 @@ Public failures are allow-listed category/message/remediation tuples. Never pass
 through executor errors, commands, environment values, authenticated URLs, or
 raw subprocess output. Tool/resource counts remain optional, and the
 last-successful timestamp advances only after a fully successful confirmation.
+
+## Clustered refresh rematerialization
+
+Dispatch-time snapshots describe what a remote execution started with; they are
+not the source for a later refresh. The coordinator resolves the selected
+profile's current settings-owned MCP map again, routes it through persisted
+execution-to-worker affinity, and lets that worker atomically edit only the MCP
+section of the execution-scoped Codex config. Use the scoped config itself as
+the replacement source so execution-local non-MCP changes survive.
+
+The worker retains the live Codex refresh control and serializes refresh per
+execution. Materialization completes before `config/mcpServer/reload`; those
+failure phases remain distinct and secret-safe. Reload acknowledgement leaves
+the session pending. A later remote turn may confirm only when its execution
+started after the pending generation was requested, preventing startup polling
+from confirming the old snapshot during a dispatch/refresh race.
+
+Worker `busy` and `unsupported` outcomes preserve those public statuses rather
+than passing through a generic failure transition. Old workers without the
+refresh route, recovered jobs without live control, and terminal jobs are
+unsupported—not successful and not retryable bootstrap failures.

@@ -115,6 +115,7 @@
       "unassigned": "未分配",
       "current": "当前服务器",
       "runOn": "运行于",
+      "coordinator": "协调器",
       "unavailable": "不可用",
       "localDescription": "此 Vibe Kanban 实例在本地运行工作区。",
       "confirmTitle": "迁移正在运行的任务？",

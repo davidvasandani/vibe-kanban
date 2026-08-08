@@ -6,9 +6,10 @@ use cluster_protocol::{
     CodexRolloutManifestRequest, CodexRolloutReadRequest, CodexRolloutStageRequest,
     CodexRolloutStageResult, CodexRolloutVerification, CodexRolloutVerifyRequest, DispatchAccepted,
     EventAcknowledgement, EventBatch, ExecutionDispatch, ExecutionQuiescenceRequest,
-    ExecutionQuiescenceStatus, InteractionResponse, JobSummary, PreviewHttpRequest,
-    PreviewHttpResponse, QuarantineRequest, TerminalClose, TerminalCreateRequest, TerminalCreated,
-    TerminalInput, TerminalOutputBatch, TerminalResize,
+    ExecutionQuiescenceStatus, InteractionResponse, JobSummary, McpRefreshRequest,
+    PreviewHttpRequest, PreviewHttpResponse, QuarantineRequest, TerminalClose,
+    TerminalCreateRequest, TerminalCreated, TerminalInput, TerminalOutputBatch, TerminalResize,
+    WorkerMcpRefreshResult,
 };
 use ed25519_dalek::{Signer, SigningKey};
 use futures::StreamExt;
@@ -112,6 +113,24 @@ impl WorkerClient {
             }
         }
         unreachable!("bounded dispatch retry returns on final attempt")
+    }
+
+    pub async fn refresh_mcp(
+        &self,
+        worker_node_id: Uuid,
+        request: &McpRefreshRequest,
+    ) -> Result<WorkerMcpRefreshResult, WorkerClientError> {
+        let path = format!("/v1/executions/{}/mcp/refresh", request.execution_id);
+        self.post(worker_node_id, &path, request).await
+    }
+
+    pub async fn mcp_status(
+        &self,
+        worker_node_id: Uuid,
+        request: &McpRefreshRequest,
+    ) -> Result<WorkerMcpRefreshResult, WorkerClientError> {
+        let path = format!("/v1/executions/{}/mcp/status", request.execution_id);
+        self.post(worker_node_id, &path, request).await
     }
 
     pub async fn codex_rollout_manifest(
