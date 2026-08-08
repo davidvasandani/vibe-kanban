@@ -1,8 +1,7 @@
-# Implementation Plan: Firecrawl Browser MCP Smoke Test
+# Implementation Plan: Firecrawl MCP Worker Authentication
 
-1. Inspect the active tool catalog for the configured Firecrawl browser MCP and identify its page-navigation operation.
-2. Invoke that MCP operation with `https://admin13.parpos.com/`, without credentials or follow-up interactions.
-3. Validate the returned status, final URL, and visible page evidence; if invocation fails, preserve the exact failure boundary (tool unavailable, connection failure, navigation failure, or target response).
-4. Review the repository diff to confirm it contains only this task's specification and plan artifacts.
-5. Run an independent Codex CLI review of the diff, address confirmed significant findings, and repeat review until it reports none.
-6. Report the smoke-test outcome and review status to the user.
+1. Add the Firecrawl bearer reference to each worker's generic `executorSecretRefs` configuration.
+2. Allowlist `FIRECRAWL_BROWSER_AUTH_TOKEN` in the Firecrawl stdio MCP definition using Codex's `env_vars` forwarding mechanism.
+3. Keep the private Firecrawl URL in the MCP definition and the bearer value exclusively in 1Password.
+4. Validate the changed JSON and Nix host declarations without exposing secret values.
+5. Run independent Codex review, address confirmed findings, and repeat until no significant findings remain.
