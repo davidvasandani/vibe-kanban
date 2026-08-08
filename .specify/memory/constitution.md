@@ -278,6 +278,15 @@ scoped to the failure being surfaced — a blanket unwrapping of every internal
 error is not the remedy, and messages remain free of secrets, tokens, and
 environment values.
 
+### XXII. Collapsed controls retain decisive context
+Expandable workspace controls MAY hide detail, but their collapsed affordance
+MUST retain the concise state needed to decide whether to open them. That state
+comes from an existing summary/cache source when one exists; a closed section
+must not stay mounted or issue a private request solely to label its header.
+Header metadata and disclosure actions share a constrained row, so dynamic text
+must have an explicit shrink/truncation boundary and remain distinguishable from
+the control label at the narrowest supported sidebar width.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
