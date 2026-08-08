@@ -50,9 +50,9 @@ and may run in parallel within their group. Each task names the files it changes
 
 ## Phase 5: Knowledge distillation
 
-- [ ] T013 Distill reusable collapsed-header/responsive-flex guidance, if any,
+- [x] T013 Distill reusable collapsed-header/responsive-flex guidance, if any,
   into the appropriate page under `docs/knowledge-base/` with task tag `61a3`,
   and refresh `docs/knowledge-base/INDEX.md` (depends on T012)
-- [ ] T014 Commit the knowledge-base update separately, or record “no new
+- [x] T014 Commit the knowledge-base update separately, or record “no new
   knowledge to record” in `specs/vk/61a3-server-affinity/validation.md` if no
   reusable knowledge emerged (depends on T013)

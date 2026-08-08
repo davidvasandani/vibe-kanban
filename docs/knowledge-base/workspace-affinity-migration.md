@@ -1,6 +1,6 @@
 # Workspace affinity migration
 
-Contributing tasks: `9a64-vk-workspace-aff`
+Contributing tasks: `9a64-vk-workspace-aff`, `61a3-server-affinity`
 
 Workspace affinity is both a placement policy and a resolved worker. Keep those concepts
 separate: automatic placement may already resolve to the worker an operator later pins,
@@ -21,3 +21,11 @@ Placement controls must use the same online, mount-health, lease, and executor-c
 eligibility rules as the scheduler. Bulk workspace summaries should carry resolved affinity
 to avoid per-row requests, and every memo/cache dependency that renders affinity must update
 when placement changes.
+
+Collapsed affinity UI should read that bulk summary rather than keep the detail
+container mounted or issue a label-only request. Resolve display context in the same order
+everywhere: assigned worker hostname, requested worker hostname, then placement-kind copy.
+Keep dynamic header metadata in its own bounded, truncating flex item so the disclosure
+caret remains usable. In the expanded body, align labels and controls with a two-column grid
+(`auto` plus `minmax(0, 1fr)`) instead of independent `justify-between` rows; this preserves
+label/value association and lets selectors shrink without overflow.
