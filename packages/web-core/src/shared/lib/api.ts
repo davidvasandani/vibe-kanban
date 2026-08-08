@@ -2004,6 +2004,23 @@ export const agentsApi = {
 
 // Queue API for session follow-up messages
 export const queueApi = {
+  queueMcpRestart: async (
+    sessionId: string,
+    data: DraftFollowUpData & { confirmed_running_restart: boolean }
+  ): Promise<{
+    status: 'confirmation_required' | 'queued' | 'started';
+  }> => {
+    const response = await makeRequest(
+      `/api/sessions/${sessionId}/queue/mcp-restart`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<{
+      status: 'confirmation_required' | 'queued' | 'started';
+    }>(response);
+  },
   /**
    * Queue a follow-up message to be executed when current execution finishes
    */
