@@ -3,7 +3,7 @@
 Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`,
 `c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`, `d893-fix-slack-mcp`,
 `067cb434-mcp-tools`, `4daf-gmail-mcp`, `vk/a5f8-concat-repeating`,
-`967a-migrate-slack-mc`
+`967a-migrate-slack-mc`, `VAS-356`
 
 Vibe Kanban derives shared MCP settings from each base executor's native config
 file. There is no separate registry: the native files remain the source consumed
@@ -39,9 +39,15 @@ first with identifier fallback, but key every operational action by identifier.
 Catalog object keys are preferred identifiers and `meta.<key>.name` values are
 display labels. If an unsafe key must be suggested as a safe identifier, use the
 shared normalizer (for example, `Atlassian Rovo` becomes `atlassian_rovo`) and
-reject collisions with both configured servers and unresolved conflicts. Never
-silently normalize native keys during reads or inject display-only fields into
-an external client's native MCP definition.
+reject collisions with both configured servers and unresolved conflicts. A read
+may propose that safe identifier while retaining the original native key as its
+origin and display label, but it must not mutate the native file. Commit the
+rename only on an explicit save, preserving the native entry verbatim (including
+credentials, disabled state, and client-only fields). Preflight every assigned
+profile; disagreeing definitions or an existing safe key make the migration
+ambiguous. Roll back earlier profile writes if a later write or label-sidecar
+update fails. Never inject display-only fields into an external client's native
+MCP definition.
 
 Display labels live in the versioned host-local
 `mcp-display-labels.json` sidecar, not in native agent files, so they do not

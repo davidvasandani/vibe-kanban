@@ -419,20 +419,45 @@ async fn update_shared_mcp_servers(
     if let Err(message) = validate_write_request_against_snapshots(&payload, &snapshots) {
         return Ok(ResponseJson(ApiResponse::error(&message)));
     }
+    let mut plans = Vec::with_capacity(snapshots.len());
+    for snapshot in &snapshots {
+        let plan =
+            match plan_servers_for_executor(snapshot.profile.executor, &snapshot.servers, &payload)
+            {
+                Ok(plan) => plan,
+                Err(message) => return Ok(ResponseJson(ApiResponse::error(&message))),
+            };
+        plans.push(plan);
+    }
+    let legacy_migration = payload.servers.iter().any(|server| {
+        snapshots.iter().any(|snapshot| {
+            snapshot.servers.keys().any(|native_name| {
+                !executors::shared_mcp_config::is_valid_server_identifier(native_name)
+                    && executors::shared_mcp_config::suggested_server_identifier(native_name)
+                        == server.name
+            })
+        })
+    });
+    if legacy_migration
+        && snapshots
+            .iter()
+            .zip(&plans)
+            .any(|(snapshot, (_, affected))| !affected.is_empty() && snapshot.config_path.is_none())
+    {
+        return Ok(ResponseJson(ApiResponse::error(
+            "Legacy MCP identifier migration cannot start because an affected profile has no config path",
+        )));
+    }
     let mut outcomes = Vec::new();
     let mut any_success = false;
     let mut any_failed = false;
     let mut any_native_changes = false;
     let mut successfully_written_identifiers = std::collections::HashSet::new();
+    let mut migration_writes = Vec::new();
 
-    for snapshot in &snapshots {
-        let Ok((planned_servers, affected_servers)) =
-            plan_servers_for_executor(snapshot.profile.executor, &snapshot.servers, &payload)
-        else {
-            // `validate_write_request` catches compatibility before writes.
-            continue;
-        };
-
+    for (index, (snapshot, (planned_servers, affected_servers))) in
+        snapshots.iter().zip(plans).enumerate()
+    {
         if affected_servers.is_empty() {
             outcomes.push(SharedMcpProfileWriteOutcome {
                 executor: snapshot.profile.executor,
@@ -462,6 +487,9 @@ async fn update_shared_mcp_servers(
         match update_mcp_servers_in_config(config_path, &snapshot.mcp_config, planned_servers).await
         {
             Ok(message) => {
+                if legacy_migration {
+                    migration_writes.push(index);
+                }
                 any_success = true;
                 successfully_written_identifiers.extend(affected_servers.iter().cloned());
                 outcomes.push(SharedMcpProfileWriteOutcome {
@@ -474,6 +502,20 @@ async fn update_shared_mcp_servers(
                 });
             }
             Err(e) => {
+                if legacy_migration {
+                    let rollback_error = rollback_native_mcp_writes(&snapshots, &migration_writes)
+                        .await
+                        .err();
+                    let message = match rollback_error {
+                        Some(rollback_error) => format!(
+                            "Legacy MCP identifier migration failed and rollback was incomplete: {rollback_error}"
+                        ),
+                        None => format!(
+                            "Legacy MCP identifier migration failed; prior profile writes were rolled back: {e}"
+                        ),
+                    };
+                    return Ok(ResponseJson(ApiResponse::error(&message)));
+                }
                 any_failed = true;
                 outcomes.push(SharedMcpProfileWriteOutcome {
                     executor: snapshot.profile.executor,
@@ -506,6 +548,19 @@ async fn update_shared_mcp_servers(
         None
     };
     if metadata_error.is_some() {
+        if legacy_migration {
+            let rollback_error = rollback_native_mcp_writes(&snapshots, &migration_writes)
+                .await
+                .err();
+            let message = match rollback_error {
+                Some(rollback_error) => format!(
+                    "Legacy MCP label migration failed and native rollback was incomplete: {rollback_error}"
+                ),
+                None => "Legacy MCP label migration failed; native profile writes were rolled back"
+                    .to_string(),
+            };
+            return Ok(ResponseJson(ApiResponse::error(&message)));
+        }
         any_failed = true;
     }
     if metadata_error.is_none() {
@@ -527,6 +582,40 @@ async fn update_shared_mcp_servers(
         servers: fresh.servers,
         conflicts: fresh.conflicts,
     })))
+}
+
+async fn rollback_native_mcp_writes(
+    snapshots: &[executors::shared_mcp_config::NativeProfileSnapshot],
+    written_indices: &[usize],
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for index in written_indices.iter().rev() {
+        let snapshot = &snapshots[*index];
+        let Some(config_path) = snapshot.config_path.as_ref() else {
+            errors.push(format!("{} has no config path", snapshot.profile.executor));
+            continue;
+        };
+        let result = async {
+            let mut config = read_agent_config(config_path, &snapshot.mcp_config).await?;
+            set_mcp_servers_in_config_path(
+                &mut config,
+                &snapshot.mcp_config.servers_path,
+                &snapshot.servers,
+            )
+            .map_err(anyhow::Error::msg)?;
+            write_agent_config(config_path, &snapshot.mcp_config, &config).await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = result {
+            errors.push(format!("{}: {error}", snapshot.profile.executor));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 fn hydrate_gateway_capabilities(
@@ -1264,5 +1353,46 @@ mod tests {
         assert!(saved.contains("172.16.100.102:13080/mcp"));
         assert!(!saved.contains("xoxp"));
         assert!(!previous_version_backup_path(&path).exists());
+    }
+
+    #[tokio::test]
+    async fn rollback_restores_the_original_legacy_identifier() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mcp = McpConfig::new(
+            vec!["mcpServers".to_string()],
+            serde_json::json!({}),
+            serde_json::json!({}),
+            false,
+        );
+        let original_servers = servers("Atlassian Rovo");
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "mcpServers": { "atlassian_rovo": { "command": "x" } }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let snapshot = executors::shared_mcp_config::NativeProfileSnapshot {
+            profile: executors::shared_mcp_config::SharedMcpProfile {
+                executor: BaseCodingAgent::Codex,
+                display_name: "Codex".to_string(),
+                supports_mcp: true,
+                config_path: Some(path.display().to_string()),
+                servers_path: vec!["mcpServers".to_string()],
+                read_error: None,
+            },
+            config_path: Some(path.clone()),
+            mcp_config: mcp,
+            servers: original_servers,
+        };
+
+        rollback_native_mcp_writes(&[snapshot], &[0]).await.unwrap();
+
+        let saved: Value = serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        assert!(saved["mcpServers"].get("Atlassian Rovo").is_some());
+        assert!(saved["mcpServers"].get("atlassian_rovo").is_none());
     }
 }

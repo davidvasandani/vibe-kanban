@@ -379,10 +379,25 @@ fn normalized_display_name(identifier: &str, display_name: Option<&str>) -> Opti
 
 fn attach_display_labels(response: &mut SharedMcpReadResponse, labels: &BTreeMap<String, String>) {
     for server in &mut response.servers {
-        server.display_name = labels.get(&server.name).cloned();
+        let legacy_label = server
+            .native_sources
+            .iter()
+            .map(|source| source.server_name.as_str())
+            .find_map(|native_name| labels.get(native_name));
+        if let Some(label) = labels.get(&server.name).or(legacy_label) {
+            server.display_name = Some(label.clone());
+        }
     }
     for conflict in &mut response.conflicts {
-        conflict.display_name = labels.get(&conflict.name).cloned();
+        let legacy_label = conflict
+            .variants
+            .iter()
+            .flat_map(|variant| &variant.native_sources)
+            .map(|source| source.server_name.as_str())
+            .find_map(|native_name| labels.get(native_name));
+        if let Some(label) = labels.get(&conflict.name).or(legacy_label) {
+            conflict.display_name = Some(label.clone());
+        }
     }
 }
 
@@ -510,6 +525,7 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
 
     let mut by_name: BTreeMap<String, Vec<(NativeMcpSource, McpServerDefinition)>> =
         BTreeMap::new();
+    let mut native_names: BTreeMap<String, HashSet<String>> = BTreeMap::new();
     for snapshot in &snapshots {
         let config_path = snapshot
             .profile
@@ -519,7 +535,16 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
         for (server_name, entry) in &snapshot.servers {
             let definition = canonical_definition_for_server(server_name, entry);
             let fingerprint = normalized_fingerprint(&definition);
-            by_name.entry(server_name.clone()).or_default().push((
+            let identifier = if is_valid_server_identifier(server_name) {
+                server_name.clone()
+            } else {
+                suggested_server_identifier(server_name)
+            };
+            native_names
+                .entry(identifier.clone())
+                .or_default()
+                .insert(server_name.clone());
+            by_name.entry(identifier).or_default().push((
                 NativeMcpSource {
                     executor: snapshot.profile.executor,
                     config_path: config_path.clone(),
@@ -535,6 +560,11 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
     let mut servers = Vec::new();
     let mut conflicts = Vec::new();
     for (name, sources) in by_name {
+        let source_names = native_names.remove(&name).unwrap_or_default();
+        let legacy_display_name = (source_names.len() == 1)
+            .then(|| source_names.iter().next().cloned())
+            .flatten()
+            .filter(|source_name| source_name != &name);
         let mut variants: BTreeMap<String, Vec<(NativeMcpSource, McpServerDefinition)>> =
             BTreeMap::new();
         for (source, definition) in sources {
@@ -544,7 +574,38 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
             variants.entry(key).or_default().push((source, definition));
         }
 
-        if variants.len() == 1 {
+        if source_names.len() > 1 {
+            let variants = variants
+                .into_values()
+                .flatten()
+                .enumerate()
+                .map(|(idx, (source, definition))| {
+                    let definition = redact_gateway_definition(definition);
+                    let source = redact_gateway_source(source);
+                    SharedMcpConflictVariant {
+                        variant_id: format!("variant-{}", idx + 1),
+                        assignments: vec![assignment_from_source(&source, &definition)],
+                        native_sources: vec![source],
+                        definition,
+                    }
+                })
+                .collect();
+            let mut originals = source_names.into_iter().collect::<Vec<_>>();
+            originals.sort();
+            conflicts.push(SharedMcpConflict {
+                name: name.clone(),
+                display_name: None,
+                variants,
+                message: format!(
+                    "MCP server identifiers {} all normalize to `{name}`; rename them explicitly before saving",
+                    originals
+                        .iter()
+                        .map(|original| format!("`{original}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        } else if variants.len() == 1 {
             let (_, group) = variants.into_iter().next().expect("variant exists");
             let definition = redact_gateway_definition(group[0].1.clone());
             let native_sources = group
@@ -557,7 +618,7 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
                 .collect::<Vec<_>>();
             servers.push(SharedMcpServer {
                 name,
-                display_name: None,
+                display_name: legacy_display_name,
                 definition: definition.clone(),
                 assignments,
                 source_kind: if native_sources.len() > 1 {
@@ -596,7 +657,7 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
                 .collect();
             conflicts.push(SharedMcpConflict {
                 name: name.clone(),
-                display_name: None,
+                display_name: legacy_display_name,
                 variants,
                 message: format!(
                     "MCP server `{name}` has different definitions across assigned profiles"
@@ -1066,7 +1127,20 @@ pub fn plan_servers_for_executor(
     let mut next = current.clone();
     let mut affected = Vec::new();
     for server in &request.servers {
+        let legacy_name = legacy_name_for_server(current, server)?;
         if server.assignments.contains(&executor) {
+            if let Some(legacy_name) = &legacy_name
+                && !server.native_overrides.contains_key(&executor)
+            {
+                let entry = current
+                    .get(legacy_name)
+                    .expect("legacy candidate came from current servers")
+                    .clone();
+                next.remove(legacy_name);
+                next.insert(server.name.clone(), entry);
+                affected.push(server.name.clone());
+                continue;
+            }
             if !server.native_overrides.contains_key(&executor)
                 && current.get(&server.name).is_some_and(|entry| {
                     if server.name == "slack"
@@ -1085,18 +1159,71 @@ pub fn plan_servers_for_executor(
                 server.native_overrides.get(&executor),
             )?;
             preserve_gateway_capability(current, &server.name, &mut entry);
+            if let Some(legacy_name) = &legacy_name {
+                next.remove(legacy_name);
+            }
             next.insert(server.name.clone(), entry);
             affected.push(server.name.clone());
-        } else if next.remove(&server.name).is_some() {
-            affected.push(server.name.clone());
+        } else {
+            let removed = next.remove(&server.name).is_some()
+                || legacy_name
+                    .as_ref()
+                    .is_some_and(|legacy_name| next.remove(legacy_name).is_some());
+            if removed {
+                affected.push(server.name.clone());
+            }
         }
     }
     for name in &request.removed_servers {
-        if next.remove(name).is_some() && !affected.contains(name) {
+        let removed = next.remove(name).is_some();
+        let legacy_names = next
+            .keys()
+            .filter(|candidate| {
+                !is_valid_server_identifier(candidate)
+                    && suggested_server_identifier(candidate) == name.as_str()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if legacy_names.len() > 1 {
+            return Err(format!(
+                "Multiple legacy MCP identifiers normalize to `{name}`; rename them explicitly"
+            ));
+        }
+        let removed = legacy_names
+            .first()
+            .is_some_and(|legacy_name| next.remove(legacy_name).is_some())
+            || removed;
+        if removed && !affected.contains(name) {
             affected.push(name.clone());
         }
     }
     Ok((next, affected))
+}
+
+fn legacy_name_for_server(
+    current: &HashMap<String, Value>,
+    server: &SharedMcpServerInput,
+) -> Result<Option<String>, String> {
+    if current.contains_key(&server.name) {
+        return Ok(None);
+    }
+    let candidates = current
+        .iter()
+        .filter(|(candidate, entry)| {
+            !is_valid_server_identifier(candidate)
+                && suggested_server_identifier(candidate) == server.name
+                && canonical_definition_for_server(candidate, entry) == server.definition
+        })
+        .map(|(candidate, _)| candidate.clone())
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [candidate] => Ok(Some(candidate.clone())),
+        _ => Err(format!(
+            "Multiple legacy MCP identifiers normalize to `{}`; rename them explicitly",
+            server.name
+        )),
+    }
 }
 
 fn preserve_gateway_capability(
@@ -1147,7 +1274,56 @@ pub fn validate_write_request_against_snapshots(
     request: &SharedMcpWriteRequest,
     snapshots: &[NativeProfileSnapshot],
 ) -> Result<(), String> {
-    validate_write_request_with(request, |server| unchanged_legacy_server(server, snapshots))
+    for server in &request.servers {
+        let has_legacy_candidate = snapshots.iter().any(|snapshot| {
+            snapshot.servers.keys().any(|native_name| {
+                !is_valid_server_identifier(native_name)
+                    && suggested_server_identifier(native_name) == server.name
+            })
+        });
+        if has_legacy_candidate && !migrated_legacy_server(server, snapshots) {
+            return Err(format!(
+                "Legacy MCP definitions for `{}` disagree across profiles or collide with an existing identifier; resolve the conflict before saving",
+                server.name
+            ));
+        }
+    }
+    validate_write_request_with(request, |server| {
+        unchanged_legacy_server(server, snapshots) || migrated_legacy_server(server, snapshots)
+    })
+}
+
+fn migrated_legacy_server(
+    server: &SharedMcpServerInput,
+    snapshots: &[NativeProfileSnapshot],
+) -> bool {
+    server.native_overrides.is_empty()
+        && is_valid_server_identifier(&server.name)
+        && server.assignments.iter().all(|executor| {
+            snapshots
+                .iter()
+                .any(|snapshot| snapshot.profile.executor == *executor)
+        })
+        && snapshots.iter().all(|snapshot| {
+            let assigned = server.assignments.contains(&snapshot.profile.executor);
+            let candidates = snapshot
+                .servers
+                .iter()
+                .filter(|(native_name, _)| {
+                    !is_valid_server_identifier(native_name)
+                        && suggested_server_identifier(native_name) == server.name
+                })
+                .collect::<Vec<_>>();
+            match candidates.as_slice() {
+                [] => !assigned && !snapshot.servers.contains_key(&server.name),
+                [(native_name, entry)] => {
+                    !snapshot.servers.contains_key(&server.name)
+                        && assigned
+                        && canonical_definition_for_server(native_name, entry) == server.definition
+                }
+                _ => false,
+            }
+        })
 }
 
 fn unchanged_legacy_server(
@@ -1174,11 +1350,12 @@ fn unchanged_legacy_server(
 
 fn validate_write_request_with(
     request: &SharedMcpWriteRequest,
-    allow_invalid_identifier: impl Fn(&SharedMcpServerInput) -> bool,
+    allow_legacy_server: impl Fn(&SharedMcpServerInput) -> bool,
 ) -> Result<(), String> {
     let mut names = HashSet::new();
     for server in &request.servers {
-        if !is_valid_server_identifier(&server.name) && !allow_invalid_identifier(server) {
+        let is_legacy_server = allow_legacy_server(server);
+        if !is_valid_server_identifier(&server.name) && !is_legacy_server {
             return Err(format!(
                 "Invalid MCP server identifier `{}`: identifiers must match \
                  ^[a-zA-Z0-9_-]+$. Use `{}` as the identifier and keep `{}` \
@@ -1201,7 +1378,9 @@ fn validate_write_request_with(
             if agent_for(*executor).is_none() {
                 return Err(format!("Executor `{executor}` was not found"));
             }
-            if let Some(reason) = incompatibility_reason(*executor, &server.definition) {
+            if let Some(reason) = incompatibility_reason(*executor, &server.definition)
+                && !is_legacy_server
+            {
                 return Err(format!(
                     "MCP server `{}` cannot be assigned to `{}`: {}",
                     server.name, executor, reason
@@ -1850,6 +2029,160 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
             suggested_server_identifier("  Rovo...Cloud!  "),
             "rovo_cloud"
         );
+    }
+
+    #[test]
+    fn legacy_identifier_is_proposed_with_its_label_and_native_origin() {
+        let entry = json!({
+            "url": "https://mcp.atlassian.com/v1/mcp",
+            "http_headers": {"Authorization": "Bearer credential"}
+        });
+        let mut response = reconcile_snapshots(vec![snapshot(
+            BaseCodingAgent::Codex,
+            HashMap::from([("Atlassian Rovo".to_string(), entry)]),
+        )]);
+
+        assert!(response.conflicts.is_empty());
+        assert_eq!(response.servers[0].name, "atlassian_rovo");
+        assert_eq!(
+            response.servers[0].display_name.as_deref(),
+            Some("Atlassian Rovo")
+        );
+        assert_eq!(
+            response.servers[0].assignments[0].native_name,
+            "Atlassian Rovo"
+        );
+
+        attach_display_labels(
+            &mut response,
+            &BTreeMap::from([("Atlassian Rovo".to_string(), "Rovo for Jira".to_string())]),
+        );
+        assert_eq!(
+            response.servers[0].display_name.as_deref(),
+            Some("Rovo for Jira")
+        );
+    }
+
+    #[test]
+    fn saving_a_legacy_identifier_replaces_the_native_key() {
+        let entry = json!({
+            "url": "https://mcp.atlassian.com/v1/mcp",
+            "http_headers": {"Authorization": "Bearer credential"}
+        });
+        let response = reconcile_snapshots(vec![snapshot(
+            BaseCodingAgent::Codex,
+            HashMap::from([("Atlassian Rovo".to_string(), entry.clone())]),
+        )]);
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: response.servers[0].name.clone(),
+                display_name: response.servers[0].display_name.clone(),
+                definition: response.servers[0].definition.clone(),
+                assignments: vec![BaseCodingAgent::Codex],
+                native_overrides: HashMap::new(),
+            }],
+            removed_servers: Vec::new(),
+            resolved_conflicts: Vec::new(),
+        };
+
+        let (next, affected) = plan_servers_for_executor(
+            BaseCodingAgent::Codex,
+            &HashMap::from([("Atlassian Rovo".to_string(), entry)]),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(next.get("Atlassian Rovo"), None);
+        assert_eq!(
+            next["atlassian_rovo"]["http_headers"]["Authorization"],
+            "Bearer credential"
+        );
+        assert_eq!(affected, vec!["atlassian_rovo"]);
+    }
+
+    #[test]
+    fn legacy_identifier_collision_is_reported_without_a_server() {
+        let definition = json!({"url": "https://mcp.atlassian.com/v1/mcp"});
+        let response = reconcile_snapshots(vec![snapshot(
+            BaseCodingAgent::Codex,
+            HashMap::from([
+                ("Atlassian Rovo".to_string(), definition.clone()),
+                ("atlassian_rovo".to_string(), definition),
+            ]),
+        )]);
+
+        assert!(response.servers.is_empty());
+        assert_eq!(response.conflicts[0].name, "atlassian_rovo");
+        assert!(response.conflicts[0].message.contains("all normalize"));
+    }
+
+    #[test]
+    fn disabled_legacy_server_is_renamed_verbatim() {
+        let entry = json!({
+            "type": "remote",
+            "url": "https://mcp.atlassian.com/v1/mcp",
+            "enabled": false,
+            "custom_native_field": "preserve"
+        });
+        let snapshots = vec![snapshot(
+            BaseCodingAgent::Opencode,
+            HashMap::from([("Atlassian Rovo".to_string(), entry.clone())]),
+        )];
+        let response = reconcile_snapshots(snapshots.clone());
+        assert_eq!(
+            response.servers[0].definition.transport,
+            McpTransportKind::Unknown
+        );
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "atlassian_rovo".to_string(),
+                display_name: Some("Atlassian Rovo".to_string()),
+                definition: response.servers[0].definition.clone(),
+                assignments: vec![BaseCodingAgent::Opencode],
+                native_overrides: HashMap::new(),
+            }],
+            removed_servers: Vec::new(),
+            resolved_conflicts: Vec::new(),
+        };
+
+        validate_write_request_against_snapshots(&request, &snapshots).unwrap();
+        let (next, affected) =
+            plan_servers_for_executor(BaseCodingAgent::Opencode, &snapshots[0].servers, &request)
+                .unwrap();
+
+        assert_eq!(next.get("Atlassian Rovo"), None);
+        assert_eq!(next["atlassian_rovo"], entry);
+        assert_eq!(affected, vec!["atlassian_rovo"]);
+    }
+
+    #[test]
+    fn migration_rejects_a_different_legacy_definition_in_another_profile() {
+        let codex_entry = json!({"url": "https://mcp.atlassian.com/v1/mcp"});
+        let claude_entry = json!({"url": "https://different.example/mcp"});
+        let snapshots = vec![
+            snapshot(
+                BaseCodingAgent::Codex,
+                HashMap::from([("Atlassian Rovo".to_string(), codex_entry.clone())]),
+            ),
+            snapshot(
+                BaseCodingAgent::ClaudeCode,
+                HashMap::from([("Atlassian Rovo".to_string(), claude_entry)]),
+            ),
+        ];
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "atlassian_rovo".to_string(),
+                display_name: Some("Atlassian Rovo".to_string()),
+                definition: canonical_definition(&codex_entry),
+                assignments: vec![BaseCodingAgent::Codex],
+                native_overrides: HashMap::new(),
+            }],
+            removed_servers: Vec::new(),
+            resolved_conflicts: Vec::new(),
+        };
+
+        let error = validate_write_request_against_snapshots(&request, &snapshots).unwrap_err();
+        assert!(error.contains("disagree across profiles"));
     }
 
     #[tokio::test]
