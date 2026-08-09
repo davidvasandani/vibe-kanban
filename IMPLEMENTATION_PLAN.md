@@ -1,16 +1,7 @@
-# Implementation Plan: Legacy MCP Identifier Migration
+# Implementation Plan: Firecrawl MCP Worker Authentication
 
-1. Extend the constitution and VAS MCP specification with collision-safe legacy
-   identifier migration requirements.
-2. Model migration candidates from native snapshots without mutating files on
-   read.
-3. Return safe identifiers and preserved display labels to the shared settings
-   editor only when the migration is unambiguous across profiles.
-4. Make save atomically rename legacy native keys across assigned profiles and
-   update display-label metadata; reject collisions before any write.
-5. Add focused tests for `Atlassian Rovo`, credentials/assignment preservation,
-   collisions, conflicts, and Codex-native output.
-6. Update reusable knowledge, run formatting and focused Rust tests, then iterate
-   independent Codex review until clean.
-7. Commit, publish, merge, deploy, and verify the coordinator no longer stores
-   the legacy Atlassian key.
+1. Add the Firecrawl bearer reference to each worker's generic `executorSecretRefs` configuration.
+2. Allowlist `FIRECRAWL_BROWSER_AUTH_TOKEN` in the Firecrawl stdio MCP definition using Codex's `env_vars` forwarding mechanism.
+3. Keep the private Firecrawl URL in the MCP definition and the bearer value exclusively in 1Password.
+4. Validate the changed JSON and Nix host declarations without exposing secret values.
+5. Run independent Codex review, address confirmed findings, and repeat until no significant findings remain.
