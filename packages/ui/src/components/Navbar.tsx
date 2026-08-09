@@ -16,6 +16,7 @@ import {
   SidebarSimple as SidebarSimpleIcon,
 } from '@phosphor-icons/react';
 import { cn } from '../lib/cn';
+import { DeployStatus } from './DeployStatus';
 import { Tooltip } from './Tooltip';
 import {
   SyncErrorIndicator,
@@ -189,6 +190,8 @@ export interface NavbarProps {
   // iPadOS Stage Manager grabber / traffic lights) so they don't cover the
   // drawer button.
   reserveWindowControls?: boolean;
+  appVersion?: string | null;
+  deploymentTimestamp?: string | null;
 }
 
 export function Navbar({
@@ -216,6 +219,8 @@ export function Navbar({
   showMobileTabs,
   mobileShowBack,
   reserveWindowControls = false,
+  appVersion,
+  deploymentTimestamp,
 }: NavbarProps) {
   // Width reserved at the leading edge for OS window controls (matches the
   // desktop traffic-light spacer in SharedAppLayout). Never smaller than the
@@ -369,6 +374,11 @@ export function Navbar({
 
           {/* Right side: sync indicator + action buttons + user slot */}
           <div className="flex items-center gap-1 shrink-0">
+            <DeployStatus
+              version={appVersion ?? null}
+              deploymentTimestamp={deploymentTimestamp}
+              className="mr-0.5"
+            />
             <SyncErrorIndicator errors={syncErrors} />
             {isOnProjectPage &&
               rightItems

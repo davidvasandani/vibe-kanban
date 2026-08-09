@@ -11,6 +11,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=POSTHOG_API_ENDPOINT");
     println!("cargo:rerun-if-env-changed=VK_SHARED_API_BASE");
     println!("cargo:rerun-if-env-changed=SENTRY_DSN");
+    println!("cargo:rerun-if-env-changed=VK_BUILD_TIMESTAMP");
     if env_file.exists() {
         println!("cargo:rerun-if-changed={}", env_file.display());
     }
@@ -40,6 +41,11 @@ fn main() {
         .filter(|s| !s.is_empty());
     if let Some(sha) = git_sha {
         println!("cargo:rustc-env=VK_GIT_SHA={}", sha);
+    }
+    if let Ok(timestamp) = std::env::var("VK_BUILD_TIMESTAMP")
+        && !timestamp.trim().is_empty()
+    {
+        println!("cargo:rustc-env=VK_BUILD_TIMESTAMP={timestamp}");
     }
 
     // Ensure build script re-runs when these env vars change
