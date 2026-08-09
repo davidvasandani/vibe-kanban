@@ -10,6 +10,7 @@ function renderPanel(overrides: {
   mode: "create" | "edit";
   issueId?: string | null;
   jiraLink?: { issueKey: string; url: string; active: boolean } | null;
+  renderPipeline?: () => React.ReactNode;
 }) {
   const formData: IssueFormData = {
     title: "Test issue",
@@ -35,11 +36,36 @@ function renderPanel(overrides: {
       onSubmit={vi.fn()}
       titleInputRef={createRef<HTMLTextAreaElement>()}
       renderDescriptionEditor={() => <div data-testid="description-editor" />}
+      renderPipeline={overrides.renderPipeline}
       renderWorkspacesSection={() => <div data-testid="workspaces-section" />}
       renderCommentsSection={() => <div data-testid="comments-section" />}
     />,
   );
 }
+
+describe("KanbanIssuePanel – scrolling", () => {
+  it("keeps create settings and actions in a shrinkable scrolling body", () => {
+    renderPanel({
+      mode: "create",
+      issueId: null,
+      renderPipeline: () => <div data-testid="pipeline-settings" />,
+    });
+
+    const panel = screen.getByTestId("kanban-issue-panel");
+    const scrollRegion = screen.getByTestId("kanban-issue-panel-scroll-region");
+    const pipelineSettings = screen.getByTestId("pipeline-settings");
+    const draftWorkspaceToggle = screen.getByRole("switch");
+    const createIssueButton = screen.getByRole("button", {
+      name: /kanban\.createIssue/i,
+    });
+
+    expect(panel).toHaveClass("flex", "flex-col", "h-full", "overflow-hidden");
+    expect(scrollRegion).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
+    expect(scrollRegion).toContainElement(pipelineSettings);
+    expect(scrollRegion).toContainElement(draftWorkspaceToggle);
+    expect(scrollRegion).toContainElement(createIssueButton);
+  });
+});
 
 describe("KanbanIssuePanel – section order", () => {
   it("renders the workspaces section above the title and description in edit mode", () => {
