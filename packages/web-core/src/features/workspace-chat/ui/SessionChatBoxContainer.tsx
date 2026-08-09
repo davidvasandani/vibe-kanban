@@ -6,7 +6,6 @@ import {
   BaseAgentCapability,
   type Session,
   type BaseCodingAgent,
-  type McpRefreshResult,
   ExecutionProcessStatus,
   PermissionPolicy,
 } from 'shared/types';
@@ -66,11 +65,13 @@ import { useActionVisibilityContext } from '@/shared/hooks/useActionVisibilityCo
 import { PrCommentsDialog } from '@/shared/dialogs/tasks/PrCommentsDialog';
 import type { NormalizedComment } from '@vibe/ui/components/pr-comment-node';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
-import { sessionsApi } from '@/shared/lib/api';
+import { queueApi, sessionsApi } from '@/shared/lib/api';
 import { RenameSessionDialog } from '@vibe/ui/components/RenameSessionDialog';
 import type { TurnNavigationItem } from '@vibe/ui/components/TurnNavigationPopup';
 import { ArrowsClockwiseIcon } from '@phosphor-icons/react';
+import { ConfirmDialog } from '@/shared/dialogs/shared/ConfirmDialog';
 import { toast } from 'sonner';
+import { restartAgentForMcpChanges } from '../model/restartAgentForMcpChanges';
 
 /**
  * Follow-up prompt sent when resuming a run interrupted by a server restart.
@@ -158,9 +159,6 @@ type SessionChatBoxContainerProps =
   | PlaceholderProps;
 
 export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
-  const [isRefreshingMcp, setIsRefreshingMcp] = useState(false);
-  const [mcpRefreshResult, setMcpRefreshResult] =
-    useState<McpRefreshResult | null>(null);
   const {
     mode,
     sessions,
@@ -191,11 +189,6 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     mode === 'existing-session' ? props.onStartNewSession : undefined;
 
   const sessionId = session?.id;
-  const activeSessionIdRef = useRef(sessionId);
-  activeSessionIdRef.current = sessionId;
-  useEffect(() => {
-    setMcpRefreshResult(null);
-  }, [sessionId]);
   const queryClient = useQueryClient();
   const hostId = useHostId();
 
@@ -549,6 +542,75 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     executorConfig,
   });
 
+  const sessionHasRunningAgent = useMemo(
+    () =>
+      Boolean(sessionId) &&
+      processes.some(
+        (process) =>
+          process.session_id === sessionId &&
+          process.run_reason === 'codingagent' &&
+          process.status === ExecutionProcessStatus.running
+      ),
+    [processes, sessionId]
+  );
+  const restartInProgressRef = useRef(false);
+  const [isRestartingForMcp, setIsRestartingForMcp] = useState(false);
+
+  const handleRestartForMcpChanges = useCallback(async () => {
+    if (
+      !sessionId ||
+      !executorConfig ||
+      isSending ||
+      isQueueLoading ||
+      restartInProgressRef.current
+    )
+      return;
+    restartInProgressRef.current = true;
+    setIsRestartingForMcp(true);
+
+    try {
+      const result = await restartAgentForMcpChanges({
+        isRunning: sessionHasRunningAgent,
+        executorConfig,
+        confirmQueue: async () =>
+          (await ConfirmDialog.show({
+            title: 'Queue agent restart?',
+            message:
+              'The current turn will finish normally. Vibe Kanban will then start a fresh agent process so it can load the latest MCP configuration.',
+            confirmText: 'Queue restart',
+            cancelText: 'Cancel',
+            variant: 'info',
+          })) === 'confirmed',
+        queueRestart: async (message, config, confirmedRunningRestart) => {
+          const result = await queueApi.queueMcpRestart(sessionId, {
+            message,
+            executor_config: config,
+            confirmed_running_restart: confirmedRunningRestart,
+          });
+          return result.status;
+        },
+      });
+
+      if (result === 'queued') {
+        toast.info('Agent restart queued after the current turn.');
+      } else if (result === 'started') {
+        toast.success('Agent restarted with the latest MCP configuration.');
+      }
+    } catch {
+      toast.error('Agent restart failed.');
+    } finally {
+      restartInProgressRef.current = false;
+      setIsRestartingForMcp(false);
+    }
+  }, [
+    executorConfig,
+    isQueueLoading,
+    isSending,
+    send,
+    sessionHasRunningAgent,
+    sessionId,
+  ]);
+
   const handleSend = useCallback(async () => {
     // Sending with an empty editor in an existing session submits the
     // default continue prompt advertised by the placeholder.
@@ -837,100 +899,6 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     [executeAction, workspaceId]
   );
 
-  const handleRefreshMcpTools = useCallback(async () => {
-    if (!workspaceId || !sessionId || isRefreshingMcp) return;
-    setIsRefreshingMcp(true);
-    try {
-      const result = await sessionsApi.refreshMcpTools(workspaceId, sessionId);
-      if (sessionId !== activeSessionIdRef.current) return;
-      setMcpRefreshResult(result);
-      if (result.status === 'pending_next_turn') {
-        toast.info('MCP refresh queued for the next agent turn.');
-      } else if (result.status === 'unsupported') {
-        toast.info(
-          result.error?.message ??
-            'This executor cannot refresh MCP tools in place.'
-        );
-      } else if (result.status === 'busy') {
-        toast.info(
-          result.error?.message ?? 'An MCP refresh is already in progress.'
-        );
-      } else if (result.status === 'refreshed') {
-        toast.success('MCP tools refreshed.');
-      } else {
-        toast.error(result.error?.message ?? 'MCP refresh failed.');
-      }
-    } catch {
-      toast.error('MCP refresh failed.');
-    } finally {
-      setIsRefreshingMcp(false);
-    }
-  }, [workspaceId, sessionId, isRefreshingMcp]);
-
-  useEffect(() => {
-    if (
-      !workspaceId ||
-      !sessionId ||
-      mcpRefreshResult?.status !== 'pending_next_turn'
-    ) {
-      return;
-    }
-    const timer = window.setInterval(async () => {
-      try {
-        const result = await sessionsApi.getMcpRefreshStatus(
-          workspaceId,
-          sessionId
-        );
-        if (sessionId !== activeSessionIdRef.current) return;
-        if (!result) {
-          setMcpRefreshResult(null);
-          return;
-        }
-        setMcpRefreshResult(result);
-        if (result.status === 'refreshed') {
-          toast.success('MCP tool inventory confirmed for this session.');
-        } else if (result.status === 'partially_refreshed') {
-          toast.warning(
-            'MCP tools refreshed with one or more server failures.'
-          );
-        } else if (result.status === 'failed') {
-          toast.error(result.error?.message ?? 'MCP refresh failed.');
-        }
-      } catch {
-        // Keep the last confirmed state; a later poll may recover.
-      }
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [mcpRefreshResult?.status, sessionId, workspaceId]);
-
-  const mcpRefreshTooltip = useMemo(() => {
-    if (!mcpRefreshResult) {
-      return 'Reload MCP configuration for this session without replacing its conversation';
-    }
-    const refreshedAt = mcpRefreshResult.last_successful_refresh_at
-      ? new Date(mcpRefreshResult.last_successful_refresh_at).toLocaleString()
-      : 'not yet confirmed';
-    const servers = mcpRefreshResult.servers
-      .map(
-        (server) =>
-          `${server.server_id}: ${server.status}, ${
-            server.tool_count == null
-              ? 'tool count unknown'
-              : `${server.tool_count} tools`
-          }, ${
-            server.restart_occurred == null
-              ? 'restart unknown'
-              : server.restart_occurred
-                ? 'restarted'
-                : 'reused'
-          }`
-      )
-      .join('; ');
-    return `MCP refresh: ${mcpRefreshResult.status}. Last successful: ${refreshedAt}${
-      servers ? `. ${servers}` : ''
-    }`;
-  }, [mcpRefreshResult]);
-
   // Define which actions appear in the toolbar
   const toolbarActionsList = useMemo(
     () =>
@@ -947,12 +915,16 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
             {
               id: 'refresh-mcp-tools',
               icon: ArrowsClockwiseIcon,
-              label: 'Refresh MCP tools',
-              tooltip: mcpRefreshTooltip,
+              label: 'Restart agent for MCP changes',
+              tooltip: sessionHasRunningAgent
+                ? 'Queue a fresh agent process after the current turn finishes'
+                : 'Start a fresh agent process with the latest MCP configuration',
               disabled:
-                isRefreshingMcp ||
-                mcpRefreshResult?.status === 'pending_next_turn',
-              onClick: handleRefreshMcpTools,
+                !executorConfig ||
+                isSending ||
+                isQueueLoading ||
+                isRestartingForMcp,
+              onClick: handleRestartForMcpChanges,
             },
           ]
         : []),
@@ -979,10 +951,12 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
       toolbarActionsList,
       actionCtx,
       handleToolbarAction,
-      handleRefreshMcpTools,
-      isRefreshingMcp,
-      mcpRefreshResult?.status,
-      mcpRefreshTooltip,
+      executorConfig,
+      handleRestartForMcpChanges,
+      isQueueLoading,
+      isRestartingForMcp,
+      isSending,
+      sessionHasRunningAgent,
       sessionId,
       workspaceId,
     ]

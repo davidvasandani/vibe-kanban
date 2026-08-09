@@ -163,12 +163,22 @@ notification path, and concrete condition that reopens the decision. Dependency
 updates move the source pin, integrity record, tests, and documentation in the
 same reviewed change and fail closed rather than substituting another build.
 
+When a bundled entry points to an operator-hosted shared service instead of
+launching locally, the deployment remains responsible for that same immutable
+source and integrity contract. The catalog contains only the network endpoint
+and non-secret headers; upstream credentials stay at the supervised service and
+must never be copied into an agent's native configuration.
+
 ### XVII. Live capability state is confirmed and atomic
 Configuration on disk is not evidence that a running external agent adopted a
 change. Any feature that reports a live tool, connector, or protocol capability
 as refreshed MUST receive confirmation from the process that owns that live
-capability set. Unsupported reload paths are reported truthfully rather than
-simulated with an independent probe or whole-session restart.
+capability set. Unsupported in-process reload paths are reported truthfully
+rather than simulated with an independent probe. A product operation may instead
+offer an explicitly named agent restart: it must preserve the logical session,
+use the normal continuation path, and report success only after a fresh process
+has started from the new configuration. It must never label a restart as a live
+refresh.
 
 Capability replacement is generation-based: readers observe one complete old or
 new inventory, never a partially rebuilt set. Refresh coordinates with in-flight
@@ -177,17 +187,17 @@ identifies failures by stable configured identifier. Configuration comparisons,
 logs, diagnostics, and API results never expose environment values, tokens,
 authorization material, authenticated URLs, or secret-bearing command arguments.
 
+If a restart is requested while a turn is running, the product must obtain an
+explicit user confirmation before queueing the handoff. The current turn is not
+interrupted unless the dialog says so. Exactly one lifecycle consumer owns the
+queued continuation.
+
 ### XVIII. Distributed execution is affinity-bound and evidence-backed
 Workspace process ownership MUST be explicit, persisted, and stable. A
 coordinator may dispatch work only to the worker assigned to that workspace,
 and the worker must authorize the execution ID and canonical workspace path
 against that assignment. Retries are idempotent and cannot create a second
 process for one execution.
-
-Placement intent is explicit at every boundary: automatic scheduling,
-coordinator-local execution, and a requested worker are distinct choices. A
-null or omitted value must not be overloaded to mean more than one of them, and
-contradictory choices are rejected before placement state is mutated.
 
 Remote liveness and terminal state require worker evidence. A timeout,
 disconnect, missing handle, or expired lease is not proof that a process
@@ -283,41 +293,82 @@ scoped to the failure being surfaced — a blanket unwrapping of every internal
 error is not the remedy, and messages remain free of secrets, tokens, and
 environment values.
 
-### XXII. Process lifetime follows the stable owner
-Managed coding-agent and execution-helper processes MUST have one explicit
-owner for their complete lifetime. A control-plane client disconnect, HTTP
-server replacement, dropped in-memory handle, timeout, or missing observation
-is not evidence that a managed process exited and MUST NOT implicitly cancel or
-terminalise it. Ownership includes the process group, input channel, ordered
-output capture, exit watcher, cancellation state, and cleanup responsibility;
-moving only a PID or child handle does not transfer ownership.
+### XXII. Affinity migration is a single owned lifecycle transition
+An executing process is never transferred between nodes. Changing affinity
+while work is active means terminating the old execution with the established
+stop/cancellation protocol, committing the new placement, and creating at most
+one new continuation execution. The coordinator owns that full transition; a
+browser or worker may request it but must not assemble it from independent
+stop, placement, and follow-up mutations.
 
-Every replacement boundary is an evidence-backed handoff. Commands that may be
-retried after an uncertain response are idempotent under a stable execution
-identity. Execution output and terminal-state events are monotonically ordered, acknowledged,
-replayable within an explicit bound, and expose gaps rather than hiding them.
-A new control-plane generation becomes ready only after compatibility is
-negotiated and authoritative process state is reconciled. At most one
-generation holds mutation authority at a time.
+The transition is serialized per workspace and revalidates both liveness and
+target eligibility at execution time. A missing worker response is not evidence
+that stop succeeded, and affinity cannot change until terminal evidence meets
+the existing lifecycle contract. Duplicate requests, retries, and lost HTTP
+responses cannot create duplicate continuations.
 
-Soft detach and hard shutdown are different operations. Soft detach preserves
-managed processes and their streams under the stable owner. Hard shutdown is
-explicit, retains process-group cleanup and work-preservation rules, and is the
-only application lifecycle operation allowed to terminate all managed
-children. Recovery for a genuinely lost owner remains fail-safe: unverifiable
-state is interrupted or indeterminate, never silently completed or adopted.
+Outcomes name the last durable boundary reached. If stop fails, placement is
+unchanged. If placement succeeds but continuation creation fails, the workspace
+remains stopped on the new affinity and the operator is told exactly that; the
+system must not roll back into a node that may still own process state or claim
+the migration completed. Product-owned continuation prompts are versioned in
+source and preserve the user's prior session context rather than fabricating a
+new task.
 
-### XXIII. Flexible panels have one explicit space and scroll owner
-Panel stacks that divide bounded space MUST express that division at the
-component that owns expanded/collapsed state. Expanded panels may grow and
-shrink into available space; collapsed panels remain intrinsically sized.
-Avoid viewport-derived or arbitrary per-panel height caps when the containing
-layout already defines the available height.
+### XXIII. Remote execution receives authoritative configuration snapshots
+Configuration that affects a remotely owned execution is resolved by the
+coordinator and carried through the authenticated dispatch boundary. A worker
+must not reconstruct settings from deployment defaults, query an unauthenticated
+side channel, or silently continue with stale local state when the coordinator
+supplied a snapshot.
 
-Nested flex scroll regions identify one overflow owner, and every flex ancestor
-between the bounded container and that owner permits shrinking (`min-height: 0`
-or its equivalent). Headers and controls stay outside the content scroller so
-overflow does not make them unreachable.
+Secret-bearing snapshots are minimal, bounded, included in idempotency checks,
+and never logged or returned in diagnostics. Workers validate that a snapshot
+belongs to the dispatched executor, apply it atomically through the existing
+native-config adapter, and preserve unrelated vendor settings. Optional protocol
+fields provide rolling compatibility; presence with invalid content fails closed
+before the child process starts.
+
+### XXIV. MCP definitions have one settings authority
+Vibe Kanban settings own every MCP definition. Deployment configuration may
+install immutable executables, expose network routes, and supply service
+environment, but it must not add, remove, or rewrite native agent MCP tables at
+service startup. Remote workers consume settings-owned definitions through the
+authenticated execution snapshot rather than reconstructing them locally.
+
+### XXV. Executor continuation artifacts move by manifest, never by home copy
+An executor home mixes immutable continuation artifacts with mutable databases,
+credentials, configuration, caches, and logs. Cross-node continuation transfer
+MUST select only artifacts required for the named continuation, bind them to an
+operation manifest, and verify identity, size, digest, regular-file type,
+permissions, ownership, and structural containment before stopping the source
+or changing affinity. Copying the complete executor home is prohibited.
+
+Transfer completion is durable positive evidence, never path existence. Retries
+reuse identical verified content and reject conflicts rather than overwriting.
+Missing, corrupt, oversized, unauthorized, indeterminate, or partial lineage
+leaves source execution and placement unchanged. Readers, writers, and cleaners
+never follow symlinks, accept caller absolute paths, or log contents; all byte,
+count, depth, and time dimensions are bounded. Partials are operation-scoped,
+and verified artifacts have age-based retention that protects every active or
+recoverable reference.
+
+### XXVI. Collapsed controls retain decisive context
+Expandable workspace controls MAY hide detail, but their collapsed affordance
+MUST retain the concise state needed to decide whether to open them. That state
+comes from an existing summary/cache source when one exists; a closed section
+must not stay mounted or issue a private request solely to label its header.
+Header metadata and disclosure actions share a constrained row, so dynamic text
+must have an explicit shrink/truncation boundary and remain distinguishable from
+the control label at the narrowest supported sidebar width.
+
+### XXVII. Legacy identifiers migrate explicitly and atomically
+When a persisted external identifier no longer satisfies the protocol contract,
+reads may diagnose and propose the shared canonical form but must not mutate
+storage. Migration occurs at an explicit write boundary, preserves the original
+human label and complete definition, rejects collisions and cross-profile
+ambiguity before the first write, and either commits every affected native key
+plus metadata or leaves the legacy state recoverable and clearly reported.
 
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
@@ -340,12 +391,14 @@ overflow does not make them unreachable.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.22.0 (adds stable process ownership and evidence-backed soft
-restart handoffs — control-plane disconnect is not process death, ownership
-includes the complete I/O/monitoring lifecycle, replay is ordered and explicit
-about gaps, mutation authority is single-generation, and only hard shutdown
-terminates all managed children; 0.21.0 made cluster placement intent explicit and unambiguous;
-0.20.0 added explicit flexible-panel space and scroll ownership; 0.19.0 added
+**Version**: 0.24.0 (requires explicit, collision-safe, atomic legacy identifier
+migration with label and definition preservation; 0.23.0 required collapsed controls to retain summary-backed,
+responsive decision context; 0.22.0 made Vibe Kanban settings the sole
+MCP-definition authority and limited deployment ownership to runtime
+prerequisites; 0.21.0 added coordinator-authoritative, bounded remote execution
+configuration snapshots with atomic worker materialization and secret-safe
+failure behavior; 0.20.0 added coordinator-owned, serialized affinity migration with
+truthful durable-boundary outcomes and at-most-once continuation; 0.19.0 added
 one-convention-per-concept — reuse the existing
 resolution rule rather than re-deriving it, accept the producer's default value,
 and report failures with the fact that identifies them instead of a generic

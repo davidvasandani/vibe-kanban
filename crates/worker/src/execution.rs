@@ -13,13 +13,17 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
 use cluster_protocol::{
     DispatchAccepted, EventBatch, ExecutionDispatch, ExecutionEventPayload, JobState, JobSummary,
-    TerminalEvidence, TerminalState,
+    McpConfigSnapshot, TerminalEvidence, TerminalState, WorkerMcpRefreshResult,
+    WorkerMcpRefreshStatus,
 };
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use executors::{
-    actions::{Executable, ExecutorAction},
+    actions::{Executable, ExecutorAction, ExecutorActionType},
     env::{ExecutionEnv, RepoContext},
-    profile::ExecutorProfile,
+    executors::{BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor},
+    mcp_config::write_coding_agent_mcp_servers_to_path,
+    mcp_refresh::McpRefreshHandle,
+    profile::{ExecutorConfig, ExecutorProfile},
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -54,6 +58,18 @@ enum WorkerAction {
     Executor(ExecutorAction),
 }
 
+fn executor_config_for_action(action: &WorkerAction) -> Option<&ExecutorConfig> {
+    let WorkerAction::Executor(action) = action else {
+        return None;
+    };
+    match action.typ() {
+        ExecutorActionType::CodingAgentInitialRequest(request) => Some(&request.executor_config),
+        ExecutorActionType::CodingAgentFollowUpRequest(request) => Some(&request.executor_config),
+        ExecutorActionType::ReviewRequest(request) => Some(&request.executor_config),
+        ExecutorActionType::ScriptRequest(_) => None,
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ExecutionError {
     #[error("execution {execution_id} was already dispatched with a different request digest")]
@@ -62,6 +78,12 @@ pub enum ExecutionError {
     InvalidAction(#[from] serde_json::Error),
     #[error("execution action program must not be empty")]
     EmptyProgram,
+    #[error("MCP configuration snapshot is invalid for executor {executor}")]
+    InvalidMcpSnapshot { executor: String },
+    #[error("failed to materialize MCP configuration for executor {executor}")]
+    McpMaterialization { executor: String },
+    #[error("Codex MCP status is unavailable")]
+    McpReload,
     #[error("working directory resolves outside its authorized workspace")]
     WorkingDirectoryOutsideWorkspace,
     #[error(transparent)]
@@ -100,6 +122,54 @@ pub struct WorkerJob {
     acknowledged_sequence: Mutex<u64>,
     recovery_store: Option<RecoveryStore>,
     interactions: Arc<InteractionBroker>,
+    mcp_config: Mutex<Option<PreparedMcpConfig>>,
+    mcp_refresh: RwLock<Option<McpRefreshHandle>>,
+    mcp_refresh_claim: Mutex<()>,
+    quiesced_by: Mutex<Option<Uuid>>,
+}
+
+struct PreparedMcpConfig {
+    scoped_home: PathBuf,
+    agent: CodingAgent,
+}
+
+impl Drop for PreparedMcpConfig {
+    fn drop(&mut self) {
+        let execution_root = self.scoped_home.parent().unwrap_or(&self.scoped_home);
+        let _ = std::fs::remove_dir_all(execution_root);
+    }
+}
+
+fn prepare_scoped_codex_home(source_home: &Path, scoped_home: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let source_home = match source_home.canonicalize() {
+        Ok(source_home) => Some(source_home),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(execution_root) = scoped_home.parent() {
+        match std::fs::remove_dir_all(execution_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    std::fs::create_dir_all(scoped_home)?;
+    std::fs::set_permissions(scoped_home, std::fs::Permissions::from_mode(0o700))?;
+    let Some(source_home) = source_home else {
+        return Ok(());
+    };
+    let entries = std::fs::read_dir(source_home)?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "config.toml" || name == "config.toml.bak" {
+            continue;
+        }
+        symlink(entry.path(), scoped_home.join(name))?;
+    }
+    Ok(())
 }
 
 struct ExecutionAdmission(Arc<AtomicU32>);
@@ -111,6 +181,17 @@ impl Drop for ExecutionAdmission {
 }
 
 impl ExecutionSupervisor {
+    pub async fn authorizes_session_transfer(
+        &self,
+        execution_id: Uuid,
+        workspace_id: Uuid,
+    ) -> bool {
+        let Some(job) = self.job(execution_id).await else {
+            return false;
+        };
+        job.workspace_id == workspace_id && job.state().await == JobState::Running
+    }
+
     pub fn new(path_authority: PathAuthority) -> Self {
         Self::with_journal_capacity(path_authority, DEFAULT_JOURNAL_CAPACITY)
     }
@@ -184,6 +265,10 @@ impl ExecutionSupervisor {
                     acknowledged_sequence: Mutex::new(0),
                     recovery_store: Some(recovery_store.clone()),
                     interactions: Arc::new(InteractionBroker::default()),
+                    mcp_config: Mutex::new(None),
+                    mcp_refresh: RwLock::new(None),
+                    mcp_refresh_claim: Mutex::new(()),
+                    quiesced_by: Mutex::new(None),
                 }),
             );
         }
@@ -231,6 +316,18 @@ impl ExecutionSupervisor {
             .clone()
             .map(serde_json::from_value)
             .transpose()?;
+        let prepared_mcp = match &dispatch.mcp_config_snapshot {
+            Some(snapshot) => Some(
+                self.prepare_mcp_snapshot(
+                    dispatch.execution_id,
+                    &action,
+                    executor_profile.as_ref(),
+                    snapshot,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         if matches!(&action, WorkerAction::Command(action) if action.program.trim().is_empty()) {
             return Err(ExecutionError::EmptyProgram);
         }
@@ -255,6 +352,10 @@ impl ExecutionSupervisor {
             acknowledged_sequence: Mutex::new(0),
             recovery_store: self.recovery_store.clone(),
             interactions: Arc::new(InteractionBroker::default()),
+            mcp_config: Mutex::new(None),
+            mcp_refresh: RwLock::new(None),
+            mcp_refresh_claim: Mutex::new(()),
+            quiesced_by: Mutex::new(None),
         });
         jobs.insert(dispatch.execution_id, job.clone());
         drop(admission);
@@ -267,6 +368,7 @@ impl ExecutionSupervisor {
             working_directory,
             dispatch.environment,
             executor_profile,
+            prepared_mcp,
             dispatch.timeout_seconds,
         ));
         Ok(DispatchAccepted {
@@ -276,6 +378,288 @@ impl ExecutionSupervisor {
             state: JobState::Accepted,
             last_sequence: 1,
         })
+    }
+
+    async fn prepare_mcp_snapshot(
+        &self,
+        execution_id: Uuid,
+        action: &WorkerAction,
+        profile: Option<&ExecutorProfile>,
+        snapshot: &McpConfigSnapshot,
+    ) -> Result<PreparedMcpConfig, ExecutionError> {
+        snapshot
+            .validate_size()
+            .map_err(|_| ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            })?;
+        let config = executor_config_for_action(action).ok_or_else(|| {
+            ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            }
+        })?;
+        if snapshot.executor != config.executor.to_string() {
+            return Err(ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            });
+        }
+        if config.executor != BaseCodingAgent::Codex {
+            return Err(ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            });
+        }
+        let variant = config.variant.as_deref().unwrap_or("DEFAULT");
+        let agent = profile
+            .and_then(|profile| profile.get_variant(variant))
+            .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            })?;
+        let source_config =
+            agent
+                .default_mcp_config_path()
+                .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                    executor: snapshot.executor.clone(),
+                })?;
+        let source_home =
+            source_config
+                .parent()
+                .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                    executor: snapshot.executor.clone(),
+                })?;
+        let scoped_home = std::env::temp_dir()
+            .join("vibe-kanban")
+            .join("mcp-config")
+            .join(execution_id.to_string())
+            .join("codex");
+        prepare_scoped_codex_home(source_home, &scoped_home).map_err(|_| {
+            ExecutionError::McpMaterialization {
+                executor: snapshot.executor.clone(),
+            }
+        })?;
+        let prepared = PreparedMcpConfig {
+            scoped_home,
+            agent: agent.clone(),
+        };
+        let servers = snapshot.servers.clone().into_iter().collect();
+        write_coding_agent_mcp_servers_to_path(
+            agent,
+            &source_config,
+            &prepared.scoped_home.join("config.toml"),
+            &servers,
+        )
+        .await
+        .map_err(|_| ExecutionError::McpMaterialization {
+            executor: snapshot.executor.clone(),
+        })?;
+        Ok(prepared)
+    }
+
+    pub async fn refresh_mcp(
+        &self,
+        execution_id: Uuid,
+        snapshot: &McpConfigSnapshot,
+    ) -> Result<WorkerMcpRefreshResult, ExecutionError> {
+        snapshot
+            .validate_size()
+            .map_err(|_| ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            })?;
+        let job = self
+            .jobs
+            .read()
+            .await
+            .get(&execution_id)
+            .cloned()
+            .ok_or(ExecutionError::NotFound(execution_id))?;
+        let Ok(_claim) = job.mcp_refresh_claim.try_lock() else {
+            return Ok(WorkerMcpRefreshResult {
+                status: WorkerMcpRefreshStatus::Busy,
+                servers: Vec::new(),
+            });
+        };
+        if job.state().await.is_terminal() {
+            return Ok(WorkerMcpRefreshResult {
+                status: WorkerMcpRefreshStatus::Unsupported,
+                servers: Vec::new(),
+            });
+        }
+        if snapshot.executor != BaseCodingAgent::Codex.to_string() {
+            return Err(ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            });
+        }
+        let (agent, target_config) = {
+            let prepared = job.mcp_config.lock().await;
+            let Some(prepared) = prepared.as_ref() else {
+                return Ok(WorkerMcpRefreshResult {
+                    status: WorkerMcpRefreshStatus::Unsupported,
+                    servers: Vec::new(),
+                });
+            };
+            (
+                prepared.agent.clone(),
+                prepared.scoped_home.join("config.toml"),
+            )
+        };
+        let servers = snapshot.servers.clone().into_iter().collect();
+        if write_coding_agent_mcp_servers_to_path(&agent, &target_config, &target_config, &servers)
+            .await
+            .is_err()
+        {
+            return Ok(WorkerMcpRefreshResult {
+                status: WorkerMcpRefreshStatus::MaterializationFailed,
+                servers: Vec::new(),
+            });
+        }
+        let Some(control) = job.mcp_refresh.read().await.clone() else {
+            return Ok(WorkerMcpRefreshResult {
+                status: WorkerMcpRefreshStatus::ReloadFailed,
+                servers: Vec::new(),
+            });
+        };
+        if control.0.queue_refresh().await.is_err() {
+            return Ok(WorkerMcpRefreshResult {
+                status: WorkerMcpRefreshStatus::ReloadFailed,
+                servers: Vec::new(),
+            });
+        }
+        Ok(WorkerMcpRefreshResult {
+            status: WorkerMcpRefreshStatus::Queued,
+            servers: Vec::new(),
+        })
+    }
+
+    pub async fn mcp_status(
+        &self,
+        execution_id: Uuid,
+    ) -> Result<WorkerMcpRefreshResult, ExecutionError> {
+        let job = self
+            .jobs
+            .read()
+            .await
+            .get(&execution_id)
+            .cloned()
+            .ok_or(ExecutionError::NotFound(execution_id))?;
+        let Some(control) = job.mcp_refresh.read().await.clone() else {
+            return Ok(WorkerMcpRefreshResult {
+                status: WorkerMcpRefreshStatus::Unsupported,
+                servers: Vec::new(),
+            });
+        };
+        let servers = control
+            .0
+            .list_servers()
+            .await
+            .map_err(|_| ExecutionError::McpReload)?
+            .into_iter()
+            .filter_map(|server| serde_json::to_value(server).ok())
+            .collect();
+        Ok(WorkerMcpRefreshResult {
+            status: WorkerMcpRefreshStatus::Queued,
+            servers,
+        })
+    }
+
+    #[cfg(unix)]
+    pub async fn set_quiesced(
+        &self,
+        execution_id: Uuid,
+        workspace_id: Uuid,
+        operation_id: Uuid,
+        quiesced: bool,
+    ) -> Result<(), ExecutionError> {
+        let job = self
+            .job(execution_id)
+            .await
+            .ok_or(ExecutionError::NotFound(execution_id))?;
+        let state = job.state().await;
+        if job.workspace_id != workspace_id
+            || (quiesced && state != JobState::Running)
+            || (!quiesced && state.is_terminal())
+        {
+            return Err(ExecutionError::NotFound(execution_id));
+        }
+        let mut owner = job.quiesced_by.lock().await;
+        if quiesced {
+            if owner
+                .as_ref()
+                .is_some_and(|existing| *existing != operation_id)
+            {
+                return Err(ExecutionError::DigestConflict { execution_id });
+            }
+            if owner.as_ref() == Some(&operation_id) {
+                return Ok(());
+            }
+        } else if owner.as_ref() != Some(&operation_id) {
+            return Err(ExecutionError::DigestConflict { execution_id });
+        }
+        let pid = {
+            let mut child = job.child.lock().await;
+            child.as_mut().and_then(|child| child.inner().id())
+        }
+        .ok_or(ExecutionError::NotFound(execution_id))?;
+        let signal = if quiesced { "-STOP" } else { "-CONT" };
+        let target = format!("-{pid}");
+        let status = tokio::process::Command::new("kill")
+            .args([signal, "--", &target])
+            .status()
+            .await
+            .map_err(|_| ExecutionError::NotFound(execution_id))?;
+        if !status.success() {
+            return Err(ExecutionError::NotFound(execution_id));
+        }
+        *owner = quiesced.then_some(operation_id);
+        drop(owner);
+        if quiesced {
+            // A coordinator can disappear after SIGSTOP and before its
+            // compensating resume. The lease is deliberately longer than the
+            // coordinator's stale-operation window, giving a retry time to
+            // finish while ensuring an abandoned execution is not frozen
+            // forever.
+            let supervisor = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(15 * 60)).await;
+                let _ = supervisor
+                    .resume_quiesced(execution_id, workspace_id, operation_id)
+                    .await;
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn resume_quiesced(
+        &self,
+        execution_id: Uuid,
+        workspace_id: Uuid,
+        operation_id: Uuid,
+    ) -> Result<(), ExecutionError> {
+        let job = self
+            .job(execution_id)
+            .await
+            .ok_or(ExecutionError::NotFound(execution_id))?;
+        if job.workspace_id != workspace_id || job.state().await.is_terminal() {
+            return Err(ExecutionError::NotFound(execution_id));
+        }
+        let mut owner = job.quiesced_by.lock().await;
+        if owner.as_ref() != Some(&operation_id) {
+            return Err(ExecutionError::DigestConflict { execution_id });
+        }
+        let pid = {
+            let mut child = job.child.lock().await;
+            child.as_mut().and_then(|child| child.inner().id())
+        }
+        .ok_or(ExecutionError::NotFound(execution_id))?;
+        let target = format!("-{pid}");
+        let status = tokio::process::Command::new("kill")
+            .args(["-CONT", "--", &target])
+            .status()
+            .await
+            .map_err(|_| ExecutionError::NotFound(execution_id))?;
+        if !status.success() {
+            return Err(ExecutionError::NotFound(execution_id));
+        }
+        *owner = None;
+        Ok(())
     }
 
     pub async fn events(
@@ -463,11 +847,26 @@ async fn run_job(
     job: Arc<WorkerJob>,
     action: WorkerAction,
     working_directory: PathBuf,
-    environment: std::collections::BTreeMap<String, String>,
+    mut environment: std::collections::BTreeMap<String, String>,
     executor_profile: Option<ExecutorProfile>,
+    prepared_mcp: Option<PreparedMcpConfig>,
     timeout_seconds: Option<u64>,
 ) {
     set_state(&job, JobState::Starting, ExecutionEventPayload::Starting).await;
+    let inherited_path = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+    if let Some(path) = utils::shell::append_cli_tools_to_path(&inherited_path) {
+        environment.insert("PATH".into(), path.to_string_lossy().into_owned());
+    }
+    if let Some(prepared) = &prepared_mcp {
+        environment.insert(
+            "CODEX_HOME".into(),
+            prepared.scoped_home.to_string_lossy().into_owned(),
+        );
+    }
+    *job.mcp_config.lock().await = prepared_mcp;
     let spawned = match action {
         WorkerAction::Command(action) => {
             let mut command = Command::new(action.program);
@@ -478,7 +877,10 @@ async fn run_job(
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            command.group_spawn().map_err(|error| error.to_string())
+            command
+                .group_spawn()
+                .map(|child| (child, None))
+                .map_err(|error| error.to_string())
         }
         WorkerAction::Executor(action) => {
             // Admission already proved this workspace is enumerable and its
@@ -504,12 +906,12 @@ async fn run_job(
                     &env,
                 )
                 .await
-                .map(|spawned| spawned.child)
+                .map(|mut spawned| (spawned.child, spawned.mcp_refresh.take()))
                 .map_err(|error| error.to_string())
         }
     };
-    let mut child = match spawned {
-        Ok(child) => child,
+    let (mut child, mcp_refresh) = match spawned {
+        Ok(spawned) => spawned,
         Err(error) => {
             finish_failed(&job, None, format!("failed to start process: {error}")).await;
             return;
@@ -520,6 +922,15 @@ async fn run_job(
     *job.child.lock().await = Some(child);
     *job.state.write().await = JobState::Running;
     job.persist().await;
+
+    if let Some(signal) = mcp_refresh {
+        let job = job.clone();
+        tokio::spawn(async move {
+            if let Ok(handle) = signal.await {
+                *job.mcp_refresh.write().await = Some(handle);
+            }
+        });
+    }
 
     let mut stdout_task =
         stdout.map(|stdout| tokio::spawn(stream_output(job.clone(), stdout, false)));
@@ -699,6 +1110,8 @@ async fn finish_status(job: &WorkerJob, status: ExitStatus) {
         _ => (JobState::Failed, ExecutionEventPayload::Failed(evidence)),
     };
     set_state(job, state, payload).await;
+    *job.mcp_refresh.write().await = None;
+    *job.mcp_config.lock().await = None;
 }
 
 async fn finish_failed(job: &WorkerJob, exit_code: Option<i32>, reason: String) {
@@ -715,6 +1128,8 @@ async fn finish_failed(job: &WorkerJob, exit_code: Option<i32>, reason: String) 
         ExecutionEventPayload::Failed(evidence),
     )
     .await;
+    *job.mcp_refresh.write().await = None;
+    *job.mcp_config.lock().await = None;
 }
 
 fn terminal_evidence(
@@ -761,9 +1176,18 @@ fn signal(_status: &ExitStatus) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs};
+    use std::{
+        collections::BTreeMap,
+        fs,
+        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    };
 
+    use async_trait::async_trait;
     use cluster_protocol::{PROTOCOL_VERSION, PersistencePolicy, RequestAuthority};
+    use executors::mcp_refresh::{
+        McpRefreshControl, McpRefreshErrorCategory, McpServerRefreshSnapshot,
+        McpServerRefreshStatus,
+    };
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -796,6 +1220,7 @@ mod tests {
             working_directory: ".".into(),
             executor_profile: "fixture".into(),
             executor_profile_config: None,
+            mcp_config_snapshot: None,
             action: json!({"program": "/bin/sh", "args": ["-c", script]}),
             environment: BTreeMap::new(),
             run_reason: "test".into(),
@@ -819,6 +1244,104 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("execution did not finish");
+    }
+
+    #[derive(Default)]
+    struct RefreshFixture {
+        queued: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl McpRefreshControl for RefreshFixture {
+        async fn queue_refresh(&self) -> Result<(), McpRefreshErrorCategory> {
+            self.queued.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(())
+        }
+
+        async fn list_servers(
+            &self,
+        ) -> Result<Vec<McpServerRefreshSnapshot>, McpRefreshErrorCategory> {
+            Ok(vec![McpServerRefreshSnapshot {
+                server_id: "snapshot-b".into(),
+                status: McpServerRefreshStatus::Ready,
+                tool_count: Some(1),
+                resource_count: Some(0),
+                prompt_count: Some(0),
+                restart_occurred: Some(true),
+                error: None,
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_replaces_only_scoped_mcp_snapshot_and_preserves_live_job() {
+        let (_temp, supervisor, _workspace) = fixture();
+        let execution_id = Uuid::new_v4();
+        let scoped_home = std::env::temp_dir()
+            .join("vibe-kanban-worker-refresh-test")
+            .join(execution_id.to_string())
+            .join("codex");
+        fs::create_dir_all(&scoped_home).unwrap();
+        fs::write(
+            scoped_home.join("config.toml"),
+            "model = 'preserved'\n[mcp_servers.snapshot-a]\ncommand = 'old'\n",
+        )
+        .unwrap();
+        fs::write(scoped_home.join("history.jsonl"), "conversation-state").unwrap();
+        let control = Arc::new(RefreshFixture::default());
+        let agent: CodingAgent = serde_json::from_value(json!({"CODEX": {}})).unwrap();
+        let job = Arc::new(WorkerJob {
+            execution_id,
+            worker_job_id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            request_digest: "refresh-fixture".into(),
+            state: RwLock::new(JobState::Running),
+            journal: Mutex::new(EventJournal::new(execution_id, 16).unwrap()),
+            child: Mutex::new(None),
+            cancellation: Mutex::new(()),
+            acknowledged_sequence: Mutex::new(0),
+            recovery_store: None,
+            interactions: Arc::new(InteractionBroker::default()),
+            mcp_config: Mutex::new(Some(PreparedMcpConfig {
+                scoped_home: scoped_home.clone(),
+                agent,
+            })),
+            mcp_refresh: RwLock::new(Some(McpRefreshHandle(control.clone()))),
+            mcp_refresh_claim: Mutex::new(()),
+            quiesced_by: Mutex::new(None),
+        });
+        supervisor.jobs.write().await.insert(execution_id, job);
+
+        let result = supervisor
+            .refresh_mcp(
+                execution_id,
+                &McpConfigSnapshot {
+                    executor: BaseCodingAgent::Codex.to_string(),
+                    servers: BTreeMap::from([(
+                        "snapshot-b".into(),
+                        json!({"command": "new", "args": ["--tools-list"]}),
+                    )]),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, WorkerMcpRefreshStatus::Queued);
+        assert_eq!(control.queued.load(AtomicOrdering::SeqCst), 1);
+        let config = fs::read_to_string(scoped_home.join("config.toml")).unwrap();
+        assert!(config.contains("model = \"preserved\""));
+        assert!(config.contains("snapshot-b"));
+        assert!(!config.contains("snapshot-a"));
+        assert_eq!(
+            fs::read_to_string(scoped_home.join("history.jsonl")).unwrap(),
+            "conversation-state"
+        );
+        let status = supervisor.mcp_status(execution_id).await.unwrap();
+        assert_eq!(status.servers[0]["server_id"], "snapshot-b");
+        assert_eq!(
+            supervisor.job(execution_id).await.unwrap().state().await,
+            JobState::Running
+        );
     }
 
     #[tokio::test]
@@ -861,6 +1384,78 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event.payload, ExecutionEventPayload::Stderr { .. }))
         );
+    }
+
+    #[test]
+    fn scoped_codex_homes_share_runtime_assets_but_not_config_files() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let first = temp.path().join("scoped").join("first").join("codex");
+        let second = temp.path().join("scoped").join("second").join("codex");
+        fs::create_dir_all(source.join("skills")).unwrap();
+        fs::write(source.join("auth.json"), "credential").unwrap();
+        fs::write(source.join("config.toml"), "global = true").unwrap();
+
+        prepare_scoped_codex_home(&source, &first).unwrap();
+        prepare_scoped_codex_home(&source, &second).unwrap();
+        fs::write(first.join("config.toml"), "snapshot = 'one'").unwrap();
+        fs::write(second.join("config.toml"), "snapshot = 'two'").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(first.join("auth.json")).unwrap(),
+            "credential"
+        );
+        assert!(first.join("skills").is_dir());
+        assert_eq!(
+            fs::read_to_string(first.join("config.toml")).unwrap(),
+            "snapshot = 'one'"
+        );
+        assert_eq!(
+            fs::read_to_string(second.join("config.toml")).unwrap(),
+            "snapshot = 'two'"
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("config.toml")).unwrap(),
+            "global = true"
+        );
+    }
+
+    #[test]
+    fn scoped_codex_home_can_start_without_a_global_home() {
+        let temp = TempDir::new().unwrap();
+        let missing_source = temp.path().join("missing");
+        let scoped = temp.path().join("scoped").join("codex");
+
+        prepare_scoped_codex_home(&missing_source, &scoped).unwrap();
+
+        assert!(scoped.is_dir());
+    }
+
+    #[tokio::test]
+    async fn raw_command_preserves_dispatched_path() {
+        let (_temp, supervisor, workspace) = fixture();
+        let mut request = dispatch(&workspace, "path", "printf %s \"$PATH\"");
+        request
+            .environment
+            .insert("PATH".into(), "/fixture/bin".into());
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        assert_eq!(summary.state, JobState::Completed);
+
+        let batch = supervisor.events(execution_id, 0).await.unwrap();
+        let output = batch
+            .events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                ExecutionEventPayload::Stdout { data_base64 } => {
+                    BASE64_STANDARD.decode(data_base64).ok()
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(String::from_utf8_lossy(&output).starts_with("/fixture/bin"));
     }
 
     #[tokio::test]

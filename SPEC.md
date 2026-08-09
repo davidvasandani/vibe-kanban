@@ -1,58 +1,41 @@
-# Deploy Status in the Mobile Header
+# Technical Spec: Ship Firecrawl MCP Authentication to Cluster Workers
 
-## Summary
+## Objective
 
-Expose the running Vibe Kanban deployment's short Git SHA and elapsed time since deployment in the mobile navigation header. The desktop rail already exposes the SHA; this change makes equivalent deployment identity visible on narrow/mobile layouts without opening settings or switching views.
+Ensure Vibe Kanban worker-hosted coding agents receive both values required by the configured `firecrawl-browser` stdio MCP launcher:
 
-## Problem
+- `FIRECRAWL_BROWSER_URL`
+- `FIRECRAWL_BROWSER_AUTH_TOKEN`
 
-The mobile UI header contains navigation and utility actions but no deployment identity. Operators therefore cannot tell which revision is running or how recently it was deployed from the mobile interface, even though the backend already reports the build version.
+This prevents remote workers such as think4 from reaching Firecrawl but failing `/api/internal/mcp-scope` bootstrap with HTTP 401.
 
-## Goals
+## Design
 
-- Display the running short Git SHA in the mobile header.
-- Display a compact, human-readable elapsed duration since that deployment.
-- Preserve the existing mobile navigation actions and usable layout at phone widths.
-- Link a real SHA to its GitHub commit, consistent with the desktop UI.
-- Keep local unstamped builds (`dev`) understandable and non-linking.
-- Add focused automated coverage for presentation and responsive behavior where practical.
+Use the deployment module's generic `executorSecretRefs` worker option to resolve the Firecrawl bearer through the existing 1Password bootstrap path and export it into the long-running worker process. Executor subprocesses and their stdio MCP children inherit it.
 
-## Non-goals
+The repository MCP definition sets the URL directly and allowlists `FIRECRAWL_BROWSER_AUTH_TOKEN` for forwarding from the worker environment. It does not use a literal `${VAR}` value: Codex's supported secret-forwarding mechanism for stdio MCP servers is `env_vars`.
 
-- Changing deployment infrastructure or any service other than Vibe Kanban.
-- Changing the desktop deployment indicator beyond extracting reusable presentation logic if useful.
-- Adding a deployment history or release notes UI.
-- Inferring deploy time from client page-load time.
+The secret value must never enter the Nix store, repository, command line, logs, or generated agent configuration. Only the 1Password reference is declarative.
 
-## Functional requirements
+Configure each Vibe Kanban execution worker with the private Firecrawl URL and existing `op://Homelab/Firecrawl Browser MCP/bearer-token` reference.
 
-1. The server info/config response must provide both the embedded Git revision and an authoritative build/deployment timestamp suitable for elapsed-time display.
-2. The shared application layout must pass deployment metadata to the mobile navbar.
-3. On mobile, the header must render a compact deployment indicator containing the short SHA and elapsed time (for example, `abc1234 · 2h`).
-4. Elapsed time must update while the page remains open at an interval appropriate to its displayed precision.
-5. A non-`dev` SHA must link to the matching `davidvasandani/vibe-kanban` commit in a new tab with safe external-link attributes.
-6. The `dev` sentinel must render as plain text and must not produce a misleading GitHub link.
-7. Missing deployment metadata must fail gracefully without an empty or broken control.
-8. Existing refresh/update-available behavior must remain intact.
+When no user follow-up already exists, use:
 
-## UX and accessibility
+- `homelab/modules/vibe-kanban-rebuild.nix`
+- Vibe Kanban worker host declarations using that module
+- Evaluation checks for paired configuration and rendered service environment
 
-- The indicator must remain legible but visually secondary to navigation.
-- Its full accessible label/title must identify the deployed revision and elapsed time without relying only on compact abbreviations.
-- It must not force the right-side mobile controls outside the viewport; truncation or responsive hiding of lower-priority text is acceptable at very narrow widths.
-- Touch targets and existing header actions must retain their current behavior.
+## Out of Scope
 
-## Acceptance criteria
+- Changes to the Firecrawl service itself.
+- Changes to Firecrawl authentication policy or firewall rules.
+- Embedding the bearer value in `.mcp.json`, Codex TOML, or the Nix store.
 
-- A deployed production build shows its short SHA and time since deployment in the mobile header shown in the task screenshot.
-- Tapping the SHA opens the exact GitHub commit.
-- The elapsed label is derived from server-supplied deployment/build time and advances over time.
-- A local `dev` build renders safely without a commit link.
-- The mobile header remains functional at representative phone widths.
-- Relevant frontend/backend tests and type checks pass.
+## Acceptance Criteria
 
-## Constraints and risks
-
-- Build metadata must be deterministic and embedded by the existing Rust build path; runtime filesystem or Git access is not assumed.
-- Timestamp semantics must be documented clearly (build time versus service start time). If only build time is available, UI wording must avoid claiming stronger precision than the data supports.
-- Generated TypeScript API types must only be changed through their Rust source generator.
+1. Worker configuration declares the Firecrawl token reference through `executorSecretRefs`, while the MCP definition declares the service URL.
+2. The worker service resolves and exports `FIRECRAWL_BROWSER_AUTH_TOKEN` before launching Vibe Kanban.
+3. The Firecrawl stdio MCP definition allowlists `FIRECRAWL_BROWSER_AUTH_TOKEN` with `env_vars`, so Codex forwards it from the worker environment into the MCP child.
+4. The 1Password bootstrap credentials are still removed before executor jobs start.
+5. Existing generic worker-secret assertions validate the secret configuration.
+6. The changed configuration is syntactically valid and independent Codex review reports no significant findings.

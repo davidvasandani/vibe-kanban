@@ -1,9 +1,13 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{Path, Query, Request, State, ws::WebSocketUpgrade},
+    extract::{DefaultBodyLimit, Path, Query, Request, State, ws::WebSocketUpgrade},
     http::StatusCode,
     middleware::{Next, from_fn_with_state},
     response::{IntoResponse, Response},
@@ -12,12 +16,16 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
 use cluster_protocol::{
-    CancellationRequest, DispatchAccepted, EventAcknowledgement, EventBatch, ExecutionDispatch,
-    InteractionResponse, JobSummary, PROTOCOL_VERSION, PreviewHttpRequest, PreviewHttpResponse,
-    QuarantineRequest, RequestAuthority, TerminalClose, TerminalCreateRequest, TerminalCreated,
-    TerminalInput, TerminalOutputBatch, TerminalResize,
+    CancellationRequest, CodexRolloutArtifact, CodexRolloutManifestRequest,
+    CodexRolloutReadRequest, CodexRolloutStageRequest, CodexRolloutStageResult,
+    CodexRolloutVerification, CodexRolloutVerifyRequest, DispatchAccepted, EventAcknowledgement,
+    EventBatch, ExecutionDispatch, ExecutionQuiescenceRequest, ExecutionQuiescenceStatus,
+    InteractionResponse, JobSummary, McpRefreshRequest, PROTOCOL_VERSION, PreviewHttpRequest,
+    PreviewHttpResponse, QuarantineRequest, RequestAuthority, TerminalClose, TerminalCreateRequest,
+    TerminalCreated, TerminalInput, TerminalOutputBatch, TerminalResize, WorkerMcpRefreshResult,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
+use executors::executors::codex::{codex_home, rollout_transfer::CodexRolloutStore};
 use node_metrics::{MetricsSampler, SampleBatch};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -55,6 +63,7 @@ struct WorkerApiState {
     /// view: nothing on this path can influence a lease, a job, or the
     /// worker's liveness (constitution XIX).
     metrics: Arc<MetricsSampler>,
+    codex_rollouts: Option<Arc<CodexRolloutStore>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +101,12 @@ pub async fn router(
 ) -> anyhow::Result<Router> {
     let coordinator_key = load_verifying_key(&config.coordinator_public_key_file).await?;
     let path_authority = PathAuthority::new(&config.shared_root)?;
+    let codex_rollouts = codex_home()
+        .and_then(|home| CodexRolloutStore::new(home).ok())
+        .map(Arc::new);
+    if let Some(store) = codex_rollouts.clone() {
+        spawn_rollout_cleanup(store);
+    }
     let state = WorkerApiState {
         supervisor,
         worker_node_id: config.worker_node_id,
@@ -101,8 +116,44 @@ pub async fn router(
         terminals: TerminalService::new(path_authority),
         preview: PreviewService::new(),
         metrics,
+        codex_rollouts,
     };
     Ok(build_router(state))
+}
+
+fn spawn_rollout_cleanup(store: Arc<CodexRolloutStore>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(6 * 60 * 60));
+        loop {
+            interval.tick().await;
+            // This worker cannot prove that an idle persisted session or a
+            // recoverable coordinator operation no longer references a rollout.
+            // It may clean partials locally, but verified deletion requires
+            // coordinator-supplied reference proof that is not yet available.
+            let allow_verified_removal = false;
+            let store = store.clone();
+            match tokio::task::spawn_blocking(move || {
+                store.cleanup_expired(SystemTime::now(), allow_verified_removal)
+            })
+            .await
+            {
+                Ok(Ok(result)) if result.partials_removed + result.verified_removed > 0 => {
+                    tracing::info!(
+                        partials_removed = result.partials_removed,
+                        verified_removed = result.verified_removed,
+                        "Cleaned expired Codex transfer artifacts"
+                    );
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!("Codex transfer cleanup failed: {error}");
+                }
+                Err(error) => {
+                    tracing::warn!("Codex transfer cleanup task failed: {error}");
+                }
+            }
+        }
+    });
 }
 
 /// Route table and middleware stack, split out so tests exercise the exact
@@ -112,6 +163,30 @@ fn build_router(state: WorkerApiState) -> Router {
     Router::new()
         .route("/v1/jobs", get(inventory))
         .route("/v1/metrics", get(metrics))
+        .route(
+            "/v1/session-transfers/{operation_id}/manifest",
+            post(codex_manifest),
+        )
+        .route(
+            "/v1/session-transfers/{operation_id}/artifact",
+            post(codex_artifact),
+        )
+        .route(
+            "/v1/session-transfers/{operation_id}/stage",
+            post(codex_stage),
+        )
+        .route(
+            "/v1/session-transfers/{operation_id}/verify",
+            post(codex_verify),
+        )
+        .route(
+            "/v1/session-transfers/{operation_id}/quiesce",
+            post(quiesce_execution),
+        )
+        .route(
+            "/v1/session-transfers/{operation_id}/resume",
+            post(resume_execution),
+        )
         .route("/v1/terminals", post(create_terminal))
         .route("/v1/terminals/{terminal_id}/output", get(terminal_output))
         .route("/v1/terminals/{terminal_id}/input", post(terminal_input))
@@ -130,12 +205,195 @@ fn build_router(state: WorkerApiState) -> Router {
         .route("/v1/executions/{execution_id}/ack", post(acknowledge))
         .route("/v1/executions/{execution_id}/cancel", post(cancel))
         .route(
+            "/v1/executions/{execution_id}/mcp/refresh",
+            post(refresh_mcp),
+        )
+        .route("/v1/executions/{execution_id}/mcp/status", post(mcp_status))
+        .route(
             "/v1/executions/{execution_id}/interactions/{interaction_id}",
             post(respond_interaction),
         )
         .route("/v1/executions/{execution_id}/quarantine", post(quarantine))
+        .layer(DefaultBodyLimit::max(MAX_SIGNED_BODY_BYTES))
         .layer(from_fn_with_state(state.clone(), require_signature))
         .with_state(state)
+}
+
+async fn quiesce_execution(
+    State(state): State<WorkerApiState>,
+    Path(operation_id): Path<Uuid>,
+    Json(request): Json<ExecutionQuiescenceRequest>,
+) -> Result<Json<ExecutionQuiescenceStatus>, WorkerApiError> {
+    validate_authority(&state, &request.authority).await?;
+    validate_transfer_authority(&state, operation_id, &request.authority)?;
+    if request.operation_id != operation_id {
+        return Err(WorkerApiError::Forbidden);
+    }
+    #[cfg(unix)]
+    state
+        .supervisor
+        .set_quiesced(
+            request.execution_id,
+            request.workspace_id,
+            operation_id,
+            true,
+        )
+        .await?;
+    #[cfg(not(unix))]
+    return Err(WorkerApiError::BadRequest(
+        "session transfer quiescence is unsupported on this worker".into(),
+    ));
+    Ok(Json(ExecutionQuiescenceStatus {
+        execution_id: request.execution_id,
+        operation_id,
+        quiesced: true,
+    }))
+}
+
+async fn resume_execution(
+    State(state): State<WorkerApiState>,
+    Path(operation_id): Path<Uuid>,
+    Json(request): Json<ExecutionQuiescenceRequest>,
+) -> Result<Json<ExecutionQuiescenceStatus>, WorkerApiError> {
+    validate_authority(&state, &request.authority).await?;
+    validate_transfer_authority(&state, operation_id, &request.authority)?;
+    if request.operation_id != operation_id {
+        return Err(WorkerApiError::Forbidden);
+    }
+    #[cfg(unix)]
+    state
+        .supervisor
+        .set_quiesced(
+            request.execution_id,
+            request.workspace_id,
+            operation_id,
+            false,
+        )
+        .await?;
+    #[cfg(not(unix))]
+    return Err(WorkerApiError::BadRequest(
+        "session transfer quiescence is unsupported on this worker".into(),
+    ));
+    Ok(Json(ExecutionQuiescenceStatus {
+        execution_id: request.execution_id,
+        operation_id,
+        quiesced: false,
+    }))
+}
+
+fn validate_transfer_authority(
+    _state: &WorkerApiState,
+    operation_id: Uuid,
+    authority: &RequestAuthority,
+) -> Result<(), WorkerApiError> {
+    if authority.correlation_id != operation_id {
+        return Err(WorkerApiError::BadRequest(
+            "session transfer authority is not bound to the operation".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn codex_manifest(
+    State(state): State<WorkerApiState>,
+    Path(operation_id): Path<Uuid>,
+    Json(request): Json<CodexRolloutManifestRequest>,
+) -> Result<Json<cluster_protocol::CodexRolloutManifest>, WorkerApiError> {
+    validate_authority(&state, &request.authority).await?;
+    validate_transfer_authority(&state, operation_id, &request.authority)?;
+    if request.operation_id != operation_id
+        || request.source_worker_node_id != state.worker_node_id
+        || !state
+            .supervisor
+            .authorizes_session_transfer(request.source_execution_id, request.workspace_id)
+            .await
+    {
+        return Err(WorkerApiError::Forbidden);
+    }
+    state
+        .codex_rollouts
+        .as_ref()
+        .ok_or_else(|| WorkerApiError::BadRequest("Codex session storage is unavailable".into()))?
+        .resolve_manifest(
+            operation_id,
+            request.workspace_id,
+            request.source_execution_id,
+            request.source_worker_node_id,
+            request.target_worker_node_id,
+            request.leaf_thread_id,
+        )
+        .map(Json)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
+}
+
+async fn codex_artifact(
+    State(state): State<WorkerApiState>,
+    Path(operation_id): Path<Uuid>,
+    Json(request): Json<CodexRolloutReadRequest>,
+) -> Result<Json<CodexRolloutArtifact>, WorkerApiError> {
+    validate_authority(&state, &request.authority).await?;
+    validate_transfer_authority(&state, operation_id, &request.authority)?;
+    if request.manifest.operation_id != operation_id
+        || request.manifest.source_worker_node_id != state.worker_node_id
+        || !state
+            .supervisor
+            .authorizes_session_transfer(
+                request.manifest.source_execution_id,
+                request.manifest.workspace_id,
+            )
+            .await
+    {
+        return Err(WorkerApiError::Forbidden);
+    }
+    state
+        .codex_rollouts
+        .as_ref()
+        .ok_or_else(|| WorkerApiError::BadRequest("Codex session storage is unavailable".into()))?
+        .read_artifact(&request.manifest, request.thread_id)
+        .map(Json)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
+}
+
+async fn codex_stage(
+    State(state): State<WorkerApiState>,
+    Path(operation_id): Path<Uuid>,
+    Json(request): Json<CodexRolloutStageRequest>,
+) -> Result<Json<CodexRolloutStageResult>, WorkerApiError> {
+    validate_authority(&state, &request.authority).await?;
+    validate_transfer_authority(&state, operation_id, &request.authority)?;
+    if request.manifest.operation_id != operation_id
+        || request.manifest.target_worker_node_id != state.worker_node_id
+    {
+        return Err(WorkerApiError::Forbidden);
+    }
+    state
+        .codex_rollouts
+        .as_ref()
+        .ok_or_else(|| WorkerApiError::BadRequest("Codex session storage is unavailable".into()))?
+        .stage_artifact(&request.manifest, &request.artifact)
+        .map(Json)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
+}
+
+async fn codex_verify(
+    State(state): State<WorkerApiState>,
+    Path(operation_id): Path<Uuid>,
+    Json(request): Json<CodexRolloutVerifyRequest>,
+) -> Result<Json<CodexRolloutVerification>, WorkerApiError> {
+    validate_authority(&state, &request.authority).await?;
+    validate_transfer_authority(&state, operation_id, &request.authority)?;
+    if request.manifest.operation_id != operation_id
+        || request.manifest.target_worker_node_id != state.worker_node_id
+    {
+        return Err(WorkerApiError::Forbidden);
+    }
+    state
+        .codex_rollouts
+        .as_ref()
+        .ok_or_else(|| WorkerApiError::BadRequest("Codex session storage is unavailable".into()))?
+        .verify_manifest(&request.manifest)
+        .map(Json)
+        .map_err(|error| WorkerApiError::BadRequest(error.to_string()))
 }
 
 async fn proxy_preview_ws(
@@ -303,7 +561,7 @@ async fn dispatch(
     Json(payload): Json<ExecutionDispatch>,
 ) -> Result<Json<DispatchAccepted>, WorkerApiError> {
     validate_authority(&state, &payload.authority).await?;
-    if payload.execution_id != execution_id {
+    if payload.execution_id != execution_id || payload.authority.correlation_id != execution_id {
         return Err(WorkerApiError::BadRequest(
             "path execution ID does not match dispatch".into(),
         ));
@@ -311,6 +569,44 @@ async fn dispatch(
     state
         .supervisor
         .dispatch(payload)
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+async fn refresh_mcp(
+    State(state): State<WorkerApiState>,
+    Path(execution_id): Path<Uuid>,
+    Json(payload): Json<McpRefreshRequest>,
+) -> Result<Json<WorkerMcpRefreshResult>, WorkerApiError> {
+    validate_authority(&state, &payload.authority).await?;
+    if payload.execution_id != execution_id || payload.authority.correlation_id != execution_id {
+        return Err(WorkerApiError::BadRequest(
+            "path execution ID does not match MCP refresh".into(),
+        ));
+    }
+    state
+        .supervisor
+        .refresh_mcp(execution_id, &payload.snapshot)
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+async fn mcp_status(
+    State(state): State<WorkerApiState>,
+    Path(execution_id): Path<Uuid>,
+    Json(payload): Json<McpRefreshRequest>,
+) -> Result<Json<WorkerMcpRefreshResult>, WorkerApiError> {
+    validate_authority(&state, &payload.authority).await?;
+    if payload.execution_id != execution_id || payload.authority.correlation_id != execution_id {
+        return Err(WorkerApiError::BadRequest(
+            "MCP status target mismatch".into(),
+        ));
+    }
+    state
+        .supervisor
+        .mcp_status(execution_id)
         .await
         .map(Json)
         .map_err(Into::into)
@@ -565,6 +861,14 @@ mod tests {
         SigningKey::from_bytes(&[7_u8; 32])
     }
 
+    fn coordinator_id() -> Uuid {
+        Uuid::from_u128(7)
+    }
+
+    fn worker_id() -> Uuid {
+        Uuid::from_u128(8)
+    }
+
     /// The real route table with a hand-built state, so these cases test the
     /// production wiring rather than a parallel router assembled in the test.
     fn metrics_router(temp: &TempDir, sampler: Arc<MetricsSampler>) -> Router {
@@ -572,13 +876,16 @@ mod tests {
             supervisor: ExecutionSupervisor::new(
                 PathAuthority::new(temp.path()).expect("shared root"),
             ),
-            worker_node_id: Uuid::new_v4(),
-            coordinator_id: Uuid::new_v4(),
+            worker_node_id: worker_id(),
+            coordinator_id: coordinator_id(),
             coordinator_key: coordinator_key().verifying_key(),
             seen_nonces: Arc::new(Mutex::new(HashMap::new())),
             terminals: TerminalService::new(PathAuthority::new(temp.path()).expect("shared root")),
             preview: PreviewService::new(),
             metrics: sampler,
+            codex_rollouts: Some(Arc::new(
+                CodexRolloutStore::new(temp.path().join("codex")).unwrap(),
+            )),
         };
         build_router(state)
     }
@@ -600,6 +907,30 @@ mod tests {
                 BASE64_STANDARD.encode(signature.to_bytes()),
             )
             .body(Body::empty())
+            .expect("request builds")
+    }
+
+    fn signed_post<T: Serialize>(request_target: &str, payload: &T) -> Request<Body> {
+        let body = serde_json::to_vec(payload).unwrap();
+        signed_post_body(request_target, body)
+    }
+
+    fn signed_post_body(request_target: &str, body: Vec<u8>) -> Request<Body> {
+        let timestamp = Utc::now().timestamp();
+        let digest = BASE64_STANDARD.encode(Sha256::digest(&body));
+        let message = format!("{timestamp}.POST.{request_target}.{digest}");
+        let signature = coordinator_key().sign(message.as_bytes());
+        Request::builder()
+            .method("POST")
+            .uri(request_target)
+            .header("content-type", "application/json")
+            .header(TIMESTAMP_HEADER, timestamp.to_string())
+            .header(CONTENT_DIGEST_HEADER, digest)
+            .header(
+                SIGNATURE_HEADER,
+                BASE64_STANDARD.encode(signature.to_bytes()),
+            )
+            .body(Body::from(body))
             .expect("request builds")
     }
 
@@ -654,6 +985,66 @@ mod tests {
         let stale = Utc::now().timestamp() - (MAX_TIMESTAMP_DRIFT_SECONDS + 5);
         let request = signed_get("/v1/metrics?after=0", "/v1/metrics?after=0", stale);
         assert_eq!(status_of(router, request).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn transfer_routes_reject_operation_and_target_substitution() {
+        let temp = TempDir::new().unwrap();
+        let router = metrics_router(
+            &temp,
+            Arc::new(MetricsSampler::new(SamplerConfig::default())),
+        );
+        let operation_id = Uuid::new_v4();
+        let other_operation_id = Uuid::new_v4();
+        let manifest = cluster_protocol::CodexRolloutManifest {
+            operation_id,
+            workspace_id: Uuid::new_v4(),
+            source_execution_id: Uuid::new_v4(),
+            source_worker_node_id: Uuid::new_v4(),
+            target_worker_node_id: Uuid::new_v4(),
+            leaf_thread_id: Uuid::new_v4(),
+            entries: Vec::new(),
+            manifest_sha256: String::new(),
+        };
+        let mut payload = CodexRolloutVerifyRequest {
+            authority: RequestAuthority {
+                protocol_version: PROTOCOL_VERSION,
+                coordinator_id: coordinator_id(),
+                worker_node_id: worker_id(),
+                correlation_id: operation_id,
+                issued_at: Utc::now(),
+                nonce: Uuid::new_v4().to_string(),
+            },
+            manifest: manifest.clone(),
+        };
+        let wrong_operation_path = format!("/v1/session-transfers/{other_operation_id}/verify");
+        assert_eq!(
+            status_of(router.clone(), signed_post(&wrong_operation_path, &payload)).await,
+            StatusCode::BAD_REQUEST
+        );
+
+        payload.authority.nonce = Uuid::new_v4().to_string();
+        payload.authority.issued_at = Utc::now();
+        let correct_path = format!("/v1/session-transfers/{operation_id}/verify");
+        assert_eq!(
+            status_of(router, signed_post(&correct_path, &payload)).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_routes_accept_bodies_above_axum_default_limit() {
+        let temp = TempDir::new().unwrap();
+        let router = metrics_router(
+            &temp,
+            Arc::new(MetricsSampler::new(SamplerConfig::default())),
+        );
+        let path = format!("/v1/session-transfers/{}/stage", Uuid::new_v4());
+        let body = vec![b' '; 3 * 1024 * 1024];
+        assert_eq!(
+            status_of(router, signed_post_body(&path, body)).await,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[cfg(target_os = "linux")]

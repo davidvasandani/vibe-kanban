@@ -91,4 +91,28 @@ describe('CollapsibleSectionHeader flexible sizing', () => {
     expect(container.querySelector('button')).toBeNull();
     expect(sectionRoot().textContent).toContain('Issue content');
   });
+
+  it('keeps header context visible when the section is collapsed', () => {
+    act(() => {
+      root.render(
+        <CollapsibleSectionHeader
+          title="Server Affinity"
+          headerExtra={<span>think4</span>}
+          fillAvailableSpace
+        >
+          <div>Affinity controls</div>
+        </CollapsibleSectionHeader>
+      );
+    });
+
+    const toggle = container.querySelector('button');
+    if (!(toggle instanceof HTMLButtonElement)) {
+      throw new Error('Expected a collapsible section button');
+    }
+
+    act(() => toggle.click());
+
+    expect(sectionRoot().textContent).toContain('think4');
+    expect(sectionRoot().textContent).not.toContain('Affinity controls');
+  });
 });

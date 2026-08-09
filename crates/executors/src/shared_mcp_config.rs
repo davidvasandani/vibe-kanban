@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,9 @@ use ts_rs::TS;
 
 use crate::{
     executors::{BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor},
-    mcp_config::{McpConfig, PRECONFIGURED_MCP_SERVERS, read_agent_config},
+    mcp_config::{
+        McpConfig, PRECONFIGURED_MCP_SERVERS, default_slack_stdio_launcher, read_agent_config,
+    },
     profile::{ExecutorConfigs, ExecutorProfileId},
 };
 
@@ -86,6 +88,8 @@ pub struct SharedMcpCompatibility {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SharedMcpServer {
     pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub definition: McpServerDefinition,
     pub assignments: Vec<SharedMcpAssignment>,
     pub source_kind: SharedMcpSourceKind,
@@ -106,6 +110,8 @@ pub struct SharedMcpConflictVariant {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SharedMcpConflict {
     pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub variants: Vec<SharedMcpConflictVariant>,
     pub message: String,
 }
@@ -124,11 +130,14 @@ pub struct SharedMcpReadResponse {
     pub conflicts: Vec<SharedMcpConflict>,
     pub preconfigured: Value,
     pub read_errors: Vec<SharedMcpProfileError>,
+    pub metadata_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SharedMcpServerInput {
     pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub definition: McpServerDefinition,
     pub assignments: Vec<BaseCodingAgent>,
     #[serde(default)]
@@ -179,6 +188,7 @@ pub struct SharedMcpProfileWriteOutcome {
 pub struct SharedMcpWriteResponse {
     pub status: SharedMcpWriteStatus,
     pub outcomes: Vec<SharedMcpProfileWriteOutcome>,
+    pub metadata_error: Option<String>,
     pub servers: Vec<SharedMcpServer>,
     pub conflicts: Vec<SharedMcpConflict>,
 }
@@ -307,7 +317,190 @@ pub async fn load_native_snapshots() -> Vec<NativeProfileSnapshot> {
 }
 
 pub async fn load_shared_mcp_config() -> SharedMcpReadResponse {
-    reconcile_snapshots(load_native_snapshots().await)
+    let mut response = reconcile_snapshots(load_native_snapshots().await);
+    let labels = match load_display_labels().await {
+        Ok(labels) => labels,
+        Err(error) => {
+            tracing::warn!(%error, "MCP display labels are unavailable");
+            response.metadata_error = Some(error);
+            BTreeMap::new()
+        }
+    };
+    attach_display_labels(&mut response, &labels);
+    response
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SharedMcpDisplayLabels {
+    #[serde(default = "display_label_store_version")]
+    version: u8,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+}
+
+fn display_label_store_version() -> u8 {
+    1
+}
+
+fn display_labels_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("vibe-kanban")
+        .join("mcp-display-labels.json")
+}
+
+async fn load_display_labels_from(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let content = match tokio::fs::read(path).await {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(format!("failed to read MCP display labels: {error}")),
+    };
+    let store: SharedMcpDisplayLabels = serde_json::from_slice(&content)
+        .map_err(|error| format!("failed to parse MCP display labels: {error}"))?;
+    if store.version != display_label_store_version() {
+        return Err(format!(
+            "unsupported MCP display-label store version {}",
+            store.version
+        ));
+    }
+    Ok(store.labels)
+}
+
+async fn load_display_labels() -> Result<BTreeMap<String, String>, String> {
+    load_display_labels_from(&display_labels_path()).await
+}
+
+fn normalized_display_name(identifier: &str, display_name: Option<&str>) -> Option<String> {
+    display_name
+        .map(str::trim)
+        .filter(|label| !label.is_empty() && *label != identifier)
+        .map(str::to_string)
+}
+
+fn attach_display_labels(response: &mut SharedMcpReadResponse, labels: &BTreeMap<String, String>) {
+    for server in &mut response.servers {
+        let legacy_label = server
+            .native_sources
+            .iter()
+            .map(|source| source.server_name.as_str())
+            .find_map(|native_name| labels.get(native_name));
+        if let Some(label) = labels.get(&server.name).or(legacy_label) {
+            server.display_name = Some(label.clone());
+        }
+    }
+    for conflict in &mut response.conflicts {
+        let legacy_label = conflict
+            .variants
+            .iter()
+            .flat_map(|variant| &variant.native_sources)
+            .map(|source| source.server_name.as_str())
+            .find_map(|native_name| labels.get(native_name));
+        if let Some(label) = labels.get(&conflict.name).or(legacy_label) {
+            conflict.display_name = Some(label.clone());
+        }
+    }
+}
+
+async fn write_display_labels_to(
+    path: &Path,
+    labels: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "MCP display-label path has no parent directory".to_string())?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|error| format!("failed to create MCP display-label directory: {error}"))?;
+    let store = SharedMcpDisplayLabels {
+        version: display_label_store_version(),
+        labels: labels.clone(),
+    };
+    let content = serde_json::to_vec_pretty(&store)
+        .map_err(|error| format!("failed to serialize MCP display labels: {error}"))?;
+    let staged = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
+    tokio::fs::write(&staged, content)
+        .await
+        .map_err(|error| format!("failed to stage MCP display labels: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))
+            .await
+            .map_err(|error| format!("failed to protect MCP display labels: {error}"))?;
+    }
+    // Windows rename does not replace an existing destination. Move the old
+    // sidecar to a backup first, restoring it if installing the staged file
+    // fails, so a transient replacement error cannot discard existing labels.
+    #[cfg(windows)]
+    let backup = if tokio::fs::metadata(path).await.is_ok() {
+        let backup = path.with_extension(format!("json.{}.bak", uuid::Uuid::new_v4()));
+        tokio::fs::rename(path, &backup)
+            .await
+            .map_err(|error| format!("failed to preserve old MCP display labels: {error}"))?;
+        Some(backup)
+    } else {
+        None
+    };
+    if let Err(error) = tokio::fs::rename(&staged, path).await {
+        let _ = tokio::fs::remove_file(&staged).await;
+        #[cfg(windows)]
+        if let Some(backup) = &backup {
+            if let Err(restore_error) = tokio::fs::rename(backup, path).await {
+                return Err(format!(
+                    "failed to replace MCP display labels: {error}; failed to restore prior labels: {restore_error}"
+                ));
+            }
+        }
+        return Err(format!("failed to replace MCP display labels: {error}"));
+    }
+    #[cfg(windows)]
+    if let Some(backup) = backup {
+        let _ = tokio::fs::remove_file(backup).await;
+    }
+    Ok(())
+}
+
+pub async fn persist_display_labels(
+    request: &SharedMcpWriteRequest,
+    existing_identifiers: &HashSet<String>,
+    updatable_identifiers: Option<&HashSet<String>>,
+) -> Result<(), String> {
+    let current = load_display_labels().await.unwrap_or_else(|error| {
+        tracing::warn!(%error, "replacing unavailable MCP display-label metadata");
+        BTreeMap::new()
+    });
+    let labels = merged_display_labels(
+        current,
+        request,
+        existing_identifiers,
+        updatable_identifiers,
+    );
+    write_display_labels_to(&display_labels_path(), &labels).await
+}
+
+fn merged_display_labels(
+    mut labels: BTreeMap<String, String>,
+    request: &SharedMcpWriteRequest,
+    existing_identifiers: &HashSet<String>,
+    updatable_identifiers: Option<&HashSet<String>>,
+) -> BTreeMap<String, String> {
+    labels.retain(|identifier, _| existing_identifiers.contains(identifier));
+    for server in &request.servers {
+        if !existing_identifiers.contains(&server.name)
+            || updatable_identifiers.is_some_and(|identifiers| !identifiers.contains(&server.name))
+        {
+            continue;
+        }
+        match normalized_display_name(&server.name, server.display_name.as_deref()) {
+            Some(label) => {
+                labels.insert(server.name.clone(), label);
+            }
+            None => {
+                labels.remove(&server.name);
+            }
+        }
+    }
+    labels
 }
 
 pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpReadResponse {
@@ -332,6 +525,7 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
 
     let mut by_name: BTreeMap<String, Vec<(NativeMcpSource, McpServerDefinition)>> =
         BTreeMap::new();
+    let mut native_names: BTreeMap<String, HashSet<String>> = BTreeMap::new();
     for snapshot in &snapshots {
         let config_path = snapshot
             .profile
@@ -341,7 +535,16 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
         for (server_name, entry) in &snapshot.servers {
             let definition = canonical_definition_for_server(server_name, entry);
             let fingerprint = normalized_fingerprint(&definition);
-            by_name.entry(server_name.clone()).or_default().push((
+            let identifier = if is_valid_server_identifier(server_name) {
+                server_name.clone()
+            } else {
+                suggested_server_identifier(server_name)
+            };
+            native_names
+                .entry(identifier.clone())
+                .or_default()
+                .insert(server_name.clone());
+            by_name.entry(identifier).or_default().push((
                 NativeMcpSource {
                     executor: snapshot.profile.executor,
                     config_path: config_path.clone(),
@@ -357,6 +560,11 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
     let mut servers = Vec::new();
     let mut conflicts = Vec::new();
     for (name, sources) in by_name {
+        let source_names = native_names.remove(&name).unwrap_or_default();
+        let legacy_display_name = (source_names.len() == 1)
+            .then(|| source_names.iter().next().cloned())
+            .flatten()
+            .filter(|source_name| source_name != &name);
         let mut variants: BTreeMap<String, Vec<(NativeMcpSource, McpServerDefinition)>> =
             BTreeMap::new();
         for (source, definition) in sources {
@@ -366,7 +574,38 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
             variants.entry(key).or_default().push((source, definition));
         }
 
-        if variants.len() == 1 {
+        if source_names.len() > 1 {
+            let variants = variants
+                .into_values()
+                .flatten()
+                .enumerate()
+                .map(|(idx, (source, definition))| {
+                    let definition = redact_gateway_definition(definition);
+                    let source = redact_gateway_source(source);
+                    SharedMcpConflictVariant {
+                        variant_id: format!("variant-{}", idx + 1),
+                        assignments: vec![assignment_from_source(&source, &definition)],
+                        native_sources: vec![source],
+                        definition,
+                    }
+                })
+                .collect();
+            let mut originals = source_names.into_iter().collect::<Vec<_>>();
+            originals.sort();
+            conflicts.push(SharedMcpConflict {
+                name: name.clone(),
+                display_name: None,
+                variants,
+                message: format!(
+                    "MCP server identifiers {} all normalize to `{name}`; rename them explicitly before saving",
+                    originals
+                        .iter()
+                        .map(|original| format!("`{original}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        } else if variants.len() == 1 {
             let (_, group) = variants.into_iter().next().expect("variant exists");
             let definition = redact_gateway_definition(group[0].1.clone());
             let native_sources = group
@@ -379,6 +618,7 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
                 .collect::<Vec<_>>();
             servers.push(SharedMcpServer {
                 name,
+                display_name: legacy_display_name,
                 definition: definition.clone(),
                 assignments,
                 source_kind: if native_sources.len() > 1 {
@@ -417,6 +657,7 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
                 .collect();
             conflicts.push(SharedMcpConflict {
                 name: name.clone(),
+                display_name: legacy_display_name,
                 variants,
                 message: format!(
                     "MCP server `{name}` has different definitions across assigned profiles"
@@ -431,6 +672,7 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
         conflicts,
         preconfigured: PRECONFIGURED_MCP_SERVERS.clone(),
         read_errors,
+        metadata_error: None,
     }
 }
 
@@ -605,7 +847,7 @@ pub fn canonical_definition(entry: &Value) -> McpServerDefinition {
 }
 
 fn canonical_definition_for_server(name: &str, entry: &Value) -> McpServerDefinition {
-    let mut definition = canonical_definition(entry);
+    let definition = canonical_definition(entry);
     if name != "slack" || !is_legacy_bundled_slack_definition(&definition) {
         return definition;
     }
@@ -613,33 +855,57 @@ fn canonical_definition_for_server(name: &str, entry: &Value) -> McpServerDefini
     let Some(current_entry) = PRECONFIGURED_MCP_SERVERS.get("slack") else {
         return definition;
     };
-    let current = canonical_definition(current_entry);
-    let Some(env) = definition.value.get("env").cloned() else {
-        return definition;
-    };
+    migrate_bundled_slack_definition(definition, canonical_definition(current_entry))
+}
 
-    definition = current;
-    if let Some(value) = definition.value.as_object_mut() {
+fn migrate_bundled_slack_definition(
+    historical: McpServerDefinition,
+    mut current: McpServerDefinition,
+) -> McpServerDefinition {
+    // The old stdio token is preserved only when migrating between local stdio
+    // launchers. HTTP deployments own the Slack credential at the service and
+    // must never copy it into an agent-readable definition.
+    if current.transport == McpTransportKind::Stdio
+        && let Some(env) = historical.value.get("env").cloned()
+        && let Some(value) = current.value.as_object_mut()
+    {
         value.insert("env".to_string(), env);
     }
-    definition
+    current
 }
 
 fn is_legacy_bundled_slack_definition(definition: &McpServerDefinition) -> bool {
+    // Append-only: once a launcher was shipped, keep recognizing it so a later
+    // catalog pin bump cannot strand existing configs on credential-bearing
+    // stdio. The current catalog launcher is also admitted below without
+    // duplicating its actively managed pin.
+    const HISTORICAL_SLACK_STDIO_LAUNCHERS: &[&str] = &[
+        "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz",
+    ];
+    let pinned_fork = default_slack_stdio_launcher();
     definition.transport == McpTransportKind::Stdio
         && definition.value.get("command").and_then(Value::as_str) == Some("npx")
-        && definition.value.get("args")
-            == Some(&serde_json::json!([
-                "-y",
-                "slack-mcp-server@latest",
-                "--transport",
-                "stdio"
-            ]))
+        && definition.value.get("args").is_some_and(|args| {
+            args == &serde_json::json!(["-y", "slack-mcp-server@latest", "--transport", "stdio"])
+                || pinned_fork.as_ref().is_some_and(|launcher| {
+                    args == &serde_json::json!(["-y", launcher, "--transport", "stdio"])
+                })
+                || HISTORICAL_SLACK_STDIO_LAUNCHERS.iter().any(|launcher| {
+                    args == &serde_json::json!(["-y", launcher, "--transport", "stdio"])
+                })
+        })
         && definition
             .value
             .get("env")
             .and_then(Value::as_object)
             .is_some_and(|env| env.len() == 1 && env.contains_key("SLACK_MCP_XOXP_TOKEN"))
+}
+
+/// Whether a native entry is one of the exact stdio Slack templates shipped by
+/// Vibe Kanban. Callers use this to remove recovery copies that would otherwise
+/// retain the superseded agent-readable XOXP token after HTTP migration.
+pub fn is_historical_bundled_slack_entry(entry: &Value) -> bool {
+    is_legacy_bundled_slack_definition(&canonical_definition(entry))
 }
 
 fn compact_object<const N: usize>(entries: [(&str, Value); N]) -> Value {
@@ -861,25 +1127,103 @@ pub fn plan_servers_for_executor(
     let mut next = current.clone();
     let mut affected = Vec::new();
     for server in &request.servers {
+        let legacy_name = legacy_name_for_server(current, server)?;
         if server.assignments.contains(&executor) {
+            if let Some(legacy_name) = &legacy_name
+                && !server.native_overrides.contains_key(&executor)
+            {
+                let entry = current
+                    .get(legacy_name)
+                    .expect("legacy candidate came from current servers")
+                    .clone();
+                next.remove(legacy_name);
+                next.insert(server.name.clone(), entry);
+                affected.push(server.name.clone());
+                continue;
+            }
+            if !server.native_overrides.contains_key(&executor)
+                && current.get(&server.name).is_some_and(|entry| {
+                    if server.name == "slack"
+                        && is_legacy_bundled_slack_definition(&canonical_definition(entry))
+                    {
+                        return false;
+                    }
+                    canonical_definition_for_server(&server.name, entry) == server.definition
+                })
+            {
+                continue;
+            }
             let mut entry = materialize_definition(
                 executor,
                 &server.definition,
                 server.native_overrides.get(&executor),
             )?;
             preserve_gateway_capability(current, &server.name, &mut entry);
+            if let Some(legacy_name) = &legacy_name {
+                next.remove(legacy_name);
+            }
             next.insert(server.name.clone(), entry);
             affected.push(server.name.clone());
-        } else if next.remove(&server.name).is_some() {
-            affected.push(server.name.clone());
+        } else {
+            let removed = next.remove(&server.name).is_some()
+                || legacy_name
+                    .as_ref()
+                    .is_some_and(|legacy_name| next.remove(legacy_name).is_some());
+            if removed {
+                affected.push(server.name.clone());
+            }
         }
     }
     for name in &request.removed_servers {
-        if next.remove(name).is_some() && !affected.contains(name) {
+        let removed = next.remove(name).is_some();
+        let legacy_names = next
+            .keys()
+            .filter(|candidate| {
+                !is_valid_server_identifier(candidate)
+                    && suggested_server_identifier(candidate) == name.as_str()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if legacy_names.len() > 1 {
+            return Err(format!(
+                "Multiple legacy MCP identifiers normalize to `{name}`; rename them explicitly"
+            ));
+        }
+        let removed = legacy_names
+            .first()
+            .is_some_and(|legacy_name| next.remove(legacy_name).is_some())
+            || removed;
+        if removed && !affected.contains(name) {
             affected.push(name.clone());
         }
     }
     Ok((next, affected))
+}
+
+fn legacy_name_for_server(
+    current: &HashMap<String, Value>,
+    server: &SharedMcpServerInput,
+) -> Result<Option<String>, String> {
+    if current.contains_key(&server.name) {
+        return Ok(None);
+    }
+    let candidates = current
+        .iter()
+        .filter(|(candidate, entry)| {
+            !is_valid_server_identifier(candidate)
+                && suggested_server_identifier(candidate) == server.name
+                && canonical_definition_for_server(candidate, entry) == server.definition
+        })
+        .map(|(candidate, _)| candidate.clone())
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [candidate] => Ok(Some(candidate.clone())),
+        _ => Err(format!(
+            "Multiple legacy MCP identifiers normalize to `{}`; rename them explicitly",
+            server.name
+        )),
+    }
 }
 
 fn preserve_gateway_capability(
@@ -923,10 +1267,104 @@ fn preserve_gateway_capability(
 }
 
 pub fn validate_write_request(request: &SharedMcpWriteRequest) -> Result<(), String> {
-    validate_server_identifiers(request.servers.iter().map(|server| server.name.as_str()))?;
+    validate_write_request_with(request, |_| false)
+}
 
+pub fn validate_write_request_against_snapshots(
+    request: &SharedMcpWriteRequest,
+    snapshots: &[NativeProfileSnapshot],
+) -> Result<(), String> {
+    for server in &request.servers {
+        let has_legacy_candidate = snapshots.iter().any(|snapshot| {
+            snapshot.servers.keys().any(|native_name| {
+                !is_valid_server_identifier(native_name)
+                    && suggested_server_identifier(native_name) == server.name
+            })
+        });
+        if has_legacy_candidate && !migrated_legacy_server(server, snapshots) {
+            return Err(format!(
+                "Legacy MCP definitions for `{}` disagree across profiles or collide with an existing identifier; resolve the conflict before saving",
+                server.name
+            ));
+        }
+    }
+    validate_write_request_with(request, |server| {
+        unchanged_legacy_server(server, snapshots) || migrated_legacy_server(server, snapshots)
+    })
+}
+
+fn migrated_legacy_server(
+    server: &SharedMcpServerInput,
+    snapshots: &[NativeProfileSnapshot],
+) -> bool {
+    server.native_overrides.is_empty()
+        && is_valid_server_identifier(&server.name)
+        && server.assignments.iter().all(|executor| {
+            snapshots
+                .iter()
+                .any(|snapshot| snapshot.profile.executor == *executor)
+        })
+        && snapshots.iter().all(|snapshot| {
+            let assigned = server.assignments.contains(&snapshot.profile.executor);
+            let candidates = snapshot
+                .servers
+                .iter()
+                .filter(|(native_name, _)| {
+                    !is_valid_server_identifier(native_name)
+                        && suggested_server_identifier(native_name) == server.name
+                })
+                .collect::<Vec<_>>();
+            match candidates.as_slice() {
+                [] => !assigned && !snapshot.servers.contains_key(&server.name),
+                [(native_name, entry)] => {
+                    !snapshot.servers.contains_key(&server.name)
+                        && assigned
+                        && canonical_definition_for_server(native_name, entry) == server.definition
+                }
+                _ => false,
+            }
+        })
+}
+
+fn unchanged_legacy_server(
+    server: &SharedMcpServerInput,
+    snapshots: &[NativeProfileSnapshot],
+) -> bool {
+    server.native_overrides.is_empty()
+        && server.assignments.iter().all(|executor| {
+            snapshots
+                .iter()
+                .any(|snapshot| snapshot.profile.executor == *executor)
+        })
+        && snapshots.iter().all(|snapshot| {
+            let assigned = server.assignments.contains(&snapshot.profile.executor);
+            match (assigned, snapshot.servers.get(&server.name)) {
+                (true, Some(entry)) => {
+                    canonical_definition_for_server(&server.name, entry) == server.definition
+                }
+                (false, None) => true,
+                _ => false,
+            }
+        })
+}
+
+fn validate_write_request_with(
+    request: &SharedMcpWriteRequest,
+    allow_legacy_server: impl Fn(&SharedMcpServerInput) -> bool,
+) -> Result<(), String> {
     let mut names = HashSet::new();
     for server in &request.servers {
+        let is_legacy_server = allow_legacy_server(server);
+        if !is_valid_server_identifier(&server.name) && !is_legacy_server {
+            return Err(format!(
+                "Invalid MCP server identifier `{}`: identifiers must match \
+                 ^[a-zA-Z0-9_-]+$. Use `{}` as the identifier and keep `{}` \
+                 as the display label.",
+                server.name,
+                suggested_server_identifier(&server.name),
+                server.name
+            ));
+        }
         if !names.insert(server.name.clone()) {
             return Err(format!("MCP server `{}` is duplicated", server.name));
         }
@@ -940,7 +1378,9 @@ pub fn validate_write_request(request: &SharedMcpWriteRequest) -> Result<(), Str
             if agent_for(*executor).is_none() {
                 return Err(format!("Executor `{executor}` was not found"));
             }
-            if let Some(reason) = incompatibility_reason(*executor, &server.definition) {
+            if let Some(reason) = incompatibility_reason(*executor, &server.definition)
+                && !is_legacy_server
+            {
                 return Err(format!(
                     "MCP server `{}` cannot be assigned to `{}`: {}",
                     server.name, executor, reason
@@ -1185,6 +1625,27 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
     }
 
     #[test]
+    fn pinned_stdio_slack_migrates_to_http_without_the_token() {
+        let historical = canonical_definition(&slack_json_entry("xoxp-must-disappear"));
+        assert!(is_legacy_bundled_slack_definition(&historical));
+
+        let migrated = migrate_bundled_slack_definition(
+            historical,
+            canonical_definition(&json!({
+                "type": "http",
+                "url": "http://172.16.100.102:13080/mcp"
+            })),
+        );
+
+        assert_eq!(migrated.transport, McpTransportKind::Http);
+        assert_eq!(
+            migrated.value,
+            json!({ "url": "http://172.16.100.102:13080/mcp" })
+        );
+        assert!(!serde_json::to_string(&migrated).unwrap().contains("xoxp"));
+    }
+
+    #[test]
     fn equivalent_slack_conflicts_on_semantic_stdio_differences() {
         let cases = [
             (
@@ -1287,6 +1748,7 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         let request = SharedMcpWriteRequest {
             servers: vec![SharedMcpServerInput {
                 name: "slack".to_string(),
+                display_name: None,
                 definition,
                 assignments: vec![
                     BaseCodingAgent::Codex,
@@ -1392,6 +1854,7 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         let request = SharedMcpWriteRequest {
             servers: vec![SharedMcpServerInput {
                 name: "shared".to_string(),
+                display_name: None,
                 definition: canonical_definition(&json!({"command":"npx"})),
                 assignments: vec![BaseCodingAgent::ClaudeCode],
                 native_overrides: HashMap::new(),
@@ -1411,10 +1874,69 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
     }
 
     #[test]
+    fn deleting_one_server_does_not_rematerialize_unchanged_servers() {
+        let unchanged = json!({
+            "command": "npx",
+            "args": ["firecrawl-browser"],
+            "custom_native_field": true
+        });
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "firecrawl-browser".to_string(),
+                display_name: None,
+                definition: canonical_definition(&unchanged),
+                assignments: vec![BaseCodingAgent::ClaudeCode],
+                native_overrides: HashMap::new(),
+            }],
+            resolved_conflicts: Vec::new(),
+            removed_servers: vec!["deleted".to_string()],
+        };
+        let current = HashMap::from([
+            ("firecrawl-browser".to_string(), unchanged.clone()),
+            ("deleted".to_string(), json!({"command": "remove-me"})),
+        ]);
+
+        let (next, affected) =
+            plan_servers_for_executor(BaseCodingAgent::ClaudeCode, &current, &request).unwrap();
+
+        assert_eq!(next["firecrawl-browser"], unchanged);
+        assert_eq!(next.get("deleted"), None);
+        assert_eq!(affected, vec!["deleted"]);
+    }
+
+    #[test]
+    fn unrelated_save_still_migrates_the_legacy_slack_template() {
+        let legacy = slack_json_entry_with_spec("xoxp-test", "slack-mcp-server@latest");
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "slack".to_string(),
+                display_name: None,
+                definition: canonical_definition_for_server("slack", &legacy),
+                assignments: vec![BaseCodingAgent::ClaudeCode],
+                native_overrides: HashMap::new(),
+            }],
+            resolved_conflicts: Vec::new(),
+            removed_servers: vec!["deleted".to_string()],
+        };
+        let current = HashMap::from([
+            ("slack".to_string(), legacy),
+            ("deleted".to_string(), json!({"command": "remove-me"})),
+        ]);
+
+        let (next, affected) =
+            plan_servers_for_executor(BaseCodingAgent::ClaudeCode, &current, &request).unwrap();
+
+        assert_eq!(next["slack"], slack_json_entry("xoxp-test"));
+        assert_eq!(next.get("deleted"), None);
+        assert_eq!(affected, vec!["slack", "deleted"]);
+    }
+
+    #[test]
     fn unassigned_server_is_removed_only_for_that_executor() {
         let request = SharedMcpWriteRequest {
             servers: vec![SharedMcpServerInput {
                 name: "shared".to_string(),
+                display_name: None,
                 definition: canonical_definition(&json!({"command":"npx"})),
                 assignments: vec![BaseCodingAgent::Gemini],
                 native_overrides: HashMap::new(),
@@ -1458,6 +1980,7 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         let request = SharedMcpWriteRequest {
             servers: vec![SharedMcpServerInput {
                 name: "tools".to_string(),
+                display_name: None,
                 definition: response.servers[0].definition.clone(),
                 assignments: vec![BaseCodingAgent::ClaudeCode],
                 native_overrides: HashMap::new(),
@@ -1502,12 +2025,230 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         assert_eq!(suggested_server_identifier("Vibe Kanban"), "vibe_kanban");
         assert_eq!(suggested_server_identifier("vibe...kanban"), "vibe_kanban");
         assert_eq!(suggested_server_identifier("工具"), "mcp_server");
+        assert_eq!(
+            suggested_server_identifier("  Rovo...Cloud!  "),
+            "rovo_cloud"
+        );
+    }
+
+    #[test]
+    fn legacy_identifier_is_proposed_with_its_label_and_native_origin() {
+        let entry = json!({
+            "url": "https://mcp.atlassian.com/v1/mcp",
+            "http_headers": {"Authorization": "Bearer credential"}
+        });
+        let mut response = reconcile_snapshots(vec![snapshot(
+            BaseCodingAgent::Codex,
+            HashMap::from([("Atlassian Rovo".to_string(), entry)]),
+        )]);
+
+        assert!(response.conflicts.is_empty());
+        assert_eq!(response.servers[0].name, "atlassian_rovo");
+        assert_eq!(
+            response.servers[0].display_name.as_deref(),
+            Some("Atlassian Rovo")
+        );
+        assert_eq!(
+            response.servers[0].assignments[0].native_name,
+            "Atlassian Rovo"
+        );
+
+        attach_display_labels(
+            &mut response,
+            &BTreeMap::from([("Atlassian Rovo".to_string(), "Rovo for Jira".to_string())]),
+        );
+        assert_eq!(
+            response.servers[0].display_name.as_deref(),
+            Some("Rovo for Jira")
+        );
+    }
+
+    #[test]
+    fn saving_a_legacy_identifier_replaces_the_native_key() {
+        let entry = json!({
+            "url": "https://mcp.atlassian.com/v1/mcp",
+            "http_headers": {"Authorization": "Bearer credential"}
+        });
+        let response = reconcile_snapshots(vec![snapshot(
+            BaseCodingAgent::Codex,
+            HashMap::from([("Atlassian Rovo".to_string(), entry.clone())]),
+        )]);
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: response.servers[0].name.clone(),
+                display_name: response.servers[0].display_name.clone(),
+                definition: response.servers[0].definition.clone(),
+                assignments: vec![BaseCodingAgent::Codex],
+                native_overrides: HashMap::new(),
+            }],
+            removed_servers: Vec::new(),
+            resolved_conflicts: Vec::new(),
+        };
+
+        let (next, affected) = plan_servers_for_executor(
+            BaseCodingAgent::Codex,
+            &HashMap::from([("Atlassian Rovo".to_string(), entry)]),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(next.get("Atlassian Rovo"), None);
+        assert_eq!(
+            next["atlassian_rovo"]["http_headers"]["Authorization"],
+            "Bearer credential"
+        );
+        assert_eq!(affected, vec!["atlassian_rovo"]);
+    }
+
+    #[test]
+    fn legacy_identifier_collision_is_reported_without_a_server() {
+        let definition = json!({"url": "https://mcp.atlassian.com/v1/mcp"});
+        let response = reconcile_snapshots(vec![snapshot(
+            BaseCodingAgent::Codex,
+            HashMap::from([
+                ("Atlassian Rovo".to_string(), definition.clone()),
+                ("atlassian_rovo".to_string(), definition),
+            ]),
+        )]);
+
+        assert!(response.servers.is_empty());
+        assert_eq!(response.conflicts[0].name, "atlassian_rovo");
+        assert!(response.conflicts[0].message.contains("all normalize"));
+    }
+
+    #[test]
+    fn disabled_legacy_server_is_renamed_verbatim() {
+        let entry = json!({
+            "type": "remote",
+            "url": "https://mcp.atlassian.com/v1/mcp",
+            "enabled": false,
+            "custom_native_field": "preserve"
+        });
+        let snapshots = vec![snapshot(
+            BaseCodingAgent::Opencode,
+            HashMap::from([("Atlassian Rovo".to_string(), entry.clone())]),
+        )];
+        let response = reconcile_snapshots(snapshots.clone());
+        assert_eq!(
+            response.servers[0].definition.transport,
+            McpTransportKind::Unknown
+        );
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "atlassian_rovo".to_string(),
+                display_name: Some("Atlassian Rovo".to_string()),
+                definition: response.servers[0].definition.clone(),
+                assignments: vec![BaseCodingAgent::Opencode],
+                native_overrides: HashMap::new(),
+            }],
+            removed_servers: Vec::new(),
+            resolved_conflicts: Vec::new(),
+        };
+
+        validate_write_request_against_snapshots(&request, &snapshots).unwrap();
+        let (next, affected) =
+            plan_servers_for_executor(BaseCodingAgent::Opencode, &snapshots[0].servers, &request)
+                .unwrap();
+
+        assert_eq!(next.get("Atlassian Rovo"), None);
+        assert_eq!(next["atlassian_rovo"], entry);
+        assert_eq!(affected, vec!["atlassian_rovo"]);
+    }
+
+    #[test]
+    fn migration_rejects_a_different_legacy_definition_in_another_profile() {
+        let codex_entry = json!({"url": "https://mcp.atlassian.com/v1/mcp"});
+        let claude_entry = json!({"url": "https://different.example/mcp"});
+        let snapshots = vec![
+            snapshot(
+                BaseCodingAgent::Codex,
+                HashMap::from([("Atlassian Rovo".to_string(), codex_entry.clone())]),
+            ),
+            snapshot(
+                BaseCodingAgent::ClaudeCode,
+                HashMap::from([("Atlassian Rovo".to_string(), claude_entry)]),
+            ),
+        ];
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "atlassian_rovo".to_string(),
+                display_name: Some("Atlassian Rovo".to_string()),
+                definition: canonical_definition(&codex_entry),
+                assignments: vec![BaseCodingAgent::Codex],
+                native_overrides: HashMap::new(),
+            }],
+            removed_servers: Vec::new(),
+            resolved_conflicts: Vec::new(),
+        };
+
+        let error = validate_write_request_against_snapshots(&request, &snapshots).unwrap_err();
+        assert!(error.contains("disagree across profiles"));
+    }
+
+    #[tokio::test]
+    async fn display_labels_round_trip_without_entering_native_definitions() {
+        let path = std::env::temp_dir().join(format!(
+            "vibe-kanban-mcp-labels-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let labels = BTreeMap::from([("atlassian_rovo".to_string(), "Atlassian Rovo".to_string())]);
+        write_display_labels_to(&path, &labels).await.unwrap();
+        assert_eq!(load_display_labels_from(&path).await.unwrap(), labels);
+
+        let mut response = reconcile_snapshots(vec![snapshot(
+            BaseCodingAgent::ClaudeCode,
+            HashMap::from([(
+                "atlassian_rovo".to_string(),
+                json!({"url": "https://rovo.example/mcp"}),
+            )]),
+        )]);
+        attach_display_labels(&mut response, &labels);
+        assert_eq!(
+            response.servers[0].display_name.as_deref(),
+            Some("Atlassian Rovo")
+        );
+        assert!(
+            response.servers[0]
+                .definition
+                .value
+                .get("display_name")
+                .is_none()
+        );
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[test]
+    fn display_label_merge_preserves_unresolved_existing_servers() {
+        let current = BTreeMap::from([
+            ("conflicted".to_string(), "Friendly Conflict".to_string()),
+            ("removed".to_string(), "Removed".to_string()),
+        ]);
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "updated".to_string(),
+                display_name: Some("Updated Label".to_string()),
+                definition: canonical_definition(&json!({"command":"npx"})),
+                assignments: vec![BaseCodingAgent::ClaudeCode],
+                native_overrides: HashMap::new(),
+            }],
+            removed_servers: vec!["removed".to_string()],
+            resolved_conflicts: Vec::new(),
+        };
+        let existing = HashSet::from(["conflicted".to_string(), "updated".to_string()]);
+        assert_eq!(
+            merged_display_labels(current, &request, &existing, None),
+            BTreeMap::from([
+                ("conflicted".to_string(), "Friendly Conflict".to_string()),
+                ("updated".to_string(), "Updated Label".to_string()),
+            ])
+        );
     }
 
     #[test]
     fn duplicate_identifiers_are_rejected_after_the_user_repairs_them() {
         let server = |name: &str| SharedMcpServerInput {
             name: name.to_string(),
+            display_name: None,
             definition: canonical_definition(&json!({"command":"npx"})),
             assignments: vec![BaseCodingAgent::ClaudeCode],
             native_overrides: HashMap::new(),
@@ -1528,6 +2269,7 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         let request = SharedMcpWriteRequest {
             servers: vec![SharedMcpServerInput {
                 name: "Vibe Kanban".to_string(),
+                display_name: Some("Vibe Kanban".to_string()),
                 definition: canonical_definition(&json!({"command":"npx"})),
                 assignments: vec![BaseCodingAgent::ClaudeCode],
                 native_overrides: HashMap::new(),
@@ -1538,5 +2280,33 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         let error = validate_write_request(&request).unwrap_err();
         assert!(error.contains("^[a-zA-Z0-9_-]+$"));
         assert!(error.contains("Use `vibe_kanban`"));
+    }
+
+    #[test]
+    fn unchanged_legacy_identifier_does_not_block_an_unrelated_save() {
+        let legacy_entry = json!({"command":"npx", "args":["atlassian-rovo"]});
+        let legacy = SharedMcpServerInput {
+            name: "Atlassian Rovo".to_string(),
+            display_name: Some("Atlassian Rovo".to_string()),
+            definition: canonical_definition(&legacy_entry),
+            assignments: vec![BaseCodingAgent::ClaudeCode],
+            native_overrides: HashMap::new(),
+        };
+        let request = SharedMcpWriteRequest {
+            servers: vec![legacy.clone()],
+            removed_servers: vec!["deleted".to_string()],
+            resolved_conflicts: Vec::new(),
+        };
+        let snapshots = vec![snapshot(
+            BaseCodingAgent::ClaudeCode,
+            HashMap::from([("Atlassian Rovo".to_string(), legacy_entry)]),
+        )];
+
+        assert!(validate_write_request_against_snapshots(&request, &snapshots).is_ok());
+
+        let mut changed = request;
+        changed.servers[0].definition = canonical_definition(&json!({"command":"different"}));
+        let error = validate_write_request_against_snapshots(&changed, &snapshots).unwrap_err();
+        assert!(error.contains("Use `atlassian_rovo`"));
     }
 }

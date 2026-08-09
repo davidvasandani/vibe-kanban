@@ -7,6 +7,8 @@ import { PreviewControlsContainer } from './PreviewControlsContainer';
 import { BrowserControlsContainer } from './BrowserControlsContainer';
 import { GitPanelContainer } from './GitPanelContainer';
 import { ServerMetricsSectionContainer } from './ServerMetricsSectionContainer';
+import { ServerAffinitySectionContainer } from './ServerAffinitySectionContainer';
+import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { TerminalPanelContainer } from '@/shared/components/TerminalPanelContainer';
 import { WorkspaceNotesContainer } from './WorkspaceNotesContainer';
 import { useDiffs } from '@/shared/stores/useWorkspaceDiffStore';
@@ -25,6 +27,7 @@ import {
   CollapsibleSectionHeader,
   type SectionAction,
 } from '@vibe/ui/components/CollapsibleSectionHeader';
+import { getServerAffinityLabel } from './serverAffinityLabel';
 
 type SectionDef = {
   title: string;
@@ -34,6 +37,7 @@ type SectionDef = {
   collapsible?: boolean;
   content: React.ReactNode;
   actions: SectionAction[];
+  headerExtra?: React.ReactNode;
 };
 
 export interface RightSidebarProps {
@@ -53,6 +57,14 @@ export const RightSidebar = memo(function RightSidebar({
   const diffs = useDiffs();
   const isTerminalVisible = useUiPreferencesStore((s) => s.isTerminalVisible);
   const { expandTerminal, isTerminalExpanded } = useLogsPanel();
+  const { activeWorkspaces } = useWorkspaceContext();
+  const selectedWorkspaceSummary = activeWorkspaces.find(
+    (workspace) => workspace.id === selectedWorkspace?.id
+  );
+  const serverAffinityLabel = getServerAffinityLabel(
+    selectedWorkspaceSummary?.serverAffinity,
+    (kind) => t(`common:workspaces.serverAffinity.${kind}`)
+  );
 
   const [changesExpanded] = usePersistedExpanded(
     PERSIST_KEYS.changesSection,
@@ -76,6 +88,10 @@ export const RightSidebar = memo(function RightSidebar({
   );
   const [serverMetricsExpanded] = usePersistedExpanded(
     PERSIST_KEYS.serverMetricsSection,
+    false
+  );
+  const [serverAffinityExpanded] = usePersistedExpanded(
+    PERSIST_KEYS.serverAffinitySection,
     false
   );
   const [terminalExpanded] = usePersistedExpanded(
@@ -131,6 +147,29 @@ export const RightSidebar = memo(function RightSidebar({
             repos={repos}
           />
         ),
+        actions: [],
+      },
+      {
+        title: t('common:sections.serverAffinity', {
+          defaultValue: 'Server Affinity',
+        }),
+        persistKey: PERSIST_KEYS.serverAffinitySection,
+        visible: !!selectedWorkspace,
+        expanded: serverAffinityExpanded,
+        headerExtra: serverAffinityLabel ? (
+          <span
+            className="min-w-0 max-w-28 truncate text-sm text-low"
+            title={serverAffinityLabel}
+          >
+            {serverAffinityLabel}
+          </span>
+        ) : null,
+        content: selectedWorkspace ? (
+          <ServerAffinitySectionContainer
+            workspaceId={selectedWorkspace.id}
+            isRunning={selectedWorkspaceSummary?.isRunning ?? false}
+          />
+        ) : null,
         actions: [],
       },
       {
@@ -235,16 +274,16 @@ export const RightSidebar = memo(function RightSidebar({
   }, [
     rightMainPanelMode,
     selectedWorkspace,
+    linkedIssueForWorkspace,
     repos,
     diffs,
     gitExpanded,
     serverMetricsExpanded,
+    serverAffinityExpanded,
+    serverAffinityLabel,
+    selectedWorkspaceSummary?.isRunning,
     terminalExpanded,
     notesExpanded,
-    changesExpanded,
-    processesExpanded,
-    devServerExpanded,
-    browserExpanded,
     isTerminalVisible,
     isTerminalExpanded,
     hasUpperContent,
@@ -266,6 +305,7 @@ export const RightSidebar = memo(function RightSidebar({
               defaultExpanded={section.expanded}
               collapsible={section.collapsible ?? true}
               actions={section.actions}
+              headerExtra={section.headerExtra}
               fillAvailableSpace
             >
               <div className="flex min-h-0 flex-1 border-t w-full overflow-auto">

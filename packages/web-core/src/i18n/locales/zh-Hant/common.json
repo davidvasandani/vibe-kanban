@@ -108,6 +108,23 @@
     "label": "標籤"
   },
   "workspaces": {
+    "serverAffinity": {
+      "local": "本機",
+      "automatic": "自動配置",
+      "worker": "工作節點",
+      "unassigned": "未指派",
+      "current": "目前伺服器",
+      "runOn": "執行於",
+      "coordinator": "協調器",
+      "unavailable": "無法使用",
+      "localDescription": "此 Vibe Kanban 執行個體在本機執行工作區。",
+      "confirmTitle": "遷移執行中的工作？",
+      "confirmMessage": "Vibe Kanban 將停止目前工作、變更伺服器親和性，並使用受管理的繼續提示重新啟動工作。",
+      "confirmAction": "停止、遷移並重新啟動",
+      "updated": "伺服器親和性已更新",
+      "updateFailed": "無法更新伺服器親和性",
+      "restartFailed": "親和性已變更，但工作無法重新啟動"
+    },
     "title": "工作區",
     "searchPlaceholder": "搜尋...",
     "active": "活躍",
@@ -189,6 +206,7 @@
     "nextGitHubComment": "下一個有評論的檔案"
   },
   "sections": {
+    "serverAffinity": "伺服器親和性",
     "changes": "變更",
     "repositories": "儲存庫",
     "addRepositories": "新增儲存庫",

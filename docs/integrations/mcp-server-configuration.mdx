@@ -27,13 +27,15 @@ MCP servers provide additional functionality to coding agents through standardiz
 
 Vibe Kanban provides popular MCP server templates. Add a template, then choose the compatible agents that should receive it.
 
+You can add the same template more than once. The first instance takes the template's own name; later ones are numbered (`gmail`, `gmail_2`, `gmail_3`), and you can rename each to something meaningful. This is how you run one connector against several accounts — two Slack workspaces, or a Gmail server per mailbox.
+
 <Frame>
 <img src="/images/settings-popular-mcp-servers.png" alt="Popular MCP servers including Vibe Kanban, Context7, Playwright, Exa, Chrome DevTools, and Dev Manager" />
 </Frame>
 
 ### Slack connector
 
-The Slack template installs a pinned build of the
+The generic Slack template installs a pinned build of the
 [davidvasandani/slack-mcp-server](https://github.com/davidvasandani/slack-mcp-server)
 fork rather than the upstream npm package, because the fork adds attachment
 retrieval:
@@ -56,15 +58,38 @@ Release **v1.3.0-vk.2** is based on upstream 1.3.0 and includes fork commit
 downloads the server binary for your platform from that same release, verifies
 it against a SHA-256 recorded at build time, caches it, and runs it. A
 verification failure is fatal — the connector never falls back to a different
-build. Paste your Slack user token (`xoxp-…`) in place of `YOUR_TOKEN`.
+build. Paste your Slack user token (`xoxp-…`) in place of `YOUR_TOKEN` when
+using this local stdio form.
 
-The launcher verifies the platform binary, but npm downloads the launcher
+Clustered self-hosted deployments can instead set
+`VIBE_KANBAN_SLACK_MCP_URL` to one operator-hosted Streamable HTTP endpoint.
+When set, Vibe Kanban exposes the bundled Slack definition as URL-only HTTP:
+
+```json
+{
+  "type": "http",
+  "url": "http://172.16.100.102:13080/mcp"
+}
+```
+
+The Slack token then belongs only to the supervised server and is not written
+to agent configuration. Exact saved copies of the previously shipped stdio
+templates reconcile to this HTTP definition; modified or custom `slack` entries
+are left untouched. Migration deliberately drops the old
+`SLACK_MCP_XOXP_TOKEN` instead of turning it into a client header.
+
+For generic stdio installs, the launcher verifies the platform binary, but npm downloads the launcher
 tarball itself without an expected integrity value. A release writer could
 replace that outer asset under the existing tag before the daily audit detects
 it. Vibe Kanban records the expected launcher digest, audits it daily, and opens
 a GitHub issue on failure; this is a detection control, not install-time
 verification. Upgrades still use reviewed new `-vk.<n+1>` tags rather than
 re-uploading an existing asset.
+
+An operator-hosted Nix deployment can close that outer gap by fetching the
+launcher tarball as a fixed-output derivation before passing the verified local
+path to `npx`. The server still uses the same fork tag and platform-binary
+digest checks.
 
 <Note>
 The fork exposes `attachment_get_data`, which takes a `file_id` (the ID shown in
@@ -95,7 +120,8 @@ In the fork, tag the revision and run `scripts/build-release.sh`, then publish
 the binaries, the launcher tarball, and `checksums.txt` as release assets.
 </Step>
 <Step title="Update the pin">
-Change the URL in `crates/executors/default_mcp.json` and the
+Change the URL in `crates/executors/default_mcp.json`, any deployment-owned
+fixed-output URL/hash, and the
 `SLACK_MCP_FORK_TAG` and `SLACK_MCP_LAUNCHER_SHA256` constants in
 `crates/executors/src/mcp_config.rs`, and the version named on this page — all
 in the same change.
@@ -106,6 +132,137 @@ to confirm the published tarball matches the recorded audit digest. `npx` does
 not enforce this digest when it installs a URL package.
 </Step>
 </Steps>
+
+### Gmail connector
+
+The Gmail template installs a pinned revision of the
+[davidvasandani/Gmail-MCP-Server](https://github.com/davidvasandani/Gmail-MCP-Server)
+fork:
+
+```json
+{
+  "command": "npx",
+  "args": [
+    "-y",
+    "github:davidvasandani/Gmail-MCP-Server#030da3492753222a41645a9f343466d151c63f3c",
+    "--tool-prefix=YOUR_PREFIX_"
+  ],
+  "env": { "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/credentials.json" }
+}
+```
+
+The pin is a commit SHA, so the installed code cannot change under you. Replace
+both placeholders before saving — Vibe Kanban does not check that you have.
+
+<Warning>
+Give `GMAIL_CREDENTIALS_PATH` an **absolute** path. This value is copied verbatim
+into your agent's configuration and the server is started without a shell, so
+`~` is never expanded: a `~/.gmail-mcp/…` value resolves against the agent's
+working directory, which is a task worktree. You would get a literal `~`
+directory inside your repository — containing a Gmail refresh token.
+
+Keep the trailing underscore on the prefix (`personal_`, not `personal`), or your
+tools come out as `personalsearch_emails`.
+</Warning>
+
+<Note>
+This entry installs from a Git revision rather than a published package, so `git`
+and network access are required, and the **first** launch compiles the server
+from source (roughly a minute). Later launches reuse the npm cache. Unlike other
+connectors, no credential is stored in your agent's configuration — only the
+*path* to a credentials file that the Gmail server owns.
+</Note>
+
+#### Prerequisites
+
+Setting up Gmail is two steps, and both matter. Missing the first is loud;
+missing the second is quiet.
+
+<Steps>
+<Step title="Create a Google Cloud OAuth client (once)">
+Create an OAuth client of type **Desktop app** in a Google Cloud project with the
+Gmail API enabled, download its JSON, and save it as
+`~/.gmail-mcp/gcp-oauth.keys.json`.
+
+This file identifies the *project*, not a mailbox, so every Gmail instance you
+create shares it. That is why the template does not ask you for its path.
+
+<Warning>
+Without this file the server exits before it finishes starting, so **Test
+connection** reports a failure naming the missing file. That is unfinished setup,
+not a broken connector.
+</Warning>
+</Step>
+
+<Step title="Authorise each mailbox (once per account)">
+Run the server's own `auth` command in a terminal, once per mailbox, with
+`GMAIL_CREDENTIALS_PATH` pointing at where that account's tokens should live.
+Omit `--tool-prefix`; it plays no part in authentication.
+
+```bash
+GMAIL_CREDENTIALS_PATH=~/.gmail-mcp/credentials-personal.json \
+  npx -y github:davidvasandani/Gmail-MCP-Server#030da3492753222a41645a9f343466d151c63f3c auth
+```
+
+Your browser opens for consent, and the refresh token is written to that path.
+Repeat for each mailbox with a different filename.
+
+Narrow the permissions you grant with `--scopes`, for example
+`--scopes=gmail.readonly`. Deleting messages requires the full scope.
+
+<Warning>
+Skipping this step for an account is the quiet failure: the connector still
+**tests green**, because listing tools needs only the OAuth client file. It fails
+the first time the agent actually reads mail.
+</Warning>
+</Step>
+</Steps>
+
+#### Running several mailboxes at once
+
+One server instance serves exactly one mailbox, because it loads a single set of
+credentials. For several mailboxes, add the Gmail template once per account and
+give each instance its own credentials path and its own tool prefix:
+
+| Server name | `GMAIL_CREDENTIALS_PATH` | `--tool-prefix` |
+| --- | --- | --- |
+| `gmail_personal` | `/home/you/.gmail-mcp/credentials-personal.json` | `personal_` |
+| `gmail_work` | `/home/you/.gmail-mcp/credentials-work.json` | `work_` |
+| `gmail_client` | `/home/you/.gmail-mcp/credentials-client.json` | `client_` |
+
+Substitute your own home directory. These must be absolute for the reason given
+above; the `~` in the `auth` command below is expanded by your shell, but the
+same text in the configuration field is not.
+
+Server names are protocol identifiers, so they may contain only letters, digits,
+underscores and hyphens — `gmail_personal`, not `Gmail (Personal)`.
+
+<Warning>
+Give every instance a **different** `--tool-prefix`. Some agents identify tools
+by their base name across servers, so two instances sharing a prefix leave one
+silently shadowing the other: you see a working `search_emails` that reads the
+wrong mailbox. With distinct prefixes the agent sees `personal_search_emails` and
+`work_search_emails` and can address each mailbox deliberately.
+
+Two instances sharing a `GMAIL_CREDENTIALS_PATH` simply read the same mailbox.
+</Warning>
+
+Each instance contributes 28 tools, so three mailboxes add 84. Assign only the
+instances an agent genuinely needs, and use `--scopes` to keep each one narrow —
+see the tip on limiting MCP servers below.
+
+#### Updating the pin
+
+Renovate cannot track a commit SHA on a fork that publishes no releases, so this
+pin is updated by hand. A bump moves the SHA in
+`crates/executors/default_mcp.json`, the `GMAIL_MCP_FORK_REVISION` constant in
+`crates/executors/src/mcp_config.rs`, and the revision on this page — together.
+
+There is no separate checksum to refresh and no scheduled audit, unlike the Slack
+connector above: a commit SHA cannot be re-pointed, so a recorded digest would
+only ever confirm that a hash equals itself. Note that the SHA pins the fork's
+source, not its dependency versions — installing from Git runs the package's own
+build, which resolves its dependencies from npm at that moment.
 
 ## Adding Custom MCP Servers
 

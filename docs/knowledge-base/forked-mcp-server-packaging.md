@@ -1,6 +1,7 @@
 # Packaging a forked MCP server VK can pin
 
-Contributing tasks: `36d7-use-the-maintain`, `95e9-close-the-unveri`
+Contributing tasks: `36d7-use-the-maintain`, `95e9-close-the-unveri`,
+`4daf-gmail-mcp`, `967a-migrate-slack-mc`
 
 How to ship a **fork** of a third-party MCP server through
 `crates/executors/default_mcp.json` when the upstream package name is not ours
@@ -32,11 +33,60 @@ Alternatives and why they lost:
 | Publish a fork npm package | Requires registry credentials the project does not have; the upstream name is not ours. |
 | `go run github.com/<fork>/…@<rev>` | A fork keeps upstream's `module` path, so the import path never resolves; renaming touches every import and fights future merges. Adds a Go prerequisite. |
 | `docker run …@sha256:…` | Pinnable, but adds Docker where `npx` already suffices. |
-| `npx github:owner/repo#<sha>` | Pinned, but clones the whole (Go) repo per cache miss and still needs a binary source at run time. |
+| `npx github:owner/repo#<sha>` | Pinned, but clones the whole (Go) repo per cache miss and still needs a binary source at run time. **Scope: this objection is Go-specific.** For a Node package with a `prepare` script the checkout *is* the runnable artifact — see [When the fork is a Node package](#when-the-fork-is-a-node-package-pin-the-commit). |
 
 Publishing per-platform packages as URL-spec `optionalDependencies` does **not**
 work: `os`/`cpu` filtering needs a registry packument, so npm downloads all six
 platform tarballs. Ship one small launcher that fetches exactly one binary.
+
+## When the fork is a Node package: pin the commit (task 4daf)
+
+Everything above describes the **Slack** fork, which is a Go program: a git
+checkout of Go source is not runnable by `npx`, so a launcher that downloads a
+compiled per-platform binary was unavoidable, and the two-digest apparatus
+follows from that.
+
+A fork that is already a Node package needs none of it. If its `package.json`
+declares `"prepare": "npm run build"`, npm compiles the TypeScript when
+installing from a git spec, so `npx -y github:<owner>/<repo>#<40-hex-sha>` yields
+a working `dist/`. The Gmail connector ships this way (measured: ~53 s cold
+install, then cached).
+
+**A content-addressed pin is the integrity record.** Slack needs
+`SLACK_MCP_LAUNCHER_SHA256` and a daily audit because a release asset names a
+*location* whose bytes a maintainer can replace under a fixed tag. A commit SHA
+names an immutable object. Recording a digest of it and re-checking that on a
+schedule would assert a hash equals itself — so a commit-pinned entry gets **no
+digest constant and no audit workflow**, and a reviewer should not demand parity
+with the weaker mechanism.
+
+**But state the scope honestly.** The SHA pins the fork's *source*, not its
+dependency closure: a `github:` install runs `prepare`, which resolves
+dependencies from npm at install time. What executes is therefore *less*
+reproducible than Slack's statically linked, digest-checked binary. The argument
+for no audit job is that auditing an immutable pin is a no-op — not that this
+delivery mechanism is stronger overall. Getting this backwards is an easy and
+tempting over-claim.
+
+Costs to document rather than hide: the first launch builds from source, and the
+install needs `git`, network, and `prepare` to actually run (`ignore-scripts=true`
+suppresses it).
+
+**Renovate cannot follow a bare SHA on a release-less fork**, and the fix is *not*
+to add a manager anyway. A manager that matches the pin and can never propose a
+successor is the same "coverage that looks real and is not" failure as the
+`ignoreUnstable` trap below. Record the pin as hand-bumped in `AGENTS.md`
+instead — a known-manual pin beats fictitious automation.
+
+The shape test adapts directly: parse `github:<owner>/<repo>#<commit-ish>`,
+assert `owner/repo` equals the owner/repo in `meta.<server>.url`, assert the
+commit-ish is 40 lowercase hex characters, and reject `#main`, `#master`,
+`refs/heads/`, `@latest`, and a fragment-less bare repo reference. The
+40-hex-length check is what actually catches branches and tags; the
+forbidden-substring loop is inherited readability, not incremental coverage.
+
+Preferred end state is unchanged: a fork-controlled npm package at an exact
+version, where npm verifies `dist.integrity`.
 
 ## The launcher's non-negotiables
 
@@ -138,6 +188,13 @@ inside the current launcher starts too late to protect that launcher itself.
   that should create the incident skips the notification step.
 
 ## Building the artifact
+
+An operator-owned Nix deployment can close the outer-tarball gap that generic
+`npx` installs retain: fetch the launcher URL as a fixed-output derivation, then
+pass the verified store path to `npx`. Keep that deployment URL/hash in the same
+coordinated review as the catalog tag and digest. If an stdio-to-HTTP migration
+recognizes shipped launchers, its historical list is append-only so a later pin
+bump does not strand old credential-bearing native configs.
 
 - `npm pack` on a **scoped** package emits `scope-name-version.tgz`; if the pin
   says otherwise the install 404s. Keep the launcher unscoped so the packed
