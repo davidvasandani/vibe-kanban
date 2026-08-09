@@ -1,22 +1,32 @@
-# VK Soft Restart Resilience — Implementation Plan
+# Implementation Plan: Scrollable Create-Issue Settings
 
-> Delivery note: SpecKit analysis found that production already has the stable
-> cluster-worker boundary. Implementation therefore hardened that boundary for
-> coding-agent executions; PTY and standalone/local-server resilience remain
-> explicitly out of scope for this increment.
+**Task ID:** `vk/4f69-vk-create-issue`
 
-This plan will be refined by the required SpecKit research, clarification, planning, task, and analysis stages. It is intentionally scoped to the Vibe Kanban repository and `homelab/modules/vibe-kanban-rebuild.nix`.
+1. Refresh the repository SpecKit constitution and create the task's feature
+   artifacts under a task-specific `specs/vk/` directory.
+2. Reconcile the feature specification with `SPEC.md`, the supplied mobile
+   screenshot, `PRIOR_KNOWLEDGE.md`, and the existing issue-panel host/layout
+   hierarchy; resolve ambiguities without expanding beyond Vibe Kanban.
+3. Produce the SpecKit technical plan, research, contracts/data-model notes,
+   dependency-ordered tasks, and pre-implementation analysis.
+4. Add focused regression coverage for the issue-panel layout contract:
+   fixed/clipped shell, shrinkable vertically scrolling content, and create
+   controls contained within that scroll region.
+5. Update the shared `KanbanIssuePanel` flex sizing so constrained mobile and
+   desktop hosts allow the content child to shrink and scroll while the header
+   remains fixed.
+6. Install frozen workspace dependencies if required, then run the focused UI
+   test, formatting, relevant frontend type/lint verification, and
+   `git diff --check`.
+7. Run an independent Codex diff review, address confirmed significant
+   findings, and repeat verification/review until clean.
+8. Record the reusable nested-flex scroll-containment pattern and regression
+   approach in `docs/knowledge-base/`, tag it `vk/4f69-vk-create-issue`, refresh
+   the index, and commit that knowledge-base update.
+9. Merge the completed task branch into its base branch after confirming both
+   repositories remain scoped correctly and clean apart from intended work.
 
-1. **Baseline and map ownership.** Install locked dependencies, run focused existing tests, and trace every local execution resource owned by `LocalContainerService`: child/process group, stdin/input channels, log normalization and persistence, exit monitoring, cancellation/approval, terminal sessions, dev-server routing, and warm processes. Record which resources must survive application replacement.
-2. **Choose the smallest stable boundary.** Evaluate reusing the existing coordinator/worker protocol and worker crate on localhost versus extracting a supervisor-specific crate. Select the approach that keeps executor behavior in one implementation, preserves SQLite single-writer authority, and can negotiate protocol compatibility before a deploy.
-3. **Define contracts and state.** Specify supervisor/app generations, execution identity, idempotent command keys, ordered event sequence/cursors, replay bounds/gaps, attach/detach, inventory reconciliation, terminal acknowledgements, readiness, drain, and hard shutdown. Add shared Rust types and serialization/compatibility tests without editing generated TypeScript directly.
-4. **Build the long-lived process owner.** Implement a dedicated supervisor/bootstrap binary or extend the local worker runtime so it owns managed subprocesses and all supporting lifecycle tasks independently of the HTTP application. Protect its Unix-domain IPC endpoint with filesystem permissions, retain bounded event replay, and expose structured status/metrics.
-5. **Introduce an application-side client abstraction.** Route local execution spawn/input/stop/query/preview operations through a supervisor client in production while retaining an in-process implementation for tests/desktop or explicit development mode. Make uncertain spawn responses idempotently retryable.
-6. **Implement startup attachment and reconciliation.** Before application readiness, negotiate protocol versions, attach a new application generation, obtain authoritative inventory, reconcile database rows in both directions, and resume streams from acknowledged cursors. Run existing interrupted-worktree recovery only for rows not validated by the live supervisor.
-7. **Split soft detach from hard shutdown.** Add explicit shutdown intent. Soft application replacement drains HTTP traffic and detaches without cancelling execution tokens or dropping kill-on-drop child owners; hard shutdown retains process-group termination, WIP preservation, warm-process reaping, and terminal-state policy.
-8. **Implement serialized release handoff.** Add Nix/systemd units and a deployment command so the stable supervisor remains running while it starts the new release, transfers application write authority only after readiness/reconciliation, and retires the old generation. Preserve `/api/health` probing, immutable releases, matching static assets, and rollback. Reject incompatible supervisor protocol upgrades with a clear hard-restart requirement.
-9. **Harden frontend reconnect behavior.** Locate local REST/WebSocket/SSE error boundaries and query caches. Preserve rendered workspace/conversation state during a restart, add a reconnecting indicator with bounded exponential backoff/jitter, restore subscriptions from their cursors, explicitly clear recovery state, and coordinate a full asset reload only when the ready server reports an incompatible frontend build.
-10. **Test lifecycle invariants.** Add unit tests for negotiation, idempotent commands, replay ordering/deduplication/gaps, reconciliation, and shutdown intent. Add process-level integration tests proving the same PID/process group and execution ID survive an application handoff, output is exact across the gap, terminal events reconcile while detached, failed candidates roll back, and a true supervisor loss invokes orphan recovery.
-11. **Verify deployment and UI.** Run formatting, targeted Rust and frontend suites, workspace checks appropriate to changed crates/packages, and Nix evaluation/tests for the deployment module. Perform a staging drill with a real coding-agent turn and dev server if the environment exposes the Vibe Kanban host; otherwise provide an exact operator drill and clearly identify the unexecuted external verification.
-12. **Independent review.** Run the required Codex CLI review over the scoped diff, fix confirmed significant findings, re-run affected verification, and repeat until no significant findings remain.
-13. **Document reusable knowledge.** Add or update a focused page in `docs/knowledge-base/` tagged `vk/9632-vk-soft-restarts`, refresh `docs/knowledge-base/INDEX.md`, and commit the knowledge-base update before handoff.
+Steps 4 and 5 will be represented in the dependency-ordered SpecKit task list;
+tests should land before or alongside the implementation so the regression is
+demonstrable. No deployment/IaC update is expected because this is a shared
+frontend source fix only.
