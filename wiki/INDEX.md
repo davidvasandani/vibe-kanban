@@ -113,7 +113,9 @@ contributed to it.
 - [self-hosted-deployment.md](self-hosted-deployment.md) — Versioned-release
   deploy contract (`VK_RELEASES_DIR`), why services must not run from the
   source checkout, deploy-loop invariants (reconciler over edge triggers,
-  health-gated rollback, paging), health endpoints, rejected alternatives.
+  health-gated rollback, paging), one-source artifact identity (`sha` plus an
+  optional build/publish timestamp surfaced through `/api/info`), health
+  endpoints, rejected alternatives.
 - [project-context-map.md](project-context-map.md) — Giving a spawned issue its
   scope in a monorepo: a machine-readable `project-context.json` mapping service
   → source path → governing IaC (JSON+jq not YAML, empty-list = no IaC, single

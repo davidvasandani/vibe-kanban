@@ -37,6 +37,27 @@ Unset (CI, local dev), the build behaves exactly as before. Key properties:
   remote-web static release `build-<id>` come from one script run, which is
   what lets a health-gate rollback revert *both* consistently.
 
+## Surfacing deployed identity in the UI
+
+Deployment identity should come from the immutable artifact, not from the
+service process. `local-build.sh` now calculates one UTC timestamp before the
+release build, exports it as `VK_BUILD_TIMESTAMP` for the server build script,
+and writes the identical value to `release.json.built_at`. The server exposes
+that optional timestamp beside its embedded `VK_GIT_SHA` through `/api/info`.
+
+This creates one convention for “time since deployed”:
+
+- it means time since the running immutable release was built/published;
+- restarting the service does not reset it, because a restart is not a deploy;
+- unstamped and older builds return no timestamp, so clients retain revision
+  identity without fabricating an age;
+- the browser derives relative age from the timestamp and may update it locally
+  without polling a second deployment endpoint.
+
+Keep the value optional in API contracts. Release-path access is not guaranteed
+for every packaging mode, and reading `current/release.json` on each request
+would couple the server to one host layout unnecessarily.
+
 ## Why services must not run from the source checkout
 
 `/srv/src/vibe-kanban` on the deploy host is simultaneously: poll target
@@ -104,3 +125,4 @@ migrations) completed, because the listener binds only after init.
 ## Contributed by
 
 - vk/f00d-vibe-kanban-depl
+- vk/7596-deploy-status-mo

@@ -1,66 +1,58 @@
-# Technical Spec: Scrollable Create-Issue Settings
+# Deploy Status in the Mobile Header
 
-**Task ID:** `vk/4f69-vk-create-issue`<br>
-**Service:** Vibe Kanban<br>
-**Status:** Draft before implementation
+## Summary
+
+Expose the running Vibe Kanban deployment's short Git SHA and elapsed time since deployment in the mobile navigation header. The desktop rail already exposes the SHA; this change makes equivalent deployment identity visible on narrow/mobile layouts without opening settings or switching views.
 
 ## Problem
 
-On constrained viewports, especially mobile, the create-issue panel's lower
-settings and submit controls can extend below the visible panel. The panel is
-intended to provide a vertically scrollable content region, but its flex sizing
-does not reliably allow that region to shrink below its content's intrinsic
-height. As a result, controls are cut off and the user cannot scroll to them.
+The mobile UI header contains navigation and utility actions but no deployment identity. Operators therefore cannot tell which revision is running or how recently it was deployed from the mobile interface, even though the backend already reports the build version.
 
-## Scope
+## Goals
 
-- Correct the create/edit issue panel layout so its content region becomes the
-  scroll container within the available panel height.
-- Preserve the fixed header, current control order, and existing create/edit
-  behavior.
-- Add regression coverage that asserts the panel shell and content region use
-  the sizing and overflow contract required for scrolling.
-- Limit code and documentation changes to the Vibe Kanban repository. No other
-  service or deployment configuration is in scope.
+- Display the running short Git SHA in the mobile header.
+- Display a compact, human-readable elapsed duration since that deployment.
+- Preserve the existing mobile navigation actions and usable layout at phone widths.
+- Link a real SHA to its GitHub commit, consistent with the desktop UI.
+- Keep local unstamped builds (`dev`) understandable and non-linking.
+- Add focused automated coverage for presentation and responsive behavior where practical.
 
-## Technical Approach
+## Non-goals
 
-The panel shell is a column flex container. Its scrolling child must be allowed
-to shrink inside that container; in CSS flex layouts this requires a zero
-minimum block size (`min-h-0`) on the relevant flex item (and, where necessary,
-the shell). Retain `overflow-y-auto` on the content region and
-`overflow-hidden` on the shell so scrolling occurs inside the issue panel rather
-than leaking to an ancestor or the page.
+- Changing deployment infrastructure or any service other than Vibe Kanban.
+- Changing the desktop deployment indicator beyond extracting reusable presentation logic if useful.
+- Adding a deployment history or release notes UI.
+- Inferring deploy time from client page-load time.
 
-Regression coverage will render `KanbanIssuePanel` and verify that:
+## Functional requirements
 
-1. the panel shell remains a height-constrained, overflow-clipping flex column;
-2. the content region is a shrinkable flex child with vertical auto overflow;
-3. create-only settings and the Create Issue action remain inside that region.
+1. The server info/config response must provide both the embedded Git revision and an authoritative build/deployment timestamp suitable for elapsed-time display.
+2. The shared application layout must pass deployment metadata to the mobile navbar.
+3. On mobile, the header must render a compact deployment indicator containing the short SHA and elapsed time (for example, `abc1234 · 2h`).
+4. Elapsed time must update while the page remains open at an interval appropriate to its displayed precision.
+5. A non-`dev` SHA must link to the matching `davidvasandani/vibe-kanban` commit in a new tab with safe external-link attributes.
+6. The `dev` sentinel must render as plain text and must not produce a misleading GitHub link.
+7. Missing deployment metadata must fail gracefully without an empty or broken control.
+8. Existing refresh/update-available behavior must remain intact.
 
-## Acceptance Criteria
+## UX and accessibility
 
-1. On a short/mobile-height viewport, users can vertically scroll from the top
-   of create-issue content through pipeline/settings controls to the Create
-   Issue button.
-2. The header stays outside the scrolling content and remains visible.
-3. Edit-mode content continues to scroll and its section ordering is unchanged.
-4. Existing keyboard, attachment, draft-workspace, pipeline, and submission
-   behavior is unchanged.
-5. Focused frontend tests, formatting, and relevant type/lint checks pass.
+- The indicator must remain legible but visually secondary to navigation.
+- Its full accessible label/title must identify the deployed revision and elapsed time without relying only on compact abbreviations.
+- It must not force the right-side mobile controls outside the viewport; truncation or responsive hiding of lower-priority text is acceptable at very narrow widths.
+- Touch targets and existing header actions must retain their current behavior.
 
-## Risks and Mitigations
+## Acceptance criteria
 
-- **Ancestor height contract differs across hosts:** keep the change local to
-  the shared issue panel and test its explicit flex/overflow contract.
-- **Accidental nested/page scrolling:** preserve the shell's clipped overflow
-  and designate only the content child as vertically scrollable.
-- **Visual regressions in edit mode:** use the same scrolling contract for both
-  modes and retain existing DOM ordering.
+- A deployed production build shows its short SHA and time since deployment in the mobile header shown in the task screenshot.
+- Tapping the SHA opens the exact GitHub commit.
+- The elapsed label is derived from server-supplied deployment/build time and advances over time.
+- A local `dev` build renders safely without a commit link.
+- The mobile header remains functional at representative phone widths.
+- Relevant frontend/backend tests and type checks pass.
 
-## Verification
+## Constraints and risks
 
-- Run the focused `KanbanIssuePanel` test suite.
-- Run repository formatting.
-- Run the relevant frontend typecheck/lint commands available in the workspace.
-- Independently review the completed diff and address confirmed findings.
+- Build metadata must be deterministic and embedded by the existing Rust build path; runtime filesystem or Git access is not assumed.
+- Timestamp semantics must be documented clearly (build time versus service start time). If only build time is available, UI wording must avoid claiming stronger precision than the data supports.
+- Generated TypeScript API types must only be changed through their Rust source generator.

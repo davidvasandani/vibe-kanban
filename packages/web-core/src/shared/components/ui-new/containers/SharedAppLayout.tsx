@@ -71,7 +71,7 @@ export function SharedAppLayout() {
     (s) => s.isLeftSidebarVisible
   );
   const { isSignedIn } = useAuth();
-  const { appVersion } = useUserSystem();
+  const { appVersion, deploymentTimestamp } = useUserSystem();
   const updateVersion = useAppUpdateStore((s) => s.updateVersion);
   const restartForUpdate = useAppUpdateStore((s) => s.restart);
   const { updateAvailable: deployUpdateAvailable } = useDeployUpdateAvailable();
@@ -450,6 +450,8 @@ export function SharedAppLayout() {
             )}
             <NavbarContainer
               mobileMode={isMobile}
+              appVersion={appVersion}
+              deploymentTimestamp={deploymentTimestamp}
               onOrgSelect={setSelectedOrgId}
               onOpenDrawer={() => setIsDrawerOpen(true)}
             />

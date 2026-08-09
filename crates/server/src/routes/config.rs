@@ -105,6 +105,7 @@ impl Environment {
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct UserSystemInfo {
     pub version: String,
+    pub deployment_timestamp: Option<String>,
     pub config: Config,
     pub machine_id: String,
     pub login_status: LoginStatus,
@@ -178,6 +179,7 @@ async fn get_user_system_info(
 
     let user_system_info = UserSystemInfo {
         version: option_env!("VK_GIT_SHA").unwrap_or("dev").to_string(),
+        deployment_timestamp: option_env!("VK_BUILD_TIMESTAMP").map(str::to_string),
         config,
         machine_id: deployment.user_id().to_string(),
         login_status,
