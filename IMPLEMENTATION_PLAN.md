@@ -1,12 +1,16 @@
-# Implementation Plan: Executor-Neutral MCP Restart
+# Implementation Plan: Legacy MCP Identifier Migration
 
-1. Replace the toolbar’s `useMcpRefresh` dependency with the existing common
-   follow-up and queued-follow-up lifecycle.
-2. Add a small tested orchestration helper that starts stopped sessions,
-   confirms running-session queueing, and preserves existing queued user input.
-3. Compute running state from the selected session’s running coding-agent
-   process rows.
-4. Use the shared confirmation dialog and truthful restart copy.
-5. Run the focused unit suite, web-core typecheck, formatting, and independent
-   review.
-6. Record the reusable lifecycle rule in the project knowledge base.
+1. Extend the constitution and VAS MCP specification with collision-safe legacy
+   identifier migration requirements.
+2. Model migration candidates from native snapshots without mutating files on
+   read.
+3. Return safe identifiers and preserved display labels to the shared settings
+   editor only when the migration is unambiguous across profiles.
+4. Make save atomically rename legacy native keys across assigned profiles and
+   update display-label metadata; reject collisions before any write.
+5. Add focused tests for `Atlassian Rovo`, credentials/assignment preservation,
+   collisions, conflicts, and Codex-native output.
+6. Update reusable knowledge, run formatting and focused Rust tests, then iterate
+   independent Codex review until clean.
+7. Commit, publish, merge, deploy, and verify the coordinator no longer stores
+   the legacy Atlassian key.

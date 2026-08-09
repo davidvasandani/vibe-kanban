@@ -362,6 +362,14 @@ Header metadata and disclosure actions share a constrained row, so dynamic text
 must have an explicit shrink/truncation boundary and remain distinguishable from
 the control label at the narrowest supported sidebar width.
 
+### XXVII. Legacy identifiers migrate explicitly and atomically
+When a persisted external identifier no longer satisfies the protocol contract,
+reads may diagnose and propose the shared canonical form but must not mutate
+storage. Migration occurs at an explicit write boundary, preserves the original
+human label and complete definition, rejects collisions and cross-profile
+ambiguity before the first write, and either commits every affected native key
+plus metadata or leaves the legacy state recoverable and clearly reported.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -383,7 +391,8 @@ the control label at the narrowest supported sidebar width.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.23.0 (requires collapsed controls to retain summary-backed,
+**Version**: 0.24.0 (requires explicit, collision-safe, atomic legacy identifier
+migration with label and definition preservation; 0.23.0 required collapsed controls to retain summary-backed,
 responsive decision context; 0.22.0 made Vibe Kanban settings the sole
 MCP-definition authority and limited deployment ownership to runtime
 prerequisites; 0.21.0 added coordinator-authoritative, bounded remote execution

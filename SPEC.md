@@ -1,5 +1,23 @@
 # Restart Agents After MCP Changes
 
+## Legacy MCP identifier migration
+
+Existing settings may contain display labels such as `Atlassian Rovo` as native
+MCP server keys. New saves reject those keys while the unchanged-legacy
+exception allows the invalid state to persist. Restart then rematerializes the
+invalid key, and Codex omits or rejects the server.
+
+Loading shared MCP configuration must derive a stable protocol-safe identifier
+using the existing suggestion rule, retain the original key as the display
+label, and preserve definitions, assignments, overrides, credentials, and
+disabled state. Saving must atomically rename the key in every assigned profile
+and update display-label metadata. Migration must fail without partial writes if
+the suggested identifier collides or profiles disagree.
+
+Acceptance requires `Atlassian Rovo` to become `atlassian_rovo` with its display
+label preserved, collision and cross-profile disagreement coverage, and a
+migrated Codex configuration that exposes the server after restart.
+
 ## Problem
 
 The chat toolbar currently invokes a Codex-only live MCP reload. It does not
