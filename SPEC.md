@@ -106,3 +106,23 @@ Vibe Kanban imports them; chat rendering uses the durable local copy.
    remote URL lifetime or reachability.
 7. Firecrawl's `screenshot` tool returns a reusable, TTL-bound image
    `resource_link` without carrying base64 through MCP.
+
+## Follow-up: MCP Refresh Nested Route
+
+### Problem
+
+The session MCP refresh and status handlers are nested below both workspace and
+session path parameters, but each handler extracts only one UUID. Axum rejects
+requests before the handler runs because the route contains two path arguments,
+causing the refresh endpoint to return HTTP 500.
+
+### Required behavior
+
+- Both refresh endpoints extract the workspace and session UUID tuple expected
+  by the nested route.
+- The existing workspace extension remains the authority for the loaded
+  workspace; the path workspace UUID is consumed only to satisfy route
+  extraction.
+- Refresh requests reach the deployment MCP refresh service instead of failing
+  during Axum path extraction.
+- No routes or services outside Vibe Kanban are changed.
