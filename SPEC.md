@@ -120,6 +120,8 @@ causing the refresh endpoint to return HTTP 500.
 
 - Both refresh endpoints extract the workspace and session UUID tuple expected
   by the nested route.
+- The workspace-loading middleware extracts the named `{id}` parameter without
+  rejecting additional parameters belonging to nested routes.
 - The existing workspace extension remains the authority for the loaded
   workspace; the path workspace UUID is consumed only to satisfy route
   extraction.
