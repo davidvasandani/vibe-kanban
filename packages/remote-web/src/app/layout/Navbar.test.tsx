@@ -75,6 +75,31 @@ describe("DeployStatus", () => {
     ).toHaveTextContent("abc1234");
     expect(screen.queryByText(/·/)).not.toBeInTheDocument();
   });
+
+  it("can keep deployment age visible in the desktop drawer", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime("2026-08-09T15:00:00Z");
+
+    render(
+      <DeployStatus
+        version="abc1234"
+        deploymentTimestamp="2026-08-09T13:00:00Z"
+        alwaysShowAge
+      />,
+    );
+
+    expect(screen.getByText("· 2h")).toHaveClass("inline");
+    expect(screen.getByText("· 2h")).not.toHaveClass("hidden");
+  });
+
+  it("omits malformed deployment ages", () => {
+    render(<DeployStatus version="abc1234" deploymentTimestamp="not-a-date" />);
+
+    expect(
+      screen.getByRole("link", { name: "Deployed revision abc1234" }),
+    ).toHaveTextContent("abc1234");
+    expect(screen.queryByText(/Invalid Date|·/)).not.toBeInTheDocument();
+  });
 });
 
 describe("mobile Navbar deployment status", () => {

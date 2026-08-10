@@ -152,4 +152,5 @@ contributed to it.
 - [flexible-collapsible-panel-stacks.md](flexible-collapsible-panel-stacks.md)
   — How bounded vertical panel stacks let expanded collapsibles share remaining
   height: expansion-owned flex participation, the complete `min-h-0` chain,
-  content-scroll ownership, and the outer short-window header-scroll fallback.
+  content-scroll ownership, the outer short-window header-scroll fallback, and
+  desktop-only fixed chrome in a drawer component also reused on mobile.

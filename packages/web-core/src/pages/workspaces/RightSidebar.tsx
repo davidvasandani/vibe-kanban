@@ -28,6 +28,8 @@ import {
   type SectionAction,
 } from '@vibe/ui/components/CollapsibleSectionHeader';
 import { getServerAffinityLabel } from './serverAffinityLabel';
+import { DeployStatus } from '@vibe/ui/components/DeployStatus';
+import { useUserSystem } from '@/shared/hooks/useUserSystem';
 
 type SectionDef = {
   title: string;
@@ -45,6 +47,7 @@ export interface RightSidebarProps {
   selectedWorkspace: Workspace | undefined;
   repos: RepoWithTargetBranch[];
   linkedIssueForWorkspace?: { remoteProjectId: string; issueId: string } | null;
+  showDeployStatus?: boolean;
 }
 
 export const RightSidebar = memo(function RightSidebar({
@@ -52,8 +55,10 @@ export const RightSidebar = memo(function RightSidebar({
   selectedWorkspace,
   repos,
   linkedIssueForWorkspace,
+  showDeployStatus = false,
 }: RightSidebarProps) {
   const { t } = useTranslation(['tasks', 'common']);
+  const { appVersion, deploymentTimestamp } = useUserSystem();
   const diffs = useDiffs();
   const isTerminalVisible = useUiPreferencesStore((s) => s.isTerminalVisible);
   const { expandTerminal, isTerminalExpanded } = useLogsPanel();
@@ -295,6 +300,20 @@ export const RightSidebar = memo(function RightSidebar({
   return (
     <div className="h-full min-h-0 border-l bg-secondary overflow-x-hidden overflow-y-auto">
       <div className="flex h-full min-h-0 flex-col divide-y border-b">
+        {showDeployStatus && (
+          <div
+            className="flex flex-none shrink-0 items-center justify-between gap-base px-base py-half"
+            data-testid="deploy-status-row"
+          >
+            <span className="text-sm text-low">Deploy Status</span>
+            <DeployStatus
+              version={appVersion}
+              deploymentTimestamp={deploymentTimestamp}
+              alwaysShowAge
+              className="max-w-none"
+            />
+          </div>
+        )}
         {sections
           .filter((section) => section.visible)
           .map((section) => (

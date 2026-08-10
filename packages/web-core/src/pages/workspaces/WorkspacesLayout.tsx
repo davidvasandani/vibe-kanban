@@ -538,6 +538,7 @@ export function WorkspacesLayout() {
                   selectedWorkspace={selectedWorkspace}
                   repos={repos}
                   linkedIssueForWorkspace={linkedIssueForWorkspace}
+                  showDeployStatus
                 />
               </LinkedIssueProvider>
             </div>

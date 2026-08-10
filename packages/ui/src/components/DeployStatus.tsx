@@ -57,12 +57,14 @@ export interface DeployStatusProps {
   version: string | null;
   deploymentTimestamp?: string | null;
   className?: string;
+  alwaysShowAge?: boolean;
 }
 
 export function DeployStatus({
   version,
   deploymentTimestamp,
   className,
+  alwaysShowAge = false,
 }: DeployStatusProps) {
   const [nowMs, setNowMs] = useState(Date.now());
 
@@ -88,7 +90,12 @@ export function DeployStatus({
     <>
       <span className="truncate">{version}</span>
       {version !== 'dev' && age && (
-        <span className="hidden min-[390px]:inline shrink-0">
+        <span
+          className={cn(
+            'shrink-0',
+            alwaysShowAge ? 'inline' : 'hidden min-[390px]:inline'
+          )}
+        >
           {' '}
           · {age.compact}
         </span>
