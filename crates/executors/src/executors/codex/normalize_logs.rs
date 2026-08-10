@@ -1245,7 +1245,7 @@ fn handle_direct_item_started(
     }
 }
 
-fn handle_direct_item_completed(
+async fn handle_direct_item_completed(
     notification: AppItemCompletedNotification,
     state: &mut LogState,
     msg_store: &Arc<MsgStore>,
@@ -1312,10 +1312,11 @@ fn handle_direct_item_completed(
                 mcp_tool_state.status = app_mcp_status_to_tool_status(&status);
                 if let Some(result) = result {
                     if let Some(markdown) =
-                        crate::logs::image_extraction::rewrite_blocks_with_images(
+                        crate::logs::image_extraction::rewrite_blocks_with_images_async(
                             std::path::Path::new(worktree_path),
                             &result.content,
                         )
+                        .await
                     {
                         mcp_tool_state.result = Some(ToolResult {
                             r#type: ToolResultValueType::Markdown,
@@ -1511,7 +1512,7 @@ fn handle_direct_request(
     }
 }
 
-fn handle_direct_notification(
+async fn handle_direct_notification(
     notification: ServerNotification,
     state: &mut LogState,
     msg_store: &Arc<MsgStore>,
@@ -1585,7 +1586,8 @@ fn handle_direct_notification(
                 msg_store,
                 entry_index,
                 worktree_path,
-            );
+            )
+            .await;
             true
         }
         ServerNotification::ModelRerouted(notification) => {
@@ -1785,7 +1787,9 @@ pub fn normalize_logs(
                     &msg_store,
                     &entry_index,
                     &worktree_path_str,
-                ) {
+                )
+                .await
+                {
                     continue;
                 }
             } else if let Some(session_id) = line
@@ -2088,10 +2092,11 @@ pub fn normalize_logs(
                                     ToolStatus::Success
                                 };
                                 if let Some(markdown) =
-                                    crate::logs::image_extraction::rewrite_blocks_with_images(
+                                    crate::logs::image_extraction::rewrite_blocks_with_images_async(
                                         std::path::Path::new(&worktree_path_str),
                                         &value.content,
                                     )
+                                    .await
                                 {
                                     // MCP result carried image blocks (e.g. a
                                     // browser screenshot): persisted to the

@@ -41,6 +41,7 @@ codex-app-server-protocol = { git = "https://github.com/openai/codex.git", packa
 sha2 = "0.10"
 derivative = "2.2.0"
 reqwest = { workspace = true }
+hickory-resolver = "0.25.2"
 eventsource-stream = "0.2"
 walkdir = "2"
 rand = "0.8"
