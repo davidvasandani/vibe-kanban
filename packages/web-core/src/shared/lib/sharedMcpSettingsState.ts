@@ -275,6 +275,7 @@ export function definitionFromEntry(entry: JsonValue): McpServerDefinition {
           command: obj.command,
           args: obj.args,
           env: obj.env ?? obj.environment,
+          env_vars: obj.env_vars,
         }
       : transport === 'http' || transport === 'sse'
         ? {
