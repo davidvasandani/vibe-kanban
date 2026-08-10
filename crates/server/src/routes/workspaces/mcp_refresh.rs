@@ -20,7 +20,7 @@ pub fn router() -> Router<DeploymentImpl> {
 pub async fn refresh(
     Extension(workspace): Extension<Workspace>,
     State(deployment): State<DeploymentImpl>,
-    Path(session_id): Path<Uuid>,
+    Path((_workspace_id, session_id)): Path<(Uuid, Uuid)>,
 ) -> Result<ResponseJson<ApiResponse<McpRefreshResult>>, ApiError> {
     let result = deployment
         .container()
@@ -33,7 +33,7 @@ pub async fn refresh(
 pub async fn status(
     Extension(workspace): Extension<Workspace>,
     State(deployment): State<DeploymentImpl>,
-    Path(session_id): Path<Uuid>,
+    Path((_workspace_id, session_id)): Path<(Uuid, Uuid)>,
 ) -> Result<ResponseJson<ApiResponse<Option<McpRefreshResult>>>, ApiError> {
     let result = deployment
         .container()

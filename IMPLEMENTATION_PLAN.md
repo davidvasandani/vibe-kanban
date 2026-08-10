@@ -29,3 +29,13 @@
    and return capability URLs as MCP `resource_link` image blocks.
 7. Verify Firecrawl build/tests and the end-to-end MCP screenshot contract.
 8. Run independent Codex review and address confirmed findings until none remain.
+
+## Follow-up implementation: MCP refresh nested route
+
+1. Update the refresh and status handlers to extract the nested workspace and
+   session UUID path tuple.
+2. Run Rust formatting, a focused server compile, and diff validation.
+3. Run an independent Codex review and address confirmed findings until none
+   remain.
+4. Merge and deploy the fix, then verify the live refresh endpoint and native
+   Firecrawl browser tool availability.
