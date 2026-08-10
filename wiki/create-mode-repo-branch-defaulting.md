@@ -63,12 +63,13 @@ which preserves the submit guard's "every repo has a branch" invariant.
   `origin/main` default is what actually applies. Treat it as an optional
   override, and re-validate it still exists in the fetched branch list before
   using it (a stale configured branch should fall through, not be selected).
-- **There is a dormant second selector.** `useRepoBranchSelection.ts` +
-  `RepoBranchSelector.tsx` implement a `userOverride -> initialBranch ->
-  default_target_branch -> is_current -> first` chain but have **no importers**.
-  They are NOT wired into the create-mode screen and their fallback prefers the
-  current branch, not `origin/main`. If you touch branch defaults, know this
-  divergent logic exists; reconciling or deleting it is a separate task.
+- **The dormant second selector shares the canonical policy.**
+  `useRepoBranchSelection.ts` + `RepoBranchSelector.tsx` still have no runtime
+  importers and are NOT wired into the create-mode screen. Task `vk/1476` made
+  the hook preserve `userOverride -> initialBranch` precedence and then delegate
+  configured/default/fallback inference to `resolveDefaultBranch`. Keep future
+  selectors on this helper so a dormant or newly wired path cannot silently
+  reintroduce current-checkout-first behavior.
 
 ## What the backend owes this default
 
@@ -103,3 +104,5 @@ Two rules follow for anyone adding such a consumer:
   `origin/main`; introduced `resolveDefaultBranch` and documented this seam.
 - `vk/b72a-internal-error-o` — recorded the backend consumer contract after the
   shared repository store shipped a second, narrower resolution rule.
+- `vk/1476-protect-git-repo` — reconciled the reusable hook with the canonical
+  remote-mainline policy and added hook-boundary regression coverage.
