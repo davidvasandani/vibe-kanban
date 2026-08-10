@@ -33,37 +33,13 @@ deployment, or branch configuration of any other service under `/srv/src`.
 
 ## Verification
 
-<<<<<<< HEAD
 - Unit coverage proves configured defaults and explicit initial branches win.
 - Coverage proves `origin/main` and `origin/master` outrank a current local
   branch.
 - Coverage proves the existing current/first fallback and empty-list behavior.
 - Relevant frontend type, lint, format, and test checks pass.
-=======
-Configure each Vibe Kanban execution worker with the private Firecrawl URL and existing `op://Homelab/Firecrawl Browser MCP/bearer-token` reference.
 
-When no user follow-up already exists, use:
-
-- `homelab/modules/vibe-kanban-rebuild.nix`
-- Vibe Kanban worker host declarations using that module
-- Evaluation checks for paired configuration and rendered service environment
-
-## Out of Scope
-
-- Changes to the Firecrawl service itself.
-- Changes to Firecrawl authentication policy or firewall rules.
-- Embedding the bearer value in `.mcp.json`, Codex TOML, or the Nix store.
-
-## Acceptance Criteria
-
-1. Worker configuration declares the Firecrawl token reference through `executorSecretRefs`, while the MCP definition declares the service URL.
-2. The worker service resolves and exports `FIRECRAWL_BROWSER_AUTH_TOKEN` before launching Vibe Kanban.
-3. The Firecrawl stdio MCP definition allowlists `FIRECRAWL_BROWSER_AUTH_TOKEN` with `env_vars`, so Codex forwards it from the worker environment into the MCP child.
-4. The 1Password bootstrap credentials are still removed before executor jobs start.
-5. Existing generic worker-secret assertions validate the secret configuration.
-6. The changed configuration is syntactically valid and independent Codex review reports no significant findings.
-
-## Follow-up: Inline MCP Screenshot Results
+## Follow-up: Durable MCP Screenshot Imports
 
 ### Objective
 
@@ -130,4 +106,3 @@ Vibe Kanban imports them; chat rendering uses the durable local copy.
    remote URL lifetime or reachability.
 7. Firecrawl's `screenshot` tool returns a reusable, TTL-bound image
    `resource_link` without carrying base64 through MCP.
->>>>>>> 0e5e0ea7 (fix: persist hosted MCP images locally)
