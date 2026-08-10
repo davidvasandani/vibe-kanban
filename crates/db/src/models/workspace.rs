@@ -683,28 +683,7 @@ impl Workspace {
                SET creation_status = 'failed',
                    creation_error = 'Workspace creation was interrupted by a server restart. Create a new workspace to try again.',
                    updated_at = datetime('now', 'subsec')
-               WHERE creation_status IN ('queued', 'running')
-                 AND NOT EXISTS (
-                    SELECT 1 FROM sessions s
-                    JOIN execution_processes ep ON ep.session_id = s.id
-                    WHERE s.workspace_id = workspaces.id
-                      AND ep.run_reason = 'codingagent'
-                 )"#
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query!(
-            r#"UPDATE workspaces
-               SET creation_status = 'ready', creation_error = NULL,
-                   updated_at = datetime('now', 'subsec')
-               WHERE creation_status IN ('queued', 'running')
-                 AND EXISTS (
-                    SELECT 1 FROM sessions s
-                    JOIN execution_processes ep ON ep.session_id = s.id
-                    WHERE s.workspace_id = workspaces.id
-                      AND ep.run_reason = 'codingagent'
-                 )"#
+               WHERE creation_status IN ('queued', 'running')"#
         )
         .execute(pool)
         .await?;

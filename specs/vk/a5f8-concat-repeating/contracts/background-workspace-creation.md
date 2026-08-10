@@ -36,4 +36,4 @@ Existing workspace list/detail endpoints return creation fields. Clients treat:
 - Duplicate claim: no-op; it must not start another workflow.
 - Success: `running -> ready` only after initial execution startup succeeds.
 - Failure: `queued|running -> failed` with bounded safe text.
-- Startup: unfinished state becomes ready only with positive initial-execution evidence; otherwise failed.
+- Startup: every unfinished state becomes failed because an execution row alone cannot prove startup returned successfully.

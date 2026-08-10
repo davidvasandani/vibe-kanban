@@ -225,6 +225,75 @@ fn compose_prompt_with_project_context(context: &str, prompt: &str) -> String {
     }
 }
 
+const CREATION_STATUS_WRITE_ATTEMPTS: usize = 10;
+
+async fn claim_creation_with_retry(
+    deployment: &DeploymentImpl,
+    workspace_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    for attempt in 1..=CREATION_STATUS_WRITE_ATTEMPTS {
+        match Workspace::claim_creation(&deployment.db().pool, workspace_id).await {
+            Ok(claimed) => return Ok(claimed),
+            Err(error) if attempt < CREATION_STATUS_WRITE_ATTEMPTS => {
+                tracing::warn!(
+                    "Workspace creation {} claim attempt {} failed: {}",
+                    workspace_id,
+                    attempt,
+                    error
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+async fn finish_creation_with_retry(
+    deployment: &DeploymentImpl,
+    workspace_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    for attempt in 1..=CREATION_STATUS_WRITE_ATTEMPTS {
+        match Workspace::finish_creation(&deployment.db().pool, workspace_id).await {
+            Ok(finished) => return Ok(finished),
+            Err(error) if attempt < CREATION_STATUS_WRITE_ATTEMPTS => {
+                tracing::warn!(
+                    "Workspace creation {} completion attempt {} failed: {}",
+                    workspace_id,
+                    attempt,
+                    error
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+async fn fail_creation_with_retry(
+    deployment: &DeploymentImpl,
+    workspace_id: Uuid,
+    message: &str,
+) -> Result<bool, sqlx::Error> {
+    for attempt in 1..=CREATION_STATUS_WRITE_ATTEMPTS {
+        match Workspace::fail_creation(&deployment.db().pool, workspace_id, message).await {
+            Ok(failed) => return Ok(failed),
+            Err(error) if attempt < CREATION_STATUS_WRITE_ATTEMPTS => {
+                tracing::warn!(
+                    "Workspace creation {} failure-write attempt {} failed: {}",
+                    workspace_id,
+                    attempt,
+                    error
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
 async fn run_create_and_start_workspace(
     deployment: DeploymentImpl,
     workspace: Workspace,
@@ -432,7 +501,7 @@ pub async fn create_and_start_workspace(
     let background_deployment = deployment.clone();
     tokio::spawn(async move {
         let workspace_id = workspace.id;
-        match Workspace::claim_creation(&background_deployment.db().pool, workspace_id).await {
+        match claim_creation_with_retry(&background_deployment, workspace_id).await {
             Ok(true) => {}
             Ok(false) => {
                 tracing::warn!("Workspace creation {} was already claimed", workspace_id);
@@ -444,6 +513,12 @@ pub async fn create_and_start_workspace(
                     workspace_id,
                     error
                 );
+                let _ = fail_creation_with_retry(
+                    &background_deployment,
+                    workspace_id,
+                    "Workspace creation could not start. Create a new workspace to try again.",
+                )
+                .await;
                 return;
             }
         }
@@ -461,25 +536,32 @@ pub async fn create_and_start_workspace(
         .await
         {
             Ok(()) => {
-                if let Err(error) =
-                    Workspace::finish_creation(&background_deployment.db().pool, workspace_id).await
-                {
-                    tracing::error!(
-                        "Failed to mark workspace creation {} ready: {}",
-                        workspace_id,
-                        error
-                    );
+                match finish_creation_with_retry(&background_deployment, workspace_id).await {
+                    Ok(true) => {}
+                    Ok(false) => tracing::warn!(
+                        "Workspace creation {} was terminal before completion was recorded",
+                        workspace_id
+                    ),
+                    Err(error) => {
+                        tracing::error!(
+                            "Failed to mark workspace creation {} ready: {}",
+                            workspace_id,
+                            error
+                        );
+                        let _ = fail_creation_with_retry(
+                            &background_deployment,
+                            workspace_id,
+                            "Workspace creation completed, but its status could not be saved. Create a new workspace to avoid duplicate work.",
+                        )
+                        .await;
+                    }
                 }
             }
             Err(error) => {
                 tracing::error!("Workspace creation {} failed: {}", workspace_id, error);
                 let message = "Workspace creation failed. Create a new workspace to try again.";
-                if let Err(status_error) = Workspace::fail_creation(
-                    &background_deployment.db().pool,
-                    workspace_id,
-                    message,
-                )
-                .await
+                if let Err(status_error) =
+                    fail_creation_with_retry(&background_deployment, workspace_id, message).await
                 {
                     tracing::error!(
                         "Failed to record workspace creation {} failure: {}",

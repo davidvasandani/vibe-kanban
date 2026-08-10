@@ -21,14 +21,13 @@
 new row -> queued -> running -> ready
                        |          ^
                        +-> failed |
-queued/running at startup -> ready only with positive execution evidence
-queued/running at startup -> failed otherwise
+queued/running at startup -> failed
 ```
 
 Invariants:
 
 - Existing pre-feature workspaces migrate to `ready`.
 - Only an atomic `queued -> running` update claims work.
-- `ready` requires positive evidence that initial execution startup returned successfully or an initial execution row exists during reconciliation.
+- `ready` is written only by the live consumer after initial execution startup returns successfully; an execution row alone is insufficient restart evidence.
 - `failed` is terminal for this feature; users create a replacement workspace.
 - The workspace ID is the creation-operation identity; no second operation row is needed while retry-in-place is out of scope.

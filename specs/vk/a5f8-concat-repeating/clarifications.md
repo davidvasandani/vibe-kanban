@@ -4,7 +4,7 @@
 
 ### Restart reconciliation is conservative
 
-The accepted job persists its state, but this feature does not attempt arbitrary mid-phase replay after a coordinator restart. On startup, an unfinished creation is reconciled from positive evidence: if its initial execution exists, creation is successful; otherwise it becomes a visible interrupted/failed creation with guidance to create a replacement workspace. This guarantees that accepted work never remains pending forever while avoiding unsafe duplicate Git or execution work.
+The accepted job persists its state, but this feature does not attempt arbitrary mid-phase replay after a coordinator restart. On startup, every unfinished creation becomes a visible interrupted/failed creation with guidance to create a replacement workspace. Even an execution row is not sufficient completion evidence because a crash can occur after inserting it but before process startup returns. This guarantees that accepted work never remains pending forever while avoiding unsafe duplicate Git or execution work.
 
 Reason: the immediate defect is browser-request cancellation. Exact phase-resume would require making every existing repository, remote import, worktree, placement, and execution operation replay-safe and substantially expands scope. A persisted truthful interruption meets the durability and observability contract safely.
 
