@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE workspaces\n               SET creation_status = 'failed',\n                   creation_error = 'Workspace creation was interrupted by a server restart. Create a new workspace to try again.',\n                   updated_at = datetime('now', 'subsec')\n               WHERE creation_status IN ('queued', 'running')\n                 AND NOT EXISTS (\n                    SELECT 1 FROM sessions s\n                    JOIN execution_processes ep ON ep.session_id = s.id\n                    WHERE s.workspace_id = workspaces.id\n                      AND ep.run_reason = 'codingagent'\n                 )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "246a15768e9245f0ba6232ad5d510bc1b2cad2227fd45b1f4a09873c2421a635"
+}

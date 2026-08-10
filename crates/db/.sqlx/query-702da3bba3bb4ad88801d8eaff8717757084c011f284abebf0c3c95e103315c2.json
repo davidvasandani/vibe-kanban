@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE workspaces\n               SET creation_status = 'ready', creation_error = NULL,\n                   updated_at = datetime('now', 'subsec')\n               WHERE creation_status IN ('queued', 'running')\n                 AND EXISTS (\n                    SELECT 1 FROM sessions s\n                    JOIN execution_processes ep ON ep.session_id = s.id\n                    WHERE s.workspace_id = workspaces.id\n                      AND ep.run_reason = 'codingagent'\n                 )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "702da3bba3bb4ad88801d8eaff8717757084c011f284abebf0c3c95e103315c2"
+}

@@ -63,6 +63,19 @@ pub struct Workspace {
     /// Which repo worktree hosts `specs/` + `.specify/` for this workspace's
     /// SpecKit artifacts. Persisted at first provisioning.
     pub speckit_host_repo_id: Option<Uuid>,
+    pub creation_status: WorkspaceCreationStatus,
+    pub creation_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Type, TS)]
+#[sqlx(type_name = "workspace_creation_status", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+#[ts(use_ts_enum)]
+pub enum WorkspaceCreationStatus {
+    Queued,
+    Running,
+    Ready,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -354,7 +367,9 @@ impl Workspace {
                           worktree_deleted AS "worktree_deleted!: bool",
                           current_pipeline_stage,
                           speckit_feature_key,
-                          speckit_host_repo_id AS "speckit_host_repo_id: Uuid"
+                          speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                          creation_status AS "creation_status!: WorkspaceCreationStatus",
+                          creation_error
                    FROM workspaces
                    ORDER BY created_at DESC"#
         )
@@ -459,7 +474,9 @@ impl Workspace {
                        worktree_deleted  AS "worktree_deleted!: bool",
                        current_pipeline_stage,
                        speckit_feature_key,
-                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid"
+                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                       creation_status AS "creation_status!: WorkspaceCreationStatus",
+                       creation_error
                FROM    workspaces
                WHERE   id = $1"#,
             id
@@ -484,7 +501,9 @@ impl Workspace {
                        worktree_deleted  AS "worktree_deleted!: bool",
                        current_pipeline_stage,
                        speckit_feature_key,
-                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid"
+                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                       creation_status AS "creation_status!: WorkspaceCreationStatus",
+                       creation_error
                FROM    workspaces
                WHERE   rowid = $1"#,
             rowid
@@ -530,7 +549,9 @@ impl Workspace {
                 w.worktree_deleted as "worktree_deleted!: bool",
                 w.current_pipeline_stage,
                 w.speckit_feature_key,
-                w.speckit_host_repo_id as "speckit_host_repo_id: Uuid"
+                w.speckit_host_repo_id as "speckit_host_repo_id: Uuid",
+                w.creation_status as "creation_status!: WorkspaceCreationStatus",
+                w.creation_error
             FROM workspaces w
             LEFT JOIN sessions s ON w.id = s.workspace_id
             LEFT JOIN execution_processes ep ON s.id = ep.session_id AND ep.completed_at IS NOT NULL
@@ -578,7 +599,7 @@ impl Workspace {
             Workspace,
             r#"INSERT INTO workspaces (id, task_id, container_ref, branch, setup_completed_at, name)
                VALUES ($1, $2, $3, $4, $5, $6)
-               RETURNING id as "id!: Uuid", task_id as "task_id: Uuid", container_ref, branch, setup_completed_at as "setup_completed_at: DateTime<Utc>", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", archived as "archived!: bool", pinned as "pinned!: bool", name, worktree_deleted as "worktree_deleted!: bool", current_pipeline_stage, speckit_feature_key, speckit_host_repo_id as "speckit_host_repo_id: Uuid""#,
+               RETURNING id as "id!: Uuid", task_id as "task_id: Uuid", container_ref, branch, setup_completed_at as "setup_completed_at: DateTime<Utc>", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", archived as "archived!: bool", pinned as "pinned!: bool", name, worktree_deleted as "worktree_deleted!: bool", current_pipeline_stage, speckit_feature_key, speckit_host_repo_id as "speckit_host_repo_id: Uuid", creation_status as "creation_status!: WorkspaceCreationStatus", creation_error"#,
             id,
             Option::<Uuid>::None,
             Option::<String>::None,
@@ -588,6 +609,107 @@ impl Workspace {
         )
         .fetch_one(pool)
         .await?)
+    }
+
+    pub async fn queue_creation(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query!(
+            r#"UPDATE workspaces
+               SET creation_status = 'queued', creation_error = NULL,
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = ? AND creation_status = 'ready'"#,
+            workspace_id
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn claim_creation(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query!(
+            r#"UPDATE workspaces
+               SET creation_status = 'running', creation_error = NULL,
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = ? AND creation_status = 'queued'"#,
+            workspace_id
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn finish_creation(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query!(
+            r#"UPDATE workspaces
+               SET creation_status = 'ready', creation_error = NULL,
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = ? AND creation_status = 'running'"#,
+            workspace_id
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn fail_creation(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        error: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query!(
+            r#"UPDATE workspaces
+               SET creation_status = 'failed', creation_error = ?,
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = ? AND creation_status IN ('queued', 'running')"#,
+            error,
+            workspace_id
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn fail_unfinished_creations(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query!(
+            r#"UPDATE workspaces
+               SET creation_status = 'failed',
+                   creation_error = 'Workspace creation was interrupted by a server restart. Create a new workspace to try again.',
+                   updated_at = datetime('now', 'subsec')
+               WHERE creation_status IN ('queued', 'running')
+                 AND NOT EXISTS (
+                    SELECT 1 FROM sessions s
+                    JOIN execution_processes ep ON ep.session_id = s.id
+                    WHERE s.workspace_id = workspaces.id
+                      AND ep.run_reason = 'codingagent'
+                 )"#
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query!(
+            r#"UPDATE workspaces
+               SET creation_status = 'ready', creation_error = NULL,
+                   updated_at = datetime('now', 'subsec')
+               WHERE creation_status IN ('queued', 'running')
+                 AND EXISTS (
+                    SELECT 1 FROM sessions s
+                    JOIN execution_processes ep ON ep.session_id = s.id
+                    WHERE s.workspace_id = workspaces.id
+                      AND ep.run_reason = 'codingagent'
+                 )"#
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(result.rows_affected())
     }
 
     pub async fn update_branch_name(
@@ -769,7 +891,9 @@ impl Workspace {
                        worktree_deleted  AS "worktree_deleted!: bool",
                        current_pipeline_stage,
                        speckit_feature_key,
-                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid"
+                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                       creation_status AS "creation_status!: WorkspaceCreationStatus",
+                       creation_error
                FROM    workspaces
                WHERE   task_id = $1 AND worktree_deleted = FALSE
                ORDER BY created_at DESC
@@ -889,6 +1013,8 @@ impl Workspace {
                 w.current_pipeline_stage,
                 w.speckit_feature_key,
                 w.speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                w.creation_status AS "creation_status!: WorkspaceCreationStatus",
+                w.creation_error,
 
                 CASE WHEN EXISTS (
                     SELECT 1
@@ -934,6 +1060,8 @@ impl Workspace {
                     current_pipeline_stage: rec.current_pipeline_stage,
                     speckit_feature_key: rec.speckit_feature_key,
                     speckit_host_repo_id: rec.speckit_host_repo_id,
+                    creation_status: rec.creation_status,
+                    creation_error: rec.creation_error,
                 },
                 is_running: rec.is_running != 0,
                 is_errored: rec.is_errored != 0,
@@ -989,6 +1117,8 @@ impl Workspace {
                 w.current_pipeline_stage,
                 w.speckit_feature_key,
                 w.speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                w.creation_status AS "creation_status!: WorkspaceCreationStatus",
+                w.creation_error,
 
                 CASE WHEN EXISTS (
                     SELECT 1
@@ -1037,6 +1167,8 @@ impl Workspace {
                 current_pipeline_stage: rec.current_pipeline_stage,
                 speckit_feature_key: rec.speckit_feature_key,
                 speckit_host_repo_id: rec.speckit_host_repo_id,
+                creation_status: rec.creation_status,
+                creation_error: rec.creation_error,
             },
             is_running: rec.is_running != 0,
             is_errored: rec.is_errored != 0,
@@ -1059,7 +1191,10 @@ mod tests {
     use chrono::Utc;
     use uuid::Uuid;
 
-    use super::{CreateWorkspace, Workspace, WorkspacePlacement, WorkspacePlacementState};
+    use super::{
+        CreateWorkspace, Workspace, WorkspaceCreationStatus, WorkspacePlacement,
+        WorkspacePlacementState,
+    };
     use crate::models::worker_node::{UpsertWorkerNode, WorkerMountStatus, WorkerNode};
 
     async fn test_pool() -> sqlx::SqlitePool {
@@ -1070,6 +1205,87 @@ mod tests {
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn creation_lifecycle_has_a_single_claim_and_terminal_state() {
+        let pool = test_pool().await;
+        let workspace = Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "vk/background-create-test".to_string(),
+                name: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(workspace.creation_status, WorkspaceCreationStatus::Ready);
+        assert!(
+            Workspace::queue_creation(&pool, workspace.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            Workspace::claim_creation(&pool, workspace.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !Workspace::claim_creation(&pool, workspace.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            Workspace::finish_creation(&pool, workspace.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !Workspace::fail_creation(&pool, workspace.id, "late failure")
+                .await
+                .unwrap()
+        );
+
+        let workspace = Workspace::find_by_id(&pool, workspace.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(workspace.creation_status, WorkspaceCreationStatus::Ready);
+        assert_eq!(workspace.creation_error, None);
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_fails_unfinished_creation_without_execution() {
+        let pool = test_pool().await;
+        let workspace = Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "vk/interrupted-create-test".to_string(),
+                name: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+        Workspace::queue_creation(&pool, workspace.id)
+            .await
+            .unwrap();
+        Workspace::claim_creation(&pool, workspace.id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            Workspace::fail_unfinished_creations(&pool).await.unwrap(),
+            1
+        );
+        let workspace = Workspace::find_by_id(&pool, workspace.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(workspace.creation_status, WorkspaceCreationStatus::Failed);
+        assert!(workspace.creation_error.unwrap().contains("server restart"));
     }
 
     #[tokio::test]

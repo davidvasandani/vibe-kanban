@@ -244,7 +244,7 @@ speckit_feature_key: string | null,
  * Which repo worktree hosts `specs/` + `.specify/` for this workspace's
  * SpecKit artifacts. Persisted at first provisioning.
  */
-speckit_host_repo_id: string | null, };
+speckit_host_repo_id: string | null, creation_status: WorkspaceCreationStatus, creation_error: string | null, };
 
 export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, 
 /**
@@ -264,11 +264,13 @@ speckit_feature_key: string | null,
  * Which repo worktree hosts `specs/` + `.specify/` for this workspace's
  * SpecKit artifacts. Persisted at first provisioning.
  */
-speckit_host_repo_id: string | null, };
+speckit_host_repo_id: string | null, creation_status: WorkspaceCreationStatus, creation_error: string | null, };
 
 export type WorkspacePlacement = { workspace_id: string, worker_node_id: string | null, placement_state: WorkspacePlacementState, placed_at: string | null, placement_reason: string | null, requested_worker_node_id: string | null, placement_constraints: unknown, };
 
 export enum WorkspacePlacementState { local = "local", reserved = "reserved", provisioning = "provisioning", ready = "ready", failed = "failed", cleaning = "cleaning" }
+
+export enum WorkspaceCreationStatus { queued = "queued", running = "running", ready = "ready", failed = "failed" }
 
 export type WorkerNode = { id: string, hostname: string, status: WorkerNodeStatus, worker_version: string, vibe_version: string, capabilities: unknown, resource_snapshot: unknown, labels: unknown, mount_status: WorkerMountStatus, mount_message: string | null, last_heartbeat_at: string | null, lease_expires_at: string | null, created_at: string, updated_at: string, };
 
@@ -912,7 +914,7 @@ run_on_coordinator: boolean,
  */
 requested_worker_node_id: string | null, };
 
-export type CreateAndStartWorkspaceResponse = { workspace: Workspace, execution_process: ExecutionProcess, };
+export type CreateAndStartWorkspaceResponse = { workspace: Workspace, };
 
 export type UnifiedPrComment = { "comment_type": "general", id: string, author: string, author_association: string | null, body: string, created_at: string, url: string | null, } | { "comment_type": "review", id: bigint, author: string, author_association: string | null, body: string, created_at: string, url: string | null, path: string, line: bigint | null, side: string | null, diff_hunk: string | null, };
 

@@ -1,20 +1,12 @@
-# Implementation Plan: Firecrawl MCP Worker Authentication
+# Implementation Plan: Durable Background Workspace Creation
 
-1. Add the Firecrawl bearer reference to each worker's generic `executorSecretRefs` configuration.
-2. Allowlist `FIRECRAWL_BROWSER_AUTH_TOKEN` in the Firecrawl stdio MCP definition using Codex's `env_vars` forwarding mechanism.
-3. Keep the private Firecrawl URL in the MCP definition and the bearer value exclusively in 1Password.
-4. Validate the changed JSON and Nix host declarations without exposing secret values.
-5. Run independent Codex review, address confirmed findings, and repeat until no significant findings remain.
-
-## Follow-up Implementation: Inline MCP Screenshots
-
-1. Extend the shared MCP image-result normalizer to recognize hosted HTTP(S)
-   `resource_link` image blocks.
-2. Reuse the shared normalizer in Codex's direct app-server completion path.
-3. Teach the shared image node and desktop CSP to display HTTP(S) image URLs.
-4. Add focused unit tests for hosted image links and rejected resource links.
-5. Run formatting and targeted executor/frontend checks.
-6. Reuse Firecrawl's bounded artifact store for reusable screenshot artifacts
-   and return capability URLs as MCP `resource_link` image blocks.
-7. Verify Firecrawl build/tests and the end-to-end MCP screenshot contract.
-8. Run independent Codex review and address confirmed findings until none remain.
+1. Trace every create-and-start caller, workspace/session/execution query, event stream, and startup reconciliation path; identify the smallest persisted state model that can represent accepted, running, succeeded, and failed creation.
+2. Add a database migration and model for workspace-creation job state and the serialized inputs needed after HTTP acceptance or coordinator restart. Enforce one creation job per workspace and explicit terminal error metadata.
+3. Refactor the current `create_and_start_workspace` workflow into validation/acceptance and an idempotent background runner. Preserve placement resolution, repository association, remote attachment/context import, materialization, and execution startup ordering.
+4. Add a coordinator-owned runner that claims queued jobs, executes them outside request cancellation, records phase/outcome, and reconciles unfinished jobs on startup. Prevent duplicate initial execution on retries.
+5. Change the create-and-start response contract to return the accepted workspace and creation status without waiting for an execution process. Regenerate shared TypeScript types and update all Rust request/response constructors.
+6. Expose creation status through the workspace read/event surface used by the frontend, including a safe user-facing failure message.
+7. Update create-workspace mutations to navigate as soon as acceptance returns. Update workspace views to render persisted pending/failure states and converge on normal session/execution UI after success.
+8. Add backend tests for early acknowledgement, request cancellation independence, state transitions, restart recovery, failure recording, and idempotency. Add frontend coverage for navigation and pending/failure rendering.
+9. Run generated-type checks, focused Rust and frontend tests, formatting, lint/type checks, then the independent Codex diff-review loop.
+10. Update the Vibe Kanban knowledge base and index with the reusable background-job lifecycle pattern, commit it, and merge the task branch into its base branch.

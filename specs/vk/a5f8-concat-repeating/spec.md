@@ -1,91 +1,53 @@
-# Feature Specification: MCP Identifier and Display-Label Separation
+# Feature Specification: Background Workspace Creation
 
 **Feature dir**: `specs/vk/a5f8-concat-repeating/`
-**Task id**: `vk/a5f8-concat-repeating`
+**Task id**: `vk/5e1e-vk-workspace-cre`
 **Status**: Clarified
 
 ## Summary
 
-Allow human-readable MCP names such as “Atlassian Rovo” to appear throughout
-Vibe Kanban without using those labels as protocol identifiers. MCP configuration
-must save with client-compatible keys while retaining friendly names in the
-management UI, eliminating a generic class of save failures for names containing
-spaces or punctuation.
+Accept workspace creation as background lifecycle work so a user can navigate away immediately without cancelling a slow creation. The workspace remains discoverable while it is being prepared, transitions to its normal running experience when ready, and exposes a useful terminal failure if creation cannot complete.
 
 ## User Stories
 
-- As a user adding a suggested MCP, I want it to save successfully without
-  manually translating its friendly name into a machine identifier.
-- As a user managing MCPs, I want friendly product names in the UI while still
-  being able to see the exact identifier used by coding agents.
-- As a user with existing MCP configuration and authentication state, I want a
-  no-op edit/save to preserve the operational identity of every server.
-- As an operator diagnosing invalid configuration, I want an actionable error
-  that distinguishes an invalid identifier from a valid display label.
+- As a user creating a workspace, I want the request to be accepted quickly so I am not trapped on a form for ten seconds or more.
+- As a user who navigates elsewhere after submitting, I want creation and the first agent turn to continue without the create page remaining open.
+- As a user returning to the new workspace, I want to see whether it is still being created, ready, or failed.
+- As an operator, I want accepted creation work to have one observable identity and an actionable outcome so retries and restarts do not create duplicate agents or indefinite pending state.
 
 ## Functional Requirements
 
-- FR-1: Every MCP server written to an external coding-agent configuration must
-  have a non-empty identifier matching `^[a-zA-Z0-9_-]+$`.
-- FR-2: The system must model a server's protocol identifier separately from
-  its optional human-readable display label.
-- FR-3: A suggested/catalog MCP must use its stable catalog key as its preferred
-  identifier and its catalog metadata name as its display label.
-- FR-4: If an incoming suggested entry lacks a safe identifier, the system must
-  derive one using the same deterministic normalization rule presented by
-  validation errors.
-- FR-5: Identifier derivation must not overwrite an existing server. A collision
-  must be surfaced before persistence and the user must be able to choose a
-  distinct identifier.
-- FR-6: The MCP list and edit surface must render the display label when present,
-  with the identifier available as secondary identity; entries without labels
-  must continue to render their identifier.
-- FR-7: Add, edit, rename, delete, assign, test, authenticate, disconnect,
-  refresh, merge, and conflict-resolution operations must address servers by
-  identifier rather than display label.
-- FR-8: Display labels must survive the confirmed draft's save/reload cycle and
-  JSON-mode round trip without being placed into unsupported fields in external
-  coding-agent definitions.
-- FR-9: Existing safe native configurations must preserve their identifiers and
-  executable definitions during a no-op load/save.
-- FR-10: Existing unsafe native keys must remain visible with an actionable
-  validation state and must not be silently renamed during read.
-- FR-11: Both the client form and authoritative server write boundary must reject
-  manually supplied unsafe identifiers.
-- FR-12: All identifiers and normalized collisions must be validated before any
-  per-agent configuration file is written.
+- FR-1: The system must reject an empty prompt, an empty repository selection, or contradictory placement choices before accepting workspace creation.
+- FR-2: On acceptance, the system must assign and return a durable workspace identity without waiting for repository/worktree materialization or initial execution startup.
+- FR-3: All work after acceptance must continue independently of the originating HTTP connection and frontend route.
+- FR-4: The accepted operation must preserve the submitted workspace name, repository targets, linked issue, attachments, executor configuration, prompt, and placement intent.
+- FR-5: The system must expose an accepted workspace as creating until background work reaches a terminal outcome.
+- FR-6: Successful background work must create exactly one initial execution and transition the workspace into the existing ready/running experience.
+- FR-7: Failed background work must persist a safe, actionable failure associated with the workspace and must not remain creating indefinitely.
+- FR-8: Repeated delivery, retry, or restart recovery for one accepted operation must not create duplicate repository associations, placement operations, or initial executions.
+- FR-9: A coordinator restart after acceptance must reconcile unfinished creation from persisted evidence by safely continuing it or recording a truthful terminal/indeterminate outcome.
+- FR-10: The frontend must navigate to the accepted workspace as soon as acceptance succeeds and render creation status from authoritative server state rather than mutation-local state.
+- FR-11: Completion and failure must become visible through the product's normal refresh/event mechanisms even when the initiating create component has unmounted.
+- FR-12: Current linked-issue attachment import, project-context composition, analytics, worker scheduling, coordinator-local placement, and execution configuration behavior must be preserved.
 
 ## Out of Scope
 
-- Relaxing coding-agent identifier grammar.
-- Automatically migrating existing unsafe native keys.
-- Changing MCP transports, commands, credentials, OAuth providers, or catalog
-  installation sources.
-- Adding display metadata to an external client's native MCP definition unless
-  that client explicitly supports it.
-- Deployment changes or changes to any service outside Vibe Kanban.
+- Changes to services outside Vibe Kanban.
+- A general-purpose user-configurable job system.
+- Redesigning the create form or workspace navigation.
+- Automatically retrying arbitrary non-idempotent external failures without bounded policy and durable evidence.
 
 ## Acceptance Criteria
 
-- [ ] Adding “Atlassian Rovo” produces the identifier `atlassian_rovo` (or its
-      safe catalog key), displays “Atlassian Rovo,” and saves successfully.
-- [ ] A second fixture whose label contains punctuation also saves under a safe
-      identifier while retaining its original label.
-- [ ] Reloading after save retains the friendly label and exact identifier.
-- [ ] Native coding-agent configuration contains the safe identifier and no
-      unsupported display-only field.
-- [ ] Testing and authentication requests use the safe identifier, not the
-      friendly label.
-- [ ] Two suggestions that resolve to the same identifier cannot overwrite one
-      another and persistence does not begin.
-- [ ] A manually entered unsafe identifier is rejected in the dialog and by the
-      backend write API with a safe suggestion.
-- [ ] A no-op round trip of an existing safe server preserves its identifier,
-      definition, assignments, and credential placeholders.
-- [ ] An unsafe pre-existing native key is reported rather than auto-renamed.
-- [ ] Focused backend and frontend regression tests, generated-type checks,
-      formatting, and applicable repository checks pass.
+- [ ] With workspace materialization deliberately delayed beyond ten seconds, the create endpoint returns an accepted workspace before the delay completes.
+- [ ] Cancelling the HTTP client or navigating away after acceptance does not prevent the workspace and initial execution from being created.
+- [ ] Opening the accepted workspace during preparation shows a creation-in-progress state sourced from the server.
+- [ ] On completion, the same workspace shows its initial session/execution without a second create request.
+- [ ] A forced background failure produces a persisted visible failure and no indefinite spinner.
+- [ ] Restart/replay coverage proves one accepted workspace produces at most one initial execution.
+- [ ] Existing automatic, coordinator, and explicit-worker placement cases retain their semantics.
+- [ ] Backend and frontend focused tests, generated-type checks, formatting, and independent review pass.
 
 ## Open Questions
 
-None. See [`clarifications.md`](clarifications.md).
+None. See `clarifications.md` for the resolved decisions.

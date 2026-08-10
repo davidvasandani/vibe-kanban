@@ -1,44 +1,24 @@
-# Clarifications: MCP Identifier and Display-Label Separation
+# Clarifications: Background Workspace Creation
 
 ## Resolved Decisions
 
-### Display labels survive independently of the live catalog
+### Restart reconciliation is conservative
 
-Display labels are Vibe Kanban-owned logical metadata and must persist across a
-save/reload even if a catalog entry is later removed or renamed. They must not
-be inserted into coding-agent-native MCP definition objects. The plan stage will
-select the existing Vibe Kanban configuration/state mechanism that can hold this
-metadata with the least new plumbing; it must not turn native executable
-definitions into a second source of truth.
+The accepted job persists its state, but this feature does not attempt arbitrary mid-phase replay after a coordinator restart. On startup, an unfinished creation is reconciled from positive evidence: if its initial execution exists, creation is successful; otherwise it becomes a visible interrupted/failed creation with guidance to create a replacement workspace. This guarantees that accepted work never remains pending forever while avoiding unsafe duplicate Git or execution work.
 
-Reason: re-deriving from the current catalog makes the UI label mutable and
-loses labels for MCPs originating from external catalogs or plugins—the reported
-class of failure.
+Reason: the immediate defect is browser-request cancellation. Exact phase-resume would require making every existing repository, remote import, worktree, placement, and execution operation replay-safe and substantially expands scope. A persisted truthful interruption meets the durability and observability contract safely.
 
-### Identifier collisions require an explicit user choice
+### The existing endpoint becomes asynchronous
 
-When a suggested identifier is already in use, the UI opens the edit/add flow
-with the safe candidate visible and reports that it is taken. Vibe Kanban does
-not automatically append a numeric suffix because that creates a durable
-external identifier without user confirmation and may obscure that the same MCP
-is already configured.
+`POST /api/workspaces/start` remains the single create-and-start operation, but its success response becomes an acceptance response containing the workspace and creation status rather than a completed execution process. All in-repository callers migrate together. No parallel synchronous endpoint is retained.
 
-### Unsafe existing native keys can be explicitly repaired
+Reason: retaining a synchronous path leaves non-browser callers vulnerable to the same request-lifetime bug and creates two semantics for one product action.
 
-An unsafe native key remains unchanged merely by loading settings. Editing it
-seeds a safe identifier suggestion and retains the original text as the display
-label. Submitting and then saving is an explicit remove-plus-add rename, so the
-user can repair the config without editing files externally. The UI warns that
-the identifier is changing; cancel leaves the native key untouched.
+### Failed creation is informational in this increment
 
-### Identifier normalization
+A failed workspace shows the persisted error and directs the user to create a new workspace. It does not expose an in-place Retry button.
 
-Normalization is ASCII and deterministic: trim surrounding whitespace,
-lowercase ASCII alphanumerics, preserve `_` and `-`, replace each run of other
-characters with one `_`, trim resulting leading/trailing underscores, and fall
-back to `mcp_server` when nothing remains. This is the existing backend
-suggestion contract and must have one equivalent frontend implementation or a
-server-provided result, not independently drifting variants.
+Reason: safe in-place retry requires phase-specific replay semantics. Users still receive an actionable, terminal state instead of an indefinite spinner, and can resubmit from the create flow.
 
 ## Remaining Open Questions
 

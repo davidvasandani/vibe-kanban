@@ -621,6 +621,12 @@
     "updateIssue": "Update Issue",
     "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue."
   },
+  "workspaceCreation": {
+    "creatingTitle": "ワークスペースを作成中…",
+    "creatingBody": "このページから移動しても、作成はバックグラウンドで続行されます。",
+    "failedTitle": "ワークスペースの作成に失敗しました",
+    "failedFallback": "新しいワークスペースを作成して、もう一度お試しください。"
+  },
   "speckit": {
     "title": "SpecKit",
     "stageProgress": "{{done}}/{{total}} stages",

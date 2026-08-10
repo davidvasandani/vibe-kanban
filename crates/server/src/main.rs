@@ -76,6 +76,14 @@ async fn main() -> Result<(), VibeKanbanError> {
         .cleanup_orphan_executions()
         .await
         .map_err(DeploymentError::from)?;
+    let interrupted_creations =
+        db::models::workspace::Workspace::fail_unfinished_creations(&deployment.db().pool).await?;
+    if interrupted_creations > 0 {
+        tracing::warn!(
+            "Marked {} interrupted workspace creations as failed",
+            interrupted_creations
+        );
+    }
     deployment
         .browser_sessions()
         .cleanup_orphan_sessions()

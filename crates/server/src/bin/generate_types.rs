@@ -72,6 +72,7 @@ fn generate_types_content() -> String {
         db::models::workspace::WorkspaceWithStatus::decl(),
         db::models::workspace::WorkspacePlacement::decl(),
         db::models::workspace::WorkspacePlacementState::decl(),
+        db::models::workspace::WorkspaceCreationStatus::decl(),
         db::models::worker_node::WorkerNode::decl(),
         db::models::worker_node::WorkerNodeStatus::decl(),
         db::models::worker_node::WorkerMountStatus::decl(),

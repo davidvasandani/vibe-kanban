@@ -621,6 +621,12 @@
     "updateIssue": "Update Issue",
     "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue."
   },
+  "workspaceCreation": {
+    "creatingTitle": "Creating workspace…",
+    "creatingBody": "You can navigate away. Creation will continue in the background.",
+    "failedTitle": "Workspace creation failed",
+    "failedFallback": "Create a new workspace to try again."
+  },
   "speckit": {
     "title": "SpecKit",
     "stageProgress": "{{done}}/{{total}} stages",

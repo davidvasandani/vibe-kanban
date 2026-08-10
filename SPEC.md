@@ -1,92 +1,57 @@
-# Technical Spec: Ship Firecrawl MCP Authentication to Cluster Workers
+# Technical Spec: Durable Background Workspace Creation
+
+## Problem
+
+`POST /api/workspaces/start` currently performs repository setup, placement, workspace materialization, and initial execution startup inside the request that the create-workspace UI awaits. These operations can take more than ten seconds. Navigating away aborts the browser request and can cancel the server-side future before the workspace has been fully created, leaving the intended workspace unavailable.
 
 ## Objective
 
-Ensure Vibe Kanban worker-hosted coding agents receive both values required by the configured `firecrawl-browser` stdio MCP launcher:
+Make create-and-start durable with respect to the initiating HTTP connection. Once the server accepts a valid request and creates the workspace record, the remaining creation and initial-start workflow must continue as a server-owned background job even if the client disconnects or navigates elsewhere.
 
-- `FIRECRAWL_BROWSER_URL`
-- `FIRECRAWL_BROWSER_AUTH_TOKEN`
+## Functional Requirements
 
-This prevents remote workers such as think4 from reaching Firecrawl but failing `/api/internal/mcp-scope` bootstrap with HTTP 401.
+1. The create-and-start endpoint validates all request fields that can be validated synchronously and creates a durable workspace identity before acknowledging the request.
+2. Slow work—repository association, attachments and remote context import, worker placement, filesystem/worktree materialization, and initial execution startup—runs independently of the request future.
+3. The endpoint returns promptly with the created workspace identity and a representation of its pending creation state; the frontend navigates to that workspace without waiting for materialization.
+4. Workspace APIs expose enough state for the UI to distinguish pending creation, successful readiness/execution, and failed creation.
+5. The workspace page displays a creation-in-progress state while the job runs and updates when the background work completes, without relying on the create form remaining mounted.
+6. Failures are persisted and presented to the user instead of leaving an indefinite “Creating…” state.
+7. Existing placement choices, repository targets, linked-issue behavior, attachment import, executor configuration, and initial prompt semantics remain intact.
+8. Duplicate client retries must not start multiple initial executions for the same accepted workspace.
 
-## Design
+## Design Direction
 
-Use the deployment module's generic `executorSecretRefs` worker option to resolve the Firecrawl bearer through the existing 1Password bootstrap path and export it into the long-running worker process. Executor subprocesses and their stdio MCP children inherit it.
+Use the service's existing durable background-task/job abstractions if available. Split create-and-start into a short acceptance phase and a background execution phase. Persist job inputs or all state required to resume/observe the operation before returning. Drive frontend progress from persisted server state through the existing query/event refresh mechanisms rather than component-local mutation state.
 
-The repository MCP definition sets the URL directly and allowlists `FIRECRAWL_BROWSER_AUTH_TOKEN` for forwarding from the worker environment. It does not use a literal `${VAR}` value: Codex's supported secret-forwarding mechanism for stdio MCP servers is `env_vars`.
+The exact API and data-model changes will be selected after inspecting existing job, execution, and workspace-state conventions. Backward compatibility should be preserved where practical, but correctness on disconnect takes precedence over preserving the endpoint's synchronous completion semantics.
 
-The secret value must never enter the Nix store, repository, command line, logs, or generated agent configuration. Only the 1Password reference is declarative.
+## Error Handling and Recovery
 
-Configure each Vibe Kanban execution worker with the private Firecrawl URL and existing `op://Homelab/Firecrawl Browser MCP/bearer-token` reference.
+- Validate prompt, repositories, and contradictory placement options before acceptance.
+- Persist a terminal failure state with a safe, actionable error message if background creation fails.
+- Log the detailed server error with workspace/job identifiers.
+- Ensure partially created resources follow the existing cleanup/reconciliation policy.
+- On process restart, accepted but unfinished work must either resume through a durable queue or be deterministically reconciled to a visible failed/retryable state; an in-memory detached task alone is insufficient.
 
-When no user follow-up already exists, use:
+## Testing
 
-- `homelab/modules/vibe-kanban-rebuild.nix`
-- Vibe Kanban worker host declarations using that module
-- Evaluation checks for paired configuration and rendered service environment
+- Endpoint tests prove that acceptance returns before a deliberately blocked creation operation finishes.
+- A disconnect/cancellation test proves accepted creation continues independently of the request.
+- Background-job tests cover success, failure persistence, and idempotent execution.
+- Frontend tests cover pending, completion, and failure rendering/navigation behavior.
+- Existing create-and-start, placement, linked issue, and attachment behavior remains covered.
 
 ## Out of Scope
 
-- Changes to the Firecrawl service itself.
-- Changes to Firecrawl authentication policy or firewall rules.
-- Embedding the bearer value in `.mcp.json`, Codex TOML, or the Nix store.
+- Changes to services other than Vibe Kanban.
+- Changes to Vibe Kanban deployment or hosting unless required to activate an in-repo background worker safely.
+- General redesign of workspace creation UI or unrelated job infrastructure.
 
 ## Acceptance Criteria
 
-1. Worker configuration declares the Firecrawl token reference through `executorSecretRefs`, while the MCP definition declares the service URL.
-2. The worker service resolves and exports `FIRECRAWL_BROWSER_AUTH_TOKEN` before launching Vibe Kanban.
-3. The Firecrawl stdio MCP definition allowlists `FIRECRAWL_BROWSER_AUTH_TOKEN` with `env_vars`, so Codex forwards it from the worker environment into the MCP child.
-4. The 1Password bootstrap credentials are still removed before executor jobs start.
-5. Existing generic worker-secret assertions validate the secret configuration.
-6. The changed configuration is syntactically valid and independent Codex review reports no significant findings.
-
-## Follow-up: Inline MCP Screenshot Results
-
-### Objective
-
-Render screenshots returned by MCP tools inline in Vibe Kanban's Codex chat
-without dumping base64 or raw MCP content JSON into the tool result.
-
-### Design
-
-Use the existing executor log-normalization boundary. Base64 MCP `image` blocks
-are decoded into the workspace's ignored `.vibe-attachments/` directory and
-rendered as Markdown image references. Hosted MCP `resource_link` blocks whose
-MIME type is `image/*` are rendered directly as Markdown images when their URI
-uses HTTP or HTTPS.
-
-Apply the same normalization to both Codex protocol paths, including the direct
-app-server item-completion path used by clustered Vibe Kanban workers.
-The shared image node recognizes HTTP(S) sources as previewable images, and the
-desktop CSP permits HTTP(S) image loading without widening script or connection
-permissions.
-
-### Security and Lifecycle
-
-- Do not fetch arbitrary resource links in the worker.
-- Only render HTTP(S) resource links explicitly marked with an image MIME type.
-- Keep base64 image persistence content-addressed and worktree-local.
-- The MCP server remains responsible for authorizing and retaining hosted URLs.
-
-### Firecrawl Browser Integration
-
-The Firecrawl Browser service stores screenshots in its existing bounded
-artifact store and returns a capability-bearing MCP `resource_link`. Screenshot
-artifacts are reusable until their short TTL expires so both the inline
-thumbnail and full-size preview can load them, including after the browser
-session closes. Existing browser-download
-artifacts remain single-use.
-
-A Vibe Kanban artifact proxy or durable remote-image import remains out of
-scope; hosted screenshots expire according to Firecrawl's artifact policy.
-
-### Acceptance Criteria
-
-1. Codex app-server MCP image results render as inline Markdown images.
-2. Base64 image blocks continue to persist into `.vibe-attachments/`.
-3. HTTP(S) `resource_link` blocks with `image/*` MIME types render inline.
-4. Non-image and non-HTTP(S) resource links retain existing JSON behavior.
-5. Automated tests cover base64, hosted-image, and rejected-link behavior.
-6. Web and desktop clients can load hosted HTTP(S) image sources.
-7. Firecrawl's `screenshot` tool returns a reusable, TTL-bound image
-   `resource_link` without carrying base64 through MCP.
+1. After the server accepts create-and-start, closing or navigating away from the create view does not prevent workspace creation.
+2. The create request is no longer held open for the full worktree/materialization duration.
+3. The resulting workspace and initial execution have the same configuration and content as in the current synchronous flow.
+4. Pending and failed states are observable and do not remain ambiguous indefinitely.
+5. Automated tests demonstrate request-lifetime independence and cover relevant state transitions.
+6. Repository checks, formatting, and independent Codex review pass with no significant findings.

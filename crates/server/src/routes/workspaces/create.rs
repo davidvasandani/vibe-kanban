@@ -5,11 +5,13 @@ use chrono::Utc;
 use db::models::{
     requests::{
         CreateAndStartWorkspaceRequest, CreateAndStartWorkspaceResponse, CreateWorkspaceApiRequest,
+        LinkedIssueInfo, WorkspaceRepoInput,
     },
     worker_node::WorkerNode,
     workspace::{CreateWorkspace, Workspace, WorkspacePlacement},
 };
 use deployment::Deployment;
+use executors::profile::ExecutorConfig;
 use services::services::container::ContainerService;
 use utils::response::ApiResponse;
 use uuid::Uuid;
@@ -223,38 +225,19 @@ fn compose_prompt_with_project_context(context: &str, prompt: &str) -> String {
     }
 }
 
-pub async fn create_and_start_workspace(
-    State(deployment): State<DeploymentImpl>,
-    Json(payload): Json<CreateAndStartWorkspaceRequest>,
-) -> Result<ResponseJson<ApiResponse<CreateAndStartWorkspaceResponse>>, ApiError> {
-    let CreateAndStartWorkspaceRequest {
-        name,
-        repos,
-        linked_issue,
-        executor_config,
-        prompt,
-        attachment_ids,
-        run_on_coordinator,
-        requested_worker_node_id,
-    } = payload;
-
-    let placement_intent = PlacementIntent::resolve(run_on_coordinator, requested_worker_node_id)?;
-
-    let mut workspace_prompt = normalize_prompt(&prompt).ok_or_else(|| {
-        ApiError::BadRequest(
-            "A workspace prompt is required. Provide a non-empty `prompt`.".to_string(),
-        )
-    })?;
-
-    if repos.is_empty() {
-        return Err(ApiError::BadRequest(
-            "At least one repository is required".to_string(),
-        ));
-    }
-
+async fn run_create_and_start_workspace(
+    deployment: DeploymentImpl,
+    workspace: Workspace,
+    repos: Vec<WorkspaceRepoInput>,
+    linked_issue: Option<LinkedIssueInfo>,
+    executor_config: ExecutorConfig,
+    mut workspace_prompt: String,
+    attachment_ids: Option<Vec<Uuid>>,
+    placement_intent: PlacementIntent,
+) -> Result<(), ApiError> {
     let mut managed_workspace = deployment
         .workspace_manager()
-        .load_managed_workspace(create_workspace_record(&deployment, name).await?)
+        .load_managed_workspace(workspace)
         .await?;
 
     for repo in &repos {
@@ -329,11 +312,6 @@ pub async fn create_and_start_workspace(
             }
         }
 
-        // Prepend the project's freeform "context" briefing (set in the Remote
-        // Projects settings) to the initial prompt. Best-effort and *bounded*:
-        // RemoteClient's own timeout is 30s with a retry (~60s worst case), which
-        // is far too long to make an optional briefing block the spawn — so cap
-        // it with a short timeout and skip the briefing on failure/timeout.
         let context_fetch = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             client.get_remote_project(linked_issue.remote_project_id),
@@ -344,19 +322,15 @@ pub async fn create_and_start_workspace(
                 workspace_prompt =
                     compose_prompt_with_project_context(&project.context, &workspace_prompt);
             }
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    "Failed to fetch project context for {}: {}",
-                    linked_issue.remote_project_id,
-                    e
-                );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "Timed out fetching project context for {}",
-                    linked_issue.remote_project_id
-                );
-            }
+            Ok(Err(e)) => tracing::warn!(
+                "Failed to fetch project context for {}: {}",
+                linked_issue.remote_project_id,
+                e
+            ),
+            Err(_) => tracing::warn!(
+                "Timed out fetching project context for {}",
+                linked_issue.remote_project_id
+            ),
         }
     }
 
@@ -396,7 +370,7 @@ pub async fn create_and_start_workspace(
     }
     tracing::info!("Created workspace {}", workspace.id);
 
-    let execution_process = deployment
+    deployment
         .container()
         .start_workspace(&workspace, executor_config.clone(), workspace_prompt)
         .await?;
@@ -412,10 +386,114 @@ pub async fn create_and_start_workspace(
         )
         .await;
 
+    Ok(())
+}
+
+pub async fn create_and_start_workspace(
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<CreateAndStartWorkspaceRequest>,
+) -> Result<ResponseJson<ApiResponse<CreateAndStartWorkspaceResponse>>, ApiError> {
+    let CreateAndStartWorkspaceRequest {
+        name,
+        repos,
+        linked_issue,
+        executor_config,
+        prompt,
+        attachment_ids,
+        run_on_coordinator,
+        requested_worker_node_id,
+    } = payload;
+
+    let placement_intent = PlacementIntent::resolve(run_on_coordinator, requested_worker_node_id)?;
+
+    let workspace_prompt = normalize_prompt(&prompt).ok_or_else(|| {
+        ApiError::BadRequest(
+            "A workspace prompt is required. Provide a non-empty `prompt`.".to_string(),
+        )
+    })?;
+
+    if repos.is_empty() {
+        return Err(ApiError::BadRequest(
+            "At least one repository is required".to_string(),
+        ));
+    }
+
+    let workspace = create_workspace_record(&deployment, name).await?;
+    if !Workspace::queue_creation(&deployment.db().pool, workspace.id).await? {
+        return Err(ApiError::Conflict(format!(
+            "Workspace creation {} could not be queued",
+            workspace.id
+        )));
+    }
+    let workspace = Workspace::find_by_id(&deployment.db().pool, workspace.id)
+        .await?
+        .ok_or(db::models::workspace::WorkspaceError::WorkspaceNotFound)?;
+    let accepted_workspace = workspace.clone();
+    let background_deployment = deployment.clone();
+    tokio::spawn(async move {
+        let workspace_id = workspace.id;
+        match Workspace::claim_creation(&background_deployment.db().pool, workspace_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!("Workspace creation {} was already claimed", workspace_id);
+                return;
+            }
+            Err(error) => {
+                tracing::error!(
+                    "Failed to claim workspace creation {}: {}",
+                    workspace_id,
+                    error
+                );
+                return;
+            }
+        }
+
+        match run_create_and_start_workspace(
+            background_deployment.clone(),
+            workspace,
+            repos,
+            linked_issue,
+            executor_config,
+            workspace_prompt,
+            attachment_ids,
+            placement_intent,
+        )
+        .await
+        {
+            Ok(()) => {
+                if let Err(error) =
+                    Workspace::finish_creation(&background_deployment.db().pool, workspace_id).await
+                {
+                    tracing::error!(
+                        "Failed to mark workspace creation {} ready: {}",
+                        workspace_id,
+                        error
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::error!("Workspace creation {} failed: {}", workspace_id, error);
+                let message = "Workspace creation failed. Create a new workspace to try again.";
+                if let Err(status_error) = Workspace::fail_creation(
+                    &background_deployment.db().pool,
+                    workspace_id,
+                    message,
+                )
+                .await
+                {
+                    tracing::error!(
+                        "Failed to record workspace creation {} failure: {}",
+                        workspace_id,
+                        status_error
+                    );
+                }
+            }
+        }
+    });
+
     Ok(ResponseJson(ApiResponse::success(
         CreateAndStartWorkspaceResponse {
-            workspace,
-            execution_process,
+            workspace: accepted_workspace,
         },
     )))
 }

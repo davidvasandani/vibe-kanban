@@ -370,6 +370,21 @@ human label and complete definition, rejects collisions and cross-profile
 ambiguity before the first write, and either commits every affected native key
 plus metadata or leaves the legacy state recoverable and clearly reported.
 
+### XXVIII. Accepted lifecycle work outlives its request
+Once an API acknowledges lifecycle work that creates or mutates durable product
+state, completion MUST NOT depend on the originating HTTP connection, browser
+route, or component remaining alive. The coordinator persists an authoritative
+operation identity and observable state before acknowledgement, and exactly one
+background consumer claims the work. Retries replay or continue that identity;
+they never create a duplicate execution or repeat a committed phase.
+
+Pending, successful, failed, and indeterminate outcomes are durable and visible
+through ordinary product reads. Process restart reconciles every accepted
+non-terminal operation from positive evidence: it resumes an idempotent phase or
+records a truthful actionable outcome, never infers success from absence and
+never leaves an unbounded pending state. Slow external or filesystem operations
+run outside request cancellation, and no coordination lock is held across them.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -391,7 +406,9 @@ plus metadata or leaves the legacy state recoverable and clearly reported.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.24.0 (requires explicit, collision-safe, atomic legacy identifier
+**Version**: 0.25.0 (requires accepted lifecycle work to have a persisted,
+single-consumer operation identity, request-independent execution, idempotent
+restart reconciliation, and durable user-visible outcomes; 0.24.0 required explicit, collision-safe, atomic legacy identifier
 migration with label and definition preservation; 0.23.0 required collapsed controls to retain summary-backed,
 responsive decision context; 0.22.0 made Vibe Kanban settings the sole
 MCP-definition authority and limited deployment ownership to runtime
