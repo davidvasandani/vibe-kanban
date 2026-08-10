@@ -40,5 +40,5 @@ and may run in parallel within their group.
 
 ## Phase 5: Integration
 
-- [ ] T008 Merge branch `vk/89c5-pipeline-instruc` into its base branch after
+- [x] T008 Merge branch `vk/89c5-pipeline-instruc` into its base branch after
   T007.
