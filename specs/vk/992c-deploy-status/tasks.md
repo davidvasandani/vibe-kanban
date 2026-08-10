@@ -46,7 +46,7 @@ and may run in parallel within their layer. Each task names the files it changes
   with `VAS-377`, refresh `wiki/INDEX.md` if needed, and commit the knowledge-base
   change; record the result in `specs/vk/992c-deploy-status/knowledge.md`
   (depends on T007).
-- [ ] T009 Merge branch `vk/992c-deploy-status` into its configured base branch
+- [x] T009 Merge branch `vk/992c-deploy-status` into its configured base branch
   after confirming the repository is clean and the diff is limited to Vibe
   Kanban (depends on T008).
 
