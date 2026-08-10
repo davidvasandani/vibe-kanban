@@ -29,9 +29,9 @@
 ## Layer 4 — Verification and Delivery
 
 - [x] T010 Run formatting and focused Rust tests/checks; fix confirmed failures.
-- [ ] T011 Run independent Codex review, address significant findings, and
+- [x] T011 Run independent Codex review, address significant findings, and
   re-verify until clean.
-- [ ] T012 Record reusable project knowledge, tag it with VAS-375, refresh the
+- [x] T012 Record reusable project knowledge, tag it with VAS-375, refresh the
   knowledge index, and commit the knowledge-base update.
 - [ ] T013 Publish coordinated Vibe Kanban and homelab PRs, merge them, and report
   credential-rotation and deployment verification requirements.
