@@ -1,41 +1,40 @@
-# Technical Spec: Ship Firecrawl MCP Authentication to Cluster Workers
+# Default every new workspace to the remote mainline
 
-## Objective
+Task: `vk/1476-protect-git-repo`
 
-Ensure Vibe Kanban worker-hosted coding agents receive both values required by the configured `firecrawl-browser` stdio MCP launcher:
+## Problem
 
-- `FIRECRAWL_BROWSER_URL`
-- `FIRECRAWL_BROWSER_AUTH_TOKEN`
+When Vibe Kanban starts a workspace, one repository-selection path defaults the
+target branch to the registered checkout's current local branch. Repositories in
+`/srv/src` may be checked out on deployment, recovery, or operator branches, so
+that local state is not a safe workspace base. The intended default is the
+remote mainline, normally `origin/main`.
 
-This prevents remote workers such as think4 from reaching Firecrawl but failing `/api/internal/mcp-scope` bootstrap with HTTP 401.
+## Required behavior
 
-## Design
+- Every new-workspace repository selection path uses the same default-branch
+  policy.
+- An explicitly configured repository default remains highest priority.
+- Without an explicit default, `origin/main` is preferred, followed by
+  `origin/master` for legacy repositories.
+- Only when neither remote mainline exists may selection fall back to the
+  current branch and then the first available branch.
+- An explicit initial branch supplied by the calling workflow remains higher
+  priority than repository/default inference when it exists.
+- The exact selected remote-tracking branch is persisted as the workspace's
+  target branch, so worktree creation resolves that ref rather than local HEAD.
+- Empty branch lists remain non-selectable and existing manual overrides remain
+  unchanged.
 
-Use the deployment module's generic `executorSecretRefs` worker option to resolve the Firecrawl bearer through the existing 1Password bootstrap path and export it into the long-running worker process. Executor subprocesses and their stdio MCP children inherit it.
+## Scope
 
-The repository MCP definition sets the URL directly and allowlists `FIRECRAWL_BROWSER_AUTH_TOKEN` for forwarding from the worker environment. It does not use a literal `${VAR}` value: Codex's supported secret-forwarding mechanism for stdio MCP servers is `env_vars`.
+This is a Vibe Kanban application change. It must not alter the checkout,
+deployment, or branch configuration of any other service under `/srv/src`.
 
-The secret value must never enter the Nix store, repository, command line, logs, or generated agent configuration. Only the 1Password reference is declarative.
+## Verification
 
-Configure each Vibe Kanban execution worker with the private Firecrawl URL and existing `op://Homelab/Firecrawl Browser MCP/bearer-token` reference.
-
-When no user follow-up already exists, use:
-
-- `homelab/modules/vibe-kanban-rebuild.nix`
-- Vibe Kanban worker host declarations using that module
-- Evaluation checks for paired configuration and rendered service environment
-
-## Out of Scope
-
-- Changes to the Firecrawl service itself.
-- Changes to Firecrawl authentication policy or firewall rules.
-- Embedding the bearer value in `.mcp.json`, Codex TOML, or the Nix store.
-
-## Acceptance Criteria
-
-1. Worker configuration declares the Firecrawl token reference through `executorSecretRefs`, while the MCP definition declares the service URL.
-2. The worker service resolves and exports `FIRECRAWL_BROWSER_AUTH_TOKEN` before launching Vibe Kanban.
-3. The Firecrawl stdio MCP definition allowlists `FIRECRAWL_BROWSER_AUTH_TOKEN` with `env_vars`, so Codex forwards it from the worker environment into the MCP child.
-4. The 1Password bootstrap credentials are still removed before executor jobs start.
-5. Existing generic worker-secret assertions validate the secret configuration.
-6. The changed configuration is syntactically valid and independent Codex review reports no significant findings.
+- Unit coverage proves configured defaults and explicit initial branches win.
+- Coverage proves `origin/main` and `origin/master` outrank a current local
+  branch.
+- Coverage proves the existing current/first fallback and empty-list behavior.
+- Relevant frontend type, lint, format, and test checks pass.

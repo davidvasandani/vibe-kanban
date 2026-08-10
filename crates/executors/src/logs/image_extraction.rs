@@ -2,10 +2,10 @@
 //! `.vibe-attachments/` directory so they render inline in the chat.
 //!
 //! MCP tool results can carry `image` content blocks (a base64 payload plus a
-//! MIME type). Executors otherwise collapse tool results to text or dump the
-//! raw JSON (base64 and all), so the image is never shown. This module extracts
-//! those blocks, writes the decoded bytes into the worktree, and produces a
-//! Markdown rendering that references them as `![alt](.vibe-attachments/<file>)`.
+//! MIME type) or hosted `resource_link` image blocks. Executors otherwise
+//! collapse tool results to text or dump the raw JSON (base64 and all), so the
+//! image is never shown. This module persists embedded images and produces a
+//! Markdown rendering for both forms.
 //! The frontend's WYSIWYG chat renderer turns that Markdown into an inline
 //! thumbnail (see `packages/ui/src/components/image-node.tsx`), and the backend
 //! serves the file straight from the worktree — no DB record required.
@@ -13,6 +13,7 @@
 use std::{fs, path::Path};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use reqwest::Url;
 use sha2::{Digest, Sha256};
 use workspace_utils::path::VIBE_ATTACHMENTS_DIR;
 
@@ -62,6 +63,12 @@ pub fn rewrite_blocks_with_images(
                     parts.push(format!("![image]({rel_path})"));
                 }
             }
+            Some("resource_link") => {
+                if let Some(uri) = hosted_image_uri(block) {
+                    found_image = true;
+                    parts.push(format!("![image]({uri})"));
+                }
+            }
             _ => {}
         }
     }
@@ -70,6 +77,26 @@ pub fn rewrite_blocks_with_images(
         Some(parts.join("\n\n"))
     } else {
         None
+    }
+}
+
+/// Return the URI for a hosted MCP image resource that is safe for the browser
+/// to request directly. Authorization and retention remain the MCP server's
+/// responsibility; the executor deliberately does not fetch remote content.
+fn hosted_image_uri(block: &serde_json::Value) -> Option<String> {
+    let mime = block.get("mimeType").and_then(|value| value.as_str())?;
+    if !mime.to_ascii_lowercase().starts_with("image/") {
+        return None;
+    }
+
+    let uri = block.get("uri").and_then(|value| value.as_str())?;
+    let parsed = Url::parse(uri).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        None
+    } else {
+        // Lexical's Markdown image matcher terminates at `)`, so encode
+        // parentheses that are otherwise valid URL characters.
+        Some(parsed.as_str().replace('(', "%28").replace(')', "%29"))
     }
 }
 
@@ -233,5 +260,60 @@ mod tests {
             .collect();
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0], refs[1], "content-addressed filenames dedupe");
+    }
+
+    #[test]
+    fn hosted_image_resource_link_is_rendered_inline() {
+        let wt = tmp_worktree("resource-link");
+        let content = serde_json::json!([
+            { "type": "text", "text": "captured page" },
+            {
+                "type": "resource_link",
+                "uri": "https://artifacts.example/screenshot.jpg?token=opaque",
+                "mimeType": "image/jpeg",
+                "name": "screenshot"
+            }
+        ]);
+
+        let md = rewrite_content_with_images(&wt, &content).expect("should rewrite");
+        assert_eq!(
+            md,
+            "captured page\n\n![image](https://artifacts.example/screenshot.jpg?token=opaque)"
+        );
+        assert!(!wt.join(".vibe-attachments").exists());
+    }
+
+    #[test]
+    fn unsafe_or_non_image_resource_links_are_not_rewritten() {
+        let wt = tmp_worktree("rejected-resource-links");
+        for content in [
+            serde_json::json!([{
+                "type": "resource_link",
+                "uri": "file:///tmp/screenshot.jpg",
+                "mimeType": "image/jpeg"
+            }]),
+            serde_json::json!([{
+                "type": "resource_link",
+                "uri": "https://artifacts.example/report.json",
+                "mimeType": "application/json"
+            }]),
+        ] {
+            assert!(rewrite_content_with_images(&wt, &content).is_none());
+        }
+    }
+
+    #[test]
+    fn hosted_image_uri_is_safe_for_markdown_parser() {
+        let wt = tmp_worktree("resource-link-parentheses");
+        let content = serde_json::json!([{
+            "type": "resource_link",
+            "uri": "https://artifacts.example/screenshot(1).jpg",
+            "mimeType": "image/jpeg"
+        }]);
+
+        assert_eq!(
+            rewrite_content_with_images(&wt, &content).as_deref(),
+            Some("![image](https://artifacts.example/screenshot%281%29.jpg)")
+        );
     }
 }
