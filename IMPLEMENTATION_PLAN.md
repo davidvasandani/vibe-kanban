@@ -14,4 +14,7 @@
 3. Teach the shared image node and desktop CSP to display HTTP(S) image URLs.
 4. Add focused unit tests for hosted image links and rejected resource links.
 5. Run formatting and targeted executor/frontend checks.
-6. Run independent Codex review and address confirmed findings until none remain.
+6. Reuse Firecrawl's bounded artifact store for reusable screenshot artifacts
+   and return capability URLs as MCP `resource_link` image blocks.
+7. Verify Firecrawl build/tests and the end-to-end MCP screenshot contract.
+8. Run independent Codex review and address confirmed findings until none remain.

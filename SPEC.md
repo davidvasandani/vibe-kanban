@@ -68,11 +68,17 @@ permissions.
 - Keep base64 image persistence content-addressed and worktree-local.
 - The MCP server remains responsible for authorizing and retaining hosted URLs.
 
-### Out of Scope
+### Firecrawl Browser Integration
 
-- Changing the Firecrawl Browser service to host screenshots or emit
-  `resource_link` results.
-- Adding a Vibe Kanban artifact proxy or durable remote-image import.
+The Firecrawl Browser service stores screenshots in its existing bounded
+artifact store and returns a capability-bearing MCP `resource_link`. Screenshot
+artifacts are reusable until their short TTL expires so both the inline
+thumbnail and full-size preview can load them, including after the browser
+session closes. Existing browser-download
+artifacts remain single-use.
+
+A Vibe Kanban artifact proxy or durable remote-image import remains out of
+scope; hosted screenshots expire according to Firecrawl's artifact policy.
 
 ### Acceptance Criteria
 
@@ -82,3 +88,5 @@ permissions.
 4. Non-image and non-HTTP(S) resource links retain existing JSON behavior.
 5. Automated tests cover base64, hosted-image, and rejected-link behavior.
 6. Web and desktop clients can load hosted HTTP(S) image sources.
+7. Firecrawl's `screenshot` tool returns a reusable, TTL-bound image
+   `resource_link` without carrying base64 through MCP.
