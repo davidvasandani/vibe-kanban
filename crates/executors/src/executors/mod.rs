@@ -125,7 +125,48 @@ pub enum CodingAgent {
     QaMock(QaMockExecutor),
 }
 
+/// How an agent's MCP configuration can be redirected for a single execution.
+///
+/// Cluster workers materialize a per-execution MCP config rather than editing
+/// the agent's real config in place: concurrent executions on one worker would
+/// otherwise race on a single shared file, and a crashed execution would leave
+/// its servers behind. The worker builds a scoped directory, writes
+/// `file_name` into it, and points the agent at it with `env_var` — the only
+/// lever the worker has, since the command line is built coordinator-side.
+///
+/// `None` means the agent offers no such redirection, so worker-side
+/// materialization is unsupported for it and must fail loudly rather than
+/// silently editing the shared config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedMcpConfig {
+    /// Environment variable that relocates the agent's config directory.
+    pub env_var: &'static str,
+    /// Config file name the agent reads inside that directory.
+    pub file_name: &'static str,
+}
+
 impl CodingAgent {
+    /// Per-execution MCP config redirection, when the agent supports it.
+    ///
+    /// Only agents verified to honor a config-directory environment variable
+    /// appear here. Adding one requires confirming the variable actually
+    /// relocates the config the agent reads — an unverified guess would send
+    /// the agent's MCP servers to a directory it never consults, which looks
+    /// like success and silently drops every shared server.
+    pub fn scoped_mcp_config(&self) -> Option<ScopedMcpConfig> {
+        match self {
+            Self::Codex(_) => Some(ScopedMcpConfig {
+                env_var: "CODEX_HOME",
+                file_name: "config.toml",
+            }),
+            Self::ClaudeCode(_) => Some(ScopedMcpConfig {
+                env_var: "CLAUDE_CONFIG_DIR",
+                file_name: ".claude.json",
+            }),
+            _ => None,
+        }
+    }
+
     pub fn get_mcp_config(&self) -> McpConfig {
         match self {
             Self::Codex(_) => McpConfig::new(

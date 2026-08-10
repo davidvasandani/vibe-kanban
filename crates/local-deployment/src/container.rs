@@ -2627,9 +2627,14 @@ impl ContainerService for LocalContainerService {
         let profile =
             ExecutionProcess::latest_executor_profile_for_session(&self.db.pool, session_id)
                 .await?;
-        let supported = profile
-            .as_ref()
-            .is_some_and(|profile| profile.executor == BaseCodingAgent::Codex);
+        // Live refresh follows the same rule as dispatch-time materialization:
+        // supported exactly when the agent can be pointed at a per-execution
+        // config directory.
+        let supported = profile.as_ref().is_some_and(|profile| {
+            ExecutorConfigs::get_cached()
+                .get_coding_agent(profile)
+                .is_some_and(|agent| agent.scoped_mcp_config().is_some())
+        });
         let result = self
             .mcp_refresh_coordinator
             .request(session_id, supported)
@@ -2638,7 +2643,7 @@ impl ContainerService for LocalContainerService {
             return Ok(result);
         }
 
-        // A clustered execution owns both its scoped config and live Codex
+        // A clustered execution owns both its scoped config and live MCP
         // control on the assigned worker. Resolve settings again here; the
         // dispatch-time snapshot is intentionally not reused.
         let latest_execution =
@@ -2675,8 +2680,12 @@ impl ContainerService for LocalContainerService {
                         .unwrap_or(result));
                 }
             };
+            // Label the snapshot with the execution's actual executor. The
+            // worker rejects a snapshot whose executor does not match what it
+            // prepared, so a hardcoded value here would make every non-Codex
+            // refresh fail as a mismatch.
             let snapshot = McpConfigSnapshot {
-                executor: BaseCodingAgent::Codex.to_string(),
+                executor: profile_id.executor.to_string(),
                 servers,
             };
             if snapshot.validate_size().is_err() {
@@ -3092,23 +3101,30 @@ impl ContainerService for LocalContainerService {
             .map(serde_json::to_value)
             .transpose()
             .map_err(anyhow::Error::from)?;
-        let mcp_config_snapshot = if let Some(config) =
-            executor_config.filter(|config| config.executor == BaseCodingAgent::Codex)
-        {
+        // Previously gated to Codex. Support is now decided by the resolved
+        // agent: any agent that can be pointed at a per-execution config
+        // directory gets the coordinator's shared MCP servers, so Claude Code
+        // no longer depends on the host writing ~/.claude.json out of band.
+        // Agents without that redirection still get None and are unaffected.
+        let mcp_config_snapshot = if let Some(config) = executor_config {
             let profile_id = config.profile_id();
             let agent = ExecutorConfigs::get_cached()
                 .get_coding_agent(&profile_id)
                 .ok_or_else(|| anyhow!("executor profile {profile_id} is unavailable"))?;
-            let snapshot = McpConfigSnapshot {
-                executor: config.executor.to_string(),
-                servers: read_coding_agent_mcp_servers(&agent)
-                    .await
-                    .map_err(anyhow::Error::from)?
-                    .into_iter()
-                    .collect(),
-            };
-            snapshot.validate_size().map_err(anyhow::Error::from)?;
-            Some(snapshot)
+            if agent.scoped_mcp_config().is_some() {
+                let snapshot = McpConfigSnapshot {
+                    executor: config.executor.to_string(),
+                    servers: read_coding_agent_mcp_servers(&agent)
+                        .await
+                        .map_err(anyhow::Error::from)?
+                        .into_iter()
+                        .collect(),
+                };
+                snapshot.validate_size().map_err(anyhow::Error::from)?;
+                Some(snapshot)
+            } else {
+                None
+            }
         } else {
             None
         };
