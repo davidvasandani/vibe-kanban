@@ -1061,11 +1061,36 @@ impl ClaudeLogProcessor {
                                 _ => {}
                             }
 
-                            let patches = processor.normalize_entries(
-                                &claude_json,
-                                &worktree_path,
-                                &entry_index_provider,
-                            );
+                            let contains_hosted_image = serde_json::to_value(&claude_json)
+                                .ok()
+                                .is_some_and(|value| {
+                                    crate::logs::image_extraction::contains_hosted_image_resource_link(
+                                        &value,
+                                    )
+                                });
+                            let patches = if contains_hosted_image {
+                                let blocking_worktree_path = worktree_path.clone();
+                                let blocking_entry_index_provider = entry_index_provider.clone();
+                                let (next_processor, patches) =
+                                    tokio::task::spawn_blocking(move || {
+                                        let patches = processor.normalize_entries(
+                                            &claude_json,
+                                            &blocking_worktree_path,
+                                            &blocking_entry_index_provider,
+                                        );
+                                        (processor, patches)
+                                    })
+                                    .await
+                                    .expect("Claude image-result normalization task panicked");
+                                processor = next_processor;
+                                patches
+                            } else {
+                                processor.normalize_entries(
+                                    &claude_json,
+                                    &worktree_path,
+                                    &entry_index_provider,
+                                )
+                            };
                             for patch in patches {
                                 msg_store.push_patch(patch);
                             }
