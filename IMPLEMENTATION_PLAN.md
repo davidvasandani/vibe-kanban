@@ -34,8 +34,10 @@
 
 1. Update the refresh and status handlers to extract the nested workspace and
    session UUID path tuple.
-2. Run Rust formatting, a focused server compile, and diff validation.
-3. Run an independent Codex review and address confirmed findings until none
+2. Update the workspace-loading middleware to deserialize the named workspace
+   path parameter while tolerating parameters added by nested routes.
+3. Run Rust formatting, a focused server compile, and diff validation.
+4. Run an independent Codex review and address confirmed findings until none
    remain.
-4. Merge and deploy the fix, then verify the live refresh endpoint and native
+5. Merge and deploy the fix, then verify the live refresh endpoint and native
    Firecrawl browser tool availability.
