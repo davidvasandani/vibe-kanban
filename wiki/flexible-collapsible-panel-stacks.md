@@ -46,6 +46,26 @@ Without that fallback, lower headers can be clipped and become unreachable.
 Pair it with `overflow-x-hidden` so vertical overflow does not accidentally
 create a horizontal scroll surface.
 
+## Fixed chrome in a shared drawer component
+
+The same `RightSidebar` composition is used by the desktop workspace drawer and
+the mobile Git tab. Desktop-only fixed chrome therefore cannot be added
+unconditionally inside `RightSidebar`: doing so duplicates mobile chrome and
+changes a surface outside the desktop requirement.
+
+Let the layout mount identify the desktop use explicitly, then render fixed
+chrome as a first-child intrinsic row (`flex-none shrink-0`) before the mapped
+collapsible sections. The row must not use `CollapsibleSectionHeader` or a
+persisted expansion key when the product says it is always visible. This keeps
+the row outside disclosure state while preserving all remaining-height sharing
+for expanded sections.
+
+Rendered-DOM coverage should assert both halves of the contract: the desktop
+mount enables the row, and the row is first, intrinsic, and has no disclosure
+button. Keep shared behavior such as formatting, timers, links, and accessible
+labels in the existing presentational component rather than reimplementing it
+at the drawer boundary.
+
 ## Verification
 
 Rendered-DOM coverage should assert the shared primitive's opt-in expanded,
@@ -56,3 +76,4 @@ height caps.
 ## Contributed by
 
 - vk/b74a-right-drawer-exp
+- VAS-377

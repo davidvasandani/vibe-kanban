@@ -1,92 +1,94 @@
-# Technical Spec: Ship Firecrawl MCP Authentication to Cluster Workers
+# Technical Spec: Desktop Deploy Status (`VAS-377`)
 
 ## Objective
 
-Ensure Vibe Kanban worker-hosted coding agents receive both values required by the configured `firecrawl-browser` stdio MCP launcher:
+Show the running Vibe Kanban deployment identity and age at the top of the
+desktop workspace right drawer. The status is informational, has no visibility
+toggle, and remains present whenever the desktop right drawer is mounted.
 
-- `FIRECRAWL_BROWSER_URL`
-- `FIRECRAWL_BROWSER_AUTH_TOKEN`
+## Existing Capability
 
-This prevents remote workers such as think4 from reaching Firecrawl but failing `/api/internal/mcp-scope` bootstrap with HTTP 401.
+VAS-377's mobile work already supplies the required data and presentation:
 
-## Design
+- `GET /api/info` exposes the running `version` and optional
+  `deployment_timestamp`.
+- `useUserSystem` owns the loaded system metadata.
+- `packages/ui/src/components/DeployStatus.tsx` renders the revision, optional
+  elapsed age, production commit link, development-build fallback, accessible
+  label, and minute-scale refresh.
 
-Use the deployment module's generic `executorSecretRefs` worker option to resolve the Firecrawl bearer through the existing 1Password bootstrap path and export it into the long-running worker process. Executor subprocesses and their stdio MCP children inherit it.
+The desktop change must reuse those contracts. It must not add another request,
+timestamp source, persisted preference, or deployment/IaC change.
 
-The repository MCP definition sets the URL directly and allowlists `FIRECRAWL_BROWSER_AUTH_TOKEN` for forwarding from the worker environment. It does not use a literal `${VAR}` value: Codex's supported secret-forwarding mechanism for stdio MCP servers is `env_vars`.
+## User Experience
 
-The secret value must never enter the Nix store, repository, command line, logs, or generated agent configuration. Only the 1Password reference is declarative.
+On desktop workspace pages, the deploy status appears before every existing
+collapsible section in the right drawer. It is a fixed, non-collapsible row and
+therefore cannot be hidden independently of the drawer itself.
 
-Configure each Vibe Kanban execution worker with the private Firecrawl URL and existing `op://Homelab/Firecrawl Browser MCP/bearer-token` reference.
+The row:
 
-When no user follow-up already exists, use:
+- is labelled `Deploy Status`;
+- shows the same revision and elapsed-age presentation used by the mobile
+  header;
+- links a real revision to its exact GitHub commit;
+- renders `dev` as a non-linking development build;
+- retains a valid revision when the timestamp is missing or malformed;
+- renders no misleading placeholder when no version is available; and
+- visually participates in the drawer's existing divided stack while remaining
+  above scrollable/collapsible feature sections.
 
-- `homelab/modules/vibe-kanban-rebuild.nix`
-- Vibe Kanban worker host declarations using that module
-- Evaluation checks for paired configuration and rendered service environment
+“Always visible” means the deploy-status row has no feature toggle and no
+collapse state. The existing global right-drawer toggle still controls whether
+the drawer itself is open.
+
+## Architecture
+
+The workspace `RightSidebar` is the desktop right-drawer composition boundary.
+It will read `appVersion` and `deploymentTimestamp` from the existing
+`useUserSystem` context and render a small desktop-specific row using the shared
+`DeployStatus` component before mapping its current section definitions.
+
+The shared component may receive additive styling/presentation options if the
+desktop row needs a wider layout than the compact mobile header, but mobile
+behavior and its responsive priority must remain unchanged.
+
+The project/issue contextual side panel is out of scope: it is route content,
+not the persistent workspace drawer controlled by `ToggleRightSidebar`.
+
+## Testing
+
+Automated coverage will verify that:
+
+1. The desktop drawer renders `Deploy Status` before its existing sections.
+2. The row is non-collapsible and does not introduce a toggle or persisted
+   preference.
+3. Existing deployment metadata is passed to the shared presentation.
+4. Production, `dev`, and missing/invalid timestamp behavior remains correct.
+5. Existing mobile navbar behavior is unchanged.
+
+Verification will use the repository-owned frontend test, type-check, lint,
+format, and generated-type checks appropriate to the touched files.
 
 ## Out of Scope
 
-- Changes to the Firecrawl service itself.
-- Changes to Firecrawl authentication policy or firewall rules.
-- Embedding the bearer value in `.mcp.json`, Codex TOML, or the Nix store.
+- Changes to any service other than Vibe Kanban.
+- Changes to `homelab/modules/vibe-kanban-rebuild.nix` or any host deployment.
+- Deployment history, rollback controls, release notes, or a status toggle.
+- New backend fields, API calls, dependencies, or persisted UI preferences.
+- Redesigning the existing right drawer or project/issue contextual panels.
 
 ## Acceptance Criteria
 
-1. Worker configuration declares the Firecrawl token reference through `executorSecretRefs`, while the MCP definition declares the service URL.
-2. The worker service resolves and exports `FIRECRAWL_BROWSER_AUTH_TOKEN` before launching Vibe Kanban.
-3. The Firecrawl stdio MCP definition allowlists `FIRECRAWL_BROWSER_AUTH_TOKEN` with `env_vars`, so Codex forwards it from the worker environment into the MCP child.
-4. The 1Password bootstrap credentials are still removed before executor jobs start.
-5. Existing generic worker-secret assertions validate the secret configuration.
-6. The changed configuration is syntactically valid and independent Codex review reports no significant findings.
-
-## Follow-up: Inline MCP Screenshot Results
-
-### Objective
-
-Render screenshots returned by MCP tools inline in Vibe Kanban's Codex chat
-without dumping base64 or raw MCP content JSON into the tool result.
-
-### Design
-
-Use the existing executor log-normalization boundary. Base64 MCP `image` blocks
-are decoded into the workspace's ignored `.vibe-attachments/` directory and
-rendered as Markdown image references. Hosted MCP `resource_link` blocks whose
-MIME type is `image/*` are rendered directly as Markdown images when their URI
-uses HTTP or HTTPS.
-
-Apply the same normalization to both Codex protocol paths, including the direct
-app-server item-completion path used by clustered Vibe Kanban workers.
-The shared image node recognizes HTTP(S) sources as previewable images, and the
-desktop CSP permits HTTP(S) image loading without widening script or connection
-permissions.
-
-### Security and Lifecycle
-
-- Do not fetch arbitrary resource links in the worker.
-- Only render HTTP(S) resource links explicitly marked with an image MIME type.
-- Keep base64 image persistence content-addressed and worktree-local.
-- The MCP server remains responsible for authorizing and retaining hosted URLs.
-
-### Firecrawl Browser Integration
-
-The Firecrawl Browser service stores screenshots in its existing bounded
-artifact store and returns a capability-bearing MCP `resource_link`. Screenshot
-artifacts are reusable until their short TTL expires so both the inline
-thumbnail and full-size preview can load them, including after the browser
-session closes. Existing browser-download
-artifacts remain single-use.
-
-A Vibe Kanban artifact proxy or durable remote-image import remains out of
-scope; hosted screenshots expire according to Firecrawl's artifact policy.
-
-### Acceptance Criteria
-
-1. Codex app-server MCP image results render as inline Markdown images.
-2. Base64 image blocks continue to persist into `.vibe-attachments/`.
-3. HTTP(S) `resource_link` blocks with `image/*` MIME types render inline.
-4. Non-image and non-HTTP(S) resource links retain existing JSON behavior.
-5. Automated tests cover base64, hosted-image, and rejected-link behavior.
-6. Web and desktop clients can load hosted HTTP(S) image sources.
-7. Firecrawl's `screenshot` tool returns a reusable, TTL-bound image
-   `resource_link` without carrying base64 through MCP.
+- [ ] On desktop, the workspace right drawer starts with a visible `Deploy
+      Status` row above all existing sections.
+- [ ] The row displays the running revision and deployment age using the VAS-377
+      data already loaded by the application.
+- [ ] The status has no collapse control, feature toggle, or independent hidden
+      state.
+- [ ] A production revision links to the exact Vibe Kanban commit; `dev` does
+      not link.
+- [ ] Missing or invalid deployment time degrades without `Invalid Date` or a
+      fabricated age.
+- [ ] The existing mobile deploy status and desktop drawer controls continue to
+      behave as before.
