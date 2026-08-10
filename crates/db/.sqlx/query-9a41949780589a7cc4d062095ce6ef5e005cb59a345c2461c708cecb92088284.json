@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT  id                AS \"id!: Uuid\",\n                       task_id           AS \"task_id: Uuid\",\n                       container_ref,\n                       branch,\n                       setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                       created_at        AS \"created_at!: DateTime<Utc>\",\n                       updated_at        AS \"updated_at!: DateTime<Utc>\",\n                       archived          AS \"archived!: bool\",\n                       pinned            AS \"pinned!: bool\",\n                       name,\n                       worktree_deleted  AS \"worktree_deleted!: bool\",\n                       current_pipeline_stage,\n                       speckit_feature_key,\n                       speckit_host_repo_id AS \"speckit_host_repo_id: Uuid\"\n               FROM    workspaces\n               WHERE   rowid = $1",
+  "query": "INSERT INTO workspaces (id, task_id, container_ref, branch, setup_completed_at, name)\n               VALUES ($1, $2, $3, $4, $5, $6)\n               RETURNING id as \"id!: Uuid\", task_id as \"task_id: Uuid\", container_ref, branch, setup_completed_at as \"setup_completed_at: DateTime<Utc>\", created_at as \"created_at!: DateTime<Utc>\", updated_at as \"updated_at!: DateTime<Utc>\", archived as \"archived!: bool\", pinned as \"pinned!: bool\", name, worktree_deleted as \"worktree_deleted!: bool\", current_pipeline_stage, speckit_feature_key, speckit_host_repo_id as \"speckit_host_repo_id: Uuid\", creation_status as \"creation_status!: WorkspaceCreationStatus\", creation_error",
   "describe": {
     "columns": [
       {
@@ -72,10 +72,20 @@
         "name": "speckit_host_repo_id: Uuid",
         "ordinal": 13,
         "type_info": "Blob"
+      },
+      {
+        "name": "creation_status!: WorkspaceCreationStatus",
+        "ordinal": 14,
+        "type_info": "Text"
+      },
+      {
+        "name": "creation_error",
+        "ordinal": 15,
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 6
     },
     "nullable": [
       true,
@@ -91,8 +101,10 @@
       false,
       true,
       true,
+      true,
+      false,
       true
     ]
   },
-  "hash": "e2ce7fddd26eb76e2e987bfdaf18e14305d256987b7d9f859ccffc50086fce2b"
+  "hash": "9a41949780589a7cc4d062095ce6ef5e005cb59a345c2461c708cecb92088284"
 }

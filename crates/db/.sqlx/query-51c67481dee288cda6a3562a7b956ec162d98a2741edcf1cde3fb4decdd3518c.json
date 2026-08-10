@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!: Uuid\",\n                          task_id AS \"task_id: Uuid\",\n                          container_ref,\n                          branch,\n                          setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                          created_at AS \"created_at!: DateTime<Utc>\",\n                          updated_at AS \"updated_at!: DateTime<Utc>\",\n                          archived AS \"archived!: bool\",\n                          pinned AS \"pinned!: bool\",\n                          name,\n                          worktree_deleted AS \"worktree_deleted!: bool\",\n                          current_pipeline_stage,\n                          speckit_feature_key,\n                          speckit_host_repo_id AS \"speckit_host_repo_id: Uuid\"\n                   FROM workspaces\n                   ORDER BY created_at DESC",
+  "query": "SELECT id AS \"id!: Uuid\",\n                          task_id AS \"task_id: Uuid\",\n                          container_ref,\n                          branch,\n                          setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                          created_at AS \"created_at!: DateTime<Utc>\",\n                          updated_at AS \"updated_at!: DateTime<Utc>\",\n                          archived AS \"archived!: bool\",\n                          pinned AS \"pinned!: bool\",\n                          name,\n                          worktree_deleted AS \"worktree_deleted!: bool\",\n                          current_pipeline_stage,\n                          speckit_feature_key,\n                          speckit_host_repo_id AS \"speckit_host_repo_id: Uuid\",\n                          creation_status AS \"creation_status!: WorkspaceCreationStatus\",\n                          creation_error\n                   FROM workspaces\n                   ORDER BY created_at DESC",
   "describe": {
     "columns": [
       {
@@ -72,6 +72,16 @@
         "name": "speckit_host_repo_id: Uuid",
         "ordinal": 13,
         "type_info": "Blob"
+      },
+      {
+        "name": "creation_status!: WorkspaceCreationStatus",
+        "ordinal": 14,
+        "type_info": "Text"
+      },
+      {
+        "name": "creation_error",
+        "ordinal": 15,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -91,8 +101,10 @@
       false,
       true,
       true,
+      true,
+      false,
       true
     ]
   },
-  "hash": "e5ba216c8faeff6e2474bca47f8f790b54427bb1255ded43f6391aec7a1a7b93"
+  "hash": "51c67481dee288cda6a3562a7b956ec162d98a2741edcf1cde3fb4decdd3518c"
 }

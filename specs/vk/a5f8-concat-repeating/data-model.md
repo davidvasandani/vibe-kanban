@@ -1,73 +1,33 @@
-# Data Model: MCP Identifier and Display Label
+# Data Model: Background Workspace Creation
 
-## Logical shared server
+## Workspace additions
 
-`SharedMcpServer`
+`creation_status: WorkspaceCreationStatus`
 
-- `name: String` — protocol identifier/native map key; retained for API
-  compatibility.
-- `display_name: Option<String>` — Vibe Kanban presentation metadata. `None`
-  means render `name`.
-- existing definition, assignments, source, compatibility, auth, and gateway
-  fields are unchanged.
+- `queued`: workspace identity persisted; background consumer not yet claimed.
+- `running`: one coordinator consumer claimed the workflow.
+- `ready`: materialization and initial execution startup completed.
+- `failed`: creation did not complete or was interrupted by coordinator restart.
 
-`SharedMcpServerInput`
+`creation_error: Option<String>`
 
-- `name: String` — submitted protocol identifier.
-- `display_name: Option<String>` — submitted presentation metadata; blank or
-  identical-to-identifier values normalize to `None`.
-- existing definition, assignments, and native overrides are unchanged.
+- absent for queued, running, and ready;
+- bounded, safe user-facing explanation for failed;
+- detailed underlying error remains in structured server logs.
 
-`SharedMcpConflict`
+## State transitions
 
-- `name: String` remains the conflicting native identifier.
-- `display_name: Option<String>` is attached from the label store for
-  presentation and carried into a selected variant.
-
-## Label store
-
-Versioned JSON document owned by Vibe Kanban:
-
-```json
-{
-  "version": 1,
-  "labels": {
-    "atlassian_rovo": "Atlassian Rovo"
-  }
-}
+```text
+new row -> queued -> running -> ready
+                       |          ^
+                       +-> failed |
+queued/running at startup -> failed
 ```
 
 Invariants:
 
-- keys are safe protocol identifiers;
-- values are trimmed, non-empty display labels different from their key;
-- labels never affect native definition equality or fingerprints;
-- stale labels for identifiers absent from every native profile are pruned only
-  during a successful shared save, not during read;
-- malformed metadata degrades to a scoped metadata error and does not block
-  otherwise valid native agent configuration writes.
-
-## Frontend draft
-
-`SharedMcpDraftServer`
-
-- `name: string` — protocol identifier.
-- `displayName?: string | null` — presentation label.
-- `definition`, `assignments` unchanged.
-
-The stable key for all maps and actions is `name`. Rendering uses
-`displayName?.trim() || name`.
-
-## State transitions
-
-1. Native read groups by native identifier.
-2. Label store decorates matching logical servers/conflicts.
-3. Catalog Add creates `{ name: catalog.key, displayName: catalog.name }`.
-4. Unsafe existing Edit proposes a safe `name`, preserves original as
-   `displayName`, and tracks the old name for removal in outer draft comparison.
-5. Identifier and native-definition validation completes before any write;
-   sidecar errors remain scoped metadata failures.
-6. Native profile writes materialize definitions under `name` only.
-7. After one or more relevant native successes, the label sidecar atomically
-   converges to labels for the resulting logical set.
-8. Reload repeats steps 1–2; tests/auth/actions continue to use `name`.
+- Existing pre-feature workspaces migrate to `ready`.
+- Only an atomic `queued -> running` update claims work.
+- `ready` is written only by the live consumer after initial execution startup returns successfully; an execution row alone is insufficient restart evidence.
+- `failed` is terminal for this feature; users create a replacement workspace.
+- The workspace ID is the creation-operation identity; no second operation row is needed while retry-in-place is out of scope.

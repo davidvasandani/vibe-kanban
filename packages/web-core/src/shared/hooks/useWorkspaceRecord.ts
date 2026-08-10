@@ -25,5 +25,9 @@ export function useWorkspaceRecord(workspaceId?: string, opts?: Options) {
     queryKey: workspaceRecordKeys.byId(workspaceId, hostId),
     queryFn: () => workspacesApi.get(workspaceId!),
     enabled,
+    refetchInterval: (query) => {
+      const status = query.state.data?.creation_status;
+      return status === 'queued' || status === 'running' ? 1000 : false;
+    },
   });
 }

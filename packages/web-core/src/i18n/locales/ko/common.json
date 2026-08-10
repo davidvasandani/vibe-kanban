@@ -621,6 +621,12 @@
     "updateIssue": "Update Issue",
     "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue."
   },
+  "workspaceCreation": {
+    "creatingTitle": "워크스페이스 생성 중…",
+    "creatingBody": "다른 페이지로 이동해도 생성 작업은 백그라운드에서 계속됩니다.",
+    "failedTitle": "워크스페이스 생성 실패",
+    "failedFallback": "새 워크스페이스를 만들어 다시 시도하세요."
+  },
   "speckit": {
     "title": "SpecKit",
     "stageProgress": "{{done}}/{{total}} stages",

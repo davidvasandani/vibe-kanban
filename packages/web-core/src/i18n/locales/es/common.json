@@ -621,6 +621,12 @@
     "updateIssue": "Update Issue",
     "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue."
   },
+  "workspaceCreation": {
+    "creatingTitle": "Creando espacio de trabajo…",
+    "creatingBody": "Puedes salir de esta página. La creación continuará en segundo plano.",
+    "failedTitle": "No se pudo crear el espacio de trabajo",
+    "failedFallback": "Crea un nuevo espacio de trabajo para intentarlo de nuevo."
+  },
   "speckit": {
     "title": "SpecKit",
     "stageProgress": "{{done}}/{{total}} stages",

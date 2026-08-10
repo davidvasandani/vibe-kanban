@@ -621,6 +621,12 @@
     "updateIssue": "Update Issue",
     "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue."
   },
+  "workspaceCreation": {
+    "creatingTitle": "正在创建工作区…",
+    "creatingBody": "你可以离开此页面，创建过程将在后台继续。",
+    "failedTitle": "工作区创建失败",
+    "failedFallback": "请创建新的工作区后重试。"
+  },
   "speckit": {
     "title": "SpecKit",
     "stageProgress": "{{done}}/{{total}} stages",

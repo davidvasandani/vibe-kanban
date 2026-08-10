@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
-use super::{execution_process::ExecutionProcess, workspace::Workspace};
+use super::workspace::Workspace;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ContainerQuery {
@@ -46,7 +46,6 @@ pub struct CreateAndStartWorkspaceRequest {
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct CreateAndStartWorkspaceResponse {
     pub workspace: Workspace,
-    pub execution_process: ExecutionProcess,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
