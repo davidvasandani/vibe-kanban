@@ -1311,7 +1311,17 @@ fn handle_direct_item_completed(
             if let Some(mut mcp_tool_state) = state.mcp_tools.remove(&id) {
                 mcp_tool_state.status = app_mcp_status_to_tool_status(&status);
                 if let Some(result) = result {
-                    if result
+                    if let Some(markdown) =
+                        crate::logs::image_extraction::rewrite_blocks_with_images(
+                            std::path::Path::new(worktree_path),
+                            &result.content,
+                        )
+                    {
+                        mcp_tool_state.result = Some(ToolResult {
+                            r#type: ToolResultValueType::Markdown,
+                            value: Value::String(markdown),
+                        });
+                    } else if result
                         .content
                         .iter()
                         .all(|block| block.get("type").and_then(|t| t.as_str()) == Some("text"))

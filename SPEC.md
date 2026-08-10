@@ -39,3 +39,46 @@ When no user follow-up already exists, use:
 4. The 1Password bootstrap credentials are still removed before executor jobs start.
 5. Existing generic worker-secret assertions validate the secret configuration.
 6. The changed configuration is syntactically valid and independent Codex review reports no significant findings.
+
+## Follow-up: Inline MCP Screenshot Results
+
+### Objective
+
+Render screenshots returned by MCP tools inline in Vibe Kanban's Codex chat
+without dumping base64 or raw MCP content JSON into the tool result.
+
+### Design
+
+Use the existing executor log-normalization boundary. Base64 MCP `image` blocks
+are decoded into the workspace's ignored `.vibe-attachments/` directory and
+rendered as Markdown image references. Hosted MCP `resource_link` blocks whose
+MIME type is `image/*` are rendered directly as Markdown images when their URI
+uses HTTP or HTTPS.
+
+Apply the same normalization to both Codex protocol paths, including the direct
+app-server item-completion path used by clustered Vibe Kanban workers.
+The shared image node recognizes HTTP(S) sources as previewable images, and the
+desktop CSP permits HTTP(S) image loading without widening script or connection
+permissions.
+
+### Security and Lifecycle
+
+- Do not fetch arbitrary resource links in the worker.
+- Only render HTTP(S) resource links explicitly marked with an image MIME type.
+- Keep base64 image persistence content-addressed and worktree-local.
+- The MCP server remains responsible for authorizing and retaining hosted URLs.
+
+### Out of Scope
+
+- Changing the Firecrawl Browser service to host screenshots or emit
+  `resource_link` results.
+- Adding a Vibe Kanban artifact proxy or durable remote-image import.
+
+### Acceptance Criteria
+
+1. Codex app-server MCP image results render as inline Markdown images.
+2. Base64 image blocks continue to persist into `.vibe-attachments/`.
+3. HTTP(S) `resource_link` blocks with `image/*` MIME types render inline.
+4. Non-image and non-HTTP(S) resource links retain existing JSON behavior.
+5. Automated tests cover base64, hosted-image, and rejected-link behavior.
+6. Web and desktop clients can load hosted HTTP(S) image sources.
