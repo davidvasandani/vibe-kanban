@@ -101,6 +101,18 @@ const WORKSPACE_TOUCH_DEBOUNCE: Duration = Duration::from_mins(2);
 /// observe E2E here). See `specs/vk/826e-coding-agent-war/`.
 const KEEP_WARM_ENV: &str = "VK_KEEP_WARM_AGENTS";
 
+fn validated_mcp_snapshot(
+    executor: BaseCodingAgent,
+    servers: BTreeMap<String, serde_json::Value>,
+) -> anyhow::Result<McpConfigSnapshot> {
+    let snapshot = McpConfigSnapshot {
+        executor: executor.to_string(),
+        servers,
+    };
+    snapshot.validate_size().map_err(anyhow::Error::from)?;
+    Ok(snapshot)
+}
+
 fn push_worker_bytes(store: &MsgStore, encoded: &str, stderr: bool) {
     let message = match BASE64_STANDARD.decode(encoded) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -3092,23 +3104,24 @@ impl ContainerService for LocalContainerService {
             .map(serde_json::to_value)
             .transpose()
             .map_err(anyhow::Error::from)?;
-        let mcp_config_snapshot = if let Some(config) =
-            executor_config.filter(|config| config.executor == BaseCodingAgent::Codex)
-        {
+        let mcp_config_snapshot = if let Some(config) = executor_config {
             let profile_id = config.profile_id();
             let agent = ExecutorConfigs::get_cached()
                 .get_coding_agent(&profile_id)
                 .ok_or_else(|| anyhow!("executor profile {profile_id} is unavailable"))?;
-            let snapshot = McpConfigSnapshot {
-                executor: config.executor.to_string(),
-                servers: read_coding_agent_mcp_servers(&agent)
-                    .await
-                    .map_err(anyhow::Error::from)?
-                    .into_iter()
-                    .collect(),
-            };
-            snapshot.validate_size().map_err(anyhow::Error::from)?;
-            Some(snapshot)
+            if agent.supports_mcp() {
+                let snapshot = validated_mcp_snapshot(
+                    config.executor,
+                    read_coding_agent_mcp_servers(&agent)
+                        .await
+                        .map_err(anyhow::Error::from)?
+                        .into_iter()
+                        .collect(),
+                )?;
+                Some(snapshot)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -4173,6 +4186,33 @@ fn success_exit_status() -> std::process::ExitStatus {
     {
         use std::os::windows::process::ExitStatusExt;
         ExitStatusExt::from_raw(0)
+    }
+}
+
+#[cfg(test)]
+mod mcp_snapshot_tests {
+    use std::collections::BTreeMap;
+
+    use executors::executors::BaseCodingAgent;
+    use serde_json::json;
+
+    use super::validated_mcp_snapshot;
+
+    #[test]
+    fn snapshot_builder_preserves_non_codex_executor_identity_and_definition() {
+        for executor in [BaseCodingAgent::ClaudeCode, BaseCodingAgent::Gemini] {
+            let snapshot = validated_mcp_snapshot(
+                executor,
+                BTreeMap::from([(
+                    "settings-owned".into(),
+                    json!({"type": "http", "url": "https://example.invalid/mcp"}),
+                )]),
+            )
+            .unwrap();
+
+            assert_eq!(snapshot.executor, executor.to_string());
+            assert!(snapshot.servers.contains_key("settings-owned"));
+        }
     }
 }
 

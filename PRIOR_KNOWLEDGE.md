@@ -1,17 +1,35 @@
-# Prior Knowledge: Legacy MCP Identifier Migration
+# Prior Knowledge: Settings-Owned MCPs in Worker Sessions
 
-Relevant knowledge exists in `shared-mcp-configuration.md` and
-`multi-instance-catalog-templates.md`.
+Relevant project knowledge is not empty.
 
-- Native map keys are protocol identifiers and must match
-  `^[a-zA-Z0-9_-]+$`; display labels belong in `mcp-display-labels.json`.
-- The shared normalizer already maps `Atlassian Rovo` to `atlassian_rovo`.
-- Ordinary reads must not silently rename native keys because collisions and
-  multi-profile disagreement require an explicit, transactional decision.
-- Operational state—assignments, tests, refresh, and authentication—is keyed by
-  the stable identifier.
-- Collision checks must include configured servers and unresolved conflicts.
+## Distilled guidance
 
-The implementation should therefore expose a deterministic migration during the
-save/reconciliation boundary, preserve the legacy label in metadata, and refuse
-ambiguous migrations without partial native writes.
+- `cluster-mcp-runtime-connectivity.md`: persistence, runtime adoption, and
+  worker connectivity are separate boundaries. Authenticated definitions must
+  be dispatched from settings; deployment cannot reconstruct them. The proven
+  Codex pattern uses a bounded authenticated snapshot, an execution-scoped home,
+  shared runtime/auth assets, no global worker mutation, and cleanup at job end.
+- `shared-mcp-configuration.md`: native executor files are the definition source
+  of truth. Deployment supplies immutable commands and prerequisites but must
+  not seed a competing registry. Identifiers remain operational keys and secrets
+  must not enter diagnostics.
+- `active-mcp-refresh.md`: live reload is an executor capability. Codex refresh
+  may update its scoped config and queue the vendor reload; unsupported
+  executors adopt settings through a fresh process rather than claiming a live
+  refresh.
+- `workspace-environment-inheritance.md`: secrets belong at the narrow child
+  process boundary, with deterministic precedence and no mutation of the
+  long-lived service environment. Do not log or persist resolved maps.
+
+## Consequences for this task
+
+1. Generalize the existing Codex dispatch snapshot instead of inventing an
+   environment-variable registry for MCP headers.
+2. Preserve per-execution isolation for every executor; never update worker
+   global native configs.
+3. Make a scoped home overlay retain existing authentication/runtime assets and
+   replace only the MCP-bearing config path.
+4. Keep Codex refresh semantics unchanged and treat a new process as the
+   adoption boundary for other executors.
+5. Remove the repository `.mcp.json` Vibe entry because it is a competing
+   project-scoped definition, not a persistence mechanism for Settings values.
