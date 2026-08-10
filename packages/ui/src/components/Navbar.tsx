@@ -21,6 +21,7 @@ import {
   SyncErrorIndicator,
   type SyncErrorIndicatorError,
 } from './SyncErrorIndicator';
+import { MobileDeployStatus } from './MobileDeployStatus';
 
 /**
  * Action item rendered in the navbar.
@@ -172,6 +173,8 @@ export interface NavbarProps {
   // Mobile props
   mobileMode?: boolean;
   mobileUserSlot?: ReactNode;
+  mobileDeploymentRevision?: string | null;
+  mobileDeploymentStartedAt?: string | null;
   isOnProjectPage?: boolean;
   onOpenCommandBar?: () => void;
   onOpenSettings?: () => void;
@@ -202,6 +205,8 @@ export function Navbar({
   className,
   mobileMode = false,
   mobileUserSlot,
+  mobileDeploymentRevision,
+  mobileDeploymentStartedAt,
   isOnProjectPage = false,
   onOpenCommandBar,
   onOpenSettings,
@@ -369,6 +374,10 @@ export function Navbar({
 
           {/* Right side: sync indicator + action buttons + user slot */}
           <div className="flex items-center gap-1 shrink-0">
+            <MobileDeployStatus
+              revision={mobileDeploymentRevision}
+              startedAt={mobileDeploymentStartedAt}
+            />
             <SyncErrorIndicator errors={syncErrors} />
             {isOnProjectPage &&
               rightItems

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::LazyLock};
 
 use api_types::LoginStatus;
 use axum::{
@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Json as ResponseJson, Response},
     routing::{get, post, put},
 };
+use chrono::{DateTime, Utc};
 use deployment::{Deployment, DeploymentError};
 use executors::{
     executors::{
@@ -49,6 +50,10 @@ use crate::{
 };
 
 pub fn router() -> Router<DeploymentImpl> {
+    // Initialize this when the server builds its routes so every /info request
+    // reports one stable start time for the lifetime of this process.
+    let _ = deployment_started_at();
+
     Router::new()
         .route("/info", get(get_user_system_info))
         .route("/config", put(update_config))
@@ -74,6 +79,12 @@ pub fn router() -> Router<DeploymentImpl> {
             "/agents/discovered-options/ws",
             get(stream_executor_discovered_options_ws),
         )
+}
+
+static DEPLOYMENT_STARTED_AT: LazyLock<DateTime<Utc>> = LazyLock::new(Utc::now);
+
+fn deployment_started_at() -> DateTime<Utc> {
+    *DEPLOYMENT_STARTED_AT
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -105,6 +116,7 @@ impl Environment {
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct UserSystemInfo {
     pub version: String,
+    pub started_at: DateTime<Utc>,
     pub config: Config,
     pub machine_id: String,
     pub login_status: LoginStatus,
@@ -178,6 +190,7 @@ async fn get_user_system_info(
 
     let user_system_info = UserSystemInfo {
         version: option_env!("VK_GIT_SHA").unwrap_or("dev").to_string(),
+        started_at: deployment_started_at(),
         config,
         machine_id: deployment.user_id().to_string(),
         login_status,
@@ -1104,6 +1117,17 @@ async fn handle_executor_discovered_options_ws(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deployment_start_time_is_stable_and_serializes_as_rfc3339() {
+        let first = deployment_started_at();
+        let second = deployment_started_at();
+
+        assert_eq!(first, second);
+        let serialized = serde_json::to_value(first).unwrap();
+        let value = serialized.as_str().unwrap();
+        assert!(DateTime::parse_from_rfc3339(value).is_ok());
+    }
 
     fn servers(name: &str) -> HashMap<String, Value> {
         HashMap::from([(name.to_string(), serde_json::json!({ "command": "x" }))])

@@ -278,6 +278,16 @@ scoped to the failure being surfaced — a blanket unwrapping of every internal
 error is not the remedy, and messages remain free of secrets, tokens, and
 environment values.
 
+### XXII. Responsive shells preserve operational identity
+When a responsive breakpoint replaces one application shell with another, the
+replacement MUST preserve compact access to operational identity that users
+need to diagnose the running application, including deployed revision and
+deployment age when those are exposed by the desktop shell. Responsive
+presentation may shorten or regroup that metadata, but it must consume the same
+authoritative backend values and degrade safely when metadata is unavailable.
+Browser page-load time and source commit time are not substitutes for server
+deployment start time.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in

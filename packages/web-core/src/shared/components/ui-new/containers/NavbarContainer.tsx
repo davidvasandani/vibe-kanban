@@ -134,7 +134,8 @@ export function NavbarContainer({
   const { workspace: selectedWorkspace, isCreateMode } = useWorkspaceContext();
   const { workspaces } = useUserContext();
   const syncErrorContext = useSyncErrorContext();
-  const { remoteAuthDegraded } = useUserSystem();
+  const { appVersion, deploymentStartedAt, remoteAuthDegraded } =
+    useUserSystem();
   const appNavigation = useAppNavigation();
   const destination = useCurrentAppDestination();
   const projectDestination = useMemo(
@@ -380,6 +381,8 @@ export function NavbarContainer({
       mobileMode={mobileMode}
       reserveWindowControls={reserveWindowControls}
       mobileUserSlot={userPopoverSlot}
+      mobileDeploymentRevision={appVersion}
+      mobileDeploymentStartedAt={deploymentStartedAt}
       isOnProjectPage={isOnProjectPage}
       isOnProjectSubRoute={isOnProjectSubRoute}
       onOpenCommandBar={handleOpenCommandBar}
