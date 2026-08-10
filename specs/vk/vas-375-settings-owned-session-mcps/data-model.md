@@ -22,10 +22,8 @@ contents are secret-bearing and never logged; optional for rolling compatibility
 
 Lifecycle: prepare before spawn; atomically replace the target MCP map; retain
 through process lifetime and confirmed Codex refresh; remove on drop.
-
 ## Home Overlay
 
 The overlay mirrors the source home structurally. Unrelated entries are symbolic
 links. Ancestors of the target config are real directories whose non-target
 children are links. The target config is a real execution-scoped file.
-

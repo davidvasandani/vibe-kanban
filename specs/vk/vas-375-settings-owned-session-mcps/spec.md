@@ -1,7 +1,7 @@
 # Feature Specification: Settings-Owned MCPs in Every New Session
 
-**Task**: VAS-375 follow-up  
-**Status**: Draft  
+**Task**: VAS-375 follow-up
+**Status**: Draft
 **Scope**: Vibe Kanban remote execution and its homelab deployment configuration
 
 ## Problem

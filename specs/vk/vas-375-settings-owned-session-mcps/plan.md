@@ -47,4 +47,3 @@ rolling compatibility. Deploy coordinator and workers together for immediate
 all-executor behavior. Rollback restores the prior binaries; the removed
 repository definition should not be restored because Settings remains the sole
 authority.
-

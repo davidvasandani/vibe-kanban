@@ -62,4 +62,3 @@ store or environment-variable persistence is introduced.
 ## Dependencies
 
 No new dependencies are required.
-
