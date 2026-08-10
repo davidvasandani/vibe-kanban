@@ -1,6 +1,6 @@
 # Prompt-driven agent pipelines
 
-Tags: `a17f-fix-parallel-age`
+Tags: `a17f-fix-parallel-age`, `89c5-pipeline-instruc`
 
 ## Treat prompts as executable contracts
 
@@ -25,6 +25,24 @@ For cross-provider fan-out, state the positive execution contract explicitly:
 without repository-reading capability can decline before understanding the
 task or return an ungrounded partial answer. Tests should pin these semantic
 clauses, not merely check that provider names or the word `parallel` appear.
+
+## Scope task-authored artifacts by task identity
+
+Concurrent tasks in one repository must never be instructed to write design
+records to shared root filenames. Put WikiLLM artifacts beside the task's
+SpecKit record under `specs/vk/<task-id>/`, and name each artifact by role (for
+example, `technical-spec.md`, `prior-knowledge.md`, and
+`implementation-plan.md`). Because pipeline fragments are executable prose and
+there is no placeholder resolver, each prompt must explain that `<task-id>` is
+replaced with the identifier from the current task or task branch.
+
+Constitution principle numbers assigned on a task branch are provisional. An
+early draft-time base check cannot prevent another concurrent branch from
+merging the same number first. The merge-stage contract must re-read the latest
+actual base-branch tip immediately before integration, renumber only the
+unmerged addition to the next free number, and update its internal references.
+Already-merged principles remain stable because external documents may cite
+their numbers.
 
 ## Refresh user-editable bundled defaults safely
 
