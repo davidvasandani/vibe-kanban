@@ -20,7 +20,7 @@ use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use executors::{
     actions::{Executable, ExecutorAction, ExecutorActionType},
     env::{ExecutionEnv, RepoContext},
-    executors::{BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor},
+    executors::{BaseCodingAgent, CodingAgent, ScopedMcpConfig, StandardCodingAgentExecutor},
     mcp_config::write_coding_agent_mcp_servers_to_path,
     mcp_refresh::McpRefreshHandle,
     profile::{ExecutorConfig, ExecutorProfile},
@@ -131,6 +131,16 @@ pub struct WorkerJob {
 struct PreparedMcpConfig {
     scoped_home: PathBuf,
     agent: CodingAgent,
+    /// Environment variable that points the agent at `scoped_home`, and the
+    /// config file written inside it. Carried per execution because it differs
+    /// per agent (CODEX_HOME/config.toml, CLAUDE_CONFIG_DIR/.claude.json).
+    scoped: ScopedMcpConfig,
+}
+
+impl PreparedMcpConfig {
+    fn config_path(&self) -> PathBuf {
+        self.scoped_home.join(self.scoped.file_name)
+    }
 }
 
 impl Drop for PreparedMcpConfig {
@@ -140,7 +150,18 @@ impl Drop for PreparedMcpConfig {
     }
 }
 
-fn prepare_scoped_codex_home(source_home: &Path, scoped_home: &Path) -> std::io::Result<()> {
+/// Build a private config directory for one execution.
+///
+/// Everything in the agent's real config home is symlinked in — auth, session
+/// state, caches — so the agent behaves normally, EXCEPT the MCP config file
+/// itself, which is written fresh by the caller. Skipping it (and its backup)
+/// is what makes the scoping meaningful: symlinking it would route writes back
+/// to the shared file this scoping exists to protect.
+fn prepare_scoped_agent_home(
+    source_home: &Path,
+    scoped_home: &Path,
+    config_file_name: &str,
+) -> std::io::Result<()> {
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     let source_home = match source_home.canonicalize() {
@@ -160,11 +181,12 @@ fn prepare_scoped_codex_home(source_home: &Path, scoped_home: &Path) -> std::io:
     let Some(source_home) = source_home else {
         return Ok(());
     };
+    let backup_file_name = format!("{config_file_name}.bak");
     let entries = std::fs::read_dir(source_home)?;
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
-        if name == "config.toml" || name == "config.toml.bak" {
+        if name == config_file_name || name == backup_file_name.as_str() {
             continue;
         }
         symlink(entry.path(), scoped_home.join(name))?;
@@ -402,17 +424,22 @@ impl ExecutionSupervisor {
                 executor: snapshot.executor.clone(),
             });
         }
-        if config.executor != BaseCodingAgent::Codex {
-            return Err(ExecutionError::InvalidMcpSnapshot {
-                executor: snapshot.executor.clone(),
-            });
-        }
         let variant = config.variant.as_deref().unwrap_or("DEFAULT");
         let agent = profile
             .and_then(|profile| profile.get_variant(variant))
             .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
                 executor: snapshot.executor.clone(),
             })?;
+        // Replaces an explicit `executor != Codex` rejection. Support is now a
+        // property of the agent — whether it exposes a config-directory
+        // environment variable — rather than a hardcoded list, so an agent that
+        // gains one is covered by declaring it in scoped_mcp_config().
+        let scoped =
+            agent
+                .scoped_mcp_config()
+                .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                    executor: snapshot.executor.clone(),
+                })?;
         let source_config =
             agent
                 .default_mcp_config_path()
@@ -429,8 +456,8 @@ impl ExecutionSupervisor {
             .join("vibe-kanban")
             .join("mcp-config")
             .join(execution_id.to_string())
-            .join("codex");
-        prepare_scoped_codex_home(source_home, &scoped_home).map_err(|_| {
+            .join(config.executor.to_string().to_lowercase());
+        prepare_scoped_agent_home(source_home, &scoped_home, scoped.file_name).map_err(|_| {
             ExecutionError::McpMaterialization {
                 executor: snapshot.executor.clone(),
             }
@@ -438,12 +465,13 @@ impl ExecutionSupervisor {
         let prepared = PreparedMcpConfig {
             scoped_home,
             agent: agent.clone(),
+            scoped,
         };
         let servers = snapshot.servers.clone().into_iter().collect();
         write_coding_agent_mcp_servers_to_path(
             agent,
             &source_config,
-            &prepared.scoped_home.join("config.toml"),
+            &prepared.config_path(),
             &servers,
         )
         .await
@@ -482,11 +510,6 @@ impl ExecutionSupervisor {
                 servers: Vec::new(),
             });
         }
-        if snapshot.executor != BaseCodingAgent::Codex.to_string() {
-            return Err(ExecutionError::InvalidMcpSnapshot {
-                executor: snapshot.executor.clone(),
-            });
-        }
         let (agent, target_config) = {
             let prepared = job.mcp_config.lock().await;
             let Some(prepared) = prepared.as_ref() else {
@@ -495,10 +518,16 @@ impl ExecutionSupervisor {
                     servers: Vec::new(),
                 });
             };
-            (
-                prepared.agent.clone(),
-                prepared.scoped_home.join("config.toml"),
-            )
+            // The refresh must target the same executor the execution was
+            // prepared for. Comparing against the prepared agent rather than a
+            // hardcoded Codex check keeps a mismatched snapshot an error while
+            // letting every scopable agent refresh.
+            if snapshot.executor != prepared.agent.to_string() {
+                return Err(ExecutionError::InvalidMcpSnapshot {
+                    executor: snapshot.executor.clone(),
+                });
+            }
+            (prepared.agent.clone(), prepared.config_path())
         };
         let servers = snapshot.servers.clone().into_iter().collect();
         if write_coding_agent_mcp_servers_to_path(&agent, &target_config, &target_config, &servers)
@@ -862,7 +891,7 @@ async fn run_job(
     }
     if let Some(prepared) = &prepared_mcp {
         environment.insert(
-            "CODEX_HOME".into(),
+            prepared.scoped.env_var.into(),
             prepared.scoped_home.to_string_lossy().into_owned(),
         );
     }
@@ -1304,6 +1333,9 @@ mod tests {
             interactions: Arc::new(InteractionBroker::default()),
             mcp_config: Mutex::new(Some(PreparedMcpConfig {
                 scoped_home: scoped_home.clone(),
+                scoped: agent
+                    .scoped_mcp_config()
+                    .expect("test agent must support scoped MCP config"),
                 agent,
             })),
             mcp_refresh: RwLock::new(Some(McpRefreshHandle(control.clone()))),
@@ -1396,8 +1428,8 @@ mod tests {
         fs::write(source.join("auth.json"), "credential").unwrap();
         fs::write(source.join("config.toml"), "global = true").unwrap();
 
-        prepare_scoped_codex_home(&source, &first).unwrap();
-        prepare_scoped_codex_home(&source, &second).unwrap();
+        prepare_scoped_agent_home(&source, &first, "config.toml").unwrap();
+        prepare_scoped_agent_home(&source, &second, "config.toml").unwrap();
         fs::write(first.join("config.toml"), "snapshot = 'one'").unwrap();
         fs::write(second.join("config.toml"), "snapshot = 'two'").unwrap();
 
@@ -1426,9 +1458,53 @@ mod tests {
         let missing_source = temp.path().join("missing");
         let scoped = temp.path().join("scoped").join("codex");
 
-        prepare_scoped_codex_home(&missing_source, &scoped).unwrap();
+        prepare_scoped_agent_home(&missing_source, &scoped, "config.toml").unwrap();
 
         assert!(scoped.is_dir());
+    }
+
+    /// The scoped home must shadow only the agent's own MCP config file.
+    /// Claude keeps `.claude.json` next to state the agent still needs, so a
+    /// hardcoded "config.toml" skip would symlink `.claude.json` straight back
+    /// to the shared file and let one execution's servers leak into every other.
+    #[test]
+    fn scoped_agent_home_shadows_only_the_named_config_file() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("home");
+        let scoped = temp.path().join("scoped").join("claude_code");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join(".claude.json"), "{\"shared\":true}").unwrap();
+        fs::write(source.join(".claude.json.bak"), "{}").unwrap();
+        fs::write(source.join(".credentials.json"), "auth").unwrap();
+
+        prepare_scoped_agent_home(&source, &scoped, ".claude.json").unwrap();
+
+        // The config and its backup are absent, so the caller's fresh write
+        // cannot reach the shared file.
+        assert!(!scoped.join(".claude.json").exists());
+        assert!(!scoped.join(".claude.json.bak").exists());
+        // Everything else is still reachable, so the agent still authenticates.
+        assert_eq!(
+            fs::read_to_string(scoped.join(".credentials.json")).unwrap(),
+            "auth"
+        );
+    }
+
+    /// Both scopable agents must declare a redirection, and the two must not
+    /// collide: reusing Codex's variable for Claude would point Claude at a
+    /// directory it never reads, which fails silently.
+    #[test]
+    fn scopable_agents_declare_distinct_redirection() {
+        let codex: CodingAgent = serde_json::from_value(json!({"CODEX": {}})).unwrap();
+        let claude: CodingAgent = serde_json::from_value(json!({"CLAUDE_CODE": {}})).unwrap();
+        let codex = codex.scoped_mcp_config().expect("codex is scopable");
+        let claude = claude.scoped_mcp_config().expect("claude code is scopable");
+
+        assert_eq!(codex.env_var, "CODEX_HOME");
+        assert_eq!(codex.file_name, "config.toml");
+        assert_eq!(claude.env_var, "CLAUDE_CONFIG_DIR");
+        assert_eq!(claude.file_name, ".claude.json");
+        assert_ne!(codex.env_var, claude.env_var);
     }
 
     #[tokio::test]
