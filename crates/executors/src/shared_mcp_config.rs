@@ -789,6 +789,13 @@ pub fn canonical_definition(entry: &Value) -> McpServerDefinition {
                 ("command", Value::String(command.to_string())),
                 ("args", Value::Array(args)),
                 ("env", normalize_string_map(obj, &["env", "environment"])),
+                (
+                    "env_vars",
+                    obj.get("env_vars")
+                        .filter(|value| value.is_array())
+                        .cloned()
+                        .unwrap_or_else(|| Value::Array(Vec::new())),
+                ),
             ]),
             representable_in_form: !command.is_empty(),
         };
@@ -811,6 +818,13 @@ pub fn canonical_definition(entry: &Value) -> McpServerDefinition {
                     ),
                 ),
                 ("env", normalize_string_map(obj, &["env", "environment"])),
+                (
+                    "env_vars",
+                    obj.get("env_vars")
+                        .filter(|value| value.is_array())
+                        .cloned()
+                        .unwrap_or_else(|| Value::Array(Vec::new())),
+                ),
             ]),
             representable_in_form: true,
         };
@@ -984,6 +998,17 @@ pub fn incompatibility_reason(
     executor: BaseCodingAgent,
     definition: &McpServerDefinition,
 ) -> Option<String> {
+    if !matches!(executor, BaseCodingAgent::Codex)
+        && definition
+            .value
+            .get("env_vars")
+            .and_then(Value::as_array)
+            .is_some_and(|env_vars| !env_vars.is_empty())
+    {
+        return Some(format!(
+            "{executor} does not support forwarding selected host environment variables"
+        ));
+    }
     if matches!(executor, BaseCodingAgent::Codex | BaseCodingAgent::Grok)
         && matches!(definition.transport, McpTransportKind::Sse)
     {
@@ -1048,6 +1073,17 @@ pub fn materialize_definition(
                 .filter(|v| !v.as_object().is_some_and(Map::is_empty))
             {
                 out.insert("env".to_string(), env.clone());
+            }
+            // Codex intentionally starts stdio MCP subprocesses with a
+            // restricted environment. `env_vars` is its supported mechanism
+            // for forwarding selected variables without copying secret values
+            // into Settings, snapshots, or generated config files.
+            if matches!(executor, BaseCodingAgent::Codex)
+                && let Some(env_vars) = obj
+                    .get("env_vars")
+                    .filter(|v| !v.as_array().is_some_and(Vec::is_empty))
+            {
+                out.insert("env_vars".to_string(), env_vars.clone());
             }
             if matches!(executor, BaseCodingAgent::Opencode) {
                 let mut parts = Vec::new();
@@ -1799,6 +1835,33 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
         assert_eq!(response.servers.len(), 0);
         assert_eq!(response.conflicts.len(), 1);
         assert_eq!(response.conflicts[0].variants.len(), 2);
+    }
+
+    #[test]
+    fn preserves_codex_stdio_env_var_forwarding() {
+        let definition = canonical_definition(&json!({
+            "command": "firecrawl-browser-mcp",
+            "env": {"FIRECRAWL_BROWSER_URL": "http://browser.test"},
+            "env_vars": ["FIRECRAWL_BROWSER_AUTH_TOKEN"]
+        }));
+
+        assert_eq!(
+            definition.value,
+            json!({
+                "command": "firecrawl-browser-mcp",
+                "env": {"FIRECRAWL_BROWSER_URL": "http://browser.test"},
+                "env_vars": ["FIRECRAWL_BROWSER_AUTH_TOKEN"]
+            })
+        );
+        assert_eq!(
+            materialize_definition(BaseCodingAgent::Codex, &definition, None).unwrap(),
+            json!({
+                "command": "firecrawl-browser-mcp",
+                "env": {"FIRECRAWL_BROWSER_URL": "http://browser.test"},
+                "env_vars": ["FIRECRAWL_BROWSER_AUTH_TOKEN"]
+            })
+        );
+        assert!(incompatibility_reason(BaseCodingAgent::ClaudeCode, &definition).is_some());
     }
 
     #[test]
