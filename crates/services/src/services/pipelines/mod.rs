@@ -1181,4 +1181,68 @@ mod tests {
             "Write a technical spec for this task and save it to `SPEC.md` at the repo root before implementing."
         );
     }
+
+    #[test]
+    fn bundled_wikillm_artifacts_are_task_scoped() {
+        let d = TmpDir::new();
+        let pipelines = load_pipelines(d.path());
+        let wikillm = pipelines.iter().find(|p| p.id == "wikillm").unwrap();
+
+        let cases = [
+            ("spec", "specs/vk/<task-id>/technical-spec.md"),
+            ("recall-knowledge", "specs/vk/<task-id>/prior-knowledge.md"),
+            ("plan", "specs/vk/<task-id>/implementation-plan.md"),
+        ];
+
+        for (stage_id, path) in cases {
+            let stage = wikillm
+                .stages
+                .iter()
+                .find(|stage| stage.id == stage_id)
+                .unwrap();
+            assert!(stage.prompt_fragment.contains(path));
+            assert!(
+                stage
+                    .prompt_fragment
+                    .contains("current task's identifier from the task or task branch")
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_speckit_constitution_avoids_principle_number_collisions() {
+        let d = TmpDir::new();
+        let pipelines = load_pipelines(d.path());
+        let speckit = pipelines.iter().find(|p| p.id == "speckit").unwrap();
+        let constitution = speckit
+            .stages
+            .iter()
+            .find(|stage| stage.id == "speckit-constitution")
+            .unwrap();
+        let prompt = constitution.prompt_fragment.to_lowercase();
+
+        assert!(prompt.contains("assigned while drafting as provisional"));
+        assert!(prompt.contains("immediately before merge"));
+        assert!(prompt.contains("latest tip of its actual base branch"));
+        assert!(prompt.contains("highest existing principle number"));
+        assert!(prompt.contains("choose the next free number"));
+        assert!(prompt.contains("renumber its own addition"));
+        assert!(prompt.contains("never renumber an already-merged principle"));
+
+        for pipeline_id in ["wikillm", "speckit"] {
+            let pipeline = pipelines.iter().find(|p| p.id == pipeline_id).unwrap();
+            let merge = pipeline
+                .stages
+                .iter()
+                .find(|stage| stage.id == "merge")
+                .unwrap();
+            let prompt = merge.prompt_fragment.to_lowercase();
+            assert!(prompt.contains("immediately before merging a constitution change"));
+            assert!(prompt.contains("latest base-branch tip"));
+            assert!(prompt.contains("highest existing principle number"));
+            assert!(prompt.contains("renumber the unmerged principle"));
+            assert!(prompt.contains("update its internal references"));
+            assert!(prompt.contains("never renumber an already-merged principle"));
+        }
+    }
 }
