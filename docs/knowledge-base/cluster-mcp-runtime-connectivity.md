@@ -1,6 +1,6 @@
 # Cluster MCP runtime connectivity
 
-Contributing task: `VAS-356`
+Contributing tasks: `VAS-356`, `VAS-375`
 
 An MCP configuration can be valid, persisted, and successfully tested by the
 coordinator while remaining unusable by an executor on a worker. Treat these as
@@ -33,19 +33,31 @@ evidence rather than a Codex reload defect.
 ## Dispatch settings-owned definitions, not deployment approximations
 
 Deployment bootstrap can make an MCP executable available, but it cannot safely
-reconstruct settings-owned headers or environment secrets. For remote Codex
-executions, snapshot the selected coordinator profile's native MCP server map in
-the authenticated dispatch and materialize it in an execution-scoped Codex home.
-Preserve the worker's shared authentication and runtime assets via symlinks, but
-never overwrite its global `config.toml`: concurrent executions may select
-different definitions. Bound and validate the snapshot, bind it to the selected
-executor, avoid logging its contents, and remove the scoped home when the job
-ends. A worker without an existing Codex home must still be able to start when
-authentication is supplied through its environment.
+reconstruct settings-owned headers or environment secrets. For every MCP-capable
+remote executor, snapshot the selected coordinator profile's native MCP server
+map in the authenticated dispatch and materialize it in an execution-scoped
+native config. Preserve the worker's shared authentication and runtime assets via
+symlinks, but never overwrite its global vendor config: concurrent executions may
+select different definitions. Bound and validate the snapshot, bind it to the
+selected executor, avoid logging its contents, and remove the scoped tree when
+the job ends.
+
+Use the executor's real configuration boundary. Codex supports a narrow
+`CODEX_HOME`; most other agents require an execution-scoped `HOME`. If an agent
+uses a custom `XDG_CONFIG_HOME` outside `$HOME`, scope and redirect that XDG root
+instead of rejecting it or assuming `~/.config`. Build real directories only
+along the native config path and link their non-target siblings so login/session
+assets remain available without letting native config writes reach the worker's
+global file or its backup.
 
 Do not seed any MCP through `codex mcp add` during service startup. Settings own
 every definition, including `vibe_kanban`; startup mutation creates a second
 authority and can silently replace a complete definition with an incomplete one.
+Repository `.mcp.json` entries are also a competing authority when they define
+the same service under another identifier or expect environment placeholders
+that Settings never creates. Remove those duplicates as part of the coordinated
+Settings-owned migration; keep deployment ownership limited to executables,
+routes, and runtime prerequisites.
 
 ## Widen only the required service port
 

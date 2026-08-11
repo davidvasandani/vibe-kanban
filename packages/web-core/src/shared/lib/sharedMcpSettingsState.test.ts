@@ -252,6 +252,19 @@ describe('shared MCP settings state', () => {
       value: { url: 'https://example.test' },
       representable_in_form: true,
     });
+    expect(
+      definitionFromEntry({
+        command: 'firecrawl-browser-mcp',
+        env_vars: ['FIRECRAWL_BROWSER_AUTH_TOKEN'],
+      })
+    ).toEqual({
+      transport: 'stdio',
+      value: {
+        command: 'firecrawl-browser-mcp',
+        env_vars: ['FIRECRAWL_BROWSER_AUTH_TOKEN'],
+      },
+      representable_in_form: true,
+    });
   });
 
   it('merges OAuth refresh into the live draft', () => {

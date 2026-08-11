@@ -1,43 +1,43 @@
-# Implementation Plan: Desktop Deploy Status (`VAS-377`)
+# Implementation plan: default workspace bases to remote mainline
 
-Companion to [`SPEC.md`](SPEC.md) and
-[`PRIOR_KNOWLEDGE.md`](PRIOR_KNOWLEDGE.md). Steps are dependency ordered.
+1. Reuse the existing `resolveDefaultBranch` policy in every repository branch
+   selection hook used to assemble new-workspace inputs.
+2. Preserve explicit initial-branch precedence, then delegate repository
+   default and fallback selection to the canonical helper.
+3. Add focused hook tests proving `origin/main`/`origin/master` outrank a current
+   deployment branch while configured and explicit initial choices still win.
+4. Retain exact remote-prefixed target branch names through workspace input
+   creation; make no `/srv/src` checkout or deployment changes.
+5. Run formatting, frontend tests, type checking, and linting.
+6. Run SpecKit analysis and implementation tasks, then independent Codex review
+   until no significant findings remain.
+7. Update the existing branch-defaulting knowledge page and index contribution
+   metadata, commit the knowledge update, and merge into the base branch.
 
-1. **Confirm the existing contract and composition boundary**
-   - Trace `useUserSystem` deployment metadata and the shared `DeployStatus`
-     behavior added by the mobile implementation.
-   - Confirm the desktop workspace `RightSidebar` is the persistent drawer
-     controlled by `ToggleRightSidebar` and preserve its flex/overflow contract.
+## Follow-up implementation: durable MCP screenshots
 
-2. **Add the fixed desktop deploy-status row**
-   - Read `appVersion` and `deploymentTimestamp` from the existing user-system
-     context inside the workspace right drawer.
-   - Render a labelled, non-collapsible, intrinsic-height row above the current
-     section list.
-   - Reuse `DeployStatus`; add only an additive presentation option or class
-     override if necessary for the wider desktop layout.
-   - Do not add a preference key, visibility action, API request, backend field,
-     or homelab change.
+1. Extend the shared MCP image-result normalizer to fetch hosted HTTP(S)
+   `resource_link` image blocks with bounded time and size, rejected redirects,
+   and destination validation with an explicit private-origin allowlist.
+2. Persist successful downloads content-addressed in `.vibe-attachments/` and
+   emit only worktree-relative Markdown references.
+3. Reuse the shared normalizer in Codex's direct app-server completion path.
+4. Add focused tests for successful import, transfer failure, invalid response
+   type, oversized content, and rejected resource links.
+5. Run formatting and targeted executor/frontend checks.
+6. Reuse Firecrawl's bounded artifact store for reusable screenshot artifacts
+   and return capability URLs as MCP `resource_link` image blocks.
+7. Verify Firecrawl build/tests and the end-to-end MCP screenshot contract.
+8. Run independent Codex review and address confirmed findings until none remain.
 
-3. **Add regression coverage**
-   - Cover drawer placement and the absence of a collapse/toggle affordance.
-   - Verify production revision, `dev`, missing timestamp, and invalid timestamp
-     rendering through the shared presentation tests.
-   - Protect the intrinsic row and bounded drawer flex/scroll class contract.
+## Follow-up implementation: MCP refresh nested route
 
-4. **Run SpecKit implementation and verification**
-   - Execute the dependency-ordered SpecKit tasks, ticking each item as it
-     lands.
-   - Run `pnpm install --frozen-lockfile` if the worktree is not prepared.
-   - Run focused tests plus appropriate repository type checks, generated-type
-     check, lint, formatting, and `git diff --check`.
-   - Record verification results in the feature directory.
-
-5. **Review, document, and integrate**
-   - Run independent Codex CLI review of the task diff, address confirmed
-     findings, and repeat until no significant findings remain.
-   - Add the reusable desktop placement/layout lesson to the most relevant
-     project knowledge page, tag it with `VAS-377`, refresh the index if needed,
-     and commit the knowledge-base update.
-   - Merge the task branch into its configured base branch only after the task
-     diff is clean, reviewed, and limited to Vibe Kanban.
+1. Update the refresh and status handlers to extract the nested workspace and
+   session UUID path tuple.
+2. Update the workspace-loading middleware to deserialize the named workspace
+   path parameter while tolerating parameters added by nested routes.
+3. Run Rust formatting, a focused server compile, and diff validation.
+4. Run an independent Codex review and address confirmed findings until none
+   remain.
+5. Merge and deploy the fix, then verify the live refresh endpoint and native
+   Firecrawl browser tool availability.

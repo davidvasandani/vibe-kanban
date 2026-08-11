@@ -129,47 +129,123 @@ pub struct WorkerJob {
 }
 
 struct PreparedMcpConfig {
-    scoped_home: PathBuf,
+    execution_root: PathBuf,
+    target_config: PathBuf,
+    environment: std::collections::BTreeMap<String, String>,
     agent: CodingAgent,
 }
 
 impl Drop for PreparedMcpConfig {
     fn drop(&mut self) {
-        let execution_root = self.scoped_home.parent().unwrap_or(&self.scoped_home);
-        let _ = std::fs::remove_dir_all(execution_root);
+        let _ = std::fs::remove_dir_all(&self.execution_root);
     }
 }
 
-fn prepare_scoped_codex_home(source_home: &Path, scoped_home: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{PermissionsExt, symlink};
+fn prepare_scoped_home(
+    source_home: &Path,
+    scoped_home: &Path,
+    target_relative: &Path,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
 
+    fn overlay_directory(
+        source: Option<&Path>,
+        scoped: &Path,
+        target: &Path,
+    ) -> std::io::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        std::fs::create_dir_all(scoped)?;
+        let mut components = target.components();
+        let target_name = components.next().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty config path")
+        })?;
+        let remainder = components.as_path();
+        if let Some(source) = source {
+            let backup_name = target_name
+                .as_os_str()
+                .to_str()
+                .map(|name| format!("{name}.bak"));
+            for entry in std::fs::read_dir(source)? {
+                let entry = entry?;
+                if entry.file_name() == target_name.as_os_str()
+                    || backup_name
+                        .as_deref()
+                        .is_some_and(|name| entry.file_name() == name)
+                {
+                    continue;
+                }
+                symlink(entry.path(), scoped.join(entry.file_name()))?;
+            }
+        }
+        if !remainder.as_os_str().is_empty() {
+            let source_child = source.map(|source| source.join(target_name.as_os_str()));
+            let source_child = source_child.as_deref().filter(|path| path.is_dir());
+            overlay_directory(
+                source_child,
+                &scoped.join(target_name.as_os_str()),
+                remainder,
+            )?;
+        }
+        Ok(())
+    }
+
+    if target_relative.is_absolute()
+        || target_relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "config path escapes scoped home",
+        ));
+    }
     let source_home = match source_home.canonicalize() {
         Ok(source_home) => Some(source_home),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
-    if let Some(execution_root) = scoped_home.parent() {
-        match std::fs::remove_dir_all(execution_root) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
     std::fs::create_dir_all(scoped_home)?;
     std::fs::set_permissions(scoped_home, std::fs::Permissions::from_mode(0o700))?;
-    let Some(source_home) = source_home else {
-        return Ok(());
-    };
-    let entries = std::fs::read_dir(source_home)?;
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name == "config.toml" || name == "config.toml.bak" {
-            continue;
-        }
-        symlink(entry.path(), scoped_home.join(name))?;
-    }
+    overlay_directory(source_home.as_deref(), scoped_home, target_relative)?;
     Ok(())
+}
+
+fn non_codex_scoped_config_layout(
+    source_config: &Path,
+    source_home: PathBuf,
+    source_xdg: Option<PathBuf>,
+    execution_root: &Path,
+) -> Option<(
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    std::collections::BTreeMap<String, String>,
+)> {
+    if let Ok(target_relative) = source_config.strip_prefix(&source_home) {
+        let target_relative = target_relative.to_path_buf();
+        let scoped_home = execution_root.join("home");
+        let mut environment = std::collections::BTreeMap::from([(
+            "HOME".into(),
+            scoped_home.to_string_lossy().into_owned(),
+        )]);
+        if target_relative.starts_with(".config") {
+            environment.insert(
+                "XDG_CONFIG_HOME".into(),
+                scoped_home.join(".config").to_string_lossy().into_owned(),
+            );
+        }
+        return Some((source_home, scoped_home, target_relative, environment));
+    }
+
+    let source_xdg = source_xdg?;
+    let target_relative = source_config.strip_prefix(&source_xdg).ok()?.to_path_buf();
+    let scoped_xdg = execution_root.join("xdg");
+    let environment = std::collections::BTreeMap::from([(
+        "XDG_CONFIG_HOME".into(),
+        scoped_xdg.to_string_lossy().into_owned(),
+    )]);
+    Some((source_xdg, scoped_xdg, target_relative, environment))
 }
 
 struct ExecutionAdmission(Arc<AtomicU32>);
@@ -402,11 +478,6 @@ impl ExecutionSupervisor {
                 executor: snapshot.executor.clone(),
             });
         }
-        if config.executor != BaseCodingAgent::Codex {
-            return Err(ExecutionError::InvalidMcpSnapshot {
-                executor: snapshot.executor.clone(),
-            });
-        }
         let variant = config.variant.as_deref().unwrap_or("DEFAULT");
         let agent = profile
             .and_then(|profile| profile.get_variant(variant))
@@ -419,31 +490,72 @@ impl ExecutionSupervisor {
                 .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
                     executor: snapshot.executor.clone(),
                 })?;
-        let source_home =
-            source_config
-                .parent()
-                .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
-                    executor: snapshot.executor.clone(),
-                })?;
-        let scoped_home = std::env::temp_dir()
+        let execution_root = std::env::temp_dir()
             .join("vibe-kanban")
             .join("mcp-config")
-            .join(execution_id.to_string())
-            .join("codex");
-        prepare_scoped_codex_home(source_home, &scoped_home).map_err(|_| {
+            .join(execution_id.to_string());
+        let (source_home, scoped_home, target_relative, environment) =
+            if config.executor == BaseCodingAgent::Codex {
+                let source_home =
+                    source_config
+                        .parent()
+                        .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                            executor: snapshot.executor.clone(),
+                        })?;
+                let scoped_home = execution_root.join("codex");
+                let target_relative = PathBuf::from("config.toml");
+                let environment = std::collections::BTreeMap::from([(
+                    "CODEX_HOME".into(),
+                    scoped_home.to_string_lossy().into_owned(),
+                )]);
+                (
+                    source_home.to_path_buf(),
+                    scoped_home,
+                    target_relative,
+                    environment,
+                )
+            } else {
+                let source_home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+                    ExecutionError::InvalidMcpSnapshot {
+                        executor: snapshot.executor.clone(),
+                    }
+                })?;
+                non_codex_scoped_config_layout(
+                    &source_config,
+                    source_home,
+                    std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+                    &execution_root,
+                )
+                .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                    executor: snapshot.executor.clone(),
+                })?
+            };
+        match std::fs::remove_dir_all(&execution_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(ExecutionError::McpMaterialization {
+                    executor: snapshot.executor.clone(),
+                });
+            }
+        }
+        prepare_scoped_home(&source_home, &scoped_home, &target_relative).map_err(|_| {
             ExecutionError::McpMaterialization {
                 executor: snapshot.executor.clone(),
             }
         })?;
+        let target_config = scoped_home.join(&target_relative);
         let prepared = PreparedMcpConfig {
-            scoped_home,
+            execution_root,
+            target_config,
+            environment,
             agent: agent.clone(),
         };
         let servers = snapshot.servers.clone().into_iter().collect();
         write_coding_agent_mcp_servers_to_path(
             agent,
             &source_config,
-            &prepared.scoped_home.join("config.toml"),
+            &prepared.target_config,
             &servers,
         )
         .await
@@ -495,10 +607,7 @@ impl ExecutionSupervisor {
                     servers: Vec::new(),
                 });
             };
-            (
-                prepared.agent.clone(),
-                prepared.scoped_home.join("config.toml"),
-            )
+            (prepared.agent.clone(), prepared.target_config.clone())
         };
         let servers = snapshot.servers.clone().into_iter().collect();
         if write_coding_agent_mcp_servers_to_path(&agent, &target_config, &target_config, &servers)
@@ -861,10 +970,7 @@ async fn run_job(
         environment.insert("PATH".into(), path.to_string_lossy().into_owned());
     }
     if let Some(prepared) = &prepared_mcp {
-        environment.insert(
-            "CODEX_HOME".into(),
-            prepared.scoped_home.to_string_lossy().into_owned(),
-        );
+        environment.extend(prepared.environment.clone());
     }
     *job.mcp_config.lock().await = prepared_mcp;
     let spawned = match action {
@@ -1303,7 +1409,12 @@ mod tests {
             recovery_store: None,
             interactions: Arc::new(InteractionBroker::default()),
             mcp_config: Mutex::new(Some(PreparedMcpConfig {
-                scoped_home: scoped_home.clone(),
+                execution_root: scoped_home.parent().unwrap().to_path_buf(),
+                target_config: scoped_home.join("config.toml"),
+                environment: std::collections::BTreeMap::from([(
+                    "CODEX_HOME".into(),
+                    scoped_home.to_string_lossy().into_owned(),
+                )]),
                 agent,
             })),
             mcp_refresh: RwLock::new(Some(McpRefreshHandle(control.clone()))),
@@ -1387,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_codex_homes_share_runtime_assets_but_not_config_files() {
+    fn scoped_homes_share_runtime_assets_but_not_config_files() {
         let temp = TempDir::new().unwrap();
         let source = temp.path().join("source");
         let first = temp.path().join("scoped").join("first").join("codex");
@@ -1395,9 +1506,10 @@ mod tests {
         fs::create_dir_all(source.join("skills")).unwrap();
         fs::write(source.join("auth.json"), "credential").unwrap();
         fs::write(source.join("config.toml"), "global = true").unwrap();
+        fs::write(source.join("config.toml.bak"), "global backup").unwrap();
 
-        prepare_scoped_codex_home(&source, &first).unwrap();
-        prepare_scoped_codex_home(&source, &second).unwrap();
+        prepare_scoped_home(&source, &first, Path::new("config.toml")).unwrap();
+        prepare_scoped_home(&source, &second, Path::new("config.toml")).unwrap();
         fs::write(first.join("config.toml"), "snapshot = 'one'").unwrap();
         fs::write(second.join("config.toml"), "snapshot = 'two'").unwrap();
 
@@ -1418,17 +1530,71 @@ mod tests {
             fs::read_to_string(source.join("config.toml")).unwrap(),
             "global = true"
         );
+        assert!(!first.join("config.toml.bak").exists());
     }
 
     #[test]
-    fn scoped_codex_home_can_start_without_a_global_home() {
+    fn scoped_home_can_start_without_a_global_home() {
         let temp = TempDir::new().unwrap();
         let missing_source = temp.path().join("missing");
         let scoped = temp.path().join("scoped").join("codex");
 
-        prepare_scoped_codex_home(&missing_source, &scoped).unwrap();
+        prepare_scoped_home(&missing_source, &scoped, Path::new("config.toml")).unwrap();
 
         assert!(scoped.is_dir());
+    }
+
+    #[test]
+    fn scoped_home_isolates_nested_config_and_preserves_vendor_auth() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let scoped = temp.path().join("scoped").join("home");
+        fs::create_dir_all(source.join(".gemini")).unwrap();
+        fs::write(source.join(".gemini/oauth_creds.json"), "credential").unwrap();
+        fs::write(source.join(".gemini/settings.json"), "global-settings").unwrap();
+        fs::write(source.join(".gitconfig"), "git-settings").unwrap();
+
+        prepare_scoped_home(&source, &scoped, Path::new(".gemini/settings.json")).unwrap();
+        fs::write(scoped.join(".gemini/settings.json"), "session-settings").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(scoped.join(".gemini/oauth_creds.json")).unwrap(),
+            "credential"
+        );
+        assert_eq!(
+            fs::read_to_string(scoped.join(".gitconfig")).unwrap(),
+            "git-settings"
+        );
+        assert_eq!(
+            fs::read_to_string(source.join(".gemini/settings.json")).unwrap(),
+            "global-settings"
+        );
+    }
+
+    #[test]
+    fn custom_xdg_config_outside_home_gets_its_own_scoped_root() {
+        let temp = TempDir::new().unwrap();
+        let source_home = temp.path().join("home");
+        let source_xdg = temp.path().join("config");
+        let source_config = source_xdg.join("opencode/opencode.json");
+        let execution_root = temp.path().join("execution");
+
+        let (source_root, scoped_root, relative, environment) = non_codex_scoped_config_layout(
+            &source_config,
+            source_home,
+            Some(source_xdg.clone()),
+            &execution_root,
+        )
+        .unwrap();
+
+        assert_eq!(source_root, source_xdg);
+        assert_eq!(scoped_root, execution_root.join("xdg"));
+        assert_eq!(relative, Path::new("opencode/opencode.json"));
+        assert_eq!(
+            environment.get("XDG_CONFIG_HOME"),
+            Some(&execution_root.join("xdg").to_string_lossy().into_owned())
+        );
+        assert!(!environment.contains_key("HOME"));
     }
 
     #[tokio::test]

@@ -385,6 +385,21 @@ records a truthful actionable outcome, never infers success from absence and
 never leaves an unbounded pending state. Slow external or filesystem operations
 run outside request cancellation, and no coordination lock is held across them.
 
+### XXIX. Settings-owned MCP materialization is executor-neutral and isolated
+Every MCP-capable remote execution receives the selected profile's complete,
+latest settings-owned MCP map, regardless of executor. The worker materializes
+that map into an execution-scoped native configuration and redirects only that
+execution to it; it must not mutate repository configuration or a worker-global
+vendor configuration. Required vendor authentication and continuation assets are
+preserved without copying secret material into logs or diagnostics.
+
+Executor-specific live reload remains an explicit capability. An executor that
+cannot confirm in-process adoption receives new settings at its next process
+boundary rather than pretending a probe or file write refreshed the running
+session. Credential-bearing snapshots stay within the authenticated dispatch
+channel, remain bounded and idempotency-covered, and are removed with the
+execution-scoped configuration.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -406,7 +421,9 @@ run outside request cancellation, and no coordination lock is held across them.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.25.0 (requires accepted lifecycle work to have a persisted,
+**Version**: 0.26.0 (requires executor-neutral, execution-scoped materialization
+of settings-owned MCP snapshots while keeping live reload capability-specific;
+0.25.0 required accepted lifecycle work to have a persisted,
 single-consumer operation identity, request-independent execution, idempotent
 restart reconciliation, and durable user-visible outcomes; 0.24.0 required explicit, collision-safe, atomic legacy identifier
 migration with label and definition preservation; 0.23.0 required collapsed controls to retain summary-backed,

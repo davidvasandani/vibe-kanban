@@ -1,37 +1,35 @@
-# Prior Knowledge: Desktop Deploy Status (`VAS-377`)
+# Prior Knowledge: Settings-Owned MCPs in Worker Sessions
 
-The populated project knowledge bases (`docs/knowledge-base/` and `wiki/`)
-were searched read-only for deploy identity, right-drawer composition, flex
-layout, and verification guidance.
+Relevant project knowledge is not empty.
 
-## Relevant pages
+## Distilled guidance
 
-| Page | Reusable guidance |
-| --- | --- |
-| `wiki/self-hosted-deployment.md` | Deployment identity is the immutable artifact's embedded Git SHA plus optional build/publish timestamp from `/api/info`; service restarts are not deployments, missing timestamps must not fabricate age, and relative age can update locally. |
-| `wiki/flexible-collapsible-panel-stacks.md` | `RightSidebar.tsx` is the desktop workspace right drawer. Its bounded flex stack gives expanded collapsible sections the remaining height, while non-collapsible intrinsic rows must remain `flex-none h-auto`. The complete `min-h-0` chain and outer overflow fallback must be preserved. |
-| `docs/knowledge-base/nested-flex-scroll-containment.md` | Fixed content above a scrolling flex body must be `shrink-0`, with scroll ownership and `min-h-0` applied deliberately. Rendered-DOM tests can protect class contracts even though JSDOM cannot calculate layout. |
-| `docs/knowledge-base/worktree-formatting-prerequisites.md` | Run `pnpm install --frozen-lockfile` before repository formatting in a fresh worktree; the preformat hook intentionally fails before partial mutation if package-local formatter shims are missing. |
+- `cluster-mcp-runtime-connectivity.md`: persistence, runtime adoption, and
+  worker connectivity are separate boundaries. Authenticated definitions must
+  be dispatched from settings; deployment cannot reconstruct them. The proven
+  Codex pattern uses a bounded authenticated snapshot, an execution-scoped home,
+  shared runtime/auth assets, no global worker mutation, and cleanup at job end.
+- `shared-mcp-configuration.md`: native executor files are the definition source
+  of truth. Deployment supplies immutable commands and prerequisites but must
+  not seed a competing registry. Identifiers remain operational keys and secrets
+  must not enter diagnostics.
+- `active-mcp-refresh.md`: live reload is an executor capability. Codex refresh
+  may update its scoped config and queue the vendor reload; unsupported
+  executors adopt settings through a fresh process rather than claiming a live
+  refresh.
+- `workspace-environment-inheritance.md`: secrets belong at the narrow child
+  process boundary, with deterministic precedence and no mutation of the
+  long-lived service environment. Do not log or persist resolved maps.
 
-## Distilled constraints for the spec and plan
+## Consequences for this task
 
-1. Reuse `useUserSystem` and the existing shared `DeployStatus`; do not create a
-   second API request, runtime release-file read, timestamp meaning, or desktop
-   formatter.
-2. Insert the desktop status at the `RightSidebar` composition boundary, before
-   the section list. This is the drawer controlled by `ToggleRightSidebar`.
-3. “No toggle / always visible” is best represented by a fixed intrinsic row,
-   not by a new `CollapsibleSectionHeader` or persisted expansion key.
-4. Preserve the drawer's bounded flex and overflow behavior. The fixed row must
-   not claim a share of the height intended for expanded content sections.
-5. Preserve compatibility: a real SHA links to its commit; `dev` is non-linking;
-   absent or invalid timestamps leave the revision visible without an age.
-6. Validate the rendered structure/classes and shared status behavior with
-   focused tests, then run repository-owned type, generated-contract, lint,
-   format, and relevant test commands after locked dependency setup.
-
-## Scope conclusion
-
-No homelab or other-service change is required. The project/issue contextual
-panel is distinct from the persistent workspace right drawer and is not part of
-this task.
+1. Generalize the existing Codex dispatch snapshot instead of inventing an
+   environment-variable registry for MCP headers.
+2. Preserve per-execution isolation for every executor; never update worker
+   global native configs.
+3. Make a scoped home overlay retain existing authentication/runtime assets and
+   replace only the MCP-bearing config path.
+4. Keep Codex refresh semantics unchanged and treat a new process as the
+   adoption boundary for other executors.
+5. Remove the repository `.mcp.json` Vibe entry because it is a competing
+   project-scoped definition, not a persistence mechanism for Settings values.
