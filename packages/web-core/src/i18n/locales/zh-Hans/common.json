@@ -134,6 +134,7 @@
     "notFoundDescription": "此工作区可能已被删除，或链接不正确。",
     "selectToStart": "选择一个工作区开始",
     "draft": "草稿",
+    "creating": "创建中…",
     "viewArchive": "查看归档",
     "backToActive": "返回活跃",
     "noArchived": "没有已归档的工作区",

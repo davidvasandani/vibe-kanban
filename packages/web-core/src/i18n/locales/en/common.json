@@ -134,6 +134,7 @@
     "notFoundDescription": "This workspace may have been deleted or the link may be incorrect.",
     "selectToStart": "Select a workspace to get started",
     "draft": "Draft",
+    "creating": "Creating…",
     "viewArchive": "View Archive",
     "backToActive": "Back to Active",
     "noArchived": "No archived workspaces",

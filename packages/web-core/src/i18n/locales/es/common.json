@@ -134,6 +134,7 @@
     "notFoundDescription": "Es posible que este espacio de trabajo haya sido eliminado o que el enlace sea incorrecto.",
     "selectToStart": "Selecciona un espacio de trabajo para comenzar",
     "draft": "Borrador",
+    "creating": "Creando…",
     "viewArchive": "Ver archivo",
     "backToActive": "Volver a activos",
     "noArchived": "No hay espacios de trabajo archivados",
