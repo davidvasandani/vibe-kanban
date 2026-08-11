@@ -103,8 +103,9 @@ const KEEP_WARM_ENV: &str = "VK_KEEP_WARM_AGENTS";
 
 fn validated_mcp_snapshot(
     executor: BaseCodingAgent,
-    servers: BTreeMap<String, serde_json::Value>,
+    mut servers: BTreeMap<String, serde_json::Value>,
 ) -> anyhow::Result<McpConfigSnapshot> {
+    executors::mcp_config::route_mcp_servers_for_runtime(&mut servers);
     let snapshot = McpConfigSnapshot {
         executor: executor.to_string(),
         servers,
@@ -2687,9 +2688,15 @@ impl ContainerService for LocalContainerService {
                         .unwrap_or(result));
                 }
             };
-            let snapshot = McpConfigSnapshot {
-                executor: BaseCodingAgent::Codex.to_string(),
-                servers,
+            let snapshot = match validated_mcp_snapshot(BaseCodingAgent::Codex, servers) {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    return Ok(self
+                        .mcp_refresh_coordinator
+                        .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                        .await
+                        .unwrap_or(result));
+                }
             };
             if snapshot.validate_size().is_err() {
                 return Ok(self

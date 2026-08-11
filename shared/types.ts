@@ -634,7 +634,7 @@ export type SharedMcpAuthMode = "shared_gateway" | "agent_native" | "explicit_he
 
 export type SharedMcpCompatibility = { executor: BaseCodingAgent, compatible: boolean, reason: string | null, };
 
-export type SharedMcpServer = { name: string, display_name: string | null, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, source_kind: SharedMcpSourceKind, native_sources: Array<NativeMcpSource>, compatibility: Array<SharedMcpCompatibility>, auth_mode: SharedMcpAuthMode, gateway_status: string | null, };
+export type SharedMcpServer = { name: string, display_name: string | null, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, source_kind: SharedMcpSourceKind, native_sources: Array<NativeMcpSource>, compatibility: Array<SharedMcpCompatibility>, auth_mode: SharedMcpAuthMode, gateway_status: string | null, runtime_route_configured: boolean, };
 
 export type SharedMcpConflictVariant = { variant_id: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, native_sources: Array<NativeMcpSource>, };
 
