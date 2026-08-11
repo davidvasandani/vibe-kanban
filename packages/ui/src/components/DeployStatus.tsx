@@ -88,15 +88,12 @@ export function DeployStatus({
     <>
       <span className="truncate">{version}</span>
       {version !== 'dev' && age && (
-        <span className="hidden min-[390px]:inline shrink-0">
-          {' '}
-          · {age.compact}
-        </span>
+        <span className="shrink-0 text-[8px]">{age.compact} ago</span>
       )}
     </>
   );
   const classes = cn(
-    'flex min-w-0 max-w-20 items-center font-ibm-plex-mono text-[9px] leading-none text-low',
+    'flex min-w-0 max-w-20 flex-col items-start gap-0.5 font-ibm-plex-mono text-[9px] leading-none text-low',
     className
   );
 

@@ -48,7 +48,7 @@ describe("DeployStatus", () => {
       "href",
       "https://github.com/davidvasandani/vibe-kanban/commit/abc1234",
     );
-    expect(screen.getByText("· 1m")).toHaveClass("min-[390px]:inline");
+    expect(screen.getByText("1m ago")).toBeVisible();
 
     act(() => {
       vi.advanceTimersByTime(60_000);
@@ -98,6 +98,7 @@ describe("mobile Navbar deployment status", () => {
         name: "Deployed revision abc1234 2 hours ago",
       }),
     ).toBeInTheDocument();
+    expect(screen.getByText("2h ago")).toBeVisible();
     expect(
       screen.getByRole("button", { name: "Settings" }),
     ).toBeInTheDocument();
