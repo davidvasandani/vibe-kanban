@@ -1,39 +1,27 @@
-# Research: Concatenate Repeating Lines
+# Research: Background Workspace Creation
 
-## Visible-row owner
+## Current cancellation boundary
 
-The screenshots show normalized tool rows whose content is
-`codex review --uncommitted`. They are produced by the Codex command paths in
-`crates/executors/src/executors/codex/normalize_logs.rs`, not by the Claude/Grok
-compactor or the frontend.
+`create_and_start_workspace` in `crates/server/src/routes/workspaces/create.rs` awaits repository association, remote attachment/context calls, placement, worktree creation, and `start_workspace` before responding. The frontend mutation remains mounted and shows “Creating…” throughout. Dropping the HTTP request can drop this handler future at any await, so the workspace row alone is not evidence that creation completed.
 
-## Existing pattern
+## Decision: workspace-owned lifecycle state
 
-`ClaudeLogProcessor` already collapses high-frequency system events and repeated
-successful Grok `Bash` calls. The reusable invariants are:
+Creation is a one-time lifecycle of a workspace, and existing workspace list/detail reads already drive navigation. Storing its status on `workspaces` is the smallest authoritative model and automatically gives clients an observable identity before sessions exist.
 
-- allocate once, then replace the original normalized index;
-- prove adjacency with `EntryIndexProvider::current() == index + 1`;
-- correlate raw lifecycle events by unique call ID;
-- let only the latest occurrence own shared-row updates;
-- require success before reuse;
-- bound tick rendering.
+A separate general job table was rejected because this feature does not expose scheduling, retry, history, or multiple job kinds. It would add joins and APIs while still requiring a workspace-level summary for the UI.
 
-The Codex normalizer has equivalent `CommandState` lifecycle maps and accepts two
-event formats, but currently allocates a new entry at every command start.
+## Decision: runtime-owned task plus startup reconciliation
 
-## Scope decision
+Tokio ownership severs browser cancellation from the work. Persisting `queued` before spawn and claiming it atomically prevents two live consumers. Tokio tasks do not survive process shutdown, so startup reconciliation turns unproven unfinished operations into visible failures rather than leaving them pending or replaying non-idempotent Git work.
 
-Generic identical-command compaction was rejected. Repeating a shell command can
-be deliberate and each output can matter. The feature recognizes only the
-reported `codex review --uncommitted` operation after the existing shell
-unwrapping used for display.
+Full phase checkpoint/replay was rejected for this increment. Repository association, attachment import, placement, filesystem materialization, and process startup do not currently share a phase-idempotency contract. Replaying them after an arbitrary crash risks duplicate initial execution or destructive worktree behavior.
 
-Frontend compaction was rejected because it would duplicate stateful
-tool-lifecycle logic, leave other consumers inconsistent, and receive patches
-whose indices still include the hidden rows.
+## Decision: return workspace, not speculative execution
 
-## Dependencies
+An execution does not exist at acceptance time. Returning an optional or placeholder execution weakens the contract. The response returns the accepted workspace only; clients observe the real execution through existing session/execution reads after creation reaches ready.
 
-No new dependency is needed. Existing shell parsing, normalized patch helpers,
-`HashMap`, and `EntryIndexProvider` cover the implementation.
+## Error policy
+
+Persist a bounded generic-but-actionable message that names workspace creation as the failed operation. Log the full error with workspace ID and phase. This keeps server paths, remote bodies, and potential configuration details out of user-visible durable state.
+
+No new dependency is required.

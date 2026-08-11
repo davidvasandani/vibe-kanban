@@ -7,6 +7,7 @@ import {
   CircleIcon,
   GitPullRequestIcon,
   DotsThreeIcon,
+  HardDrivesIcon,
 } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '../lib/cn';
@@ -50,6 +51,11 @@ export interface WorkspaceSummaryProps {
     | 'interrupted'
     | 'indeterminate';
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
+  serverAffinity?: {
+    kind: 'local' | 'automatic' | 'worker' | 'unassigned';
+    worker_hostname: string | null;
+    requested_worker_hostname: string | null;
+  };
   onClick?: () => void;
   className?: string;
   summary?: boolean;
@@ -74,6 +80,7 @@ export function WorkspaceSummary({
   latestProcessCompletedAt,
   latestProcessStatus,
   prStatus,
+  serverAffinity,
   onClick,
   className,
   summary = false,
@@ -87,6 +94,11 @@ export function WorkspaceSummary({
     latestProcessStatus === 'killed' ||
     latestProcessStatus === 'interrupted' ||
     latestProcessStatus === 'indeterminate';
+  const affinityLabel = serverAffinity
+    ? (serverAffinity.worker_hostname ??
+      serverAffinity.requested_worker_hostname ??
+      t(`workspaces.serverAffinity.${serverAffinity.kind}`))
+    : null;
 
   const handleOpenCommandBar = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -230,6 +242,16 @@ export function WorkspaceSummary({
                 {linesRemoved !== undefined && (
                   <span className="text-error">-{linesRemoved}</span>
                 )}
+              </span>
+            )}
+
+            {affinityLabel && (
+              <span
+                className="flex max-w-24 shrink-0 items-center gap-half truncate"
+                title={affinityLabel}
+              >
+                <HardDrivesIcon className="size-icon-xs shrink-0" />
+                <span className="truncate">{affinityLabel}</span>
               </span>
             )}
           </div>

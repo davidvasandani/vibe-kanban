@@ -93,6 +93,20 @@ pub fn merge_paths(primary: impl AsRef<OsStr>, secondary: impl AsRef<OsStr>) -> 
     join_paths(merged).unwrap_or_default()
 }
 
+/// Append Vibe Kanban's app-managed CLI tools directory to an inherited PATH.
+///
+/// The execution host derives the directory locally. A missing directory is a
+/// no-op, and inherited entries stay first so machine-provided tools win.
+pub fn append_cli_tools_to_path(primary: impl AsRef<OsStr>) -> Option<OsString> {
+    append_existing_dir_to_path(primary, &crate::assets::cli_tools_dir().join("bin"))
+}
+
+fn append_existing_dir_to_path(primary: impl AsRef<OsStr>, directory: &Path) -> Option<OsString> {
+    directory
+        .is_dir()
+        .then(|| merge_paths(primary, directory.as_os_str()))
+}
+
 async fn refresh_path() -> bool {
     let Some(refreshed) = get_fresh_path().await else {
         return false;
@@ -269,6 +283,54 @@ async fn get_fresh_path() -> Option<String> {
         .map(OsString::from)
         .reduce(|a, b| merge_paths(&a, &b))
         .map(|merged| merged.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{env::join_paths, fs};
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn existing_directory_is_appended_after_inherited_entries_once() {
+        let temp = TempDir::new().unwrap();
+        let host_first = temp.path().join("host-first");
+        let host_second = temp.path().join("host-second");
+        let managed = temp.path().join("managed-bin");
+        fs::create_dir_all(&managed).unwrap();
+        let inherited = join_paths([&host_first, &managed, &host_second]).unwrap();
+
+        let merged = append_existing_dir_to_path(&inherited, &managed).unwrap();
+        let entries = std::env::split_paths(&merged).collect::<Vec<_>>();
+
+        assert_eq!(entries, vec![host_first, managed, host_second]);
+    }
+
+    #[test]
+    fn existing_directory_is_appended_when_not_already_present() {
+        let temp = TempDir::new().unwrap();
+        let host = temp.path().join("host");
+        let managed = temp.path().join("managed-bin");
+        fs::create_dir_all(&managed).unwrap();
+        let inherited = join_paths([&host]).unwrap();
+
+        let merged = append_existing_dir_to_path(&inherited, &managed).unwrap();
+
+        assert_eq!(
+            std::env::split_paths(&merged).collect::<Vec<_>>(),
+            vec![host, managed]
+        );
+    }
+
+    #[test]
+    fn missing_directory_does_not_replace_inherited_path() {
+        let temp = TempDir::new().unwrap();
+        let inherited = join_paths([temp.path().join("host")]).unwrap();
+
+        assert!(append_existing_dir_to_path(&inherited, &temp.path().join("missing")).is_none());
+    }
 }
 
 #[cfg(windows)]

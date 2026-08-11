@@ -1,66 +1,130 @@
-# Technical Spec: Scrollable Create-Issue Settings
+# Default every new workspace to the remote mainline
 
-**Task ID:** `vk/4f69-vk-create-issue`<br>
-**Service:** Vibe Kanban<br>
-**Status:** Draft before implementation
+Task: `vk/1476-protect-git-repo`
 
 ## Problem
 
-On constrained viewports, especially mobile, the create-issue panel's lower
-settings and submit controls can extend below the visible panel. The panel is
-intended to provide a vertically scrollable content region, but its flex sizing
-does not reliably allow that region to shrink below its content's intrinsic
-height. As a result, controls are cut off and the user cannot scroll to them.
+When Vibe Kanban starts a workspace, one repository-selection path defaults the
+target branch to the registered checkout's current local branch. Repositories in
+`/srv/src` may be checked out on deployment, recovery, or operator branches, so
+that local state is not a safe workspace base. The intended default is the
+remote mainline, normally `origin/main`.
+
+## Required behavior
+
+- Every new-workspace repository selection path uses the same default-branch
+  policy.
+- An explicitly configured repository default remains highest priority.
+- Without an explicit default, `origin/main` is preferred, followed by
+  `origin/master` for legacy repositories.
+- Only when neither remote mainline exists may selection fall back to the
+  current branch and then the first available branch.
+- An explicit initial branch supplied by the calling workflow remains higher
+  priority than repository/default inference when it exists.
+- The exact selected remote-tracking branch is persisted as the workspace's
+  target branch, so worktree creation resolves that ref rather than local HEAD.
+- Empty branch lists remain non-selectable and existing manual overrides remain
+  unchanged.
 
 ## Scope
 
-- Correct the create/edit issue panel layout so its content region becomes the
-  scroll container within the available panel height.
-- Preserve the fixed header, current control order, and existing create/edit
-  behavior.
-- Add regression coverage that asserts the panel shell and content region use
-  the sizing and overflow contract required for scrolling.
-- Limit code and documentation changes to the Vibe Kanban repository. No other
-  service or deployment configuration is in scope.
-
-## Technical Approach
-
-The panel shell is a column flex container. Its scrolling child must be allowed
-to shrink inside that container; in CSS flex layouts this requires a zero
-minimum block size (`min-h-0`) on the relevant flex item (and, where necessary,
-the shell). Retain `overflow-y-auto` on the content region and
-`overflow-hidden` on the shell so scrolling occurs inside the issue panel rather
-than leaking to an ancestor or the page.
-
-Regression coverage will render `KanbanIssuePanel` and verify that:
-
-1. the panel shell remains a height-constrained, overflow-clipping flex column;
-2. the content region is a shrinkable flex child with vertical auto overflow;
-3. create-only settings and the Create Issue action remain inside that region.
-
-## Acceptance Criteria
-
-1. On a short/mobile-height viewport, users can vertically scroll from the top
-   of create-issue content through pipeline/settings controls to the Create
-   Issue button.
-2. The header stays outside the scrolling content and remains visible.
-3. Edit-mode content continues to scroll and its section ordering is unchanged.
-4. Existing keyboard, attachment, draft-workspace, pipeline, and submission
-   behavior is unchanged.
-5. Focused frontend tests, formatting, and relevant type/lint checks pass.
-
-## Risks and Mitigations
-
-- **Ancestor height contract differs across hosts:** keep the change local to
-  the shared issue panel and test its explicit flex/overflow contract.
-- **Accidental nested/page scrolling:** preserve the shell's clipped overflow
-  and designate only the content child as vertically scrollable.
-- **Visual regressions in edit mode:** use the same scrolling contract for both
-  modes and retain existing DOM ordering.
+This is a Vibe Kanban application change. It must not alter the checkout,
+deployment, or branch configuration of any other service under `/srv/src`.
 
 ## Verification
 
-- Run the focused `KanbanIssuePanel` test suite.
-- Run repository formatting.
-- Run the relevant frontend typecheck/lint commands available in the workspace.
-- Independently review the completed diff and address confirmed findings.
+- Unit coverage proves configured defaults and explicit initial branches win.
+- Coverage proves `origin/main` and `origin/master` outrank a current local
+  branch.
+- Coverage proves the existing current/first fallback and empty-list behavior.
+- Relevant frontend type, lint, format, and test checks pass.
+
+## Follow-up: Durable MCP Screenshot Imports
+
+### Objective
+
+Render screenshots returned by MCP tools inline in Vibe Kanban's Codex chat
+without dumping base64 or raw MCP content JSON into the tool result.
+
+### Design
+
+Use the existing executor log-normalization boundary. Base64 MCP `image` blocks
+are decoded into the workspace's ignored `.vibe-attachments/` directory and
+rendered as Markdown image references. Hosted MCP `resource_link` blocks whose
+MIME type is `image/*` are downloaded immediately while their capability URL
+is valid, persisted in `.vibe-attachments/`, and rendered using a
+worktree-relative Markdown image reference. Conversation history must not
+depend on the remote URL remaining reachable.
+
+Apply the same normalization to both Codex protocol paths, including the direct
+app-server item-completion path used by clustered Vibe Kanban workers.
+The shared image node renders the resulting local attachment through the
+existing worktree asset route.
+
+### Security and Lifecycle
+
+- Fetch only HTTP(S) resource links explicitly marked with an image MIME type.
+- Bound remote fetch duration and response size; reject redirects so every
+  destination is validated before a request is made.
+- Import at most eight hosted images per result concurrently under one
+  aggregate deadline, so per-image timeouts do not accumulate.
+- Reject loopback, private, link-local, multicast, documentation, and
+  unspecified destinations unless their exact origin appears in the
+  deployment-managed `VIBE_MCP_IMAGE_ALLOWED_ORIGINS` allowlist.
+- Also accept the exact origin in the existing deployment-controlled
+  `FIRECRAWL_BROWSER_URL` when it is present in the Vibe process environment.
+- Require the fetched response to remain an image before persistence.
+- Verify a supported raster-image signature rather than trusting MIME headers;
+  transient remote SVG is not imported.
+- Keep base64 image persistence content-addressed and worktree-local.
+- Treat the MCP URL as a transient transfer capability and do not retain it in
+  normalized Markdown after a successful import.
+
+### Firecrawl Browser Integration
+
+The Firecrawl Browser service stores screenshots in its existing bounded
+artifact store and returns a capability-bearing MCP `resource_link`. Screenshot
+artifacts are reusable until their short TTL expires so both the inline
+thumbnail and full-size preview can load them, including after the browser
+session closes. Existing browser-download
+artifacts remain single-use.
+
+Hosted screenshots may expire according to Firecrawl's artifact policy after
+Vibe Kanban imports them; chat rendering uses the durable local copy.
+
+### Acceptance Criteria
+
+1. Codex app-server MCP image results render as inline Markdown images.
+2. Base64 image blocks continue to persist into `.vibe-attachments/`.
+3. HTTP(S) `resource_link` blocks with `image/*` MIME types are copied into
+   `.vibe-attachments/` before rendering.
+4. Failed, oversized, non-image, and non-HTTP(S) resource links retain existing
+   tool-result behavior and are not persisted.
+5. Automated tests cover base64, successful hosted-image import, and rejected
+   or failed links.
+6. Web and desktop clients render the local attachment without depending on
+   remote URL lifetime or reachability.
+7. Firecrawl's `screenshot` tool returns a reusable, TTL-bound image
+   `resource_link` without carrying base64 through MCP.
+
+## Follow-up: MCP Refresh Nested Route
+
+### Problem
+
+The session MCP refresh and status handlers are nested below both workspace and
+session path parameters, but each handler extracts only one UUID. Axum rejects
+requests before the handler runs because the route contains two path arguments,
+causing the refresh endpoint to return HTTP 500.
+
+### Required behavior
+
+- Both refresh endpoints extract the workspace and session UUID tuple expected
+  by the nested route.
+- The workspace-loading middleware extracts the named `{id}` parameter without
+  rejecting additional parameters belonging to nested routes.
+- The existing workspace extension remains the authority for the loaded
+  workspace; the path workspace UUID is consumed only to satisfy route
+  extraction.
+- Refresh requests reach the deployment MCP refresh service instead of failing
+  during Axum path extraction.
+- No routes or services outside Vibe Kanban are changed.

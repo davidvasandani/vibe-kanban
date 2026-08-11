@@ -1,32 +1,43 @@
-# Implementation Plan: Scrollable Create-Issue Settings
+# Implementation plan: default workspace bases to remote mainline
 
-**Task ID:** `vk/4f69-vk-create-issue`
+1. Reuse the existing `resolveDefaultBranch` policy in every repository branch
+   selection hook used to assemble new-workspace inputs.
+2. Preserve explicit initial-branch precedence, then delegate repository
+   default and fallback selection to the canonical helper.
+3. Add focused hook tests proving `origin/main`/`origin/master` outrank a current
+   deployment branch while configured and explicit initial choices still win.
+4. Retain exact remote-prefixed target branch names through workspace input
+   creation; make no `/srv/src` checkout or deployment changes.
+5. Run formatting, frontend tests, type checking, and linting.
+6. Run SpecKit analysis and implementation tasks, then independent Codex review
+   until no significant findings remain.
+7. Update the existing branch-defaulting knowledge page and index contribution
+   metadata, commit the knowledge update, and merge into the base branch.
 
-1. Refresh the repository SpecKit constitution and create the task's feature
-   artifacts under a task-specific `specs/vk/` directory.
-2. Reconcile the feature specification with `SPEC.md`, the supplied mobile
-   screenshot, `PRIOR_KNOWLEDGE.md`, and the existing issue-panel host/layout
-   hierarchy; resolve ambiguities without expanding beyond Vibe Kanban.
-3. Produce the SpecKit technical plan, research, contracts/data-model notes,
-   dependency-ordered tasks, and pre-implementation analysis.
-4. Add focused regression coverage for the issue-panel layout contract:
-   fixed/clipped shell, shrinkable vertically scrolling content, and create
-   controls contained within that scroll region.
-5. Update the shared `KanbanIssuePanel` flex sizing so constrained mobile and
-   desktop hosts allow the content child to shrink and scroll while the header
-   remains fixed.
-6. Install frozen workspace dependencies if required, then run the focused UI
-   test, formatting, relevant frontend type/lint verification, and
-   `git diff --check`.
-7. Run an independent Codex diff review, address confirmed significant
-   findings, and repeat verification/review until clean.
-8. Record the reusable nested-flex scroll-containment pattern and regression
-   approach in `docs/knowledge-base/`, tag it `vk/4f69-vk-create-issue`, refresh
-   the index, and commit that knowledge-base update.
-9. Merge the completed task branch into its base branch after confirming both
-   repositories remain scoped correctly and clean apart from intended work.
+## Follow-up implementation: durable MCP screenshots
 
-Steps 4 and 5 will be represented in the dependency-ordered SpecKit task list;
-tests should land before or alongside the implementation so the regression is
-demonstrable. No deployment/IaC update is expected because this is a shared
-frontend source fix only.
+1. Extend the shared MCP image-result normalizer to fetch hosted HTTP(S)
+   `resource_link` image blocks with bounded time and size, rejected redirects,
+   and destination validation with an explicit private-origin allowlist.
+2. Persist successful downloads content-addressed in `.vibe-attachments/` and
+   emit only worktree-relative Markdown references.
+3. Reuse the shared normalizer in Codex's direct app-server completion path.
+4. Add focused tests for successful import, transfer failure, invalid response
+   type, oversized content, and rejected resource links.
+5. Run formatting and targeted executor/frontend checks.
+6. Reuse Firecrawl's bounded artifact store for reusable screenshot artifacts
+   and return capability URLs as MCP `resource_link` image blocks.
+7. Verify Firecrawl build/tests and the end-to-end MCP screenshot contract.
+8. Run independent Codex review and address confirmed findings until none remain.
+
+## Follow-up implementation: MCP refresh nested route
+
+1. Update the refresh and status handlers to extract the nested workspace and
+   session UUID path tuple.
+2. Update the workspace-loading middleware to deserialize the named workspace
+   path parameter while tolerating parameters added by nested routes.
+3. Run Rust formatting, a focused server compile, and diff validation.
+4. Run an independent Codex review and address confirmed findings until none
+   remain.
+5. Merge and deploy the fix, then verify the live refresh endpoint and native
+   Firecrawl browser tool availability.

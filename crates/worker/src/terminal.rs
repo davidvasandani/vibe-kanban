@@ -48,7 +48,7 @@ impl TerminalService {
         }
     }
 
-    pub async fn create(&self, request: TerminalCreateRequest) -> Result<Uuid, TerminalError> {
+    pub async fn create(&self, mut request: TerminalCreateRequest) -> Result<Uuid, TerminalError> {
         validate_size(request.cols, request.rows)?;
         let workspace = self
             .paths
@@ -58,6 +58,16 @@ impl TerminalService {
             return Err(TerminalError::Operation(
                 "working directory is outside workspace".into(),
             ));
+        }
+        let inherited_path = request
+            .environment
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+        if let Some(path) = utils::shell::append_cli_tools_to_path(&inherited_path) {
+            request
+                .environment
+                .insert("PATH".into(), path.to_string_lossy().into_owned());
         }
         let terminal_id = Uuid::new_v4();
         let (tx, rx) = mpsc::channel(OUTPUT_QUEUE_CAPACITY);

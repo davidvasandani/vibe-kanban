@@ -41,13 +41,18 @@ codex-app-server-protocol = { git = "https://github.com/openai/codex.git", packa
 sha2 = "0.10"
 derivative = "2.2.0"
 reqwest = { workspace = true }
+hickory-resolver = "0.25.2"
 eventsource-stream = "0.2"
 walkdir = "2"
 rand = "0.8"
 base64 = "0.22"
+cluster-protocol = { path = "../cluster-protocol" }
 jsonc-parser = { version = "0.29", features = ["cst", "serde"] }
 lru = "0.12"
 async-stream = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 winsplit = "0.1.0"

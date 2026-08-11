@@ -39,6 +39,7 @@ export function useUserSystemController({
 
   const config = userSystemInfo?.config || null;
   const appVersion = userSystemInfo?.version || null;
+  const deploymentTimestamp = userSystemInfo?.deployment_timestamp ?? null;
   const previewProxyPort = userSystemInfo?.preview_proxy_port ?? null;
   const environment = userSystemInfo?.environment || null;
   const machineId = userSystemInfo?.machine_id || null;
@@ -147,6 +148,7 @@ export function useUserSystemController({
     () => ({
       system: {
         appVersion,
+        deploymentTimestamp,
         previewProxyPort,
         config,
         environment,
@@ -158,6 +160,7 @@ export function useUserSystemController({
         attachmentsEnabled,
       },
       appVersion,
+      deploymentTimestamp,
       previewProxyPort,
       config,
       environment,
@@ -180,6 +183,7 @@ export function useUserSystemController({
     [
       machineId,
       appVersion,
+      deploymentTimestamp,
       capabilities,
       config,
       environment,

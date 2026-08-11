@@ -1,30 +1,33 @@
-# Data Model: Concatenate Repeating Lines
+# Data Model: Background Workspace Creation
 
-All state is process-local inside one Codex log-normalization stream.
+## Workspace additions
 
-## `RepeatedCommand`
+`creation_status: WorkspaceCreationStatus`
 
-- `entry_index: usize` — original normalized row shared by the run.
-- `command: String` — exact normalized eligible command used for equality.
-- `count: usize` — total occurrences represented by the row, including the
-  first.
-- `latest_call_id: String` — only this lifecycle may replace the shared row.
-- `latest_completed: bool` — true only after the latest occurrence succeeds;
-  required before the next occurrence can reuse the row.
+- `queued`: workspace identity persisted; background consumer not yet claimed.
+- `running`: one coordinator consumer claimed the workflow.
+- `ready`: materialization and initial execution startup completed.
+- `failed`: creation did not complete or was interrupted by coordinator restart.
 
-## `CommandState` addition
+`creation_error: Option<String>`
 
-- `repeat_count: usize` — total occurrences represented by this command's
-  visible row. Defaults to one and is copied into every streamed/completed
-  replacement so the marker is stable.
+- absent for queued, running, and ready;
+- bounded, safe user-facing explanation for failed;
+- detailed underlying error remains in structured server logs.
 
 ## State transitions
 
-- `none -> active(count=1, incomplete)` on the first eligible command.
-- `active(success) -> active(count+1, incomplete)` on an adjacent identical
-  eligible command with a new call ID.
-- `active(incomplete) -> active(success)` on successful owner completion.
-- `active(incomplete) -> active(failed)` on unsuccessful owner completion;
-  the row is failed and a future call allocates a new row.
-- Any changed/intervening command fails the adjacency/equality guard and starts
-  a new tracker at count one.
+```text
+new row -> queued -> running -> ready
+                       |          ^
+                       +-> failed |
+queued/running at startup -> failed
+```
+
+Invariants:
+
+- Existing pre-feature workspaces migrate to `ready`.
+- Only an atomic `queued -> running` update claims work.
+- `ready` is written only by the live consumer after initial execution startup returns successfully; an execution row alone is insufficient restart evidence.
+- `failed` is terminal for this feature; users create a replacement workspace.
+- The workspace ID is the creation-operation identity; no second operation row is needed while retry-in-place is out of scope.

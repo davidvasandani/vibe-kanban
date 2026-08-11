@@ -7,6 +7,8 @@ import { PreviewControlsContainer } from './PreviewControlsContainer';
 import { BrowserControlsContainer } from './BrowserControlsContainer';
 import { GitPanelContainer } from './GitPanelContainer';
 import { ServerMetricsSectionContainer } from './ServerMetricsSectionContainer';
+import { ServerAffinitySectionContainer } from './ServerAffinitySectionContainer';
+import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { TerminalPanelContainer } from '@/shared/components/TerminalPanelContainer';
 import { WorkspaceNotesContainer } from './WorkspaceNotesContainer';
 import { useDiffs } from '@/shared/stores/useWorkspaceDiffStore';
@@ -25,6 +27,9 @@ import {
   CollapsibleSectionHeader,
   type SectionAction,
 } from '@vibe/ui/components/CollapsibleSectionHeader';
+import { getServerAffinityLabel } from './serverAffinityLabel';
+import { DeployStatus } from '@vibe/ui/components/DeployStatus';
+import { useUserSystem } from '@/shared/hooks/useUserSystem';
 
 type SectionDef = {
   title: string;
@@ -34,6 +39,7 @@ type SectionDef = {
   collapsible?: boolean;
   content: React.ReactNode;
   actions: SectionAction[];
+  headerExtra?: React.ReactNode;
 };
 
 export interface RightSidebarProps {
@@ -41,6 +47,7 @@ export interface RightSidebarProps {
   selectedWorkspace: Workspace | undefined;
   repos: RepoWithTargetBranch[];
   linkedIssueForWorkspace?: { remoteProjectId: string; issueId: string } | null;
+  showDeployStatus?: boolean;
 }
 
 export const RightSidebar = memo(function RightSidebar({
@@ -48,11 +55,21 @@ export const RightSidebar = memo(function RightSidebar({
   selectedWorkspace,
   repos,
   linkedIssueForWorkspace,
+  showDeployStatus = false,
 }: RightSidebarProps) {
   const { t } = useTranslation(['tasks', 'common']);
+  const { appVersion, deploymentTimestamp } = useUserSystem();
   const diffs = useDiffs();
   const isTerminalVisible = useUiPreferencesStore((s) => s.isTerminalVisible);
   const { expandTerminal, isTerminalExpanded } = useLogsPanel();
+  const { activeWorkspaces } = useWorkspaceContext();
+  const selectedWorkspaceSummary = activeWorkspaces.find(
+    (workspace) => workspace.id === selectedWorkspace?.id
+  );
+  const serverAffinityLabel = getServerAffinityLabel(
+    selectedWorkspaceSummary?.serverAffinity,
+    (kind) => t(`common:workspaces.serverAffinity.${kind}`)
+  );
 
   const [changesExpanded] = usePersistedExpanded(
     PERSIST_KEYS.changesSection,
@@ -76,6 +93,10 @@ export const RightSidebar = memo(function RightSidebar({
   );
   const [serverMetricsExpanded] = usePersistedExpanded(
     PERSIST_KEYS.serverMetricsSection,
+    false
+  );
+  const [serverAffinityExpanded] = usePersistedExpanded(
+    PERSIST_KEYS.serverAffinitySection,
     false
   );
   const [terminalExpanded] = usePersistedExpanded(
@@ -131,6 +152,29 @@ export const RightSidebar = memo(function RightSidebar({
             repos={repos}
           />
         ),
+        actions: [],
+      },
+      {
+        title: t('common:sections.serverAffinity', {
+          defaultValue: 'Server Affinity',
+        }),
+        persistKey: PERSIST_KEYS.serverAffinitySection,
+        visible: !!selectedWorkspace,
+        expanded: serverAffinityExpanded,
+        headerExtra: serverAffinityLabel ? (
+          <span
+            className="min-w-0 max-w-28 truncate text-sm text-low"
+            title={serverAffinityLabel}
+          >
+            {serverAffinityLabel}
+          </span>
+        ) : null,
+        content: selectedWorkspace ? (
+          <ServerAffinitySectionContainer
+            workspaceId={selectedWorkspace.id}
+            isRunning={selectedWorkspaceSummary?.isRunning ?? false}
+          />
+        ) : null,
         actions: [],
       },
       {
@@ -235,16 +279,16 @@ export const RightSidebar = memo(function RightSidebar({
   }, [
     rightMainPanelMode,
     selectedWorkspace,
+    linkedIssueForWorkspace,
     repos,
     diffs,
     gitExpanded,
     serverMetricsExpanded,
+    serverAffinityExpanded,
+    serverAffinityLabel,
+    selectedWorkspaceSummary?.isRunning,
     terminalExpanded,
     notesExpanded,
-    changesExpanded,
-    processesExpanded,
-    devServerExpanded,
-    browserExpanded,
     isTerminalVisible,
     isTerminalExpanded,
     hasUpperContent,
@@ -254,33 +298,39 @@ export const RightSidebar = memo(function RightSidebar({
   ]);
 
   return (
-    <div className="h-full border-l bg-secondary overflow-y-auto">
-      <div className="divide-y border-b">
+    <div className="h-full min-h-0 border-l bg-secondary overflow-x-hidden overflow-y-auto">
+      <div className="flex h-full min-h-0 flex-col divide-y border-b">
+        {showDeployStatus && (
+          <div
+            className="flex flex-none shrink-0 items-center justify-between gap-base px-base py-half"
+            data-testid="deploy-status-row"
+          >
+            <span className="text-sm text-low">Deploy Status</span>
+            <DeployStatus
+              version={appVersion}
+              deploymentTimestamp={deploymentTimestamp}
+              alwaysShowAge
+              className="max-w-none"
+            />
+          </div>
+        )}
         {sections
           .filter((section) => section.visible)
           .map((section) => (
-            <div
+            <CollapsibleSectionHeader
               key={section.persistKey}
-              className="max-h-[max(50vh,400px)] flex flex-col overflow-hidden"
+              title={section.title}
+              persistKey={section.persistKey}
+              defaultExpanded={section.expanded}
+              collapsible={section.collapsible ?? true}
+              actions={section.actions}
+              headerExtra={section.headerExtra}
+              fillAvailableSpace
             >
-              <CollapsibleSectionHeader
-                title={section.title}
-                persistKey={section.persistKey}
-                defaultExpanded={section.expanded}
-                collapsible={section.collapsible ?? true}
-                actions={section.actions}
-              >
-                <div
-                  className={`flex flex-1 border-t w-full overflow-auto ${
-                    (section.collapsible ?? true)
-                      ? 'min-h-[200px]'
-                      : 'min-h-[1px]'
-                  }`}
-                >
-                  {section.content}
-                </div>
-              </CollapsibleSectionHeader>
-            </div>
+              <div className="flex min-h-0 flex-1 border-t w-full overflow-auto">
+                {section.content}
+              </div>
+            </CollapsibleSectionHeader>
           ))}
       </div>
     </div>

@@ -4,12 +4,13 @@ import { useJsonPatchWsStream } from '@/shared/hooks/useJsonPatchWsStream';
 import { workspaceSummaryKeys } from '@/shared/hooks/workspaceSummaryKeys';
 import { makeLocalApiRequest } from '@/shared/lib/localApiTransport';
 import { useHostId } from '@/shared/providers/HostIdProvider';
-import { WorkspacePlacementState } from 'shared/types';
+import { WorkspaceCreationStatus } from 'shared/types';
 import type {
   WorkspaceWithStatus,
   WorkspaceSummary,
   WorkspaceSummaryResponse,
   ApiResponse,
+  WorkspaceAffinitySummary,
 } from 'shared/types';
 
 // UI-specific workspace type for sidebar display
@@ -41,6 +42,7 @@ export interface SidebarWorkspace {
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
   prNumber?: number;
   prUrl?: string;
+  serverAffinity?: WorkspaceAffinitySummary;
 }
 
 // Keep the old export name for backwards compatibility
@@ -78,8 +80,8 @@ function toSidebarWorkspace(
     // Real data from stream
     isRunning: ws.is_running,
     isCreating:
-      ws.placement_state === WorkspacePlacementState.reserved ||
-      ws.placement_state === WorkspacePlacementState.provisioning,
+      ws.creation_status === WorkspaceCreationStatus.queued ||
+      ws.creation_status === WorkspaceCreationStatus.running,
     isPinned: ws.pinned,
     isArchived: ws.archived,
     // Additional data from summary
@@ -92,6 +94,7 @@ function toSidebarWorkspace(
     prNumber:
       summary?.pr_number != null ? Number(summary.pr_number) : undefined,
     prUrl: summary?.pr_url ?? undefined,
+    serverAffinity: summary?.affinity,
   };
 }
 

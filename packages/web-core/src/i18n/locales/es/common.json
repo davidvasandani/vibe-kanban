@@ -108,6 +108,23 @@
     "label": "Etiqueta"
   },
   "workspaces": {
+    "serverAffinity": {
+      "local": "Local",
+      "automatic": "Ubicación automática",
+      "worker": "Trabajador",
+      "unassigned": "Sin asignar",
+      "current": "Servidor actual",
+      "runOn": "Ejecutar en",
+      "coordinator": "Coordinador",
+      "unavailable": "No disponible",
+      "localDescription": "Esta instancia de Vibe Kanban ejecuta los espacios de trabajo localmente.",
+      "confirmTitle": "¿Migrar la tarea en ejecución?",
+      "confirmMessage": "Vibe Kanban detendrá la tarea actual, cambiará la afinidad del servidor y la iniciará de nuevo con un mensaje de continuación administrado.",
+      "confirmAction": "Detener, migrar y reiniciar",
+      "updated": "Afinidad del servidor actualizada",
+      "updateFailed": "No se pudo actualizar la afinidad del servidor",
+      "restartFailed": "La afinidad cambió, pero no se pudo reiniciar la tarea"
+    },
     "title": "Espacios de trabajo",
     "searchPlaceholder": "Buscar...",
     "active": "Activo",
@@ -190,6 +207,7 @@
     "nextGitHubComment": "Siguiente archivo con comentarios"
   },
   "sections": {
+    "serverAffinity": "Afinidad del servidor",
     "changes": "Cambios",
     "repositories": "Repositorios",
     "addRepositories": "Agregar repositorios",
@@ -518,7 +536,8 @@
     },
     "worker": {
       "label": "Ejecutar en",
-      "automatic": "Colocación automática"
+      "automatic": "Colocación automática",
+      "coordinator": "Coordinador"
     },
     "repoPicker": {
       "actions": {
@@ -602,6 +621,12 @@
     "resetToGenerated": "Reset to generated",
     "updateIssue": "Update Issue",
     "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue."
+  },
+  "workspaceCreation": {
+    "creatingTitle": "Creando espacio de trabajo…",
+    "creatingBody": "Puedes salir de esta página. La creación continuará en segundo plano.",
+    "failedTitle": "No se pudo crear el espacio de trabajo",
+    "failedFallback": "Crea un nuevo espacio de trabajo para intentarlo de nuevo."
   },
   "speckit": {
     "title": "SpecKit",

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE workspaces\n               SET creation_status = 'ready', creation_error = NULL,\n                   updated_at = datetime('now', 'subsec')\n               WHERE id = ? AND creation_status = 'running'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "ce41d901b1182812a56a3b3c443c13bdcb3e30822d992c623c7be4b61b97fc72"
+}

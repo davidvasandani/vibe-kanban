@@ -35,8 +35,9 @@ contributed to it.
 - [managed-cli-tool-catalog.md](managed-cli-tool-catalog.md) — How to extend
   the app-managed CLI catalog: stable wire ids, complete catalog registration,
   immutable artifact URLs and SHA-256 pins, per-platform archive executable
-  paths, generated TypeScript types, generic route/UI behavior, and the focused
-  validation sequence.
+  paths, generated TypeScript types, generic route/UI behavior, focused
+  validation, and host-first PATH propagation across local and clustered
+  workspace process boundaries.
 - [agent-process-lifecycle.md](agent-process-lifecycle.md) — How a coding-agent
   turn ends at the process level: the one-turn-one-`ExecutionProcess` identity
   chain, the implicit app-server marker (`exit_signal: Some` vs `None`, distinct
@@ -113,7 +114,9 @@ contributed to it.
 - [self-hosted-deployment.md](self-hosted-deployment.md) — Versioned-release
   deploy contract (`VK_RELEASES_DIR`), why services must not run from the
   source checkout, deploy-loop invariants (reconciler over edge triggers,
-  health-gated rollback, paging), health endpoints, rejected alternatives.
+  health-gated rollback, paging), one-source artifact identity (`sha` plus an
+  optional build/publish timestamp surfaced through `/api/info`), health
+  endpoints, rejected alternatives.
 - [project-context-map.md](project-context-map.md) — Giving a spawned issue its
   scope in a monorepo: a machine-readable `project-context.json` mapping service
   → source path → governing IaC (JSON+jq not YAML, empty-list = no IaC, single
@@ -146,3 +149,8 @@ contributed to it.
   layout state and physical-device detection combine as a visibility truth
   table, and where to keep the policy without changing desktop drag/snap
   behavior or the presentational UI component.
+- [flexible-collapsible-panel-stacks.md](flexible-collapsible-panel-stacks.md)
+  — How bounded vertical panel stacks let expanded collapsibles share remaining
+  height: expansion-owned flex participation, the complete `min-h-0` chain,
+  content-scroll ownership, the outer short-window header-scroll fallback, and
+  desktop-only fixed chrome in a drawer component also reused on mobile.

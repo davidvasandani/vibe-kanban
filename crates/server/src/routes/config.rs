@@ -14,15 +14,16 @@ use executors::{
     executors::{
         AvailabilityInfo, BaseAgentCapability, BaseCodingAgent, StandardCodingAgentExecutor,
     },
-    mcp_config::{McpConfig, read_agent_config, write_agent_config},
+    mcp_config::{McpConfig, previous_version_backup_path, read_agent_config, write_agent_config},
     mcp_test::{McpServerTestResult, test_mcp_servers},
     profile::{ExecutorConfigs, ExecutorProfileId},
     shared_mcp_config::{
         SharedMcpProfileWriteOutcome, SharedMcpProfileWriteStatus, SharedMcpReadResponse,
         SharedMcpTestRequest, SharedMcpTestTarget, SharedMcpWriteRequest, SharedMcpWriteResponse,
-        SharedMcpWriteStatus, canonical_definition, load_native_snapshots, load_shared_mcp_config,
-        plan_servers_for_executor, reconcile_snapshots, validate_server_identifiers,
-        validate_write_request,
+        SharedMcpWriteStatus, canonical_definition, is_historical_bundled_slack_entry,
+        load_native_snapshots, load_shared_mcp_config, persist_display_labels,
+        plan_servers_for_executor, validate_server_identifiers,
+        validate_write_request_against_snapshots,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -105,6 +106,7 @@ impl Environment {
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct UserSystemInfo {
     pub version: String,
+    pub deployment_timestamp: Option<String>,
     pub config: Config,
     pub machine_id: String,
     pub login_status: LoginStatus,
@@ -178,6 +180,7 @@ async fn get_user_system_info(
 
     let user_system_info = UserSystemInfo {
         version: option_env!("VK_GIT_SHA").unwrap_or("dev").to_string(),
+        deployment_timestamp: option_env!("VK_BUILD_TIMESTAMP").map(str::to_string),
         config,
         machine_id: deployment.user_id().to_string(),
         login_status,
@@ -415,22 +418,48 @@ async fn update_shared_mcp_servers(
     if let Err(message) = hydrate_gateway_capabilities(&mut payload, &snapshots) {
         return Ok(ResponseJson(ApiResponse::error(&message)));
     }
-    if let Err(message) = validate_write_request(&payload) {
+    if let Err(message) = validate_write_request_against_snapshots(&payload, &snapshots) {
         return Ok(ResponseJson(ApiResponse::error(&message)));
     }
-
+    let mut plans = Vec::with_capacity(snapshots.len());
+    for snapshot in &snapshots {
+        let plan =
+            match plan_servers_for_executor(snapshot.profile.executor, &snapshot.servers, &payload)
+            {
+                Ok(plan) => plan,
+                Err(message) => return Ok(ResponseJson(ApiResponse::error(&message))),
+            };
+        plans.push(plan);
+    }
+    let legacy_migration = payload.servers.iter().any(|server| {
+        snapshots.iter().any(|snapshot| {
+            snapshot.servers.keys().any(|native_name| {
+                !executors::shared_mcp_config::is_valid_server_identifier(native_name)
+                    && executors::shared_mcp_config::suggested_server_identifier(native_name)
+                        == server.name
+            })
+        })
+    });
+    if legacy_migration
+        && snapshots
+            .iter()
+            .zip(&plans)
+            .any(|(snapshot, (_, affected))| !affected.is_empty() && snapshot.config_path.is_none())
+    {
+        return Ok(ResponseJson(ApiResponse::error(
+            "Legacy MCP identifier migration cannot start because an affected profile has no config path",
+        )));
+    }
     let mut outcomes = Vec::new();
     let mut any_success = false;
     let mut any_failed = false;
+    let mut any_native_changes = false;
+    let mut successfully_written_identifiers = std::collections::HashSet::new();
+    let mut migration_writes = Vec::new();
 
-    for snapshot in &snapshots {
-        let Ok((planned_servers, affected_servers)) =
-            plan_servers_for_executor(snapshot.profile.executor, &snapshot.servers, &payload)
-        else {
-            // `validate_write_request` catches compatibility before writes.
-            continue;
-        };
-
+    for (index, (snapshot, (planned_servers, affected_servers))) in
+        snapshots.iter().zip(plans).enumerate()
+    {
         if affected_servers.is_empty() {
             outcomes.push(SharedMcpProfileWriteOutcome {
                 executor: snapshot.profile.executor,
@@ -442,6 +471,7 @@ async fn update_shared_mcp_servers(
             });
             continue;
         }
+        any_native_changes = true;
 
         let Some(config_path) = snapshot.config_path.as_ref() else {
             any_failed = true;
@@ -459,7 +489,11 @@ async fn update_shared_mcp_servers(
         match update_mcp_servers_in_config(config_path, &snapshot.mcp_config, planned_servers).await
         {
             Ok(message) => {
+                if legacy_migration {
+                    migration_writes.push(index);
+                }
                 any_success = true;
+                successfully_written_identifiers.extend(affected_servers.iter().cloned());
                 outcomes.push(SharedMcpProfileWriteOutcome {
                     executor: snapshot.profile.executor,
                     config_path: snapshot.profile.config_path.clone(),
@@ -470,6 +504,20 @@ async fn update_shared_mcp_servers(
                 });
             }
             Err(e) => {
+                if legacy_migration {
+                    let rollback_error = rollback_native_mcp_writes(&snapshots, &migration_writes)
+                        .await
+                        .err();
+                    let message = match rollback_error {
+                        Some(rollback_error) => format!(
+                            "Legacy MCP identifier migration failed and rollback was incomplete: {rollback_error}"
+                        ),
+                        None => format!(
+                            "Legacy MCP identifier migration failed; prior profile writes were rolled back: {e}"
+                        ),
+                    };
+                    return Ok(ResponseJson(ApiResponse::error(&message)));
+                }
                 any_failed = true;
                 outcomes.push(SharedMcpProfileWriteOutcome {
                     executor: snapshot.profile.executor,
@@ -483,7 +531,43 @@ async fn update_shared_mcp_servers(
         }
     }
 
-    let mut fresh = reconcile_snapshots(load_native_snapshots().await);
+    let mut fresh = load_shared_mcp_config().await;
+    let existing_identifiers = fresh
+        .servers
+        .iter()
+        .map(|server| server.name.clone())
+        .chain(fresh.conflicts.iter().map(|conflict| conflict.name.clone()))
+        .collect::<std::collections::HashSet<_>>();
+    let metadata_error = if any_success || !any_failed {
+        persist_display_labels(
+            &payload,
+            &existing_identifiers,
+            any_native_changes.then_some(&successfully_written_identifiers),
+        )
+        .await
+        .err()
+    } else {
+        None
+    };
+    if metadata_error.is_some() {
+        if legacy_migration {
+            let rollback_error = rollback_native_mcp_writes(&snapshots, &migration_writes)
+                .await
+                .err();
+            let message = match rollback_error {
+                Some(rollback_error) => format!(
+                    "Legacy MCP label migration failed and native rollback was incomplete: {rollback_error}"
+                ),
+                None => "Legacy MCP label migration failed; native profile writes were rolled back"
+                    .to_string(),
+            };
+            return Ok(ResponseJson(ApiResponse::error(&message)));
+        }
+        any_failed = true;
+    }
+    if metadata_error.is_none() {
+        fresh = load_shared_mcp_config().await;
+    }
     attach_gateway_status(&_deployment, &mut fresh).await;
     let status = if any_failed && any_success {
         SharedMcpWriteStatus::PartialFailure
@@ -496,9 +580,44 @@ async fn update_shared_mcp_servers(
     Ok(ResponseJson(ApiResponse::success(SharedMcpWriteResponse {
         status,
         outcomes,
+        metadata_error,
         servers: fresh.servers,
         conflicts: fresh.conflicts,
     })))
+}
+
+async fn rollback_native_mcp_writes(
+    snapshots: &[executors::shared_mcp_config::NativeProfileSnapshot],
+    written_indices: &[usize],
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for index in written_indices.iter().rev() {
+        let snapshot = &snapshots[*index];
+        let Some(config_path) = snapshot.config_path.as_ref() else {
+            errors.push(format!("{} has no config path", snapshot.profile.executor));
+            continue;
+        };
+        let result = async {
+            let mut config = read_agent_config(config_path, &snapshot.mcp_config).await?;
+            set_mcp_servers_in_config_path(
+                &mut config,
+                &snapshot.mcp_config.servers_path,
+                &snapshot.servers,
+            )
+            .map_err(anyhow::Error::msg)?;
+            write_agent_config(config_path, &snapshot.mcp_config, &config).await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = result {
+            errors.push(format!("{}: {error}", snapshot.profile.executor));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 fn hydrate_gateway_capabilities(
@@ -781,17 +900,28 @@ pub(crate) async fn update_mcp_servers_in_config(
     mcpc: &McpConfig,
     new_servers: HashMap<String, Value>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    validate_server_identifiers(new_servers.keys().map(String::as_str))?;
-
     // Ensure parent directory exists
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).await?;
     }
     // Read existing config (JSON or TOML depending on agent)
     let mut config = read_agent_config(config_path, mcpc).await?;
+    let current_servers = get_mcp_servers_from_config_path(&config, &mcpc.servers_path);
+
+    // Existing native configs may predate identifier validation. Permit those
+    // keys only while their definitions remain exactly unchanged, so an
+    // unrelated edit can be saved without allowing new invalid identifiers.
+    validate_changed_server_identifiers(&current_servers, &new_servers)?;
 
     // Get the current server count for comparison
-    let old_servers = get_mcp_servers_from_config_path(&config, &mcpc.servers_path).len();
+    let old_count = current_servers.len();
+    let removes_bundled_slack_token = current_servers
+        .get("slack")
+        .is_some_and(is_historical_bundled_slack_entry)
+        && new_servers.get("slack").is_some_and(|entry| {
+            canonical_definition(entry).transport
+                == executors::shared_mcp_config::McpTransportKind::Http
+        });
 
     // Set the MCP servers using the correct attribute path
     set_mcp_servers_in_config_path(&mut config, &mcpc.servers_path, &new_servers)?;
@@ -799,8 +929,20 @@ pub(crate) async fn update_mcp_servers_in_config(
     // Write the updated config back to file (JSON or TOML depending on agent)
     write_agent_config(config_path, mcpc, &config).await?;
 
+    if removes_bundled_slack_token {
+        // atomic_write_agent_config normally retains the previous file for
+        // recovery. During this one exact migration that file contains the old
+        // XOXP credential, defeating centralization, so remove it after the new
+        // config has landed successfully.
+        match fs::remove_file(previous_version_backup_path(config_path)).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
     let new_count = new_servers.len();
-    let message = match (old_servers, new_count) {
+    let message = match (old_count, new_count) {
         (0, 0) => "No MCP servers configured".to_string(),
         (0, n) => format!("Added {} MCP server(s)", n),
         (old, new) if old == new => format!("Updated MCP server configuration ({} server(s))", new),
@@ -811,6 +953,15 @@ pub(crate) async fn update_mcp_servers_in_config(
     };
 
     Ok(message)
+}
+
+fn validate_changed_server_identifiers(
+    current_servers: &HashMap<String, Value>,
+    new_servers: &HashMap<String, Value>,
+) -> Result<(), String> {
+    validate_server_identifiers(new_servers.iter().filter_map(|(name, definition)| {
+        (current_servers.get(name) != Some(definition)).then_some(name.as_str())
+    }))
 }
 
 /// Helper function to get MCP servers from config using a path
@@ -1133,5 +1284,117 @@ mod tests {
         let mut config = serde_json::json!({});
         let err = set_mcp_servers_in_config_path(&mut config, &[], &servers("srv"));
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn unchanged_legacy_identifier_does_not_block_native_config_write() {
+        let current = servers("Atlassian Rovo");
+        let mut next = current.clone();
+        next.insert(
+            "deleted-replacement".to_string(),
+            serde_json::json!({ "command": "new" }),
+        );
+
+        assert!(validate_changed_server_identifiers(&current, &next).is_ok());
+
+        next.insert(
+            "Atlassian Rovo".to_string(),
+            serde_json::json!({ "command": "changed" }),
+        );
+        let error = validate_changed_server_identifiers(&current, &next).unwrap_err();
+        assert!(error.contains("Use `atlassian_rovo`"));
+    }
+
+    #[tokio::test]
+    async fn http_slack_migration_does_not_retain_token_in_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "unrelated": true,
+                "mcpServers": {
+                    "slack": {
+                        "command": "npx",
+                        "args": [
+                            "-y",
+                            "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz",
+                            "--transport",
+                            "stdio"
+                        ],
+                        "env": { "SLACK_MCP_XOXP_TOKEN": "xoxp-must-disappear" }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let mcp = McpConfig::new(
+            vec!["mcpServers".to_string()],
+            serde_json::json!({}),
+            serde_json::json!({}),
+            false,
+        );
+
+        update_mcp_servers_in_config(
+            &path,
+            &mcp,
+            HashMap::from([(
+                "slack".to_string(),
+                serde_json::json!({
+                    "type": "http",
+                    "url": "http://172.16.100.102:13080/mcp"
+                }),
+            )]),
+        )
+        .await
+        .unwrap();
+
+        let saved = fs::read_to_string(&path).await.unwrap();
+        assert!(saved.contains("172.16.100.102:13080/mcp"));
+        assert!(!saved.contains("xoxp"));
+        assert!(!previous_version_backup_path(&path).exists());
+    }
+
+    #[tokio::test]
+    async fn rollback_restores_the_original_legacy_identifier() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mcp = McpConfig::new(
+            vec!["mcpServers".to_string()],
+            serde_json::json!({}),
+            serde_json::json!({}),
+            false,
+        );
+        let original_servers = servers("Atlassian Rovo");
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "mcpServers": { "atlassian_rovo": { "command": "x" } }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let snapshot = executors::shared_mcp_config::NativeProfileSnapshot {
+            profile: executors::shared_mcp_config::SharedMcpProfile {
+                executor: BaseCodingAgent::Codex,
+                display_name: "Codex".to_string(),
+                supports_mcp: true,
+                config_path: Some(path.display().to_string()),
+                servers_path: vec!["mcpServers".to_string()],
+                read_error: None,
+            },
+            config_path: Some(path.clone()),
+            mcp_config: mcp,
+            servers: original_servers,
+        };
+
+        rollback_native_mcp_writes(&[snapshot], &[0]).await.unwrap();
+
+        let saved: Value = serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        assert!(saved["mcpServers"].get("Atlassian Rovo").is_some());
+        assert!(saved["mcpServers"].get("atlassian_rovo").is_none());
     }
 }

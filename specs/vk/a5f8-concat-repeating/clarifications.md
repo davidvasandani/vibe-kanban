@@ -1,35 +1,24 @@
-# Clarifications: Concatenate Repeating Lines
+# Clarifications: Background Workspace Creation
 
 ## Resolved Decisions
 
-### Eligible command
+### Restart reconciliation is conservative
 
-Compaction is limited to the reported `codex review --uncommitted` operation.
-An absolute executable path or shell wrapper is acceptable when the command
-normalizes to that same visible operation. Other review targets and arbitrary
-identical shell commands remain distinct.
+The accepted job persists its state, but this feature does not attempt arbitrary mid-phase replay after a coordinator restart. On startup, every unfinished creation becomes a visible interrupted/failed creation with guidance to create a replacement workspace. Even an execution row is not sufficient completion evidence because a crash can occur after inserting it but before process startup returns. This guarantees that accepted work never remains pending forever while avoiding unsafe duplicate Git or execution work.
 
-This is the smallest scope supported by the screenshots. It also follows prior
-project knowledge that generic command suppression can conceal deliberate
-repeated operations and their outputs.
+Reason: the immediate defect is browser-request cancellation. Exact phase-resume would require making every existing repository, remote import, worktree, placement, and execution operation replay-safe and substantially expands scope. A persisted truthful interruption meets the durability and observability contract safely.
 
-### Marker meaning
+### The existing endpoint becomes asynchronous
 
-The marker counts successful repetitions after the first occurrence, matching
-the existing repeated-log convention. Thus three total successful executions
-render `✓✓`, while ten total executions render `✓ ×9`.
+`POST /api/workspaces/start` remains the single create-and-start operation, but its success response becomes an acceptance response containing the workspace and creation status rather than a completed execution process. All in-repository callers migrate together. No parallel synchronous endpoint is retained.
 
-### Completion and failure boundary
+Reason: retaining a synchronous path leaves non-browser callers vulnerable to the same request-lifetime bug and creates two semantics for one product action.
 
-Only a successfully completed occurrence arms reuse for the next matching
-command. Failed, denied, or timed-out occurrences remain visibly unsuccessful
-and disarm the run. A later matching command starts a new row.
+### Failed creation is informational in this increment
 
-### Protocol coverage
+A failed workspace shows the persisted error and directs the user to create a new workspace. It does not expose an in-place Retry button.
 
-Both current app-server item notifications and the legacy Codex event stream
-must use the same compaction rules because Vibe Kanban accepts both formats in
-one normalizer.
+Reason: safe in-place retry requires phase-specific replay semantics. Users still receive an actionable, terminal state instead of an indefinite spinner, and can resubmit from the create flow.
 
 ## Remaining Open Questions
 

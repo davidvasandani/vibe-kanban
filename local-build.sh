@@ -14,6 +14,11 @@ umask 002
 # serialized — both builds can compile in parallel against their own
 # CARGO_TARGET_DIRs.
 BUILD_ID="$$-$(date +%s)"
+# One timestamp describes this immutable release everywhere it is surfaced:
+# in the running server's /api/info response and in release.json. Exporting it
+# also makes Cargo rerun the server build script for each release build.
+VK_BUILD_TIMESTAMP="$(date -u +%FT%TZ)"
+export VK_BUILD_TIMESTAMP
 
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -280,7 +285,7 @@ if [ -n "${VK_RELEASES_DIR:-}" ]; then
 {
   "sha": "$(git rev-parse HEAD)",
   "build_id": "${BUILD_ID}",
-  "built_at": "$(date -u +%FT%TZ)"
+  "built_at": "${VK_BUILD_TIMESTAMP}"
 }
 EOF
 

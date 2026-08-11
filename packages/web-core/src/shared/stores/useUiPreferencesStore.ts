@@ -281,6 +281,7 @@ export const PERSIST_KEYS = {
   devServerSection: 'dev-server-section',
   // Server metrics panel section
   serverMetricsSection: 'server-metrics-section',
+  serverAffinitySection: 'server-affinity-section',
   // Terminal panel section
   terminalSection: 'terminal-section',
   // Notes panel section
@@ -317,6 +318,7 @@ export type PersistKey =
   | typeof PERSIST_KEYS.changesSection
   | typeof PERSIST_KEYS.devServerSection
   | typeof PERSIST_KEYS.serverMetricsSection
+  | typeof PERSIST_KEYS.serverAffinitySection
   | typeof PERSIST_KEYS.terminalSection
   | typeof PERSIST_KEYS.notesSection
   | typeof PERSIST_KEYS.showGitHubComments

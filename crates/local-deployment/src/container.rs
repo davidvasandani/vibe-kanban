@@ -12,8 +12,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
 use cluster_protocol::{
     CancellationPhase, CancellationRequest, EventAcknowledgement, ExecutionDispatch,
-    ExecutionEventPayload, InteractionRequest, InteractionResponse, PROTOCOL_VERSION,
-    PersistencePolicy, RequestAuthority, TerminalState,
+    ExecutionEventPayload, InteractionRequest, InteractionResponse, McpConfigSnapshot,
+    McpRefreshRequest, PROTOCOL_VERSION, PersistencePolicy, RequestAuthority, TerminalState,
+    WorkerMcpRefreshStatus,
 };
 use command_group::AsyncGroupChild;
 use db::{
@@ -49,6 +50,7 @@ use executors::{
         WarmReuseHandle, WarmReuseSignal,
     },
     logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
+    mcp_config::read_coding_agent_mcp_servers,
     mcp_refresh::{
         McpRefreshErrorCategory, McpRefreshHandle, McpRefreshResult, McpRefreshSignal,
         McpRefreshStatus,
@@ -98,6 +100,18 @@ const WORKSPACE_TOUCH_DEBOUNCE: Duration = Duration::from_mins(2);
 /// exactly as before (Constitution IV — do not enable a runtime path we cannot
 /// observe E2E here). See `specs/vk/826e-coding-agent-war/`.
 const KEEP_WARM_ENV: &str = "VK_KEEP_WARM_AGENTS";
+
+fn validated_mcp_snapshot(
+    executor: BaseCodingAgent,
+    servers: BTreeMap<String, serde_json::Value>,
+) -> anyhow::Result<McpConfigSnapshot> {
+    let snapshot = McpConfigSnapshot {
+        executor: executor.to_string(),
+        servers,
+    };
+    snapshot.validate_size().map_err(anyhow::Error::from)?;
+    Ok(snapshot)
+}
 
 fn push_worker_bytes(store: &MsgStore, encoded: &str, stderr: bool) {
     let message = match BASE64_STANDARD.decode(encoded) {
@@ -1548,6 +1562,10 @@ impl LocalContainerService {
                             container.queued_message_service.has_queued(ctx.session.id),
                         ) {
                             SkippedCleanupAction::StartQueuedFollowUp => {
+                                container
+                                    .queued_message_service
+                                    .wait_for_restart_resolution(ctx.session.id)
+                                    .await;
                                 match container.queued_message_service.take_queued(ctx.session.id) {
                                     Some(queued_msg) => {
                                         container
@@ -1579,20 +1597,25 @@ impl LocalContainerService {
                         .ok()
                         .and_then(|action| action.next_action())
                         .is_some();
+                    container
+                        .queued_message_service
+                        .wait_for_restart_resolution(ctx.session.id)
+                        .await;
                     let mut started_queued_follow_up = false;
 
                     // Only execute queued messages if the execution succeeded
                     // If it failed, was killed or interrupted, just clear the queue and finalize
-                    let should_execute_queued = !matches!(
-                        ctx.execution_process.status,
-                        ExecutionProcessStatus::Failed
-                            | ExecutionProcessStatus::Killed
-                            | ExecutionProcessStatus::Interrupted
-                    );
-
                     if let Some(queued_msg) =
                         container.queued_message_service.take_queued(ctx.session.id)
                     {
+                        let should_execute_queued = (queued_msg.restart_agent
+                            && ctx.execution_process.status == ExecutionProcessStatus::Failed)
+                            || !matches!(
+                                ctx.execution_process.status,
+                                ExecutionProcessStatus::Failed
+                                    | ExecutionProcessStatus::Killed
+                                    | ExecutionProcessStatus::Interrupted
+                            );
                         if should_execute_queued {
                             tracing::info!(
                                 "Found queued message for session {}, starting follow-up execution",
@@ -1616,7 +1639,7 @@ impl LocalContainerService {
                             );
                             container.finalize_task(&ctx).await;
                         }
-                    } else {
+                    } else if !started_queued_follow_up {
                         container.finalize_task(&ctx).await;
                     }
 
@@ -1664,23 +1687,12 @@ impl LocalContainerService {
                             ctx.session.id
                         );
 
-                        if let Err(e) =
-                            Scratch::delete(&db.pool, ctx.session.id, &ScratchType::DraftFollowUp)
-                                .await
-                        {
-                            tracing::warn!(
-                                "Failed to delete scratch after consuming queued message: {}",
-                                e
-                            );
-                        }
-
-                        if let Err(e) = container
-                            .start_queued_follow_up(&ctx, &queued_msg.data)
+                        if !container
+                            .start_queued_follow_up_message(&ctx, &queued_msg)
                             .await
                         {
                             tracing::error!(
-                                "Failed to start queued follow-up from setup script completion: {}",
-                                e
+                                "Failed to start queued follow-up from setup script completion"
                             );
                         }
                     }
@@ -1964,6 +1976,12 @@ impl LocalContainerService {
                         store.push(LogMsg::Stderr(
                             "Worker output replay gap; execution state is indeterminate".into(),
                         ));
+                        // Remove before finishing so a client that subscribes
+                        // after this point re-derives from disk instead of
+                        // attaching to a store whose live broadcast will never
+                        // carry another message (see the terminal arm below
+                        // for the full explanation).
+                        container.msg_stores.write().await.remove(&execution_id);
                         store.push_finished();
                         break;
                     }
@@ -2043,6 +2061,7 @@ impl LocalContainerService {
                                 None,
                             )
                             .await;
+                            container.msg_stores.write().await.remove(&execution_id);
                             store.push_finished();
                             return;
                         }
@@ -2106,6 +2125,19 @@ impl LocalContainerService {
                         .await;
                     }
                     container.finalize_remote_execution(execution_id).await;
+                    // Remove from the map before pushing Finished. Historic
+                    // replay (`stream_normalized_logs`) reads a resident store
+                    // via `history_plus_stream()`, which chains the buffered
+                    // history onto a *live* broadcast subscription. A late
+                    // subscriber's history replay includes this store's past
+                    // `Finished` entry, but the filter used by that replay
+                    // path drops non-JsonPatch entries — so the sentinel is
+                    // discarded and the replay falls through to the live half,
+                    // which never yields again for a store nothing will ever
+                    // push to. Removing the store here ensures any later
+                    // subscriber instead falls back to the on-disk/materialized
+                    // log path, which terminates correctly.
+                    container.msg_stores.write().await.remove(&execution_id);
                     store.push_finished();
                     break;
                 }
@@ -2306,6 +2338,9 @@ impl LocalContainerService {
         ctx: &ExecutionContext,
         queued_msg: &services::services::queued_message::QueuedMessage,
     ) -> bool {
+        if queued_msg.restart_agent {
+            self.reap_warm_server(&ctx.session.id).await;
+        }
         if let Err(e) =
             Scratch::delete(&self.db.pool, ctx.session.id, &ScratchType::DraftFollowUp).await
         {
@@ -2613,6 +2648,125 @@ impl ContainerService for LocalContainerService {
             .await;
         if result.status != McpRefreshStatus::PendingNextTurn {
             return Ok(result);
+        }
+
+        // A clustered execution owns both its scoped config and live Codex
+        // control on the assigned worker. Resolve settings again here; the
+        // dispatch-time snapshot is intentionally not reused.
+        let latest_execution =
+            ExecutionProcess::find_by_session_id(&self.db.pool, session_id, false)
+                .await?
+                .into_iter()
+                .rev()
+                .find(|process| process.run_reason == ExecutionProcessRunReason::CodingAgent);
+        if let Some(execution) = latest_execution
+            && let Some(worker_job) =
+                ExecutionWorkerJob::find_by_execution_id(&self.db.pool, execution.id).await?
+        {
+            let Some(profile_id) = profile else {
+                return Ok(self
+                    .mcp_refresh_coordinator
+                    .fail(session_id, McpRefreshErrorCategory::Unsupported)
+                    .await
+                    .unwrap_or(result));
+            };
+            let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(&profile_id) else {
+                return Ok(self
+                    .mcp_refresh_coordinator
+                    .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                    .await
+                    .unwrap_or(result));
+            };
+            let servers = match read_coding_agent_mcp_servers(&agent).await {
+                Ok(servers) => servers.into_iter().collect(),
+                Err(_) => {
+                    return Ok(self
+                        .mcp_refresh_coordinator
+                        .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                        .await
+                        .unwrap_or(result));
+                }
+            };
+            let snapshot = McpConfigSnapshot {
+                executor: BaseCodingAgent::Codex.to_string(),
+                servers,
+            };
+            if snapshot.validate_size().is_err() {
+                return Ok(self
+                    .mcp_refresh_coordinator
+                    .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                    .await
+                    .unwrap_or(result));
+            }
+            let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
+                ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
+            })?;
+            let request = McpRefreshRequest {
+                authority: RequestAuthority {
+                    protocol_version: PROTOCOL_VERSION,
+                    coordinator_id,
+                    worker_node_id: worker_job.worker_node_id,
+                    correlation_id: execution.id,
+                    issued_at: Utc::now(),
+                    nonce: Uuid::new_v4().to_string(),
+                },
+                execution_id: execution.id,
+                snapshot,
+            };
+            let worker_result = match self.worker_client.as_ref() {
+                Some(client) => {
+                    client
+                        .refresh_mcp(worker_job.worker_node_id, &request)
+                        .await
+                }
+                None => {
+                    return Ok(self
+                        .mcp_refresh_coordinator
+                        .unsupported(session_id)
+                        .await
+                        .unwrap_or(result));
+                }
+            };
+            let failure = match worker_result {
+                Ok(worker_result) => match worker_result.status {
+                    WorkerMcpRefreshStatus::Queued => {
+                        return Ok(result);
+                    }
+                    WorkerMcpRefreshStatus::Busy => {
+                        return Ok(self
+                            .mcp_refresh_coordinator
+                            .busy(session_id)
+                            .await
+                            .unwrap_or(result));
+                    }
+                    WorkerMcpRefreshStatus::Unsupported => {
+                        return Ok(self
+                            .mcp_refresh_coordinator
+                            .unsupported(session_id)
+                            .await
+                            .unwrap_or(result));
+                    }
+                    WorkerMcpRefreshStatus::MaterializationFailed => {
+                        McpRefreshErrorCategory::MaterializationFailed
+                    }
+                    WorkerMcpRefreshStatus::ReloadFailed => McpRefreshErrorCategory::ReloadFailed,
+                },
+                Err(services::services::cluster::client::WorkerClientError::NotImplemented {
+                    ..
+                }) => {
+                    return Ok(self
+                        .mcp_refresh_coordinator
+                        .unsupported(session_id)
+                        .await
+                        .unwrap_or(result));
+                }
+                Err(_) => McpRefreshErrorCategory::ReloadFailed,
+            };
+            return Ok(self
+                .mcp_refresh_coordinator
+                .fail(session_id, failure)
+                .await
+                .unwrap_or(result));
         }
 
         let control = self
@@ -2950,6 +3104,27 @@ impl ContainerService for LocalContainerService {
             .map(serde_json::to_value)
             .transpose()
             .map_err(anyhow::Error::from)?;
+        let mcp_config_snapshot = if let Some(config) = executor_config {
+            let profile_id = config.profile_id();
+            let agent = ExecutorConfigs::get_cached()
+                .get_coding_agent(&profile_id)
+                .ok_or_else(|| anyhow!("executor profile {profile_id} is unavailable"))?;
+            if agent.supports_mcp() {
+                let snapshot = validated_mcp_snapshot(
+                    config.executor,
+                    read_coding_agent_mcp_servers(&agent)
+                        .await
+                        .map_err(anyhow::Error::from)?
+                        .into_iter()
+                        .collect(),
+                )?;
+                Some(snapshot)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let action = serde_json::to_value(executor_action).map_err(anyhow::Error::from)?;
         let run_reason = serde_json::to_value(&execution_process.run_reason)
             .map_err(anyhow::Error::from)?
@@ -2973,6 +3148,7 @@ impl ContainerService for LocalContainerService {
             // between two dispatches of the same execution must not be deduped
             // into the first one's definition.
             "executor_profile_config": executor_profile_config,
+            "mcp_config_snapshot": mcp_config_snapshot,
             "action": action,
             "environment": environment,
             "run_reason": run_reason,
@@ -2997,6 +3173,7 @@ impl ContainerService for LocalContainerService {
             working_directory: workspace_path,
             executor_profile,
             executor_profile_config,
+            mcp_config_snapshot,
             action,
             environment,
             run_reason,
@@ -3059,6 +3236,53 @@ impl ContainerService for LocalContainerService {
             return Err(ContainerError::Other(anyhow!(
                 "Execution worker job was not pending during acceptance"
             )));
+        }
+        if dispatch.mcp_config_snapshot.is_some()
+            && self
+                .mcp_refresh_coordinator
+                .status(execution_process.session_id)
+                .await
+                .is_some_and(|state| {
+                    state.status == McpRefreshStatus::PendingNextTurn
+                        && state.requested_at <= execution_process.started_at
+                })
+        {
+            let client = client.clone();
+            let coordinator = self.mcp_refresh_coordinator.clone();
+            let session_id = execution_process.session_id;
+            let execution_id = execution_process.id;
+            let snapshot = dispatch.mcp_config_snapshot.clone().expect("checked above");
+            tokio::spawn(async move {
+                for _ in 0..30 {
+                    let request = McpRefreshRequest {
+                        authority: RequestAuthority {
+                            protocol_version: PROTOCOL_VERSION,
+                            coordinator_id,
+                            worker_node_id,
+                            correlation_id: execution_id,
+                            issued_at: Utc::now(),
+                            nonce: Uuid::new_v4().to_string(),
+                        },
+                        execution_id,
+                        snapshot: snapshot.clone(),
+                    };
+                    if let Ok(status) = client.mcp_status(worker_node_id, &request).await
+                        && status.status == WorkerMcpRefreshStatus::Queued
+                    {
+                        let servers = status
+                            .servers
+                            .into_iter()
+                            .filter_map(|server| serde_json::from_value(server).ok())
+                            .collect();
+                        coordinator.confirm(session_id, servers).await;
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                coordinator
+                    .fail(session_id, McpRefreshErrorCategory::Timeout)
+                    .await;
+            });
         }
         self.track_worker_msgs_in_store(execution_process, worker_node_id)
             .await?;
@@ -3136,13 +3360,11 @@ impl ContainerService for LocalContainerService {
         // same tool always wins over an app-installed one. PATH is a reserved
         // env name (org vars can't set it), but base the merge on any PATH
         // already in the env so this stays correct if that ever changes.
-        let cli_tools_bin = services::services::cli_tools::cli_tools_bin_dir();
-        if cli_tools_bin.is_dir() {
-            let inherited = env
-                .get("PATH")
-                .map(std::ffi::OsString::from)
-                .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
-            let merged = utils::shell::merge_paths(&inherited, cli_tools_bin.as_os_str());
+        let inherited = env
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+        if let Some(merged) = utils::shell::append_cli_tools_to_path(&inherited) {
             env.insert("PATH", merged.to_string_lossy().into_owned());
         }
 
@@ -3433,7 +3655,7 @@ impl ContainerService for LocalContainerService {
                     mark_remote_execution_indeterminate(&self.db, execution_process.id).await?;
                 }
             }
-            if let Some(store) = self.msg_stores.read().await.get(&execution_process.id) {
+            if let Some(store) = self.msg_stores.write().await.remove(&execution_process.id) {
                 store.push_finished();
             }
             return Ok(());
@@ -3964,6 +4186,33 @@ fn success_exit_status() -> std::process::ExitStatus {
     {
         use std::os::windows::process::ExitStatusExt;
         ExitStatusExt::from_raw(0)
+    }
+}
+
+#[cfg(test)]
+mod mcp_snapshot_tests {
+    use std::collections::BTreeMap;
+
+    use executors::executors::BaseCodingAgent;
+    use serde_json::json;
+
+    use super::validated_mcp_snapshot;
+
+    #[test]
+    fn snapshot_builder_preserves_non_codex_executor_identity_and_definition() {
+        for executor in [BaseCodingAgent::ClaudeCode, BaseCodingAgent::Gemini] {
+            let snapshot = validated_mcp_snapshot(
+                executor,
+                BTreeMap::from([(
+                    "settings-owned".into(),
+                    json!({"type": "http", "url": "https://example.invalid/mcp"}),
+                )]),
+            )
+            .unwrap();
+
+            assert_eq!(snapshot.executor, executor.to_string());
+            assert!(snapshot.servers.contains_key("settings-owned"));
+        }
     }
 }
 

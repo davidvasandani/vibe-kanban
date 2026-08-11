@@ -1,95 +1,67 @@
-# Implementation Plan: Concatenate Repeating Lines
+# Implementation Plan: Background Workspace Creation
 
 **Spec**: `./spec.md`
-**Status**: Draft
+**Status**: Ready for tasks
 
 ## Technical Context
 
-The change is confined to Rust in
-`crates/executors/src/executors/codex/normalize_logs.rs`. That module consumes
-both `codex_app_server_protocol` item notifications and legacy
-`codex_protocol::EventMsg` events, and writes normalized JSON patches through a
-shared `EntryIndexProvider` into `MsgStore`.
-
-No storage migration, public API/type change, frontend change, deployment
-change, or new dependency is required.
+- Backend: Rust 2024, Axum, Tokio, SQLx/SQLite in `crates/server`, `crates/services`, `crates/local-deployment`, and `crates/db`.
+- Frontend: React/TypeScript, TanStack Query, generated `ts-rs` contracts in `packages/web-core` and `shared/types.ts`.
+- Existing flow: `crates/server/src/routes/workspaces/create.rs` creates the workspace record and then performs every slow step inline before returning an `ExecutionProcess`.
+- Existing observability: `Workspace` is returned by workspace APIs; database hooks feed existing event/query refresh paths. Extending that model avoids a separate job-status API.
+- Constraints: Vibe Kanban only, no new dependency, generated types are regenerated rather than edited, and worktree administration remains coordinator-owned.
 
 ## Architecture & Approach
 
-### Shared repeat state
+### 1. Persist creation lifecycle on the workspace
 
-Extend `LogState` with one optional `RepeatedCommand` value. It records the
-original normalized entry index and display command, number of total
-occurrences, latest call ID, whether that latest occurrence completed
-successfully, and the last successful normalized-entry snapshot.
+Add nullable/defaulted `creation_status` and `creation_error` columns to `workspaces` through a migration in `crates/db/migrations`. Extend `crates/db/src/models/workspace.rs` with a closed `WorkspaceCreationStatus` enum and helpers that atomically claim `queued -> running` and write `ready` or `failed`. Existing rows migrate as `ready`.
 
-### Eligibility and display
+The workspace ID is the operation identity. A compare-and-set claim is the single-consumer boundary; slow work occurs after the claim without holding a lock or transaction.
 
-Add a predicate for the normalized `codex review --uncommitted` operation. It
-accepts the existing shell-unwrapped display form, including an absolute path to
-the `codex` executable, but rejects other arguments and arbitrary repeated
-commands.
+### 2. Split acceptance from execution
 
-Add `repeat_ticks(total_count)` with the established threshold: up to eight
-repetitions render inline ticks; larger runs render `✓ ×N`. `CommandState`
-carries its current repeat count, while rendering excludes the in-flight
-occurrence until it succeeds.
+In `crates/server/src/routes/workspaces/create.rs`, retain pre-mutation validation for prompt, repositories, and `PlacementIntent`. Create the workspace row in `queued`, clone the deployment and accepted input into a Tokio-owned task, and return the new workspace immediately.
 
-### Lifecycle
+Move repository association, attachment handling, linked-project context, placement reservation, `start_workspace`, and success analytics into an internal runner. The runner first claims the workspace, records `ready` only after `start_workspace` returns, and catches/logs any error before recording a bounded safe failure message. The returned task handle is intentionally owned by the Tokio runtime, not the HTTP request.
 
-Centralize command start and completion behavior in `LogState` helpers used by
-both protocol branches:
+At startup, reconcile `queued`/`running` workspaces conservatively: if an initial execution exists, mark ready; otherwise mark failed/interrupted with an actionable message. This closes crash windows without replaying partially completed Git operations.
 
-1. On an eligible new call ID, reuse the tracked index only when the command is
-   identical, the latest occurrence succeeded, and the shared entry index shows
-   no intervening allocation.
-2. Store every in-flight call in `commands` for ID-based routing, while marking
-   the newest call ID as owner of the shared row.
-3. Streaming updates for that same ID replace the shared row without changing
-   the repeat count.
-4. Completion updates repeat ownership only for its latest call ID; older calls
-   still complete their distinct rows. Success arms the next repeat. Failure
-   restores the prior successful aggregate and moves the failed call to a new
-   row before disarming reuse.
-5. Non-eligible commands keep the existing fresh-index path.
+### 3. Change the response and read contract
 
-The current Codex normalizer does not reset its `EntryIndexProvider` during a
-session, so no additional reset hook is required.
+Change `CreateAndStartWorkspaceResponse` in `crates/db/src/models/requests.rs` to contain only the accepted `Workspace`; creation fields on `Workspace` make its status observable through existing list/detail APIs. Regenerate `shared/types.ts` via `pnpm run generate-types` and update Rust/MCP callers that currently expect `execution_process`.
+
+### 4. Render authoritative creation state
+
+`packages/web-core/src/shared/hooks/useCreateWorkspace.ts` already consumes only `workspace`, so it naturally navigates after the shortened request. Update direct callers in `WorkspacesLayout.tsx`, `VSCodeWorkspacePage.tsx`, and the MCP task-attempt path for the new response semantics.
+
+At the workspace layout/content boundary, render a small pending or failed state before components that assume repositories and sessions exist. Status comes from the normal workspace query/cache and transitions to the existing UI when `ready`. Include a focused component test for queued/running/failed/ready behavior.
 
 ## Data Model
 
-See `./data-model.md`.
+See [`data-model.md`](data-model.md).
 
 ## Contracts
 
-See `./contracts/normalized-patch-stream.md`.
+See [`contracts/background-workspace-creation.md`](contracts/background-workspace-creation.md).
 
 ## Research Notes
 
-See `./research.md`.
+See [`research.md`](research.md). No new dependency is introduced.
 
 ## Constitution Check
 
-- Principle II: focused fixtures cover adjacency, status, ownership, marker
-  bounds, and both protocol formats.
-- Principles III and VI: reuse the existing server-normalizer compaction
-  pattern and make the smallest command-specific extension.
-- Principle IX: equality, adjacency, completion, latest-owner, and bounded-marker
-  invariants are explicit.
-- Constraints: no generated files, dependency, remote mutation, destructive
-  operation, or external service are involved; `pnpm run format` will run.
+- Principle XII: a workspace-scoped compare-and-set is the authoritative asynchronous claim; no lock spans slow work.
+- Principle XVIII: placement and execution remain coordinator-authoritative, affinity-bound, and idempotent by existing workspace/execution identities.
+- Principle XXVIII: acceptance persists identity/status before returning; runtime-owned work outlives request cancellation; startup reconciliation produces a truthful terminal result.
+- Principles III and VI: status lives on the existing workspace read model and uses the existing create/start implementation rather than introducing a general queue framework.
+- Constraint on generated files: Rust DTOs remain authoritative and `shared/types.ts` is regenerated.
 
-No constitution deviation is planned.
+No constitution deviations remain.
 
 ## Risks & Dependencies
 
-- Different protocol formats may provide differently wrapped command strings.
-  The predicate uses the same shell-unwrapped representation already exposed in
-  `ActionType::CommandRun`, and fixtures cover both paths.
-- Late events could overwrite a newer repeat. Latest-call ownership prevents
-  stale replacement.
-- A generic compactor could hide meaningful repeated shell work. Eligibility is
-  deliberately limited to the reported review operation.
-- Reusing one row necessarily exposes only the newest occurrence's detailed
-  result. This matches existing Grok compaction and is limited to review passes
-  whose visible flood is the reported defect.
+- Some workspace screens assume repositories or sessions exist; the creation-state guard must sit above all such assumptions.
+- Axum/Tokio runtime shutdown cancels detached tasks; startup reconciliation must cover both queued-before-spawn and running-during-shutdown states.
+- Errors may contain repository paths or external details. Persist a bounded user-safe summary and keep full detail in structured logs.
+- Existing MCP/API callers may require an execution ID immediately. They must either poll the accepted workspace until ready or use an existing execution lookup; no caller may reconstruct a second start.

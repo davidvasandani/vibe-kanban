@@ -124,10 +124,14 @@ export function NavbarContainer({
   mobileMode = false,
   onOrgSelect,
   onOpenDrawer,
+  appVersion,
+  deploymentTimestamp,
 }: {
   mobileMode?: boolean;
   onOrgSelect?: (orgId: string) => void;
   onOpenDrawer?: () => void;
+  appVersion?: string | null;
+  deploymentTimestamp?: string | null;
 }) {
   const { t } = useTranslation('common');
   const { executeAction } = useActions();
@@ -379,6 +383,8 @@ export function NavbarContainer({
       syncErrors={syncErrors}
       mobileMode={mobileMode}
       reserveWindowControls={reserveWindowControls}
+      appVersion={appVersion}
+      deploymentTimestamp={deploymentTimestamp}
       mobileUserSlot={userPopoverSlot}
       isOnProjectPage={isOnProjectPage}
       isOnProjectSubRoute={isOnProjectSubRoute}

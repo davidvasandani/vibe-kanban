@@ -18,7 +18,87 @@ use serde_json::{Map, Value};
 use tokio::fs;
 use ts_rs::TS;
 
-use crate::executors::{CodingAgent, ExecutorError};
+use crate::executors::{CodingAgent, ExecutorError, StandardCodingAgentExecutor};
+
+pub fn mcp_servers_from_config(raw_config: &Value, path: &[String]) -> HashMap<String, Value> {
+    let mut current = raw_config;
+    for part in path {
+        let Some(next) = current.get(part) else {
+            return HashMap::new();
+        };
+        current = next;
+    }
+    current
+        .as_object()
+        .map(|servers| {
+            servers
+                .iter()
+                .map(|(name, definition)| (name.clone(), definition.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn set_mcp_servers_in_config(
+    raw_config: &mut Value,
+    path: &[String],
+    servers: &HashMap<String, Value>,
+) -> Result<(), ExecutorError> {
+    if !raw_config.is_object() {
+        *raw_config = serde_json::json!({});
+    }
+    let Some((final_attr, parents)) = path.split_last() else {
+        return Err(ExecutorError::UnknownExecutorType(
+            "MCP servers path is empty".into(),
+        ));
+    };
+    let mut current = raw_config;
+    for part in parents {
+        if current.get(part).is_none() {
+            current
+                .as_object_mut()
+                .expect("config normalized to object")
+                .insert(part.clone(), serde_json::json!({}));
+        }
+        current = current.get_mut(part).expect("inserted config path");
+        if !current.is_object() {
+            *current = serde_json::json!({});
+        }
+    }
+    current
+        .as_object_mut()
+        .expect("config path normalized to object")
+        .insert(final_attr.clone(), serde_json::to_value(servers)?);
+    Ok(())
+}
+
+pub async fn read_coding_agent_mcp_servers(
+    agent: &CodingAgent,
+) -> Result<HashMap<String, Value>, ExecutorError> {
+    let path = agent.default_mcp_config_path().ok_or_else(|| {
+        ExecutorError::UnknownExecutorType("executor has no MCP config path".into())
+    })?;
+    let mcp_config = agent.get_mcp_config();
+    let config = read_agent_config(&path, &mcp_config).await?;
+    Ok(mcp_servers_from_config(&config, &mcp_config.servers_path))
+}
+
+pub async fn write_coding_agent_mcp_servers_to_path(
+    agent: &CodingAgent,
+    source_path: &Path,
+    target_path: &Path,
+    servers: &HashMap<String, Value>,
+) -> Result<(), ExecutorError> {
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(ExecutorError::Io)?;
+    }
+    let mcp_config = agent.get_mcp_config();
+    let mut config = read_agent_config(source_path, &mcp_config).await?;
+    set_mcp_servers_in_config(&mut config, &mcp_config.servers_path, servers)?;
+    write_agent_config(target_path, &mcp_config, &config).await
+}
 
 fn is_jsonc_file(path: &Path) -> bool {
     path.extension()
@@ -27,6 +107,20 @@ fn is_jsonc_file(path: &Path) -> bool {
 }
 
 static DEFAULT_MCP_JSON: &str = include_str!("../default_mcp.json");
+
+/// Returns the launcher spec from the checked-in generic Slack stdio template.
+/// Migration recognition reads this source of truth so coordinated pin bumps do
+/// not require a second release URL in Rust.
+pub(crate) fn default_slack_stdio_launcher() -> Option<String> {
+    serde_json::from_str::<Value>(DEFAULT_MCP_JSON)
+        .ok()?
+        .get("slack")?
+        .get("args")?
+        .as_array()?
+        .get(1)?
+        .as_str()
+        .map(str::to_string)
+}
 
 /// Overrides the executable used to launch the bundled Vibe Kanban MCP server
 /// that gets written into launched agents' config files. Lets a self-hosted /
@@ -40,11 +134,16 @@ const MCP_COMMAND_ENV: &str = "VIBE_KANBAN_MCP_COMMAND";
 /// `vibe-kanban-mcp` binary directly needs no extra args (defaults to global
 /// mode), unlike the `npx … --mcp` form where `--mcp` selects the subcommand.
 const MCP_ARGS_ENV: &str = "VIBE_KANBAN_MCP_ARGS";
+/// Optional deployment-owned Streamable HTTP endpoint for the bundled Slack
+/// connector. Self-hosted clusters use one supervised server instead of
+/// putting a Slack token and stdio launcher in every agent config.
+const SLACK_MCP_URL_ENV: &str = "VIBE_KANBAN_SLACK_MCP_URL";
 
 pub static PRECONFIGURED_MCP_SERVERS: LazyLock<Value> = LazyLock::new(|| {
     let mut value =
         serde_json::from_str::<Value>(DEFAULT_MCP_JSON).expect("Failed to parse default MCP JSON");
     apply_vibe_kanban_command_override(&mut value);
+    apply_slack_http_override(&mut value);
     value
 });
 
@@ -75,6 +174,29 @@ fn set_vibe_kanban_command(value: &mut Value, command: &str, args: Vec<String>) 
         entry.insert(
             "args".to_string(),
             Value::Array(args.into_iter().map(Value::String).collect()),
+        );
+    }
+}
+
+fn apply_slack_http_override(value: &mut Value) {
+    let Ok(url) = std::env::var(SLACK_MCP_URL_ENV) else {
+        return;
+    };
+    let url = url.trim();
+    if url.is_empty() {
+        return;
+    }
+    set_slack_http_url(value, url);
+}
+
+/// Replaces the bundled local Slack launcher with a deployment-owned HTTP
+/// endpoint. Rebuild the object rather than removing selected fields so a
+/// future stdio-only field cannot accidentally carry a credential forward.
+fn set_slack_http_url(value: &mut Value, url: &str) {
+    if let Some(servers) = value.as_object_mut() {
+        servers.insert(
+            "slack".to_string(),
+            serde_json::json!({ "type": "http", "url": url }),
         );
     }
 }
@@ -112,28 +234,32 @@ pub async fn read_agent_config(
     config_path: &std::path::Path,
     mcp_config: &McpConfig,
 ) -> Result<Value, ExecutorError> {
-    if let Ok(file_content) = fs::read_to_string(config_path).await {
-        if mcp_config.is_toml_config {
-            if file_content.trim().is_empty() {
-                return Ok(serde_json::json!({}));
+    match fs::read_to_string(config_path).await {
+        Ok(file_content) => {
+            if mcp_config.is_toml_config {
+                if file_content.trim().is_empty() {
+                    return Ok(serde_json::json!({}));
+                }
+                let toml_val: toml::Value = toml::from_str(&file_content)?;
+                let json_string = serde_json::to_string(&toml_val)?;
+                Ok(serde_json::from_str(&json_string)?)
+            } else if is_jsonc_file(config_path) {
+                if file_content.trim().is_empty() {
+                    return Ok(serde_json::json!({}));
+                }
+                match jsonc_parser::parse_to_serde_value(&file_content, &ParseOptions::default()) {
+                    Ok(Some(value)) => Ok(value),
+                    Ok(None) => Ok(serde_json::json!({})),
+                    Err(_) => Ok(serde_json::from_str(&file_content)?),
+                }
+            } else {
+                Ok(serde_json::from_str(&file_content)?)
             }
-            let toml_val: toml::Value = toml::from_str(&file_content)?;
-            let json_string = serde_json::to_string(&toml_val)?;
-            Ok(serde_json::from_str(&json_string)?)
-        } else if is_jsonc_file(config_path) {
-            if file_content.trim().is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            match jsonc_parser::parse_to_serde_value(&file_content, &ParseOptions::default()) {
-                Ok(Some(value)) => Ok(value),
-                Ok(None) => Ok(serde_json::json!({})),
-                Err(_) => Ok(serde_json::from_str(&file_content)?),
-            }
-        } else {
-            Ok(serde_json::from_str(&file_content)?)
         }
-    } else {
-        Ok(mcp_config.template.clone())
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(mcp_config.template.clone())
+        }
+        Err(error) => Err(ExecutorError::Io(error)),
     }
 }
 
@@ -321,6 +447,13 @@ fn is_stdio(s: &Map<String, Value>) -> bool {
     !is_http_server(s) && s.get("command").is_some()
 }
 
+/// Splits the presentation-only `meta` block off the server map.
+///
+/// `preserve_order` is enabled workspace-wide, which makes `Map::remove` a
+/// *swap*-remove: it moves the map's last entry into the vacated slot. That is
+/// harmless only because `meta` is the last key in `default_mcp.json`. Keep new
+/// catalog entries **above** `meta`, or the appended entry will silently take
+/// `meta`'s position in every generated agent config.
 fn extract_meta(mut obj: ServerMap) -> (ServerMap, Option<Value>) {
     let meta = obj.remove("meta");
     (obj, meta)
@@ -560,6 +693,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn replacing_mcp_section_preserves_unrelated_native_settings() {
+        let mut config = serde_json::json!({
+            "model": "gpt-5",
+            "mcp_servers": {"old": {"command": "old"}},
+            "projects": {"/workspace": {"trust_level": "trusted"}}
+        });
+        let servers = HashMap::from([(
+            "firecrawl-browser".into(),
+            serde_json::json!({"url": "https://example.invalid/mcp", "headers": {"Authorization": "Bearer secret"}}),
+        )]);
+
+        set_mcp_servers_in_config(&mut config, &["mcp_servers".into()], &servers).unwrap();
+
+        assert_eq!(config["model"], "gpt-5");
+        assert_eq!(config["projects"]["/workspace"]["trust_level"], "trusted");
+        assert!(config["mcp_servers"].get("old").is_none());
+        assert_eq!(
+            mcp_servers_from_config(&config, &["mcp_servers".into()]),
+            servers
+        );
+    }
+
+    #[tokio::test]
+    async fn config_reader_defaults_only_for_missing_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "vk-mcp-read-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).await.unwrap();
+        let mcp = McpConfig::new(
+            vec!["mcp_servers".into()],
+            serde_json::json!({"mcp_servers": {}}),
+            serde_json::json!({}),
+            true,
+        );
+
+        assert_eq!(
+            read_agent_config(&dir.join("missing.toml"), &mcp)
+                .await
+                .unwrap(),
+            mcp.template
+        );
+        assert!(read_agent_config(&dir, &mcp).await.is_err());
+        let _ = fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
     fn default_vibe_kanban_command_is_unchanged_without_override() {
         // The checked-in default must still point at the public package so
         // normal installs keep working; the override is opt-in via env.
@@ -651,6 +834,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn slack_http_override_contains_only_the_shared_endpoint() {
+        let mut value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        set_slack_http_url(&mut value, "http://172.16.100.102:13080/mcp");
+
+        assert_eq!(
+            value["slack"],
+            serde_json::json!({
+                "type": "http",
+                "url": "http://172.16.100.102:13080/mcp"
+            })
+        );
+        let serialized = serde_json::to_string(&value["slack"]).unwrap();
+        assert!(!serialized.contains("SLACK_MCP"));
+        assert!(!serialized.contains("slack-mcp-server"));
+        assert!(!serialized.contains("command"));
+    }
+
     /// Splits `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>`
     /// into its parts, or `None` if the URL is not a GitHub release asset.
     fn parse_github_release_asset(url: &str) -> Option<(String, String, String)> {
@@ -738,6 +939,170 @@ mod tests {
         assert_eq!(
             opencode["slack"]["environment"],
             serde_json::json!({ "SLACK_MCP_XOXP_TOKEN": "YOUR_TOKEN" })
+        );
+    }
+
+    /// Fork revision the bundled Gmail connector installs. Bumping it means
+    /// moving the spec in `default_mcp.json` and the revision named in
+    /// `docs/integrations/mcp-server-configuration.mdx` in the same change.
+    ///
+    /// Unlike the Slack pin there is no companion digest constant and no audit
+    /// workflow, and that asymmetry is deliberate: Slack pins a *release asset*,
+    /// whose bytes GitHub lets a maintainer replace under an existing tag, so a
+    /// recorded digest re-checked on a schedule is the only available control. A
+    /// git commit is content-addressed, so this SHA resolves to exactly one tree
+    /// on every machine and cannot be re-pointed. Recording a digest of it and
+    /// re-checking that daily would assert that a hash equals itself.
+    ///
+    /// Scope, precisely: the SHA pins **this repository's source**, not the
+    /// dependency closure. A `github:` install runs the package's `prepare`
+    /// script, which resolves its own dependencies from npm at install time, so
+    /// what executes is not bit-reproducible — arguably less so than Slack's
+    /// statically linked, digest-checked binary. The argument for no audit job
+    /// is that auditing an immutable pin is a no-op, not that this delivery
+    /// mechanism is stronger overall.
+    ///
+    /// Renovate cannot follow a bare SHA on a fork with no releases, so this pin
+    /// is bumped by hand; `AGENTS.md` records that. A custom manager here would
+    /// match the pin and then never propose a successor, which is worse than no
+    /// manager because it looks like coverage.
+    const GMAIL_MCP_FORK_REVISION: &str = "030da3492753222a41645a9f343466d151c63f3c";
+    const GMAIL_MCP_INSTALL_SPEC: &str =
+        "github:davidvasandani/Gmail-MCP-Server#030da3492753222a41645a9f343466d151c63f3c";
+
+    #[test]
+    fn gmail_preconfigured_server_matches_the_documented_stdio_contract() {
+        let value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+
+        assert_eq!(value["gmail"]["command"], serde_json::json!("npx"));
+        assert_eq!(
+            value["gmail"]["args"],
+            serde_json::json!(["-y", GMAIL_MCP_INSTALL_SPEC, "--tool-prefix=YOUR_PREFIX_"])
+        );
+        // A path, not a token: the refresh token stays in the Gmail server's own
+        // credentials file and never reaches an agent's config. `GMAIL_OAUTH_PATH`
+        // is deliberately absent — the OAuth client is per Google Cloud project,
+        // not per mailbox, so every instance shares its default.
+        //
+        // The placeholder is absolute on purpose. Env values are copied verbatim
+        // into agents' native config and the server spawns without a shell, so a
+        // `~/…` value is never expanded — it would resolve against the agent's
+        // cwd (a task worktree) and drop a refresh token inside the user's repo.
+        // The `--tool-prefix` placeholder keeps its trailing `_` for the same
+        // class of reason: a user who mirrors its shape without one gets
+        // `mysearch_emails` instead of `my_search_emails`.
+        assert_eq!(
+            value["gmail"]["env"],
+            serde_json::json!({ "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/credentials.json" })
+        );
+        assert_eq!(value["meta"]["gmail"]["name"], serde_json::json!("Gmail"));
+        assert_eq!(
+            value["meta"]["gmail"]["url"],
+            serde_json::json!("https://github.com/davidvasandani/Gmail-MCP-Server")
+        );
+    }
+
+    /// Splits `github:<owner>/<repo>#<commit-ish>` into its parts, or `None` if
+    /// the spec is not an npm GitHub shorthand carrying an explicit revision.
+    fn parse_github_git_spec(spec: &str) -> Option<(String, String, String)> {
+        let rest = spec.strip_prefix("github:")?;
+        let (owner, rest) = rest.split_once('/')?;
+        let (repo, commit_ish) = rest.split_once('#')?;
+        (!owner.is_empty() && !repo.is_empty() && !commit_ish.is_empty())
+            .then(|| (owner.to_string(), repo.to_string(), commit_ish.to_string()))
+    }
+
+    #[test]
+    fn gmail_preconfigured_server_pins_an_immutable_fork_revision() {
+        let value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        let spec = value["gmail"]["args"][1].as_str().expect("install spec");
+
+        // A mutable reference here is the defect this pin exists to prevent:
+        // the catalog would advertise the fork while installing whatever that
+        // branch happens to point at today.
+        for mutable in ["@latest", "#master", "#main", "refs/heads/", "/archive/"] {
+            assert!(
+                !spec.contains(mutable),
+                "gmail install spec {spec} must not contain the mutable reference {mutable}"
+            );
+        }
+
+        // `parse_github_git_spec` requires a `#<commit-ish>`, so a bare
+        // `github:owner/repo` — which would track the default branch — fails here.
+        let (owner, repo, commit_ish) =
+            parse_github_git_spec(spec).expect("gmail install spec is a pinned GitHub git spec");
+        assert_eq!(commit_ish, GMAIL_MCP_FORK_REVISION);
+        assert!(
+            commit_ish.len() == 40
+                && commit_ish
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "gmail pin {commit_ish} must be a full 40-character lowercase commit SHA. \
+             A branch, tag, or abbreviated SHA can be re-pointed; lowercase is \
+             required so this pin has exactly one spelling to compare against"
+        );
+
+        // The UI links users to `meta.gmail.url`; it must be the repository the
+        // revision is actually installed from.
+        let meta_url = value["meta"]["gmail"]["url"].as_str().expect("meta url");
+        let meta_repo = meta_url
+            .strip_prefix("https://github.com/")
+            .expect("meta url is a GitHub URL")
+            .trim_end_matches('/');
+        assert_eq!(meta_repo, format!("{owner}/{repo}"));
+    }
+
+    #[test]
+    fn gmail_preconfigured_server_adapts_for_codex_and_opencode() {
+        let canonical = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        let codex = apply_adapter(Adapter::Codex, canonical.clone());
+        let opencode = apply_adapter(Adapter::Opencode, canonical);
+
+        assert_eq!(codex["gmail"]["command"], serde_json::json!("npx"));
+        assert_eq!(
+            codex["gmail"]["env"],
+            serde_json::json!({ "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/credentials.json" })
+        );
+        assert_eq!(opencode["gmail"]["type"], serde_json::json!("local"));
+        assert_eq!(
+            opencode["gmail"]["command"],
+            serde_json::json!([
+                "npx",
+                "-y",
+                GMAIL_MCP_INSTALL_SPEC,
+                "--tool-prefix=YOUR_PREFIX_"
+            ])
+        );
+        // Opencode calls the stdio environment field `environment`; losing this
+        // rename is what makes a credential-bearing entry silently unusable.
+        assert_eq!(
+            opencode["gmail"]["environment"],
+            serde_json::json!({ "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/credentials.json" })
+        );
+    }
+
+    #[test]
+    fn slack_http_override_adapts_for_codex_and_opencode() {
+        let mut canonical = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        set_slack_http_url(&mut canonical, "http://172.16.100.102:13080/mcp");
+        let codex = apply_adapter(Adapter::Codex, canonical.clone());
+        let opencode = apply_adapter(Adapter::Opencode, canonical);
+
+        assert_eq!(
+            codex["slack"],
+            serde_json::json!({ "url": "http://172.16.100.102:13080/mcp" })
+        );
+        assert_eq!(opencode["slack"]["type"], serde_json::json!("remote"));
+        assert_eq!(
+            opencode["slack"]["url"],
+            serde_json::json!("http://172.16.100.102:13080/mcp")
+        );
+        assert!(opencode["slack"].get("command").is_none());
+        assert!(opencode["slack"].get("environment").is_none());
+        assert!(
+            !serde_json::to_string(&opencode["slack"])
+                .unwrap()
+                .contains("Authorization")
         );
     }
 

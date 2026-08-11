@@ -244,9 +244,9 @@ speckit_feature_key: string | null,
  * Which repo worktree hosts `specs/` + `.specify/` for this workspace's
  * SpecKit artifacts. Persisted at first provisioning.
  */
-speckit_host_repo_id: string | null, };
+speckit_host_repo_id: string | null, creation_status: WorkspaceCreationStatus, creation_error: string | null, };
 
-export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, placement_state: WorkspacePlacementState, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, 
+export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, 
 /**
  * Which numbered `## Pipeline` stage the execution agent last reported
  * itself as starting (1-based), detected from a `VK-PIPELINE-STAGE: N`
@@ -264,11 +264,13 @@ speckit_feature_key: string | null,
  * Which repo worktree hosts `specs/` + `.specify/` for this workspace's
  * SpecKit artifacts. Persisted at first provisioning.
  */
-speckit_host_repo_id: string | null, };
+speckit_host_repo_id: string | null, creation_status: WorkspaceCreationStatus, creation_error: string | null, };
 
 export type WorkspacePlacement = { workspace_id: string, worker_node_id: string | null, placement_state: WorkspacePlacementState, placed_at: string | null, placement_reason: string | null, requested_worker_node_id: string | null, placement_constraints: unknown, };
 
 export enum WorkspacePlacementState { local = "local", reserved = "reserved", provisioning = "provisioning", ready = "ready", failed = "failed", cleaning = "cleaning" }
+
+export enum WorkspaceCreationStatus { queued = "queued", running = "running", ready = "ready", failed = "failed" }
 
 export type WorkerNode = { id: string, hostname: string, status: WorkerNodeStatus, worker_version: string, vibe_version: string, capabilities: unknown, resource_snapshot: unknown, labels: unknown, mount_status: WorkerMountStatus, mount_message: string | null, last_heartbeat_at: string | null, lease_expires_at: string | null, created_at: string, updated_at: string, };
 
@@ -276,17 +278,42 @@ export enum WorkerNodeStatus { online = "online", offline = "offline", draining 
 
 export enum WorkerMountStatus { healthy = "healthy", missing = "missing", local_fallback = "local_fallback", wrong_filesystem = "wrong_filesystem", probe_not_visible = "probe_not_visible", read_only = "read_only", ownership_mismatch = "ownership_mismatch", io_error = "io_error" }
 
+export type UpdateWorkspaceAffinityRequest = { 
+/**
+ * Explicitly move the workspace back to coordinator-local execution.
+ */
+run_on_coordinator: boolean, requested_worker_node_id: string | null, restart_running: boolean, operation_id: string | null, };
+
+export enum WorkspaceAffinityUpdateOutcome { updated = "updated", restarted = "restarted", restart_failed = "restart_failed", session_transfer_failed = "session_transfer_failed" }
+
+export type WorkspaceAffinityUpdateResponse = { placement: WorkspacePlacement, outcome: WorkspaceAffinityUpdateOutcome, stopped_execution_id: string | null, started_execution: ExecutionProcess | null, message: string | null, };
+
+export enum WorkspaceAffinityKind { local = "local", automatic = "automatic", worker = "worker", unassigned = "unassigned" }
+
+export type WorkspaceAffinitySummary = { kind: WorkspaceAffinityKind, placement_state: WorkspacePlacementState, worker_node_id: string | null, worker_hostname: string | null, requested_worker_node_id: string | null, requested_worker_hostname: string | null, };
+
 export type CpuSample = { model: string | null, core_count: number | null, 
 /**
  * `1 − Δidle/Δtotal`. `None` until a predecessor exists.
  */
 total_busy_percent: number | null, 
 /**
- * One entry per `cpuN`, ordered by core index — the one place a position
- * is meaningful, because core 3 is core 3. Replaced wholesale, never
- * patched per element, so a core count change cannot misalign it.
+ * One entry per **online** core, each tagged with the kernel's own `cpuN`
+ * index.
+ *
+ * Tagged rather than positional because `/proc/stat` omits offline CPUs:
+ * with cpu1 offline the second entry is cpu2, and a reader labelling by
+ * array position would show cpu2's utilisation as "core 1". Replaced
+ * wholesale, never patched per element, so a core count change cannot
+ * misalign it.
  */
-per_core_busy_percent: Array<number> | null, load_1m: number | null, load_5m: number | null, load_15m: number | null, frequency_mhz: number | null, temperature_celsius: number | null, };
+per_core_busy: Array<CoreBusy> | null, load_1m: number | null, load_5m: number | null, load_15m: number | null, frequency_mhz: number | null, temperature_celsius: number | null, };
+
+export type CoreBusy = { 
+/**
+ * The `N` of `cpuN`.
+ */
+core: number, busy_percent: number, };
 
 export type MemorySample = { total_bytes: bigint | null, available_bytes: bigint | null, 
 /**
@@ -563,7 +590,7 @@ export type TagSearchParams = { search: string | null, };
 
 export type TokenResponse = { access_token: string, expires_at: string | null, };
 
-export type UserSystemInfo = { version: string, config: Config, machine_id: string, login_status: LoginStatus, remote_auth_degraded: string | null, environment: Environment, 
+export type UserSystemInfo = { version: string, deployment_timestamp: string | null, config: Config, machine_id: string, login_status: LoginStatus, remote_auth_degraded: string | null, environment: Environment, 
 /**
  * Capabilities supported per executor (e.g., { "CLAUDE_CODE": ["SESSION_FORK"] })
  */
@@ -607,17 +634,17 @@ export type SharedMcpAuthMode = "shared_gateway" | "agent_native" | "explicit_he
 
 export type SharedMcpCompatibility = { executor: BaseCodingAgent, compatible: boolean, reason: string | null, };
 
-export type SharedMcpServer = { name: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, source_kind: SharedMcpSourceKind, native_sources: Array<NativeMcpSource>, compatibility: Array<SharedMcpCompatibility>, auth_mode: SharedMcpAuthMode, gateway_status: string | null, };
+export type SharedMcpServer = { name: string, display_name: string | null, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, source_kind: SharedMcpSourceKind, native_sources: Array<NativeMcpSource>, compatibility: Array<SharedMcpCompatibility>, auth_mode: SharedMcpAuthMode, gateway_status: string | null, };
 
 export type SharedMcpConflictVariant = { variant_id: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, native_sources: Array<NativeMcpSource>, };
 
-export type SharedMcpConflict = { name: string, variants: Array<SharedMcpConflictVariant>, message: string, };
+export type SharedMcpConflict = { name: string, display_name: string | null, variants: Array<SharedMcpConflictVariant>, message: string, };
 
 export type SharedMcpProfileError = { executor: BaseCodingAgent, config_path: string | null, error: string, };
 
-export type SharedMcpReadResponse = { profiles: Array<SharedMcpProfile>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, preconfigured: JsonValue, read_errors: Array<SharedMcpProfileError>, };
+export type SharedMcpReadResponse = { profiles: Array<SharedMcpProfile>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, preconfigured: JsonValue, read_errors: Array<SharedMcpProfileError>, metadata_error: string | null, };
 
-export type SharedMcpServerInput = { name: string, definition: McpServerDefinition, assignments: Array<BaseCodingAgent>, native_overrides: { [key in BaseCodingAgent]?: JsonValue }, };
+export type SharedMcpServerInput = { name: string, display_name: string | null, definition: McpServerDefinition, assignments: Array<BaseCodingAgent>, native_overrides: { [key in BaseCodingAgent]?: JsonValue }, };
 
 export type SharedMcpConflictResolution = { name: string, };
 
@@ -629,7 +656,7 @@ export type SharedMcpProfileWriteStatus = "success" | "skipped" | "failed";
 
 export type SharedMcpProfileWriteOutcome = { executor: BaseCodingAgent, config_path: string | null, status: SharedMcpProfileWriteStatus, affected_servers: Array<string>, message: string | null, error: string | null, };
 
-export type SharedMcpWriteResponse = { status: SharedMcpWriteStatus, outcomes: Array<SharedMcpProfileWriteOutcome>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, };
+export type SharedMcpWriteResponse = { status: SharedMcpWriteStatus, outcomes: Array<SharedMcpProfileWriteOutcome>, metadata_error: string | null, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, };
 
 export type SharedMcpTestTarget = { server_name: string, executor: BaseCodingAgent, };
 
@@ -879,11 +906,15 @@ export type GetPrCommentsQuery = { repo_id: string, };
 
 export type CreateAndStartWorkspaceRequest = { name: string | null, repos: Array<WorkspaceRepoInput>, linked_issue: LinkedIssueInfo | null, executor_config: ExecutorConfig, prompt: string, attachment_ids: Array<string> | null, 
 /**
+ * Explicitly retain coordinator-local placement in cluster mode.
+ */
+run_on_coordinator: boolean, 
+/**
  * Optional manual placement override. `None` uses automatic scheduling.
  */
 requested_worker_node_id: string | null, };
 
-export type CreateAndStartWorkspaceResponse = { workspace: Workspace, execution_process: ExecutionProcess, };
+export type CreateAndStartWorkspaceResponse = { workspace: Workspace, };
 
 export type UnifiedPrComment = { "comment_type": "general", id: string, author: string, author_association: string | null, body: string, created_at: string, url: string | null, } | { "comment_type": "review", id: bigint, author: string, author_association: string | null, body: string, created_at: string, url: string | null, path: string, line: bigint | null, side: string | null, diff_hunk: string | null, };
 
@@ -959,7 +990,7 @@ pr_number: bigint | null,
 /**
  * PR URL for this workspace (if any PR exists)
  */
-pr_url: string | null, };
+pr_url: string | null, affinity: WorkspaceAffinitySummary, };
 
 export type WorkspaceSummaryResponse = { summaries: Array<WorkspaceSummary>, };
 
@@ -1179,7 +1210,7 @@ data: DraftFollowUpData,
 /**
  * Timestamp when the message was queued
  */
-queued_at: string, };
+queued_at: string, restart_agent: boolean, };
 
 export type QueueStatus = { "status": "empty" } | { "status": "queued", message: QueuedMessage, };
 
@@ -1191,7 +1222,7 @@ export type McpConfig = { servers: { [key in string]?: JsonValue }, servers_path
 
 export type McpRefreshStatus = "pending_next_turn" | "refreshed" | "partially_refreshed" | "busy" | "unsupported" | "failed";
 
-export type McpRefreshErrorCategory = "executable_unavailable" | "process_launch_failed" | "initialize_failed" | "authentication_failed" | "capability_list_failed" | "invalid_capability_schema" | "timeout" | "refresh_in_progress" | "active_call" | "unsupported" | "internal";
+export type McpRefreshErrorCategory = "executable_unavailable" | "process_launch_failed" | "initialize_failed" | "authentication_failed" | "capability_list_failed" | "invalid_capability_schema" | "timeout" | "refresh_in_progress" | "active_call" | "materialization_failed" | "reload_failed" | "unsupported" | "internal";
 
 export type McpRefreshError = { category: McpRefreshErrorCategory, message: string, remediation: string, retryable: boolean, };
 

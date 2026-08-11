@@ -63,7 +63,41 @@ use utils::{
 use uuid::Uuid;
 use worktree_manager::WorktreeError;
 
-use crate::services::{execution_process, notification::NotificationService};
+use crate::services::{execution_process, normalized_log_cache, notification::NotificationService};
+
+/// Store the settled entries a historical replay produced, so the next reader
+/// replays them instead of re-normalizing the raw log.
+///
+/// Best-effort throughout: this is a cache over a source of truth that is still
+/// there. A failure to materialize costs the next reader time, which is the
+/// situation before this existed — so it is logged and dropped rather than
+/// failing a read that has already succeeded.
+async fn materialize_normalized_log(
+    cache_path: &std::path::Path,
+    patches: &[Patch],
+    truncated: bool,
+) {
+    if patches.is_empty() {
+        return;
+    }
+
+    let entries = match normalized_log_cache::materialize_entries(patches) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("Could not materialize normalized log: {e}");
+            return;
+        }
+    };
+
+    let header = normalized_log_cache::CacheHeader {
+        version: normalized_log_cache::CACHE_VERSION,
+        entry_count: entries.len(),
+        truncated,
+    };
+    if let Err(e) = normalized_log_cache::write(cache_path, header, &entries).await {
+        tracing::warn!("Could not store materialized normalized log: {e}");
+    }
+}
 pub type ContainerRef = String;
 
 // Historical normalization temporarily holds raw logs, parsed messages, and
@@ -1214,6 +1248,53 @@ pub trait ContainerService {
                     .boxed(),
             )
         } else {
+            let process = match ExecutionProcess::find_by_id(&self.db().pool, *id).await {
+                Ok(Some(process)) => process,
+                Ok(None) => {
+                    tracing::error!("No execution process found for ID: {}", id);
+                    return None;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to fetch execution process {}: {}", id, e);
+                    return None;
+                }
+            };
+
+            // A finished process that has already been materialized is served
+            // from its settled entries. Deliberately before the permit is taken:
+            // a cache hit does no normalization, so making it queue behind the
+            // runs that do would reintroduce the wait this exists to remove. It
+            // also skips `ensure_container_exists` below — recreating a worktree
+            // to read a conversation is pure cost once the answer is stored.
+            let cache_path =
+                utils::execution_logs::process_normalized_log_file_path(process.session_id, *id);
+            if let Some((_, entries)) = normalized_log_cache::read(&cache_path).await {
+                match normalized_log_cache::entries_as_patches(&entries) {
+                    Ok(patches) => {
+                        tracing::debug!(
+                            execution_id = %id,
+                            entry_count = patches.len(),
+                            "Serving normalized log from its materialized view"
+                        );
+                        return Some(
+                            futures::stream::iter(patches)
+                                .map(|patch| Ok::<_, std::io::Error>(LogMsg::JsonPatch(patch)))
+                                .chain(futures::stream::once(async {
+                                    Ok::<_, std::io::Error>(LogMsg::Finished)
+                                }))
+                                .boxed(),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            execution_id = %id,
+                            "Materialized normalized log could not be replayed, \
+                             re-deriving it: {e}"
+                        );
+                    }
+                }
+            }
+
             let permit = HISTORICAL_NORMALIZATION_PERMITS
                 .clone()
                 .acquire_owned()
@@ -1260,18 +1341,6 @@ pub trait ContainerService {
                 temp_store.push(msg);
             }
             temp_store.push_finished();
-
-            let process = match ExecutionProcess::find_by_id(&self.db().pool, *id).await {
-                Ok(Some(process)) => process,
-                Ok(None) => {
-                    tracing::error!("No execution process found for ID: {}", id);
-                    return None;
-                }
-                Err(e) => {
-                    tracing::error!("Failed to fetch execution process {}: {}", id, e);
-                    return None;
-                }
-            };
 
             // Get the workspace to determine correct directory
             let (workspace, _session) =
@@ -1451,10 +1520,42 @@ pub trait ContainerService {
             .map(move |item| {
                 let _keep_alive = &lifetime;
                 item
-            })
-            .chain(futures::stream::once(async {
-                Ok::<_, std::io::Error>(LogMsg::Finished)
-            }));
+            });
+
+            // Materialize what this replay produced, so the next reader pays
+            // none of it. Collected as the reader consumes the stream, and
+            // written only when the stream reaches its end: a reader that
+            // disconnects halfway has seen a partial conversation, and storing
+            // that would turn a transient disconnect into a permanently short
+            // transcript.
+            let collected: Arc<std::sync::Mutex<Vec<Patch>>> = Arc::default();
+            let collector = collected.clone();
+            let was_truncated = dropped > 0;
+            // Only a process that has actually stopped is safe to store. Being
+            // on this branch does not prove it has: a process whose in-memory
+            // store did not survive a server restart reaches here while still
+            // running, and caching that would freeze a live conversation at
+            // whatever had been written when the server came back.
+            let is_finished = process.status != ExecutionProcessStatus::Running;
+            let deduped = deduped
+                .map(move |item| {
+                    if let Ok(LogMsg::JsonPatch(patch)) = &item
+                        && let Ok(mut patches) = collector.lock()
+                    {
+                        patches.push(patch.clone());
+                    }
+                    item
+                })
+                .chain(futures::stream::once(async move {
+                    if is_finished {
+                        let patches = collected
+                            .lock()
+                            .map(|patches| patches.clone())
+                            .unwrap_or_default();
+                        materialize_normalized_log(&cache_path, &patches, was_truncated).await;
+                    }
+                    Ok::<_, std::io::Error>(LogMsg::Finished)
+                }));
 
             Some(deduped.boxed())
         }
@@ -1558,6 +1659,28 @@ pub trait ContainerService {
         executor_action: &ExecutorAction,
         run_reason: &ExecutionProcessRunReason,
     ) -> Result<ExecutionProcess, ContainerError> {
+        self.start_execution_with_id(
+            workspace,
+            session,
+            executor_action,
+            run_reason,
+            Uuid::new_v4(),
+        )
+        .await
+    }
+
+    /// Start an execution with a caller-owned durable identity. Lifecycle
+    /// transitions that cross an HTTP retry boundary use this to make process
+    /// creation idempotent instead of creating a second agent after a lost
+    /// response.
+    async fn start_execution_with_id(
+        &self,
+        workspace: &Workspace,
+        session: &Session,
+        executor_action: &ExecutorAction,
+        run_reason: &ExecutionProcessRunReason,
+        execution_process_id: Uuid,
+    ) -> Result<ExecutionProcess, ContainerError> {
         // Create new execution process record
         // Capture current HEAD per repository as the "before" commit for this execution
         let repositories =
@@ -1594,7 +1717,7 @@ pub trait ContainerService {
         let execution_process = ExecutionProcess::create(
             &self.db().pool,
             &create_execution_process,
-            Uuid::new_v4(),
+            execution_process_id,
             &repo_states,
         )
         .await?;

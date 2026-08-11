@@ -23,6 +23,7 @@ import { ApprovalFeedbackProvider } from '@/features/workspace-chat/model/contex
 import { forwardWheelToScroller } from '@/features/workspace-chat/ui/forwardWheelToScroller';
 import { useDiffStats } from '@/shared/stores/useWorkspaceDiffStore';
 import type { DiffStats } from 'shared/types';
+import { WorkspaceCreationStatusView } from './WorkspaceCreationStatusView';
 
 /**
  * Isolated component that reads diffStats from WorkspaceContext.
@@ -275,6 +276,10 @@ export const WorkspacesMainContainer = forwardRef<
     }),
     []
   );
+
+  if (selectedWorkspace && selectedWorkspace.creation_status !== 'ready') {
+    return <WorkspaceCreationStatusView workspace={selectedWorkspace} />;
+  }
 
   return (
     <ApprovalFeedbackProvider>

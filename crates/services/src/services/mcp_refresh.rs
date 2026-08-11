@@ -71,6 +71,26 @@ impl McpRefreshCoordinator {
         Some(state.clone())
     }
 
+    pub async fn busy(&self, session_id: Uuid) -> Option<McpRefreshResult> {
+        let state = self.states.read().await.get(&session_id)?.clone();
+        let mut busy = state;
+        busy.status = McpRefreshStatus::Busy;
+        busy.retryable = true;
+        busy.error = Some(safe_executor_error(
+            McpRefreshErrorCategory::RefreshInProgress,
+        ));
+        Some(busy)
+    }
+
+    pub async fn unsupported(&self, session_id: Uuid) -> Option<McpRefreshResult> {
+        let mut states = self.states.write().await;
+        let state = states.get_mut(&session_id)?;
+        state.status = McpRefreshStatus::Unsupported;
+        state.retryable = false;
+        state.error = Some(safe_executor_error(McpRefreshErrorCategory::Unsupported));
+        Some(state.clone())
+    }
+
     pub async fn confirm(
         &self,
         session_id: Uuid,

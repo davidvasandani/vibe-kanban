@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
-use super::{execution_process::ExecutionProcess, workspace::Workspace};
+use super::workspace::Workspace;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ContainerQuery {
@@ -36,6 +36,9 @@ pub struct CreateAndStartWorkspaceRequest {
     pub executor_config: ExecutorConfig,
     pub prompt: String,
     pub attachment_ids: Option<Vec<Uuid>>,
+    /// Explicitly retain coordinator-local placement in cluster mode.
+    #[serde(default)]
+    pub run_on_coordinator: bool,
     /// Optional manual placement override. `None` uses automatic scheduling.
     pub requested_worker_node_id: Option<Uuid>,
 }
@@ -43,7 +46,6 @@ pub struct CreateAndStartWorkspaceRequest {
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct CreateAndStartWorkspaceResponse {
     pub workspace: Workspace,
-    pub execution_process: ExecutionProcess,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]

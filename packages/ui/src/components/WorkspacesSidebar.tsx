@@ -41,6 +41,11 @@ export interface WorkspacesSidebarWorkspace {
     | 'interrupted'
     | 'indeterminate';
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
+  serverAffinity?: {
+    kind: 'local' | 'automatic' | 'worker' | 'unassigned';
+    worker_hostname: string | null;
+    requested_worker_hostname: string | null;
+  };
 }
 
 export function categorizeWorkspaces(
@@ -196,6 +201,7 @@ function WorkspaceList({
           latestProcessCompletedAt={workspace.latestProcessCompletedAt}
           latestProcessStatus={workspace.latestProcessStatus}
           prStatus={workspace.prStatus}
+          serverAffinity={workspace.serverAffinity}
           onOpenWorkspaceActions={onOpenWorkspaceActions}
           onClick={() => onSelectWorkspace(workspace.id)}
         />
