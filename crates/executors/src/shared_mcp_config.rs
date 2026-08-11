@@ -10,7 +10,9 @@ use ts_rs::TS;
 use crate::{
     executors::{BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor},
     mcp_config::{
-        McpConfig, PRECONFIGURED_MCP_SERVERS, default_slack_stdio_launcher, read_agent_config,
+        McpConfig, PRECONFIGURED_MCP_SERVERS, default_slack_stdio_launcher,
+        has_runtime_route_for_public_url, public_mcp_url_for_runtime, read_agent_config,
+        route_mcp_url_for_runtime,
     },
     profile::{ExecutorConfigs, ExecutorProfileId},
 };
@@ -97,6 +99,9 @@ pub struct SharedMcpServer {
     pub compatibility: Vec<SharedMcpCompatibility>,
     pub auth_mode: SharedMcpAuthMode,
     pub gateway_status: Option<String>,
+    // Presence-only inventory: local URLs and credentials are not serialized.
+    #[serde(default)]
+    pub runtime_route_configured: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -616,6 +621,11 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
                 .iter()
                 .map(|source| assignment_from_source(source, &definition))
                 .collect::<Vec<_>>();
+            let runtime_route_configured = definition
+                .value
+                .get("url")
+                .and_then(Value::as_str)
+                .is_some_and(has_runtime_route_for_public_url);
             servers.push(SharedMcpServer {
                 name,
                 display_name: legacy_display_name,
@@ -632,6 +642,7 @@ pub fn reconcile_snapshots(snapshots: Vec<NativeProfileSnapshot>) -> SharedMcpRe
                 compatibility: compatibility_for_profiles(&profiles, &definition),
                 auth_mode: auth_mode(&definition),
                 gateway_status: None,
+                runtime_route_configured,
             });
         } else {
             let variants = variants
@@ -843,7 +854,7 @@ pub fn canonical_definition(entry: &Value) -> McpServerDefinition {
         return McpServerDefinition {
             transport,
             value: compact_object([
-                ("url", Value::String(url.to_string())),
+                ("url", Value::String(public_mcp_url_for_runtime(url))),
                 (
                     "headers",
                     normalize_string_map(obj, &["headers", "http_headers"]),
@@ -1106,7 +1117,9 @@ pub fn materialize_definition(
             let mut out = Map::new();
             let url = obj
                 .get("url")
-                .cloned()
+                .and_then(Value::as_str)
+                .map(route_mcp_url_for_runtime)
+                .map(Value::String)
                 .unwrap_or(Value::String(String::new()));
             if matches!(
                 executor,

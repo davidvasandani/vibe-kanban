@@ -4,7 +4,7 @@
 //! JSONC (JSON with Comments) is supported with comment preservation using jsonc-parser's CST.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::LazyLock,
 };
@@ -19,6 +19,63 @@ use tokio::fs;
 use ts_rs::TS;
 
 use crate::executors::{CodingAgent, ExecutorError, StandardCodingAgentExecutor};
+
+const MCP_RUNTIME_ROUTES_ENV: &str = "VIBE_MCP_RUNTIME_ROUTES";
+
+fn runtime_routes() -> BTreeMap<String, String> {
+    std::env::var(MCP_RUNTIME_ROUTES_ENV)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<BTreeMap<String, String>>(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Convert a settings-owned public MCP URL to the loopback route made
+/// available by this execution host. The manifest contains URLs only; Access
+/// credential values and references never enter Vibe Kanban state.
+pub fn route_mcp_url_for_runtime(url: &str) -> String {
+    route_mcp_url(url, &runtime_routes())
+}
+
+pub fn has_runtime_route_for_public_url(url: &str) -> bool {
+    runtime_routes().contains_key(url)
+}
+
+fn route_mcp_url(url: &str, routes: &BTreeMap<String, String>) -> String {
+    routes.get(url).cloned().unwrap_or_else(|| url.to_string())
+}
+
+/// Convert an exact deployment-owned loopback route back to its public logical
+/// URL for settings and API read models.
+pub fn public_mcp_url_for_runtime(url: &str) -> String {
+    public_mcp_url(url, &runtime_routes())
+}
+
+fn public_mcp_url(url: &str, routes: &BTreeMap<String, String>) -> String {
+    routes
+        .iter()
+        .find_map(|(public, local)| (local == url).then_some(public.clone()))
+        .unwrap_or_else(|| url.to_string())
+}
+
+/// Apply runtime routing to untyped executor-native MCP entries without
+/// changing any other field. Used at coordinator dispatch so an existing
+/// settings entry is safe before the next explicit settings save.
+pub fn route_mcp_servers_for_runtime(servers: &mut BTreeMap<String, Value>) {
+    route_mcp_servers(servers, &runtime_routes());
+}
+
+fn route_mcp_servers(servers: &mut BTreeMap<String, Value>, routes: &BTreeMap<String, String>) {
+    for entry in servers.values_mut() {
+        let Some(object) = entry.as_object_mut() else {
+            continue;
+        };
+        for key in ["url", "httpUrl"] {
+            if let Some(Value::String(url)) = object.get_mut(key) {
+                *url = route_mcp_url(url, routes);
+            }
+        }
+    }
+}
 
 pub fn mcp_servers_from_config(raw_config: &Value, path: &[String]) -> HashMap<String, Value> {
     let mut current = raw_config;
@@ -1117,6 +1174,61 @@ mod tests {
         );
         assert!(context7.get("type").is_none());
         assert!(context7.get("headers").is_some());
+    }
+
+    #[test]
+    fn runtime_mcp_routes_are_exact_and_reversible() {
+        let routes = BTreeMap::from([(
+            "https://vibe.vasandani.dev/mcp".to_string(),
+            "http://127.0.0.1:18901/mcp".to_string(),
+        )]);
+
+        assert_eq!(
+            route_mcp_url("https://vibe.vasandani.dev/mcp", &routes),
+            "http://127.0.0.1:18901/mcp"
+        );
+        assert_eq!(
+            route_mcp_url("https://vibe.vasandani.dev/mcp/other", &routes),
+            "https://vibe.vasandani.dev/mcp/other"
+        );
+        assert_eq!(
+            public_mcp_url("http://127.0.0.1:18901/mcp", &routes),
+            "https://vibe.vasandani.dev/mcp"
+        );
+        assert_eq!(
+            public_mcp_url(
+                "http://127.0.0.1:3334/mcp-gateway/00000000-0000-0000-0000-000000000001",
+                &routes
+            ),
+            "http://127.0.0.1:3334/mcp-gateway/00000000-0000-0000-0000-000000000001"
+        );
+
+        let mut servers = BTreeMap::from([
+            (
+                "vibe_kanban".to_string(),
+                serde_json::json!({
+                    "url": "https://vibe.vasandani.dev/mcp",
+                    "http_headers": {"Authorization": "Bearer ${VIBE_KANBAN_MCP_TOKEN}"}
+                }),
+            ),
+            (
+                "other".to_string(),
+                serde_json::json!({"url": "https://example.test/mcp"}),
+            ),
+        ]);
+        route_mcp_servers(&mut servers, &routes);
+        assert_eq!(
+            servers["vibe_kanban"]["url"],
+            serde_json::json!("http://127.0.0.1:18901/mcp")
+        );
+        assert_eq!(
+            servers["vibe_kanban"]["http_headers"]["Authorization"],
+            serde_json::json!("Bearer ${VIBE_KANBAN_MCP_TOKEN}")
+        );
+        assert_eq!(
+            servers["other"]["url"],
+            serde_json::json!("https://example.test/mcp")
+        );
     }
 
     #[tokio::test]
