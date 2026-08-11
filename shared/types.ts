@@ -246,7 +246,7 @@ speckit_feature_key: string | null,
  */
 speckit_host_repo_id: string | null, };
 
-export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, 
+export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, placement_state: WorkspacePlacementState, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, 
 /**
  * Which numbered `## Pipeline` stage the execution agent last reported
  * itself as starting (1-based), detected from a `VK-PIPELINE-STAGE: N`

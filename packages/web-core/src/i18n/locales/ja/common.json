@@ -117,6 +117,7 @@
     "notFoundDescription": "このワークスペースは削除されたか、リンクが正しくない可能性があります。",
     "selectToStart": "ワークスペースを選択して開始",
     "draft": "下書き",
+    "creating": "作成中…",
     "viewArchive": "アーカイブを表示",
     "backToActive": "アクティブに戻る",
     "noArchived": "アーカイブされたワークスペースはありません",

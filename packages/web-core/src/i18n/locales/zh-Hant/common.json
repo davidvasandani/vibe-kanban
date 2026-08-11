@@ -117,6 +117,7 @@
     "notFoundDescription": "此工作區可能已被刪除，或連結不正確。",
     "selectToStart": "選擇一個工作區開始",
     "draft": "草稿",
+    "creating": "建立中…",
     "viewArchive": "檢視封存",
     "backToActive": "返回活躍",
     "noArchived": "沒有已封存的工作區",

@@ -4,6 +4,7 @@ import { useJsonPatchWsStream } from '@/shared/hooks/useJsonPatchWsStream';
 import { workspaceSummaryKeys } from '@/shared/hooks/workspaceSummaryKeys';
 import { makeLocalApiRequest } from '@/shared/lib/localApiTransport';
 import { useHostId } from '@/shared/providers/HostIdProvider';
+import { WorkspacePlacementState } from 'shared/types';
 import type {
   WorkspaceWithStatus,
   WorkspaceSummary,
@@ -23,6 +24,7 @@ export interface SidebarWorkspace {
   linesAdded?: number;
   linesRemoved?: number;
   isRunning?: boolean;
+  isCreating?: boolean;
   isPinned?: boolean;
   isArchived?: boolean;
   hasPendingApproval?: boolean;
@@ -75,6 +77,9 @@ function toSidebarWorkspace(
     linesRemoved: summary?.lines_removed ?? undefined,
     // Real data from stream
     isRunning: ws.is_running,
+    isCreating:
+      ws.placement_state === WorkspacePlacementState.reserved ||
+      ws.placement_state === WorkspacePlacementState.provisioning,
     isPinned: ws.pinned,
     isArchived: ws.archived,
     // Additional data from summary

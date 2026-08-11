@@ -72,6 +72,7 @@ pub struct WorkspaceWithStatus {
     pub workspace: Workspace,
     pub is_running: bool,
     pub is_errored: bool,
+    pub placement_state: WorkspacePlacementState,
 }
 
 impl std::ops::Deref for WorkspaceWithStatus {
@@ -802,6 +803,7 @@ impl Workspace {
                 w.current_pipeline_stage,
                 w.speckit_feature_key,
                 w.speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                w.placement_state AS "placement_state!: WorkspacePlacementState",
 
                 CASE WHEN EXISTS (
                     SELECT 1
@@ -850,6 +852,7 @@ impl Workspace {
                 },
                 is_running: rec.is_running != 0,
                 is_errored: rec.is_errored != 0,
+                placement_state: rec.placement_state,
             })
             // Apply archived filter if provided
             .filter(|ws| archived.is_none_or(|a| ws.workspace.archived == a))
@@ -902,6 +905,7 @@ impl Workspace {
                 w.current_pipeline_stage,
                 w.speckit_feature_key,
                 w.speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                w.placement_state AS "placement_state!: WorkspacePlacementState",
 
                 CASE WHEN EXISTS (
                     SELECT 1
@@ -953,6 +957,7 @@ impl Workspace {
             },
             is_running: rec.is_running != 0,
             is_errored: rec.is_errored != 0,
+            placement_state: rec.placement_state,
         };
 
         if ws.workspace.name.is_none()
