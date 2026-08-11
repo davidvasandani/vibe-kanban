@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::IpAddr,
     sync::{Arc, LazyLock, OnceLock},
     time::Duration,
@@ -31,6 +31,15 @@ mod proxy;
 static SECRETS: OnceLock<Result<McpGatewaySecretStore, String>> = OnceLock::new();
 static REFRESH_LOCKS: LazyLock<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+static ALLOWED_WORKER_PEERS: LazyLock<HashSet<IpAddr>> = LazyLock::new(|| {
+    services::services::cluster::config::parse_worker_source_addresses(
+        &std::env::var(services::services::cluster::config::WORKER_SOURCE_ADDRESSES_ENV)
+            .unwrap_or_default(),
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .collect()
+});
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct StoredCredentials {
@@ -72,9 +81,10 @@ async fn proxy_request(
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     request: Request,
 ) -> Response {
-    // The capability is defense-in-depth for local process isolation; never
-    // expose this route to a non-loopback peer even if the main UI listener is.
-    if !peer.ip().is_loopback() {
+    // The capability is defense-in-depth for process isolation. Cluster workers
+    // are admitted only when deployment names their exact source address; the
+    // public listener and arbitrary LAN peers retain the fail-closed 404.
+    if !gateway_peer_allowed(peer.ip(), &ALLOWED_WORKER_PEERS) {
         return StatusCode::NOT_FOUND.into_response();
     }
     let Some(token) = bearer(request.headers()) else {
@@ -139,6 +149,10 @@ async fn proxy_request(
         }
         Err(_) => first,
     }
+}
+
+fn gateway_peer_allowed(peer: IpAddr, allowed_workers: &HashSet<IpAddr>) -> bool {
+    peer.is_loopback() || allowed_workers.contains(&peer)
 }
 
 async fn refresh_credentials(
@@ -489,4 +503,45 @@ fn acceptable_upstream(url: &reqwest::Url) -> bool {
             host.eq_ignore_ascii_case("localhost")
                 || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_peers_are_limited_to_loopback_and_exact_configured_workers() {
+        let allowed = HashSet::from(["172.16.100.103".parse().unwrap()]);
+
+        assert!(gateway_peer_allowed("127.0.0.1".parse().unwrap(), &allowed));
+        assert!(gateway_peer_allowed("::1".parse().unwrap(), &allowed));
+        assert!(gateway_peer_allowed(
+            "172.16.100.103".parse().unwrap(),
+            &allowed
+        ));
+        assert!(!gateway_peer_allowed(
+            "172.16.100.104".parse().unwrap(),
+            &allowed
+        ));
+        assert!(!gateway_peer_allowed(
+            "198.51.100.10".parse().unwrap(),
+            &allowed
+        ));
+    }
+
+    #[test]
+    fn worker_peer_allowlist_uses_explicit_source_addresses() {
+        assert_eq!(
+            services::services::cluster::config::parse_worker_source_addresses(
+                "172.16.100.103,172.16.100.104"
+            )
+            .unwrap()
+            .into_iter()
+            .collect::<HashSet<_>>(),
+            HashSet::from([
+                "172.16.100.103".parse().unwrap(),
+                "172.16.100.104".parse().unwrap()
+            ])
+        );
+    }
 }
