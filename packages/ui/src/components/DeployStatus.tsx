@@ -58,6 +58,7 @@ export interface DeployStatusProps {
   deploymentTimestamp?: string | null;
   className?: string;
   alwaysShowAge?: boolean;
+  stacked?: boolean;
 }
 
 export function DeployStatus({
@@ -65,6 +66,7 @@ export function DeployStatus({
   deploymentTimestamp,
   className,
   alwaysShowAge = false,
+  stacked = false,
 }: DeployStatusProps) {
   const [nowMs, setNowMs] = useState(Date.now());
 
@@ -93,17 +95,21 @@ export function DeployStatus({
         <span
           className={cn(
             'shrink-0',
-            alwaysShowAge ? 'inline' : 'hidden min-[390px]:inline'
+            stacked
+              ? 'text-[8px]'
+              : alwaysShowAge
+                ? 'inline'
+                : 'hidden min-[390px]:inline'
           )}
         >
-          {' '}
-          · {age.compact}
+          {stacked ? `${age.compact} ago` : ` · ${age.compact}`}
         </span>
       )}
     </>
   );
   const classes = cn(
-    'flex min-w-0 max-w-20 items-center font-ibm-plex-mono text-[9px] leading-none text-low',
+    'flex min-w-0 max-w-20 font-ibm-plex-mono text-[9px] leading-none text-low',
+    stacked ? 'flex-col items-start gap-0.5' : 'items-center',
     className
   );
 

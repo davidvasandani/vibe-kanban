@@ -377,6 +377,7 @@ export function Navbar({
             <DeployStatus
               version={appVersion ?? null}
               deploymentTimestamp={deploymentTimestamp}
+              stacked
               className="mr-0.5"
             />
             <SyncErrorIndicator errors={syncErrors} />
