@@ -1,6 +1,6 @@
 use std::{
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::{
         Arc,
@@ -93,7 +93,13 @@ impl WorkerConfig {
             });
         }
         let coordinator_url = required(WORKER_COORDINATOR_URL_ENV)?;
-        if !(coordinator_url.starts_with("http://") || coordinator_url.starts_with("https://")) {
+        let valid_coordinator_url = reqwest::Url::parse(&coordinator_url).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+        });
+        if !valid_coordinator_url {
             return Err(WorkerConfigError::Invalid {
                 name: WORKER_COORDINATOR_URL_ENV,
                 value: coordinator_url,
@@ -191,16 +197,39 @@ pub async fn run(config: WorkerConfig, shutdown: CancellationToken) -> anyhow::R
     run_with_drain(config, shutdown, Arc::new(AtomicBool::new(false))).await
 }
 
+async fn reset_mcp_config_root(root: &Path) -> std::io::Result<()> {
+    match tokio::fs::remove_dir_all(root).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    tokio::fs::create_dir_all(root).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        tokio::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).await?;
+    }
+    Ok(())
+}
+
 pub async fn run_with_drain(
     config: WorkerConfig,
     shutdown: CancellationToken,
     admission_draining: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let path_authority = path_authority::PathAuthority::new(&config.shared_root)?;
+    let coordinator_url = reqwest::Url::parse(&config.coordinator_url)?;
+    let mcp_config_root = config.state_dir.join("mcp-config");
+    // Recovery interrupts formerly active jobs instead of resuming them, so no
+    // execution owns a scoped native config when this process starts.
+    reset_mcp_config_root(&mcp_config_root).await?;
     let supervisor = execution::ExecutionSupervisor::with_recovery_and_drain(
         path_authority.clone(),
         recovery::RecoveryStore::new(&config.state_dir).await?,
         admission_draining.clone(),
+        mcp_config_root,
+        coordinator_url,
     )
     .await?;
     let coordinator_task = tokio::spawn(server::registration_loop(
@@ -343,5 +372,61 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn rejects_malformed_or_non_http_coordinator_urls() {
+        let worker_id = Uuid::new_v4().to_string();
+        let coordinator_id = Uuid::new_v4().to_string();
+        for coordinator_url in [
+            "http://",
+            "not-a-url",
+            "file:///tmp/coordinator",
+            "http://user:secret@coordinator.test:3334",
+        ] {
+            assert!(matches!(
+                parse(&[
+                    (WORKER_NODE_ID_ENV, &worker_id),
+                    (WORKER_COORDINATOR_URL_ENV, coordinator_url),
+                    (WORKER_COORDINATOR_ID_ENV, &coordinator_id),
+                    (WORKER_SIGNING_KEY_FILE_ENV, "/run/credentials/worker.key"),
+                    (
+                        COORDINATOR_PUBLIC_KEY_FILE_ENV,
+                        "/run/credentials/coordinator.pub"
+                    ),
+                    (WORKER_EXPECTED_UID_ENV, "1000"),
+                    (WORKER_EXPECTED_GID_ENV, "100"),
+                ]),
+                Err(WorkerConfigError::Invalid {
+                    name: WORKER_COORDINATOR_URL_ENV,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_startup_removes_stale_scoped_mcp_configs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("mcp-config");
+        let stale = root.join(Uuid::new_v4().to_string()).join("codex");
+        tokio::fs::create_dir_all(&stale).await.unwrap();
+        tokio::fs::write(stale.join("config.toml"), "bearer = 'stale'")
+            .await
+            .unwrap();
+
+        reset_mcp_config_root(&root).await.unwrap();
+
+        assert!(root.is_dir());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
     }
 }

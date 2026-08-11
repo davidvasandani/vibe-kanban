@@ -1,6 +1,6 @@
 # Cluster MCP runtime connectivity
 
-Contributing tasks: `VAS-356`, `VAS-375`
+Contributing tasks: `VAS-356`, `VAS-375`, `268b-debug-vk-error`
 
 An MCP configuration can be valid, persisted, and successfully tested by the
 coordinator while remaining unusable by an executor on a worker. Treat these as
@@ -21,6 +21,37 @@ Workers already have an authoritative coordinator URL, so expose that same value
 under the MCP's deterministic `VIBE_BACKEND_URL` override. Derive both variables
 from one deployment option to prevent drift; do not copy a literal URL into an
 agent catalog entry.
+
+The same rule applies to settings-owned shared gateway URLs. The coordinator
+persists a loopback `/mcp-gateway/<connection-id>` URL because that is correct
+for local executors. During remote materialization, the worker replaces only a
+parsed loopback gateway authority with its configured coordinator authority;
+direct MCP URLs and every non-URL field remain unchanged. The coordinator
+gateway remains fail-closed to arbitrary remote peers: deployment supplies the
+workers' explicit outbound source IP addresses, the server admits only those
+addresses plus loopback, and the unguessable per-connection bearer is still
+required. Direct-LAN deployments may derive literal worker hosts as the default;
+NAT, proxy, load-balancer, and hostname deployments must declare the observed
+source addresses separately from dispatch destinations.
+
+## Scoped agent homes must satisfy vendor path trust
+
+Configuration isolation does not require a general temporary directory. Codex
+refuses to create PATH helper aliases when `CODEX_HOME` is beneath `/tmp`, so a
+remote execution's scoped home lives under the worker's private state directory
+(`worker.stateDir/mcp-config/<execution-id>/codex` in the Nix deployment). The
+execution UUID still isolates concurrent configs, the prepared-config owner
+still removes that exact child at teardown, and the global Codex home remains
+the source of linked authentication/runtime assets rather than a write target.
+Because a crash bypasses teardown and recovery interrupts rather than resumes
+old jobs, worker startup clears and recreates the dedicated `mcp-config` root
+with owner-only permissions before accepting executions.
+
+Treat repository skill errors separately from scoped-home routing. A skill must
+start and end YAML frontmatter with `---`; commit `efe4dd7e` fixed the historical
+`n8n-browser-automation` copies. An error naming an older workspace that lacks
+that commit requires updating or recreating that workspace, not weakening the
+skill parser or silently rewriting unrelated worktrees.
 
 ## Connectivity tests must run where executors run
 

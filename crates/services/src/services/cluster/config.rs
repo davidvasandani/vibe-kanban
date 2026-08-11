@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, time::Duration};
+use std::{env, net::IpAddr, path::PathBuf, time::Duration};
 
 use thiserror::Error;
 use url::Url;
@@ -9,6 +9,7 @@ pub const COORDINATOR_ID_ENV: &str = "VK_CLUSTER_COORDINATOR_ID";
 pub const SHARED_ROOT_ENV: &str = "VK_CLUSTER_SHARED_ROOT";
 pub const EXPECTED_FILESYSTEM_ID_ENV: &str = "VK_CLUSTER_EXPECTED_FILESYSTEM_ID";
 pub const WORKER_ENDPOINTS_ENV: &str = "VK_CLUSTER_WORKER_ENDPOINTS";
+pub const WORKER_SOURCE_ADDRESSES_ENV: &str = "VK_CLUSTER_WORKER_SOURCE_ADDRESSES";
 pub const HEARTBEAT_INTERVAL_SECONDS_ENV: &str = "VK_CLUSTER_HEARTBEAT_INTERVAL_SECONDS";
 pub const LEASE_DURATION_SECONDS_ENV: &str = "VK_CLUSTER_LEASE_DURATION_SECONDS";
 pub const LOAD_WEIGHT_ENV: &str = "VK_CLUSTER_LOAD_WEIGHT";
@@ -43,6 +44,7 @@ pub struct ClusterConfig {
     pub shared_root: PathBuf,
     pub expected_filesystem_id: String,
     pub worker_endpoints: Vec<Url>,
+    pub worker_source_addresses: Vec<IpAddr>,
     pub heartbeat_interval: Duration,
     pub lease_duration: Duration,
     pub scheduling_weights: SchedulingWeights,
@@ -56,6 +58,7 @@ impl Default for ClusterConfig {
             shared_root: PathBuf::from(DEFAULT_SHARED_ROOT),
             expected_filesystem_id: DEFAULT_EXPECTED_FILESYSTEM_ID.to_owned(),
             worker_endpoints: Vec::new(),
+            worker_source_addresses: Vec::new(),
             heartbeat_interval: Duration::from_secs(DEFAULT_HEARTBEAT_INTERVAL_SECONDS),
             lease_duration: Duration::from_secs(DEFAULT_LEASE_DURATION_SECONDS),
             scheduling_weights: SchedulingWeights::default(),
@@ -110,6 +113,9 @@ impl ClusterConfig {
         }
         if let Some(value) = nonempty(lookup(WORKER_ENDPOINTS_ENV)) {
             config.worker_endpoints = parse_worker_endpoints(&value)?;
+        }
+        if let Some(value) = nonempty(lookup(WORKER_SOURCE_ADDRESSES_ENV)) {
+            config.worker_source_addresses = parse_worker_source_addresses(&value)?;
         }
         if let Some(value) = nonempty(lookup(HEARTBEAT_INTERVAL_SECONDS_ENV)) {
             config.heartbeat_interval =
@@ -207,6 +213,23 @@ fn parse_worker_endpoints(value: &str) -> Result<Vec<Url>, ClusterConfigError> {
                     reason: "expected a comma-separated list of absolute HTTP(S) URLs",
                 })
             }
+        })
+        .collect()
+}
+
+pub fn parse_worker_source_addresses(value: &str) -> Result<Vec<IpAddr>, ClusterConfigError> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|address| !address.is_empty())
+        .map(|address| {
+            address
+                .parse()
+                .map_err(|_| ClusterConfigError::InvalidValue {
+                    name: WORKER_SOURCE_ADDRESSES_ENV,
+                    value: address.to_owned(),
+                    reason: "expected a comma-separated list of IP addresses",
+                })
         })
         .collect()
 }

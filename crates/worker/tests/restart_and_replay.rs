@@ -22,10 +22,14 @@ async fn restart_reports_active_job_interrupted_and_keeps_terminal_job() {
     store.save(&active).await.unwrap();
     store.save(&completed).await.unwrap();
 
-    let supervisor =
-        ExecutionSupervisor::with_recovery(PathAuthority::new(&shared).unwrap(), store)
-            .await
-            .unwrap();
+    let supervisor = ExecutionSupervisor::with_recovery(
+        PathAuthority::new(&shared).unwrap(),
+        store,
+        temp.path().join("state/mcp-config"),
+        reqwest::Url::parse("http://coordinator:3334").unwrap(),
+    )
+    .await
+    .unwrap();
     let inventory = supervisor.inventory().await;
 
     let active_after_restart = inventory

@@ -103,6 +103,8 @@ pub enum ExecutionError {
 #[derive(Clone)]
 pub struct ExecutionSupervisor {
     path_authority: PathAuthority,
+    mcp_config_root: PathBuf,
+    coordinator_url: reqwest::Url,
     jobs: Arc<RwLock<HashMap<Uuid, Arc<WorkerJob>>>>,
     journal_capacity: usize,
     recovery_store: Option<RecoveryStore>,
@@ -139,6 +141,49 @@ impl Drop for PreparedMcpConfig {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.execution_root);
     }
+}
+
+fn runtime_mcp_servers(
+    snapshot: &McpConfigSnapshot,
+    coordinator_url: &reqwest::Url,
+) -> HashMap<String, serde_json::Value> {
+    snapshot
+        .servers
+        .iter()
+        .map(|(name, entry)| {
+            let mut entry = entry.clone();
+            if let Some(url) = entry.get("url").and_then(serde_json::Value::as_str)
+                && let Some(runtime_url) = runtime_gateway_url(url, coordinator_url)
+            {
+                entry["url"] = serde_json::Value::String(runtime_url);
+            }
+            (name.clone(), entry)
+        })
+        .collect()
+}
+
+fn runtime_gateway_url(configured: &str, coordinator_url: &reqwest::Url) -> Option<String> {
+    let configured = reqwest::Url::parse(configured).ok()?;
+    if !matches!(configured.scheme(), "http" | "https")
+        || !configured.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        })
+        || !configured.path().starts_with("/mcp-gateway/")
+    {
+        return None;
+    }
+
+    let mut runtime = coordinator_url.clone();
+    let base_path = runtime.path().trim_end_matches('/').to_owned();
+    runtime.set_path(&format!("{base_path}{}", configured.path()));
+    runtime.set_query(configured.query());
+    runtime.set_fragment(configured.fragment());
+    Some(runtime.into())
 }
 
 fn prepare_scoped_home(
@@ -268,13 +313,18 @@ impl ExecutionSupervisor {
         job.workspace_id == workspace_id && job.state().await == JobState::Running
     }
 
+    #[cfg(test)]
     pub fn new(path_authority: PathAuthority) -> Self {
         Self::with_journal_capacity(path_authority, DEFAULT_JOURNAL_CAPACITY)
     }
 
+    #[cfg(test)]
     pub fn with_journal_capacity(path_authority: PathAuthority, journal_capacity: usize) -> Self {
+        let mcp_config_root = std::env::temp_dir().join("vibe-kanban-worker-tests/mcp-config");
         Self {
             path_authority,
+            mcp_config_root,
+            coordinator_url: reqwest::Url::parse("http://127.0.0.1:3334").unwrap(),
             jobs: Arc::new(RwLock::new(HashMap::new())),
             journal_capacity,
             recovery_store: None,
@@ -283,14 +333,30 @@ impl ExecutionSupervisor {
         }
     }
 
+    #[cfg(test)]
+    fn with_runtime_config(
+        path_authority: PathAuthority,
+        mcp_config_root: PathBuf,
+        coordinator_url: reqwest::Url,
+    ) -> Self {
+        let mut supervisor = Self::new(path_authority);
+        supervisor.mcp_config_root = mcp_config_root;
+        supervisor.coordinator_url = coordinator_url;
+        supervisor
+    }
+
     pub async fn with_recovery(
         path_authority: PathAuthority,
         recovery_store: RecoveryStore,
+        mcp_config_root: PathBuf,
+        coordinator_url: reqwest::Url,
     ) -> Result<Self, ExecutionError> {
         Self::with_recovery_and_drain(
             path_authority,
             recovery_store,
             Arc::new(AtomicBool::new(false)),
+            mcp_config_root,
+            coordinator_url,
         )
         .await
     }
@@ -299,9 +365,13 @@ impl ExecutionSupervisor {
         path_authority: PathAuthority,
         recovery_store: RecoveryStore,
         admission_draining: Arc<AtomicBool>,
+        mcp_config_root: PathBuf,
+        coordinator_url: reqwest::Url,
     ) -> Result<Self, ExecutionError> {
         let supervisor = Self {
             path_authority,
+            mcp_config_root,
+            coordinator_url,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             journal_capacity: DEFAULT_JOURNAL_CAPACITY,
             recovery_store: Some(recovery_store.clone()),
@@ -490,10 +560,7 @@ impl ExecutionSupervisor {
                 .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
                     executor: snapshot.executor.clone(),
                 })?;
-        let execution_root = std::env::temp_dir()
-            .join("vibe-kanban")
-            .join("mcp-config")
-            .join(execution_id.to_string());
+        let execution_root = self.mcp_config_root.join(execution_id.to_string());
         let (source_home, scoped_home, target_relative, environment) =
             if config.executor == BaseCodingAgent::Codex {
                 let source_home =
@@ -551,7 +618,7 @@ impl ExecutionSupervisor {
             environment,
             agent: agent.clone(),
         };
-        let servers = snapshot.servers.clone().into_iter().collect();
+        let servers = runtime_mcp_servers(snapshot, &self.coordinator_url);
         write_coding_agent_mcp_servers_to_path(
             agent,
             &source_config,
@@ -609,7 +676,7 @@ impl ExecutionSupervisor {
             };
             (prepared.agent.clone(), prepared.target_config.clone())
         };
-        let servers = snapshot.servers.clone().into_iter().collect();
+        let servers = runtime_mcp_servers(snapshot, &self.coordinator_url);
         if write_coding_agent_mcp_servers_to_path(&agent, &target_config, &target_config, &servers)
             .await
             .is_err()
@@ -1305,7 +1372,12 @@ mod tests {
         let workspace = shared.join("workspaces").join(Uuid::new_v4().to_string());
         fs::create_dir_all(&workspace).unwrap();
         let authority = PathAuthority::new(&shared).unwrap();
-        (temp, ExecutionSupervisor::new(authority), workspace)
+        let supervisor = ExecutionSupervisor::with_runtime_config(
+            authority,
+            temp.path().join("worker-state/mcp-config"),
+            reqwest::Url::parse("http://coordinator.internal:3334/base").unwrap(),
+        );
+        (temp, supervisor, workspace)
     }
 
     fn dispatch(workspace: &Path, digest: &str, script: &str) -> ExecutionDispatch {
@@ -1379,6 +1451,77 @@ mod tests {
         }
     }
 
+    #[test]
+    fn runtime_gateway_urls_use_the_worker_coordinator_authority() {
+        let coordinator = reqwest::Url::parse("http://coordinator.internal:3334/base/").unwrap();
+        let snapshot = McpConfigSnapshot {
+            executor: BaseCodingAgent::Codex.to_string(),
+            servers: BTreeMap::from([
+                (
+                    "ipv4".into(),
+                    json!({
+                        "url": "http://127.0.0.1:3334/mcp-gateway/connection-a",
+                        "http_headers": {"Authorization": "Bearer fixture-capability"}
+                    }),
+                ),
+                (
+                    "ipv6".into(),
+                    json!({"url": "http://[::1]:3334/mcp-gateway/connection-b"}),
+                ),
+                (
+                    "direct".into(),
+                    json!({"url": "https://mcp.example.test/mcp"}),
+                ),
+            ]),
+        };
+
+        let servers = runtime_mcp_servers(&snapshot, &coordinator);
+        assert_eq!(
+            servers["ipv4"]["url"],
+            "http://coordinator.internal:3334/base/mcp-gateway/connection-a"
+        );
+        assert_eq!(
+            servers["ipv4"]["http_headers"]["Authorization"],
+            "Bearer fixture-capability"
+        );
+        assert_eq!(
+            servers["ipv6"]["url"],
+            "http://coordinator.internal:3334/base/mcp-gateway/connection-b"
+        );
+        assert_eq!(servers["direct"]["url"], "https://mcp.example.test/mcp");
+    }
+
+    #[test]
+    fn gateway_adapter_preserves_non_loopback_and_unrecognized_urls() {
+        let coordinator = reqwest::Url::parse("https://coordinator.example.test").unwrap();
+        for configured in [
+            "https://mcp.example.test/mcp-gateway/connection",
+            "http://127.0.0.1:3334/not-the-gateway",
+            "not a URL",
+        ] {
+            assert_eq!(runtime_gateway_url(configured, &coordinator), None);
+        }
+    }
+
+    #[test]
+    fn execution_scoped_mcp_roots_are_uuid_isolated_under_worker_state() {
+        let (temp, supervisor, _workspace) = fixture();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let expected_root = temp.path().join("worker-state/mcp-config");
+
+        assert_eq!(supervisor.mcp_config_root, expected_root);
+        assert_ne!(
+            supervisor.mcp_config_root.join(first.to_string()),
+            supervisor.mcp_config_root.join(second.to_string())
+        );
+        assert!(
+            !supervisor
+                .mcp_config_root
+                .starts_with(std::env::temp_dir().join("vibe-kanban"))
+        );
+    }
+
     #[tokio::test]
     async fn refresh_replaces_only_scoped_mcp_snapshot_and_preserves_live_job() {
         let (_temp, supervisor, _workspace) = fixture();
@@ -1430,7 +1573,10 @@ mod tests {
                     executor: BaseCodingAgent::Codex.to_string(),
                     servers: BTreeMap::from([(
                         "snapshot-b".into(),
-                        json!({"command": "new", "args": ["--tools-list"]}),
+                        json!({
+                            "url": "http://127.0.0.1:3334/mcp-gateway/connection-b",
+                            "http_headers": {"Authorization": "Bearer fixture-capability"}
+                        }),
                     )]),
                 },
             )
@@ -1443,6 +1589,7 @@ mod tests {
         assert!(config.contains("model = \"preserved\""));
         assert!(config.contains("snapshot-b"));
         assert!(!config.contains("snapshot-a"));
+        assert!(config.contains("http://coordinator.internal:3334/base/mcp-gateway/connection-b"));
         assert_eq!(
             fs::read_to_string(scoped_home.join("history.jsonl")).unwrap(),
             "conversation-state"
@@ -1675,6 +1822,8 @@ mod tests {
             PathAuthority::new(temp.path().join("shared")).unwrap(),
             RecoveryStore::new(temp.path().join("state")).await.unwrap(),
             draining.clone(),
+            temp.path().join("state/mcp-config"),
+            reqwest::Url::parse("http://coordinator:3334").unwrap(),
         )
         .await
         .unwrap();
@@ -1766,10 +1915,14 @@ mod tests {
         store.save(&active).await.unwrap();
         store.save(&completed).await.unwrap();
 
-        let supervisor =
-            ExecutionSupervisor::with_recovery(PathAuthority::new(&shared).unwrap(), store)
-                .await
-                .unwrap();
+        let supervisor = ExecutionSupervisor::with_recovery(
+            PathAuthority::new(&shared).unwrap(),
+            store,
+            temp.path().join("state/mcp-config"),
+            reqwest::Url::parse("http://coordinator:3334").unwrap(),
+        )
+        .await
+        .unwrap();
         let inventory = supervisor.inventory().await;
         let recovered_active = inventory
             .iter()
