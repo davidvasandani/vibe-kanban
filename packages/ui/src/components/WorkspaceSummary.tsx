@@ -173,7 +173,8 @@ export function WorkspaceSummary({
                   {t('workspaces.creating', { defaultValue: 'Creating…' })}
                 </span>
               </>
-            ) : isRunning &&
+            ) : (
+              isRunning &&
               (hasPendingApproval ? (
                 <HandIcon
                   className="size-icon-xs text-brand shrink-0"
@@ -181,7 +182,8 @@ export function WorkspaceSummary({
                 />
               ) : (
                 <RunningDots />
-              ))}
+              ))
+            )}
 
             {/* Unseen activity indicator (only when not running and not failed) */}
             {hasUnseenActivity && !isRunning && !isFailed && (

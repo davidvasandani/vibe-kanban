@@ -48,9 +48,7 @@ export interface WorkspacesSidebarWorkspace {
   };
 }
 
-export function categorizeWorkspaces(
-  workspaces: WorkspacesSidebarWorkspace[]
-) {
+export function categorizeWorkspaces(workspaces: WorkspacesSidebarWorkspace[]) {
   // Provisioning belongs beside active runs so it stays visible throughout
   // creation instead of disappearing into a collapsed Idle section.
   const needsAttention = (workspace: WorkspacesSidebarWorkspace) =>
@@ -260,8 +258,10 @@ export function WorkspacesSidebar({
   };
 
   // Categorize workspaces for accordion layout
-  const { raisedHandWorkspaces, idleWorkspaces, runningWorkspaces } =
-    useMemo(() => categorizeWorkspaces(workspaces), [workspaces]);
+  const { raisedHandWorkspaces, idleWorkspaces, runningWorkspaces } = useMemo(
+    () => categorizeWorkspaces(workspaces),
+    [workspaces]
+  );
 
   const headerActions: SectionAction[] = [
     ...(onOpenCarousel
