@@ -47,6 +47,6 @@ may run together within their layer.
 - [x] T009 Update `docs/knowledge-base/` with the reusable subscribe-before-
   snapshot stream handoff rule, tag it `vk/3488-fix-stale-execut`, refresh
   `docs/knowledge-base/INDEX.md`, and commit the knowledge base (depends on T008).
-- [ ] T010 Commit remaining implementation and documentation intentionally,
+- [x] T010 Commit remaining implementation and documentation intentionally,
   open a pull request against the recorded base branch, pass required checks,
   and merge it (depends on T009).
