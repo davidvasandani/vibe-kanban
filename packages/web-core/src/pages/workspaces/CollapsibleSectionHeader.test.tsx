@@ -72,6 +72,22 @@ describe('CollapsibleSectionHeader flexible sizing', () => {
     expect(sectionRoot().classList).not.toContain('flex-none');
   });
 
+  it('keeps an expanded intrinsic section at its content height', () => {
+    act(() => {
+      root.render(
+        <CollapsibleSectionHeader title="Affinity" intrinsicHeight>
+          <div>Affinity controls</div>
+        </CollapsibleSectionHeader>
+      );
+    });
+
+    expect(sectionRoot().classList).toContain('flex-none');
+    expect(sectionRoot().classList).toContain('h-auto');
+    expect(sectionRoot().classList).not.toContain('h-full');
+    expect(sectionRoot().classList).not.toContain('flex-1');
+    expect(sectionRoot().textContent).toContain('Affinity controls');
+  });
+
   it('keeps a non-collapsible section at its intrinsic height', () => {
     act(() => {
       root.render(

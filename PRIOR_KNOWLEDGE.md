@@ -1,48 +1,48 @@
-# Prior knowledge: mobile workspace right drawer
+# Prior Knowledge: Right Drawer Section Spacing
 
-Relevant project knowledge is not empty.
+The project knowledge base is not empty. The following pages are directly
+relevant to this task.
 
-## Matches
+## `wiki/flexible-collapsible-panel-stacks.md`
 
-### `wiki/flexible-collapsible-panel-stacks.md`
+- `RightSidebar` is a bounded vertical flex stack shared by the desktop drawer
+  and mobile Sidebar tab.
+- `CollapsibleSectionHeader` owns live expansion state. Callers opt into
+  remaining-height participation with `fillAvailableSpace`; an expanded opted-in
+  section receives `flex-1 min-h-0`, while a collapsed or non-collapsible
+  section is intrinsic.
+- The complete `min-h-0` chain and body-level `overflow-auto` are necessary for
+  panels whose content should grow and scroll. The outer drawer retains
+  vertical overflow as a short-window fallback.
+- Regression coverage should assert rendered sizing classes because JSDOM
+  cannot calculate real layout.
 
-- `RightSidebar` is intentionally shared between the desktop workspace drawer
-  and the mobile Git tab.
-- Mobile must reuse that composition; desktop-only chrome must be enabled by
-  the desktop mount instead of being added unconditionally to the shared
-  component.
-- The drawer owns a bounded `min-h-0` flex chain and an outer vertical overflow
-  fallback. Access changes must not disturb those sizing and scrolling rules.
+## `docs/knowledge-base/workspace-affinity-migration.md`
 
-### `wiki/workspace-context-bar-responsive-visibility.md`
+- The expanded Server Affinity body deliberately uses a two-column grid with
+  `auto` and `minmax(0, 1fr)` columns so labels stay associated with values and
+  controls can shrink at mobile widths.
+- Collapsed affinity context comes from the workspace summary and must remain
+  in a bounded, truncating header item so the caret stays usable.
+- The existing compact body layout is therefore correct; the excessive blank
+  space comes from the section's participation in the parent flex stack, not
+  from its internal row grid.
 
-- The responsive workspace layout is selected by `useIsMobile()` at the
-  project's 767px breakpoint; physical-device detection is not authoritative
-  for layout chrome.
-- Mobile already exposes workspace-adjacent destinations as navbar tabs.
-  Therefore the existing tab architecture is the appropriate access point for
-  the right drawer, rather than duplicating desktop controls or adding a new
-  floating context bar.
-- Layout-specific policy belongs in the workspace/container composition while
-  shared presentational components should remain broadly reusable.
+## `docs/knowledge-base/nested-flex-scroll-containment.md`
 
-### `wiki/workspace-navbar-breadcrumbs.md`
+- Flex growth and `min-h-0` should remain on content panels that need to share
+  bounded height and scroll.
+- Layout regression tests should protect class contracts at stable component
+  boundaries rather than rely on pixel measurements in JSDOM.
 
-- `NavbarContainer` is the stateful boundary between workspace context and the
-  shared `Navbar` presentation.
-- Async workspace identity can be temporarily unavailable, so a drawer affordance
-  should not assume selected-workspace data is always ready.
+## Consequences for This Task
 
-## Consequences for this task
-
-1. Keep the existing `git` mobile-tab state identifier so persisted preferences
-   and `WorkspacesLayout` routing remain compatible.
-2. Make the tab visibly and accessibly describe the right sidebar rather than
-   introducing a second drawer instance or a new visibility store.
-3. Preserve `RightSidebar`'s flex/overflow composition and desktop-only chrome
-   contract.
-4. Test at the shared navbar boundary for control semantics and at the workspace
-   layout boundary only where necessary to prove the existing drawer mount is
-   selected.
-5. Use responsive layout state, not user-agent detection, for any conditional
-   behavior.
+1. Keep Server Affinity's internal grid unchanged.
+2. Make fill-available-space participation a per-section composition decision;
+   Server Affinity should be intrinsic when expanded, while content panels keep
+   flexible growth.
+3. Do not duplicate disclosure state in `RightSidebar` or alter the shared
+   primitive's state ownership.
+4. Preserve the drawer's bounded flex/overflow chain for desktop and mobile.
+5. Add rendered-DOM coverage at the `RightSidebar` composition boundary to
+   prevent compact sections from regaining `flex-1` sizing.

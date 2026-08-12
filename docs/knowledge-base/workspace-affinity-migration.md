@@ -1,6 +1,7 @@
 # Workspace affinity migration
 
-Contributing tasks: `9a64-vk-workspace-aff`, `61a3-server-affinity`
+Contributing tasks: `9a64-vk-workspace-aff`, `61a3-server-affinity`,
+`vk/d80e-fix-the-spacing`
 
 Workspace affinity is both a placement policy and a resolved worker. Keep those concepts
 separate: automatic placement may already resolve to the worker an operator later pins,
@@ -29,3 +30,13 @@ Keep dynamic header metadata in its own bounded, truncating flex item so the dis
 caret remains usable. In the expanded body, align labels and controls with a two-column grid
 (`auto` plus `minmax(0, 1fr)`) instead of independent `justify-between` rows; this preserves
 label/value association and lets selectors shrink without overflow.
+
+Compact control sections must also opt out of the right drawer's remaining-height
+sharing. `CollapsibleSectionHeader` has three distinct sizing contracts: opted-in
+expanded panels use `flex-1 min-h-0`, an explicit intrinsic mode uses `flex-none
+h-auto`, and the omitted/default mode retains legacy `h-full min-h-0` behavior.
+Passing a false fill flag is therefore not enough to make a section intrinsic.
+Express the policy per section in `RightSidebar`, use intrinsic sizing for Server
+Affinity, and keep content-heavy Git, logs, preview, metrics, terminal, and notes
+panels flexible. Test the real primitive's rendered root classes: a prop-forwarding
+mock cannot detect a full-height default that recreates the visual gap.
