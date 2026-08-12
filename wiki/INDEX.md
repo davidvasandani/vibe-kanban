@@ -153,4 +153,6 @@ contributed to it.
   — How bounded vertical panel stacks let expanded collapsibles share remaining
   height: expansion-owned flex participation, the complete `min-h-0` chain,
   content-scroll ownership, the outer short-window header-scroll fallback, and
-  desktop-only fixed chrome in a drawer component also reused on mobile.
+  desktop-only fixed chrome in a drawer component also reused on mobile; plus
+  discoverable mobile access, stable persisted tab identifiers, truthful button
+  semantics, and route-owned availability during async workspace loading.
