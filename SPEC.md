@@ -1,47 +1,71 @@
-# Fix Right Drawer Section Spacing
+# Fix Toolbar — Technical Specification
+
+## Summary
+
+Improve the mobile workspace navbar so the workspace tool tabs use the available
+horizontal space instead of remaining a tightly packed cluster with unused space
+on the leading side. The right-side deployment, settings, command, and user
+controls must remain visible and stable.
 
 ## Problem
 
-The expanded **Server Affinity** section in the workspace right drawer is
-treated as a flexible, fill-available-space panel. On a tall mobile viewport,
-its two compact rows are consequently spread across a large empty section,
-leaving "Current server" near the top and "Run on" near the bottom. The
-controls should remain grouped at their natural content height.
+On phone-sized workspace views, the primary tool tabs (Chat, Diff, Logs,
+Preview, Browser, and Sidebar, subject to route availability) are rendered at
+their content width. In landscape/mobile layouts this leaves visually unused
+horizontal space and makes the controls feel compressed, as shown in the task
+screenshots.
 
 ## Scope
 
-- Change only the Vibe Kanban frontend.
-- Keep compact informational sections, specifically Server Affinity, at their
-  intrinsic height when expanded.
-- Preserve fill-available-space behavior for panels whose contents are intended
-  to grow and scroll, such as Git, Changes, Logs, Preview, Browser, Server
-  Metrics, Terminal, and Notes.
-- Preserve the existing collapsed-section sizing, persistence, labels,
-  controls, and responsive drawer behavior.
-- Do not change any other service or homelab deployment configuration.
+- Update the Vibe Kanban frontend mobile navbar layout only.
+- Allow the tool-tab strip to grow across all horizontal room available between
+  its leading navigation affordance and the fixed right-side controls.
+- Distribute the available width among visible tool tabs while retaining a
+  usable fallback when the viewport is too narrow.
+- Preserve existing tab visibility, active state, labels, click behavior,
+  accessibility attributes, safe-area/window-control clearance, and navigation
+  actions.
+- Add focused regression coverage for the mobile navbar layout contract.
+
+## Out of Scope
+
+- Desktop navbar changes.
+- Changes to tool availability or tab ordering.
+- Changes to the homelab deployment configuration or any other service.
+- Visual redesign of icons, colors, typography, or right-side controls.
 
 ## Functional Requirements
 
-1. Expanding Server Affinity must render its body immediately below its header
-   without consuming the drawer's remaining vertical space.
-2. "Current server" and "Run on" must retain the existing compact grid spacing
-   and remain adjacent rows on desktop and mobile widths.
-3. Collapsing Server Affinity must continue to hide its controls while keeping
-   its header context visible.
-4. Content-oriented sections must retain their ability to share available
-   drawer height and scroll internally.
-
-## Verification
-
-- Add or update a focused component test proving Server Affinity is intrinsic
-  while fillable sections remain flexible.
-- Run the focused frontend tests and relevant type/lint checks.
-- Format the repository before completion.
-- Independently review the final diff and resolve significant findings.
+1. The mobile workspace toolbar's leading section MUST consume the horizontal
+   space remaining after the right-side controls.
+2. The visible tool tabs MUST expand within that section so unused width is
+   shared across the controls.
+3. When the available width cannot fit the controls at their usable minimum
+   size, the toolbar MUST remain horizontally scrollable and MUST NOT push the
+   right-side controls off-screen.
+4. Project-page mobile headers MUST retain their current layout.
+5. Existing safe-area and iPad window-control spacing MUST remain effective.
+6. The active tool MUST retain its visible active indicator and `aria-pressed`
+   state.
 
 ## Acceptance Criteria
 
-- The mobile right drawer no longer contains a large blank gap between the two
-  Server Affinity rows.
-- No unrelated service or deployment files change.
-- Automated verification passes.
+- In a landscape phone workspace view, the tool buttons occupy the available
+  toolbar region rather than appearing as a compact group separated from empty
+  space.
+- Settings, command-bar, deployment status, sync status, and user controls remain
+  fixed at the trailing side and usable.
+- On narrower viewports, all available tabs can still be reached by horizontal
+  scrolling without wrapping.
+- Mobile project-page behavior and desktop navbar behavior are unchanged.
+- Automated tests assert the growing/distributed toolbar classes and the
+  fixed-width trailing section.
+- Relevant frontend checks, formatting, and tests pass.
+
+## Implementation Notes
+
+The likely change is localized to `packages/ui/src/components/Navbar.tsx`.
+Prefer flexbox growth on the non-project mobile toolbar region, an inner
+full-width tab group, and equal growth for tab buttons. Preserve `min-w-0` on
+the flexible region and `shrink-0` on trailing controls to ensure overflow is
+contained in the toolbar rather than the navbar.

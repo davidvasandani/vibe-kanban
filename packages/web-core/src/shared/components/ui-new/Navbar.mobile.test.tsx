@@ -21,6 +21,41 @@ afterEach(() => {
 });
 
 describe('Navbar mobile right sidebar tab', () => {
+  it('expands workspace tools while keeping trailing actions fixed', () => {
+    act(() => {
+      root.render(
+        <Navbar
+          mobileMode
+          mobileActiveTab="chat"
+          onOpenSettings={vi.fn()}
+          onOpenCommandBar={vi.fn()}
+        />
+      );
+    });
+
+    const toolbar = container.querySelector(
+      '[data-testid="mobile-workspace-toolbar"]'
+    );
+    const tabs = container.querySelector(
+      '[data-testid="mobile-workspace-tabs"]'
+    );
+    const actions = container.querySelector(
+      '[data-testid="mobile-navbar-actions"]'
+    );
+    const chatTab = container.querySelector('[aria-label="Chat"]');
+
+    expect(toolbar).not.toBeNull();
+    expect(toolbar?.classList.contains('flex-1')).toBe(true);
+    expect(toolbar?.classList.contains('min-w-0')).toBe(true);
+    expect(toolbar?.classList.contains('overflow-x-auto')).toBe(true);
+    expect(tabs?.classList.contains('flex-1')).toBe(true);
+    expect(tabs?.classList.contains('min-w-fit')).toBe(true);
+    expect(chatTab?.classList.contains('flex-1')).toBe(true);
+    expect(chatTab?.classList.contains('min-w-10')).toBe(true);
+    expect(actions?.classList.contains('shrink-0')).toBe(true);
+    expect(chatTab?.getAttribute('aria-pressed')).toBe('true');
+  });
+
   it('identifies, selects, and activates the existing drawer destination', () => {
     const onMobileTabChange = vi.fn();
 

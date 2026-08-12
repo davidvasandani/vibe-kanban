@@ -1,29 +1,27 @@
-# Implementation Plan: Fix Right Drawer Section Spacing
+# Fix Toolbar — Implementation Plan
 
-1. Refresh the SpecKit constitution and generate the task-specific SpecKit
-   specification, clarification, plan, task list, and analysis artifacts.
-2. Extend `RightSidebar` section metadata with an explicit sizing policy so
-   each section decides whether its expanded body fills available height.
-3. Configure Server Affinity as intrinsic-height and retain flexible sizing for
-   content panels that grow or scroll.
-4. Add a focused `RightSidebar` regression test that renders the section
-   composition and proves expanded Server Affinity is not `flex-1`, while a
-   fillable section still is.
-5. Run focused Vitest coverage, TypeScript checks, lint, repository formatting,
-   and whitespace validation.
-6. Execute an independent Codex diff review; address confirmed significant
-   findings and repeat verification/review until clean.
-7. Update the project knowledge base and index with the reusable per-section
-   sizing rule, tagged with task `d80e-fix-the-spacing`, and commit it.
-8. Commit the implementation intentionally, push the task branch, open a pull
-   request against the repository base branch, wait for required checks, and
-   merge the pull request.
-
-## Dependency Order
-
-- Steps 2 and 3 depend on the completed SpecKit artifacts.
-- Step 4 depends on the final composition API from steps 2 and 3.
-- Step 5 depends on implementation and tests.
-- Step 6 depends on a verified diff; any review fix loops back through step 5.
-- Step 7 depends on the final shipped behavior.
-- Step 8 depends on all local verification, review, and documentation work.
+1. Confirm the mobile navbar's current rendered structure and existing tests,
+   including the split between the flexible workspace-tool region and trailing
+   status/actions.
+2. Establish/refine the SpecKit project constitution and generate the task's
+   feature artifacts through the required specify, clarify, plan, tasks, and
+   analyze stages.
+3. Update the shared `Navbar` mobile workspace layout so:
+   - the leading toolbar region grows and may shrink (`flex-1 min-w-0`);
+   - the visible tab group fills that region;
+   - each visible tab shares surplus width while retaining a practical minimum;
+   - horizontal overflow remains available when space is constrained; and
+   - the trailing action region stays non-shrinking.
+4. Add focused rendered-component tests in the web-core Vitest lane that assert
+   the flex growth/distribution/overflow contract, active accessibility state,
+   and fixed trailing controls without changing project-page behavior.
+5. Run focused tests, TypeScript checks, lint, repository formatting, and a
+   scoped diff sanity check.
+6. Run an independent Codex diff review; address and re-verify all confirmed
+   significant findings until the review is clean.
+7. Distill reusable responsive-toolbar knowledge into the Vibe Kanban knowledge
+   base, tag it with `vk/2163-fix-toolbar`, refresh the index, and commit the
+   knowledge-base update.
+8. Commit the implementation, push the task branch, open a pull request against
+   the repository's base branch, wait for required checks as needed, and merge
+   it.

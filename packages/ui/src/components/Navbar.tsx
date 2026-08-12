@@ -331,7 +331,10 @@ export function Navbar({
               {afterTitleSlot}
             </div>
           ) : (
-            <div className="flex items-center gap-0.5 overflow-x-auto">
+            <div
+              data-testid="mobile-workspace-toolbar"
+              className="flex flex-1 min-w-0 items-center gap-0.5 overflow-x-auto"
+            >
               {mobileShowBack && onNavigateBack ? (
                 <>
                   <button
@@ -360,7 +363,10 @@ export function Navbar({
                 )
               )}
               {showMobileTabs !== false && (
-                <div className="flex items-center gap-0.5">
+                <div
+                  data-testid="mobile-workspace-tabs"
+                  className="flex flex-1 min-w-fit items-center gap-0.5"
+                >
                   {(mobileTabs ?? MOBILE_TABS).map((tab) => {
                     const TabIcon = tab.icon;
                     const isActive = mobileActiveTab === tab.id;
@@ -371,7 +377,7 @@ export function Navbar({
                         aria-label={tab.accessibleLabel ?? tab.label}
                         aria-pressed={isActive}
                         className={cn(
-                          'flex items-center gap-1 px-1.5 py-1 text-xs whitespace-nowrap transition-colors',
+                          'flex flex-1 min-w-10 items-center justify-center gap-1 px-1.5 py-1 text-xs whitespace-nowrap transition-colors',
                           isActive
                             ? 'text-normal border-b-2 border-brand'
                             : 'text-low hover:text-normal'
@@ -404,7 +410,10 @@ export function Navbar({
           )}
 
           {/* Right side: sync indicator + action buttons + user slot */}
-          <div className="flex items-center gap-1 shrink-0">
+          <div
+            data-testid="mobile-navbar-actions"
+            className="flex items-center gap-1 shrink-0"
+          >
             <DeployStatus
               version={appVersion ?? null}
               deploymentTimestamp={deploymentTimestamp}
