@@ -1,43 +1,25 @@
-# Implementation plan: default workspace bases to remote mainline
+# Implementation Plan: Authoritative Execution Status Reconciliation
 
-1. Reuse the existing `resolveDefaultBranch` policy in every repository branch
-   selection hook used to assemble new-workspace inputs.
-2. Preserve explicit initial-branch precedence, then delegate repository
-   default and fallback selection to the canonical helper.
-3. Add focused hook tests proving `origin/main`/`origin/master` outrank a current
-   deployment branch while configured and explicit initial choices still win.
-4. Retain exact remote-prefixed target branch names through workspace input
-   creation; make no `/srv/src` checkout or deployment changes.
-5. Run formatting, frontend tests, type checking, and linting.
-6. Run SpecKit analysis and implementation tasks, then independent Codex review
-   until no significant findings remain.
-7. Update the existing branch-defaulting knowledge page and index contribution
-   metadata, commit the knowledge update, and merge into the base branch.
+Task: `vk/3488-fix-stale-execut`
 
-## Follow-up implementation: durable MCP screenshots
-
-1. Extend the shared MCP image-result normalizer to fetch hosted HTTP(S)
-   `resource_link` image blocks with bounded time and size, rejected redirects,
-   and destination validation with an explicit private-origin allowlist.
-2. Persist successful downloads content-addressed in `.vibe-attachments/` and
-   emit only worktree-relative Markdown references.
-3. Reuse the shared normalizer in Codex's direct app-server completion path.
-4. Add focused tests for successful import, transfer failure, invalid response
-   type, oversized content, and rejected resource links.
-5. Run formatting and targeted executor/frontend checks.
-6. Reuse Firecrawl's bounded artifact store for reusable screenshot artifacts
-   and return capability URLs as MCP `resource_link` image blocks.
-7. Verify Firecrawl build/tests and the end-to-end MCP screenshot contract.
-8. Run independent Codex review and address confirmed findings until none remain.
-
-## Follow-up implementation: MCP refresh nested route
-
-1. Update the refresh and status handlers to extract the nested workspace and
-   session UUID path tuple.
-2. Update the workspace-loading middleware to deserialize the named workspace
-   path parameter while tolerating parameters added by nested routes.
-3. Run Rust formatting, a focused server compile, and diff validation.
-4. Run an independent Codex review and address confirmed findings until none
-   remain.
-5. Merge and deploy the fix, then verify the live refresh endpoint and native
-   Firecrawl browser tool availability.
+1. Reproduce the UI failure by retaining a running snapshot across an
+   unexpected close, missing the terminal patch, and reconnecting.
+2. Assert that a full terminal replacement snapshot on reconnect changes the
+   rendered state from running to interrupted without clearing the UI during
+   transport downtime.
+3. Subscribe the session execution stream to broadcasts before awaiting its
+   database snapshot so updates during snapshot capture are buffered.
+4. Chain snapshot, Ready, then buffered/live updates, preserving the existing
+   keyed JSON Patch contract.
+5. Turn broadcast lag into an explicit stream error and close the WebSocket with
+   retryable code 1011 so the browser must reconnect and resnapshot.
+6. Extract and test the exact running-attempt derivation: active coding-agent
+   work remains cancellable; completed, failed, killed, interrupted, and
+   indeterminate statuses clear Stop.
+7. Verify existing restart/shutdown behavior with focused local deployment
+   coverage and retain evidence-based worker reconciliation.
+8. Run formatting, focused frontend/Rust tests, TypeScript checks, server
+   compilation, and diff validation.
+9. Run independent Codex review until no significant findings remain.
+10. Record reusable snapshot/live handoff knowledge, commit it, open the task
+    pull request against the recorded base branch, and merge after checks pass.

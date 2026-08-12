@@ -96,4 +96,55 @@ describe('useJsonPatchWsStream restart recovery', () => {
       'live'
     );
   });
+
+  it('replaces a stale running snapshot with the terminal reconnect snapshot', async () => {
+    const first = new FakeSocket();
+    const second = new FakeSocket();
+    transport.open
+      .mockResolvedValueOnce(first as unknown as WebSocket)
+      .mockResolvedValueOnce(second as unknown as WebSocket);
+
+    await act(async () => root.render(<Fixture />));
+    await act(async () => {});
+    act(() => {
+      first.onopen?.();
+      first.onmessage?.({
+        data: JSON.stringify({
+          JsonPatch: [{ op: 'replace', path: '/value', value: 'running' }],
+        }),
+      });
+      first.onmessage?.({ data: JSON.stringify({ Ready: true }) });
+    });
+    expect(container.firstElementChild?.getAttribute('data-value')).toBe(
+      'running'
+    );
+
+    // The terminal event is missed while disconnected, so the last known
+    // running state remains visible until the authoritative reconnect snapshot.
+    act(() => first.onclose?.({ code: 1011, wasClean: false }));
+    expect(container.firstElementChild?.getAttribute('data-value')).toBe(
+      'running'
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_500);
+    });
+    await act(async () => {});
+    act(() => {
+      second.onopen?.();
+      second.onmessage?.({
+        data: JSON.stringify({
+          JsonPatch: [{ op: 'replace', path: '/value', value: 'interrupted' }],
+        }),
+      });
+      second.onmessage?.({ data: JSON.stringify({ Ready: true }) });
+    });
+
+    expect(container.firstElementChild?.getAttribute('data-value')).toBe(
+      'interrupted'
+    );
+    expect(container.firstElementChild?.getAttribute('data-initialized')).toBe(
+      'true'
+    );
+  });
 });
