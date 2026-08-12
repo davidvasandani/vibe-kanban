@@ -36,6 +36,7 @@ type SectionDef = {
   persistKey: PersistKey;
   visible: boolean;
   expanded: boolean;
+  fillAvailableSpace: boolean;
   collapsible?: boolean;
   content: React.ReactNode;
   actions: SectionAction[];
@@ -133,6 +134,7 @@ export const RightSidebar = memo(function RightSidebar({
         persistKey: PERSIST_KEYS.issueSection,
         visible: !!linkedIssueForWorkspace,
         expanded: true,
+        fillAvailableSpace: true,
         collapsible: false,
         content: (
           <IssueSectionContainer
@@ -146,6 +148,7 @@ export const RightSidebar = memo(function RightSidebar({
         persistKey: PERSIST_KEYS.gitPanelRepositories,
         visible: true,
         expanded: gitExpanded,
+        fillAvailableSpace: true,
         content: (
           <GitPanelContainer
             selectedWorkspace={selectedWorkspace}
@@ -161,6 +164,7 @@ export const RightSidebar = memo(function RightSidebar({
         persistKey: PERSIST_KEYS.serverAffinitySection,
         visible: !!selectedWorkspace,
         expanded: serverAffinityExpanded,
+        fillAvailableSpace: false,
         headerExtra: serverAffinityLabel ? (
           <span
             className="min-w-0 max-w-28 truncate text-sm text-low"
@@ -186,6 +190,7 @@ export const RightSidebar = memo(function RightSidebar({
         persistKey: PERSIST_KEYS.serverMetricsSection,
         visible: true,
         expanded: serverMetricsExpanded,
+        fillAvailableSpace: true,
         content: <ServerMetricsSectionContainer />,
         actions: [],
       },
@@ -194,6 +199,7 @@ export const RightSidebar = memo(function RightSidebar({
         persistKey: PERSIST_KEYS.terminalSection,
         visible: isTerminalVisible && !isTerminalExpanded,
         expanded: terminalExpanded,
+        fillAvailableSpace: true,
         content: <TerminalPanelContainer />,
         actions: [{ icon: ArrowsOutSimpleIcon, onClick: expandTerminal }],
       },
@@ -202,6 +208,7 @@ export const RightSidebar = memo(function RightSidebar({
         persistKey: PERSIST_KEYS.notesSection,
         visible: true,
         expanded: notesExpanded,
+        fillAvailableSpace: true,
         content: <WorkspaceNotesContainer />,
         actions: [],
       },
@@ -215,6 +222,7 @@ export const RightSidebar = memo(function RightSidebar({
             persistKey: PERSIST_KEYS.changesSection,
             visible: hasUpperContent,
             expanded: upperExpanded,
+            fillAvailableSpace: true,
             content: (
               <FileTreeContainer
                 key={selectedWorkspace.id}
@@ -233,6 +241,7 @@ export const RightSidebar = memo(function RightSidebar({
           persistKey: PERSIST_KEYS.rightPanelprocesses,
           visible: hasUpperContent,
           expanded: upperExpanded,
+          fillAvailableSpace: true,
           content: <ProcessListContainer />,
           actions: [],
         });
@@ -244,6 +253,7 @@ export const RightSidebar = memo(function RightSidebar({
             persistKey: PERSIST_KEYS.rightPanelPreview,
             visible: hasUpperContent,
             expanded: upperExpanded,
+            fillAvailableSpace: true,
             content: (
               <PreviewControlsContainer
                 workspaceId={selectedWorkspace.id}
@@ -261,6 +271,7 @@ export const RightSidebar = memo(function RightSidebar({
             persistKey: PERSIST_KEYS.rightPanelBrowser,
             visible: hasUpperContent,
             expanded: upperExpanded,
+            fillAvailableSpace: true,
             content: (
               <BrowserControlsContainer
                 workspaceId={selectedWorkspace.id}
@@ -325,7 +336,8 @@ export const RightSidebar = memo(function RightSidebar({
               collapsible={section.collapsible ?? true}
               actions={section.actions}
               headerExtra={section.headerExtra}
-              fillAvailableSpace
+              fillAvailableSpace={section.fillAvailableSpace}
+              intrinsicHeight={!section.fillAvailableSpace}
             >
               <div className="flex min-h-0 flex-1 border-t w-full overflow-auto">
                 {section.content}

@@ -1,25 +1,29 @@
-# Implementation Plan: Authoritative Execution Status Reconciliation
+# Implementation Plan: Fix Right Drawer Section Spacing
 
-Task: `vk/3488-fix-stale-execut`
+1. Refresh the SpecKit constitution and generate the task-specific SpecKit
+   specification, clarification, plan, task list, and analysis artifacts.
+2. Extend `RightSidebar` section metadata with an explicit sizing policy so
+   each section decides whether its expanded body fills available height.
+3. Configure Server Affinity as intrinsic-height and retain flexible sizing for
+   content panels that grow or scroll.
+4. Add a focused `RightSidebar` regression test that renders the section
+   composition and proves expanded Server Affinity is not `flex-1`, while a
+   fillable section still is.
+5. Run focused Vitest coverage, TypeScript checks, lint, repository formatting,
+   and whitespace validation.
+6. Execute an independent Codex diff review; address confirmed significant
+   findings and repeat verification/review until clean.
+7. Update the project knowledge base and index with the reusable per-section
+   sizing rule, tagged with task `d80e-fix-the-spacing`, and commit it.
+8. Commit the implementation intentionally, push the task branch, open a pull
+   request against the repository base branch, wait for required checks, and
+   merge the pull request.
 
-1. Reproduce the UI failure by retaining a running snapshot across an
-   unexpected close, missing the terminal patch, and reconnecting.
-2. Assert that a full terminal replacement snapshot on reconnect changes the
-   rendered state from running to interrupted without clearing the UI during
-   transport downtime.
-3. Subscribe the session execution stream to broadcasts before awaiting its
-   database snapshot so updates during snapshot capture are buffered.
-4. Chain snapshot, Ready, then buffered/live updates, preserving the existing
-   keyed JSON Patch contract.
-5. Turn broadcast lag into an explicit stream error and close the WebSocket with
-   retryable code 1011 so the browser must reconnect and resnapshot.
-6. Extract and test the exact running-attempt derivation: active coding-agent
-   work remains cancellable; completed, failed, killed, interrupted, and
-   indeterminate statuses clear Stop.
-7. Verify existing restart/shutdown behavior with focused local deployment
-   coverage and retain evidence-based worker reconciliation.
-8. Run formatting, focused frontend/Rust tests, TypeScript checks, server
-   compilation, and diff validation.
-9. Run independent Codex review until no significant findings remain.
-10. Record reusable snapshot/live handoff knowledge, commit it, open the task
-    pull request against the recorded base branch, and merge after checks pass.
+## Dependency Order
+
+- Steps 2 and 3 depend on the completed SpecKit artifacts.
+- Step 4 depends on the final composition API from steps 2 and 3.
+- Step 5 depends on implementation and tests.
+- Step 6 depends on a verified diff; any review fix loops back through step 5.
+- Step 7 depends on the final shipped behavior.
+- Step 8 depends on all local verification, review, and documentation work.

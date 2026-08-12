@@ -2,6 +2,7 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Workspace } from 'shared/types';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -60,21 +61,6 @@ vi.mock('@/shared/stores/useUiPreferencesStore', () => ({
     selector({ isTerminalVisible: false }),
 }));
 
-vi.mock('@vibe/ui/components/CollapsibleSectionHeader', () => ({
-  CollapsibleSectionHeader: ({
-    title,
-    children,
-  }: {
-    title: string;
-    children: React.ReactNode;
-  }) => (
-    <section data-testid="drawer-section">
-      <button type="button">{title}</button>
-      {children}
-    </section>
-  ),
-}));
-
 vi.mock('./IssueSectionContainer', () => ({
   IssueSectionContainer: () => null,
 }));
@@ -93,7 +79,7 @@ vi.mock('./ServerMetricsSectionContainer', () => ({
   ServerMetricsSectionContainer: () => null,
 }));
 vi.mock('./ServerAffinitySectionContainer', () => ({
-  ServerAffinitySectionContainer: () => null,
+  ServerAffinitySectionContainer: () => <div>Affinity controls</div>,
 }));
 vi.mock('./WorkspaceNotesContainer', () => ({
   WorkspaceNotesContainer: () => null,
@@ -111,7 +97,27 @@ import { RightSidebar } from './RightSidebar';
 let container: HTMLDivElement;
 let root: Root;
 
+const selectedWorkspace: Workspace = {
+  id: 'workspace-id',
+  task_id: null,
+  container_ref: null,
+  branch: 'vk/test',
+  setup_completed_at: null,
+  created_at: '2026-08-12T00:00:00Z',
+  updated_at: '2026-08-12T00:00:00Z',
+  archived: false,
+  pinned: false,
+  name: null,
+  worktree_deleted: false,
+  current_pipeline_stage: null,
+  speckit_feature_key: null,
+  speckit_host_repo_id: null,
+  creation_status: 'ready',
+  creation_error: null,
+};
+
 beforeEach(() => {
+  window.localStorage.clear();
   vi.useFakeTimers();
   vi.setSystemTime('2026-08-09T15:00:00Z');
   container = document.createElement('div');
@@ -122,6 +128,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  window.localStorage.clear();
   vi.useRealTimers();
 });
 
@@ -149,8 +156,46 @@ describe('RightSidebar deploy status', () => {
 
     const stack = row?.parentElement;
     expect(stack?.firstElementChild).toBe(row);
-    expect(
-      stack?.querySelectorAll('[data-testid="drawer-section"]').length
-    ).toBeGreaterThan(0);
+    expect(stack?.querySelectorAll('button').length).toBeGreaterThan(0);
+  });
+});
+
+describe('RightSidebar section sizing', () => {
+  it('keeps Server Affinity intrinsic while content sections fill space', () => {
+    act(() => {
+      root.render(
+        <RightSidebar
+          rightMainPanelMode={null}
+          selectedWorkspace={selectedWorkspace}
+          repos={[]}
+        />
+      );
+    });
+
+    const sectionNamed = (name: string) => {
+      const button = Array.from(container.querySelectorAll('button')).find(
+        (candidate) => candidate.textContent === name
+      );
+      const section = button?.parentElement?.parentElement;
+      if (
+        !(button instanceof HTMLButtonElement) ||
+        !(section instanceof HTMLDivElement)
+      ) {
+        throw new Error(`Expected ${name} section`);
+      }
+      return { button, section };
+    };
+
+    const affinity = sectionNamed('Server Affinity');
+    act(() => affinity.button.click());
+
+    expect(affinity.section.classList).toContain('flex-none');
+    expect(affinity.section.classList).toContain('h-auto');
+    expect(affinity.section.classList).not.toContain('h-full');
+    expect(affinity.section.textContent).toContain('Affinity controls');
+
+    const git = sectionNamed('Git');
+    expect(git.section.classList).toContain('flex-1');
+    expect(git.section.classList).toContain('min-h-0');
   });
 });
