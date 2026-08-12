@@ -51,5 +51,5 @@ and may be performed together within their phase.
 - [x] T012 Update `wiki/` and `wiki/INDEX.md` with reusable mobile drawer/tab
   knowledge, tag it with this task id, and commit the knowledge base (depends on
   T011).
-- [ ] T013 Open a pull request against the base branch and merge it after checks
+- [x] T013 Open a pull request against the base branch and merge it after checks
   pass (depends on T012).
