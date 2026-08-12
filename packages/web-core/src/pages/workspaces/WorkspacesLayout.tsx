@@ -49,6 +49,7 @@ import {
   RIGHT_MAIN_PANEL_MODES,
 } from '@/shared/stores/useUiPreferencesStore';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
+import { getWorkspaceMobileTabFallback } from '@/shared/components/ui-new/containers/workspaceMobileTabs';
 
 const WORKSPACES_GUIDE_ID = 'workspaces-guide';
 
@@ -199,6 +200,18 @@ export function WorkspacesLayout() {
     }
     wasWorkspacesLandingRef.current = isWorkspacesLanding;
   }, [isMobile, isWorkspacesLanding, setMobileActiveTab]);
+
+  useEffect(() => {
+    if (!isMobile) return;
+
+    const availableTab = getWorkspaceMobileTabFallback(mobileTab, {
+      hasWorkspaceRoute: Boolean(workspaceId),
+      isCreateMode,
+    });
+    if (availableTab !== mobileTab) {
+      setMobileActiveTab(availableTab);
+    }
+  }, [isCreateMode, isMobile, mobileTab, setMobileActiveTab, workspaceId]);
 
   const handleScrollToBottom = useCallback(
     (behavior: 'auto' | 'smooth' = 'smooth') => {
