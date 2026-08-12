@@ -66,6 +66,27 @@ button. Keep shared behavior such as formatting, timers, links, and accessible
 labels in the existing presentational component rather than reimplementing it
 at the drawer boundary.
 
+## Mobile access uses the existing drawer destination
+
+The mobile workspace layout routes the persisted `git` tab identifier to the
+same `RightSidebar` composition. Keep that identifier stable even when the
+user-facing affordance changes: it is both a saved UI preference and the layout
+switch key.
+
+The mobile control should describe the surface, not only one section inside it.
+Use the mirrored right-sidebar icon, the visible label `Sidebar`, and the
+accessible name `Right sidebar`. At phone widths visible labels are hidden, so
+the accessible name is the durable meaning of the icon-only button. Native
+button semantics plus `aria-pressed` accurately expose selection without
+claiming the full ARIA tabs keyboard model.
+
+Availability is route-owned. A workspace route ID makes the drawer destination
+available even while its record is still loading; basing availability on fetched
+workspace data resets a persisted drawer selection during ordinary refresh.
+Omit the destination on the workspace-less landing and in create mode, and
+recover an already-active `git` value to `workspaces` or `chat` respectively so
+the layout cannot remain on hidden empty content.
+
 ## Verification
 
 Rendered-DOM coverage should assert the shared primitive's opt-in expanded,
@@ -76,4 +97,5 @@ height caps.
 ## Contributed by
 
 - vk/b74a-right-drawer-exp
+- vk/a12b-right-drawer-on
 - VAS-377
