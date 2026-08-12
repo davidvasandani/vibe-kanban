@@ -6,6 +6,7 @@ update pages (and this index) when a task ships something reusable.
 
 | Page | Summary | Contributing tasks |
 | --- | --- | --- |
+| [authoritative-snapshot-stream-handoffs](authoritative-snapshot-stream-handoffs.md) | Lossless subscribe-before-snapshot initialization, state-retaining reconnects, lag-triggered resnapshot, and exact authoritative derivation for execution activity UI | `vk/3488-fix-stale-execut` |
 | [request-independent-workspace-creation](request-independent-workspace-creation.md) | Accepting slow workspace lifecycle work before materialization; workspace-scoped single-consumer state, request-independent execution, conservative restart reconciliation, bounded status writes, and pending/failed UI convergence | `vk/5e1e-vk-workspace-cre` |
 | [codex-rollout-transfer](codex-rollout-transfer.md) | Coordinator-gated Codex lineage transfer: active-execution identity, quiesce/hash/verify ordering, bounded symlink-safe idempotent staging, durable target and recovery phases, and reference-safe retention | `c8a9-transfer-codex-r` |
 | [workspace-affinity-migration](workspace-affinity-migration.md) | Policy versus resolved placement, coordinator-owned stop/reassign/continue transitions, durable retry/recovery boundaries, scheduler-aligned eligibility, UI cache convergence, and compact summary-backed collapsed/expanded affinity layouts | `9a64-vk-workspace-aff`, `61a3-server-affinity` |

@@ -1,27 +1,45 @@
-# Research: Background Workspace Creation
+# Research: Authoritative Execution Status Reconciliation
 
-## Current cancellation boundary
+## Root cause
 
-`create_and_start_workspace` in `crates/server/src/routes/workspaces/create.rs` awaits repository association, remote attachment/context calls, placement, worktree creation, and `start_workspace` before responding. The frontend mutation remains mounted and shows “Creating…” throughout. Dropping the HTTP request can drop this handler future at any await, so the workspace row alone is not evidence that creation completed.
+`stream_execution_processes_for_session_raw` first awaits
+`ExecutionProcess::find_by_session_id` and only afterward calls
+`msg_store.get_receiver()`. If completion is committed and broadcast between
+those operations, the new stream has a stale `running` snapshot and cannot
+receive the already-sent terminal patch. The client faithfully retains and
+renders that stale snapshot, including after the reconnect that hit the race.
 
-## Decision: workspace-owned lifecycle state
+## Decision: subscribe before snapshot
 
-Creation is a one-time lifecycle of a workspace, and existing workspace list/detail reads already drive navigation. Storing its status on `workspaces` is the smallest authoritative model and automatically gives clients an observable identity before sessions exist.
+Create the broadcast receiver before querying the snapshot. Updates occurring
+during the query remain buffered and are chained after snapshot plus `Ready`.
+The latest keyed update wins, so both initial connections and reconnects
+converge without a new API, cursor, or polling loop.
 
-A separate general job table was rejected because this feature does not expose scheduling, retry, history, or multiple job kinds. It would add joins and APIs while still requiring a workspace-level summary for the UI.
+Query-twice was rejected because a second query still has a boundary before
+subscription unless paired with the same ordering, and it adds database work to
+every connection. Client polling was rejected because it masks rather than
+repairs the authoritative stream contract.
 
-## Decision: runtime-owned task plus startup reconciliation
+## Frontend behavior
 
-Tokio ownership severs browser cancellation from the work. Persisting `queued` before spawn and claiming it atomically prevents two live consumers. Tokio tasks do not survive process shutdown, so startup reconciliation turns unproven unfinished operations into visible failures rather than leaving them pending or replaying non-idempotent Git work.
+`useJsonPatchWsStream` deliberately retains initialized data during reconnect,
+then applies the server's replacement snapshot. That provides continuity and is
+correct once the server snapshot handoff is lossless. Clearing data immediately
+on disconnect would hide valid active state and produce flicker without proving
+terminal status.
 
-Full phase checkpoint/replay was rejected for this increment. Repository association, attachment import, placement, filesystem materialization, and process startup do not currently share a phase-idempotency contract. Replaying them after an arbitrary crash risks duplicate initial execution or destructive worktree behavior.
+`useExecutionProcesses` defines running with exact equality to `running`.
+Consequently completed, failed, killed, interrupted, and indeterminate already
+clear the composer once received. No parallel local running flag needs to be
+introduced.
 
-## Decision: return workspace, not speculative execution
+## Shutdown behavior
 
-An execution does not exist at acceptance time. Returning an optional or placeholder execution weakens the contract. The response returns the accepted workspace only; clients observe the real execution through existing session/execution reads after creation reaches ready.
-
-## Error policy
-
-Persist a bounded generic-but-actionable message that names workspace creation as the failed operation. Log the full error with workspace ID and phase. This keeps server paths, remote bodies, and potential configuration details out of user-visible durable state.
+Coordinator-local orphan cleanup tries safe process adoption, preserves WIP,
+and marks unrecoverable non-persistent rows interrupted. Worker-owned rows are
+left for evidence-backed reconciliation, which can classify uncertainty as
+indeterminate. Focused verification is required, but the observed stale UI does
+not justify weakening these lifecycle rules.
 
 No new dependency is required.

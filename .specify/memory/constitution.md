@@ -400,6 +400,22 @@ session. Credential-bearing snapshots stay within the authenticated dispatch
 channel, remain bounded and idempotency-covered, and are removed with the
 execution-scoped configuration.
 
+### XXX. Execution UI is derived from authoritative, rehydratable state
+An execution is shown as active only while the latest authoritative process
+snapshot says it is non-terminal. WebSocket patches are an optimization, not
+the source of truth: every initial connection and reconnect MUST replace or
+reconcile local execution state from a full backend snapshot before subsequent
+patches are applied. A missed completion event, interrupted request, client
+reconnect, or service restart must therefore converge to the backend's latest
+terminal state without requiring a manual refresh.
+
+Backend shutdown and recovery paths finalize or truthfully classify every
+execution whose process can no longer be proven active. Completed, failed,
+killed, interrupted, and indeterminate terminal outcomes all clear running UI;
+only positively active executions remain cancellable. Regression coverage MUST
+exercise a missed terminal event followed by snapshot rehydration and preserve
+the active-execution Stop behavior.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -421,7 +437,10 @@ execution-scoped configuration.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.26.0 (requires executor-neutral, execution-scoped materialization
+**Version**: 0.27.0 (requires execution activity UI to derive from authoritative,
+rehydratable process snapshots, reconnects to recover missed terminal events,
+and shutdown/recovery to classify executions that are no longer provably active;
+0.26.0 required executor-neutral, execution-scoped materialization
 of settings-owned MCP snapshots while keeping live reload capability-specific;
 0.25.0 required accepted lifecycle work to have a persisted,
 single-consumer operation identity, request-independent execution, idempotent

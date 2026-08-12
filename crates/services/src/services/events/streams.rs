@@ -4,7 +4,7 @@ use db::models::{
 };
 use futures::StreamExt;
 use serde_json::json;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use utils::log_msg::LogMsg;
 use uuid::Uuid;
 
@@ -24,6 +24,12 @@ impl EventService {
         futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>,
         super::types::EventError,
     > {
+        // Subscribe before awaiting the database snapshot. Otherwise an update
+        // committed between the query and `get_receiver()` is absent from both
+        // the snapshot and the live stream, leaving reconnecting clients with
+        // stale process state indefinitely.
+        let receiver = self.msg_store.get_receiver();
+
         // Get execution processes for this session
         let processes =
             ExecutionProcess::find_by_session_id(&self.db.pool, session_id, show_soft_deleted)
@@ -48,97 +54,92 @@ impl EventService {
         let initial_msg = LogMsg::JsonPatch(serde_json::from_value(initial_patch).unwrap());
 
         // Get filtered event stream
-        let filtered_stream =
-            BroadcastStream::new(self.msg_store.get_receiver()).filter_map(move |msg_result| {
-                async move {
-                    match msg_result {
-                        Ok(LogMsg::JsonPatch(patch)) => {
-                            // Filter events based on session_id
-                            if let Some(patch_op) = patch.0.first() {
-                                // Check if this is a modern execution process patch
-                                if patch_op.path().starts_with("/execution_processes/") {
-                                    match patch_op {
-                                        json_patch::PatchOperation::Add(op) => {
-                                            // Parse execution process data directly from value
-                                            if let Ok(process) =
-                                                serde_json::from_value::<ExecutionProcess>(
-                                                    op.value.clone(),
-                                                )
-                                                && process.session_id == session_id
-                                            {
-                                                if !show_soft_deleted && process.dropped {
-                                                    let remove_patch =
-                                                        execution_process_patch::remove(process.id);
-                                                    return Some(Ok(LogMsg::JsonPatch(
-                                                        remove_patch,
-                                                    )));
-                                                }
-                                                return Some(Ok(LogMsg::JsonPatch(patch)));
+        let filtered_stream = BroadcastStream::new(receiver).filter_map(move |msg_result| {
+            async move {
+                match msg_result {
+                    Ok(LogMsg::JsonPatch(patch)) => {
+                        // Filter events based on session_id
+                        if let Some(patch_op) = patch.0.first() {
+                            // Check if this is a modern execution process patch
+                            if patch_op.path().starts_with("/execution_processes/") {
+                                match patch_op {
+                                    json_patch::PatchOperation::Add(op) => {
+                                        // Parse execution process data directly from value
+                                        if let Ok(process) =
+                                            serde_json::from_value::<ExecutionProcess>(
+                                                op.value.clone(),
+                                            )
+                                            && process.session_id == session_id
+                                        {
+                                            if !show_soft_deleted && process.dropped {
+                                                let remove_patch =
+                                                    execution_process_patch::remove(process.id);
+                                                return Some(Ok(LogMsg::JsonPatch(remove_patch)));
                                             }
-                                        }
-                                        json_patch::PatchOperation::Replace(op) => {
-                                            // Parse execution process data directly from value
-                                            if let Ok(process) =
-                                                serde_json::from_value::<ExecutionProcess>(
-                                                    op.value.clone(),
-                                                )
-                                                && process.session_id == session_id
-                                            {
-                                                if !show_soft_deleted && process.dropped {
-                                                    let remove_patch =
-                                                        execution_process_patch::remove(process.id);
-                                                    return Some(Ok(LogMsg::JsonPatch(
-                                                        remove_patch,
-                                                    )));
-                                                }
-                                                return Some(Ok(LogMsg::JsonPatch(patch)));
-                                            }
-                                        }
-                                        json_patch::PatchOperation::Remove(_) => {
-                                            // For remove operations, we can't verify session_id
-                                            // so we allow all removals and let the client handle filtering
                                             return Some(Ok(LogMsg::JsonPatch(patch)));
                                         }
-                                        _ => {}
                                     }
-                                }
-                                // Fallback to legacy EventPatch format for backward compatibility
-                                else if let Ok(event_patch_value) = serde_json::to_value(patch_op)
-                                    && let Ok(event_patch) =
-                                        serde_json::from_value::<EventPatch>(event_patch_value)
-                                {
-                                    match &event_patch.value.record {
-                                        RecordTypes::ExecutionProcess(process) => {
-                                            if process.session_id == session_id {
-                                                if !show_soft_deleted && process.dropped {
-                                                    let remove_patch =
-                                                        execution_process_patch::remove(process.id);
-                                                    return Some(Ok(LogMsg::JsonPatch(
-                                                        remove_patch,
-                                                    )));
-                                                }
-                                                return Some(Ok(LogMsg::JsonPatch(patch)));
+                                    json_patch::PatchOperation::Replace(op) => {
+                                        // Parse execution process data directly from value
+                                        if let Ok(process) =
+                                            serde_json::from_value::<ExecutionProcess>(
+                                                op.value.clone(),
+                                            )
+                                            && process.session_id == session_id
+                                        {
+                                            if !show_soft_deleted && process.dropped {
+                                                let remove_patch =
+                                                    execution_process_patch::remove(process.id);
+                                                return Some(Ok(LogMsg::JsonPatch(remove_patch)));
                                             }
+                                            return Some(Ok(LogMsg::JsonPatch(patch)));
                                         }
-                                        RecordTypes::DeletedExecutionProcess {
-                                            session_id: Some(deleted_session_id),
-                                            ..
-                                        } => {
-                                            if *deleted_session_id == session_id {
-                                                return Some(Ok(LogMsg::JsonPatch(patch)));
-                                            }
-                                        }
-                                        _ => {}
                                     }
+                                    json_patch::PatchOperation::Remove(_) => {
+                                        // For remove operations, we can't verify session_id
+                                        // so we allow all removals and let the client handle filtering
+                                        return Some(Ok(LogMsg::JsonPatch(patch)));
+                                    }
+                                    _ => {}
                                 }
                             }
-                            None
+                            // Fallback to legacy EventPatch format for backward compatibility
+                            else if let Ok(event_patch_value) = serde_json::to_value(patch_op)
+                                && let Ok(event_patch) =
+                                    serde_json::from_value::<EventPatch>(event_patch_value)
+                            {
+                                match &event_patch.value.record {
+                                    RecordTypes::ExecutionProcess(process) => {
+                                        if process.session_id == session_id {
+                                            if !show_soft_deleted && process.dropped {
+                                                let remove_patch =
+                                                    execution_process_patch::remove(process.id);
+                                                return Some(Ok(LogMsg::JsonPatch(remove_patch)));
+                                            }
+                                            return Some(Ok(LogMsg::JsonPatch(patch)));
+                                        }
+                                    }
+                                    RecordTypes::DeletedExecutionProcess {
+                                        session_id: Some(deleted_session_id),
+                                        ..
+                                    } => {
+                                        if *deleted_session_id == session_id {
+                                            return Some(Ok(LogMsg::JsonPatch(patch)));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
-                        Ok(other) => Some(Ok(other)), // Pass through non-patch messages
-                        Err(_) => None,               // Filter out broadcast errors
+                        None
+                    }
+                    Ok(other) => Some(Ok(other)), // Pass through non-patch messages
+                    Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                        Some(Err(broadcast_lag_error(skipped)))
                     }
                 }
-            });
+            }
+        });
 
         // Start with initial snapshot, Ready signal, then live updates
         let initial_stream = futures::stream::iter(vec![Ok(initial_msg), Ok(LogMsg::Ready)]);
@@ -379,5 +380,24 @@ impl EventService {
 
         let initial_stream = futures::stream::iter(vec![Ok(initial_msg), Ok(LogMsg::Ready)]);
         Ok(initial_stream.chain(filtered_stream).boxed())
+    }
+}
+
+fn broadcast_lag_error(skipped: u64) -> std::io::Error {
+    std::io::Error::other(format!(
+        "execution-process stream lagged by {skipped} messages; resnapshot required"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::broadcast_lag_error;
+
+    #[test]
+    fn lag_error_requires_an_authoritative_resnapshot() {
+        let error = broadcast_lag_error(7);
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(error.to_string().contains("lagged by 7 messages"));
+        assert!(error.to_string().contains("resnapshot required"));
     }
 }

@@ -1,67 +1,42 @@
-# Mobile access to the workspace right drawer
+# Technical Specification: Authoritative Execution Status Reconciliation
 
-Task: `a12b9b02-6250-42e9-b5b0-220ea5fca2af`
+Task: `vk/3488-fix-stale-execut`
 
 ## Problem
 
-The desktop workspace layout has a right sidebar and a dedicated action for
-showing or hiding it. In the mobile layout the same `RightSidebar` content is
-mounted under the `git` mobile tab, represented by a git-fork glyph in the
-top tab strip. That affordance does not identify itself as the right drawer,
-and the desktop `ToggleRightSidebar` action is not rendered in the mobile
-navbar. A mobile user can therefore reasonably conclude that the drawer is
-missing.
+The session execution-process WebSocket reads its database snapshot before
+subscribing to live broadcasts. A terminal update committed in that gap appears
+in neither source, so the browser can retain a stale `running` process and keep
+the chat composer on Stop indefinitely. Broadcast lag is also silently ignored,
+creating a second missed-event path with no forced resnapshot.
 
-## Objective
+## Required Behavior
 
-Make the workspace right drawer discoverable and directly accessible on mobile
-without changing the existing desktop panel behavior or the contents of the
-drawer.
+- Subscribe to execution-process updates before capturing the full session
+  snapshot.
+- Emit the snapshot and Ready marker before draining buffered/live updates.
+- Treat broadcast lag as loss of stream authority and close with a retryable
+  error so the client reconnects and obtains a new snapshot.
+- Retain the last good snapshot during ordinary reconnect downtime, then replace
+  it with the new authoritative snapshot.
+- Define only `running` coding-agent/setup/cleanup/archive processes as active.
+  Completed, failed, killed, interrupted, and indeterminate statuses clear Stop.
+- Preserve active Stop/cancellation behavior.
 
-## Required behavior
+## Lifecycle Invariants
 
-- A mobile workspace screen exposes a clearly identifiable control for the
-  right drawer in the top navigation.
-- Activating the control shows the existing `RightSidebar` content for the
-  selected workspace.
-- The control communicates its purpose through an accessible name and the
-  established right-sidebar iconography.
-- The active state is visible while the right drawer is selected.
-- The control remains usable at narrow phone widths and participates in the
-  existing horizontally scrollable mobile tab strip.
-- Create mode and workspace-less states do not render unusable drawer content.
-- Desktop `ToggleRightSidebar`, persistence, and resizable-panel behavior stay
-  unchanged.
-- Existing mobile tabs (workspaces, chat, changes, logs, preview, and browser)
-  keep their behavior and state preservation.
-
-## Technical direction
-
-Use the existing mobile-tab architecture rather than introducing a second
-overlay or a competing visibility state. Give the existing mobile right-drawer
-tab explicit sidebar semantics in the shared navbar configuration, while
-retaining the current `git` tab identifier to avoid a preference migration.
-Keep `WorkspacesLayout` as the owner of rendering `RightSidebar` for that tab.
-
-## Scope
-
-This is a Vibe Kanban frontend change in `packages/ui` and/or
-`packages/web-core`. No other service or homelab deployment configuration is in
-scope.
+Coordinator-local non-persistent processes that cannot be adopted after restart
+become interrupted after safe WIP handling. Worker-owned uncertainty remains
+evidence-backed and may become indeterminate. Transport loss alone never
+fabricates completion, but neither interrupted nor indeterminate is displayed as
+an active cancellable turn.
 
 ## Verification
 
-- Component coverage proves the mobile navbar renders a right-drawer control
-  with an accessible name, selects it, and exposes its active state.
-- Workspace layout coverage proves the selected mobile tab displays the
-  existing `RightSidebar` and other tab content remains hidden/preserved.
-- Relevant frontend tests, type checking, linting, and formatting pass.
-- A narrow mobile viewport is inspected to confirm the control remains
-  reachable and visually understandable.
-
-## Non-goals
-
-- Redesigning the contents of `RightSidebar`.
-- Changing desktop sidebar sizing or persistence.
-- Adding a new backend API or persisted preference field.
-- Updating any service other than Vibe Kanban.
+- A rendered hook regression retains running while disconnected and converges
+  to interrupted when the reconnect snapshot arrives.
+- Status derivation tests cover active running and every terminal status.
+- The event stream tests its lag-to-resnapshot error contract.
+- Existing shutdown cleanup coverage proves warm/local process teardown.
+- Focused frontend tests, services tests, server compilation, TypeScript checks,
+  formatting, and diff checks pass.

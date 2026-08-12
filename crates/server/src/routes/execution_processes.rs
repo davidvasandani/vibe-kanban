@@ -1,7 +1,10 @@
 use anyhow;
 use axum::{
     Extension, Router,
-    extract::{Path, Query, State, ws::Message},
+    extract::{
+        Path, Query, State,
+        ws::{CloseFrame, Message},
+    },
     middleware::from_fn_with_state,
     response::{IntoResponse, Json as ResponseJson},
     routing::{get, post},
@@ -273,7 +276,15 @@ async fn handle_execution_processes_by_session_ws(
                     }
                     Some(Err(e)) => {
                         tracing::error!("stream error: {}", e);
-                        break;
+                        // A lagged execution stream is no longer authoritative.
+                        // Close with an error code so the client reconnects and
+                        // receives a fresh full snapshot instead of retaining a
+                        // stale running process forever.
+                        let _ = socket.send(Message::Close(Some(CloseFrame {
+                            code: 1011,
+                            reason: "execution process stream requires resnapshot".into(),
+                        }))).await;
+                        return Err(e.into());
                     }
                     None => break,
                 }

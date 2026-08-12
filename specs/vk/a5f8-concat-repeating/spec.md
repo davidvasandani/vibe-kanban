@@ -1,52 +1,77 @@
-# Feature Specification: Background Workspace Creation
+# Feature Specification: Authoritative Execution Status Reconciliation
 
 **Feature dir**: `specs/vk/a5f8-concat-repeating/`
-**Task id**: `vk/5e1e-vk-workspace-cre`
+**Task id**: `vk/3488-fix-stale-execut`
 **Status**: Clarified
 
 ## Summary
 
-Accept workspace creation as background lifecycle work so a user can navigate away immediately without cancelling a slow creation. The workspace remains discoverable while it is being prepared, transitions to its normal running experience when ready, and exposes a useful terminal failure if creation cannot complete.
+Ensure the workspace chat composer derives Send versus Stop from the latest
+authoritative execution state. Initial connection, reconnect, missed events,
+interrupted executions, and service restarts must converge to a terminal state
+promptly instead of leaving a stale local running flag and indefinite spinner.
 
 ## User Stories
 
-- As a user creating a workspace, I want the request to be accepted quickly so I am not trapped on a form for ten seconds or more.
-- As a user who navigates elsewhere after submitting, I want creation and the first agent turn to continue without the create page remaining open.
-- As a user returning to the new workspace, I want to see whether it is still being created, ready, or failed.
-- As an operator, I want accepted creation work to have one observable identity and an actionable outcome so retries and restarts do not create duplicate agents or indefinite pending state.
+- As a workspace user, I want the composer to return to Send when an execution
+  finishes so I can start the next turn.
+- As a user reconnecting after a network or service interruption, I want the
+  workspace to recover current process state without a manual refresh.
+- As a user with an active execution, I want Stop to remain visible and
+  cancellable until authoritative state becomes terminal.
+- As an operator, I want shutdown and recovery to classify abandoned process
+  records truthfully so no client can remain permanently running.
 
 ## Functional Requirements
 
-- FR-1: The system must reject an empty prompt, an empty repository selection, or contradictory placement choices before accepting workspace creation.
-- FR-2: On acceptance, the system must assign and return a durable workspace identity without waiting for repository/worktree materialization or initial execution startup.
-- FR-3: All work after acceptance must continue independently of the originating HTTP connection and frontend route.
-- FR-4: The accepted operation must preserve the submitted workspace name, repository targets, linked issue, attachments, executor configuration, prompt, and placement intent.
-- FR-5: The system must expose an accepted workspace as creating until background work reaches a terminal outcome.
-- FR-6: Successful background work must create exactly one initial execution and transition the workspace into the existing ready/running experience.
-- FR-7: Failed background work must persist a safe, actionable failure associated with the workspace and must not remain creating indefinitely.
-- FR-8: Repeated delivery, retry, or restart recovery for one accepted operation must not create duplicate repository associations, placement operations, or initial executions.
-- FR-9: A coordinator restart after acceptance must reconcile unfinished creation from persisted evidence by safely continuing it or recording a truthful terminal/indeterminate outcome.
-- FR-10: The frontend must navigate to the accepted workspace as soon as acceptance succeeds and render creation status from authoritative server state rather than mutation-local state.
-- FR-11: Completion and failure must become visible through the product's normal refresh/event mechanisms even when the initiating create component has unmounted.
-- FR-12: Current linked-issue attachment import, project-context composition, analytics, worker scheduling, coordinator-local placement, and execution configuration behavior must be preserved.
+- FR-1: The composer must show Stop only when the latest authoritative
+  execution state is active.
+- FR-2: Completed, failed, killed, interrupted, and applicable indeterminate
+  terminal statuses must clear the running composer state.
+- FR-3: An initial execution-process connection must hydrate client state from
+  a complete current server snapshot before applying incremental updates.
+- FR-4: Every reconnect must reconcile local process state with a complete
+  current server snapshot, including terminal changes whose events were missed.
+- FR-5: Snapshot replacement must remove or terminalize locally cached active
+  executions that are no longer active in authoritative state.
+- FR-6: Incremental execution updates received after hydration must continue to
+  update the composer without regressing newer state.
+- FR-7: Service shutdown and startup recovery must not leave an execution
+  classified as running when the system lacks positive evidence that its agent
+  process remains active.
+- FR-8: Interrupted or failed cancellation and transport loss must converge to
+  a truthful terminal or indeterminate classification rather than an unbounded
+  running state.
+- FR-9: Active executions must retain Stop behavior and remain cancellable.
+- FR-10: The fix must preserve workspace/session selection semantics and avoid
+  treating unrelated executions as the current session's activity.
+- FR-11: Automated regression coverage must reproduce a missed terminal event
+  followed by reconnect and verify convergence from Stop to Send.
+- FR-12: Focused coverage must verify both terminal-state clearing and active
+  execution cancellation behavior.
 
 ## Out of Scope
 
-- Changes to services outside Vibe Kanban.
-- A general-purpose user-configurable job system.
-- Redesigning the create form or workspace navigation.
-- Automatically retrying arbitrary non-idempotent external failures without bounded policy and durable evidence.
+- Changes to services other than Vibe Kanban.
+- Redesigning the chat composer or execution history presentation.
+- Treating a disconnect alone as proof of successful completion.
+- Changes to worker affinity, scheduling, or executor protocols beyond what is
+  necessary to reconcile existing execution lifecycle state.
 
 ## Acceptance Criteria
 
-- [ ] With workspace materialization deliberately delayed beyond ten seconds, the create endpoint returns an accepted workspace before the delay completes.
-- [ ] Cancelling the HTTP client or navigating away after acceptance does not prevent the workspace and initial execution from being created.
-- [ ] Opening the accepted workspace during preparation shows a creation-in-progress state sourced from the server.
-- [ ] On completion, the same workspace shows its initial session/execution without a second create request.
-- [ ] A forced background failure produces a persisted visible failure and no indefinite spinner.
-- [ ] Restart/replay coverage proves one accepted workspace produces at most one initial execution.
-- [ ] Existing automatic, coordinator, and explicit-worker placement cases retain their semantics.
-- [ ] Backend and frontend focused tests, generated-type checks, formatting, and independent review pass.
+- [ ] An automated regression test first reproduces a stale Stop/spinner after
+  a terminal event is missed.
+- [ ] Reconnecting replaces stale active client state with the latest terminal
+  server snapshot and the composer renders Send.
+- [ ] Restart or interrupted-execution coverage proves the composer cannot
+  remain permanently running once backend recovery has classified the process.
+- [ ] Completed, failed, killed, interrupted, and applicable indeterminate
+  terminal states consistently render the composer idle.
+- [ ] A positively active execution still renders Stop and its cancellation
+  action remains available.
+- [ ] Focused frontend and/or backend tests, formatting, and repository checks
+  pass.
 
 ## Open Questions
 

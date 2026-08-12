@@ -1,67 +1,100 @@
-# Implementation Plan: Background Workspace Creation
+# Implementation Plan: Authoritative Execution Status Reconciliation
 
 **Spec**: `./spec.md`
 **Status**: Ready for tasks
 
 ## Technical Context
 
-- Backend: Rust 2024, Axum, Tokio, SQLx/SQLite in `crates/server`, `crates/services`, `crates/local-deployment`, and `crates/db`.
-- Frontend: React/TypeScript, TanStack Query, generated `ts-rs` contracts in `packages/web-core` and `shared/types.ts`.
-- Existing flow: `crates/server/src/routes/workspaces/create.rs` creates the workspace record and then performs every slow step inline before returning an `ExecutionProcess`.
-- Existing observability: `Workspace` is returned by workspace APIs; database hooks feed existing event/query refresh paths. Extending that model avoids a separate job-status API.
-- Constraints: Vibe Kanban only, no new dependency, generated types are regenerated rather than edited, and worktree administration remains coordinator-owned.
+- Backend: Rust 2024, Tokio broadcast streams, SQLx/SQLite, Axum WebSockets in
+  `crates/services` and `crates/server`.
+- Frontend: React/TypeScript and the shared `useJsonPatchWsStream` hook in
+  `packages/web-core`.
+- Existing contract: a session execution WebSocket emits a full
+  `replace /execution_processes` snapshot, then `Ready`, then incremental
+  patches. The hook intentionally retains the last snapshot across reconnects.
+- Status domain: only `running` is active; all five other statuses clear Stop.
+- Scope: Vibe Kanban only, no new dependency, no generated contract change.
 
 ## Architecture & Approach
 
-### 1. Persist creation lifecycle on the workspace
+### 1. Close the stream initialization race
 
-Add nullable/defaulted `creation_status` and `creation_error` columns to `workspaces` through a migration in `crates/db/migrations`. Extend `crates/db/src/models/workspace.rs` with a closed `WorkspaceCreationStatus` enum and helpers that atomically claim `queued -> running` and write `ready` or `failed`. Existing rows migrate as `ready`.
+Refactor
+`EventService::stream_execution_processes_for_session_raw` in
+`crates/services/src/services/events/streams.rs` so the broadcast receiver is
+subscribed before the awaited database snapshot query. Build the filtered live
+stream from that already-subscribed receiver, then chain the authoritative
+snapshot and `Ready` ahead of buffered/live events.
 
-The workspace ID is the operation identity. A compare-and-set claim is the single-consumer boundary; slow work occurs after the claim without holding a lock or transaction.
+This makes the handoff gap lossless: a terminal update committed while the
+snapshot is being loaded is buffered for the new subscriber and applied after
+the snapshot. Reconnects therefore converge even when completion occurs during
+stream initialization.
 
-### 2. Split acceptance from execution
+### 2. Add a deterministic regression seam
 
-In `crates/server/src/routes/workspaces/create.rs`, retain pre-mutation validation for prompt, repositories, and `PlacementIntent`. Create the workspace row in `queued`, clone the deployment and accepted input into a Tokio-owned task, and return the new workspace immediately.
+Extract or parameterize the snapshot-plus-subscribed-stream construction just
+enough for a service test to pause after subscription and before snapshot
+completion. The test will publish a running-to-terminal update in that window,
+consume the initial snapshot/Ready/update sequence, and prove the final reduced
+state is terminal. A companion assertion retains an active `running` process.
 
-Move repository association, attachment handling, linked-project context, placement reservation, `start_workspace`, and success analytics into an internal runner. The runner first claims the workspace, records `ready` only after `start_workspace` returns, and catches/logs any error before recording a bounded safe failure message. The returned task handle is intentionally owned by the Tokio runtime, not the HTTP request.
+Prefer testing the event service contract directly over timing a real socket;
+the socket route in `crates/server/src/routes/execution_processes.rs` is a
+transparent forwarding layer.
 
-At startup, reconcile `queued`/`running` workspaces conservatively: if an initial execution exists, mark ready; otherwise mark failed/interrupted with an actionable message. This closes crash windows without replaying partially completed Git operations.
+### 3. Lock the frontend reconnect contract
 
-### 3. Change the response and read contract
+Extend
+`packages/web-core/src/shared/hooks/useJsonPatchWsStream.reconnect.test.tsx`
+to simulate a missed terminal update, unexpected close, and reconnect. The
+second connection sends a full replacement snapshot followed by `Ready`; assert
+the retained stale running value becomes terminal. This covers the shared
+client behavior that drives `useExecutionProcesses`, while existing exact
+`status === running` derivation in `useExecutionProcesses.ts` and
+`SessionChatBoxContainer.tsx` preserves Stop for active work.
 
-Change `CreateAndStartWorkspaceResponse` in `crates/db/src/models/requests.rs` to contain only the accepted `Workspace`; creation fields on `Workspace` make its status observable through existing list/detail APIs. Regenerate `shared/types.ts` via `pnpm run generate-types` and update Rust/MCP callers that currently expect `execution_process`.
+### 4. Verify restart finalization
 
-### 4. Render authoritative creation state
-
-`packages/web-core/src/shared/hooks/useCreateWorkspace.ts` already consumes only `workspace`, so it naturally navigates after the shortened request. Update direct callers in `WorkspacesLayout.tsx`, `VSCodeWorkspacePage.tsx`, and the MCP task-attempt path for the new response semantics.
-
-At the workspace layout/content boundary, render a small pending or failed state before components that assume repositories and sessions exist. Status comes from the normal workspace query/cache and transitions to the existing UI when `ready`. Include a focused component test for queued/running/failed/ready behavior.
+Run the focused orphan-cleanup/shutdown tests around
+`ContainerService::cleanup_orphan_executions` and local deployment shutdown.
+Only add backend code if these tests expose an execution that can remain
+`running` without positive worker/process evidence; otherwise document the
+existing `interrupted`/`indeterminate` recovery as verified rather than
+duplicating lifecycle logic.
 
 ## Data Model
 
-See [`data-model.md`](data-model.md).
+See `./data-model.md`. No schema or generated type changes are planned.
 
 ## Contracts
 
-See [`contracts/background-workspace-creation.md`](contracts/background-workspace-creation.md).
+See `./contracts/execution-process-stream.md`.
 
 ## Research Notes
 
-See [`research.md`](research.md). No new dependency is introduced.
+See `./research.md`. No new dependency is introduced.
 
 ## Constitution Check
 
-- Principle XII: a workspace-scoped compare-and-set is the authoritative asynchronous claim; no lock spans slow work.
-- Principle XVIII: placement and execution remain coordinator-authoritative, affinity-bound, and idempotent by existing workspace/execution identities.
-- Principle XXVIII: acceptance persists identity/status before returning; runtime-owned work outlives request cancellation; startup reconciliation produces a truthful terminal result.
-- Principles III and VI: status lives on the existing workspace read model and uses the existing create/start implementation rather than introducing a general queue framework.
-- Constraint on generated files: Rust DTOs remain authoritative and `shared/types.ts` is regenerated.
+- Principle II: service and rendered-hook regression tests cover missed
+  terminal events and the active Stop case.
+- Principles VI and XII: the fix strengthens the existing snapshot/broadcast
+  handoff rather than adding a second execution-status channel.
+- Principles XVIII and XXX: only authoritative backend evidence changes
+  lifecycle state, while every reconnect rehydrates from a full snapshot.
+- Principle XIX: patch streaming remains an optimization over full snapshots.
 
-No constitution deviations remain.
+No constitution deviation remains.
 
 ## Risks & Dependencies
 
-- Some workspace screens assume repositories or sessions exist; the creation-state guard must sit above all such assumptions.
-- Axum/Tokio runtime shutdown cancels detached tasks; startup reconciliation must cover both queued-before-spawn and running-during-shutdown states.
-- Errors may contain repository paths or external details. Persist a bounded user-safe summary and keep full detail in structured logs.
-- Existing MCP/API callers may require an execution ID immediately. They must either poll the accepted workspace until ready or use an existing execution lookup; no caller may reconstruct a second start.
+- Subscribe-before-query can yield a duplicate update already reflected in the
+  snapshot. JSON Patch add/replace application must remain idempotent for the
+  keyed process value; the existing upsert patch semantics provide this.
+- Broadcast lag must not silently look authoritative. Existing lag handling
+  ends the stream, causing the client to reconnect and resnapshot.
+- Frontend tests alone cannot prove the backend handoff is lossless; both sides
+  require focused coverage.
+- Historical artifacts already present beside the command-selected spec path
+  are unrelated and must not be treated as implementation scope.
