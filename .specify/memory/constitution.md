@@ -435,6 +435,15 @@ Historical reads do not implicitly migrate workspace affinity. Using another
 node requires an explicit authenticated, affinity-safe reconstruction contract;
 idle-node telemetry alone is never scheduling authority.
 
+### XXXIV. Partial projections degrade deterministically
+When a UI projection joins an authoritative record with asynchronously loaded
+summary or enrichment data, the base record MUST remain immediately usable.
+Ordering and grouping use a persisted base-record fallback until enrichment is
+available; missing or malformed enrichment never outranks known values merely
+because it is absent. Arrival of richer data may refine the projection, but ties
+and incomplete records remain deterministic through stable identity-based
+fallbacks. Regression coverage exercises both the base-only and enriched states.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in

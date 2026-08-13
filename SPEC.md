@@ -1,6 +1,6 @@
 # Technical Specification: Resource-Aware Chat Loading
 
-## Objective
+## Problem
 
 Opening a workspace with a long agent conversation can drive the Vibe Kanban
 coordinator to approximately 100% CPU for an extended period while other
