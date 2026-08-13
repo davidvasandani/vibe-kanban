@@ -410,7 +410,14 @@ mod tests {
         let fixture = Fixture::new().with(Uuid::from_u128(1), &[1, 2]);
         let patch = MetricsPatchBuilder::new().next(&fixture.snapshot());
 
-        assert_eq!(paths(&patch), ["replace /nodes", "replace /generated_at"]);
+        assert_eq!(
+            paths(&patch),
+            [
+                "replace /nodes",
+                "replace /generated_at",
+                "replace /disk_alert_thresholds",
+            ]
+        );
         assert!(
             patch.0.iter().all(|op| match op {
                 PatchOperation::Replace(op) => !op.path.is_root(),
