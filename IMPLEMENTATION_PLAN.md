@@ -1,27 +1,28 @@
-# Fix Toolbar — Implementation Plan
+# Implementation Plan: Commits Behind in the Git Header
 
-1. Confirm the mobile navbar's current rendered structure and existing tests,
-   including the split between the flexible workspace-tool region and trailing
-   status/actions.
-2. Establish/refine the SpecKit project constitution and generate the task's
-   feature artifacts through the required specify, clarify, plan, tasks, and
-   analyze stages.
-3. Update the shared `Navbar` mobile workspace layout so:
-   - the leading toolbar region grows and may shrink (`flex-1 min-w-0`);
-   - the visible tab group fills that region;
-   - each visible tab shares surplus width while retaining a practical minimum;
-   - horizontal overflow remains available when space is constrained; and
-   - the trailing action region stays non-shrinking.
-4. Add focused rendered-component tests in the web-core Vitest lane that assert
-   the flex growth/distribution/overflow contract, active accessibility state,
-   and fixed trailing controls without changing project-page behavior.
-5. Run focused tests, TypeScript checks, lint, repository formatting, and a
-   scoped diff sanity check.
-6. Run an independent Codex diff review; address and re-verify all confirmed
-   significant findings until the review is clean.
-7. Distill reusable responsive-toolbar knowledge into the Vibe Kanban knowledge
-   base, tag it with `vk/2163-fix-toolbar`, refresh the index, and commit the
-   knowledge-base update.
-8. Commit the implementation, push the task branch, open a pull request against
-   the repository's base branch, wait for required checks as needed, and merge
-   it.
+1. Establish the task's SpecKit constitution and feature artifacts under a new
+   `specs/vk/a35b-commits-behind-m/` directory, retaining the request's scope and
+   the prior-knowledge constraints.
+2. Inspect the branch-status hook/query lifecycle, `RightSidebar` header-extra
+   composition, and existing UI test conventions to choose a presentation seam
+   that remains live while the Git body is collapsed.
+3. Add a small, testable Git-header status derivation/presentation component
+   that:
+   - joins repository metadata to branch status by repository ID;
+   - omits zero, missing, and loading values;
+   - shows only the count for a single-repository workspace;
+   - shows repository names with counts for a multi-repository workspace; and
+   - bounds/truncates visible text while preserving full accessible context.
+4. Mount that component through the existing Git section `headerExtra` in
+   `RightSidebar` without changing the drawer's expansion or flex behavior.
+5. Add focused tests for empty/zero state, one repository, multiple
+   repositories, ID-based matching, and collapsed-header availability.
+6. Run the targeted frontend tests, formatting, type checks, and linting; resolve
+   any regressions within Vibe Kanban scope.
+7. Run the required independent Codex review, address confirmed significant
+   findings, and repeat verification until no significant findings remain.
+8. Distill genuinely reusable UI/query-boundary knowledge into the Vibe Kanban
+   knowledge base, tag it with `vk/a35b-commits-behind-m`, refresh the index,
+   and commit the knowledge-base update.
+9. Commit the complete task, open a pull request against the latest base branch,
+   verify its checks and review state, merge it, and report the merged result.
