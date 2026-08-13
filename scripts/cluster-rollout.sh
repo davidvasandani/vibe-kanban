@@ -44,9 +44,6 @@ atomic_link() {
 
 restore_known_good_links() {
   atomic_link "$known_good_release" "$VK_RELEASES_DIR/current"
-  if [[ -n "$known_good_static" && -d "$known_good_static" ]]; then
-    atomic_link "$known_good_static" "$VK_REMOTE_STATIC_RELEASES/current"
-  fi
 }
 
 rollback() {
@@ -74,7 +71,6 @@ VK_ROLLOUT_REPO=${VK_ROLLOUT_REPO:-/srv/src/vibe-kanban}
 VK_ROLLOUT_BUILD_TREE=${VK_ROLLOUT_BUILD_TREE:-/srv/src/vibe-kanban-rebuild-cache/cluster-rollout-tree}
 VK_ROLLOUT_TARGET_DIR=${VK_ROLLOUT_TARGET_DIR:-/srv/src/vibe-kanban-cluster-rollout-cache/target}
 VK_RELEASES_DIR=${VK_RELEASES_DIR:-/srv/vk-releases}
-VK_REMOTE_STATIC_RELEASES=${VK_REMOTE_STATIC_RELEASES:-/srv/vk-static}
 VK_ROLLOUT_SYSTEMCTL=${VK_ROLLOUT_SYSTEMCTL:-systemctl}
 VK_ROLLOUT_CURL=${VK_ROLLOUT_CURL:-curl}
 VK_ROLLOUT_UNITS=${VK_ROLLOUT_UNITS:-"vibe-kanban-dev.service vibe-kanban-remote.service vibe-kanban-relay.service"}
@@ -85,7 +81,7 @@ VK_ROLLOUT_BUILD_COMMAND=${VK_ROLLOUT_BUILD_COMMAND:-"pnpm install --frozen-lock
 intended_sha=${1:-${VK_ROLLOUT_SHA:-}}
 
 [[ "$intended_sha" =~ ^[0-9a-f]{40}$ ]] || die "a full 40-character commit SHA is required"
-for path_var in VK_ROLLOUT_REPO VK_ROLLOUT_BUILD_TREE VK_ROLLOUT_TARGET_DIR VK_RELEASES_DIR VK_REMOTE_STATIC_RELEASES; do
+for path_var in VK_ROLLOUT_REPO VK_ROLLOUT_BUILD_TREE VK_ROLLOUT_TARGET_DIR VK_RELEASES_DIR; do
   require_absolute "$path_var" "${!path_var}"
 done
 [[ "$VK_ROLLOUT_TARGET_DIR" != /srv/src/vibe-kanban-rebuild-cache/target ]] \
@@ -97,7 +93,6 @@ repo_sha=$(git -C "$VK_ROLLOUT_REPO" rev-parse "$intended_sha^{commit}")
 [[ "$repo_sha" == "$intended_sha" ]] || die "intended commit is not available in $VK_ROLLOUT_REPO"
 
 known_good_release=$(readlink -f "$VK_RELEASES_DIR/current" 2>/dev/null || true)
-known_good_static=$(readlink -f "$VK_REMOTE_STATIC_RELEASES/current" 2>/dev/null || true)
 [[ -n "$known_good_release" && -f "$known_good_release/release.json" ]] \
   || die "current does not resolve to a self-describing known-good release"
 known_good_sha=$(jq -r '.sha // empty' "$known_good_release/release.json")
@@ -121,13 +116,11 @@ if ! (
   [[ "$(git rev-parse HEAD)" == "$intended_sha" ]] \
     || die "build worktree does not match intended commit"
   export CARGO_TARGET_DIR="$VK_ROLLOUT_TARGET_DIR"
-  export VK_RELEASES_DIR VK_REMOTE_STATIC_RELEASES
+  export CARGO_INCREMENTAL=0
+  export VK_RELEASES_DIR
   export VK_RELEASES_DEFER_FLIP=1
   bash -c "$VK_ROLLOUT_BUILD_COMMAND"
 ); then
-  # local-build.sh publishes static content before its final binary symlink
-  # flip. Restore both snapshots even when the build/publish command aborts in
-  # that narrow interval.
   restore_known_good_links
   die "candidate build or publish failed; known-good links restored"
 fi
@@ -154,14 +147,8 @@ for artifact in vibe-kanban vibe-kanban-mcp vibe-kanban-review remote relay-serv
 done
 log "verified candidate release $candidate for $intended_sha"
 
-candidate_build_id=$(jq -r '.build_id // empty' "$candidate/release.json")
-candidate_static="$VK_REMOTE_STATIC_RELEASES/build-$candidate_build_id"
-[[ -n "$candidate_build_id" && -d "$candidate_static" ]] \
-  || die "candidate has no matching remote-web release"
-
 # Only verified, complete artifacts reach the live symlinks.
 atomic_link "$known_good_release" "$VK_RELEASES_DIR/previous"
-atomic_link "$candidate_static" "$VK_REMOTE_STATIC_RELEASES/current"
 atomic_link "$candidate" "$VK_RELEASES_DIR/current"
 log "candidate flipped live; starting health gate"
 
