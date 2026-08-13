@@ -105,10 +105,10 @@ parallel within their layer.
   generated-type checks as applicable, `pnpm run check`, `pnpm run lint`, and
   applicable broad Rust tests; record results in
   `specs/vk/c89d-address-fable-fo/verification.md` (depends on T025).
-- [ ] T027 Run independent `codex review`, address confirmed significant
+- [x] T027 Run independent `codex review`, address confirmed significant
   findings, rerun affected verification, and repeat until clean; write
   `specs/vk/c89d-address-fable-fo/review.md` (depends on T026).
-- [ ] T028 Update reusable project knowledge in `docs/knowledge-base/`, tag it
+- [x] T028 Update reusable project knowledge in `docs/knowledge-base/`, tag it
   `c89d-address-fable-fo`, refresh `docs/knowledge-base/INDEX.md`, and commit the
   knowledge-base work (depends on T027).
 - [ ] T029 Commit remaining scoped changes, push the task branch, open a PR

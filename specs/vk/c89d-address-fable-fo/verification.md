@@ -22,4 +22,3 @@ Verified on 2026-08-13.
   `crates/server/src/routes/workspaces/create.rs:297`; `git diff 9d5cf949 --`
   confirms this task did not change that file. Frontend ESLint and the changed
   Rust code complete cleanly before that baseline failure.
-
