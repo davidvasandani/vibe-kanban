@@ -1,36 +1,35 @@
-# Clarifications: Authoritative Execution Status Reconciliation
+# Clarifications: Concatenate Repeating Lines
 
 ## Resolved Decisions
 
-### Only `running` is active
+### Eligible command
 
-The existing closed status domain is `running`, `completed`, `failed`, `killed`,
-`interrupted`, and `indeterminate`. Only `running` is active and cancellable.
-Every other value clears Stop. `indeterminate` means the coordinator cannot
-prove the remote process's terminal outcome; it is still non-running and
-non-cancellable in the composer rather than a reason to spin forever.
+Compaction is limited to the reported `codex review --uncommitted` operation.
+An absolute executable path or shell wrapper is acceptable when the command
+normalizes to that same visible operation. Other review targets and arbitrary
+identical shell commands remain distinct.
 
-### Reconnect snapshots already exist, but their capture is racy
+This is the smallest scope supported by the screenshots. It also follows prior
+project knowledge that generic command suppression can conceal deliberate
+repeated operations and their outputs.
 
-The execution-process session stream already sends `replace
-/execution_processes` followed by `Ready` on every new WebSocket. The client
-preserves the prior snapshot during reconnect and correctly applies a replace.
-The server currently queries the database before it subscribes to the broadcast
-channel. A process can become terminal between those steps: the snapshot says
-running and the terminal broadcast has already passed before the receiver
-exists. This explains why even a reconnect can retain stale running state.
+### Marker meaning
 
-The stream initialization contract must close that query/subscribe gap (or
-otherwise replay/requery before declaring readiness), while retaining the
-client's last-good rendering during transport outages.
+The marker counts successful repetitions after the first occurrence, matching
+the existing repeated-log convention. Thus three total successful executions
+render `✓✓`, while ten total executions render `✓ ×9`.
 
-### Shutdown recovery remains evidence-based
+### Completion and failure boundary
 
-Existing shutdown/restart reconciliation must be verified as part of the fix.
-Local non-persistent executions that cannot survive shutdown should become
-`interrupted`; remote uncertainty may become `indeterminate`. Neither status is
-active in the composer. A disconnect by itself is not reclassified as
-`completed` or `killed`.
+Only a successfully completed occurrence arms reuse for the next matching
+command. Failed, denied, or timed-out occurrences remain visibly unsuccessful
+and disarm the run. A later matching command starts a new row.
+
+### Protocol coverage
+
+Both current app-server item notifications and the legacy Codex event stream
+must use the same compaction rules because Vibe Kanban accepts both formats in
+one normalizer.
 
 ## Remaining Open Questions
 

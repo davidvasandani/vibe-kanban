@@ -25,17 +25,17 @@ Unset (CI, local dev), the build behaves exactly as before. Key properties:
 - **Self-describing** — `release.json.sha` lets a reconciler compare
   "deployed" to "desired" mechanically. It equals the stamp SHA because the
   deploy host builds a worktree pinned to the stamp.
-- **Stage/flip split** — binaries are *staged* before the remote-web static
-  publish and *flipped* after it, so a mid-script failure can't leave the
-  remote frontend live on a build whose binaries never shipped; the drift is
-  always detectable via `release.json`.
+- **Stage/flip split** — binaries are fully staged before the atomic `current`
+  flip, so a mid-script failure leaves the previous complete release live and
+  the drift remains detectable via `release.json`.
 - **Locked flip+prune** — `previous`-repoint, `current`-flip, and prune run
   under `$VK_RELEASES_DIR/.publish-lock` (concurrent builders race
   otherwise), and prune never deletes the resolved targets of
   `current`/`previous`.
-- **Same BUILD_ID pairing** — the binary release `build-<id>` and the
-  remote-web static release `build-<id>` come from one script run, which is
-  what lets a health-gate rollback revert *both* consistently.
+- **No remote-web publish** — live UI traffic is served by local-web through
+  the path-splitting Caddy listener. The remote binary handles only API paths,
+  so `/srv/static` is not part of the release or rollback verdict. Remote-web
+  retains its independent frontend CI build and tests.
 
 ## Surfacing deployed identity in the UI
 

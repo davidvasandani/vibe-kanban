@@ -280,6 +280,7 @@ export const PERSIST_KEYS = {
   // Preview panel sections
   devServerSection: 'dev-server-section',
   // Server metrics panel section
+  deployStatusSection: 'deploy-status-section',
   serverMetricsSection: 'server-metrics-section',
   serverAffinitySection: 'server-affinity-section',
   // Terminal panel section
@@ -317,6 +318,7 @@ export type PersistKey =
   | typeof PERSIST_KEYS.processesSection
   | typeof PERSIST_KEYS.changesSection
   | typeof PERSIST_KEYS.devServerSection
+  | typeof PERSIST_KEYS.deployStatusSection
   | typeof PERSIST_KEYS.serverMetricsSection
   | typeof PERSIST_KEYS.serverAffinitySection
   | typeof PERSIST_KEYS.terminalSection

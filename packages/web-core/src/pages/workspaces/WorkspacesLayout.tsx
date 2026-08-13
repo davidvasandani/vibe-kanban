@@ -40,6 +40,7 @@ import { PreviewBrowserContainer } from './PreviewBrowserContainer';
 import { BrowserPanelContainer } from './BrowserPanelContainer';
 import { WorkspacesGuideDialog } from '@/shared/dialogs/shared/WorkspacesGuideDialog';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
+import { useDeployUpdateAvailable } from '@/shared/hooks/useDeployUpdateAvailable';
 import { LinkedIssueProvider } from '@/shared/providers/remote/LinkedIssueContext';
 
 import {
@@ -54,6 +55,7 @@ import { getWorkspaceMobileTabFallback } from '@/shared/components/ui-new/contai
 const WORKSPACES_GUIDE_ID = 'workspaces-guide';
 
 export function WorkspacesLayout() {
+  const { updateAvailable: deployUpdateAvailable } = useDeployUpdateAvailable();
   const appNavigation = useAppNavigation();
   const {
     workspaceId,
@@ -552,6 +554,8 @@ export function WorkspacesLayout() {
                   repos={repos}
                   linkedIssueForWorkspace={linkedIssueForWorkspace}
                   showDeployStatus
+                  deployUpdateAvailable={deployUpdateAvailable}
+                  onDeployRefresh={() => window.location.reload()}
                 />
               </LinkedIssueProvider>
             </div>
