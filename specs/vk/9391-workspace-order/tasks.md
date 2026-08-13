@@ -38,5 +38,5 @@ may run in parallel within their layer.
   `vk/9391-workspace-order` to
   `docs/knowledge-base/workspace-summary-ordering.md` and refresh
   `docs/knowledge-base/INDEX.md` (depends on T006).
-- [ ] T008 Commit the knowledge base and completed task, open a pull request,
+- [x] T008 Commit the knowledge base and completed task, open a pull request,
   pass required checks, and merge it (depends on T007).
