@@ -6,7 +6,10 @@ import type { MetricsNode } from 'shared/types';
 import { clusterMetricsApi } from '@/shared/lib/api';
 import { clusterMetricsKeys } from '@/shared/lib/clusterMetricsKeys';
 import { useHostId } from '@/shared/providers/HostIdProvider';
-import { rollupDiskAlerts } from '@/shared/components/ui-new/views/metrics/diskAlerts';
+import {
+  DEFAULT_DISK_ALERT_THRESHOLDS,
+  rollupDiskAlerts,
+} from '@/shared/components/ui-new/views/metrics/diskAlerts';
 import { cn } from '@/shared/lib/utils';
 
 export function ServerMetricsHeader() {
@@ -23,7 +26,10 @@ export function ServerMetricsHeader() {
   const nodes = Object.values(data.nodes).filter(
     (node): node is MetricsNode => !!node
   );
-  const rollup = rollupDiskAlerts(nodes, data.disk_alert_thresholds);
+  const rollup = rollupDiskAlerts(
+    nodes,
+    data.disk_alert_thresholds ?? DEFAULT_DISK_ALERT_THRESHOLDS
+  );
   if (!rollup.severity) return null;
 
   const severity = t(

@@ -6,6 +6,13 @@ import type {
 
 export type DiskAlertSeverity = 'warning' | 'critical';
 
+export const DEFAULT_DISK_ALERT_THRESHOLDS: DiskAlertThresholds = {
+  warning_free_percent: 10,
+  warning_free_bytes: 5n * 1024n ** 3n,
+  critical_free_percent: 2,
+  critical_free_bytes: 1024n ** 3n,
+};
+
 export interface FilesystemDiskAlert {
   filesystem: FilesystemSample;
   severity: DiskAlertSeverity;

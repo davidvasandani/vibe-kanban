@@ -40,7 +40,10 @@ import {
   isStale,
 } from '@/shared/components/ui-new/views/metrics/NodeStrip';
 import { ratioPercent } from '@/shared/components/ui-new/views/metrics/format';
-import { classifyNode } from '@/shared/components/ui-new/views/metrics/diskAlerts';
+import {
+  classifyNode,
+  DEFAULT_DISK_ALERT_THRESHOLDS,
+} from '@/shared/components/ui-new/views/metrics/diskAlerts';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { createShapeCollection } from '@/shared/lib/electric/collections';
 import { PROJECT_ISSUES_SHAPE } from 'shared/remote-types';
@@ -206,12 +209,7 @@ export function ServerMetricsSectionContainer({
       nodes: {},
       generated_at: null,
       sample_interval_ms: DEFAULT_SAMPLE_INTERVAL_MS,
-      disk_alert_thresholds: {
-        warning_free_percent: 10,
-        warning_free_bytes: 5n * 1024n ** 3n,
-        critical_free_percent: 2,
-        critical_free_bytes: 1024n ** 3n,
-      },
+      disk_alert_thresholds: DEFAULT_DISK_ALERT_THRESHOLDS,
     }),
     []
   );
@@ -276,12 +274,10 @@ export function ServerMetricsSectionContainer({
           },
           hostId
         );
-        if (response.created) {
-          const issues = createShapeCollection(PROJECT_ISSUES_SHAPE, {
-            project_id: projectId,
-          });
-          await issues.utils.awaitTxId(Number(response.txid), 10_000);
-        }
+        const issues = createShapeCollection(PROJECT_ISSUES_SHAPE, {
+          project_id: projectId,
+        });
+        await issues.utils.awaitTxId(Number(response.txid), 10_000);
         appNavigation.goToProjectIssue(projectId, response.issue.id);
       } catch (error) {
         setDiskActionError(
