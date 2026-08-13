@@ -95,6 +95,7 @@ use crate::{command, copy};
 
 const WORKSPACE_TOUCH_DEBOUNCE: Duration = Duration::from_mins(2);
 const FINAL_OUTPUT_RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(45);
+type AsyncChildStore = Arc<RwLock<HashMap<Uuid, Arc<RwLock<AsyncGroupChild>>>>>;
 
 fn history_has_final_assistant_message(history: &[LogMsg]) -> bool {
     history
@@ -124,7 +125,7 @@ fn normalized_final_assistant_state(message: &LogMsg) -> Option<bool> {
 
 async fn wait_for_unfinalized_output(
     msg_stores: Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>,
-    child_store: Option<Arc<RwLock<HashMap<Uuid, Arc<RwLock<AsyncGroupChild>>>>>>,
+    child_store: Option<AsyncChildStore>,
     exec_id: Uuid,
 ) {
     let mut observed_final_at = None;
@@ -671,7 +672,7 @@ fn dispatched_executor_profile(config: &ExecutorConfig) -> Option<ExecutorProfil
 pub struct LocalContainerService {
     db: DBService,
     workspace_manager: WorkspaceManager,
-    child_store: Arc<RwLock<HashMap<Uuid, Arc<RwLock<AsyncGroupChild>>>>>,
+    child_store: AsyncChildStore,
     cancellation_tokens: Arc<RwLock<HashMap<Uuid, CancellationToken>>>,
     msg_stores: Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>,
     /// Tracks background tasks that stream logs to the database.
