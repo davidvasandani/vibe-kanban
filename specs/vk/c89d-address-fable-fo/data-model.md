@@ -21,7 +21,7 @@ These fields are positive remote authority. General metrics are excluded.
 
 ### Reconciliation registration
 
-Initially an in-memory record owned by the same container that owns execution
+An in-memory quiet-window record owned by the same container that owns execution
 handles:
 
 ```text
@@ -33,11 +33,11 @@ FinalOutputReconciliation {
 }
 ```
 
-Normal terminal completion removes/cancels the record. Startup reconciliation
-already handles durable `running` rows. If implementation inspection shows the
-45-second intent itself must survive coordinator replacement to meet the bound,
-persist `final_output_observed_at` on the execution row and regenerate types;
-otherwise avoid schema expansion.
+Normal terminal completion removes/cancels the record. New log/worker events
+reset `observed_at`. The deadline itself need not survive coordinator
+replacement: startup reconciliation already handles durable `running` rows and
+preserves WIP before classification, so persisting a second lifecycle clock
+would create competing owners. No schema expansion is required.
 
 ## Client stream state
 

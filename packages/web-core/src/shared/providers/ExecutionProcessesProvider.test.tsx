@@ -9,6 +9,12 @@ import { ExecutionProcessesProvider } from './ExecutionProcessesProvider';
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const executionHook = vi.hoisted(() => ({ use: vi.fn() }));
+vi.mock('@/shared/lib/hmrContext', async () => {
+  const { createContext } = await import('react');
+  return {
+    createHmrContext: <T,>(_key: string, value: T) => createContext(value),
+  };
+});
 vi.mock('@/shared/hooks/useExecutionProcesses', async (importOriginal) => {
   const original =
     await importOriginal<

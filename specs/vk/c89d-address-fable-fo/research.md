@@ -71,3 +71,19 @@ metadata.
 
 Tokio synchronization/time, existing broadcast wrappers, Vitest fake timers,
 and current relay event helpers cover the needed behavior.
+
+## Sibling stream audit disposition
+
+- Execution processes, scratch, workspaces, and browser sessions all combine a
+  DB snapshot with the shared event broadcast. They now call the same
+  subscribe-before-snapshot helper and the same lag-to-error live adapter.
+- `MsgStore::history_plus_stream` is history plus live state, not a DB snapshot,
+  but has the same lossless boundary. `push` publishes while holding the history
+  write lock; a subscriber takes the receiver while holding the read lock, so a
+  message appears exactly once across history/live. Lag returns an I/O error.
+- Raw and normalized live log WebSockets preserve that error through their
+  filters. Stdout/stderr chunk streams now preserve it as well.
+- The temporary historical-normalization store is exempt from resnapshot: it is
+  a private, single-producer replay with the normal 100,000-message broadcast
+  capacity and a Ready sentinel, not a concurrently changing authoritative DB
+  snapshot. Its consumer owns and aborts the producer tasks if dropped.

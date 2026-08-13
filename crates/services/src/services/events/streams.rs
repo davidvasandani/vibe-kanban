@@ -464,11 +464,25 @@ mod tests {
         finish_snapshot.notify_one();
 
         let (snapshot, receiver) = handoff.await.unwrap();
-        assert_eq!(snapshot, "running");
-        let mut live = lossless_broadcast(receiver);
-        assert!(
-            matches!(live.next().await, Some(Ok(LogMsg::Stdout(value))) if value == "completed")
-        );
+        let initial =
+            futures::stream::iter([Ok(LogMsg::Stdout(snapshot.into())), Ok(LogMsg::Ready)]);
+        let mut stream = initial.chain(lossless_broadcast(receiver));
+        let mut reduced_status = None;
+        let mut ready = false;
+        while !(ready && reduced_status.as_deref() == Some("completed")) {
+            match stream
+                .next()
+                .await
+                .expect("snapshot, Ready, buffered update")
+            {
+                Ok(LogMsg::Stdout(status)) => reduced_status = Some(status),
+                Ok(LogMsg::Ready) => ready = true,
+                other => panic!("unexpected handoff message: {other:?}"),
+            }
+        }
+
+        assert!(ready);
+        assert_eq!(reduced_status.as_deref(), Some("completed"));
     }
 
     #[tokio::test]

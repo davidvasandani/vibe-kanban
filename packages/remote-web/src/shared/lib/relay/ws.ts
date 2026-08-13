@@ -173,8 +173,12 @@ class RelaySignedWebSocket extends EventTarget {
         // report that metadata to this shim's consumer and close the underlying
         // transport with a legal empty close. The raw close listener is
         // de-duplicated by emitClose.
-        this.emitClose(closePayload.code, closePayload.reason, false);
-        this.rawSocket.close();
+        forwardDecodedRelayClose(
+          this.rawSocket,
+          closePayload.code,
+          closePayload.reason ?? "",
+          (code, reason) => this.emitClose(code, reason, false),
+        );
         return;
       }
       case "ping":
@@ -232,6 +236,16 @@ class RelaySignedWebSocket extends EventTarget {
   private asWebSocket(): WebSocket {
     return this as unknown as WebSocket;
   }
+}
+
+export function forwardDecodedRelayClose(
+  rawSocket: Pick<WebSocket, "close">,
+  code: number,
+  reason: string,
+  emitClose: (code: number, reason: string) => void,
+): void {
+  emitClose(code, reason);
+  rawSocket.close();
 }
 
 async function normalizeOutboundWsPayload(
