@@ -140,10 +140,9 @@ export const useJsonPatchWsStream = <T extends object>(
           }
 
           ws.onopen = () => {
-            setError(null);
             setIsConnected(true);
-            // Reset backoff on successful connection
-            retryAttemptsRef.current = 0;
+            // Opening the transport does not prove this patch stream is
+            // authoritative. Only Ready resets failure pressure.
             if (retryTimerRef.current) {
               window.clearTimeout(retryTimerRef.current);
               retryTimerRef.current = null;
@@ -176,6 +175,7 @@ export const useJsonPatchWsStream = <T extends object>(
               // Handle Ready messages (initial data has been sent)
               if ('Ready' in msg) {
                 initializedForEndpointRef.current = endpoint;
+                retryAttemptsRef.current = 0;
                 setIsInitialized(true);
                 setError(null);
               }
@@ -215,8 +215,12 @@ export const useJsonPatchWsStream = <T extends object>(
 
             // Otherwise, reconnect on unexpected/error closures
             retryAttemptsRef.current += 1;
-            // Only show error if we haven't received any data yet
-            if (!dataRef.current && retryAttemptsRef.current > 6) {
+            // InitialData is only a local placeholder. A bounded connection
+            // error depends on whether an authoritative Ready was received.
+            if (
+              initializedForEndpointRef.current !== endpoint &&
+              retryAttemptsRef.current > 6
+            ) {
               setError('Connection failed');
             }
             scheduleReconnect();
@@ -230,6 +234,12 @@ export const useJsonPatchWsStream = <T extends object>(
 
           console.error('Failed to open WebSocket stream:', error);
           retryAttemptsRef.current += 1;
+          if (
+            initializedForEndpointRef.current !== endpoint &&
+            retryAttemptsRef.current > 6
+          ) {
+            setError('Connection failed');
+          }
           scheduleReconnect();
         }
       })();

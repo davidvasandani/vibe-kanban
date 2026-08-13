@@ -280,10 +280,9 @@ async fn handle_execution_processes_by_session_ws(
                         // Close with an error code so the client reconnects and
                         // receives a fresh full snapshot instead of retaining a
                         // stale running process forever.
-                        let _ = socket.send(Message::Close(Some(CloseFrame {
-                            code: 1011,
-                            reason: "execution process stream requires resnapshot".into(),
-                        }))).await;
+                        let _ = socket
+                            .send(Message::Close(Some(resnapshot_close_frame())))
+                            .await;
                         return Err(e.into());
                     }
                     None => break,
@@ -300,6 +299,13 @@ async fn handle_execution_processes_by_session_ws(
         }
     }
     Ok(())
+}
+
+fn resnapshot_close_frame() -> CloseFrame {
+    CloseFrame {
+        code: 1011,
+        reason: "execution process stream requires resnapshot".into(),
+    }
 }
 
 async fn get_execution_process_repo_states(
@@ -333,4 +339,16 @@ pub(super) fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .nest("/{id}", workspace_id_router);
 
     Router::new().nest("/execution-processes", workspaces_router)
+}
+
+#[cfg(test)]
+mod stream_close_tests {
+    use super::resnapshot_close_frame;
+
+    #[test]
+    fn authority_loss_uses_retryable_resnapshot_close() {
+        let frame = resnapshot_close_frame();
+        assert_eq!(frame.code, 1011);
+        assert!(frame.reason.contains("requires resnapshot"));
+    }
 }

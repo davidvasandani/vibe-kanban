@@ -83,16 +83,6 @@ trap 'rm -rf "$DIST_STAGING" 2>/dev/null || true' EXIT
 echo "🔨 Building web app..."
 (cd packages/local-web && npm run build)
 
-# Build the remote deployment frontend in the SAME script that compiles the
-# `remote` binary, so the served UI and the backend are always from one
-# commit. The remote binary embeds the git sha at compile time (shown in the
-# app's corner); previously nothing here built packages/remote-web, so that
-# sha advanced every deploy while the served frontend stayed frozen. Always
-# building it (not just on the deploy host) also means CI/local builds catch
-# remote-web breakage instead of shipping a stale UI.
-echo "🔨 Building remote web app..."
-(cd packages/remote-web && npm run build)
-
 echo "🔨 Building Rust binaries..."
 # Build only the CLI binaries. Building the whole workspace pulls in
 # crates/tauri-app, whose GTK/glib system deps aren't installed on the
@@ -247,19 +237,12 @@ chmod -R g+rwX,o+rX npx-cli/dist || true
 #     current  -> build-<id>       (atomic rename flip)
 #     previous -> old current      (single-step rollback target)
 #
-# This extends the VK_REMOTE_STATIC_RELEASES pattern (see the remote-web
-# publish below) to the binaries.
 # Deployed services stop running out of npx-cli/dist inside the source
 # checkout — where a repo reset/chmod/wipe can take the running deployment
 # down — and instead exec extracted binaries behind a `current` symlink.
 #
-# The publish is split in two around the remote-web publish below:
-# STAGING (here) happens before the remote-web `current` flips, the binary
-# `current` FLIP happens after it. Any failure therefore leaves the deployed
-# system fully consistent — either nothing flipped, or (in the few-symlink-op
-# window between the two flips) a version drift the deploy reconciler detects
-# and retries. `current` always resolves to a release whose every binary
-# built.
+# Staging completes before the atomic live flip below. Any failure therefore
+# leaves `current` resolving to the previous complete release.
 if [ -n "${VK_RELEASES_DIR:-}" ]; then
   # Symlink targets are resolved relative to the symlink's own directory, so
   # a relative VK_RELEASES_DIR would produce a self-prefixed, dangling
@@ -294,44 +277,6 @@ EOF
   chmod -R g+rwX,o+rX "$RELEASE" || true
 fi
 
-# --- Publish remote web frontend ------------------------------------------
-# The remote service (crates/remote) serves the UI from a fixed path via
-# ServeDir, where that path is a symlink the deploy host points at the
-# "current" release below. Publishing here — from the same build that just
-# compiled the `remote` binary — is what guarantees the served frontend and
-# the backend binary are always the same commit.
-#
-# Gated on VK_REMOTE_STATIC_RELEASES (set by the deploy host) so CI and local
-# developer builds, which have no such directory, are unaffected. The builder
-# only writes inside this releases dir, so it needs no privileges on the
-# served symlink's parent.
-if [ -n "${VK_REMOTE_STATIC_RELEASES:-}" ]; then
-  echo "📦 Publishing remote web to ${VK_REMOTE_STATIC_RELEASES}..."
-  REMOTE_RELEASE="${VK_REMOTE_STATIC_RELEASES}/build-${BUILD_ID}"
-  rm -rf "$REMOTE_RELEASE"
-  mkdir -p "$REMOTE_RELEASE"
-  cp -a packages/remote-web/dist/. "$REMOTE_RELEASE/"
-  # World-readable so the (non-builder) remote service user can serve it
-  # regardless of the build umask.
-  chmod -R g+rwX,o+rX "$REMOTE_RELEASE" || true
-  if [ "${VK_RELEASES_DEFER_FLIP:-0}" = "1" ]; then
-    echo "✅ Remote web staged (live flip deferred): $REMOTE_RELEASE"
-  else
-    # Atomic repoint: stage a new "current" symlink, then rename it over the
-    # old one. rename(2) is atomic, so the live site never resolves to a
-    # half-copied tree.
-    ln -sfn "$REMOTE_RELEASE" "${VK_REMOTE_STATIC_RELEASES}/.current-${BUILD_ID}"
-    mv -Tf "${VK_REMOTE_STATIC_RELEASES}/.current-${BUILD_ID}" \
-      "${VK_REMOTE_STATIC_RELEASES}/current"
-    # Retain the 3 most recent builds; prune older ones so the releases dir
-    # doesn't grow without bound.
-    ls -1dt "${VK_REMOTE_STATIC_RELEASES}"/build-* 2>/dev/null \
-      | tail -n +4 \
-      | xargs -r rm -rf
-    echo "✅ Remote web published: $REMOTE_RELEASE"
-  fi
-fi
-
 # --- Flip the binary release live --------------------------------------------
 if [ -n "${VK_RELEASES_DIR:-}" ] && [ "${VK_RELEASES_DEFER_FLIP:-0}" != "1" ]; then
   # Serialize the previous-repoint + current-flip + prune across concurrent
@@ -352,8 +297,8 @@ if [ -n "${VK_RELEASES_DIR:-}" ] && [ "${VK_RELEASES_DEFER_FLIP:-0}" != "1" ]; t
         "${VK_RELEASES_DIR}/previous"
     fi
 
-    # Atomic repoint, same protocol as the remote-web publish above: readers
-    # always resolve either the old or the new complete release.
+    # Atomic repoint: readers always resolve either the old or the new complete
+    # release.
     ln -sfn "$RELEASE" "${VK_RELEASES_DIR}/.current-${BUILD_ID}"
     mv -Tf "${VK_RELEASES_DIR}/.current-${BUILD_ID}" "${VK_RELEASES_DIR}/current"
 

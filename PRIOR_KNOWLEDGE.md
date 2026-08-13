@@ -61,3 +61,4 @@ accordions, configuration, issue creation, and duplicate prevention.
 - Preserve the existing collapsed-body collection policy by implementing only
   the smallest header data subscriber needed for the rollup.
 - Keep scheduling changes explicitly out of scope.
+

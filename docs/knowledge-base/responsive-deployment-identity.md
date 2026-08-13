@@ -1,6 +1,7 @@
 # Responsive deployment identity
 
-Contributing tasks: `vk/6e4c-deploy-status-mo`, `vk/7596-deploy-status-mo`.
+Contributing tasks: `vk/6e4c-deploy-status-mo`, `vk/7596-deploy-status-mo`,
+`vk/0694-move-refresh`.
 
 ## Responsive shells can drop operational data
 
@@ -50,3 +51,20 @@ One generator-specific verification detail: `shared/types.ts` currently emits
 trailing spaces on multiline declarations. `pnpm run generate-types:check` is
 the authority for generator fidelity; a scoped `git diff --check` can exclude
 that generated file while still checking all authored files.
+
+## Deployment actions belong with deployment identity
+
+When the polled server revision diverges from the page-load revision, the
+resulting page-reload action is deployment state, not account state. Keep that
+Refresh action with Deploy Status rather than beneath the user avatar. Native
+binary Update remains a separate AppBar concern because it invokes the desktop
+updater instead of adopting a new web bundle.
+
+If Deploy Status becomes one of the shared right-sidebar sections, preserve two
+subtle contracts. First, insert it only after route-mode sections have been
+assembled; otherwise later `unshift` operations can silently put Changes, Logs,
+Preview, or Browser ahead of a supposedly first status section. Second, keep
+revision/age in `headerExtra` so identity survives collapse, and use an isolated
+section action for Refresh so mouse and keyboard activation do not toggle the
+disclosure. Rendered-DOM tests should cover both ordering with a mode-specific
+section present and action/disclosure isolation.

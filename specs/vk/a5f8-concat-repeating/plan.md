@@ -1,100 +1,95 @@
-# Implementation Plan: Authoritative Execution Status Reconciliation
+# Implementation Plan: Concatenate Repeating Lines
 
 **Spec**: `./spec.md`
-**Status**: Ready for tasks
+**Status**: Draft
 
 ## Technical Context
 
-- Backend: Rust 2024, Tokio broadcast streams, SQLx/SQLite, Axum WebSockets in
-  `crates/services` and `crates/server`.
-- Frontend: React/TypeScript and the shared `useJsonPatchWsStream` hook in
-  `packages/web-core`.
-- Existing contract: a session execution WebSocket emits a full
-  `replace /execution_processes` snapshot, then `Ready`, then incremental
-  patches. The hook intentionally retains the last snapshot across reconnects.
-- Status domain: only `running` is active; all five other statuses clear Stop.
-- Scope: Vibe Kanban only, no new dependency, no generated contract change.
+The change is confined to Rust in
+`crates/executors/src/executors/codex/normalize_logs.rs`. That module consumes
+both `codex_app_server_protocol` item notifications and legacy
+`codex_protocol::EventMsg` events, and writes normalized JSON patches through a
+shared `EntryIndexProvider` into `MsgStore`.
+
+No storage migration, public API/type change, frontend change, deployment
+change, or new dependency is required.
 
 ## Architecture & Approach
 
-### 1. Close the stream initialization race
+### Shared repeat state
 
-Refactor
-`EventService::stream_execution_processes_for_session_raw` in
-`crates/services/src/services/events/streams.rs` so the broadcast receiver is
-subscribed before the awaited database snapshot query. Build the filtered live
-stream from that already-subscribed receiver, then chain the authoritative
-snapshot and `Ready` ahead of buffered/live events.
+Extend `LogState` with one optional `RepeatedCommand` value. It records the
+original normalized entry index and display command, number of total
+occurrences, latest call ID, whether that latest occurrence completed
+successfully, and the last successful normalized-entry snapshot.
 
-This makes the handoff gap lossless: a terminal update committed while the
-snapshot is being loaded is buffered for the new subscriber and applied after
-the snapshot. Reconnects therefore converge even when completion occurs during
-stream initialization.
+### Eligibility and display
 
-### 2. Add a deterministic regression seam
+Add a predicate for the normalized `codex review --uncommitted` operation. It
+accepts the existing shell-unwrapped display form, including an absolute path to
+the `codex` executable, but rejects other arguments and arbitrary repeated
+commands.
 
-Extract or parameterize the snapshot-plus-subscribed-stream construction just
-enough for a service test to pause after subscription and before snapshot
-completion. The test will publish a running-to-terminal update in that window,
-consume the initial snapshot/Ready/update sequence, and prove the final reduced
-state is terminal. A companion assertion retains an active `running` process.
+Add `repeat_ticks(total_count)` with the established threshold: up to eight
+repetitions render inline ticks; larger runs render `✓ ×N`. `CommandState`
+carries its current repeat count, while rendering excludes the in-flight
+occurrence until it succeeds.
 
-Prefer testing the event service contract directly over timing a real socket;
-the socket route in `crates/server/src/routes/execution_processes.rs` is a
-transparent forwarding layer.
+### Lifecycle
 
-### 3. Lock the frontend reconnect contract
+Centralize command start and completion behavior in `LogState` helpers used by
+both protocol branches:
 
-Extend
-`packages/web-core/src/shared/hooks/useJsonPatchWsStream.reconnect.test.tsx`
-to simulate a missed terminal update, unexpected close, and reconnect. The
-second connection sends a full replacement snapshot followed by `Ready`; assert
-the retained stale running value becomes terminal. This covers the shared
-client behavior that drives `useExecutionProcesses`, while existing exact
-`status === running` derivation in `useExecutionProcesses.ts` and
-`SessionChatBoxContainer.tsx` preserves Stop for active work.
+1. On an eligible new call ID, reuse the tracked index only when the command is
+   identical, the latest occurrence succeeded, and the shared entry index shows
+   no intervening allocation.
+2. Store every in-flight call in `commands` for ID-based routing, while marking
+   the newest call ID as owner of the shared row.
+3. Streaming updates for that same ID replace the shared row without changing
+   the repeat count.
+4. Completion updates repeat ownership only for its latest call ID; older calls
+   still complete their distinct rows. Success arms the next repeat. Failure
+   restores the prior successful aggregate and moves the failed call to a new
+   row before disarming reuse.
+5. Non-eligible commands keep the existing fresh-index path.
 
-### 4. Verify restart finalization
-
-Run the focused orphan-cleanup/shutdown tests around
-`ContainerService::cleanup_orphan_executions` and local deployment shutdown.
-Only add backend code if these tests expose an execution that can remain
-`running` without positive worker/process evidence; otherwise document the
-existing `interrupted`/`indeterminate` recovery as verified rather than
-duplicating lifecycle logic.
+The current Codex normalizer does not reset its `EntryIndexProvider` during a
+session, so no additional reset hook is required.
 
 ## Data Model
 
-See `./data-model.md`. No schema or generated type changes are planned.
+See `./data-model.md`.
 
 ## Contracts
 
-See `./contracts/execution-process-stream.md`.
+See `./contracts/normalized-patch-stream.md`.
 
 ## Research Notes
 
-See `./research.md`. No new dependency is introduced.
+See `./research.md`.
 
 ## Constitution Check
 
-- Principle II: service and rendered-hook regression tests cover missed
-  terminal events and the active Stop case.
-- Principles VI and XII: the fix strengthens the existing snapshot/broadcast
-  handoff rather than adding a second execution-status channel.
-- Principles XVIII and XXX: only authoritative backend evidence changes
-  lifecycle state, while every reconnect rehydrates from a full snapshot.
-- Principle XIX: patch streaming remains an optimization over full snapshots.
+- Principle II: focused fixtures cover adjacency, status, ownership, marker
+  bounds, and both protocol formats.
+- Principles III and VI: reuse the existing server-normalizer compaction
+  pattern and make the smallest command-specific extension.
+- Principle IX: equality, adjacency, completion, latest-owner, and bounded-marker
+  invariants are explicit.
+- Constraints: no generated files, dependency, remote mutation, destructive
+  operation, or external service are involved; `pnpm run format` will run.
 
-No constitution deviation remains.
+No constitution deviation is planned.
 
 ## Risks & Dependencies
 
-- Subscribe-before-query can yield a duplicate update already reflected in the
-  snapshot. JSON Patch add/replace application must remain idempotent for the
-  keyed process value; the existing upsert patch semantics provide this.
-- Broadcast lag must not silently look authoritative. Existing lag handling
-  ends the stream, causing the client to reconnect and resnapshot.
-- Frontend tests alone cannot prove the backend handoff is lossless; both sides
-  require focused coverage.
-- Historical artifacts already present beside the command-selected spec path
-  are unrelated and must not be treated as implementation scope.
+- Different protocol formats may provide differently wrapped command strings.
+  The predicate uses the same shell-unwrapped representation already exposed in
+  `ActionType::CommandRun`, and fixtures cover both paths.
+- Late events could overwrite a newer repeat. Latest-call ownership prevents
+  stale replacement.
+- A generic compactor could hide meaningful repeated shell work. Eligibility is
+  deliberately limited to the reported review operation.
+- Reusing one row necessarily exposes only the newest occurrence's detailed
+  result. This matches existing Grok compaction and is limited to review passes
+  whose visible flood is the reported defect.

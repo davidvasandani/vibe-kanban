@@ -40,3 +40,4 @@
 11. Commit the implementation and knowledge-base updates intentionally, push
     the task branch, open a pull request against the detected base branch,
     monitor required checks, fix failures, and merge only when green.
+

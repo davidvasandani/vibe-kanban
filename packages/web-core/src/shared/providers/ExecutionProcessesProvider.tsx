@@ -1,5 +1,8 @@
 import React, { useMemo } from 'react';
-import { useExecutionProcesses } from '@/shared/hooks/useExecutionProcesses';
+import {
+  hasRunningAttempt,
+  useExecutionProcesses,
+} from '@/shared/hooks/useExecutionProcesses';
 import type { ExecutionProcess } from 'shared/types';
 import {
   ExecutionProcessesContext,
@@ -30,14 +33,7 @@ export const ExecutionProcessesProvider: React.FC<{
   }, [visible]);
 
   const isAttemptRunningVisible = useMemo(
-    () =>
-      visible.some(
-        (process) =>
-          (process.run_reason === 'codingagent' ||
-            process.run_reason === 'cleanupscript' ||
-            process.run_reason === 'archivescript') &&
-          process.status === 'running'
-      ),
+    () => hasRunningAttempt(visible),
     [visible]
   );
 

@@ -425,6 +425,34 @@ only positively active executions remain cancellable. Regression coverage MUST
 exercise a missed terminal event followed by snapshot rehydration and preserve
 the active-execution Stop behavior.
 
+### XXXI. Historical views are materialized once and shared
+CPU-intensive reconstruction of immutable execution history MUST be keyed by
+the durable source identity and single-flight within a service process.
+Concurrent readers of one cache miss join the same computation; they do not
+independently parse or normalize the same source. A valid completed
+materialization bypasses both coordination and capacity queues.
+
+Only an atomically complete artifact is reusable evidence. Partial output,
+reader cancellation, worker failure, or an in-memory in-flight marker never
+becomes a completed history view, and failure clears coordination so a later
+reader can retry. Input, output, concurrency, and retained coordination state
+are bounded. Expensive synchronous work does not monopolize the async request
+runtime, and structured diagnostics distinguish cache hits, leaders, joined
+waiters, queueing, completion, cancellation, failure, and truncation.
+
+Historical reads do not implicitly migrate workspace affinity. Using another
+node requires an explicit authenticated, affinity-safe reconstruction contract;
+idle-node telemetry alone is never scheduling authority.
+
+### XXXIV. Partial projections degrade deterministically
+When a UI projection joins an authoritative record with asynchronously loaded
+summary or enrichment data, the base record MUST remain immediately usable.
+Ordering and grouping use a persisted base-record fallback until enrichment is
+available; missing or malformed enrichment never outranks known values merely
+because it is absent. Arrival of richer data may refine the projection, but ties
+and incomplete records remain deterministic through stable identity-based
+fallbacks. Regression coverage exercises both the base-only and enriched states.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -446,10 +474,13 @@ the active-execution Stop behavior.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.28.0 (allows explicit metrics-to-remediation issue actions only
-with preserved evidence, explicit project context, transactional open-incident
-deduplication, and no promotion of alert state into scheduling authority;
-0.27.0 requires execution activity UI to derive from authoritative,
+**Version**: 0.28.0 (requires immutable historical reconstruction to be
+single-flight by durable identity, atomically materialized, bounded,
+cancellation-safe, observable, and kept off implicit affinity migration; also
+allows explicit metrics-to-remediation issue actions only with preserved
+evidence, explicit project context, transactional open-incident deduplication,
+and no promotion of alert state into scheduling authority; 0.27.0 required
+execution activity UI to derive from authoritative,
 rehydratable process snapshots, reconnects to recover missed terminal events,
 and shutdown/recovery to classify executions that are no longer provably active;
 0.26.0 required executor-neutral, execution-scoped materialization
