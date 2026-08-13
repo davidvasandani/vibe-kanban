@@ -28,13 +28,13 @@ may run in parallel within their layer.
   T003).
 - [x] T005 Run `pnpm run format` and inspect the final Vibe Kanban diff (depends
   on T004).
-- [ ] T006 Run independent Codex CLI review, record results in
+- [x] T006 Run independent Codex CLI review, record results in
   `specs/vk/9391-workspace-order/review.md`, and address confirmed significant
   findings in their affected files until clean (depends on T005).
 
 ## Phase 4: Knowledge and Delivery
 
-- [ ] T007 Add reusable partial-projection ordering knowledge tagged
+- [x] T007 Add reusable partial-projection ordering knowledge tagged
   `vk/9391-workspace-order` to
   `docs/knowledge-base/workspace-summary-ordering.md` and refresh
   `docs/knowledge-base/INDEX.md` (depends on T006).
