@@ -82,6 +82,11 @@ vi.mock('./GitBehindHeader', () => ({
 vi.mock('./ServerMetricsSectionContainer', () => ({
   ServerMetricsSectionContainer: () => null,
 }));
+vi.mock('./ServerMetricsHeader', () => ({
+  ServerMetricsHeader: () => (
+    <span data-testid="server-metrics-header-alert">Low disk · 1 node</span>
+  ),
+}));
 vi.mock('./ServerAffinitySectionContainer', () => ({
   ServerAffinitySectionContainer: () => <div>Affinity controls</div>,
 }));

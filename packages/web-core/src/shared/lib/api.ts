@@ -143,6 +143,8 @@ import type {
   SlackConfigResponse,
   SlackTestConnectionResponse,
   UpsertSlackConfigRequest,
+  ResolveLowDiskIssueRequest,
+  ResolveLowDiskIssueResponse,
 } from 'shared/remote-types';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
 import { createWorkspaceWithSession } from '@/shared/types/attempt';
@@ -2185,6 +2187,20 @@ export const clusterMetricsApi = {
       options
     );
     return handleApiResponse<ClusterMetricsSnapshot>(response);
+  },
+  resolveLowDiskIssue: async (
+    request: ResolveLowDiskIssueRequest,
+    hostId?: string | null
+  ): Promise<ResolveLowDiskIssueResponse> => {
+    const response = await makeHostAwareRequest(
+      '/api/remote/issues/low-disk',
+      hostId,
+      {
+        method: 'POST',
+        body: JSON.stringify(request),
+      }
+    );
+    return handleApiResponse<ResolveLowDiskIssueResponse>(response);
   },
 };
 

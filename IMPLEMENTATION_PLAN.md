@@ -1,54 +1,43 @@
-# Implementation Plan: Resource-Aware Chat Loading
+# Implementation Plan: Low-Disk Warnings and Issue Follow-Through
 
-Task: `vk/6df4-loading-chat-pin`
+1. Trace the existing metrics transport, filesystem DTO, right-sidebar
+   collapsible lifecycle, remote issue mutation, database schema, and Nix
+   service configuration. Record exact extension seams in the SpecKit research
+   and plan artifacts.
+2. Define validated low-disk threshold configuration with documented defaults:
+   warning `<10%` or `<5 GiB`; critical `<2%` or `<1 GiB`. Expose effective
+   values with the coordinator metrics contract and wire deployment overrides
+   only through `homelab/modules/vibe-kanban-rebuild.nix` if required.
+3. Add a pure shared classification model that safely derives filesystem and
+   node severity, honors the conservative OR rule, rejects absent/invalid
+   samples, applies critical precedence, and returns the worst affected
+   filesystem plus rollup counts. Cover exact boundaries and mixed nodes.
+4. Extend the Server Metrics UI with accessible row warnings containing icon,
+   severity text, filesystem, available capacity, use percentage, and
+   mountpoint. Add keyboard-safe activation, pending/error states, and
+   light/dark theme-compatible styling.
+5. Add a header-owned metrics subscriber that reuses the existing cache/query
+   identity and renders the worst severity plus affected-node count outside the
+   collapsible body. Preserve the existing rule that the live socket/detail
+   container is unmounted while collapsed.
+6. Add a coordinator resolve-or-create-low-disk-issue API. Validate that the
+   node/sample is current and authorized, generate canonical permanent-fix
+   Markdown, atomically reuse an existing open node incident, or create a new
+   issue in the selected/linked project. Return the issue ID and whether it was
+   created.
+7. Persist machine-readable incident identity and enforce one open low-disk
+   issue per node under concurrent requests. Permit a new issue after the old
+   one reaches a terminal/closed status. Add migrations and database/API tests.
+8. Connect warning activation to the API and navigate to the returned issue.
+   Add component tests for create/reuse, double activation, collapsed rollup,
+   facts, accessibility, and failure recovery.
+9. Regenerate derived types where source types changed, format, and run focused
+   frontend/backend/configuration tests followed by the repository's standard
+   checks in proportion to available disk and time.
+10. Run the mandated independent Codex review, fix confirmed findings, repeat
+    until no significant findings remain, then document reusable architecture
+    knowledge and update its index.
+11. Commit the implementation and knowledge-base updates intentionally, push
+    the task branch, open a pull request against the detected base branch,
+    monitor required checks, fix failures, and merge only when green.
 
-1. Establish the SpecKit constitution and task-scoped specification artifacts,
-   then reconcile their requirements with `SPEC.md` and
-   `PRIOR_KNOWLEDGE.md`.
-2. Instrument and test the completed-execution cache-miss seam in
-   `ContainerService::stream_normalized_logs`, confirming where normalization
-   tasks run, how permits are held, and what happens when a reader disconnects.
-3. Introduce a process-wide, execution-ID-keyed historical-materialization
-   coordinator with explicit leader/joiner outcomes. Keep the abstraction
-   narrow: it coordinates one durable normalized sidecar, not arbitrary jobs.
-4. Recheck the durable cache after becoming the single-flight leader. This
-   closes the first-read race between the optimistic cache lookup and ownership
-   acquisition, including completions from another request or process sharing
-   the same session storage.
-5. Refactor the cache-miss normalization path so one leader performs bounded
-   reconstruction and publishes only an atomically complete materialization.
-   Joined readers await that outcome and replay the same completed entries.
-6. Define cancellation ownership deliberately: an individual joined reader may
-   disconnect without canceling work needed by other readers; when no consumers
-   remain, expensive tasks must be aborted and the in-flight entry cleared.
-   Failure and cancellation must remain retryable and must never make a partial
-   sidecar readable.
-7. Keep valid cache hits ahead of both single-flight coordination and the
-   historical-normalization semaphore. Run any newly isolated synchronous
-   materialization work on an appropriate blocking/CPU boundary so the Tokio
-   request runtime remains responsive.
-8. Add structured tracing around cache hit/miss, leader acquisition, joined
-   waiters, queue duration, normalization duration, completion, cancellation,
-   failure, message count, and truncation. Reuse existing node/process metrics
-   rather than adding another monitoring service.
-9. Add focused concurrency tests proving one normalization for simultaneous
-   readers, equal completed output for all readers, cache-hit bypass, retry
-   after leader failure/cancellation, and no partial cache publication. Retain
-   existing integrity, truncation, and running-process tests.
-10. Benchmark or otherwise measure the targeted reconstruction seam with a
-    representative long transcript. If single-flight plus durable reuse leaves
-    material coordinator saturation, document a follow-up distributed
-    normalization protocol; do not overload the existing agent execution-job
-    dispatch contract in this task.
-11. Run repository-required setup, formatting, targeted tests, `pnpm run check`,
-    and lint. Evaluate Vibe Kanban Nix configuration only if the deployment
-    module changes.
-12. Run SpecKit analysis before implementation and, after implementation, an
-    independent Codex diff review. Address confirmed significant findings and
-    repeat verification/review until clean.
-13. Update the Vibe Kanban knowledge base with reusable single-flight and
-    materialization findings, tag it `vk/6df4-loading-chat-pin`, refresh its
-    index, and commit the knowledge-base update.
-14. Rebase or otherwise confirm the latest base tip, commit the scoped changes,
-    open a pull request, wait for required checks/review, merge it, and report
-    the merged result.

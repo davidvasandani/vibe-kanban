@@ -31,6 +31,7 @@ import { getServerAffinityLabel } from './serverAffinityLabel';
 import { DeployStatus } from '@vibe/ui/components/DeployStatus';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { GitBehindHeader } from './GitBehindHeader';
+import { ServerMetricsHeader } from './ServerMetricsHeader';
 
 type SectionDef = {
   title: string;
@@ -236,7 +237,12 @@ export const RightSidebar = memo(function RightSidebar({
         visible: true,
         expanded: serverMetricsExpanded,
         fillAvailableSpace: true,
-        content: <ServerMetricsSectionContainer />,
+        headerExtra: <ServerMetricsHeader />,
+        content: (
+          <ServerMetricsSectionContainer
+            projectId={linkedIssueForWorkspace?.remoteProjectId}
+          />
+        ),
         actions: [],
       },
       {

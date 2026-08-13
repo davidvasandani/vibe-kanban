@@ -1,106 +1,64 @@
-# Prior Knowledge: Resource-Aware Chat Loading
+# Prior Knowledge: Low-Disk Server Metrics Warnings
 
-Task: `vk/6df4-loading-chat-pin`
+Searched `wiki/`, `docs/knowledge-base/`, and the prior Cluster Server Metrics
+feature records for server metrics, disk/filesystem behavior, collapsed
+accordions, configuration, issue creation, and duplicate prevention.
 
-The Vibe Kanban project knowledge base is not empty. These pages constrain the
-specification and plan.
+## Relevant findings
 
-## `lazy-loading-normalized-conversation-history.md`
+1. The current Server Metrics transport is intentionally live only while its
+   body is expanded. `CollapsibleSectionHeader` unmounts the body, closing the
+   metrics socket. A collapsed rollup therefore needs a small header-owned
+   subscriber/query; keeping the whole detail container mounted violates the
+   existing collection lifecycle.
+2. `workspace-affinity-migration.md` records the established pattern for
+   collapsed dynamic metadata: mount a bounded header-owned subscriber outside
+   the body, reuse the same TanStack Query key as the expanded container, and
+   avoid a label-only endpoint or duplicate polling cadence. Header content
+   must truncate without displacing the disclosure control and retain a full
+   accessible/title description.
+3. The original Cluster Server Metrics design treats absent readings as
+   distinct from zero, isolates malformed nodes, retains stale samples only
+   within the evidence window, and explicitly does not alter worker health or
+   scheduler eligibility. Low-disk classification must preserve those rules:
+   do not warn from absent data, do not let one malformed sample blank other
+   nodes, label stale facts with their observation time, and do not gate
+   dispatch in this task.
+4. Filesystems are keyed conceptually by mountpoint and current samples already
+   contain total, used, available, filesystem name, and mountpoint. The warning
+   should derive from this existing source rather than add another host probe.
+5. `mcp-connectivity-testing.md` provides the closest issue-creation precedent.
+   It uses the existing optimistic issue mutation, first project status, and
+   top-of-column ordering, but also warns that React component state is not a
+   sufficient duplicate guard because remounts/reloads reset it. Its external
+   in-flight map is suitable for suppressing simultaneous UI submissions only;
+   this feature's across-session open-issue uniqueness needs durable server/
+   database identity.
+6. The same page establishes safe generated-Markdown behavior: backend
+   diagnostics are treated as opaque and fenced safely. Disk facts are
+   structured rather than opaque, so canonical issue Markdown should be
+   generated server-side from validated values and stable labels.
+7. Existing idempotency knowledge consistently favors stable identities and a
+   persistence-level uniqueness invariant over title matching or result-cache
+   checks. For low disk, node ID is the incident identity; filesystem details
+   remain evidence in the body, while the deduplication promise is one open
+   low-disk issue per node as requested.
+8. The project knowledge base contains no existing page specifically about
+   Server Metrics alert classification or metrics-to-issue follow-through. A
+   focused page should be added after implementation if the shipped seams and
+   invariants remain reusable.
 
-- Frontend row virtualization does not bound backend work: the browser still
-  pays for normalized-log reconstruction, transfer, derivation, and retained
-  state for every opened process.
-- Persisted completed executions contain raw stdout/stderr rather than final
-  normalized entries. A correct tail cannot be obtained by slicing raw JSONL or
-  patch frames because normalizers retain lifecycle state and later operations
-  depend on earlier entries.
-- True bounded paging requires a durable final-entry materialization. Legacy
-  histories must pay one full normalization, but that work should be observable,
-  capacity-bounded, cancellable, and not tied to an interactive request.
-- The shipped lazy-loading slice pages by completed process and caps a legacy
-  normalization at the newest 2,000 normalizable messages. It does not page
-  within one large process.
+## Planning consequences
 
-Current code advances the earlier design gate: commit `f31f58ae` added an
-atomic sidecar materialized view for finished processes. A valid sidecar is
-read before the historical-normalization semaphore or worktree recreation.
-However, concurrent cache misses still independently normalize the same
-execution, so the durable cache does not prevent a thundering herd on its first
-read.
+- Reuse the current metrics query/stream and its node/sample types.
+- Extract pure threshold classification and rollup helpers shared by body and
+  header presentation.
+- Keep warning thresholds backend-owned and expose effective configuration with
+  metrics/API data so frontend defaults cannot drift.
+- Add a durable, transaction-safe resolve-or-create operation keyed by node ID;
+  navigation must use the returned issue identity whether newly created or
+  reused.
+- Preserve the existing collapsed-body collection policy by implementing only
+  the smallest header data subscriber needed for the rollup.
+- Keep scheduling changes explicitly out of scope.
 
-## `claude-log-normalization.md`
-
-- Vendor normalizers emit ordered JSON Patch operations over an entries array;
-  stdout and stderr producers share one atomic entry-index provider.
-- Later patches can replace earlier entries, so the final conversation is a
-  stateful reduction rather than a line-by-line projection.
-- Normalizer reset and tool lifecycle behavior are correctness-sensitive.
-  Resource changes should orchestrate existing normalizers, not introduce a
-  second transcript parser.
-
-## `clustered-workspace-execution.md`
-
-- The coordinator owns SQLite authority, placement, user-facing state, and
-  shared-worktree administration. A worker owns only the processes dispatched
-  to its sticky workspace, including ordered output and cancellation.
-- Worker dispatch identity is an execution job, with idempotency and affinity
-  bound to that job. Reusing it for an unrelated read-only reconstruction job
-  would broaden the protocol and recovery model.
-- Shared storage is a verified capability, not merely a matching path. The
-  cluster does have portable workspace storage, but every cross-node operation
-  still needs mount-health and ownership evidence.
-- An offline worker is indeterminate, not permission to silently move work.
-
-Consequently, idle workers are not currently a safe transparent compute pool
-for historical chat normalization. The first implementation should eliminate
-duplicate work and keep normalization off the async request scheduler on the
-serving/owning node. Distributed normalization is a later protocol feature only
-if measurements show meaningful residual demand.
-
-## `workspace-affinity-migration.md`
-
-- Placement policy and resolved worker are distinct; placement decisions must
-  use the same lease, mount, and capability eligibility rules as scheduling.
-- Coordinator-owned migrations are durable operations with explicit retry and
-  recovery identities. A chat read must not implicitly change workspace
-  affinity merely to find spare CPU.
-
-## `authoritative-snapshot-stream-handoffs.md`
-
-- Snapshot-plus-stream consumers must not have a loss window; lag invalidates
-  stream authority and requires a resnapshot.
-- Existing UI state should survive transport replacement and be replaced by a
-  complete new snapshot after reconnect.
-
-The current normalized-log WebSocket contract should therefore remain intact.
-Optimization should happen behind it and must never serve a partial cache as a
-complete transcript.
-
-## `request-independent-workspace-creation.md`
-
-- Slow work should acquire a durable or server-owned operation identity before
-  it leaves the request lifetime.
-- A narrow, domain-specific single-consumer operation is preferable to a
-  general job platform when one stable identity already exists.
-- Restart evidence must prove completion rather than infer it from partial
-  artifacts.
-
-For chat materialization, the execution ID is the natural single-flight key.
-Only an atomically completed sidecar proves reusable completion; an in-memory
-in-flight marker is coordination, not durable truth.
-
-## Consequences for this task
-
-1. Preserve the existing vendor normalizers, patch semantics, WebSocket route,
-   bounded input, cancellation discipline, and atomic completed sidecar.
-2. Add execution-keyed single-flight coordination around cache misses, with a
-   cache recheck after leadership is acquired to close the race.
-3. Ensure waiters reuse the completed sidecar/result and failures remove the
-   in-flight state so a subsequent request can retry.
-4. Keep cache hits outside all expensive-work queues.
-5. Do not implicitly migrate affinity or add read-only worker dispatch in this
-   increment; first measure the residual cost after deduplication.
-6. Add structured observability for cache hits, leader starts, joined waits,
-   completion, cancellation/failure, truncation, and durations.
-7. Treat the screenshot's coordinator saturation as evidence of the symptom,
-   not proof that memory limits or worker placement are the root cause.

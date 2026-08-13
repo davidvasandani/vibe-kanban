@@ -18,7 +18,14 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const mocks = vi.hoisted(() => ({
   snapshot: vi.fn<() => Promise<ClusterMetricsSnapshot>>(),
+  resolveLowDiskIssue: vi.fn(),
   openWebSocket: vi.fn(),
+  goToProjectIssue: vi.fn(),
+  awaitTxId: vi.fn(),
+}));
+
+vi.mock('@/shared/hooks/useAppNavigation', () => ({
+  useAppNavigation: () => ({ goToProjectIssue: mocks.goToProjectIssue }),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -34,7 +41,10 @@ vi.mock('react-i18next', () => ({
 }));
 
 vi.mock('@/shared/lib/api', () => ({
-  clusterMetricsApi: { snapshot: mocks.snapshot },
+  clusterMetricsApi: {
+    snapshot: mocks.snapshot,
+    resolveLowDiskIssue: mocks.resolveLowDiskIssue,
+  },
 }));
 
 vi.mock('@/shared/providers/HostIdProvider', () => ({
@@ -44,6 +54,12 @@ vi.mock('@/shared/providers/HostIdProvider', () => ({
 
 vi.mock('@/shared/lib/localApiTransport', () => ({
   openLocalApiWebSocket: mocks.openWebSocket,
+}));
+
+vi.mock('@/shared/lib/electric/collections', () => ({
+  createShapeCollection: () => ({
+    utils: { awaitTxId: mocks.awaitTxId },
+  }),
 }));
 
 import { ServerMetricsSectionContainer } from './ServerMetricsSectionContainer';
@@ -126,6 +142,12 @@ function snapshotOf(...nodes: MetricsNode[]): ClusterMetricsSnapshot {
     nodes: Object.fromEntries(nodes.map((n) => [n.node_id, n])),
     generated_at: '2026-08-03T10:00:01Z',
     sample_interval_ms: 2000n,
+    disk_alert_thresholds: {
+      warning_free_percent: 10,
+      warning_free_bytes: 5n * 1024n ** 3n,
+      critical_free_percent: 2,
+      critical_free_bytes: 1024n ** 3n,
+    },
   };
 }
 
@@ -133,7 +155,9 @@ let container: HTMLDivElement;
 let root: Root;
 let queryClient: QueryClient;
 
-async function renderContainer(props: { expanded?: boolean } = {}) {
+async function renderContainer(
+  props: { expanded?: boolean; projectId?: string | null } = {}
+) {
   await act(async () => {
     root.render(
       <QueryClientProvider client={queryClient}>
@@ -153,6 +177,10 @@ async function renderContainer(props: { expanded?: boolean } = {}) {
 beforeEach(() => {
   mocks.snapshot.mockReset();
   mocks.openWebSocket.mockReset();
+  mocks.resolveLowDiskIssue.mockReset();
+  mocks.goToProjectIssue.mockReset();
+  mocks.awaitTxId.mockReset();
+  mocks.awaitTxId.mockResolvedValue(undefined);
   mocks.openWebSocket.mockImplementation(() =>
     Promise.resolve(new SilentWebSocket())
   );
@@ -172,6 +200,58 @@ afterEach(() => {
 });
 
 describe('ServerMetricsSectionContainer', () => {
+  it('shows concrete low-disk facts and opens the resolved issue', async () => {
+    const total = 100n * 1024n ** 3n;
+    mocks.snapshot.mockResolvedValue(
+      snapshotOf(
+        node({
+          latest: hostSample({
+            filesystems: [
+              {
+                mount_point: '/',
+                device: '/dev/mapper/pool-root',
+                fs_type: 'ext4',
+                total_bytes: total,
+                used_bytes: total - 512n * 1024n ** 2n,
+                available_bytes: 512n * 1024n ** 2n,
+              },
+            ],
+          }),
+        })
+      )
+    );
+    mocks.resolveLowDiskIssue.mockResolvedValue({
+      issue: { id: 'issue-id' },
+      txid: 1n,
+      created: true,
+    });
+
+    await renderContainer({ projectId: 'project-id' });
+
+    const alert = container.querySelector<HTMLButtonElement>(
+      '[data-testid="metrics-disk-alert"]'
+    );
+    expect(alert?.textContent).toContain('Critical disk');
+    expect(alert?.textContent).toContain('/dev/mapper/pool-root');
+    expect(alert?.textContent).toContain('512 MiB available');
+    expect(alert?.textContent).toContain('99.5% used');
+    expect(alert?.textContent).toContain('/');
+
+    await act(async () => alert?.click());
+    expect(mocks.resolveLowDiskIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project_id: 'project-id',
+        node_id: '00000000-0000-0000-0000-000000000001',
+      }),
+      null
+    );
+    expect(mocks.awaitTxId).toHaveBeenCalledWith(1, 10_000);
+    expect(mocks.goToProjectIssue).toHaveBeenCalledWith(
+      'project-id',
+      'issue-id'
+    );
+  });
+
   it('renders one entry per node', async () => {
     mocks.snapshot.mockResolvedValue(
       snapshotOf(

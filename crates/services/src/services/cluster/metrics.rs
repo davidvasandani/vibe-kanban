@@ -110,6 +110,7 @@ pub struct ClusterMetricsSnapshot {
     /// Served rather than hardcoded on the client, so the sparkline x-axis
     /// stays correct if the cadence ever changes.
     pub sample_interval_ms: u64,
+    pub disk_alert_thresholds: node_metrics::types::DiskAlertThresholds,
 }
 
 #[derive(Debug, Error)]
@@ -214,6 +215,7 @@ pub struct ClusterMetricsService {
     source: Option<Arc<dyn WorkerMetricsSource>>,
     local: Arc<MetricsSampler>,
     sampler_config: SamplerConfig,
+    disk_alert_thresholds: node_metrics::types::DiskAlertThresholds,
     coordinator_node_id: Uuid,
     coordinator_hostname: String,
     nodes: Mutex<HashMap<Uuid, NodeState>>,
@@ -263,6 +265,7 @@ impl ClusterMetricsService {
             source,
             local: Arc::new(MetricsSampler::new(sampler_config.clone())),
             sampler_config,
+            disk_alert_thresholds: disk_alert_thresholds_from_env(),
             coordinator_node_id,
             coordinator_hostname,
             nodes: Mutex::new(HashMap::new()),
@@ -502,6 +505,7 @@ impl ClusterMetricsService {
             nodes,
             generated_at: now,
             sample_interval_ms: self.sampler_config.interval_ms,
+            disk_alert_thresholds: self.disk_alert_thresholds,
         })
     }
 
@@ -739,6 +743,53 @@ fn local_hostname() -> String {
         }
     }
     "coordinator".to_owned()
+}
+
+fn disk_alert_thresholds_from_env() -> node_metrics::types::DiskAlertThresholds {
+    use node_metrics::types::DiskAlertThresholds;
+
+    fn parse<T: std::str::FromStr>(key: &str, fallback: T) -> Result<T, String> {
+        match std::env::var(key) {
+            Ok(value) => value
+                .parse()
+                .map_err(|_| format!("{key} has an invalid value")),
+            Err(std::env::VarError::NotPresent) => Ok(fallback),
+            Err(std::env::VarError::NotUnicode(_)) => Err(format!("{key} is not valid Unicode")),
+        }
+    }
+
+    let defaults = DiskAlertThresholds::default();
+    let configured = (|| {
+        Ok::<_, String>(DiskAlertThresholds {
+            warning_free_percent: parse(
+                "VK_DISK_WARNING_FREE_PERCENT",
+                defaults.warning_free_percent,
+            )?,
+            warning_free_bytes: parse("VK_DISK_WARNING_FREE_BYTES", defaults.warning_free_bytes)?,
+            critical_free_percent: parse(
+                "VK_DISK_CRITICAL_FREE_PERCENT",
+                defaults.critical_free_percent,
+            )?,
+            critical_free_bytes: parse(
+                "VK_DISK_CRITICAL_FREE_BYTES",
+                defaults.critical_free_bytes,
+            )?,
+        })
+    })();
+    match configured {
+        Ok(configured) => {
+            if let Err(reason) = configured.validate() {
+                tracing::warn!(%reason, "invalid disk alert thresholds; using defaults");
+                defaults
+            } else {
+                configured
+            }
+        }
+        Err(reason) => {
+            tracing::warn!(%reason, "invalid disk alert thresholds; using defaults");
+            defaults
+        }
+    }
 }
 
 #[cfg(test)]

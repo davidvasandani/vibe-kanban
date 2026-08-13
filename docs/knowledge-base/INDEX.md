@@ -6,6 +6,7 @@ update pages (and this index) when a task ships something reusable.
 
 | Page | Summary | Contributing tasks |
 | --- | --- | --- |
+| [metrics-alert-to-issue-follow-through](metrics-alert-to-issue-follow-through.md) | Server-owned alert policy, host-scoped collapsed rollups, coordinator re-resolution, durable issue deduplication, and Electric-safe create/reuse navigation | `vk/32f3-server-metrics-w` |
 | [workspace-summary-ordering](workspace-summary-ordering.md) | Deterministic workspace ordering while asynchronous summaries load: persisted base timestamp fallback, missing-last semantics, stable identity ties, and shared active/archive application | `vk/9391-workspace-order` |
 | [authoritative-snapshot-stream-handoffs](authoritative-snapshot-stream-handoffs.md) | Lossless subscribe-before-snapshot initialization, lag-triggered resnapshot, readiness-based reconnect pressure, relay close preservation, exact execution-activity derivation, and liveness-gated final-output reconciliation | `vk/3488-fix-stale-execut`, `c89d-address-fable-fo` |
 | [request-independent-workspace-creation](request-independent-workspace-creation.md) | Accepting slow workspace lifecycle work before materialization; workspace-scoped single-consumer state, request-independent execution, conservative restart reconciliation, bounded status writes, and pending/failed UI convergence | `vk/5e1e-vk-workspace-cre` |

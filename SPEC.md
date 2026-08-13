@@ -1,111 +1,94 @@
-# Technical Specification: Resource-Aware Chat Loading
+# Technical Specification: Low-Disk Warnings and Issue Follow-Through
 
-## Problem
+## Goal
 
-Opening a workspace with a long agent conversation can drive the Vibe Kanban
-coordinator to approximately 100% CPU for an extended period while other
-cluster workers remain lightly loaded and memory pressure remains low. The UI
-stays on the conversation loading state during that work. The attached
-production observation shows the coordinator at 98.4% CPU with a load near 37,
-while schedulable workers are substantially less busy.
+Make dangerous filesystem pressure immediately visible in the existing Server
+Metrics accordion and give an operator a one-click, duplicate-safe path to an
+actionable Vibe Kanban issue that targets permanent remediation.
 
-Historical conversations are reconstructed from persisted execution logs.
-That reconstruction is CPU-intensive and currently occurs on the server that
-serves the chat request. This task must make that path resource-aware and avoid
-repeating equivalent work while preserving conversation correctness.
+## Scope
 
-## Goals
+This change is limited to the Vibe Kanban service source and, where deployment
+configuration is required, `homelab/modules/vibe-kanban-rebuild.nix`. It does
+not gate scheduling or change any other hosted service.
 
-- Make opening an existing workspace responsive even when its history is long.
-- Prevent one chat load, refresh, or group of duplicate readers from creating
-  unbounded normalization work on the coordinator.
-- Use the resources already available to the Vibe Kanban cluster when doing so
-  is compatible with workspace ownership and the existing deployment model.
-- Reuse completed normalization work so subsequent readers have near-cache-hit
-  cost.
-- Keep memory usage bounded and make overload behavior observable.
+## User experience
 
-## Non-goals
+- Evaluate every filesystem sample for every visible node against configurable
+  warning and critical thresholds.
+- A filesystem is warning when either its free percentage or free byte count is
+  below the warning boundary. It is critical when either is below the critical
+  boundary. Critical takes precedence.
+- Default boundaries are warning below 10% free or below 5 GiB, and critical
+  below 2% free or below 1 GiB. Equality is not below the boundary.
+- Affected server rows show a warning-triangle icon, a textual severity label,
+  and theme-safe warning/critical styling. The concrete filesystem, available
+  capacity, usage percentage, and mountpoint are visible without requiring a
+  chart reading.
+- The accordion header rolls up the worst current severity and affected-node
+  count so pressure remains visible while collapsed.
+- Activating a warning by mouse or keyboard opens the matching existing open
+  low-disk issue, or creates a pre-filled issue when none exists.
+- The issue includes node ID and hostname, observation timestamp, filesystem,
+  mountpoint, size, used, available, and use percentage. Its remediation prompt
+  asks for root-cause analysis, sustainable garbage collection/retention, and a
+  volume-sizing decision rather than only immediate cleanup.
+- While issue lookup/creation is pending, repeated activation is disabled. A
+  server-side idempotency guard ensures concurrent or repeated requests cannot
+  create two open low-disk issues for the same node.
 
-- Changing, deploying, or tuning any service other than Vibe Kanban.
-- Building a general distributed job platform unrelated to conversation
-  loading.
-- Changing the semantic content or ordering of agent conversations.
-- Moving live agent execution away from its selected workspace worker.
+## Configuration
 
-## Functional requirements
+Expose four service settings, wired through the existing configuration pattern:
 
-1. A request for a completed execution's normalized history MUST reuse a valid
-   materialized result when one exists.
-2. Concurrent cache misses for the same execution MUST share one normalization
-   computation rather than independently parsing and normalizing the same log.
-3. Historical normalization MUST have an explicit concurrency bound and MUST
-   not block unrelated cache hits.
-4. Historical input and materialized output MUST remain bounded, with a visible
-   indication when older content is intentionally omitted.
-5. A disconnected reader MUST not leave orphaned CPU-heavy work indefinitely
-   and MUST not publish a partial result as complete.
-6. Running executions MUST remain live and MUST not be frozen into a stale
-   completed-history cache.
-7. The implementation MUST preserve the existing WebSocket/API contract and
-   frontend patch semantics unless the later clarified design demonstrates a
-   necessary compatible extension.
-8. The operational configuration MUST expose enough information to identify
-   which Vibe Kanban process performs expensive reconstruction and whether
-   work is queued, deduplicated, completed, or served from cache.
+- warning free percent: `10`
+- warning free bytes: `5 GiB`
+- critical free percent: `2`
+- critical free bytes: `1 GiB`
 
-## Resource-utilization design constraints
+Configuration must validate that values are non-negative and that each critical
+boundary is no less severe than its warning counterpart. The effective values
+must be available to the UI from the backend rather than duplicated as frontend
+constants. Defaults must be documented for operators.
 
-- Prefer eliminating duplicate work and serving durable materialized history
-  over merely raising CPU limits.
-- Keep workspace-local filesystem access on the node that owns or can safely
-  access the workspace and its session logs.
-- Any cluster distribution must use existing Vibe Kanban coordinator/worker
-  trust and shared-storage boundaries; it must not introduce dependencies on
-  another homelab service.
-- Concurrency defaults must be conservative and configurable for heterogeneous
-  nodes.
-- CPU-heavy synchronous work must not monopolize the async request runtime.
+## Data and API behavior
 
-## Acceptance criteria
+Use current node-metrics samples as the source of disk facts. Add a narrowly
+scoped coordinator endpoint/action for resolving a low-disk issue. The request
+identifies the node and filesystem sample/observation being acted on; the server
+validates the referenced current metrics and derives canonical issue content.
+The response distinguishes `created` from `existing` and returns the issue ID.
 
-- Automated tests prove that two simultaneous readers for one completed,
-  uncached execution trigger one normalization operation and both receive the
-  same completed transcript.
-- Automated tests prove valid cache hits bypass the normalization concurrency
-  queue.
-- Automated tests cover cancellation/failure and demonstrate that a later
-  request can retry without reading a partial cache.
-- Existing normalized-log cache integrity, truncation, and running-process
-  behavior remain covered and passing.
-- Relevant Rust and frontend checks pass; Nix evaluation is run if deployment
-  configuration changes.
-- Runtime logs or metrics distinguish cache hit, shared/in-flight wait, cache
-  miss/start, completion, failure/cancellation, and truncation.
-- No files outside the Vibe Kanban repository and
-  `homelab/modules/vibe-kanban-rebuild.nix` (plus directly related Vibe Kanban
-  deployment tests/docs) are changed.
+Persist a machine-readable low-disk identity with the issue (or in a dedicated
+association) keyed by node ID. Duplicate detection considers only open issues;
+after the prior issue has a completion timestamp or uses the established
+Done/Cancelled/Canceled status, a new incident may create a new issue. The
+database must enforce the open-issue uniqueness invariant rather than relying
+only on a title search.
 
-## Investigation questions
+## Accessibility and failure states
 
-- Is the observed CPU consumed primarily by duplicate historical normalizers,
-  one intrinsically expensive vendor normalizer, frontend replay/render work,
-  or a combination?
-- Are persisted session logs available from every worker through the existing
-  shared mount, or only from the coordinator/affined worker?
-- Does the existing execution-worker dispatch contract support read-only
-  normalization jobs, or is single-flight materialization on the serving node
-  the safer first increment?
-- Which node-level concurrency default best protects interactive agent work
-  while still using otherwise idle cores?
+Severity is never communicated by color alone. Interactive warnings are native
+buttons or links with descriptive accessible names and visible focus treatment.
+Issue-resolution failures leave metrics visible, show a recoverable error, and
+allow retry. Missing or malformed metrics do not produce false warnings.
 
 ## Verification
 
-- Targeted unit/integration tests for normalization caching and concurrent
-  readers.
-- `cargo test` for affected crates and workspace-level checks in proportion to
-  the final diff.
-- `pnpm run format`, `pnpm run check`, and `pnpm run lint` when affected code
-  requires them.
-- Nix module evaluation/tests if the Vibe Kanban deployment module changes.
-- Independent Codex diff review with all significant confirmed findings fixed.
+- Unit tests cover threshold boundaries, the OR (more conservative) rule,
+  severity precedence, formatting, and rollup counts.
+- Component tests cover collapsed-header visibility, icon/text treatment,
+  concrete disk facts, keyboard activation, pending behavior, existing-issue
+  navigation, and recoverable failures in light/dark-compatible class usage.
+- Backend tests cover issue content, open-issue reuse, concurrent idempotency,
+  closed-issue recreation, validation, and authorization.
+- Configuration tests cover defaults, overrides, and invalid ordering.
+- Existing Server Metrics and issue flows remain green.
+
+## Out of scope
+
+- Automatically deleting data or resizing volumes.
+- Preventing the scheduler from dispatching work to a pressured node.
+- Alert delivery outside the Server Metrics UI.
+- Changes to services other than Vibe Kanban.
+

@@ -17,7 +17,7 @@ import { createContext, type Context } from 'react';
 export function createHmrContext<T>(key: string, defaultValue: T): Context<T> {
   const existing = import.meta.hot?.data?.[key] as Context<T> | undefined;
   const ctx = existing ?? createContext<T>(defaultValue);
-  if (import.meta.hot) {
+  if (import.meta.hot?.data) {
     import.meta.hot.data[key] = ctx;
   }
   return ctx;

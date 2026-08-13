@@ -40,6 +40,13 @@ import {
   isStale,
 } from '@/shared/components/ui-new/views/metrics/NodeStrip';
 import { ratioPercent } from '@/shared/components/ui-new/views/metrics/format';
+import {
+  classifyNode,
+  DEFAULT_DISK_ALERT_THRESHOLDS,
+} from '@/shared/components/ui-new/views/metrics/diskAlerts';
+import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
+import { createShapeCollection } from '@/shared/lib/electric/collections';
+import { PROJECT_ISSUES_SHAPE } from 'shared/remote-types';
 
 /** The live stream, host-scoped by the transport when a host id is present. */
 const METRICS_WS_PATH = '/cluster/metrics/ws';
@@ -150,6 +157,7 @@ function memoryHistory(node: MetricsNode): (number | null)[] {
 }
 
 export interface ServerMetricsSectionContainerProps {
+  projectId?: string | null;
   /**
    * Whether the sidebar section showing this container is open.
    *
@@ -174,9 +182,14 @@ export interface ServerMetricsSectionContainerProps {
  */
 export function ServerMetricsSectionContainer({
   expanded = true,
+  projectId = null,
 }: ServerMetricsSectionContainerProps) {
   const { t } = useTranslation('common');
   const hostId = useHostId();
+  const appNavigation = useAppNavigation();
+  const [resolvingNodeId, setResolvingNodeId] = useState<string | null>(null);
+  const resolvingNodeRef = useRef<string | null>(null);
+  const [diskActionError, setDiskActionError] = useState<string | null>(null);
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [panelOverrides, setPanelOverrides] = useState<Record<string, boolean>>(
@@ -197,6 +210,7 @@ export function ServerMetricsSectionContainer({
       nodes: {},
       generated_at: null,
       sample_interval_ms: DEFAULT_SAMPLE_INTERVAL_MS,
+      disk_alert_thresholds: DEFAULT_DISK_ALERT_THRESHOLDS,
     }),
     []
   );
@@ -241,6 +255,43 @@ export function ServerMetricsSectionContainer({
     );
     return entries.sort(compareNodes);
   }, [snapshot]);
+
+  const resolveDiskAlert = useCallback(
+    async (nodeId: string) => {
+      if (!projectId || resolvingNodeRef.current) return;
+      resolvingNodeRef.current = nodeId;
+      setResolvingNodeId(nodeId);
+      setDiskActionError(null);
+      try {
+        const node = nodes.find((candidate) => candidate.node_id === nodeId);
+        if (!node?.latest)
+          throw new Error('The disk reading is no longer available.');
+        const response = await clusterMetricsApi.resolveLowDiskIssue(
+          {
+            project_id: projectId,
+            node_id: nodeId,
+            hostname: node.hostname,
+            observed_at: node.latest.captured_at,
+            filesystems: [],
+          },
+          hostId
+        );
+        const issues = createShapeCollection(PROJECT_ISSUES_SHAPE, {
+          project_id: projectId,
+        });
+        await issues.utils.awaitTxId(Number(response.txid), 10_000);
+        appNavigation.goToProjectIssue(projectId, response.issue.id);
+      } catch (error) {
+        setDiskActionError(
+          error instanceof Error ? error.message : String(error)
+        );
+      } finally {
+        resolvingNodeRef.current = null;
+        setResolvingNodeId(null);
+      }
+    },
+    [appNavigation, hostId, nodes, projectId]
+  );
 
   const togglePanel = useCallback((panelId: string) => {
     setPanelOverrides((current) => ({
@@ -288,6 +339,11 @@ export function ServerMetricsSectionContainer({
           {streamStatus}
         </p>
       )}
+      {diskActionError && (
+        <p role="alert" className="text-sm text-error">
+          Failed to resolve low-disk issue: {diskActionError}
+        </p>
+      )}
 
       {nodes.length === 0 ? (
         <p data-testid="metrics-empty" className="text-sm text-low">
@@ -315,6 +371,18 @@ export function ServerMetricsSectionContainer({
                 node={node}
                 selected={selectedNodeId === node.node_id}
                 onSelect={selectNode}
+                diskAlert={
+                  snapshot
+                    ? classifyNode(node, snapshot.disk_alert_thresholds)
+                    : null
+                }
+                onResolveDiskAlert={projectId ? resolveDiskAlert : undefined}
+                resolvingDiskAlert={resolvingNodeId === node.node_id}
+                diskAlertActionDisabledReason={
+                  projectId
+                    ? null
+                    : 'Link this workspace to a project to create an issue.'
+                }
               />
               {selectedNodeId === node.node_id && (
                 <NodeDetail

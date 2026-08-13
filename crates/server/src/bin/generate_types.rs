@@ -92,6 +92,7 @@ fn generate_types_content() -> String {
         node_metrics::CoreBusy::decl(),
         node_metrics::MemorySample::decl(),
         node_metrics::FilesystemSample::decl(),
+        node_metrics::DiskAlertThresholds::decl(),
         node_metrics::NetworkSample::decl(),
         node_metrics::ProcessSample::decl(),
         node_metrics::HostSample::decl(),

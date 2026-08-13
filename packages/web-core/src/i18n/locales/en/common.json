@@ -628,6 +628,18 @@
     "failedTitle": "Workspace creation failed",
     "failedFallback": "Create a new workspace to try again."
   },
+  "metricsDiskAlerts": {
+    "warning": "Low disk",
+    "critical": "Critical disk",
+    "available": "available",
+    "used": "used",
+    "resolving": "Resolving issue…",
+    "action": "Create or open remediation issue",
+    "noProject": "Link this workspace to a project to create an issue.",
+    "resolveFailed": "Failed to resolve low-disk issue: {{error}}",
+    "nodeCount_one": "{{severity}} · {{count}} node",
+    "nodeCount_other": "{{severity}} · {{count}} nodes"
+  },
   "speckit": {
     "title": "SpecKit",
     "stageProgress": "{{done}}/{{total}} stages",
