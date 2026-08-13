@@ -32,7 +32,14 @@ export function classifyFilesystem(
   const total = finiteNumber(filesystem.total_bytes);
   const used = finiteNumber(filesystem.used_bytes);
   const available = finiteNumber(filesystem.available_bytes);
-  if (total === null || used === null || available === null || total <= 0) {
+  if (
+    total === null ||
+    used === null ||
+    available === null ||
+    total <= 0 ||
+    used > total ||
+    available > total
+  ) {
     return null;
   }
 

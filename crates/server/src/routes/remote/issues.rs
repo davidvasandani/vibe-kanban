@@ -70,7 +70,7 @@ async fn resolve_low_disk_issue(
                 filesystem.used_bytes?,
                 filesystem.available_bytes?,
             );
-            if total == 0 {
+            if total == 0 || used > total || available > total {
                 return None;
             }
             let free_percent = available as f64 / total as f64 * 100.0;

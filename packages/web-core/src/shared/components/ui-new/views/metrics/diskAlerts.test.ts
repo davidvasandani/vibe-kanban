@@ -51,6 +51,24 @@ describe('classifyFilesystem', () => {
       )
     ).toBeNull();
   });
+
+  it('rejects internally inconsistent capacity facts', () => {
+    expect(
+      classifyFilesystem(
+        {
+          ...filesystem(1, 1024 ** 3),
+          available_bytes: 2n * 1024n ** 3n,
+        },
+        thresholds
+      )
+    ).toBeNull();
+    expect(
+      classifyFilesystem(
+        { ...filesystem(1), used_bytes: 101n * 1024n ** 3n },
+        thresholds
+      )
+    ).toBeNull();
+  });
 });
 
 describe('classifyNode availability', () => {

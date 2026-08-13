@@ -42,6 +42,9 @@ impl DiskAlertThresholds {
         if self.warning_free_percent < 0.0 || self.critical_free_percent < 0.0 {
             return Err("disk alert percentages must be non-negative");
         }
+        if self.warning_free_percent > 100.0 || self.critical_free_percent > 100.0 {
+            return Err("disk alert percentages must not exceed 100");
+        }
         if self.critical_free_percent > self.warning_free_percent
             || self.critical_free_bytes > self.warning_free_bytes
         {
@@ -80,6 +83,15 @@ mod disk_alert_threshold_tests {
     fn critical_thresholds_cannot_be_less_severe_than_warning() {
         let thresholds = DiskAlertThresholds {
             critical_free_percent: 11.0,
+            ..DiskAlertThresholds::default()
+        };
+        assert!(thresholds.validate().is_err());
+    }
+
+    #[test]
+    fn percentages_cannot_exceed_one_hundred() {
+        let thresholds = DiskAlertThresholds {
+            warning_free_percent: 101.0,
             ..DiskAlertThresholds::default()
         };
         assert!(thresholds.validate().is_err());
