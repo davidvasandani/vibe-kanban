@@ -643,7 +643,8 @@ fn ensure_feature_dir_owner(host_root: &Path, ctx: &CommandContext) -> io::Resul
     }
 
     let spec_path = dir.join("spec.md");
-    if let Ok(spec) = std::fs::read_to_string(&spec_path) {
+    if spec_path.exists() {
+        let spec = std::fs::read_to_string(&spec_path)?;
         let declared_owner = declared_spec_owner(&spec);
         let expected_dir = format!("**Feature dir**: `specs/{expected}/`");
         let matches_legacy_dir = spec.lines().any(|line| line.trim() == expected_dir);
@@ -663,6 +664,14 @@ fn ensure_feature_dir_owner(host_root: &Path, ctx: &CommandContext) -> io::Resul
                 ),
             ));
         }
+    } else if dir.exists() && std::fs::read_dir(&dir)?.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "SpecKit directory {} is nonempty but has no ownership marker or legacy spec",
+                dir.display()
+            ),
+        ));
     }
 
     write_with_parents(&owner_path, &format!("{expected}\n"))
@@ -1099,6 +1108,24 @@ mod tests {
         assert!(error.to_string().contains("vk/a-different-task"));
         assert!(!cwd.join(".claude/commands/speckit.specify.md").exists());
         assert!(!host_root.join(CONSTITUTION_REL_PATH).exists());
+    }
+
+    #[test]
+    fn scaffold_refuses_unowned_nonempty_legacy_directory() {
+        let d = TmpDir::new("scaffold-unowned-nonempty");
+        let host_root = d.path().join("backend");
+        let cwd = d.path().to_path_buf();
+        write_with_parents(
+            &host_root.join("specs/vk/feat-1/tasks.md"),
+            "# Another task's record\n",
+        )
+        .unwrap();
+
+        let error = ensure_scaffold(&host_root, &cwd, &multi_ctx()).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("nonempty"));
+        assert!(!host_root.join("specs/vk/feat-1/.speckit-owner").exists());
     }
 
     #[test]

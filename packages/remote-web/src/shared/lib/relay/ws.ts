@@ -177,7 +177,7 @@ class RelaySignedWebSocket extends EventTarget {
           this.rawSocket,
           closePayload.code,
           closePayload.reason ?? "",
-          (code, reason) => this.emitClose(code, reason, false),
+          (code, reason, wasClean) => this.emitClose(code, reason, wasClean),
         );
         return;
       }
@@ -242,9 +242,9 @@ export function forwardDecodedRelayClose(
   rawSocket: Pick<WebSocket, "close">,
   code: number,
   reason: string,
-  emitClose: (code: number, reason: string) => void,
+  emitClose: (code: number, reason: string, wasClean: boolean) => void,
 ): void {
-  emitClose(code, reason);
+  emitClose(code, reason, code === 1000);
   rawSocket.close();
 }
 

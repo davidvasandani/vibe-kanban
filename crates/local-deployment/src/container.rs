@@ -128,7 +128,6 @@ async fn wait_for_unfinalized_output(
     exec_id: Uuid,
 ) {
     let mut observed_final_at = None;
-    let mut observed_history_len = 0;
     loop {
         let history = msg_stores
             .read()
@@ -136,10 +135,13 @@ async fn wait_for_unfinalized_output(
             .get(&exec_id)
             .map(|store| store.get_history())
             .unwrap_or_default();
-        if history.len() != observed_history_len {
-            observed_history_len = history.len();
-            observed_final_at =
-                history_has_final_assistant_message(&history).then(tokio::time::Instant::now);
+        if history_has_final_assistant_message(&history) {
+            // Preserve the first observation so a capped history that evicts
+            // one entry for every append cannot postpone reconciliation merely
+            // by keeping the same retained length.
+            observed_final_at.get_or_insert_with(tokio::time::Instant::now);
+        } else {
+            observed_final_at = None;
         }
         if observed_final_at.is_some_and(|observed| {
             tokio::time::Instant::now().duration_since(observed)
@@ -188,6 +190,10 @@ fn should_ack_worker_batch(cursor: u64, has_terminal: bool) -> bool {
     cursor > 0 && !has_terminal
 }
 
+fn worker_job_has_positive_liveness(job: &ExecutionWorkerJob, now: DateTime<Utc>) -> bool {
+    !job.dispatch_state.is_terminal() && job.lease_expires_at.is_some_and(|lease| lease > now)
+}
+
 #[cfg(test)]
 mod final_output_reconciliation_tests {
     use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -200,7 +206,7 @@ mod final_output_reconciliation_tests {
 
     use super::{
         history_has_final_assistant_message, normalized_final_assistant_state,
-        should_ack_worker_batch, wait_for_unfinalized_output,
+        should_ack_worker_batch, wait_for_unfinalized_output, worker_job_has_positive_liveness,
     };
 
     fn normalized_message(entry_type: NormalizedEntryType, content: &str) -> LogMsg {
@@ -255,6 +261,36 @@ mod final_output_reconciliation_tests {
         assert!(should_ack_worker_batch(4, false));
         assert!(!should_ack_worker_batch(4, true));
         assert!(!should_ack_worker_batch(0, false));
+    }
+
+    #[test]
+    fn worker_job_liveness_requires_active_state_and_current_lease() {
+        let now = chrono::Utc::now();
+        let mut job = db::models::execution_worker_job::ExecutionWorkerJob {
+            execution_process_id: Uuid::new_v4(),
+            worker_node_id: Uuid::new_v4(),
+            worker_job_id: Uuid::new_v4(),
+            request_digest: "digest".into(),
+            dispatch_state: db::models::execution_worker_job::ExecutionWorkerDispatchState::Running,
+            last_event_sequence: 0,
+            worker_last_sequence: 0,
+            lease_expires_at: Some(now + chrono::Duration::seconds(30)),
+            output_complete: false,
+            terminal_evidence: None,
+            dispatched_at: now,
+            accepted_at: Some(now),
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        assert!(worker_job_has_positive_liveness(&job, now));
+
+        job.lease_expires_at = Some(now - chrono::Duration::seconds(1));
+        assert!(!worker_job_has_positive_liveness(&job, now));
+        job.lease_expires_at = Some(now + chrono::Duration::seconds(30));
+        job.dispatch_state =
+            db::models::execution_worker_job::ExecutionWorkerDispatchState::Completed;
+        assert!(!worker_job_has_positive_liveness(&job, now));
     }
 
     #[tokio::test(start_paused = true)]
@@ -2477,10 +2513,7 @@ impl LocalContainerService {
                     .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
                 {
                     match ExecutionWorkerJob::find_by_execution_id(&db.pool, execution_id).await {
-                        Ok(Some(job))
-                            if !job.dispatch_state.is_terminal()
-                                && job.lease_expires_at.is_some_and(|lease| lease > Utc::now()) =>
-                        {
+                        Ok(Some(job)) if worker_job_has_positive_liveness(&job, Utc::now()) => {
                             // A current job lease is authoritative positive
                             // liveness. Do not turn quiet final text into a
                             // cancellation while the worker still owns work.

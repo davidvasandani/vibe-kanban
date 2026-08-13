@@ -1,6 +1,9 @@
 use axum::{
     Json, Router,
-    extract::{Path, State, ws::Message},
+    extract::{
+        Path, State,
+        ws::{CloseFrame, Message},
+    },
     response::{IntoResponse, Json as ResponseJson},
     routing::get,
 };
@@ -136,7 +139,13 @@ async fn handle_scratch_ws(
                     }
                     Some(Err(e)) => {
                         tracing::error!("scratch stream error: {}", e);
-                        break;
+                        let _ = socket
+                            .send(Message::Close(Some(CloseFrame {
+                                code: 1011,
+                                reason: "scratch stream requires resnapshot".into(),
+                            })))
+                            .await;
+                        return Err(e.into());
                     }
                     None => break,
                 }
