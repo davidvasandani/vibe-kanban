@@ -1,6 +1,7 @@
 use api_types::{
     CreateIssueRequest, Issue, ListIssuesQuery, ListIssuesResponse, MutationResponse,
-    ResolveLowDiskIssueRequest, ResolveLowDiskIssueResponse, SearchIssuesRequest, UpdateIssueRequest,
+    ResolveLowDiskIssueRequest, ResolveLowDiskIssueResponse, SearchIssuesRequest,
+    UpdateIssueRequest,
 };
 use axum::{
     Router,
@@ -8,6 +9,7 @@ use axum::{
     response::Json as ResponseJson,
     routing::{get, post},
 };
+use deployment::Deployment;
 use utils::response::ApiResponse;
 use uuid::Uuid;
 

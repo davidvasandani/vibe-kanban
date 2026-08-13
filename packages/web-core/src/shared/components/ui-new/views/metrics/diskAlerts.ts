@@ -20,6 +20,7 @@ export interface NodeDiskAlert {
 }
 
 const finiteNumber = (value: unknown): number | null => {
+  if (value === null || value === undefined) return null;
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : null;
 };

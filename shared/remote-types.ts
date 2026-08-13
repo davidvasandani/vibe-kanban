@@ -122,6 +122,12 @@ export type CreateIssueRequest = {
  */
 id?: string, project_id: string, status_id: string, title: string, description: string | null, priority: IssuePriority | null, start_date: string | null, target_date: string | null, completed_at: string | null, sort_order: number, parent_issue_id: string | null, parent_issue_sort_order: number | null, extension_metadata: JsonValue, };
 
+export type LowDiskFilesystemObservation = { device: string, fs_type: string, mount_point: string, total_bytes: bigint, used_bytes: bigint, available_bytes: bigint, };
+
+export type ResolveLowDiskIssueRequest = { project_id: string, node_id: string, hostname: string, observed_at: string, filesystems: Array<LowDiskFilesystemObservation>, };
+
+export type ResolveLowDiskIssueResponse = { issue: Issue, txid: bigint, created: boolean, };
+
 export type UpdateIssueRequest = { status_id?: string | null, title?: string | null, description?: string | null | null, priority?: IssuePriority | null | null, start_date?: string | null | null, target_date?: string | null | null, completed_at?: string | null | null, sort_order?: number | null, parent_issue_id?: string | null | null, parent_issue_sort_order?: number | null | null, extension_metadata?: JsonValue | null, };
 
 export type CreateIssueAssigneeRequest = { 

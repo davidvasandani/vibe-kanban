@@ -334,6 +334,8 @@ export type FilesystemSample = { mount_point: string, device: string, fs_type: s
  */
 total_bytes: bigint | null, used_bytes: bigint | null, available_bytes: bigint | null, };
 
+export type DiskAlertThresholds = { warning_free_percent: number, warning_free_bytes: bigint, critical_free_percent: number, critical_free_bytes: bigint, };
+
 export type NetworkSample = { interface: string, rx_bytes_total: bigint, tx_bytes_total: bigint, 
 /**
  * `None` on the first sample and whenever the counter has gone backwards
@@ -457,7 +459,7 @@ nodes: { [key in string]?: MetricsNode }, generated_at: string,
  * Served rather than hardcoded on the client, so the sparkline x-axis
  * stays correct if the cadence ever changes.
  */
-sample_interval_ms: bigint, };
+sample_interval_ms: bigint, disk_alert_thresholds: DiskAlertThresholds, };
 
 export type Session = { id: string, workspace_id: string, name: string | null, executor: string | null, agent_working_dir: string | null, created_at: string, updated_at: string, };
 

@@ -1,5 +1,6 @@
 import { WarningIcon } from '@phosphor-icons/react';
 import { useQuery } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import type { MetricsNode } from 'shared/types';
 
 import { clusterMetricsApi } from '@/shared/lib/api';
@@ -9,6 +10,7 @@ import { rollupDiskAlerts } from '@/shared/components/ui-new/views/metrics/diskA
 import { cn } from '@/shared/lib/utils';
 
 export function ServerMetricsHeader() {
+  const { t } = useTranslation('common');
   const hostId = useHostId();
   const { data } = useQuery({
     queryKey: clusterMetricsKeys.snapshot(hostId),
@@ -24,7 +26,16 @@ export function ServerMetricsHeader() {
   const rollup = rollupDiskAlerts(nodes, data.disk_alert_thresholds);
   if (!rollup.severity) return null;
 
-  const label = `${rollup.severity === 'critical' ? 'Critical disk' : 'Low disk'} · ${rollup.affectedNodes} ${rollup.affectedNodes === 1 ? 'node' : 'nodes'}`;
+  const severity = t(
+    rollup.severity === 'critical'
+      ? 'metricsDiskAlerts.critical'
+      : 'metricsDiskAlerts.warning'
+  );
+  const label = t('metricsDiskAlerts.nodeCount', {
+    defaultValue: '{{severity}} · {{count}} nodes',
+    severity,
+    count: rollup.affectedNodes,
+  });
   return (
     <span
       data-testid="server-metrics-header-alert"

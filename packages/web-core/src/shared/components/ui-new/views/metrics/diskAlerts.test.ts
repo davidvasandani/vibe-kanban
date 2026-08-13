@@ -21,9 +21,9 @@ const filesystem = (available: number, total = 100 * 1024 ** 3) =>
 
 describe('classifyFilesystem', () => {
   it('uses the more conservative percent or byte rule', () => {
-    expect(classifyFilesystem(filesystem(6 * 1024 ** 3), thresholds)?.severity).toBe(
-      'warning'
-    );
+    expect(
+      classifyFilesystem(filesystem(6 * 1024 ** 3), thresholds)?.severity
+    ).toBe('warning');
     expect(
       classifyFilesystem(filesystem(4 * 1024 ** 3, 20 * 1024 ** 3), thresholds)
         ?.severity
@@ -31,9 +31,9 @@ describe('classifyFilesystem', () => {
   });
 
   it('gives critical precedence', () => {
-    expect(classifyFilesystem(filesystem(512 * 1024 ** 2), thresholds)?.severity).toBe(
-      'critical'
-    );
+    expect(
+      classifyFilesystem(filesystem(512 * 1024 ** 2), thresholds)?.severity
+    ).toBe('critical');
   });
 
   it('does not alert at exact boundaries or for absent facts', () => {

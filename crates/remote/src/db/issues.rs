@@ -61,6 +61,40 @@ fn low_disk_issue_body(request: &ResolveLowDiskIssueRequest) -> String {
     body
 }
 
+#[cfg(test)]
+mod low_disk_tests {
+    use api_types::{LowDiskFilesystemObservation, ResolveLowDiskIssueRequest};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use super::low_disk_issue_body;
+
+    #[test]
+    fn issue_body_preserves_disk_facts_and_permanent_remediation() {
+        let request = ResolveLowDiskIssueRequest {
+            project_id: Uuid::nil(),
+            node_id: Uuid::from_u128(1),
+            hostname: "think4".to_string(),
+            observed_at: Utc::now(),
+            filesystems: vec![LowDiskFilesystemObservation {
+                device: "/dev/mapper/pool-root".to_string(),
+                fs_type: "ext4".to_string(),
+                mount_point: "/".to_string(),
+                total_bytes: 1000,
+                used_bytes: 990,
+                available_bytes: 10,
+            }],
+        };
+        let body = low_disk_issue_body(&request);
+        assert!(body.contains("/dev/mapper/pool-root"));
+        assert!(body.contains("| 1000 | 990 | 10 | 99.0% |"));
+        assert!(body.contains("Nix store generations"));
+        assert!(body.contains("scheduled garbage collection"));
+        assert!(body.contains("volume must be resized"));
+        assert!(body.contains("manual cleanup alone"));
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IssueWorkflowSignal {
     ReviewStarted,

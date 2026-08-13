@@ -206,9 +206,9 @@ export function ServerMetricsSectionContainer({
       sample_interval_ms: DEFAULT_SAMPLE_INTERVAL_MS,
       disk_alert_thresholds: {
         warning_free_percent: 10,
-        warning_free_bytes: 5 * 1024 ** 3,
+        warning_free_bytes: 5n * 1024n ** 3n,
         critical_free_percent: 2,
-        critical_free_bytes: 1024 ** 3,
+        critical_free_bytes: 1024n ** 3n,
       },
     }),
     []
@@ -262,7 +262,8 @@ export function ServerMetricsSectionContainer({
       setDiskActionError(null);
       try {
         const node = nodes.find((candidate) => candidate.node_id === nodeId);
-        if (!node?.latest) throw new Error('The disk reading is no longer available.');
+        if (!node?.latest)
+          throw new Error('The disk reading is no longer available.');
         const response = await clusterMetricsApi.resolveLowDiskIssue({
           project_id: projectId,
           node_id: nodeId,
@@ -272,7 +273,9 @@ export function ServerMetricsSectionContainer({
         });
         appNavigation.goToProjectIssue(projectId, response.issue.id);
       } catch (error) {
-        setDiskActionError(error instanceof Error ? error.message : String(error));
+        setDiskActionError(
+          error instanceof Error ? error.message : String(error)
+        );
       } finally {
         setResolvingNodeId(null);
       }

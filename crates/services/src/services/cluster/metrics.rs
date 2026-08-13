@@ -766,10 +766,7 @@ fn disk_alert_thresholds_from_env() -> node_metrics::types::DiskAlertThresholds 
             "VK_DISK_CRITICAL_FREE_PERCENT",
             defaults.critical_free_percent,
         ),
-        critical_free_bytes: parse(
-            "VK_DISK_CRITICAL_FREE_BYTES",
-            defaults.critical_free_bytes,
-        ),
+        critical_free_bytes: parse("VK_DISK_CRITICAL_FREE_BYTES", defaults.critical_free_bytes),
     };
     if let Err(reason) = configured.validate() {
         tracing::warn!(%reason, "invalid disk alert thresholds; using defaults");
