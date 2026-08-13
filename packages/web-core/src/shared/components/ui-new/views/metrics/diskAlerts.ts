@@ -58,8 +58,16 @@ export function classifyNode(
   node: MetricsNode,
   thresholds: DiskAlertThresholds
 ): NodeDiskAlert | null {
+  const availability = node.availability.status;
+  if (availability !== 'available' && availability !== 'stale') return null;
+
   const filesystems = (node.latest?.filesystems ?? [])
     .map((filesystem) => classifyFilesystem(filesystem, thresholds))
+    .map((alert) =>
+      alert && availability === 'stale'
+        ? { ...alert, severity: 'warning' as const }
+        : alert
+    )
     .filter((alert): alert is FilesystemDiskAlert => alert !== null)
     .sort((a, b) => {
       if (a.severity !== b.severity) return a.severity === 'critical' ? -1 : 1;

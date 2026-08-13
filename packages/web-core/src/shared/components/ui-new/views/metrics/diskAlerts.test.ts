@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { DiskAlertThresholds, FilesystemSample } from 'shared/types';
-import { classifyFilesystem } from './diskAlerts';
+import type {
+  DiskAlertThresholds,
+  FilesystemSample,
+  MetricsNode,
+} from 'shared/types';
+import { classifyFilesystem, classifyNode } from './diskAlerts';
 
 const thresholds: DiskAlertThresholds = {
   warning_free_percent: 10,
@@ -46,5 +50,35 @@ describe('classifyFilesystem', () => {
         thresholds
       )
     ).toBeNull();
+  });
+});
+
+describe('classifyNode availability', () => {
+  const node = (status: MetricsNode['availability']): MetricsNode =>
+    ({
+      node_id: '00000000-0000-0000-0000-000000000001',
+      availability: status,
+      latest: { filesystems: [filesystem(512 * 1024 ** 2)] },
+    }) as MetricsNode;
+
+  it('does not alert from retained readings for unavailable nodes', () => {
+    expect(
+      classifyNode(
+        node({ status: 'unreachable', reason: 'timeout' }),
+        thresholds
+      )
+    ).toBeNull();
+    expect(
+      classifyNode(node({ status: 'not_implemented' }), thresholds)
+    ).toBeNull();
+  });
+
+  it('retains stale evidence as a warning rather than a critical alert', () => {
+    expect(
+      classifyNode(
+        node({ status: 'stale', since: '2026-08-13T10:00:00Z' }),
+        thresholds
+      )?.severity
+    ).toBe('warning');
   });
 });

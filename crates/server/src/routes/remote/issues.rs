@@ -43,6 +43,15 @@ async fn resolve_low_disk_issue(
         .nodes
         .get(&request.node_id)
         .ok_or_else(|| ApiError::BadRequest("metrics node not found".to_string()))?;
+    if !matches!(
+        node.availability,
+        node_metrics::NodeMetricsAvailability::Available
+            | node_metrics::NodeMetricsAvailability::Stale { .. }
+    ) {
+        return Err(ApiError::BadRequest(
+            "node has no current or retained stale disk reading".to_string(),
+        ));
+    }
     let sample = node
         .latest
         .as_ref()
