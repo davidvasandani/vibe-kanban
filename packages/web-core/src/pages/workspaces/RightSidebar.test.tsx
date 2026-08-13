@@ -43,6 +43,7 @@ vi.mock('@/shared/stores/useUiPreferencesStore', () => ({
     devServerSection: 'dev-server',
     rightPanelBrowser: 'browser',
     gitPanelRepositories: 'git',
+    deployStatusSection: 'deploy-status',
     serverMetricsSection: 'server-metrics',
     serverAffinitySection: 'server-affinity',
     terminalSection: 'terminal',
@@ -136,7 +137,7 @@ afterEach(() => {
 });
 
 describe('RightSidebar deploy status', () => {
-  it('renders a fixed, non-collapsible status row before drawer sections', () => {
+  it('renders a collapsed Deploy Status accordion before drawer sections', () => {
     act(() => {
       root.render(
         <RightSidebar
@@ -148,18 +149,71 @@ describe('RightSidebar deploy status', () => {
       );
     });
 
-    const row = container.querySelector('[data-testid="deploy-status-row"]');
-    expect(row).not.toBeNull();
-    expect(row?.classList).toContain('flex-none');
-    expect(row?.classList).toContain('shrink-0');
-    expect(row?.textContent).toContain('Deploy Status');
-    expect(row?.textContent).toContain('abc1234');
-    expect(row?.textContent).toContain('· 2h');
-    expect(row?.querySelector('button')).toBeNull();
+    const button = Array.from(container.querySelectorAll('button')).find(
+      (candidate) => candidate.textContent?.includes('Deploy Status')
+    );
+    const section = button?.parentElement?.parentElement;
 
-    const stack = row?.parentElement;
-    expect(stack?.firstElementChild).toBe(row);
-    expect(stack?.querySelectorAll('button').length).toBeGreaterThan(0);
+    expect(button).toBeInstanceOf(HTMLButtonElement);
+    expect(button?.textContent).toContain('abc1234');
+    expect(button?.textContent).toContain('· 2h');
+    expect(button?.textContent).not.toContain('Refresh');
+    expect(section?.classList).toContain('flex-none');
+    expect(section?.textContent).not.toContain('No newer deployment detected.');
+    expect(section?.parentElement?.firstElementChild).toBe(section);
+  });
+
+  it('keeps Deploy Status first when a mode-specific section is present', () => {
+    act(() => {
+      root.render(
+        <RightSidebar
+          rightMainPanelMode="changes"
+          selectedWorkspace={selectedWorkspace}
+          repos={[]}
+          showDeployStatus
+        />
+      );
+    });
+
+    const firstDisclosure = container.querySelector('button');
+    expect(firstDisclosure?.textContent).toContain('Deploy Status');
+  });
+
+  it('refreshes from the header action without toggling the accordion', () => {
+    const onDeployRefresh = vi.fn();
+
+    act(() => {
+      root.render(
+        <RightSidebar
+          rightMainPanelMode={null}
+          selectedWorkspace={undefined}
+          repos={[]}
+          showDeployStatus
+          deployUpdateAvailable
+          onDeployRefresh={onDeployRefresh}
+        />
+      );
+    });
+
+    const disclosure = Array.from(container.querySelectorAll('button')).find(
+      (candidate) => candidate.textContent?.includes('Deploy Status')
+    );
+    const refresh = container.querySelector('[aria-label="Refresh"]');
+    const section = disclosure?.parentElement?.parentElement;
+
+    expect(refresh?.textContent).toContain('Refresh');
+    expect(section?.textContent).not.toContain(
+      'A newer deployment is available.'
+    );
+
+    act(() => {
+      refresh?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onDeployRefresh).toHaveBeenCalledTimes(1);
+    expect(section?.textContent).not.toContain(
+      'A newer deployment is available.'
+    );
   });
 });
 

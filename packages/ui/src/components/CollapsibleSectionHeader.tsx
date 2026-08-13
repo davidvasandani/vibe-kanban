@@ -26,6 +26,7 @@ export type SectionAction = {
   icon: Icon;
   onClick: () => void;
   isActive?: boolean;
+  label?: string;
 };
 
 interface CollapsibleSectionHeaderProps {
@@ -105,14 +106,19 @@ export function CollapsibleSectionHeader({
               key={index}
               role="button"
               tabIndex={0}
+              aria-label={action.label}
+              title={action.label}
               onClick={(e) => handleActionClick(e, action.onClick)}
               onKeyDown={(e) => handleActionKeyDown(e, action.onClick)}
               className={cn(
-                'hover:text-normal',
+                'flex items-center gap-1 hover:text-normal',
                 action.isActive ? 'text-brand' : 'text-low'
               )}
             >
               <ActionIcon className="size-icon-xs" weight="bold" />
+              {action.label && (
+                <span className="text-xs font-medium">{action.label}</span>
+              )}
             </span>
           );
         })}

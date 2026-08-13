@@ -1,70 +1,66 @@
-# Single-Value Browser Titles — Technical Specification
-
-## Summary
-
-Stop composing browser-tab titles from multiple labels. When a page has a
-specific title, the tab must show that value alone; fallback labels such as the
-project name, application name, and especially an issue/ticket identifier must
-not be concatenated onto it.
+# Move deployment refresh into Deploy Status
 
 ## Problem
 
-The shared `usePageTitle` hook currently accepts multiple title parts, joins
-them with ` - `, and then appends ` | Vibe Kanban`. A project issue page can
-therefore combine the issue title, project name, and product name in one browser
-tab. These repeated context labels consume scarce tab width and obscure the
-one label users need to distinguish the page. Ticket numbers are particularly
-noisy when combined with an already descriptive issue title.
+The desktop application rail currently renders deployment identity or an
+available-deployment `Refresh` control below the user headshot. This mixes
+operational deployment controls with account navigation and duplicates the
+deployment information already exposed at the top of the workspace right
+sidebar.
 
-## Scope
+## Goal
 
-- Change browser-tab title selection in the Vibe Kanban web frontend.
-- Select one non-empty page title rather than joining title parts.
-- Show `Vibe Kanban` only when no page-specific title is available.
-- Remove redundant multi-part title arguments from current call sites.
-- Add focused regression coverage for title selection and updates.
+Make the workspace right sidebar's **Deploy Status** section the single desktop
+home for deployed revision/age and the page-refresh action that adopts a newly
+deployed build. Remove both the git revision and deployment refresh control from
+under the AppBar user headshot.
 
-## Out of Scope
+## Functional requirements
 
-- Visible navbar breadcrumbs, workspace names, issue-card labels, branch names,
-  or URL structure.
-- Renaming issues, projects, workspaces, or the Vibe Kanban product.
-- Remote review-page behavior, which owns a separate title implementation.
-- Homelab deployment changes or changes to any other service.
+1. The desktop AppBar must no longer render the current git revision or the
+   deployment `Refresh` control below the user popover/headshot.
+2. Native desktop update behavior (`Update` for an installable application
+   update) must remain available in the AppBar and retain its existing callback.
+3. The workspace right sidebar must present Deploy Status as a collapsible
+   accordion/section using the same section-header behavior as the other right
+   sidebar sections.
+4. The Deploy Status header must continue to show the deployed revision and
+   elapsed deployment age when that metadata is available.
+5. When a newer web deployment is available, the Deploy Status section must
+   expose a `Refresh` action that invokes the existing reload behavior.
+6. The refresh action must be absent when no newer deployment is available.
+7. Existing workspace sections and their sizing/collapse behavior must remain
+   unchanged.
+8. Mobile deployment identity remains out of scope and must not regress.
 
-## Functional Requirements
+## UX expectations
 
-1. A non-empty page-specific label MUST become the complete `document.title`.
-2. The hook MUST NOT append the application name, project name, ticket number,
-   separators, or any other contextual label to a page-specific title.
-3. When no non-empty page-specific label exists, `document.title` MUST be
-   `Vibe Kanban`.
-4. Existing workspace, create-workspace, and issue navigation MUST continue to
-   update the title as their selected records change.
-5. The project issue page MUST use the issue title alone when an issue is open
-   and the project name alone when no issue title is available.
-6. Blank strings MUST be treated as absent values, and surrounding whitespace
-   MUST be removed from the selected label.
+- Deploy Status appears before the Issue/Git/etc. workspace sections.
+- Its header is recognizable as an accordion and can be expanded/collapsed.
+- Revision/age remain compact and readable in the section header.
+- The available-deployment action is clearly labeled `Refresh` and keyboard
+  accessible.
+- Clicking the action must not accidentally toggle the accordion.
 
-## Acceptance Criteria
+## Technical scope
 
-- Opening an issue titled `Fix stale execution status` produces exactly
-  `Fix stale execution status` as the browser title.
-- The browser title contains no ` | Vibe Kanban` suffix.
-- An issue ticket/simple ID is not added to its descriptive title.
-- A project board with no open issue uses its project name as the single title.
-- A workspace uses its workspace name as the single title.
-- A loading or otherwise untitled page falls back to exactly `Vibe Kanban`.
-- Focused automated tests cover specific-title, fallback-title, blank-title,
-  and rerender behavior.
+- Vibe Kanban source only, primarily `packages/ui` and `packages/web-core`.
+- No changes to unrelated homelab services or deployment modules are expected.
+- Reuse the existing `deployUpdateAvailable` signal and page reload callback;
+  do not add a new backend contract.
 
-## Implementation Notes
+## Verification
 
-Keep the change centered on
-`packages/web-core/src/shared/hooks/usePageTitle.ts`. The hook can retain
-ordered fallback arguments for callers that need them, but it must choose the
-first non-empty value rather than concatenate the values. Update the project
-page call so its argument order expresses `issue title -> project name` as a
-fallback chain. Do not alter visible breadcrumbs; the screenshot's breadcrumb
-context remains useful in the page chrome even though it is redundant in the
-browser tab.
+- Add or update rendered-DOM tests for the AppBar and RightSidebar ownership
+  boundary.
+- Verify Deploy Status accordion rendering, revision/age display, conditional
+  refresh visibility, refresh callback invocation, and non-toggling action
+  behavior.
+- Run focused frontend tests, type checking/linting appropriate to touched
+  packages, formatting, and diff checks.
+
+## Non-goals
+
+- Changing update detection semantics.
+- Changing native desktop update installation behavior.
+- Modifying deployment infrastructure or any service other than Vibe Kanban.
