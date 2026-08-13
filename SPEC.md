@@ -1,71 +1,71 @@
-# Fix Toolbar — Technical Specification
-
-## Summary
-
-Improve the mobile workspace navbar so the workspace tool tabs use the available
-horizontal space instead of remaining a tightly packed cluster with unused space
-on the leading side. The right-side deployment, settings, command, and user
-controls must remain visible and stable.
+# Technical Specification: Commits Behind in the Git Header
 
 ## Problem
 
-On phone-sized workspace views, the primary tool tabs (Chat, Diff, Logs,
-Preview, Browser, and Sidebar, subject to route availability) are rendered at
-their content width. In landscape/mobile layouts this leaves visually unused
-horizontal space and makes the controls feel compressed, as shown in the task
-screenshots.
+The workspace right sidebar exposes per-repository branch divergence only inside
+the expanded Git panel. A user looking at the collapsed Git section cannot see
+whether the current task branch has fallen behind its configured target branch
+(normally `main`). This makes stale branches easy to overlook.
 
 ## Scope
 
-- Update the Vibe Kanban frontend mobile navbar layout only.
-- Allow the tool-tab strip to grow across all horizontal room available between
-  its leading navigation affordance and the fixed right-side controls.
-- Distribute the available width among visible tool tabs while retaining a
-  usable fallback when the viewport is too narrow.
-- Preserve existing tab visibility, active state, labels, click behavior,
-  accessibility attributes, safe-area/window-control clearance, and navigation
-  actions.
-- Add focused regression coverage for the mobile navbar layout contract.
+Change only the Vibe Kanban service repository. No other service or homelab
+deployment changes are required.
 
-## Out of Scope
+## Desired behavior
 
-- Desktop navbar changes.
-- Changes to tool availability or tab ordering.
-- Changes to the homelab deployment configuration or any other service.
-- Visual redesign of icons, colors, typography, or right-side controls.
+1. The `Git` collapsible-section header displays the current workspace branch's
+   non-zero commits-behind count, using the existing branch-status data and each
+   repository's configured target branch.
+2. For a workspace with one repository, the header shows the commits-behind
+   count without redundantly showing the repository name.
+3. For a workspace with multiple repositories, every repository with a non-zero
+   commits-behind count is identified by its display name and count so the
+   values cannot be confused.
+4. Repositories that are not behind are omitted. When no repository is behind,
+   the Git header remains visually unchanged.
+5. The indicator remains available while the Git body is collapsed and updates
+   when branch-status query data changes or the selected workspace changes.
+6. The header remains compact: overflow is truncated and the full status is
+   available as accessible/title text.
 
-## Functional Requirements
+## Existing system seam
 
-1. The mobile workspace toolbar's leading section MUST consume the horizontal
-   space remaining after the right-side controls.
-2. The visible tool tabs MUST expand within that section so unused width is
-   shared across the controls.
-3. When the available width cannot fit the controls at their usable minimum
-   size, the toolbar MUST remain horizontally scrollable and MUST NOT push the
-   right-side controls off-screen.
-4. Project-page mobile headers MUST retain their current layout.
-5. Existing safe-area and iPad window-control spacing MUST remain effective.
-6. The active tool MUST retain its visible active indicator and `aria-pressed`
-   state.
+- `RightSidebar.tsx` owns the `Git` section header and already supports a
+  `headerExtra` node.
+- `useBranchStatus(workspaceId)` supplies `RepoBranchStatus[]`, including
+  `repo_id` and `commits_behind` calculated against the configured target.
+- `RepoWithTargetBranch` supplies stable repository identity and display names.
+- `GitPanelContainer.tsx` already consumes the same status fields for the
+  expanded repository cards; the header indicator must preserve those
+  semantics and avoid introducing a second backend contract.
 
-## Acceptance Criteria
+## Implementation constraints
 
-- In a landscape phone workspace view, the tool buttons occupy the available
-  toolbar region rather than appearing as a compact group separated from empty
-  space.
-- Settings, command-bar, deployment status, sync status, and user controls remain
-  fixed at the trailing side and usable.
-- On narrower viewports, all available tabs can still be reached by horizontal
-  scrolling without wrapping.
-- Mobile project-page behavior and desktop navbar behavior are unchanged.
-- Automated tests assert the growing/distributed toolbar classes and the
-  fixed-width trailing section.
-- Relevant frontend checks, formatting, and tests pass.
+- Do not fetch a remote provider directly or introduce a new polling path.
+- Do not sum multiple repositories into an ambiguous project-wide number.
+- Treat absent/loading status and absent `commits_behind` values as no indicator,
+  rather than briefly displaying a misleading zero.
+- Preserve existing Git panel actions, sizing, persistence, and per-repository
+  ahead/behind indicators.
+- Add focused frontend tests for zero, single-repository, and multi-repository
+  presentation and for placement in the Git section header.
 
-## Implementation Notes
+## Acceptance criteria
 
-The likely change is localized to `packages/ui/src/components/Navbar.tsx`.
-Prefer flexbox growth on the non-project mobile toolbar region, an inner
-full-width tab group, and equal growth for tab buttons. Preserve `min-w-0` on
-the flexible region and `shrink-0` on trailing controls to ensure overflow is
-contained in the toolbar rather than the navbar.
+- A single repository 3 commits behind its target shows a compact `3 behind`
+  indicator in the Git header.
+- With repositories `web` 2 behind and `server` 5 behind, the header identifies
+  both values (for example, `web 2 · server 5`).
+- A repository at zero behind produces no Git-header status.
+- Counts are based on repository IDs, so status remains correct regardless of
+  input ordering.
+- Relevant frontend tests, formatting, type checks, and linting pass.
+
+## Non-goals
+
+- Changing how divergence is calculated by Git.
+- Fetching target branches or remotes more frequently.
+- Showing commits ahead, unpushed commits, PR state, or rebase controls in the
+  section header.
+- Modifying deployment or any service outside Vibe Kanban.
