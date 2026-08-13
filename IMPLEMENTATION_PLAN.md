@@ -1,27 +1,29 @@
-# Fix Toolbar — Implementation Plan
+# Implementation Plan: Single-Value Browser Titles
 
-1. Confirm the mobile navbar's current rendered structure and existing tests,
-   including the split between the flexible workspace-tool region and trailing
-   status/actions.
-2. Establish/refine the SpecKit project constitution and generate the task's
-   feature artifacts through the required specify, clarify, plan, tasks, and
-   analyze stages.
-3. Update the shared `Navbar` mobile workspace layout so:
-   - the leading toolbar region grows and may shrink (`flex-1 min-w-0`);
-   - the visible tab group fills that region;
-   - each visible tab shares surplus width while retaining a practical minimum;
-   - horizontal overflow remains available when space is constrained; and
-   - the trailing action region stays non-shrinking.
-4. Add focused rendered-component tests in the web-core Vitest lane that assert
-   the flex growth/distribution/overflow contract, active accessibility state,
-   and fixed trailing controls without changing project-page behavior.
-5. Run focused tests, TypeScript checks, lint, repository formatting, and a
-   scoped diff sanity check.
-6. Run an independent Codex diff review; address and re-verify all confirmed
-   significant findings until the review is clean.
-7. Distill reusable responsive-toolbar knowledge into the Vibe Kanban knowledge
-   base, tag it with `vk/2163-fix-toolbar`, refresh the index, and commit the
-   knowledge-base update.
-8. Commit the implementation, push the task branch, open a pull request against
-   the repository's base branch, wait for required checks as needed, and merge
-   it.
+1. Refresh the SpecKit constitution and capture any project-wide constraints
+   that govern this frontend change.
+2. Generate the SpecKit feature specification for single-value browser titles,
+   using the task's concise title without concatenating a ticket number into
+   the feature name.
+3. Clarify selection precedence, empty-value behavior, and the boundary between
+   browser metadata and visible breadcrumbs.
+4. Generate the SpecKit technical plan, research, and any applicable contracts.
+5. Generate dependency-ordered tasks and analyze all SpecKit artifacts for
+   omissions or constitution violations.
+6. Install frontend dependencies using the repository's frozen lockfile.
+7. Add focused hook tests that demonstrate the current concatenation failure
+   and cover single-title, fallback, blank-value, and rerender behavior.
+8. Change `usePageTitle` to select the first non-empty title candidate and use
+   `Vibe Kanban` only when no candidate exists.
+9. Keep the issue title and project name as an ordered fallback chain on the
+   kanban page; verify workspace call sites remain correct without changing
+   visible breadcrumbs or ticket identifiers.
+10. Run focused tests, formatting, frontend type checks, and linting appropriate
+    to the affected packages; resolve any regressions.
+11. Execute an independent Codex diff review, address confirmed findings, and
+    repeat review and verification until no significant findings remain.
+12. Record the reusable browser-title selection contract in the project wiki,
+    tag it with this task id, refresh the wiki index, and commit the knowledge
+    base.
+13. Commit the implementation, push the task branch, open a pull request against
+    the repository base branch, wait for required checks, and merge it.

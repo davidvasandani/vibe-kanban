@@ -416,6 +416,17 @@ only positively active executions remain cancellable. Regression coverage MUST
 exercise a missed terminal event followed by snapshot rehydration and preserve
 the active-execution Stop behavior.
 
+### XXXI. Browser titles identify one thing
+Browser-tab titles MUST contain one meaningful label, selected from an ordered
+fallback chain. They do not concatenate project names, application branding,
+ticket identifiers, or other context onto a page-specific label. When no
+page-specific label is available, the product name is the fallback.
+
+This rule is limited to browser metadata. Visible navigation retains the
+context it needs: in particular, the workspace-breadcrumb issue-ID requirement
+remains authoritative. Shared title selection belongs in the existing web-core
+hook and is covered by focused update and fallback tests.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -437,7 +448,9 @@ the active-execution Stop behavior.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.27.0 (requires execution activity UI to derive from authoritative,
+**Version**: 0.28.0 (requires browser tabs to identify pages with one selected
+label while preserving contextual identifiers in visible navigation; 0.27.0
+requires execution activity UI to derive from authoritative,
 rehydratable process snapshots, reconnects to recover missed terminal events,
 and shutdown/recovery to classify executions that are no longer provably active;
 0.26.0 required executor-neutral, execution-scoped materialization
