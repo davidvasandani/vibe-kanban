@@ -1,7 +1,7 @@
 # Workspace affinity migration
 
 Contributing tasks: `9a64-vk-workspace-aff`, `61a3-server-affinity`,
-`vk/d80e-fix-the-spacing`
+`vk/d80e-fix-the-spacing`, `vk/a35b-commits-behind-m`
 
 Workspace affinity is both a placement policy and a resolved worker. Keep those concepts
 separate: automatic placement may already resolve to the worker an operator later pins,
@@ -40,3 +40,20 @@ Express the policy per section in `RightSidebar`, use intrinsic sizing for Serve
 Affinity, and keep content-heavy Git, logs, preview, metrics, terminal, and notes
 panels flexible. Test the real primitive's rendered root classes: a prop-forwarding
 mock cannot detect a full-height default that recreates the visual gap.
+
+Collapsed header metadata has its own lifecycle boundary. A collapsible section
+unmounts its body, so status reported upward by the detail container disappears
+at exactly the moment the header needs it. Mount a small header-owned subscriber
+outside the body and reuse the same TanStack Query key as the expanded container;
+the cache shares and deduplicates the backend request while disclosure state no
+longer controls status availability. Do not introduce a label-only endpoint or a
+second polling interval for the same fact.
+
+For compact summaries spanning several repositories or workers, join by stable
+identity rather than array position and keep the identity-to-value mapping in the
+visible copy. An aggregate number destroys the actionability of the status.
+Render only evidence: a positive divergence may be shown, zero may be omitted,
+and null/loading must remain absent rather than being converted into a reassuring
+zero. Bound and truncate the visible header item, but preserve the full mapping
+in its accessible/title text. Cover both the pure identity mapping and the real
+collapsed-header placement in tests.
