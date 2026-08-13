@@ -62,6 +62,30 @@ impl Default for DiskAlertThresholds {
     }
 }
 
+#[cfg(test)]
+mod disk_alert_threshold_tests {
+    use super::DiskAlertThresholds;
+
+    #[test]
+    fn defaults_match_documented_policy() {
+        let thresholds = DiskAlertThresholds::default();
+        assert_eq!(thresholds.warning_free_percent, 10.0);
+        assert_eq!(thresholds.warning_free_bytes, 5 * 1024 * 1024 * 1024);
+        assert_eq!(thresholds.critical_free_percent, 2.0);
+        assert_eq!(thresholds.critical_free_bytes, 1024 * 1024 * 1024);
+        assert_eq!(thresholds.validate(), Ok(()));
+    }
+
+    #[test]
+    fn critical_thresholds_cannot_be_less_severe_than_warning() {
+        let thresholds = DiskAlertThresholds {
+            critical_free_percent: 11.0,
+            ..DiskAlertThresholds::default()
+        };
+        assert!(thresholds.validate().is_err());
+    }
+}
+
 /// One observation of one host at one instant.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct HostSample {
