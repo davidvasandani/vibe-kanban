@@ -333,13 +333,13 @@ export function Navbar({
           ) : (
             <div
               data-testid="mobile-workspace-toolbar"
-              className="flex flex-1 min-w-0 items-center gap-0.5 overflow-x-auto"
+              className="flex flex-1 min-w-0 items-center gap-0.5"
             >
               {mobileShowBack && onNavigateBack ? (
                 <>
                   <button
                     type="button"
-                    className="flex items-center justify-center px-1.5 py-1 text-low hover:text-normal"
+                    className="flex shrink-0 items-center justify-center px-1.5 py-1 text-low hover:text-normal"
                     onClick={onNavigateBack}
                     aria-label="Back"
                   >
@@ -352,7 +352,7 @@ export function Navbar({
                   <>
                     <button
                       type="button"
-                      className="flex items-center justify-center px-1.5 py-1 text-low hover:text-normal"
+                      className="flex shrink-0 items-center justify-center px-1.5 py-1 text-low hover:text-normal"
                       onClick={onOpenDrawer}
                       aria-label="Projects"
                     >
@@ -365,7 +365,7 @@ export function Navbar({
               {showMobileTabs !== false && (
                 <div
                   data-testid="mobile-workspace-tabs"
-                  className="flex flex-1 min-w-fit items-center gap-0.5"
+                  className="flex flex-1 min-w-0 items-center gap-0.5 overflow-x-auto"
                 >
                   {(mobileTabs ?? MOBILE_TABS).map((tab) => {
                     const TabIcon = tab.icon;
