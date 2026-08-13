@@ -54,6 +54,7 @@ import {
   XIcon,
 } from '@phosphor-icons/react';
 import { useRemoteCloudHostsAppBarModel } from '@/shared/hooks/useRemoteCloudHosts';
+import { sortWorkspaces } from './workspaceSort';
 
 export type WorkspaceLayoutMode = 'flat' | 'accordion';
 
@@ -230,26 +231,6 @@ function WorkspacesFilterDialog({
       </DialogContent>
     </Dialog>
   );
-}
-
-function toTimestamp(value: string | undefined): number | null {
-  if (!value) {
-    return null;
-  }
-
-  const timestamp = new Date(value).getTime();
-  return Number.isNaN(timestamp) ? null : timestamp;
-}
-
-function getWorkspaceSortTimestamp(
-  workspace: Workspace,
-  sortBy: WorkspaceSortBy
-): number | null {
-  if (sortBy === 'updated_at') {
-    return toTimestamp(workspace.latestProcessCompletedAt);
-  }
-
-  return toTimestamp(workspace.createdAt);
 }
 
 export function WorkspacesSidebarContainer({
@@ -478,47 +459,20 @@ export function WorkspacesSidebarContainer({
     searchLower,
   ]);
 
-  const sortWorkspaces = useCallback(
+  const sortVisibleWorkspaces = useCallback(
     (workspaces: Workspace[]) =>
-      [...workspaces].sort((a, b) => {
-        // Always keep pinned workspaces at the top.
-        if (a.isPinned !== b.isPinned) {
-          return a.isPinned ? -1 : 1;
-        }
-
-        const aTimestamp = getWorkspaceSortTimestamp(a, workspaceSort.sortBy);
-        const bTimestamp = getWorkspaceSortTimestamp(b, workspaceSort.sortBy);
-
-        // Workspaces without the selected timestamp are always sorted first.
-        if (aTimestamp === null && bTimestamp === null) {
-          return a.name.localeCompare(b.name);
-        }
-        if (aTimestamp === null) {
-          return -1;
-        }
-        if (bTimestamp === null) {
-          return 1;
-        }
-
-        if (aTimestamp === bTimestamp) {
-          return a.name.localeCompare(b.name);
-        }
-
-        return workspaceSort.sortOrder === 'asc'
-          ? aTimestamp - bTimestamp
-          : bTimestamp - aTimestamp;
-      }),
+      sortWorkspaces(workspaces, workspaceSort.sortBy, workspaceSort.sortOrder),
     [workspaceSort.sortBy, workspaceSort.sortOrder]
   );
 
   const sortedActiveWorkspaces = useMemo(
-    () => sortWorkspaces(filteredActiveWorkspaces),
-    [filteredActiveWorkspaces, sortWorkspaces]
+    () => sortVisibleWorkspaces(filteredActiveWorkspaces),
+    [filteredActiveWorkspaces, sortVisibleWorkspaces]
   );
 
   const sortedArchivedWorkspaces = useMemo(
-    () => sortWorkspaces(filteredArchivedWorkspaces),
-    [filteredArchivedWorkspaces, sortWorkspaces]
+    () => sortVisibleWorkspaces(filteredArchivedWorkspaces),
+    [filteredArchivedWorkspaces, sortVisibleWorkspaces]
   );
 
   // Apply pagination (only when not searching)
