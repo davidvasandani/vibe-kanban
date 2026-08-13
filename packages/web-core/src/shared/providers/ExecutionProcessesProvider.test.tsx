@@ -6,10 +6,6 @@ import type { ExecutionProcess } from 'shared/types';
 import { useExecutionProcessesContext } from '@/shared/hooks/useExecutionProcessesContext';
 import { ExecutionProcessesProvider } from './ExecutionProcessesProvider';
 
-vi.hoisted(() => {
-  process.env.NODE_ENV = 'test';
-});
-
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const executionHook = vi.hoisted(() => ({ use: vi.fn() }));

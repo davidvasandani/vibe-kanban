@@ -647,7 +647,9 @@ fn ensure_feature_dir_owner(host_root: &Path, ctx: &CommandContext) -> io::Resul
         let declared_owner = declared_spec_owner(&spec);
         let expected_dir = format!("**Feature dir**: `specs/{expected}/`");
         let matches_legacy_dir = spec.lines().any(|line| line.trim() == expected_dir);
-        if declared_owner.as_deref().is_some_and(|owner| owner != expected)
+        if declared_owner
+            .as_deref()
+            .is_some_and(|owner| owner != expected)
             || (declared_owner.is_none() && !matches_legacy_dir)
         {
             let actual = declared_owner.unwrap_or_else(|| "unknown legacy owner".to_string());

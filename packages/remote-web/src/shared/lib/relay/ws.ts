@@ -59,6 +59,7 @@ class RelaySignedWebSocket extends EventTarget {
   private outboundQueue: Promise<void> = Promise.resolve();
   private inboundQueue: Promise<void> = Promise.resolve();
   private binaryTypeValue: BinaryType = "blob";
+  private closeEmitted = false;
 
   constructor(
     private readonly rawSocket: WebSocket,
@@ -167,11 +168,13 @@ class RelaySignedWebSocket extends EventTarget {
           return;
         }
 
-        try {
-          this.close(closePayload.code, closePayload.reason);
-        } catch {
-          this.close();
-        }
+        // The relay envelope is authoritative metadata. Browser JavaScript may
+        // not originate reserved server codes such as 1011 with close(), so
+        // report that metadata to this shim's consumer and close the underlying
+        // transport with a legal empty close. The raw close listener is
+        // de-duplicated by emitClose.
+        this.emitClose(closePayload.code, closePayload.reason, false);
+        this.rawSocket.close();
         return;
       }
       case "ping":
@@ -202,6 +205,8 @@ class RelaySignedWebSocket extends EventTarget {
   }
 
   private emitClose(code: number, reason: string, wasClean: boolean): void {
+    if (this.closeEmitted) return;
+    this.closeEmitted = true;
     const event = new CloseEvent("close", { code, reason, wasClean });
     this.onclose?.call(this.asWebSocket(), event);
     this.dispatchEvent(event);

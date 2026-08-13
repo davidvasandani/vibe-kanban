@@ -32,6 +32,7 @@ function Fixture() {
       data-value={result.data?.value ?? 'missing'}
       data-connected={String(result.isConnected)}
       data-initialized={String(result.isInitialized)}
+      data-error={result.error ?? ''}
     />
   );
 }
@@ -146,5 +147,55 @@ describe('useJsonPatchWsStream restart recovery', () => {
     expect(container.firstElementChild?.getAttribute('data-initialized')).toBe(
       'true'
     );
+  });
+
+  it('surfaces bounded initial connection failure despite allocated initial data', async () => {
+    transport.open.mockRejectedValue(new Error('offline'));
+    await act(async () => root.render(<Fixture />));
+
+    for (let attempt = 0; attempt < 7; attempt += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(8_000);
+      });
+      await act(async () => {});
+    }
+
+    expect(container.firstElementChild?.getAttribute('data-value')).toBe(
+      'missing'
+    );
+    expect(container.firstElementChild?.getAttribute('data-initialized')).toBe(
+      'false'
+    );
+    expect(container.firstElementChild?.getAttribute('data-error')).toBe(
+      'Connection failed'
+    );
+  });
+
+  it('does not reset backoff when sockets open but close before Ready', async () => {
+    const sockets = Array.from({ length: 4 }, () => new FakeSocket());
+    for (const socket of sockets) {
+      transport.open.mockResolvedValueOnce(socket as unknown as WebSocket);
+    }
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    await act(async () => root.render(<Fixture />));
+    await act(async () => {});
+
+    act(() => {
+      sockets[0].onopen?.();
+      sockets[0].onclose?.({ code: 1011, wasClean: false });
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(1_999));
+    expect(transport.open).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    await act(async () => {});
+
+    act(() => {
+      sockets[1].onopen?.();
+      sockets[1].onclose?.({ code: 1011, wasClean: false });
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(3_999));
+    expect(transport.open).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(transport.open).toHaveBeenCalledTimes(3);
   });
 });

@@ -94,6 +94,94 @@ use worktree_manager::RepositoryAdminLockManager;
 use crate::{command, copy};
 
 const WORKSPACE_TOUCH_DEBOUNCE: Duration = Duration::from_mins(2);
+const FINAL_OUTPUT_RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(45);
+
+fn history_has_final_assistant_message(history: &[LogMsg]) -> bool {
+    history.iter().rev().any(|message| {
+        let LogMsg::JsonPatch(patch) = message else {
+            return false;
+        };
+        extract_normalized_entry_from_patch(patch).is_some_and(|(_, entry)| {
+            matches!(entry.entry_type, NormalizedEntryType::AssistantMessage)
+                && !entry.content.trim().is_empty()
+        })
+    })
+}
+
+async fn wait_for_unfinalized_output(
+    msg_stores: Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>,
+    exec_id: Uuid,
+) {
+    loop {
+        let has_final_output = msg_stores
+            .read()
+            .await
+            .get(&exec_id)
+            .is_some_and(|store| history_has_final_assistant_message(&store.get_history()));
+        if has_final_output {
+            tokio::time::sleep(FINAL_OUTPUT_RECONCILIATION_TIMEOUT).await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn update_completion_with_retry(
+    db: &DBService,
+    exec_id: Uuid,
+    status: ExecutionProcessStatus,
+    exit_code: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    let mut delay = Duration::from_millis(50);
+    for attempt in 1..=3 {
+        match ExecutionProcess::update_completion(&db.pool, exec_id, status, exit_code).await {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < 3 => {
+                tracing::warn!(%exec_id, ?status, attempt, %error, "Retrying execution completion write");
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("bounded completion attempts always return")
+}
+
+#[cfg(test)]
+mod final_output_reconciliation_tests {
+    use executors::logs::{NormalizedEntry, NormalizedEntryType, utils::patch::ConversationPatch};
+    use utils::log_msg::LogMsg;
+
+    use super::history_has_final_assistant_message;
+
+    #[test]
+    fn final_assistant_output_arms_reconciliation_but_empty_output_does_not() {
+        let final_message = LogMsg::JsonPatch(ConversationPatch::add_normalized_entry(
+            0,
+            NormalizedEntry {
+                timestamp: None,
+                entry_type: NormalizedEntryType::AssistantMessage,
+                content: "Final answer".into(),
+                metadata: None,
+            },
+        ));
+        let empty_message = LogMsg::JsonPatch(ConversationPatch::add_normalized_entry(
+            0,
+            NormalizedEntry {
+                timestamp: None,
+                entry_type: NormalizedEntryType::AssistantMessage,
+                content: "  ".into(),
+                metadata: None,
+            },
+        ));
+
+        assert!(history_has_final_assistant_message(&[final_message]));
+        assert!(!history_has_final_assistant_message(&[empty_message]));
+        assert!(!history_has_final_assistant_message(&[LogMsg::Stdout(
+            "Final answer".into()
+        )]));
+    }
+}
 
 /// Env gate for warm coding-agent process reuse (Phase 2). Default off: until
 /// this is set truthy, no app-server is kept warm and the runtime behaves
@@ -1407,6 +1495,9 @@ impl LocalContainerService {
                 .unwrap_or_else(|| std::future::pending().boxed()); // no signal, stall forever
 
             let status_result: std::io::Result<std::process::ExitStatus>;
+            let mut reconciliation_timed_out = false;
+            let final_output_timeout = wait_for_unfinalized_output(msg_stores.clone(), exec_id);
+            tokio::pin!(final_output_timeout);
             // True when a persistent app-server finished a turn cleanly and is
             // being left alive for reuse; also guards the tail cleanup below so
             // the warm child is not killed or dropped after finalization.
@@ -1443,12 +1534,31 @@ impl LocalContainerService {
                     status_result = match exit_result {
                         Ok(ExecutorExitResult::Success) => Ok(success_exit_status()),
                         Ok(ExecutorExitResult::Failure) => Ok(failure_exit_status()),
-                        Err(_) => Ok(success_exit_status()), // Channel closed, assume success
+                        Err(error) => Err(std::io::Error::other(format!(
+                            "executor completion channel closed without terminal evidence: {error}"
+                        ))),
                     };
                 }
                 // Process exit
                 exit_status_result = &mut process_exit_rx => {
                     status_result = exit_status_result.unwrap_or_else(|e| Err(std::io::Error::other(e)));
+                }
+                _ = &mut final_output_timeout => {
+                    reconciliation_timed_out = true;
+                    tracing::warn!(
+                        %exec_id,
+                        timeout_seconds = FINAL_OUTPUT_RECONCILIATION_TIMEOUT.as_secs(),
+                        "Final assistant output was not followed by terminal evidence; reconciling execution"
+                    );
+                    if let Some(child_lock) = child_store.read().await.get(&exec_id).cloned() {
+                        let mut child = child_lock.write().await;
+                        if let Err(error) = command::kill_process_group(&mut child).await {
+                            tracing::error!(%exec_id, %error, "Failed to reap execution after final-output reconciliation timeout");
+                        }
+                    }
+                    status_result = Err(std::io::Error::other(
+                        "final output reconciliation timed out without terminal evidence"
+                    ));
                 }
             }
 
@@ -1487,14 +1597,14 @@ impl LocalContainerService {
                     };
                     (Some(code), status)
                 }
+                Err(_) if reconciliation_timed_out => (None, ExecutionProcessStatus::Indeterminate),
                 Err(_) => (None, ExecutionProcessStatus::Failed),
             };
 
             if !ExecutionProcess::was_stopped(&db.pool, exec_id).await
-                && let Err(e) =
-                    ExecutionProcess::update_completion(&db.pool, exec_id, status, exit_code).await
+                && let Err(e) = update_completion_with_retry(&db, exec_id, status, exit_code).await
             {
-                tracing::error!("Failed to update execution process completion: {}", e);
+                tracing::error!(%exec_id, ?status, "Failed to update execution process completion after bounded retries: {e}");
             }
 
             if let Ok(ctx) = ExecutionProcess::load_context(&db.pool, exec_id).await {
@@ -1950,6 +2060,7 @@ impl LocalContainerService {
         let handle = tokio::spawn(async move {
             let mut cursor = 0_u64;
             let mut retry_delay = Duration::from_millis(100);
+            let mut final_output_deadline: Option<tokio::time::Instant> = None;
             loop {
                 let batch = match client.events(worker_node_id, execution_id, cursor).await {
                     Ok(batch) => {
@@ -2010,6 +2121,15 @@ impl LocalContainerService {
                         }
                         ExecutionEventPayload::Structured { json } => {
                             if let Ok(message) = serde_json::from_str::<LogMsg>(&json) {
+                                if history_has_final_assistant_message(std::slice::from_ref(
+                                    &message,
+                                )) && final_output_deadline.is_none()
+                                {
+                                    final_output_deadline = Some(
+                                        tokio::time::Instant::now()
+                                            + FINAL_OUTPUT_RECONCILIATION_TIMEOUT,
+                                    );
+                                }
                                 store.push(message);
                             } else {
                                 store.push_stdout(format!("{json}\n"));
@@ -2138,6 +2258,63 @@ impl LocalContainerService {
                     // push to. Removing the store here ensures any later
                     // subscriber instead falls back to the on-disk/materialized
                     // log path, which terminates correctly.
+                    container.msg_stores.write().await.remove(&execution_id);
+                    store.push_finished();
+                    break;
+                }
+
+                if final_output_deadline
+                    .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                {
+                    tracing::warn!(
+                        %execution_id,
+                        %worker_node_id,
+                        "Worker final assistant output was not followed by terminal evidence; marking execution indeterminate"
+                    );
+                    let cancellation = CancellationRequest {
+                        authority: RequestAuthority {
+                            protocol_version: PROTOCOL_VERSION,
+                            coordinator_id,
+                            worker_node_id,
+                            correlation_id: execution_id,
+                            issued_at: Utc::now(),
+                            nonce: Uuid::new_v4().to_string(),
+                        },
+                        execution_id,
+                        graceful_timeout_seconds: 5,
+                        terminate_timeout_seconds: 5,
+                    };
+                    if let Err(error) = client.cancel(worker_node_id, &cancellation).await {
+                        tracing::warn!(%execution_id, %worker_node_id, %error, "Failed to cancel worker after final-output reconciliation timeout");
+                    }
+                    if let Err(error) = ExecutionWorkerJob::update_state(
+                        &db.pool,
+                        execution_id,
+                        ExecutionWorkerDispatchState::Indeterminate,
+                        None,
+                        Some(Utc::now()),
+                    )
+                    .await
+                    {
+                        tracing::error!(%execution_id, %error, "Failed to persist indeterminate worker reconciliation state");
+                    }
+                    if let Err(error) = update_completion_with_retry(
+                        &db,
+                        execution_id,
+                        ExecutionProcessStatus::Indeterminate,
+                        None,
+                    )
+                    .await
+                    {
+                        tracing::error!(%execution_id, %error, "Failed to persist final-output reconciliation after bounded retries");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    store.push(LogMsg::Stderr(
+                        "Final response arrived without worker terminal evidence; execution state is indeterminate"
+                            .into(),
+                    ));
+                    container.finalize_remote_execution(execution_id).await;
                     container.msg_stores.write().await.remove(&execution_id);
                     store.push_finished();
                     break;

@@ -116,7 +116,11 @@ impl MsgStore {
         // subscribe→history duplication window.
         let inner = self.inner.read().unwrap();
         let rx = self.sender.subscribe();
-        let history = inner.history.iter().map(|s| s.msg.clone()).collect::<Vec<_>>();
+        let history = inner
+            .history
+            .iter()
+            .map(|s| s.msg.clone())
+            .collect::<Vec<_>>();
         drop(inner);
 
         let hist = futures::stream::iter(history.into_iter().map(Ok::<_, std::io::Error>));
@@ -198,7 +202,9 @@ mod tests {
         let mut stream = store.history_plus_stream();
         store.push_stdout("live");
 
-        assert!(matches!(stream.next().await, Some(Ok(LogMsg::Stdout(value))) if value == "history"));
+        assert!(
+            matches!(stream.next().await, Some(Ok(LogMsg::Stdout(value))) if value == "history")
+        );
         assert!(matches!(stream.next().await, Some(Ok(LogMsg::Stdout(value))) if value == "live"));
     }
 

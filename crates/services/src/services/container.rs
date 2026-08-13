@@ -1211,8 +1211,7 @@ pub trait ContainerService {
                     .filter(|msg| {
                         future::ready(matches!(
                             msg,
-                            Ok(LogMsg::Stdout(..) | LogMsg::Stderr(..) | LogMsg::Finished)
-                                | Err(_)
+                            Ok(LogMsg::Stdout(..) | LogMsg::Stderr(..) | LogMsg::Finished) | Err(_)
                         ))
                     })
                     .boxed(),
@@ -1242,9 +1241,7 @@ pub trait ContainerService {
             Some(
                 store
                     .history_plus_stream() // BoxStream<Result<LogMsg, io::Error>>
-                    .filter(|msg| {
-                        future::ready(matches!(msg, Ok(LogMsg::JsonPatch(..)) | Err(_)))
-                    })
+                    .filter(|msg| future::ready(matches!(msg, Ok(LogMsg::JsonPatch(..)) | Err(_))))
                     .chain(futures::stream::once(async {
                         Ok::<_, std::io::Error>(LogMsg::Finished)
                     }))
