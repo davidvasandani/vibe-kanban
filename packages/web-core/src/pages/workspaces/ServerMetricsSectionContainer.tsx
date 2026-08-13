@@ -188,6 +188,7 @@ export function ServerMetricsSectionContainer({
   const hostId = useHostId();
   const appNavigation = useAppNavigation();
   const [resolvingNodeId, setResolvingNodeId] = useState<string | null>(null);
+  const resolvingNodeRef = useRef<string | null>(null);
   const [diskActionError, setDiskActionError] = useState<string | null>(null);
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -257,7 +258,8 @@ export function ServerMetricsSectionContainer({
 
   const resolveDiskAlert = useCallback(
     async (nodeId: string) => {
-      if (!projectId || resolvingNodeId) return;
+      if (!projectId || resolvingNodeRef.current) return;
+      resolvingNodeRef.current = nodeId;
       setResolvingNodeId(nodeId);
       setDiskActionError(null);
       try {
@@ -284,10 +286,11 @@ export function ServerMetricsSectionContainer({
           error instanceof Error ? error.message : String(error)
         );
       } finally {
+        resolvingNodeRef.current = null;
         setResolvingNodeId(null);
       }
     },
-    [appNavigation, hostId, nodes, projectId, resolvingNodeId]
+    [appNavigation, hostId, nodes, projectId]
   );
 
   const togglePanel = useCallback((panelId: string) => {
