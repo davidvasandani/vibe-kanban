@@ -42,6 +42,8 @@ import {
 import { ratioPercent } from '@/shared/components/ui-new/views/metrics/format';
 import { classifyNode } from '@/shared/components/ui-new/views/metrics/diskAlerts';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
+import { createShapeCollection } from '@/shared/lib/electric/collections';
+import { PROJECT_ISSUES_SHAPE } from 'shared/remote-types';
 
 /** The live stream, host-scoped by the transport when a host id is present. */
 const METRICS_WS_PATH = '/cluster/metrics/ws';
@@ -271,6 +273,12 @@ export function ServerMetricsSectionContainer({
           observed_at: node.latest.captured_at,
           filesystems: [],
         });
+        if (response.created) {
+          const issues = createShapeCollection(PROJECT_ISSUES_SHAPE, {
+            project_id: projectId,
+          });
+          await issues.utils.awaitTxId(Number(response.txid), 10_000);
+        }
         appNavigation.goToProjectIssue(projectId, response.issue.id);
       } catch (error) {
         setDiskActionError(

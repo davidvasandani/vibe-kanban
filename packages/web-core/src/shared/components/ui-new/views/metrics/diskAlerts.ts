@@ -58,7 +58,7 @@ export function classifyNode(
   node: MetricsNode,
   thresholds: DiskAlertThresholds
 ): NodeDiskAlert | null {
-  const availability = node.availability.status;
+  const availability = node.availability?.status;
   if (availability !== 'available' && availability !== 'stale') return null;
 
   const filesystems = (node.latest?.filesystems ?? [])

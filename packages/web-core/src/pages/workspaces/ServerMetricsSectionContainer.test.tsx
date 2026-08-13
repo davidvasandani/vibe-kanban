@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   resolveLowDiskIssue: vi.fn(),
   openWebSocket: vi.fn(),
   goToProjectIssue: vi.fn(),
+  awaitTxId: vi.fn(),
 }));
 
 vi.mock('@/shared/hooks/useAppNavigation', () => ({
@@ -53,6 +54,12 @@ vi.mock('@/shared/providers/HostIdProvider', () => ({
 
 vi.mock('@/shared/lib/localApiTransport', () => ({
   openLocalApiWebSocket: mocks.openWebSocket,
+}));
+
+vi.mock('@/shared/lib/electric/collections', () => ({
+  createShapeCollection: () => ({
+    utils: { awaitTxId: mocks.awaitTxId },
+  }),
 }));
 
 import { ServerMetricsSectionContainer } from './ServerMetricsSectionContainer';
@@ -172,6 +179,8 @@ beforeEach(() => {
   mocks.openWebSocket.mockReset();
   mocks.resolveLowDiskIssue.mockReset();
   mocks.goToProjectIssue.mockReset();
+  mocks.awaitTxId.mockReset();
+  mocks.awaitTxId.mockResolvedValue(undefined);
   mocks.openWebSocket.mockImplementation(() =>
     Promise.resolve(new SilentWebSocket())
   );
@@ -235,6 +244,7 @@ describe('ServerMetricsSectionContainer', () => {
         node_id: '00000000-0000-0000-0000-000000000001',
       })
     );
+    expect(mocks.awaitTxId).toHaveBeenCalledWith(1, 10_000);
     expect(mocks.goToProjectIssue).toHaveBeenCalledWith(
       'project-id',
       'issue-id'

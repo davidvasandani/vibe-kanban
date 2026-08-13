@@ -7,7 +7,7 @@ use api_types::{
 use axum::{
     Json,
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::post,
 };
 use serde::{Deserialize, Serialize};
@@ -55,8 +55,19 @@ pub fn router() -> axum::Router<AppState> {
 async fn resolve_low_disk_issue(
     State(state): State<AppState>,
     Extension(ctx): Extension<RequestContext>,
+    headers: HeaderMap,
     Json(payload): Json<ResolveLowDiskIssueRequest>,
 ) -> Result<Json<ResolveLowDiskIssueResponse>, ErrorResponse> {
+    if headers
+        .get("x-client-type")
+        .and_then(|value| value.to_str().ok())
+        != Some("local-backend")
+    {
+        return Err(ErrorResponse::new(
+            StatusCode::FORBIDDEN,
+            "low-disk observations must come from the coordinator",
+        ));
+    }
     ensure_project_access(state.pool(), ctx.user.id, payload.project_id).await?;
     if payload.hostname.trim().is_empty() || payload.filesystems.is_empty() {
         return Err(ErrorResponse::new(
@@ -68,13 +79,9 @@ async fn resolve_low_disk_issue(
         .await
         .map_err(|error| db_error(error, "failed to resolve low-disk issue"))?;
     if response.created {
-        if let Err(error) = IssueFollowerRepository::create(
-            state.pool(),
-            None,
-            response.issue.id,
-            ctx.user.id,
-        )
-        .await
+        if let Err(error) =
+            IssueFollowerRepository::create(state.pool(), None, response.issue.id, ctx.user.id)
+                .await
         {
             tracing::warn!(?error, issue_id = %response.issue.id, "failed to auto-follow low-disk issue");
         }
