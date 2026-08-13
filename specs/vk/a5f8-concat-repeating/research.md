@@ -1,45 +1,39 @@
-# Research: Authoritative Execution Status Reconciliation
+# Research: Concatenate Repeating Lines
 
-## Root cause
+## Visible-row owner
 
-`stream_execution_processes_for_session_raw` first awaits
-`ExecutionProcess::find_by_session_id` and only afterward calls
-`msg_store.get_receiver()`. If completion is committed and broadcast between
-those operations, the new stream has a stale `running` snapshot and cannot
-receive the already-sent terminal patch. The client faithfully retains and
-renders that stale snapshot, including after the reconnect that hit the race.
+The screenshots show normalized tool rows whose content is
+`codex review --uncommitted`. They are produced by the Codex command paths in
+`crates/executors/src/executors/codex/normalize_logs.rs`, not by the Claude/Grok
+compactor or the frontend.
 
-## Decision: subscribe before snapshot
+## Existing pattern
 
-Create the broadcast receiver before querying the snapshot. Updates occurring
-during the query remain buffered and are chained after snapshot plus `Ready`.
-The latest keyed update wins, so both initial connections and reconnects
-converge without a new API, cursor, or polling loop.
+`ClaudeLogProcessor` already collapses high-frequency system events and repeated
+successful Grok `Bash` calls. The reusable invariants are:
 
-Query-twice was rejected because a second query still has a boundary before
-subscription unless paired with the same ordering, and it adds database work to
-every connection. Client polling was rejected because it masks rather than
-repairs the authoritative stream contract.
+- allocate once, then replace the original normalized index;
+- prove adjacency with `EntryIndexProvider::current() == index + 1`;
+- correlate raw lifecycle events by unique call ID;
+- let only the latest occurrence own shared-row updates;
+- require success before reuse;
+- bound tick rendering.
 
-## Frontend behavior
+The Codex normalizer has equivalent `CommandState` lifecycle maps and accepts two
+event formats, but currently allocates a new entry at every command start.
 
-`useJsonPatchWsStream` deliberately retains initialized data during reconnect,
-then applies the server's replacement snapshot. That provides continuity and is
-correct once the server snapshot handoff is lossless. Clearing data immediately
-on disconnect would hide valid active state and produce flicker without proving
-terminal status.
+## Scope decision
 
-`useExecutionProcesses` defines running with exact equality to `running`.
-Consequently completed, failed, killed, interrupted, and indeterminate already
-clear the composer once received. No parallel local running flag needs to be
-introduced.
+Generic identical-command compaction was rejected. Repeating a shell command can
+be deliberate and each output can matter. The feature recognizes only the
+reported `codex review --uncommitted` operation after the existing shell
+unwrapping used for display.
 
-## Shutdown behavior
+Frontend compaction was rejected because it would duplicate stateful
+tool-lifecycle logic, leave other consumers inconsistent, and receive patches
+whose indices still include the hidden rows.
 
-Coordinator-local orphan cleanup tries safe process adoption, preserves WIP,
-and marks unrecoverable non-persistent rows interrupted. Worker-owned rows are
-left for evidence-backed reconciliation, which can classify uncertainty as
-indeterminate. Focused verification is required, but the observed stale UI does
-not justify weakening these lifecycle rules.
+## Dependencies
 
-No new dependency is required.
+No new dependency is needed. Existing shell parsing, normalized patch helpers,
+`HashMap`, and `EntryIndexProvider` cover the implementation.

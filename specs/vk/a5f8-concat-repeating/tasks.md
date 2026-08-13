@@ -1,52 +1,60 @@
-# Tasks: Authoritative Execution Status Reconciliation
+# Tasks: Concatenate Repeating Lines
 
 **Plan**: `./plan.md`
 
-Tasks are dependency ordered. Tasks marked **[P]** touch independent files and
+Tasks are dependency-ordered. Tasks marked **[P]** touch independent files and
 may run together within their layer.
 
-## Phase 1: Reproduce and lock contracts
+## Layer 1 — Repeat model and lifecycle
 
-- [x] T001 Add a frontend reconnect regression that retains a stale running
-  snapshot during disconnect and replaces it with a terminal snapshot on the
-  next connection in
-  `packages/web-core/src/shared/hooks/useJsonPatchWsStream.reconnect.test.tsx`.
-- [x] T002 Add focused event-stream coverage for an execution update published
-  during snapshot initialization, plus an active-running control, in
-  `crates/services/src/services/events/streams.rs` (may initially fail; depends
-  on the existing stream contract only).
+- [x] T001 Add bounded repeat-marker rendering, eligible-command recognition,
+  `RepeatedCommand`, and per-command repeat count to
+  `crates/executors/src/executors/codex/normalize_logs.rs`.
+- [x] T002 Add shared command-start allocation and latest-owner completion
+  helpers to `crates/executors/src/executors/codex/normalize_logs.rs`. Depends
+  on T001.
 
-## Phase 2: Close the authoritative handoff gap
+## Layer 2 — Protocol integration
 
-- [x] T003 Refactor execution-process session stream initialization to acquire
-  its broadcast receiver before the database snapshot and consume that receiver
-  after snapshot/Ready in
-  `crates/services/src/services/events/streams.rs` (depends on T002).
-- [x] T004 Verify exact-running derivation and active cancellation remain intact;
-  add a focused derivation test only if current coverage is insufficient in
-  `packages/web-core/src/shared/hooks/useExecutionProcesses.ts` and the nearest
-  existing test file (depends on T001, T003).
+- [x] T003 Route direct app-server `CommandExecution` start/completion through
+  the shared lifecycle helpers in
+  `crates/executors/src/executors/codex/normalize_logs.rs`. Depends on T002.
+- [x] T004 Route legacy `ExecCommandBegin`/`ExecCommandEnd` through the shared
+  lifecycle helpers in
+  `crates/executors/src/executors/codex/normalize_logs.rs`. Depends on T003.
 
-## Phase 3: Lifecycle and regression verification
+## Layer 3 — Regression coverage
 
-- [x] T005 [P] Run focused frontend tests for
-  `packages/web-core/src/shared/hooks/useJsonPatchWsStream.reconnect.test.tsx`
-  and any execution-process derivation test (depends on T004).
-- [x] T006 [P] Run focused Rust event-stream and orphan/shutdown reconciliation
-  tests covering `crates/services/src/services/events/streams.rs`,
-  `crates/services/src/services/container.rs`, and
-  `crates/local-deployment/src/container.rs` (depends on T003).
-- [x] T007 Run `pnpm run format`, generated-type checks as applicable,
-  repository checks, and lint for changed packages (depends on T005, T006).
+- [x] T005 Add focused direct-protocol tests for adjacent compaction, tick
+  bounds, streaming updates, changed/intervening commands, non-review commands,
+  and failed runs in
+  `crates/executors/src/executors/codex/normalize_logs.rs`. Depends on T004.
+- [x] T006 Add equivalent legacy-protocol coverage and patch-operation/index
+  assertions in `crates/executors/src/executors/codex/normalize_logs.rs`.
+  Depends on T005.
 
-## Phase 4: Review and handoff
+## Layer 4 — Verification
 
-- [x] T008 Run independent Codex diff review, address confirmed findings,
-  re-run affected checks, and repeat until no significant findings remain
-  (depends on T007).
-- [x] T009 Update `docs/knowledge-base/` with the reusable subscribe-before-
-  snapshot stream handoff rule, tag it `vk/3488-fix-stale-execut`, refresh
-  `docs/knowledge-base/INDEX.md`, and commit the knowledge base (depends on T008).
-- [x] T010 Commit remaining implementation and documentation intentionally,
-  open a pull request against the recorded base branch, pass required checks,
-  and merge it (depends on T009).
+- [x] T007 Install locked dependencies with
+  `pnpm install --frozen-lockfile`, run focused executor tests, and inspect
+  failures. Depends on T006.
+- [x] T008 Run `pnpm run format`, broader Rust checks/tests appropriate to the
+  executor-only change, and inspect the diff for unrelated changes. Depends on
+  T007.
+
+## Layer 5 — Independent review and knowledge
+
+- [x] T009 Run an independent Codex diff review, address confirmed significant
+  findings, rerun validation, and repeat until clean. Depends on T008.
+- [x] T010 [P] Update
+  `docs/knowledge-base/collapsing-repeated-log-entries.md`,
+  `docs/knowledge-base/claude-log-normalization.md` or a Codex-specific page as
+  appropriate, and `docs/knowledge-base/INDEX.md`, tagging reusable knowledge
+  with `a5f8-concat-repeating`; commit the knowledge-base update. Depends on
+  T009.
+
+## Parallel Execution Notes
+
+The implementation and its tests share one Rust module and are intentionally
+serial. The final knowledge update is file-independent from code but waits for
+review so it records what actually shipped.
