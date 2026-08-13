@@ -61,7 +61,8 @@ The response distinguishes `created` from `existing` and returns the issue ID.
 
 Persist a machine-readable low-disk identity with the issue (or in a dedicated
 association) keyed by node ID. Duplicate detection considers only open issues;
-after the prior issue is closed, a new incident may create a new issue. The
+after the prior issue has a completion timestamp or uses the established
+Done/Cancelled/Canceled status, a new incident may create a new issue. The
 database must enforce the open-issue uniqueness invariant rather than relying
 only on a title search.
 

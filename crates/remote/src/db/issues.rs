@@ -129,6 +129,15 @@ impl IssueRepository {
         .fetch_optional(&mut *tx)
         .await?;
         if let Some(issue) = existing {
+            // Emit an observable row version for the caller's Electric shape.
+            // A read-only transaction ID never appears in the shape stream,
+            // which would make duplicate-safe navigation race synchronization.
+            let issue = sqlx::query_as::<_, Issue>(
+                "UPDATE issues SET extension_metadata = extension_metadata WHERE id = $1 RETURNING *",
+            )
+            .bind(issue.id)
+            .fetch_one(&mut *tx)
+            .await?;
             let txid = get_txid(&mut *tx).await?;
             tx.commit().await?;
             return Ok(ResolveLowDiskIssueResponse {

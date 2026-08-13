@@ -70,8 +70,9 @@ creating duplicate open incidents for the same node.
 - FR-15: Concurrent activations and retries MUST preserve the same one-open-
   issue invariant durably; client-only button state or title matching is not
   sufficient.
-- FR-16: Once the previous low-disk issue is in a closed/terminal project
-  status, a later observation MAY create a new issue for the same node.
+- FR-16: Once the previous low-disk issue has `completed_at` set or is in the
+  repository's established case-insensitive `Done`, `Cancelled`, or `Canceled`
+  terminal status, a later observation MAY create a new issue for the same node.
 - FR-17: A newly created node-level issue MUST include node ID, hostname, observation
   timestamp, filesystem, mountpoint, total, used, available, and usage
   percentage for every currently affected filesystem on the node, not only the
