@@ -36,7 +36,11 @@ impl Default for MsgStore {
 
 impl MsgStore {
     pub fn new() -> Self {
-        let (sender, _) = broadcast::channel(100000);
+        Self::with_capacity(100000)
+    }
+
+    fn with_capacity(capacity: usize) -> Self {
+        let (sender, _) = broadcast::channel(capacity);
         Self {
             inner: RwLock::new(Inner {
                 history: VecDeque::with_capacity(32),
@@ -47,7 +51,6 @@ impl MsgStore {
     }
 
     pub fn push(&self, msg: LogMsg) {
-        let _ = self.sender.send(msg.clone()); // live listeners
         let bytes = msg.approx_bytes();
 
         let mut inner = self.inner.write().unwrap();
@@ -58,8 +61,15 @@ impl MsgStore {
                 break;
             }
         }
-        inner.history.push_back(StoredMsg { msg, bytes });
+        inner.history.push_back(StoredMsg {
+            msg: msg.clone(),
+            bytes,
+        });
         inner.total_bytes = inner.total_bytes.saturating_add(bytes);
+        // Publish while holding the same lock used by the history handoff.
+        // A new consumer therefore sees a message in exactly one side of its
+        // history/live boundary (existing consumers still receive it live).
+        let _ = self.sender.send(msg);
     }
 
     // Convenience
@@ -101,20 +111,20 @@ impl MsgStore {
     pub fn history_plus_stream(
         &self,
     ) -> futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>> {
-        let (history, rx) = (self.get_history(), self.get_receiver());
+        // Subscribe while history is read-locked. `push` publishes under the
+        // write lock, closing both the history→subscribe loss window and the
+        // subscribe→history duplication window.
+        let inner = self.inner.read().unwrap();
+        let rx = self.sender.subscribe();
+        let history = inner.history.iter().map(|s| s.msg.clone()).collect::<Vec<_>>();
+        drop(inner);
 
         let hist = futures::stream::iter(history.into_iter().map(Ok::<_, std::io::Error>));
-        let live = BroadcastStream::new(rx).filter_map(|res| async move {
-            match res {
-                Ok(msg) => Some(Ok(msg)),
-                Err(BroadcastStreamRecvError::Lagged(n)) => {
-                    tracing::error!(
-                        skipped = n,
-                        "MsgStore broadcast lagged. {n} messages dropped for this subscriber"
-                    );
-                    None
-                }
-            }
+        let live = BroadcastStream::new(rx).map(|res| match res {
+            Ok(msg) => Ok(msg),
+            Err(BroadcastStreamRecvError::Lagged(n)) => Err(std::io::Error::other(format!(
+                "MsgStore history/live stream lagged by {n} messages; resubscribe required"
+            ))),
         });
 
         Box::pin(hist.chain(live))
@@ -128,6 +138,7 @@ impl MsgStore {
             .filter_map(|res| async move {
                 match res {
                     Ok(LogMsg::Stdout(s)) => Some(Ok(s)),
+                    Err(error) => Some(Err(error)),
                     _ => None,
                 }
             })
@@ -148,6 +159,7 @@ impl MsgStore {
             .filter_map(|res| async move {
                 match res {
                     Ok(LogMsg::Stderr(s)) => Some(Ok(s)),
+                    Err(error) => Some(Err(error)),
                     _ => None,
                 }
             })
@@ -170,5 +182,40 @@ impl MsgStore {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn history_handoff_delivers_each_message_once() {
+        let store = MsgStore::with_capacity(8);
+        store.push_stdout("history");
+        let mut stream = store.history_plus_stream();
+        store.push_stdout("live");
+
+        assert!(matches!(stream.next().await, Some(Ok(LogMsg::Stdout(value))) if value == "history"));
+        assert!(matches!(stream.next().await, Some(Ok(LogMsg::Stdout(value))) if value == "live"));
+    }
+
+    #[tokio::test]
+    async fn broadcast_lag_is_a_stream_error() {
+        let store = MsgStore::with_capacity(2);
+        let mut stream = store.history_plus_stream();
+        for value in 0..3 {
+            store.push_stdout(value.to_string());
+        }
+
+        let error = stream
+            .next()
+            .await
+            .expect("lag result")
+            .expect_err("lag must invalidate stream authority");
+        assert!(error.to_string().contains("lagged by 1 messages"));
+        assert!(error.to_string().contains("resubscribe required"));
     }
 }

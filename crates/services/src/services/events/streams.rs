@@ -2,8 +2,9 @@ use db::models::{
     browser_session::BrowserSession, execution_process::ExecutionProcess, scratch::Scratch,
     workspace::Workspace,
 };
-use futures::StreamExt;
+use futures::{StreamExt, stream::BoxStream};
 use serde_json::json;
+use tokio::sync::broadcast;
 use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use utils::log_msg::LogMsg;
 use uuid::Uuid;
@@ -13,6 +14,19 @@ use super::{
     patches::execution_process_patch,
     types::{EventPatch, RecordTypes},
 };
+
+fn lossless_broadcast(
+    receiver: broadcast::Receiver<LogMsg>,
+) -> BoxStream<'static, std::io::Result<LogMsg>> {
+    BroadcastStream::new(receiver)
+        .map(|result| match result {
+            Ok(message) => Ok(message),
+            Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                Err(broadcast_lag_error(skipped))
+            }
+        })
+        .boxed()
+}
 
 impl EventService {
     /// Stream execution processes for a specific session with initial snapshot (raw LogMsg format for WebSocket)
@@ -54,7 +68,7 @@ impl EventService {
         let initial_msg = LogMsg::JsonPatch(serde_json::from_value(initial_patch).unwrap());
 
         // Get filtered event stream
-        let filtered_stream = BroadcastStream::new(receiver).filter_map(move |msg_result| {
+        let filtered_stream = lossless_broadcast(receiver).filter_map(move |msg_result| {
             async move {
                 match msg_result {
                     Ok(LogMsg::JsonPatch(patch)) => {
@@ -134,9 +148,7 @@ impl EventService {
                         None
                     }
                     Ok(other) => Some(Ok(other)), // Pass through non-patch messages
-                    Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                        Some(Err(broadcast_lag_error(skipped)))
-                    }
+                    Err(error) => Some(Err(error)),
                 }
             }
         });
@@ -157,6 +169,10 @@ impl EventService {
         futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>,
         super::types::EventError,
     > {
+        // Acquire authority before the awaited snapshot query so updates in
+        // that window are buffered for delivery after Ready.
+        let receiver = self.msg_store.get_receiver();
+
         // Treat errors (e.g., corrupted/malformed data) the same as "scratch not found"
         // This prevents the websocket from closing and retrying indefinitely
         let scratch = match Scratch::find_by_id(&self.db.pool, scratch_id, scratch_type).await {
@@ -183,7 +199,7 @@ impl EventService {
 
         // Filter to only this scratch's events by matching id and payload.type in the patch value
         let filtered_stream =
-            BroadcastStream::new(self.msg_store.get_receiver()).filter_map(move |msg_result| {
+            lossless_broadcast(receiver).filter_map(move |msg_result| {
                 let id_str = scratch_id.to_string();
                 let type_str = type_str.clone();
                 async move {
@@ -218,7 +234,7 @@ impl EventService {
                             None
                         }
                         Ok(other) => Some(Ok(other)),
-                        Err(_) => None,
+                        Err(error) => Some(Err(error)),
                     }
                 }
             });
@@ -236,6 +252,7 @@ impl EventService {
         futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>,
         super::types::EventError,
     > {
+        let receiver = self.msg_store.get_receiver();
         let workspaces = Workspace::find_all_with_status(&self.db.pool, archived, limit).await?;
         let workspaces_map: serde_json::Map<String, serde_json::Value> = workspaces
             .into_iter()
@@ -249,7 +266,7 @@ impl EventService {
         }]);
         let initial_msg = LogMsg::JsonPatch(serde_json::from_value(initial_patch).unwrap());
 
-        let filtered_stream = BroadcastStream::new(self.msg_store.get_receiver()).filter_map(
+        let filtered_stream = lossless_broadcast(receiver).filter_map(
             move |msg_result| async move {
                 match msg_result {
                     Ok(LogMsg::JsonPatch(patch)) => {
@@ -310,7 +327,7 @@ impl EventService {
                         None
                     }
                     Ok(other) => Some(Ok(other)),
-                    Err(_) => None,
+                    Err(error) => Some(Err(error)),
                 }
             },
         );
@@ -329,6 +346,7 @@ impl EventService {
         futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>,
         super::types::EventError,
     > {
+        let receiver = self.msg_store.get_receiver();
         let sessions = BrowserSession::find_by_workspace(&self.db.pool, workspace_id, true).await?;
         let sessions_map: serde_json::Map<String, serde_json::Value> = sessions
             .into_iter()
@@ -347,7 +365,7 @@ impl EventService {
         }]);
         let initial_msg = LogMsg::JsonPatch(serde_json::from_value(initial_patch).unwrap());
 
-        let filtered_stream = BroadcastStream::new(self.msg_store.get_receiver()).filter_map(
+        let filtered_stream = lossless_broadcast(receiver).filter_map(
             move |msg_result| async move {
                 match msg_result {
                     Ok(LogMsg::JsonPatch(patch)) => {
@@ -373,7 +391,7 @@ impl EventService {
                         None
                     }
                     Ok(_) => None,
-                    Err(_) => None,
+                    Err(error) => Some(Err(error)),
                 }
             },
         );
@@ -385,7 +403,7 @@ impl EventService {
 
 fn broadcast_lag_error(skipped: u64) -> std::io::Error {
     std::io::Error::other(format!(
-        "execution-process stream lagged by {skipped} messages; resnapshot required"
+        "snapshot/live stream lagged by {skipped} messages; resnapshot required"
     ))
 }
 

@@ -416,6 +416,46 @@ only positively active executions remain cancellable. Regression coverage MUST
 exercise a missed terminal event followed by snapshot rehydration and preserve
 the active-execution Stop behavior.
 
+### XXXI. Snapshot-plus-live streams never conceal lost authority
+Any stream that combines an authoritative snapshot with live mutations MUST
+acquire its live subscription before awaiting the snapshot, emit the snapshot
+and readiness boundary first, then drain mutations buffered during snapshot
+construction in publication order. The implementation and tests must exercise
+that actual handoff boundary; an error-string test or a pure helper alone is not
+evidence that subscription ordering is correct.
+
+A dropped or lagged live mutation invalidates the stream's authority. The stream
+MUST surface the loss as an error and terminate through a retryable transport
+close so the consumer obtains another complete snapshot. It must never log and
+continue from a sequence known to be incomplete. Same-endpoint consumers retain
+their last valid snapshot while reconnecting, but distinguish allocated
+placeholder data from receipt of an authoritative readiness boundary.
+
+### XXXII. Final output starts bounded reconciliation, not assumed success
+A normalized final assistant response is positive evidence that a turn reached
+an answer, but it is not process-exit or worker-finalization evidence. If the
+expected terminal event does not follow, the execution owner MUST begin bounded
+reconciliation using the authoritative worker/process liveness channel. While
+positive liveness exists the row may remain active; once the bound expires with
+no positive liveness, required work preservation runs and the row transitions
+to the most truthful terminal outcome, using `indeterminate` when success or
+failure cannot be proven.
+
+No accepted execution may remain `running` indefinitely because a completion
+future, event, handle, or database write disappeared. Terminal writes are
+observable and boundedly retried or handed to a durable reconciliation path.
+Tests cover delayed and missing finalization without equating final text with a
+successful exit.
+
+### XXXIII. Task artifacts have validated ownership
+SpecKit, WikiLLM, review, and implementation records belong to one explicit task
+identity and live under that task's directory. Generators MUST reject a target
+already owned by a different task before modifying any file. Renaming or copying
+a record preserves its history and updates internal references; it must not
+overwrite or silently reattribute an earlier task's artifacts. Root convenience
+documents may mirror the current task only when the pipeline explicitly
+requires them and must not be treated as the durable multi-task archive.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -437,7 +477,9 @@ the active-execution Stop behavior.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.27.0 (requires execution activity UI to derive from authoritative,
+**Version**: 0.30.0 (requires lossless subscribe-before-snapshot handoffs with
+lag-fatal resnapshot, bounded evidence-backed reconciliation after final output,
+and validated per-task artifact ownership; 0.27.0 required execution activity UI to derive from authoritative,
 rehydratable process snapshots, reconnects to recover missed terminal events,
 and shutdown/recovery to classify executions that are no longer provably active;
 0.26.0 required executor-neutral, execution-scoped materialization
