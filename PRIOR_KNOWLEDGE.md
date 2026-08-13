@@ -1,48 +1,42 @@
-# Prior Knowledge: Right Drawer Section Spacing
+# Prior Knowledge: Single-Value Browser Titles
 
-The project knowledge base is not empty. The following pages are directly
-relevant to this task.
+The project knowledge base is not empty. One page is directly relevant and a
+second establishes the boundary between browser titles and visible issue UI.
 
-## `wiki/flexible-collapsible-panel-stacks.md`
+## `wiki/workspace-navbar-breadcrumbs.md`
 
-- `RightSidebar` is a bounded vertical flex stack shared by the desktop drawer
-  and mobile Sidebar tab.
-- `CollapsibleSectionHeader` owns live expansion state. Callers opt into
-  remaining-height participation with `fillAvailableSpace`; an expanded opted-in
-  section receives `flex-1 min-h-0`, while a collapsed or non-collapsible
-  section is intrinsic.
-- The complete `min-h-0` chain and body-level `overflow-auto` are necessary for
-  panels whose content should grow and scroll. The outer drawer retains
-  vertical overflow as a short-window fallback.
-- Regression coverage should assert rendered sizing classes because JSDOM
-  cannot calculate real layout.
+- Workspace breadcrumbs are deliberately hierarchical and are assembled in
+  web-core before the shared navbar renders them.
+- A linked issue's internal UUID is never a display label. Once resolved, its
+  `simple_id` (for example `VK-123`) is the correct compact label for the
+  *visible breadcrumb*.
+- The breadcrumb models async relationship resolution explicitly and should not
+  be changed as a side effect of browser-title work.
+- Consequence: the ticket number remains useful in visible navigation, but that
+  does not justify concatenating it into `document.title`.
 
-## `docs/knowledge-base/workspace-affinity-migration.md`
+## `wiki/kanban-issue-panel-sections.md`
 
-- The expanded Server Affinity body deliberately uses a two-column grid with
-  `auto` and `minmax(0, 1fr)` columns so labels stay associated with values and
-  controls can shrink at mobile widths.
-- Collapsed affinity context comes from the workspace summary and must remain
-  in a bounded, truncating header item so the caret stays usable.
-- The existing compact body layout is therefore correct; the excessive blank
-  space comes from the section's participation in the parent flex stack, not
-  from its internal row grid.
+- Issue identity can appear in visible issue-detail chrome, including the
+  panel's header id group.
+- The panel is shared between local and remote web surfaces, and its visual
+  composition is separate from page-level browser metadata.
+- Consequence: this task should not remove ticket identifiers from issue cards,
+  issue panels, or external-integration badges.
 
-## `docs/knowledge-base/nested-flex-scroll-containment.md`
+## Source Inspection Relevant to the Spec
 
-- Flex growth and `min-h-0` should remain on content panels that need to share
-  bounded height and scroll.
-- Layout regression tests should protect class contracts at stable component
-  boundaries rather than rely on pixel measurements in JSDOM.
+- `packages/web-core/src/shared/hooks/usePageTitle.ts` currently filters all
+  supplied parts, joins them with ` - `, and appends ` | Vibe Kanban`.
+- `ProjectKanban.tsx` supplies both the open issue title and project name, while
+  workspace pages supply one workspace/create-mode label.
+- There is no knowledge-base page describing a browser-title selection
+  contract, so the shipped behavior should be recorded if it proves reusable.
 
 ## Consequences for This Task
 
-1. Keep Server Affinity's internal grid unchanged.
-2. Make fill-available-space participation a per-section composition decision;
-   Server Affinity should be intrinsic when expanded, while content panels keep
-   flexible growth.
-3. Do not duplicate disclosure state in `RightSidebar` or alter the shared
-   primitive's state ownership.
-4. Preserve the drawer's bounded flex/overflow chain for desktop and mobile.
-5. Add rendered-DOM coverage at the `RightSidebar` composition boundary to
-   prevent compact sections from regaining `flex-1` sizing.
+1. Treat hook arguments as an ordered fallback chain, not title fragments.
+2. Preserve `simple_id` in visible breadcrumbs and other issue identity UI.
+3. Keep browser-title changes localized to web-core metadata behavior and its
+   call sites/tests.
+4. Use `Vibe Kanban` only when every page-specific fallback is absent.

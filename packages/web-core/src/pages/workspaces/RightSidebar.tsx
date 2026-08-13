@@ -12,7 +12,7 @@ import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { TerminalPanelContainer } from '@/shared/components/TerminalPanelContainer';
 import { WorkspaceNotesContainer } from './WorkspaceNotesContainer';
 import { useDiffs } from '@/shared/stores/useWorkspaceDiffStore';
-import { ArrowsOutSimpleIcon } from '@phosphor-icons/react';
+import { ArrowClockwiseIcon, ArrowsOutSimpleIcon } from '@phosphor-icons/react';
 import { useLogsPanel } from '@/shared/hooks/useLogsPanel';
 import type { RepoWithTargetBranch, Workspace } from 'shared/types';
 import {
@@ -30,6 +30,7 @@ import {
 import { getServerAffinityLabel } from './serverAffinityLabel';
 import { DeployStatus } from '@vibe/ui/components/DeployStatus';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
+import { GitBehindHeader } from './GitBehindHeader';
 
 type SectionDef = {
   title: string;
@@ -49,6 +50,8 @@ export interface RightSidebarProps {
   repos: RepoWithTargetBranch[];
   linkedIssueForWorkspace?: { remoteProjectId: string; issueId: string } | null;
   showDeployStatus?: boolean;
+  deployUpdateAvailable?: boolean;
+  onDeployRefresh?: () => void;
 }
 
 export const RightSidebar = memo(function RightSidebar({
@@ -57,6 +60,8 @@ export const RightSidebar = memo(function RightSidebar({
   repos,
   linkedIssueForWorkspace,
   showDeployStatus = false,
+  deployUpdateAvailable = false,
+  onDeployRefresh,
 }: RightSidebarProps) {
   const { t } = useTranslation(['tasks', 'common']);
   const { appVersion, deploymentTimestamp } = useUserSystem();
@@ -96,6 +101,10 @@ export const RightSidebar = memo(function RightSidebar({
     PERSIST_KEYS.serverMetricsSection,
     false
   );
+  const [deployStatusExpanded] = usePersistedExpanded(
+    PERSIST_KEYS.deployStatusSection,
+    false
+  );
   const [serverAffinityExpanded] = usePersistedExpanded(
     PERSIST_KEYS.serverAffinitySection,
     false
@@ -128,6 +137,39 @@ export const RightSidebar = memo(function RightSidebar({
   })();
 
   const sections: SectionDef[] = useMemo(() => {
+    const deployStatusSection: SectionDef = {
+      title: 'Deploy Status',
+      persistKey: PERSIST_KEYS.deployStatusSection,
+      visible: showDeployStatus,
+      expanded: deployStatusExpanded,
+      fillAvailableSpace: false,
+      headerExtra: (
+        <DeployStatus
+          version={appVersion}
+          deploymentTimestamp={deploymentTimestamp}
+          alwaysShowAge
+          className="max-w-none"
+        />
+      ),
+      content: (
+        <p className="px-base py-half text-xs text-low">
+          {deployUpdateAvailable
+            ? 'A newer deployment is available.'
+            : 'No newer deployment detected.'}
+        </p>
+      ),
+      actions:
+        deployUpdateAvailable && onDeployRefresh
+          ? [
+              {
+                icon: ArrowClockwiseIcon,
+                label: 'Refresh',
+                onClick: onDeployRefresh,
+                isActive: true,
+              },
+            ]
+          : [],
+    };
     const result: SectionDef[] = [
       {
         title: 'Issue',
@@ -149,6 +191,9 @@ export const RightSidebar = memo(function RightSidebar({
         visible: true,
         expanded: gitExpanded,
         fillAvailableSpace: true,
+        headerExtra: (
+          <GitBehindHeader workspaceId={selectedWorkspace?.id} repos={repos} />
+        ),
         content: (
           <GitPanelContainer
             selectedWorkspace={selectedWorkspace}
@@ -286,11 +331,18 @@ export const RightSidebar = memo(function RightSidebar({
         break;
     }
 
+    result.unshift(deployStatusSection);
     return result;
   }, [
     rightMainPanelMode,
     selectedWorkspace,
     linkedIssueForWorkspace,
+    showDeployStatus,
+    deployStatusExpanded,
+    deployUpdateAvailable,
+    onDeployRefresh,
+    appVersion,
+    deploymentTimestamp,
     repos,
     diffs,
     gitExpanded,
@@ -311,20 +363,6 @@ export const RightSidebar = memo(function RightSidebar({
   return (
     <div className="h-full min-h-0 border-l bg-secondary overflow-x-hidden overflow-y-auto">
       <div className="flex h-full min-h-0 flex-col divide-y border-b">
-        {showDeployStatus && (
-          <div
-            className="flex flex-none shrink-0 items-center justify-between gap-base px-base py-half"
-            data-testid="deploy-status-row"
-          >
-            <span className="text-sm text-low">Deploy Status</span>
-            <DeployStatus
-              version={appVersion}
-              deploymentTimestamp={deploymentTimestamp}
-              alwaysShowAge
-              className="max-w-none"
-            />
-          </div>
-        )}
         {sections
           .filter((section) => section.visible)
           .map((section) => (

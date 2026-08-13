@@ -456,6 +456,17 @@ overwrite or silently reattribute an earlier task's artifacts. Root convenience
 documents may mirror the current task only when the pipeline explicitly
 requires them and must not be treated as the durable multi-task archive.
 
+### XXXIV. Browser titles identify one thing
+Browser-tab titles MUST contain one meaningful label, selected from an ordered
+fallback chain. They do not concatenate project names, application branding,
+ticket identifiers, or other context onto a page-specific label. When no
+page-specific label is available, the product name is the fallback.
+
+This rule is limited to browser metadata. Visible navigation retains the
+context it needs: in particular, the workspace-breadcrumb issue-ID requirement
+remains authoritative. Shared title selection belongs in the existing web-core
+hook and is covered by focused update and fallback tests.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -477,7 +488,8 @@ requires them and must not be treated as the durable multi-task archive.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.30.0 (requires lossless subscribe-before-snapshot handoffs with
+**Version**: 0.31.0 (adds single-label browser-title selection while preserving
+visible navigation context; 0.30.0 requires lossless subscribe-before-snapshot handoffs with
 lag-fatal resnapshot, bounded evidence-backed reconciliation after final output,
 and validated per-task artifact ownership; 0.27.0 required execution activity UI to derive from authoritative,
 rehydratable process snapshots, reconnects to recover missed terminal events,

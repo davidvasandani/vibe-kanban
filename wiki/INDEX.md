@@ -18,6 +18,10 @@ contributed to it.
 
 ## Pages
 
+- [browser-title-selection.md](browser-title-selection.md) — Browser-tab titles
+  select one meaningful label from an ordered fallback chain, trim metadata
+  whitespace, use product branding only as the empty-state fallback, and remain
+  separate from visible breadcrumb identity.
 - [browser-session-control-arbiter.md](browser-session-control-arbiter.md) —
   Workspace browser sessions with shared human/agent control: the
   three-lock concurrency shape (control mutex / command gate / Arc'd driver
