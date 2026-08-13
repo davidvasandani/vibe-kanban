@@ -1,6 +1,7 @@
 use api_types::{
     DeleteResponse, Issue, IssuePriority, IssueSortField, ListIssuesResponse, MutationResponse,
-    PullRequestStatus, SearchIssuesRequest, SortDirection,
+    PullRequestStatus, ResolveLowDiskIssueRequest, ResolveLowDiskIssueResponse,
+    SearchIssuesRequest, SortDirection,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -29,6 +30,37 @@ pub enum IssueError {
 
 pub struct IssueRepository;
 
+fn low_disk_issue_body(request: &ResolveLowDiskIssueRequest) -> String {
+    let mut body = format!(
+        "## Low-disk observation\n\n- Node: `{}` (`{}`)\n- Observed: `{}`\n\n| Filesystem | Type | Mountpoint | Size (bytes) | Used (bytes) | Avail (bytes) | Use% |\n| --- | --- | --- | ---: | ---: | ---: | ---: |\n",
+        request.hostname,
+        request.node_id,
+        request.observed_at.to_rfc3339()
+    );
+    for filesystem in &request.filesystems {
+        let use_percent = if filesystem.total_bytes == 0 {
+            0.0
+        } else {
+            filesystem.used_bytes as f64 / filesystem.total_bytes as f64 * 100.0
+        };
+        let safe = |value: &str| value.replace('|', "\\|").replace('`', "\\`");
+        body.push_str(&format!(
+            "| `{}` | `{}` | `{}` | {} | {} | {} | {:.1}% |\n",
+            safe(&filesystem.device),
+            safe(&filesystem.fs_type),
+            safe(&filesystem.mount_point),
+            filesystem.total_bytes,
+            filesystem.used_bytes,
+            filesystem.available_bytes,
+            use_percent
+        ));
+    }
+    body.push_str(
+        "\n## Permanent remediation\n\n- [ ] Identify the root consumers (build caches, Nix store generations, old worktrees/workspaces, logs, or another source).\n- [ ] Define safe retention and scheduled garbage collection with monitoring.\n- [ ] Decide whether the volume must be resized to preserve operating headroom.\n- [ ] Verify the fix under normal build/task load; do not close this after one manual cleanup alone.\n",
+    );
+    body
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IssueWorkflowSignal {
     ReviewStarted,
@@ -36,6 +68,82 @@ enum IssueWorkflowSignal {
 }
 
 impl IssueRepository {
+    pub async fn resolve_low_disk_issue(
+        pool: &PgPool,
+        request: &ResolveLowDiskIssueRequest,
+        creator_user_id: Uuid,
+    ) -> Result<ResolveLowDiskIssueResponse, IssueError> {
+        let mut tx = super::begin_tx(pool).await?;
+        let lock_key = format!("low-disk:{}:{}", request.project_id, request.node_id);
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&lock_key)
+            .execute(&mut *tx)
+            .await?;
+
+        let existing = sqlx::query_as::<_, Issue>(
+            r#"SELECT i.* FROM issues i
+               JOIN project_statuses ps ON ps.id = i.status_id
+               WHERE i.project_id = $1
+                 AND i.extension_metadata->'low_disk'->>'kind' = 'server_low_disk'
+                 AND i.extension_metadata->'low_disk'->>'node_id' = $2
+                 AND lower(ps.name) NOT IN ('done', 'cancelled')
+               ORDER BY i.created_at DESC LIMIT 1"#,
+        )
+        .bind(request.project_id)
+        .bind(request.node_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(issue) = existing {
+            let txid = get_txid(&mut *tx).await?;
+            tx.commit().await?;
+            return Ok(ResolveLowDiskIssueResponse {
+                issue,
+                txid,
+                created: false,
+            });
+        }
+
+        let status_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM project_statuses WHERE project_id = $1 ORDER BY sort_order ASC LIMIT 1",
+        )
+        .bind(request.project_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let sort_order: f64 = sqlx::query_scalar(
+            "SELECT COALESCE(MIN(sort_order), 0) - 1 FROM issues WHERE project_id = $1 AND status_id = $2",
+        )
+        .bind(request.project_id)
+        .bind(status_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let issue_id = Uuid::new_v4();
+        let metadata = serde_json::json!({"low_disk": {
+            "kind": "server_low_disk", "node_id": request.node_id, "hostname": request.hostname
+        }});
+        let issue = sqlx::query_as::<_, Issue>(
+            r#"INSERT INTO issues
+               (id, project_id, status_id, title, description, sort_order, extension_metadata, creator_user_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
+        )
+        .bind(issue_id)
+        .bind(request.project_id)
+        .bind(status_id)
+        .bind(format!("Permanently resolve low disk space on {}", request.hostname))
+        .bind(low_disk_issue_body(request))
+        .bind(sort_order)
+        .bind(metadata)
+        .bind(creator_user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let txid = get_txid(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(ResolveLowDiskIssueResponse {
+            issue,
+            txid,
+            created: true,
+        })
+    }
+
     fn sort_field_key(sort_field: IssueSortField) -> &'static str {
         match sort_field {
             IssueSortField::SortOrder => "sort_order",

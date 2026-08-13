@@ -1,7 +1,8 @@
 use api_types::{
     CreateIssueRequest, DeleteResponse, Issue, ListIssuesQuery, ListIssuesResponse,
     MutationResponse, NotificationPayload, NotificationType, PullRequestStatus,
-    SearchIssuesRequest, UpdateIssueRequest,
+    ResolveLowDiskIssueRequest, ResolveLowDiskIssueResponse, SearchIssuesRequest,
+    UpdateIssueRequest,
 };
 use axum::{
     Json,
@@ -46,7 +47,39 @@ pub fn router() -> axum::Router<AppState> {
     mutation()
         .router()
         .route("/issues/search", post(search_issues))
+        .route("/issues/low-disk", post(resolve_low_disk_issue))
         .route("/issues/bulk", post(bulk_update_issues))
+}
+
+#[instrument(name = "issues.resolve_low_disk", skip(state, ctx, payload), fields(project_id = %payload.project_id, node_id = %payload.node_id, user_id = %ctx.user.id))]
+async fn resolve_low_disk_issue(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Json(payload): Json<ResolveLowDiskIssueRequest>,
+) -> Result<Json<ResolveLowDiskIssueResponse>, ErrorResponse> {
+    ensure_project_access(state.pool(), ctx.user.id, payload.project_id).await?;
+    if payload.hostname.trim().is_empty() || payload.filesystems.is_empty() {
+        return Err(ErrorResponse::new(
+            StatusCode::BAD_REQUEST,
+            "low-disk observation is incomplete",
+        ));
+    }
+    let response = IssueRepository::resolve_low_disk_issue(state.pool(), &payload, ctx.user.id)
+        .await
+        .map_err(|error| db_error(error, "failed to resolve low-disk issue"))?;
+    if response.created {
+        if let Err(error) = IssueFollowerRepository::create(
+            state.pool(),
+            None,
+            response.issue.id,
+            ctx.user.id,
+        )
+        .await
+        {
+            tracing::warn!(?error, issue_id = %response.issue.id, "failed to auto-follow low-disk issue");
+        }
+    }
+    Ok(Json(response))
 }
 
 async fn notify_issue_update_changes(

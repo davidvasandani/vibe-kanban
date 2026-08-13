@@ -29,6 +29,6 @@ pub mod types;
 pub use collect::{CollectError, Collector};
 pub use sampler::MetricsSampler;
 pub use types::{
-    CoreBusy, CpuSample, FilesystemSample, HostSample, MemorySample, NetworkSample,
+    CoreBusy, CpuSample, DiskAlertThresholds, FilesystemSample, HostSample, MemorySample, NetworkSample,
     NodeMetricsAvailability, NodeRole, ProcessSample, SampleBatch, SamplerConfig,
 };

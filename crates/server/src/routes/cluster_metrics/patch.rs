@@ -42,6 +42,7 @@ const MAX_APPENDS_PER_TICK: usize = 8;
 
 const NODES_PATH: &str = "/nodes";
 const GENERATED_AT_PATH: &str = "/generated_at";
+const DISK_ALERT_THRESHOLDS_PATH: &str = "/disk_alert_thresholds";
 
 fn node_path(node_id: Uuid, suffix: &str) -> String {
     // A canonical UUID contains neither `~` nor `/`, so no pointer escaping is
@@ -185,6 +186,10 @@ fn resnapshot(snapshot: &ClusterMetricsSnapshot) -> Patch {
         replace(
             GENERATED_AT_PATH.to_owned(),
             value_of(&snapshot.generated_at),
+        ),
+        replace(
+            DISK_ALERT_THRESHOLDS_PATH.to_owned(),
+            value_of(&snapshot.disk_alert_thresholds),
         ),
     ])
 }
@@ -379,6 +384,7 @@ mod tests {
                 nodes: self.nodes.clone(),
                 generated_at: self.generated_at,
                 sample_interval_ms: SamplerConfig::DEFAULT_INTERVAL_MS,
+                disk_alert_thresholds: node_metrics::types::DiskAlertThresholds::default(),
             }
         }
     }
@@ -389,6 +395,7 @@ mod tests {
             "nodes": {},
             "generated_at": serde_json::Value::Null,
             "sample_interval_ms": SamplerConfig::DEFAULT_INTERVAL_MS,
+            "disk_alert_thresholds": node_metrics::types::DiskAlertThresholds::default(),
         })
     }
 

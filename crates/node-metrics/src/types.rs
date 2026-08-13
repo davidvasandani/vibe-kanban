@@ -21,6 +21,47 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct DiskAlertThresholds {
+    pub warning_free_percent: f32,
+    pub warning_free_bytes: u64,
+    pub critical_free_percent: f32,
+    pub critical_free_bytes: u64,
+}
+
+impl DiskAlertThresholds {
+    pub const DEFAULT_WARNING_FREE_PERCENT: f32 = 10.0;
+    pub const DEFAULT_WARNING_FREE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+    pub const DEFAULT_CRITICAL_FREE_PERCENT: f32 = 2.0;
+    pub const DEFAULT_CRITICAL_FREE_BYTES: u64 = 1024 * 1024 * 1024;
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.warning_free_percent.is_finite() || !self.critical_free_percent.is_finite() {
+            return Err("disk alert percentages must be finite");
+        }
+        if self.warning_free_percent < 0.0 || self.critical_free_percent < 0.0 {
+            return Err("disk alert percentages must be non-negative");
+        }
+        if self.critical_free_percent > self.warning_free_percent
+            || self.critical_free_bytes > self.warning_free_bytes
+        {
+            return Err("critical disk thresholds must not exceed warning thresholds");
+        }
+        Ok(())
+    }
+}
+
+impl Default for DiskAlertThresholds {
+    fn default() -> Self {
+        Self {
+            warning_free_percent: Self::DEFAULT_WARNING_FREE_PERCENT,
+            warning_free_bytes: Self::DEFAULT_WARNING_FREE_BYTES,
+            critical_free_percent: Self::DEFAULT_CRITICAL_FREE_PERCENT,
+            critical_free_bytes: Self::DEFAULT_CRITICAL_FREE_BYTES,
+        }
+    }
+}
+
 /// One observation of one host at one instant.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct HostSample {

@@ -233,6 +233,15 @@ Sampling tasks terminate. A background sampler holds only a weak reference to
 its owner, re-checks each tick that a consumer still exists, exits when none
 does, and never holds a lock across an await.
 
+An explicit operator action may turn displayed evidence into a durable
+remediation issue, but sampling itself remains side-effect free. The action
+MUST preserve the concrete observation and timestamp, use an explicit project
+context, and resolve-or-create transactionally against a stable incident
+identity so retries and concurrent clicks cannot create duplicate open issues.
+Closing the prior issue may permit a later observation to create a new one.
+Alerts derived from metrics are presentation state only: they never become
+scheduler, lease, liveness, or lifecycle authority.
+
 Host introspection is secret-hostile by default. Process environments are never
 read. Anything derived from a process command line is redacted at the point of
 collection — before it is stored, transmitted, or logged — so that an
@@ -437,7 +446,10 @@ the active-execution Stop behavior.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.27.0 (requires execution activity UI to derive from authoritative,
+**Version**: 0.28.0 (allows explicit metrics-to-remediation issue actions only
+with preserved evidence, explicit project context, transactional open-incident
+deduplication, and no promotion of alert state into scheduling authority;
+0.27.0 requires execution activity UI to derive from authoritative,
 rehydratable process snapshots, reconnects to recover missed terminal events,
 and shutdown/recovery to classify executions that are no longer provably active;
 0.26.0 required executor-neutral, execution-scoped materialization

@@ -1,71 +1,92 @@
-# Technical Specification: Commits Behind in the Git Header
+# Technical Specification: Low-Disk Warnings and Issue Follow-Through
 
-## Problem
+## Goal
 
-The workspace right sidebar exposes per-repository branch divergence only inside
-the expanded Git panel. A user looking at the collapsed Git section cannot see
-whether the current task branch has fallen behind its configured target branch
-(normally `main`). This makes stale branches easy to overlook.
+Make dangerous filesystem pressure immediately visible in the existing Server
+Metrics accordion and give an operator a one-click, duplicate-safe path to an
+actionable Vibe Kanban issue that targets permanent remediation.
 
 ## Scope
 
-Change only the Vibe Kanban service repository. No other service or homelab
-deployment changes are required.
+This change is limited to the Vibe Kanban service source and, where deployment
+configuration is required, `homelab/modules/vibe-kanban-rebuild.nix`. It does
+not gate scheduling or change any other hosted service.
 
-## Desired behavior
+## User experience
 
-1. The `Git` collapsible-section header displays the current workspace branch's
-   non-zero commits-behind count, using the existing branch-status data and each
-   repository's configured target branch.
-2. For a workspace with one repository, the header shows the commits-behind
-   count without redundantly showing the repository name.
-3. For a workspace with multiple repositories, every repository with a non-zero
-   commits-behind count is identified by its display name and count so the
-   values cannot be confused.
-4. Repositories that are not behind are omitted. When no repository is behind,
-   the Git header remains visually unchanged.
-5. The indicator remains available while the Git body is collapsed and updates
-   when branch-status query data changes or the selected workspace changes.
-6. The header remains compact: overflow is truncated and the full status is
-   available as accessible/title text.
+- Evaluate every filesystem sample for every visible node against configurable
+  warning and critical thresholds.
+- A filesystem is warning when either its free percentage or free byte count is
+  below the warning boundary. It is critical when either is below the critical
+  boundary. Critical takes precedence.
+- Default boundaries are warning below 10% free or below 5 GiB, and critical
+  below 2% free or below 1 GiB. Equality is not below the boundary.
+- Affected server rows show a warning-triangle icon, a textual severity label,
+  and theme-safe warning/critical styling. The concrete filesystem, available
+  capacity, usage percentage, and mountpoint are visible without requiring a
+  chart reading.
+- The accordion header rolls up the worst current severity and affected-node
+  count so pressure remains visible while collapsed.
+- Activating a warning by mouse or keyboard opens the matching existing open
+  low-disk issue, or creates a pre-filled issue when none exists.
+- The issue includes node ID and hostname, observation timestamp, filesystem,
+  mountpoint, size, used, available, and use percentage. Its remediation prompt
+  asks for root-cause analysis, sustainable garbage collection/retention, and a
+  volume-sizing decision rather than only immediate cleanup.
+- While issue lookup/creation is pending, repeated activation is disabled. A
+  server-side idempotency guard ensures concurrent or repeated requests cannot
+  create two open low-disk issues for the same node.
 
-## Existing system seam
+## Configuration
 
-- `RightSidebar.tsx` owns the `Git` section header and already supports a
-  `headerExtra` node.
-- `useBranchStatus(workspaceId)` supplies `RepoBranchStatus[]`, including
-  `repo_id` and `commits_behind` calculated against the configured target.
-- `RepoWithTargetBranch` supplies stable repository identity and display names.
-- `GitPanelContainer.tsx` already consumes the same status fields for the
-  expanded repository cards; the header indicator must preserve those
-  semantics and avoid introducing a second backend contract.
+Expose four service settings, wired through the existing configuration pattern:
 
-## Implementation constraints
+- warning free percent: `10`
+- warning free bytes: `5 GiB`
+- critical free percent: `2`
+- critical free bytes: `1 GiB`
 
-- Do not fetch a remote provider directly or introduce a new polling path.
-- Do not sum multiple repositories into an ambiguous project-wide number.
-- Treat absent/loading status and absent `commits_behind` values as no indicator,
-  rather than briefly displaying a misleading zero.
-- Preserve existing Git panel actions, sizing, persistence, and per-repository
-  ahead/behind indicators.
-- Add focused frontend tests for zero, single-repository, and multi-repository
-  presentation and for placement in the Git section header.
+Configuration must validate that values are non-negative and that each critical
+boundary is no less severe than its warning counterpart. The effective values
+must be available to the UI from the backend rather than duplicated as frontend
+constants. Defaults must be documented for operators.
 
-## Acceptance criteria
+## Data and API behavior
 
-- A single repository 3 commits behind its target shows a compact `3 behind`
-  indicator in the Git header.
-- With repositories `web` 2 behind and `server` 5 behind, the header identifies
-  both values (for example, `web 2 · server 5`).
-- A repository at zero behind produces no Git-header status.
-- Counts are based on repository IDs, so status remains correct regardless of
-  input ordering.
-- Relevant frontend tests, formatting, type checks, and linting pass.
+Use current node-metrics samples as the source of disk facts. Add a narrowly
+scoped coordinator endpoint/action for resolving a low-disk issue. The request
+identifies the node and filesystem sample/observation being acted on; the server
+validates the referenced current metrics and derives canonical issue content.
+The response distinguishes `created` from `existing` and returns the issue ID.
 
-## Non-goals
+Persist a machine-readable low-disk identity with the issue (or in a dedicated
+association) keyed by node ID. Duplicate detection considers only open issues;
+after the prior issue is closed, a new incident may create a new issue. The
+database must enforce the open-issue uniqueness invariant rather than relying
+only on a title search.
 
-- Changing how divergence is calculated by Git.
-- Fetching target branches or remotes more frequently.
-- Showing commits ahead, unpushed commits, PR state, or rebase controls in the
-  section header.
-- Modifying deployment or any service outside Vibe Kanban.
+## Accessibility and failure states
+
+Severity is never communicated by color alone. Interactive warnings are native
+buttons or links with descriptive accessible names and visible focus treatment.
+Issue-resolution failures leave metrics visible, show a recoverable error, and
+allow retry. Missing or malformed metrics do not produce false warnings.
+
+## Verification
+
+- Unit tests cover threshold boundaries, the OR (more conservative) rule,
+  severity precedence, formatting, and rollup counts.
+- Component tests cover collapsed-header visibility, icon/text treatment,
+  concrete disk facts, keyboard activation, pending behavior, existing-issue
+  navigation, and recoverable failures in light/dark-compatible class usage.
+- Backend tests cover issue content, open-issue reuse, concurrent idempotency,
+  closed-issue recreation, validation, and authorization.
+- Configuration tests cover defaults, overrides, and invalid ordering.
+- Existing Server Metrics and issue flows remain green.
+
+## Out of scope
+
+- Automatically deleting data or resizing volumes.
+- Preventing the scheduler from dispatching work to a pressured node.
+- Alert delivery outside the Server Metrics UI.
+- Changes to services other than Vibe Kanban.

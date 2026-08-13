@@ -5,6 +5,8 @@ import type {
   NodeMetricsAvailability,
 } from 'shared/types';
 import { Meter } from '@vibe/ui/components/Meter';
+import { WarningIcon } from '@phosphor-icons/react';
+import type { NodeDiskAlert } from './diskAlerts';
 
 import { cn } from '@/shared/lib/utils';
 import {
@@ -12,6 +14,7 @@ import {
   formatPercent,
   formatTimestamp,
   ratioPercent,
+  formatBytes,
 } from './format';
 import { MetricsRow } from './MetricsSection';
 
@@ -19,6 +22,10 @@ export interface NodeStripProps {
   node: MetricsNode;
   selected: boolean;
   onSelect: (nodeId: string) => void;
+  diskAlert?: NodeDiskAlert | null;
+  onResolveDiskAlert?: (nodeId: string) => void;
+  resolvingDiskAlert?: boolean;
+  diskAlertActionDisabledReason?: string | null;
 }
 
 /** True when the node's readings are retained but no longer current. */
@@ -165,7 +172,15 @@ export function HealthBadge({ health }: { health: NodeHealth | null }) {
  * Renders **both** health and availability, and a `null` reading as an em
  * dash rather than a zero.
  */
-export function NodeStrip({ node, selected, onSelect }: NodeStripProps) {
+export function NodeStrip({
+  node,
+  selected,
+  onSelect,
+  diskAlert,
+  onResolveDiskAlert,
+  resolvingDiskAlert,
+  diskAlertActionDisabledReason,
+}: NodeStripProps) {
   const { t } = useTranslation('common');
 
   const stale = isStale(node.availability);
@@ -182,6 +197,14 @@ export function NodeStrip({ node, selected, onSelect }: NodeStripProps) {
       : t('metrics.role.worker', { defaultValue: 'Worker' });
 
   return (
+    <div
+      data-alert-severity={diskAlert?.severity}
+      className={cn(
+        'flex flex-col rounded-sm border border-transparent',
+        diskAlert?.severity === 'warning' && 'border-brand bg-brand/5',
+        diskAlert?.severity === 'critical' && 'border-error bg-error/5'
+      )}
+    >
     <button
       type="button"
       data-testid="metrics-node-strip"
@@ -245,5 +268,35 @@ export function NodeStrip({ node, selected, onSelect }: NodeStripProps) {
         />
       </span>
     </button>
+    {diskAlert && (
+      <button
+        type="button"
+        data-testid="metrics-disk-alert"
+        disabled={!onResolveDiskAlert || resolvingDiskAlert}
+        title={diskAlertActionDisabledReason ?? undefined}
+        onClick={() => onResolveDiskAlert?.(node.node_id)}
+        className={cn(
+          'flex items-start gap-half mx-half mb-half p-half rounded-sm text-left',
+          'focus:outline-none focus:ring-1 focus:ring-brand disabled:cursor-not-allowed',
+          diskAlert.severity === 'critical' ? 'text-error' : 'text-brand-secondary'
+        )}
+        aria-label={`${diskAlert.severity === 'critical' ? 'Critical disk' : 'Low disk'} on ${node.hostname}. ${diskAlertActionDisabledReason ?? 'Create or open remediation issue'}`}
+      >
+        <WarningIcon weight="fill" className="shrink-0" aria-hidden="true" />
+        <span className="flex flex-col min-w-0 text-sm">
+          <span className="font-medium">
+            {diskAlert.severity === 'critical' ? 'Critical disk' : 'Low disk'}
+          </span>
+          {diskAlert.filesystems.map(({ filesystem, usedPercent }) => (
+            <span key={`${filesystem.mount_point}:${filesystem.device}`}>
+              {filesystem.device} · {formatBytes(filesystem.available_bytes)} available ·{' '}
+              {formatPercent(usedPercent)} used · {filesystem.mount_point}
+            </span>
+          ))}
+          {resolvingDiskAlert && <span>Resolving issue…</span>}
+        </span>
+      </button>
+    )}
+    </div>
   );
 }
