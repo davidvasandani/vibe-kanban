@@ -139,7 +139,11 @@ impl IssueRepository {
         }
 
         let status_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM project_statuses WHERE project_id = $1 AND hidden = FALSE ORDER BY sort_order ASC LIMIT 1",
+            "SELECT id FROM project_statuses
+             WHERE project_id = $1
+               AND hidden = FALSE
+               AND lower(name) NOT IN ('done', 'cancelled', 'canceled')
+             ORDER BY sort_order ASC LIMIT 1",
         )
         .bind(request.project_id)
         .fetch_one(&mut *tx)
