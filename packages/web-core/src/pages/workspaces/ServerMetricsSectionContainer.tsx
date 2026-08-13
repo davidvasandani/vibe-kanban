@@ -274,10 +274,12 @@ export function ServerMetricsSectionContainer({
           },
           hostId
         );
-        const issues = createShapeCollection(PROJECT_ISSUES_SHAPE, {
-          project_id: projectId,
-        });
-        await issues.utils.awaitTxId(Number(response.txid), 10_000);
+        if (response.created) {
+          const issues = createShapeCollection(PROJECT_ISSUES_SHAPE, {
+            project_id: projectId,
+          });
+          await issues.utils.awaitTxId(Number(response.txid), 10_000);
+        }
         appNavigation.goToProjectIssue(projectId, response.issue.id);
       } catch (error) {
         setDiskActionError(
