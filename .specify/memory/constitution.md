@@ -416,56 +416,24 @@ only positively active executions remain cancellable. Regression coverage MUST
 exercise a missed terminal event followed by snapshot rehydration and preserve
 the active-execution Stop behavior.
 
-### XXXI. Snapshot-plus-live streams never conceal lost authority
-Any stream that combines an authoritative snapshot with live mutations MUST
-acquire its live subscription before awaiting the snapshot, emit the snapshot
-and readiness boundary first, then drain mutations buffered during snapshot
-construction in publication order. The implementation and tests must exercise
-that actual handoff boundary; an error-string test or a pure helper alone is not
-evidence that subscription ordering is correct.
+### XXXI. Historical views are materialized once and shared
+CPU-intensive reconstruction of immutable execution history MUST be keyed by
+the durable source identity and single-flight within a service process.
+Concurrent readers of one cache miss join the same computation; they do not
+independently parse or normalize the same source. A valid completed
+materialization bypasses both coordination and capacity queues.
 
-A dropped or lagged live mutation invalidates the stream's authority. The stream
-MUST surface the loss as an error and terminate through a retryable transport
-close so the consumer obtains another complete snapshot. It must never log and
-continue from a sequence known to be incomplete. Same-endpoint consumers retain
-their last valid snapshot while reconnecting, but distinguish allocated
-placeholder data from receipt of an authoritative readiness boundary.
+Only an atomically complete artifact is reusable evidence. Partial output,
+reader cancellation, worker failure, or an in-memory in-flight marker never
+becomes a completed history view, and failure clears coordination so a later
+reader can retry. Input, output, concurrency, and retained coordination state
+are bounded. Expensive synchronous work does not monopolize the async request
+runtime, and structured diagnostics distinguish cache hits, leaders, joined
+waiters, queueing, completion, cancellation, failure, and truncation.
 
-### XXXII. Final output starts bounded reconciliation, not assumed success
-A normalized final assistant response is positive evidence that a turn reached
-an answer, but it is not process-exit or worker-finalization evidence. If the
-expected terminal event does not follow, the execution owner MUST begin bounded
-reconciliation using the authoritative worker/process liveness channel. While
-positive liveness exists the row may remain active; once the bound expires with
-no positive liveness, required work preservation runs and the row transitions
-to the most truthful terminal outcome, using `indeterminate` when success or
-failure cannot be proven.
-
-No accepted execution may remain `running` indefinitely because a completion
-future, event, handle, or database write disappeared. Terminal writes are
-observable and boundedly retried or handed to a durable reconciliation path.
-Tests cover delayed and missing finalization without equating final text with a
-successful exit.
-
-### XXXIII. Task artifacts have validated ownership
-SpecKit, WikiLLM, review, and implementation records belong to one explicit task
-identity and live under that task's directory. Generators MUST reject a target
-already owned by a different task before modifying any file. Renaming or copying
-a record preserves its history and updates internal references; it must not
-overwrite or silently reattribute an earlier task's artifacts. Root convenience
-documents may mirror the current task only when the pipeline explicitly
-requires them and must not be treated as the durable multi-task archive.
-
-### XXXIV. Browser titles identify one thing
-Browser-tab titles MUST contain one meaningful label, selected from an ordered
-fallback chain. They do not concatenate project names, application branding,
-ticket identifiers, or other context onto a page-specific label. When no
-page-specific label is available, the product name is the fallback.
-
-This rule is limited to browser metadata. Visible navigation retains the
-context it needs: in particular, the workspace-breadcrumb issue-ID requirement
-remains authoritative. Shared title selection belongs in the existing web-core
-hook and is covered by focused update and fallback tests.
+Historical reads do not implicitly migrate workspace affinity. Using another
+node requires an explicit authenticated, affinity-safe reconstruction contract;
+idle-node telemetry alone is never scheduling authority.
 
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
@@ -488,10 +456,10 @@ hook and is covered by focused update and fallback tests.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.31.0 (adds single-label browser-title selection while preserving
-visible navigation context; 0.30.0 requires lossless subscribe-before-snapshot handoffs with
-lag-fatal resnapshot, bounded evidence-backed reconciliation after final output,
-and validated per-task artifact ownership; 0.27.0 required execution activity UI to derive from authoritative,
+**Version**: 0.28.0 (requires immutable historical reconstruction to be
+single-flight by durable identity, atomically materialized, bounded,
+cancellation-safe, observable, and kept off implicit affinity migration;
+0.27.0 required execution activity UI to derive from authoritative,
 rehydratable process snapshots, reconnects to recover missed terminal events,
 and shutdown/recovery to classify executions that are no longer provably active;
 0.26.0 required executor-neutral, execution-scoped materialization

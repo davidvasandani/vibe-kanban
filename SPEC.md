@@ -1,151 +1,111 @@
-# Stale Execution Status Follow-up — Technical Specification
+# Technical Specification: Resource-Aware Chat Loading
 
 ## Objective
 
-Eliminate every known path by which the Vibe Kanban composer can remain in a
-running/Stop state after work has ceased, while preserving cancellability for
-genuinely active coding-agent and lifecycle-script executions. Repair the
-snapshot/live-stream handoff contract shared by execution processes and sibling
-streams, expose bounded connection failures without losing last-known-good
-state, and restore isolated SpecKit records for PR #226 and the earlier task
-whose directory it reused.
+Opening a workspace with a long agent conversation can drive the Vibe Kanban
+coordinator to approximately 100% CPU for an extended period while other
+cluster workers remain lightly loaded and memory pressure remains low. The UI
+stays on the conversation loading state during that work. The attached
+production observation shows the coordinator at 98.4% CPU with a load near 37,
+while schedulable workers are substantially less busy.
 
-## Scope
+Historical conversations are reconstructed from persisted execution logs.
+That reconstruction is CPU-intensive and currently occurs on the server that
+serves the chat request. This task must make that path resource-aware and avoid
+repeating equivalent work while preserving conversation correctness.
 
-Only the `vibe-kanban` repository is in scope. Homelab deployment and all other
-services are explicitly excluded.
+## Goals
 
-The work covers:
-
-- execution-process state derivation consumed by the composer;
-- backend snapshot-plus-live streams and broadcast-lag behavior;
-- Codex app-server/worker completion, terminal evidence, and reconciliation;
-- the shared JSON-patch WebSocket client and remote relay close metadata;
-- SpecKit task-directory isolation and its validation;
-- focused regression tests and repository verification.
-
-## Functional requirements
-
-### FR-1: One authoritative running-attempt predicate
-
-1. A single runtime helper must determine whether an attempt visible to the
-   composer is active.
-2. The provider/composer path must call that helper, rather than reimplementing
-   its status/reason predicate.
-3. A visible `running` execution with run reason `codingagent`, `setupscript`,
-   `cleanupscript`, or `archivescript` is active and cancellable.
-4. `completed`, `failed`, `killed`, `interrupted`, and `indeterminate`
-   executions are not active, for every relevant run reason.
-5. Provider-boundary coverage must prove that the value consumed by
-   `useWorkspaceExecution` and `SessionChatBoxContainer` comes from this helper.
-
-### FR-2: Lossless snapshot/live handoff
-
-1. Every DB-snapshot-plus-broadcast-patch stream must subscribe to broadcasts
-   before beginning its snapshot query.
-2. Updates received while the snapshot is being built must be buffered and
-   reduced after `snapshot` and `Ready` in publication order.
-3. Broadcast receiver lag means the stream has lost authority. It must emit an
-   error and terminate so its WebSocket closes and the client reconnects for a
-   new snapshot; lag must never be silently swallowed.
-4. A deterministic execution-process test must pause after subscription but
-   before snapshot completion, publish `running` then terminal state, and prove
-   the reduced client state is terminal. The test must fail if query-before-
-   subscribe ordering is restored.
-5. Tests must assert that lag produces a stream error and an error WebSocket
-   close suitable for reconnect/resnapshot.
-6. `stream_scratch_raw`, `stream_workspaces_raw`,
-   `stream_browser_sessions_for_workspace_raw`, and
-   `MsgStore::history_plus_stream` must be audited. Snapshot/live streams must
-   use the repaired contract; any exempt API must have explicit evidence and a
-   focused test or documentation.
-7. Prefer a shared lossless-handoff primitive where stream contracts are
-   structurally alike, so subscription order and lag policy cannot diverge.
-
-### FR-3: Bounded authoritative execution finalization
-
-1. Inspect Codex app-server and worker completion paths, execution-worker
-   terminal evidence, and all errors or early returns before
-   `ExecutionProcess::update_completion`.
-2. A normalized final assistant response is evidence that requires bounded
-   reconciliation, but is not by itself proof that the child process exited.
-3. If an execution has final output but its expected completion/finalization
-   event is delayed, lost, or interrupted, reconciliation must seek positive
-   process/worker liveness and terminal evidence for a bounded interval.
-4. When positive liveness can no longer be established, the authoritative row
-   must transition without user cancellation to the most truthful one of
-   `completed`, `failed`, `interrupted`, or `indeterminate`.
-5. No final assistant response may coexist indefinitely with an authoritative
-   `running` execution.
-6. Regression coverage must simulate final output followed by missing/delayed
-   finalization and prove both the backend terminal transition and the composer
-   returning to Send from that authoritative update without refresh or Stop.
-7. Every completion update failure must be observable and must not silently
-   abandon a running row.
-
-### FR-4: WebSocket connection and retry truthfulness
-
-1. `useJsonPatchWsStream` must track receipt of an authoritative `Ready`
-   separately from allocation of its initial client object.
-2. Repeated initial connection failures must surface `Connection failed` after
-   a bounded number of attempts.
-3. Once a valid snapshot/`Ready` has been received, reconnect attempts must
-   retain and render that last-known-good snapshot; transport errors must not
-   erase it.
-4. Backoff must not reset merely because a socket opened if it repeatedly
-   closes before establishing an authoritative snapshot. Repeated
-   open/lag/error/resnapshot cycles must have bounded load.
-5. Remote relay behavior must retain diagnostic server close code/reason even
-   where browser APIs cannot legally originate a reserved `1011` close code,
-   while still causing reconnect/resnapshot.
-
-### FR-5: SpecKit artifact isolation
-
-1. Recover the prior `vk/5e1e-vk-workspace-cre` task artifacts from git history
-   into their original task record.
-2. Place PR #226 artifacts in a dedicated directory for
-   `vk/3488-fix-stale-execut`.
-3. Reconcile the reused `specs/vk/a5f8-concat-repeating` directory so neither
-   task's record is lost and unrelated stale content is not attributed to the
-   wrong task.
-4. Update internal references to the corrected locations.
-5. Add or strengthen automated validation so a future SpecKit invocation
-   cannot silently target a directory already owned by another task.
-
-## Quality and verification requirements
-
-- Tests must exercise runtime boundaries, not only extracted predicates or
-  error-string helpers.
-- Race tests must use deterministic synchronization, never timing sleeps.
-- Backend tests must reduce emitted `snapshot`, `Ready`, and buffered patches as
-  a real consumer would.
-- Run focused frontend and backend tests during implementation, followed by
-  formatting, type checks, lint, and the applicable broader suites.
-- Generated files must be regenerated from their Rust sources if types change.
-- An independent Codex review must report no significant findings before the
-  task is ready.
-- Reusable knowledge must be recorded in the project knowledge base and tagged
-  with this task ID before completion.
-
-## Deliverables
-
-1. Shared frontend running-attempt derivation and provider/composer regression
-   tests.
-2. Shared backend lossless snapshot/live handoff and deterministic race/lag
-   tests across all audited streams.
-3. Bounded execution finalization/reconciliation and missing-finalization tests.
-4. Correct JSON-patch client readiness/error/backoff semantics and relay close
-   metadata tests or evidence.
-5. Restored and isolated SpecKit artifacts plus collision prevention.
-6. Verification evidence, independent review results, knowledge-base update,
-   and a merged pull request.
+- Make opening an existing workspace responsive even when its history is long.
+- Prevent one chat load, refresh, or group of duplicate readers from creating
+  unbounded normalization work on the coordinator.
+- Use the resources already available to the Vibe Kanban cluster when doing so
+  is compatible with workspace ownership and the existing deployment model.
+- Reuse completed normalization work so subsequent readers have near-cache-hit
+  cost.
+- Keep memory usage bounded and make overload behavior observable.
 
 ## Non-goals
 
-- Changing homelab modules, hosts, or deployment configuration.
-- Treating final normalized output as unconditional proof of successful process
-  exit.
-- Hiding stream-authority loss by continuing from a potentially incomplete
-  patch sequence.
-- Broad redesign of the composer or execution UI beyond accurate Send/Stop and
-  cancellation behavior.
+- Changing, deploying, or tuning any service other than Vibe Kanban.
+- Building a general distributed job platform unrelated to conversation
+  loading.
+- Changing the semantic content or ordering of agent conversations.
+- Moving live agent execution away from its selected workspace worker.
+
+## Functional requirements
+
+1. A request for a completed execution's normalized history MUST reuse a valid
+   materialized result when one exists.
+2. Concurrent cache misses for the same execution MUST share one normalization
+   computation rather than independently parsing and normalizing the same log.
+3. Historical normalization MUST have an explicit concurrency bound and MUST
+   not block unrelated cache hits.
+4. Historical input and materialized output MUST remain bounded, with a visible
+   indication when older content is intentionally omitted.
+5. A disconnected reader MUST not leave orphaned CPU-heavy work indefinitely
+   and MUST not publish a partial result as complete.
+6. Running executions MUST remain live and MUST not be frozen into a stale
+   completed-history cache.
+7. The implementation MUST preserve the existing WebSocket/API contract and
+   frontend patch semantics unless the later clarified design demonstrates a
+   necessary compatible extension.
+8. The operational configuration MUST expose enough information to identify
+   which Vibe Kanban process performs expensive reconstruction and whether
+   work is queued, deduplicated, completed, or served from cache.
+
+## Resource-utilization design constraints
+
+- Prefer eliminating duplicate work and serving durable materialized history
+  over merely raising CPU limits.
+- Keep workspace-local filesystem access on the node that owns or can safely
+  access the workspace and its session logs.
+- Any cluster distribution must use existing Vibe Kanban coordinator/worker
+  trust and shared-storage boundaries; it must not introduce dependencies on
+  another homelab service.
+- Concurrency defaults must be conservative and configurable for heterogeneous
+  nodes.
+- CPU-heavy synchronous work must not monopolize the async request runtime.
+
+## Acceptance criteria
+
+- Automated tests prove that two simultaneous readers for one completed,
+  uncached execution trigger one normalization operation and both receive the
+  same completed transcript.
+- Automated tests prove valid cache hits bypass the normalization concurrency
+  queue.
+- Automated tests cover cancellation/failure and demonstrate that a later
+  request can retry without reading a partial cache.
+- Existing normalized-log cache integrity, truncation, and running-process
+  behavior remain covered and passing.
+- Relevant Rust and frontend checks pass; Nix evaluation is run if deployment
+  configuration changes.
+- Runtime logs or metrics distinguish cache hit, shared/in-flight wait, cache
+  miss/start, completion, failure/cancellation, and truncation.
+- No files outside the Vibe Kanban repository and
+  `homelab/modules/vibe-kanban-rebuild.nix` (plus directly related Vibe Kanban
+  deployment tests/docs) are changed.
+
+## Investigation questions
+
+- Is the observed CPU consumed primarily by duplicate historical normalizers,
+  one intrinsically expensive vendor normalizer, frontend replay/render work,
+  or a combination?
+- Are persisted session logs available from every worker through the existing
+  shared mount, or only from the coordinator/affined worker?
+- Does the existing execution-worker dispatch contract support read-only
+  normalization jobs, or is single-flight materialization on the serving node
+  the safer first increment?
+- Which node-level concurrency default best protects interactive agent work
+  while still using otherwise idle cores?
+
+## Verification
+
+- Targeted unit/integration tests for normalization caching and concurrent
+  readers.
+- `cargo test` for affected crates and workspace-level checks in proportion to
+  the final diff.
+- `pnpm run format`, `pnpm run check`, and `pnpm run lint` when affected code
+  requires them.
+- Nix module evaluation/tests if the Vibe Kanban deployment module changes.
+- Independent Codex diff review with all significant confirmed findings fixed.

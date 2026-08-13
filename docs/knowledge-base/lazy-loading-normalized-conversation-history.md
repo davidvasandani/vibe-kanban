@@ -1,6 +1,6 @@
 # Lazy-loading normalized conversation history
 
-Tags: `65ab-lazy-load-vk-wor`
+Tags: `65ab-lazy-load-vk-wor`, `vk/6df4-loading-chat-pin`
 
 ## Why frontend virtualization is insufficient
 
@@ -57,6 +57,35 @@ view. Do that in an observable, capacity-bounded, cancellable rollout path—not
 inside an interactive page request that merely returns a small response. Reuse
 the existing historical normalization semaphore and abort-on-stream-drop
 discipline. Raw logs remain the rebuildable source of truth.
+
+## Single-flight materialization for concurrent readers
+
+Task `vk/6df4-loading-chat-pin` established the coordination order for legacy
+executions that do not yet have a valid normalized sidecar:
+
+1. Optimistically replay a valid sidecar without taking coordination or global
+   capacity.
+2. On a miss, acquire a weakly retained, execution-ID-keyed ownership lease.
+3. Recheck the sidecar after ownership transfers, because the prior owner may
+   have completed while the reader waited.
+4. Only the remaining cache miss competes for the global historical
+   normalization permit and reconstructs the vendor log.
+
+The keyed lease must live for the returned stream's lifetime, not merely until
+the stream is constructed. This makes concurrent readers of one execution join
+one materialization attempt. A successful leader atomically publishes the
+sidecar, so waiters replay durable output instead of normalizing again. If the
+leader stream is dropped or its task is aborted, cancellation releases both the
+global permit and keyed lease; the next waiter rechecks the sidecar and becomes
+the retrying leader when necessary.
+
+Keep keyed registry cells weak and remove dead generations with identity-aware
+cleanup so a large history does not turn coordination metadata into permanent
+memory growth. Global capacity still protects CPU across different executions,
+while the keyed lease prevents duplicate CPU for the same execution. Idle host
+memory or CPU is not a reason to fan out duplicate reconstruction work; use
+available capacity for independent execution IDs and serve completed work from
+the sidecar.
 
 ## Frontend invariants
 
