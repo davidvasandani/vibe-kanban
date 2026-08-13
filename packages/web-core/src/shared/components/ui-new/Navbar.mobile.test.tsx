@@ -27,6 +27,7 @@ describe('Navbar mobile right sidebar tab', () => {
         <Navbar
           mobileMode
           mobileActiveTab="chat"
+          onOpenDrawer={vi.fn()}
           onOpenSettings={vi.fn()}
           onOpenCommandBar={vi.fn()}
         />
@@ -43,13 +44,16 @@ describe('Navbar mobile right sidebar tab', () => {
       '[data-testid="mobile-navbar-actions"]'
     );
     const chatTab = container.querySelector('[aria-label="Chat"]');
+    const projectsButton = container.querySelector('[aria-label="Projects"]');
 
     expect(toolbar).not.toBeNull();
     expect(toolbar?.classList.contains('flex-1')).toBe(true);
     expect(toolbar?.classList.contains('min-w-0')).toBe(true);
-    expect(toolbar?.classList.contains('overflow-x-auto')).toBe(true);
+    expect(toolbar?.classList.contains('overflow-x-auto')).toBe(false);
     expect(tabs?.classList.contains('flex-1')).toBe(true);
-    expect(tabs?.classList.contains('min-w-fit')).toBe(true);
+    expect(tabs?.classList.contains('min-w-0')).toBe(true);
+    expect(tabs?.classList.contains('overflow-x-auto')).toBe(true);
+    expect(projectsButton?.classList.contains('shrink-0')).toBe(true);
     expect(chatTab?.classList.contains('flex-1')).toBe(true);
     expect(chatTab?.classList.contains('min-w-10')).toBe(true);
     expect(actions?.classList.contains('shrink-0')).toBe(true);
