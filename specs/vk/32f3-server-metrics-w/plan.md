@@ -67,7 +67,7 @@ permanent-remediation checklist.
 
 Using the remote issue database keeps deduplication durable across browser and
 coordinator restarts. The advisory lock serializes concurrent requests where a
-partial unique index cannot express “status name is not Done/Cancelled” across
+partial unique index cannot express “status name is not Done/Cancelled/Canceled” across
 the issue/status tables.
 
 ### 5. Frontend action and navigation
@@ -112,7 +112,7 @@ No deviation remains open.
 ## Risks & Dependencies
 
 - Remote status has no explicit terminal flag; reuse the established
-  case-insensitive Done/Cancelled convention required by Constitution V.
+  case-insensitive Done/Cancelled/Canceled convention required by Constitution V.
 - Older coordinators/snapshots lack thresholds. Version-skew parsing must use a
   safe documented default without treating missing filesystem facts as zero.
 - Header REST polling is intentionally bounded; tests must prove it stops when

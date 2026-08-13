@@ -120,7 +120,7 @@ impl IssueRepository {
                WHERE i.project_id = $1
                  AND i.extension_metadata->'low_disk'->>'kind' = 'server_low_disk'
                  AND i.extension_metadata->'low_disk'->>'node_id' = $2
-                 AND lower(ps.name) NOT IN ('done', 'cancelled')
+                 AND lower(ps.name) NOT IN ('done', 'cancelled', 'canceled')
                ORDER BY i.created_at DESC LIMIT 1"#,
         )
         .bind(request.project_id)
@@ -138,7 +138,7 @@ impl IssueRepository {
         }
 
         let status_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM project_statuses WHERE project_id = $1 ORDER BY sort_order ASC LIMIT 1",
+            "SELECT id FROM project_statuses WHERE project_id = $1 AND hidden = FALSE ORDER BY sort_order ASC LIMIT 1",
         )
         .bind(request.project_id)
         .fetch_one(&mut *tx)

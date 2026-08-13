@@ -27,7 +27,7 @@ Stored in `issues.extension_metadata.low_disk`:
 - `hostname`: display evidence, not identity
 
 Logical unique-open key: `(project_id, kind, node_id)`. Terminal means the
-joined project status name is `Done` or `Cancelled`, case-insensitively.
+joined project status name is `Done`, `Cancelled`, or `Canceled`, case-insensitively.
 
 ## ResolveLowDiskIssueResult
 
