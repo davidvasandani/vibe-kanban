@@ -1,28 +1,25 @@
-# Implementation Plan: Commits Behind in the Git Header
+# Implementation Plan: Stable Workspace Order During Restart
 
 1. Establish the task's SpecKit constitution and feature artifacts under a new
-   `specs/vk/a35b-commits-behind-m/` directory, retaining the request's scope and
-   the prior-knowledge constraints.
-2. Inspect the branch-status hook/query lifecycle, `RightSidebar` header-extra
-   composition, and existing UI test conventions to choose a presentation seam
-   that remains live while the Git body is collapsed.
-3. Add a small, testable Git-header status derivation/presentation component
-   that:
-   - joins repository metadata to branch status by repository ID;
-   - omits zero, missing, and loading values;
-   - shows only the count for a single-repository workspace;
-   - shows repository names with counts for a multi-repository workspace; and
-   - bounds/truncates visible text while preserving full accessible context.
-4. Mount that component through the existing Git section `headerExtra` in
-   `RightSidebar` without changing the drawer's expansion or flex behavior.
-5. Add focused tests for empty/zero state, one repository, multiple
-   repositories, ID-based matching, and collapsed-header availability.
-6. Run the targeted frontend tests, formatting, type checks, and linting; resolve
-   any regressions within Vibe Kanban scope.
-7. Run the required independent Codex review, address confirmed significant
-   findings, and repeat verification until no significant findings remain.
-8. Distill genuinely reusable UI/query-boundary knowledge into the Vibe Kanban
-   knowledge base, tag it with `vk/a35b-commits-behind-m`, refresh the index,
-   and commit the knowledge-base update.
-9. Commit the complete task, open a pull request against the latest base branch,
-   verify its checks and review state, merge it, and report the merged result.
+   `specs/vk/9391-workspace-order/` directory, incorporating the technical spec
+   and prior-knowledge findings.
+2. Trace the workspace stream, summary-query, sidebar transformation, and sort
+   lifecycle to confirm which persisted timestamp is available before summaries
+   load and document any ambiguity during clarification.
+3. Extract or introduce a focused workspace comparator that preserves pinning,
+   selected sort direction, and deterministic ties while using `updatedAt` as a
+   fallback for missing latest-process completion data.
+4. Change missing/invalid selected timestamps to sort after known timestamps,
+   applying the same rule to active and archived lists.
+5. Add focused unit tests for startup fallback ordering, summary precedence,
+   ascending and descending sorts, pinned workspaces, invalid timestamps, and
+   stable tie-breaking.
+6. Install dependencies if needed, format the repository, and run targeted
+   frontend tests plus proportionate type/lint checks.
+7. Run an independent Codex CLI review of the diff, address every confirmed
+   significant finding, and repeat review and verification until clean.
+8. Add reusable partial-data workspace ordering guidance to the project
+   knowledge base, tag it with `vk/9391-workspace-order`, refresh the index, and
+   commit the knowledge-base update.
+9. Commit the task, open a pull request against the base branch, monitor required
+   checks, merge the pull request, and report the merged result.

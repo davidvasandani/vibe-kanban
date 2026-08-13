@@ -416,6 +416,15 @@ only positively active executions remain cancellable. Regression coverage MUST
 exercise a missed terminal event followed by snapshot rehydration and preserve
 the active-execution Stop behavior.
 
+### XXXI. Partial projections degrade deterministically
+When a UI projection joins an authoritative record with asynchronously loaded
+summary or enrichment data, the base record MUST remain immediately usable.
+Ordering and grouping use a persisted base-record fallback until enrichment is
+available; missing or malformed enrichment never outranks known values merely
+because it is absent. Arrival of richer data may refine the projection, but ties
+and incomplete records remain deterministic through stable identity-based
+fallbacks. Regression coverage exercises both the base-only and enriched states.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -437,7 +446,9 @@ the active-execution Stop behavior.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.27.0 (requires execution activity UI to derive from authoritative,
+**Version**: 0.28.0 (requires asynchronously enriched UI projections to remain
+deterministic and useful from persisted base records while enrichment loads;
+0.27.0 required execution activity UI to derive from authoritative,
 rehydratable process snapshots, reconnects to recover missed terminal events,
 and shutdown/recovery to classify executions that are no longer provably active;
 0.26.0 required executor-neutral, execution-scoped materialization
