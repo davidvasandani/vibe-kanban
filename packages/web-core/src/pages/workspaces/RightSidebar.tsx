@@ -30,6 +30,7 @@ import {
 import { getServerAffinityLabel } from './serverAffinityLabel';
 import { DeployStatus } from '@vibe/ui/components/DeployStatus';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
+import { GitBehindHeader } from './GitBehindHeader';
 
 type SectionDef = {
   title: string;
@@ -149,6 +150,9 @@ export const RightSidebar = memo(function RightSidebar({
         visible: true,
         expanded: gitExpanded,
         fillAvailableSpace: true,
+        headerExtra: (
+          <GitBehindHeader workspaceId={selectedWorkspace?.id} repos={repos} />
+        ),
         content: (
           <GitPanelContainer
             selectedWorkspace={selectedWorkspace}

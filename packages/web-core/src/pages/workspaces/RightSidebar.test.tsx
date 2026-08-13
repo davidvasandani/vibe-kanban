@@ -75,6 +75,9 @@ vi.mock('./BrowserControlsContainer', () => ({
   BrowserControlsContainer: () => null,
 }));
 vi.mock('./GitPanelContainer', () => ({ GitPanelContainer: () => null }));
+vi.mock('./GitBehindHeader', () => ({
+  GitBehindHeader: () => <span data-testid="git-behind-header">3 behind</span>,
+}));
 vi.mock('./ServerMetricsSectionContainer', () => ({
   ServerMetricsSectionContainer: () => null,
 }));
@@ -174,7 +177,7 @@ describe('RightSidebar section sizing', () => {
 
     const sectionNamed = (name: string) => {
       const button = Array.from(container.querySelectorAll('button')).find(
-        (candidate) => candidate.textContent === name
+        (candidate) => candidate.firstElementChild?.textContent === name
       );
       const section = button?.parentElement?.parentElement;
       if (
@@ -197,5 +200,33 @@ describe('RightSidebar section sizing', () => {
     const git = sectionNamed('Git');
     expect(git.section.classList).toContain('flex-1');
     expect(git.section.classList).toContain('min-h-0');
+  });
+
+  it('keeps branch status in the Git header when the body is collapsed', () => {
+    act(() => {
+      root.render(
+        <RightSidebar
+          rightMainPanelMode={null}
+          selectedWorkspace={selectedWorkspace}
+          repos={[]}
+        />
+      );
+    });
+
+    const indicator = container.querySelector(
+      '[data-testid="git-behind-header"]'
+    );
+    const gitButton = Array.from(container.querySelectorAll('button')).find(
+      (candidate) => candidate.textContent?.includes('Git')
+    );
+
+    expect(indicator).not.toBeNull();
+    expect(gitButton?.contains(indicator)).toBe(true);
+
+    act(() => gitButton?.click());
+
+    expect(
+      container.querySelector('[data-testid="git-behind-header"]')
+    ).not.toBeNull();
   });
 });
