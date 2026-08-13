@@ -242,7 +242,8 @@ describe('ServerMetricsSectionContainer', () => {
       expect.objectContaining({
         project_id: 'project-id',
         node_id: '00000000-0000-0000-0000-000000000001',
-      })
+      }),
+      null
     );
     expect(mocks.awaitTxId).toHaveBeenCalledWith(1, 10_000);
     expect(mocks.goToProjectIssue).toHaveBeenCalledWith(

@@ -120,6 +120,7 @@ impl IssueRepository {
                WHERE i.project_id = $1
                  AND i.extension_metadata->'low_disk'->>'kind' = 'server_low_disk'
                  AND i.extension_metadata->'low_disk'->>'node_id' = $2
+                 AND i.completed_at IS NULL
                  AND lower(ps.name) NOT IN ('done', 'cancelled', 'canceled')
                ORDER BY i.created_at DESC LIMIT 1"#,
         )

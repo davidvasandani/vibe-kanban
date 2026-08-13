@@ -266,13 +266,16 @@ export function ServerMetricsSectionContainer({
         const node = nodes.find((candidate) => candidate.node_id === nodeId);
         if (!node?.latest)
           throw new Error('The disk reading is no longer available.');
-        const response = await clusterMetricsApi.resolveLowDiskIssue({
-          project_id: projectId,
-          node_id: nodeId,
-          hostname: node.hostname,
-          observed_at: node.latest.captured_at,
-          filesystems: [],
-        });
+        const response = await clusterMetricsApi.resolveLowDiskIssue(
+          {
+            project_id: projectId,
+            node_id: nodeId,
+            hostname: node.hostname,
+            observed_at: node.latest.captured_at,
+            filesystems: [],
+          },
+          hostId
+        );
         if (response.created) {
           const issues = createShapeCollection(PROJECT_ISSUES_SHAPE, {
             project_id: projectId,
@@ -288,7 +291,7 @@ export function ServerMetricsSectionContainer({
         setResolvingNodeId(null);
       }
     },
-    [appNavigation, nodes, projectId, resolvingNodeId]
+    [appNavigation, hostId, nodes, projectId, resolvingNodeId]
   );
 
   const togglePanel = useCallback((panelId: string) => {

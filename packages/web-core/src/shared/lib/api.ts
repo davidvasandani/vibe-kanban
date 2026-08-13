@@ -2189,12 +2189,17 @@ export const clusterMetricsApi = {
     return handleApiResponse<ClusterMetricsSnapshot>(response);
   },
   resolveLowDiskIssue: async (
-    request: ResolveLowDiskIssueRequest
+    request: ResolveLowDiskIssueRequest,
+    hostId?: string | null
   ): Promise<ResolveLowDiskIssueResponse> => {
-    const response = await makeRequest('/api/remote/issues/low-disk', {
-      method: 'POST',
-      body: JSON.stringify(request),
-    });
+    const response = await makeHostAwareRequest(
+      '/api/remote/issues/low-disk',
+      hostId,
+      {
+        method: 'POST',
+        body: JSON.stringify(request),
+      }
+    );
     return handleApiResponse<ResolveLowDiskIssueResponse>(response);
   },
 };

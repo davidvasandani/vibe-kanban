@@ -67,8 +67,8 @@ permanent-remediation checklist.
 
 Using the remote issue database keeps deduplication durable across browser and
 coordinator restarts. The advisory lock serializes concurrent requests where a
-partial unique index cannot express “status name is not Done/Cancelled/Canceled” across
-the issue/status tables.
+partial unique index cannot express the completion/status predicate across the
+issue/status tables.
 
 ### 5. Frontend action and navigation
 
