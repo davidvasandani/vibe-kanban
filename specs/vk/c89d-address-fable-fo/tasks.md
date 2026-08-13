@@ -111,6 +111,6 @@ parallel within their layer.
 - [x] T028 Update reusable project knowledge in `docs/knowledge-base/`, tag it
   `c89d-address-fable-fo`, refresh `docs/knowledge-base/INDEX.md`, and commit the
   knowledge-base work (depends on T027).
-- [ ] T029 Commit remaining scoped changes, push the task branch, open a PR
+- [x] T029 Commit remaining scoped changes, push the task branch, open a PR
   against the current base, pass required checks, and merge it (depends on
   T028).
