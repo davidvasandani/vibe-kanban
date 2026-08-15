@@ -294,6 +294,7 @@ async fn fail_creation_with_retry(
     unreachable!()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_create_and_start_workspace(
     deployment: DeploymentImpl,
     workspace: Workspace,
