@@ -5,7 +5,7 @@ use std::{
 
 use json_patch::Patch;
 use serde::{Deserialize, Serialize};
-use serde_json::{from_value, json, to_value};
+use serde_json::{Value, from_value, json, to_value};
 use ts_rs::TS;
 use workspace_utils::{diff::Diff, msg_store::MsgStore};
 
@@ -151,6 +151,20 @@ impl ConversationPatch {
     }
 }
 
+/// Unwrap a `NormalizedEntry` out of a `PatchType`-shaped value, i.e.
+/// `{"type": "NORMALIZED_ENTRY", "content": {...}}` — the form `PatchType`
+/// serializes to, and the form the materialized-log cache stores (it caches
+/// settled patch *values*, not bare entries). Any other `type`, or a value
+/// that isn't tagged at all, returns `None` rather than erroring: this reads
+/// mixed streams (`STDOUT`/`STDERR`/`DIFF` alongside `NORMALIZED_ENTRY`)
+/// where only the normalized entries are wanted.
+pub fn normalized_entry_from_patch_value(value: &Value) -> Option<NormalizedEntry> {
+    (value.get("type")?.as_str()? == "NORMALIZED_ENTRY")
+        .then(|| value.get("content"))
+        .flatten()
+        .and_then(|c| from_value::<NormalizedEntry>(c.clone()).ok())
+}
+
 /// Extract the entry index and `NormalizedEntry` from a JsonPatch if it contains one
 pub fn extract_normalized_entry_from_patch(patch: &Patch) -> Option<(usize, NormalizedEntry)> {
     let value = to_value(patch).ok()?;
@@ -160,11 +174,7 @@ pub fn extract_normalized_entry_from_patch(patch: &Patch) -> Option<(usize, Norm
         let entry_index = path.strip_prefix("/entries/")?.parse::<usize>().ok()?;
 
         let value = op.get("value")?;
-        (value.get("type")?.as_str()? == "NORMALIZED_ENTRY")
-            .then(|| value.get("content"))
-            .flatten()
-            .and_then(|c| from_value::<NormalizedEntry>(c.clone()).ok())
-            .map(|entry| (entry_index, entry))
+        normalized_entry_from_patch_value(value).map(|entry| (entry_index, entry))
     })
 }
 
@@ -324,4 +334,51 @@ pub fn discovery_error(error: String) -> Patch {
         {"op": "replace", "path": "/options/loading_slash_commands", "value": false},
     ]))
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::logs::NormalizedEntryType;
+
+    fn assistant_entry(content: &str) -> NormalizedEntry {
+        NormalizedEntry {
+            timestamp: None,
+            entry_type: NormalizedEntryType::AssistantMessage,
+            content: content.to_string(),
+            metadata: None,
+        }
+    }
+
+    /// The materialized-log cache stores the settled patch *value*
+    /// (`{"type": "NORMALIZED_ENTRY", "content": {...}}`), not a bare
+    /// `NormalizedEntry`. A reader that calls `from_value::<NormalizedEntry>`
+    /// on that wrapper directly gets a type mismatch and silently drops the
+    /// entry — this is the shape a cache-hit reader actually sees.
+    #[test]
+    fn unwraps_the_normalized_entry_wrapper() {
+        let entry = assistant_entry("done");
+        let wrapped = json!({"type": "NORMALIZED_ENTRY", "content": entry.clone()});
+
+        let recovered = normalized_entry_from_patch_value(&wrapped).unwrap();
+        assert_eq!(recovered.content, entry.content);
+        assert!(matches!(
+            recovered.entry_type,
+            NormalizedEntryType::AssistantMessage
+        ));
+    }
+
+    #[test]
+    fn a_bare_normalized_entry_without_the_wrapper_is_rejected() {
+        let entry = to_value(assistant_entry("done")).unwrap();
+
+        assert!(normalized_entry_from_patch_value(&entry).is_none());
+    }
+
+    #[test]
+    fn other_patch_types_are_not_mistaken_for_normalized_entries() {
+        let stdout = json!({"type": "STDOUT", "content": "raw output"});
+
+        assert!(normalized_entry_from_patch_value(&stdout).is_none());
+    }
 }

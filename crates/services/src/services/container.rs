@@ -44,7 +44,10 @@ use executors::{
         NormalizedEntry, NormalizedEntryError, NormalizedEntryType,
         utils::{
             ConversationPatch,
-            patch::{fix_patch_ops, is_add_or_replace, patch_entry_path},
+            patch::{
+                fix_patch_ops, is_add_or_replace, normalized_entry_from_patch_value,
+                patch_entry_path,
+            },
         },
     },
     mcp_refresh::McpRefreshResult,
@@ -103,6 +106,24 @@ async fn materialize_normalized_log(
         return false;
     }
     true
+}
+
+/// The database-free half of [`ContainerService::cache_finished_execution`]:
+/// pull `/entries/<index>` patches out of a store's buffered history and
+/// hand them to [`materialize_normalized_log`]. Split out so a finished
+/// turn's write-on-completion path can be exercised without a database —
+/// the store already holds everything needed once the caller has confirmed
+/// the execution left `Running`.
+async fn cache_execution_from_history(cache_path: &std::path::Path, msg_store: &MsgStore) -> bool {
+    let patches: Vec<Patch> = msg_store
+        .get_history()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            LogMsg::JsonPatch(patch) if is_indexed_entry_patch(&patch) => Some(patch),
+            _ => None,
+        })
+        .collect();
+    materialize_normalized_log(cache_path, &patches, false).await
 }
 
 async fn replay_materialized_log(
@@ -1741,8 +1762,8 @@ pub trait ContainerService {
         match normalized_log_cache::materialize_entries(&patches) {
             Ok(values) => Some(
                 values
-                    .into_iter()
-                    .filter_map(|value| serde_json::from_value::<NormalizedEntry>(value).ok())
+                    .iter()
+                    .filter_map(normalized_entry_from_patch_value)
                     .collect(),
             ),
             Err(e) => {
@@ -1753,6 +1774,45 @@ pub trait ContainerService {
                 None
             }
         }
+    }
+
+    /// Write the normalized-log cache for an execution the moment it leaves
+    /// `Running`, straight from its in-memory patches — every caller here is
+    /// removing the execution's `MsgStore` from the map because the process
+    /// just finished, and that store already holds its complete history.
+    ///
+    /// Without this, a sidecar is only ever produced as a side effect of
+    /// [`Self::stream_normalized_logs`]'s historical-replay branch, which
+    /// only runs once the in-memory store is already gone *and* a reader
+    /// asks for this execution's log. If nothing asks before a server
+    /// restart drops the in-memory store, no sidecar is ever written, and
+    /// every later read pays for a full historical re-normalization — for a
+    /// large enough raw log, repeatedly and slowly enough to time out.
+    ///
+    /// Best-effort and idempotent, like [`materialize_normalized_log`]: a
+    /// store with no indexed entry patches writes nothing, a write failure
+    /// is logged and dropped rather than fatal, and a cache already written
+    /// by the historical-replay path is simply overwritten with the same
+    /// settled entries.
+    async fn cache_finished_execution(&self, id: &Uuid, msg_store: &MsgStore) {
+        let process = match ExecutionProcess::find_by_id(&self.db().pool, *id).await {
+            Ok(Some(process)) => process,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(execution_id = %id, "Could not load execution process to cache its normalized log: {e}");
+                return;
+            }
+        };
+        // Guards against a caller racing this in before the row's status
+        // transition is visible; a running process still has entries to
+        // come, and caching it now would freeze a moving target.
+        if process.status == ExecutionProcessStatus::Running {
+            return;
+        }
+
+        let cache_path =
+            utils::execution_logs::process_normalized_log_file_path(process.session_id, *id);
+        cache_execution_from_history(&cache_path, msg_store).await;
     }
 
     async fn start_workspace(
@@ -2210,8 +2270,8 @@ mod tests {
 
     use super::{
         HistoricalNormalizationLifetime, HistoricalNormalizationRegistry, LogMsg,
-        is_indexed_entry_patch, replay_materialized_log, reset_would_discard_uncommitted_work,
-        scope_initial_prompt_to_working_dir,
+        cache_execution_from_history, is_indexed_entry_patch, replay_materialized_log,
+        reset_would_discard_uncommitted_work, scope_initial_prompt_to_working_dir,
     };
 
     #[test]
@@ -2415,6 +2475,121 @@ mod tests {
             stream.next().await.unwrap().unwrap(),
             LogMsg::JsonPatch(_)
         ));
+    }
+
+    /// Regression test for VAS-440: a cache hit replays the settled entry as
+    /// a `{"type": "NORMALIZED_ENTRY", "content": {...}}` patch value — the
+    /// same shape `PatchType` serializes to — not a bare `NormalizedEntry`.
+    /// `normalized_entries` must unwrap that wrapper before deserializing,
+    /// or every cached turn's messages silently disappear.
+    #[tokio::test]
+    async fn a_cached_normalized_entry_survives_the_read_pipeline_normalized_entries_uses() {
+        let execution_id = Uuid::new_v4();
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("execution.normalized.jsonl");
+
+        let entry = super::NormalizedEntry {
+            timestamp: None,
+            entry_type: super::NormalizedEntryType::AssistantMessage,
+            content: "the fix is deployed".to_string(),
+            metadata: None,
+        };
+        let patches = vec![ConversationPatch::add_normalized_entry(0, entry.clone())];
+        let materialized = super::normalized_log_cache::materialize_entries(&patches).unwrap();
+        super::normalized_log_cache::write(
+            &cache_path,
+            super::normalized_log_cache::CacheHeader {
+                version: super::normalized_log_cache::CACHE_VERSION,
+                entry_count: materialized.len(),
+                truncated: false,
+            },
+            &materialized,
+        )
+        .await
+        .unwrap();
+
+        // Mirrors `normalized_entries`: consume the replayed stream, keep
+        // only `/entries/<index>` patches, materialize, then deserialize.
+        let mut stream = replay_materialized_log(&cache_path, execution_id, "test")
+            .await
+            .expect("a fresh cache must replay");
+        let mut replayed = Vec::new();
+        while let Some(message) = stream.next().await {
+            match message.unwrap() {
+                LogMsg::JsonPatch(patch) if is_indexed_entry_patch(&patch) => replayed.push(patch),
+                LogMsg::Finished => break,
+                _ => {}
+            }
+        }
+        let values = super::normalized_log_cache::materialize_entries(&replayed).unwrap();
+        let entries: Vec<_> = values
+            .iter()
+            .filter_map(super::normalized_entry_from_patch_value)
+            .collect();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, entry.content);
+        assert!(matches!(
+            entries[0].entry_type,
+            super::NormalizedEntryType::AssistantMessage
+        ));
+    }
+
+    /// Regression test for VAS-440's second half: a finished turn writes its
+    /// sidecar straight from the in-memory store — no reader ever has to
+    /// open `stream_normalized_logs` first for the cache to exist.
+    #[tokio::test]
+    async fn a_finished_turn_writes_its_sidecar_without_anyone_opening_logs_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("execution.normalized.jsonl");
+
+        let store = utils::msg_store::MsgStore::new();
+        let entry = super::NormalizedEntry {
+            timestamp: None,
+            entry_type: super::NormalizedEntryType::AssistantMessage,
+            content: "turn finished".to_string(),
+            metadata: None,
+        };
+        store.push_patch(ConversationPatch::add_normalized_entry(0, entry.clone()));
+
+        assert!(
+            super::normalized_log_cache::read(&cache_path)
+                .await
+                .is_none()
+        );
+
+        let wrote = cache_execution_from_history(&cache_path, &store).await;
+
+        assert!(wrote);
+        let (_, cached) = super::normalized_log_cache::read(&cache_path)
+            .await
+            .expect("the sidecar must exist as soon as the store is written, unread");
+        let entries: Vec<_> = cached
+            .iter()
+            .filter_map(super::normalized_entry_from_patch_value)
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, entry.content);
+    }
+
+    /// A store with nothing to say (e.g. a turn that errored before any
+    /// entry was produced) must not write an empty sidecar that a reader
+    /// could mistake for "materialized, zero messages" versus "never
+    /// materialized, ask again."
+    #[tokio::test]
+    async fn an_empty_store_writes_no_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("execution.normalized.jsonl");
+        let store = utils::msg_store::MsgStore::new();
+
+        let wrote = cache_execution_from_history(&cache_path, &store).await;
+
+        assert!(!wrote);
+        assert!(
+            super::normalized_log_cache::read(&cache_path)
+                .await
+                .is_none()
+        );
     }
 
     #[test]
