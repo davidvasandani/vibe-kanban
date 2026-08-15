@@ -141,6 +141,104 @@ struct GetExecutionResponse {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ListRecentMessagesRequest {
+    #[schemars(
+        description = "Session ID to inspect (reads its latest coding-agent execution). Exactly one of session_id/execution_id is required."
+    )]
+    session_id: Option<Uuid>,
+    #[schemars(
+        description = "Execution ID to inspect directly, instead of resolving a session's latest execution."
+    )]
+    execution_id: Option<Uuid>,
+    #[schemars(description = "Max messages to return, newest last. Default 20, max 100.")]
+    limit: Option<usize>,
+    #[schemars(
+        description = "Optional comma-separated role filter, any of: user, assistant, system, tool."
+    )]
+    roles: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct RecentMessage {
+    #[schemars(description = "Stable id for this message, scoped to its execution")]
+    id: String,
+    #[schemars(description = "One of: user, assistant, system, tool")]
+    role: String,
+    text: String,
+    #[schemars(description = "Entry timestamp, if the executor reported one")]
+    created_at: Option<String>,
+    execution_id: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct ListRecentMessagesResponse {
+    session_id: String,
+    execution_id: String,
+    status: String,
+    exit_code: Option<i64>,
+    #[schemars(
+        description = "Last non-empty assistant text, or null if the turn never produced one"
+    )]
+    final_message: Option<String>,
+    #[schemars(description = "Newest-last window of normalized messages, truncated per-message")]
+    messages: Vec<RecentMessage>,
+    #[schemars(
+        description = "True if more matching messages existed than `limit` allowed through"
+    )]
+    has_more: bool,
+}
+
+/// Mirrors `RecentMessagesResponse` (`crates/server/src/routes/execution_processes.rs`) —
+/// deserialization target for the backend's `.../messages` JSON, not re-exported
+/// across the process boundary since the MCP only talks HTTP to the backend.
+#[derive(Debug, Deserialize)]
+struct RecentMessagesPayload {
+    session_id: String,
+    execution_id: String,
+    status: String,
+    exit_code: Option<i64>,
+    final_message: Option<String>,
+    #[serde(default)]
+    messages: Vec<RecentMessagePayload>,
+    has_more: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecentMessagePayload {
+    id: String,
+    role: String,
+    text: String,
+    created_at: Option<String>,
+    execution_id: String,
+}
+
+impl From<RecentMessagePayload> for RecentMessage {
+    fn from(value: RecentMessagePayload) -> Self {
+        Self {
+            id: value.id,
+            role: value.role,
+            text: value.text,
+            created_at: value.created_at,
+            execution_id: value.execution_id,
+        }
+    }
+}
+
+impl From<RecentMessagesPayload> for ListRecentMessagesResponse {
+    fn from(value: RecentMessagesPayload) -> Self {
+        Self {
+            session_id: value.session_id,
+            execution_id: value.execution_id,
+            status: value.status,
+            exit_code: value.exit_code,
+            final_message: value.final_message,
+            messages: value.messages.into_iter().map(Into::into).collect(),
+            has_more: value.has_more,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct RefreshMcpToolsRequest {
     #[schemars(description = "Workspace ID. Optional in an orchestrator-scoped MCP context.")]
     workspace_id: Option<Uuid>,
@@ -405,14 +503,82 @@ impl McpServer {
             Err(error_result) => return Ok(Self::tool_error(error_result)),
         };
 
+        // Only the last assistant text matters here, so ask for the smallest
+        // window that still lets the backend compute it.
+        let final_message = match self
+            .fetch_recent_messages(
+                &format!("/api/execution-processes/{execution_id}/messages"),
+                1,
+                None,
+            )
+            .await
+        {
+            Ok(payload) => payload.final_message,
+            Err(error) => {
+                tracing::warn!(
+                    "Failed to fetch final_message for execution {execution_id}: {error}"
+                );
+                None
+            }
+        };
+
         Self::success(&GetExecutionResponse {
             execution_id: execution_process.id.to_string(),
             session_id: execution_process.session_id.to_string(),
             status: Self::execution_process_status_label(&execution_process.status).to_string(),
             is_finished,
             execution: execution_process_value,
-            final_message: None,
+            final_message,
         })
+    }
+
+    #[tool(
+        description = "Read the last N normalized messages (structured, not a raw log dump) for a session or execution — the same conversation the UI shows, without opening the logs websocket. Pass session_id to read the latest coding-agent turn, or execution_id to target a specific turn. Check this before a follow-up run_session_prompt so the nudge responds to what the agent actually said instead of guessing from status/exit_code alone."
+    )]
+    async fn list_recent_messages(
+        &self,
+        Parameters(ListRecentMessagesRequest {
+            session_id,
+            execution_id,
+            limit,
+            roles,
+        }): Parameters<ListRecentMessagesRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (path, owning_session_id) = if let Some(execution_id) = execution_id {
+            let process_url = self.url(&format!("/api/execution-processes/{execution_id}"));
+            let execution_process: ExecutionProcess =
+                match self.send_json(self.client.get(&process_url)).await {
+                    Ok(value) => value,
+                    Err(error_result) => return Ok(Self::tool_error(error_result)),
+                };
+            (
+                format!("/api/execution-processes/{execution_id}/messages"),
+                execution_process.session_id,
+            )
+        } else if let Some(session_id) = session_id {
+            (format!("/api/sessions/{session_id}/messages"), session_id)
+        } else {
+            return Self::err("session_id or execution_id is required", None);
+        };
+
+        let session_url = self.url(&format!("/api/sessions/{owning_session_id}"));
+        let session: Session = match self.send_json(self.client.get(&session_url)).await {
+            Ok(value) => value,
+            Err(error_result) => return Ok(Self::tool_error(error_result)),
+        };
+        if let Err(error_result) = self.scope_allows_workspace(session.workspace_id) {
+            return Ok(Self::tool_error(error_result));
+        }
+
+        let payload = match self
+            .fetch_recent_messages(&path, limit.unwrap_or(20), roles.as_deref())
+            .await
+        {
+            Ok(value) => value,
+            Err(error_result) => return Ok(Self::tool_error(error_result)),
+        };
+
+        Self::success(&ListRecentMessagesResponse::from(payload))
     }
 }
 
@@ -452,5 +618,30 @@ impl McpServer {
                 Some(error.to_string()),
             )
         })
+    }
+
+    /// GETs a `.../messages` endpoint (either `/api/execution-processes/{id}/messages`
+    /// or `/api/sessions/{id}/messages`). Callers are responsible for having
+    /// already checked `scope_allows_workspace` on the owning session — this
+    /// only does the HTTP call, not auth.
+    async fn fetch_recent_messages(
+        &self,
+        path: &str,
+        limit: usize,
+        roles: Option<&str>,
+    ) -> Result<RecentMessagesPayload, super::ToolError> {
+        #[derive(Serialize)]
+        struct MessagesQuery {
+            limit: usize,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            roles: Option<String>,
+        }
+
+        let url = self.url(path);
+        let query = MessagesQuery {
+            limit,
+            roles: roles.map(str::to_string),
+        };
+        self.send_json(self.client.get(&url).query(&query)).await
     }
 }

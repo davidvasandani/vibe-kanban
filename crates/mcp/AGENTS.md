@@ -57,6 +57,41 @@ survives server restarts like a dev server, and is stopped on workspace archive.
 Agents should use these instead of `setsid`/`nohup` tricks, which leak untracked
 orphans.
 
+## Reading a session before following up
+
+An orchestrator that calls `run_session_prompt` and then only polls
+`get_execution` for `status`/`exit_code` is driving blind — it never sees what
+the agent actually said, so a follow-up nudge can't respond to anything real.
+Two tools close that gap (`src/task_server/tools/sessions.rs`):
+
+- **`get_execution.final_message`** — the last non-empty `AssistantMessage`
+  text for that execution, or `null` if the turn never produced one (e.g. it
+  errored before responding). Populated on every `get_execution` call, so a
+  routine status poll is enough for "what did it just say?".
+- **`list_recent_messages`** — the last N normalized messages (newest last),
+  structured as `{ role, text, created_at, execution_id }` plus the same
+  `final_message`/`status`/`exit_code` `get_execution` returns. Accepts
+  `session_id` (resolves the session's latest `CodingAgent` execution) or
+  `execution_id` directly; `limit` defaults to 20 (max 100); `roles` optionally
+  filters to a comma-separated subset of `user`/`assistant`/`system`/`tool`.
+
+Both are read-only projections of the same normalized-logs pipeline the UI's
+conversation view and `.../normalized-logs/ws` already use
+(`ContainerService::normalized_entries`,
+`crates/services/src/services/container.rs`) — served via
+`GET /api/execution-processes/{id}/messages` and
+`GET /api/sessions/{id}/messages` (`crates/server/src/routes/execution_processes.rs`,
+`crates/server/src/routes/sessions/mod.rs`). Neither tool opens a websocket or
+adds a second store: for a finished process this reads the on-disk normalized
+log cache; for a running one it reads the in-memory `MsgStore`. Tool-result and
+message text is truncated (4000 chars) before it leaves the backend, so a
+large diff or command dump in the conversation can't blow up the response —
+use the logs websocket in the UI for the full untruncated transcript.
+
+Use `list_recent_messages` (or `get_execution.final_message`) before every
+follow-up `run_session_prompt`: a nudge that ignores the agent's last message
+is the same blind retry regardless of how it's phrased.
+
 ## Backend resolution (important)
 
 `resolve_base_url` (`src/bin/vibe_kanban_mcp.rs:100-134`) decides which backend the

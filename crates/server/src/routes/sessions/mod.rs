@@ -62,6 +62,40 @@ pub async fn get_session(
     Ok(ResponseJson(ApiResponse::success(session)))
 }
 
+/// Last N normalized messages for the session's most recent coding-agent
+/// turn. Resolves "latest execution" the same way the UI would: the newest
+/// non-soft-deleted `CodingAgent` execution process, not setup/dev-server/
+/// background-helper runs.
+pub async fn get_session_messages(
+    Extension(session): Extension<Session>,
+    State(deployment): State<DeploymentImpl>,
+    Query(query): Query<crate::routes::execution_processes::RecentMessagesQuery>,
+) -> Result<
+    ResponseJson<ApiResponse<crate::routes::execution_processes::RecentMessagesResponse>>,
+    ApiError,
+> {
+    let pool = &deployment.db().pool;
+    let execution_process = ExecutionProcess::find_by_session_id(pool, session.id, false)
+        .await?
+        .into_iter()
+        .rev()
+        .find(|process| process.run_reason == ExecutionProcessRunReason::CodingAgent)
+        .ok_or(ApiError::ExecutionProcess(
+            db::models::execution_process::ExecutionProcessError::ExecutionProcessNotFound,
+        ))?;
+
+    let limit = crate::routes::execution_processes::clamp_message_limit(query.limit);
+    let roles = crate::routes::execution_processes::parse_roles(query.roles.as_deref());
+    let response = crate::routes::execution_processes::build_recent_messages_response(
+        &deployment,
+        &execution_process,
+        limit,
+        roles.as_ref(),
+    )
+    .await;
+    Ok(ResponseJson(ApiResponse::success(response)))
+}
+
 pub async fn create_session(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<CreateSessionRequest>,
@@ -314,6 +348,7 @@ pub async fn run_setup_script(
 pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
     let session_id_router = Router::new()
         .route("/", get(get_session).put(update_session))
+        .route("/messages", get(get_session_messages))
         .route("/follow-up", post(follow_up))
         .route("/reset", post(reset_process))
         .route("/setup", post(run_setup_script))

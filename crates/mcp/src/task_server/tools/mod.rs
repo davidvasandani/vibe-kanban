@@ -621,6 +621,7 @@ mod tests {
             "get_context".to_string(),
             "get_execution".to_string(),
             "list_background_helpers".to_string(),
+            "list_recent_messages".to_string(),
             "list_sessions".to_string(),
             "refresh_mcp_tools".to_string(),
             "run_session_prompt".to_string(),
