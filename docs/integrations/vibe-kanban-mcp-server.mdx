@@ -84,7 +84,7 @@ Many tools accept an optional `project_id` or `organization_id` parameter. When 
 | Tool | Purpose | Required Parameters | Optional Parameters | Returns |
 |------|---------|-------------------|-------------------|---------|
 | `list_issues` | List issues in a project | None | `project_id`<br/>`status`<br/>`priority`<br/>`search`<br/>`simple_id`<br/>`parent_issue_id`<br/>`assignee_user_id`<br/>`tag_id`<br/>`tag_name`<br/>`limit`<br/>`offset` | Paginated list of issues with PR info |
-| `create_issue` | Create a new issue | `title` | `project_id`<br/>`description`<br/>`priority`<br/>`parent_issue_id` | Created issue ID |
+| `create_issue` | Create a new issue | `title` | `project_id`<br/>`description`<br/>`priority`<br/>`parent_issue_id`<br/>`pipeline_ids`<br/>`pipeline_stage_ids`<br/>`executor` | Created issue ID |
 | `get_issue` | Get detailed issue information | `issue_id` | None | Full issue details with tags, relationships, sub-issues, and PRs |
 | `update_issue` | Update an existing issue | `issue_id` | `title`<br/>`description`<br/>`status`<br/>`priority`<br/>`parent_issue_id` | Updated issue details |
 | `delete_issue` | Delete an issue | `issue_id` | None | Deletion confirmation |
@@ -93,6 +93,8 @@ Many tools accept an optional `project_id` or `organization_id` parameter. When 
 <Tip>
 For `update_issue`, the `parent_issue_id` field supports three states: omit it entirely to leave the parent unchanged, pass `null` to un-nest the issue from its parent, or pass a UUID to set a new parent.
 </Tip>
+
+`create_issue`'s `pipeline_ids`, `pipeline_stage_ids`, and `executor` parameters compose the same `## Pipeline` block that the New Issue UI appends to a task's description. Call `list_pipelines` first to find available pipeline and stage IDs; see [Pipelines](#pipelines) below.
 
 ### Issue Assignees
 
@@ -120,6 +122,14 @@ For `update_issue`, the `parent_issue_id` field supports three states: omit it e
 
 Supported relationship types: `blocking`, `related`, `has_duplicate`.
 
+### Pipelines
+
+| Tool | Purpose | Required Parameters | Optional Parameters | Returns |
+|------|---------|-------------------|-------------------|---------|
+| `list_pipelines` | List the available task pipelines (`~/.vibe-kanban/pipelines/*.toml`) | None | None | List of pipelines with their ordered stages |
+
+Each pipeline stage has an `id`, `label`, `prompt_fragment`, `default_enabled` flag, and `heavy` flag. Pass a pipeline's `id` in `create_issue`'s `pipeline_ids`, and (optionally) a subset of its stage `id`s in `pipeline_stage_ids` — omitting `pipeline_stage_ids` enables each selected pipeline's `default_enabled` stages.
+
 ### Repository Management
 
 | Tool | Purpose | Required Parameters | Optional Parameters | Returns |
@@ -143,7 +153,7 @@ Supported relationship types: `blocking`, `related`, `has_duplicate`.
 
 | Tool | Purpose | Required Parameters | Optional Parameters | Returns |
 |------|---------|-------------------|-------------------|---------|
-| `start_workspace` | Create a workspace and start its first coding-agent session | `name`<br/>`executor`<br/>`repositories` | `prompt`<br/>`variant`<br/>`issue_id` | Workspace ID |
+| `start_workspace` | Create a workspace and start its first coding-agent session | `name`<br/>`executor`<br/>`repositories` | `prompt`<br/>`variant`<br/>`model_id`<br/>`agent_id`<br/>`reasoning_id`<br/>`issue_id` | Workspace ID |
 | `create_session` | Create a session in an existing workspace | None | `workspace_id`<br/>`executor` | Session summary |
 | `list_sessions` | List sessions for a workspace | None | `workspace_id` | Session list |
 | `run_session_prompt` | Run a coding-agent prompt inside an existing session | `session_id`<br/>`prompt` | None | Execution details |
