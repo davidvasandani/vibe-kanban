@@ -138,6 +138,17 @@ async fn replay_materialized_log(
         }
     }
 }
+
+/// True for a patch targeting `/entries/<numeric index>` — a conversation
+/// entry, as opposed to a repo-diff patch (`/entries/<repo>/<file>`), which
+/// targets a nested object `materialize_entries` can't apply against the
+/// `{"entries": []}` array document.
+fn is_indexed_entry_patch(patch: &Patch) -> bool {
+    patch_entry_path(patch)
+        .and_then(|path| path.strip_prefix("/entries/").map(str::to_string))
+        .is_some_and(|rest| rest.parse::<usize>().is_ok())
+}
+
 pub type ContainerRef = String;
 
 // Historical normalization temporarily holds raw logs, parsed messages, and
@@ -1700,6 +1711,50 @@ pub trait ContainerService {
         }
     }
 
+    /// Returns the settled normalized entries for an execution, for callers
+    /// that want a `Vec` rather than a live stream (e.g. an MCP tool
+    /// answering "what did this turn say").
+    ///
+    /// Reuses [`Self::stream_normalized_logs`] rather than a second read
+    /// path: the same in-memory store / on-disk materialized cache / bounded
+    /// historical re-normalization decision it makes applies here too. Only
+    /// `/entries/<index>` patches are kept before materializing — repo-diff
+    /// patches (`/entries/<repo>/<file>`) target a nested object, not the
+    /// `{"entries": []}` array `materialize_entries` applies against, and
+    /// they aren't messages anyway.
+    async fn normalized_entries(&self, id: &Uuid) -> Option<Vec<NormalizedEntry>> {
+        let mut stream = self.stream_normalized_logs(id).await?;
+        let mut patches = Vec::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(LogMsg::JsonPatch(patch)) => {
+                    if is_indexed_entry_patch(&patch) {
+                        patches.push(patch);
+                    }
+                }
+                Ok(LogMsg::Finished) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+
+        match normalized_log_cache::materialize_entries(&patches) {
+            Ok(values) => Some(
+                values
+                    .into_iter()
+                    .filter_map(|value| serde_json::from_value::<NormalizedEntry>(value).ok())
+                    .collect(),
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    execution_id = %id,
+                    "Could not materialize normalized entries: {e}"
+                );
+                None
+            }
+        }
+    }
+
     async fn start_workspace(
         &self,
         workspace: &Workspace,
@@ -2147,6 +2202,7 @@ mod tests {
 
     use chrono::Utc;
     use db::models::repo::Repo;
+    use executors::logs::utils::ConversationPatch;
     use futures::StreamExt;
     use serde_json::json;
     use tokio::{sync::Semaphore, time::Duration};
@@ -2154,9 +2210,35 @@ mod tests {
 
     use super::{
         HistoricalNormalizationLifetime, HistoricalNormalizationRegistry, LogMsg,
-        replay_materialized_log, reset_would_discard_uncommitted_work,
+        is_indexed_entry_patch, replay_materialized_log, reset_would_discard_uncommitted_work,
         scope_initial_prompt_to_working_dir,
     };
+
+    #[test]
+    fn indexed_entry_patches_are_kept_and_repo_diff_patches_are_not() {
+        let entry_patch = ConversationPatch::add_stdout(3, "hello".to_string());
+        assert!(is_indexed_entry_patch(&entry_patch));
+
+        let diff_patch = ConversationPatch::add_repo_diff(
+            "repo",
+            "src/main.rs",
+            utils::diff::Diff {
+                change: utils::diff::DiffChangeKind::Added,
+                old_path: None,
+                new_path: Some("src/main.rs".to_string()),
+                old_content: None,
+                new_content: None,
+                content_omitted: false,
+                additions: None,
+                deletions: None,
+                repo_id: None,
+            },
+        );
+        assert!(!is_indexed_entry_patch(&diff_patch));
+
+        let removed_diff_patch = ConversationPatch::remove_diff("repo/src/main.rs".to_string());
+        assert!(!is_indexed_entry_patch(&removed_diff_patch));
+    }
 
     #[tokio::test]
     async fn dropping_historical_normalization_aborts_its_tasks() {

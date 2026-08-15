@@ -78,13 +78,12 @@ async fn resolve_low_disk_issue(
     let response = IssueRepository::resolve_low_disk_issue(state.pool(), &payload, ctx.user.id)
         .await
         .map_err(|error| db_error(error, "failed to resolve low-disk issue"))?;
-    if response.created {
-        if let Err(error) =
+    if response.created
+        && let Err(error) =
             IssueFollowerRepository::create(state.pool(), None, response.issue.id, ctx.user.id)
                 .await
-        {
-            tracing::warn!(?error, issue_id = %response.issue.id, "failed to auto-follow low-disk issue");
-        }
+    {
+        tracing::warn!(?error, issue_id = %response.issue.id, "failed to auto-follow low-disk issue");
     }
     Ok(Json(response))
 }

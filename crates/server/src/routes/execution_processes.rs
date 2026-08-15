@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow;
 use axum::{
     Extension, Router,
@@ -15,9 +17,11 @@ use db::models::{
     execution_worker_job::ExecutionWorkerJob,
 };
 use deployment::Deployment;
+use executors::logs::{NormalizedEntry, NormalizedEntryType};
 use futures_util::{StreamExt, TryStreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use services::services::container::ContainerService;
+use ts_rs::TS;
 use utils::{log_msg::LogMsg, response::ApiResponse};
 use uuid::Uuid;
 
@@ -29,6 +33,155 @@ use crate::{
         signed_ws::{MaybeSignedWebSocket, SignedWsUpgrade},
     },
 };
+
+/// Default/maximum number of messages a `.../messages` request returns, and
+/// the per-message character cap. Kept small on purpose: this response is
+/// meant for an orchestrator to read in one shot, not to replace the
+/// normalized-logs websocket for full-transcript viewing.
+const DEFAULT_MESSAGE_LIMIT: usize = 20;
+const MAX_MESSAGE_LIMIT: usize = 100;
+const MAX_MESSAGE_CHARS: usize = 4000;
+
+#[derive(Debug, Deserialize)]
+pub struct RecentMessagesQuery {
+    pub limit: Option<usize>,
+    /// Comma-separated subset of `user`, `assistant`, `system`, `tool`.
+    pub roles: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct SessionMessage {
+    pub id: String,
+    pub role: String,
+    pub text: String,
+    pub created_at: Option<String>,
+    pub execution_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct RecentMessagesResponse {
+    pub session_id: String,
+    pub execution_id: String,
+    pub status: ExecutionProcessStatus,
+    pub exit_code: Option<i64>,
+    /// Last non-empty assistant text for this execution, or `None` if the
+    /// turn never produced one (e.g. it errored before responding).
+    pub final_message: Option<String>,
+    pub messages: Vec<SessionMessage>,
+    /// True if there were more matching messages than `limit` allowed
+    /// through; `messages` holds the newest `limit` of them.
+    pub has_more: bool,
+}
+
+/// Maps a normalized entry's type to the coarse role an orchestrator asked
+/// to filter by. `None` means the entry isn't a message worth surfacing here
+/// (e.g. a loading spinner or token-usage telemetry frame).
+fn entry_role(entry_type: &NormalizedEntryType) -> Option<&'static str> {
+    match entry_type {
+        NormalizedEntryType::UserMessage
+        | NormalizedEntryType::UserFeedback { .. }
+        | NormalizedEntryType::UserAnsweredQuestions { .. } => Some("user"),
+        NormalizedEntryType::AssistantMessage | NormalizedEntryType::Thinking => Some("assistant"),
+        NormalizedEntryType::ToolUse { .. } => Some("tool"),
+        NormalizedEntryType::SystemMessage
+        | NormalizedEntryType::ErrorMessage { .. }
+        | NormalizedEntryType::NextAction { .. } => Some("system"),
+        NormalizedEntryType::Loading | NormalizedEntryType::TokenUsageInfo(_) => None,
+    }
+}
+
+fn truncate(text: &str) -> String {
+    if text.chars().count() <= MAX_MESSAGE_CHARS {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(MAX_MESSAGE_CHARS).collect();
+    format!("{head}\n… [truncated]")
+}
+
+/// The last non-empty assistant text among `entries`, truncated like any
+/// other message. This is what makes `get_execution.final_message` and
+/// `RecentMessagesResponse.final_message` non-null after a real turn.
+pub fn last_assistant_message(entries: &[NormalizedEntry]) -> Option<String> {
+    entries.iter().rev().find_map(|entry| {
+        if !matches!(entry.entry_type, NormalizedEntryType::AssistantMessage) {
+            return None;
+        }
+        let content = entry.content.trim();
+        (!content.is_empty()).then(|| truncate(content))
+    })
+}
+
+pub fn parse_roles(roles: Option<&str>) -> Option<HashSet<String>> {
+    let roles = roles?;
+    let set: HashSet<String> = roles
+        .split(',')
+        .map(|role| role.trim().to_ascii_lowercase())
+        .filter(|role| !role.is_empty())
+        .collect();
+    (!set.is_empty()).then_some(set)
+}
+
+/// Builds the `.../messages` response for `execution_process`, reusing
+/// `ContainerService::normalized_entries` (itself a `.collect()` over the
+/// same pipeline `stream_normalized_logs` serves to the websocket) rather
+/// than a second store.
+pub async fn build_recent_messages_response(
+    deployment: &DeploymentImpl,
+    execution_process: &ExecutionProcess,
+    limit: usize,
+    roles: Option<&HashSet<String>>,
+) -> RecentMessagesResponse {
+    let entries = deployment
+        .container()
+        .normalized_entries(&execution_process.id)
+        .await
+        .unwrap_or_default();
+
+    let final_message = last_assistant_message(&entries);
+
+    let mut messages: Vec<SessionMessage> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let role = entry_role(&entry.entry_type)?;
+            if roles.is_some_and(|roles| !roles.contains(role)) {
+                return None;
+            }
+            let text = entry.content.trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some(SessionMessage {
+                id: format!("{}:{index}", execution_process.id),
+                role: role.to_string(),
+                text: truncate(text),
+                created_at: entry.timestamp.clone(),
+                execution_id: execution_process.id.to_string(),
+            })
+        })
+        .collect();
+
+    let has_more = messages.len() > limit;
+    if has_more {
+        messages = messages.split_off(messages.len() - limit);
+    }
+
+    RecentMessagesResponse {
+        session_id: execution_process.session_id.to_string(),
+        execution_id: execution_process.id.to_string(),
+        status: execution_process.status.clone(),
+        exit_code: execution_process.exit_code,
+        final_message,
+        messages,
+        has_more,
+    }
+}
+
+pub fn clamp_message_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(DEFAULT_MESSAGE_LIMIT)
+        .clamp(1, MAX_MESSAGE_LIMIT)
+}
 
 #[derive(Debug, Deserialize)]
 struct SessionExecutionProcessQuery {
@@ -43,6 +196,19 @@ async fn get_execution_process_by_id(
     State(_deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<ExecutionProcess>>, ApiError> {
     Ok(ResponseJson(ApiResponse::success(execution_process)))
+}
+
+async fn get_execution_process_messages(
+    Extension(execution_process): Extension<ExecutionProcess>,
+    State(deployment): State<DeploymentImpl>,
+    Query(query): Query<RecentMessagesQuery>,
+) -> Result<ResponseJson<ApiResponse<RecentMessagesResponse>>, ApiError> {
+    let limit = clamp_message_limit(query.limit);
+    let roles = parse_roles(query.roles.as_deref());
+    let response =
+        build_recent_messages_response(&deployment, &execution_process, limit, roles.as_ref())
+            .await;
+    Ok(ResponseJson(ApiResponse::success(response)))
 }
 
 async fn get_execution_worker_job(
@@ -324,6 +490,7 @@ pub(super) fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/stop", post(stop_execution_process))
         .route("/repo-states", get(get_execution_process_repo_states))
         .route("/worker-job", get(get_execution_worker_job))
+        .route("/messages", get(get_execution_process_messages))
         .route("/raw-logs/ws", get(stream_raw_logs_ws))
         .route("/normalized-logs/ws", get(stream_normalized_logs_ws))
         .layer(from_fn_with_state(
@@ -350,5 +517,119 @@ mod stream_close_tests {
         let frame = resnapshot_close_frame();
         assert_eq!(frame.code, 1011);
         assert!(frame.reason.contains("requires resnapshot"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use executors::logs::{ActionType, ToolStatus};
+
+    use super::*;
+
+    fn entry(entry_type: NormalizedEntryType, content: &str) -> NormalizedEntry {
+        NormalizedEntry {
+            timestamp: None,
+            entry_type,
+            content: content.to_string(),
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn last_assistant_message_skips_trailing_non_assistant_entries() {
+        let entries = vec![
+            entry(NormalizedEntryType::AssistantMessage, "first reply"),
+            entry(
+                NormalizedEntryType::ToolUse {
+                    tool_name: "bash".to_string(),
+                    action_type: ActionType::Search {
+                        query: "grep".to_string(),
+                    },
+                    status: ToolStatus::Success,
+                },
+                "ran a command",
+            ),
+        ];
+
+        assert_eq!(
+            last_assistant_message(&entries).as_deref(),
+            Some("first reply")
+        );
+    }
+
+    #[test]
+    fn last_assistant_message_ignores_empty_assistant_text() {
+        let entries = vec![
+            entry(NormalizedEntryType::AssistantMessage, "real answer"),
+            entry(NormalizedEntryType::AssistantMessage, "   "),
+        ];
+
+        assert_eq!(
+            last_assistant_message(&entries).as_deref(),
+            Some("real answer")
+        );
+    }
+
+    #[test]
+    fn last_assistant_message_is_none_without_any_assistant_entry() {
+        let entries = vec![entry(NormalizedEntryType::UserMessage, "do the thing")];
+        assert_eq!(last_assistant_message(&entries), None);
+    }
+
+    #[test]
+    fn last_assistant_message_truncates_huge_text() {
+        let huge = "x".repeat(MAX_MESSAGE_CHARS + 500);
+        let entries = vec![entry(NormalizedEntryType::AssistantMessage, &huge)];
+
+        let message = last_assistant_message(&entries).unwrap();
+        assert!(message.len() < huge.len());
+        assert!(message.ends_with("[truncated]"));
+    }
+
+    #[test]
+    fn entry_role_maps_conversational_types_and_drops_telemetry() {
+        assert_eq!(entry_role(&NormalizedEntryType::UserMessage), Some("user"));
+        assert_eq!(
+            entry_role(&NormalizedEntryType::AssistantMessage),
+            Some("assistant")
+        );
+        assert_eq!(
+            entry_role(&NormalizedEntryType::ToolUse {
+                tool_name: "bash".to_string(),
+                action_type: ActionType::Search {
+                    query: "grep".to_string()
+                },
+                status: ToolStatus::Success,
+            }),
+            Some("tool")
+        );
+        assert_eq!(
+            entry_role(&NormalizedEntryType::SystemMessage),
+            Some("system")
+        );
+        assert_eq!(entry_role(&NormalizedEntryType::Loading), None);
+    }
+
+    #[test]
+    fn parse_roles_lowercases_trims_and_drops_empty() {
+        let roles = parse_roles(Some(" Assistant, tool ,,")).unwrap();
+        assert_eq!(
+            roles,
+            HashSet::from(["assistant".to_string(), "tool".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_roles_is_none_for_absent_or_blank_input() {
+        assert_eq!(parse_roles(None), None);
+        assert_eq!(parse_roles(Some("  ,  ")), None);
+    }
+
+    #[test]
+    fn clamp_message_limit_defaults_and_caps() {
+        assert_eq!(clamp_message_limit(None), DEFAULT_MESSAGE_LIMIT);
+        assert_eq!(clamp_message_limit(Some(0)), 1);
+        assert_eq!(clamp_message_limit(Some(9999)), MAX_MESSAGE_LIMIT);
+        assert_eq!(clamp_message_limit(Some(5)), 5);
     }
 }
