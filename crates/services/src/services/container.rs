@@ -44,7 +44,10 @@ use executors::{
         NormalizedEntry, NormalizedEntryError, NormalizedEntryType,
         utils::{
             ConversationPatch,
-            patch::{fix_patch_ops, is_add_or_replace, patch_entry_path},
+            patch::{
+                fix_patch_ops, is_add_or_replace, normalized_entry_from_patch_value,
+                patch_entry_path,
+            },
         },
     },
     mcp_refresh::McpRefreshResult,
@@ -1741,8 +1744,8 @@ pub trait ContainerService {
         match normalized_log_cache::materialize_entries(&patches) {
             Ok(values) => Some(
                 values
-                    .into_iter()
-                    .filter_map(|value| serde_json::from_value::<NormalizedEntry>(value).ok())
+                    .iter()
+                    .filter_map(normalized_entry_from_patch_value)
                     .collect(),
             ),
             Err(e) => {
@@ -2414,6 +2417,64 @@ mod tests {
         assert!(matches!(
             stream.next().await.unwrap().unwrap(),
             LogMsg::JsonPatch(_)
+        ));
+    }
+
+    /// Regression test for VAS-440: a cache hit replays the settled entry as
+    /// a `{"type": "NORMALIZED_ENTRY", "content": {...}}` patch value — the
+    /// same shape `PatchType` serializes to — not a bare `NormalizedEntry`.
+    /// `normalized_entries` must unwrap that wrapper before deserializing,
+    /// or every cached turn's messages silently disappear.
+    #[tokio::test]
+    async fn a_cached_normalized_entry_survives_the_read_pipeline_normalized_entries_uses() {
+        let execution_id = Uuid::new_v4();
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("execution.normalized.jsonl");
+
+        let entry = super::NormalizedEntry {
+            timestamp: None,
+            entry_type: super::NormalizedEntryType::AssistantMessage,
+            content: "the fix is deployed".to_string(),
+            metadata: None,
+        };
+        let patches = vec![ConversationPatch::add_normalized_entry(0, entry.clone())];
+        let materialized = super::normalized_log_cache::materialize_entries(&patches).unwrap();
+        super::normalized_log_cache::write(
+            &cache_path,
+            super::normalized_log_cache::CacheHeader {
+                version: super::normalized_log_cache::CACHE_VERSION,
+                entry_count: materialized.len(),
+                truncated: false,
+            },
+            &materialized,
+        )
+        .await
+        .unwrap();
+
+        // Mirrors `normalized_entries`: consume the replayed stream, keep
+        // only `/entries/<index>` patches, materialize, then deserialize.
+        let mut stream = replay_materialized_log(&cache_path, execution_id, "test")
+            .await
+            .expect("a fresh cache must replay");
+        let mut replayed = Vec::new();
+        while let Some(message) = stream.next().await {
+            match message.unwrap() {
+                LogMsg::JsonPatch(patch) if is_indexed_entry_patch(&patch) => replayed.push(patch),
+                LogMsg::Finished => break,
+                _ => {}
+            }
+        }
+        let values = super::normalized_log_cache::materialize_entries(&replayed).unwrap();
+        let entries: Vec<_> = values
+            .iter()
+            .filter_map(super::normalized_entry_from_patch_value)
+            .collect();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, entry.content);
+        assert!(matches!(
+            entries[0].entry_type,
+            super::NormalizedEntryType::AssistantMessage
         ));
     }
 
