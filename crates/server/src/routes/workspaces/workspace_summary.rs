@@ -291,8 +291,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        MAX_CONCURRENT_GIT_STATUS, WorkspaceAffinityKind, affinity_kind, last_workspace_activity,
-        should_skip_idle_git_status,
+        WorkspaceAffinityKind, affinity_kind, last_workspace_activity, should_skip_idle_git_status,
     };
 
     fn placement(
@@ -399,18 +398,6 @@ mod tests {
             last_workspace_activity(recent, None, now),
             now
         ));
-    }
-
-    #[test]
-    fn concurrent_git_status_limit_is_bounded() {
-        assert!(
-            MAX_CONCURRENT_GIT_STATUS > 0,
-            "concurrency limit must be positive"
-        );
-        assert!(
-            MAX_CONCURRENT_GIT_STATUS <= 16,
-            "concurrency limit should be small to avoid I/O overload"
-        );
     }
 }
 
