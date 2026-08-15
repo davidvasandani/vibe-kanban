@@ -34,6 +34,14 @@ struct StartWorkspaceRequest {
     executor: String,
     #[schemars(description = "Optional executor variant, if needed")]
     variant: Option<String>,
+    #[schemars(
+        description = "Optional model override for the executor (e.g. 'anthropic/claude-sonnet-4-20250514')"
+    )]
+    model_id: Option<String>,
+    #[schemars(description = "Optional agent mode override for the executor")]
+    agent_id: Option<String>,
+    #[schemars(description = "Optional reasoning effort override for the executor")]
+    reasoning_id: Option<String>,
     #[schemars(description = "Repository selection for the workspace")]
     repositories: Vec<McpWorkspaceRepoInput>,
     #[schemars(
@@ -101,6 +109,9 @@ impl McpServer {
             prompt,
             executor,
             variant,
+            model_id,
+            agent_id,
+            reasoning_id,
             repositories,
             issue_id,
         }): Parameters<StartWorkspaceRequest>,
@@ -141,14 +152,21 @@ impl McpServer {
             }
         };
 
-        let variant = variant.and_then(|v| {
-            let trimmed = v.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
+        let trim_to_option = |value: Option<String>| {
+            value.and_then(|v| {
+                let trimmed = v.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+        };
+
+        let variant = trim_to_option(variant);
+        let model_id = trim_to_option(model_id);
+        let agent_id = trim_to_option(agent_id);
+        let reasoning_id = trim_to_option(reasoning_id);
 
         let workspace_repos: Vec<WorkspaceRepoInput> = repositories
             .into_iter()
@@ -193,9 +211,9 @@ impl McpServer {
             executor_config: ExecutorConfig {
                 executor: base_executor,
                 variant,
-                model_id: None,
-                agent_id: None,
-                reasoning_id: None,
+                model_id,
+                agent_id,
+                reasoning_id,
                 permission_policy: None,
             },
             prompt: workspace_prompt,
