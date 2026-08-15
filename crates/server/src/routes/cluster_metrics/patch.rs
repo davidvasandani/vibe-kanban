@@ -508,7 +508,14 @@ mod tests {
         fixture.tick(2);
         fixture = fixture.with(second, &[1]);
         let patch = builder.next(&fixture.snapshot());
-        assert_eq!(paths(&patch), ["replace /nodes", "replace /generated_at", "replace /disk_alert_thresholds"]);
+        assert_eq!(
+            paths(&patch),
+            [
+                "replace /nodes",
+                "replace /generated_at",
+                "replace /disk_alert_thresholds"
+            ]
+        );
 
         apply(&mut document, &patch);
         assert_eq!(document["nodes"], value_of(&fixture.snapshot().nodes));
@@ -533,7 +540,14 @@ mod tests {
         fixture.tick(2);
         fixture.nodes.remove(&second);
         let patch = builder.next(&fixture.snapshot());
-        assert_eq!(paths(&patch), ["replace /nodes", "replace /generated_at", "replace /disk_alert_thresholds"]);
+        assert_eq!(
+            paths(&patch),
+            [
+                "replace /nodes",
+                "replace /generated_at",
+                "replace /disk_alert_thresholds"
+            ]
+        );
 
         apply(&mut document, &patch);
         assert!(document["nodes"].get(second.to_string()).is_none());
@@ -554,7 +568,14 @@ mod tests {
         fixture = fixture.with(id, &ring);
         let patch = builder.next(&fixture.snapshot());
 
-        assert_eq!(paths(&patch), ["replace /nodes", "replace /generated_at", "replace /disk_alert_thresholds"]);
+        assert_eq!(
+            paths(&patch),
+            [
+                "replace /nodes",
+                "replace /generated_at",
+                "replace /disk_alert_thresholds"
+            ]
+        );
         apply(&mut document, &patch);
         assert_eq!(document["nodes"], value_of(&fixture.snapshot().nodes));
     }
@@ -572,7 +593,14 @@ mod tests {
         fixture = fixture.with(id, &[9, 10, 11]);
         let patch = builder.next(&fixture.snapshot());
 
-        assert_eq!(paths(&patch), ["replace /nodes", "replace /generated_at", "replace /disk_alert_thresholds"]);
+        assert_eq!(
+            paths(&patch),
+            [
+                "replace /nodes",
+                "replace /generated_at",
+                "replace /disk_alert_thresholds"
+            ]
+        );
         apply(&mut document, &patch);
         assert_eq!(document["nodes"], value_of(&fixture.snapshot().nodes));
     }
@@ -589,7 +617,11 @@ mod tests {
         fixture = fixture.with(id, &[1]);
         assert_eq!(
             paths(&builder.next(&fixture.snapshot())),
-            ["replace /nodes", "replace /generated_at", "replace /disk_alert_thresholds"]
+            [
+                "replace /nodes",
+                "replace /generated_at",
+                "replace /disk_alert_thresholds"
+            ]
         );
     }
 
@@ -611,7 +643,14 @@ mod tests {
         };
         fixture.nodes.insert(id, expired);
         let patch = builder.next(&fixture.snapshot());
-        assert_eq!(paths(&patch), ["replace /nodes", "replace /generated_at", "replace /disk_alert_thresholds"]);
+        assert_eq!(
+            paths(&patch),
+            [
+                "replace /nodes",
+                "replace /generated_at",
+                "replace /disk_alert_thresholds"
+            ]
+        );
         apply(&mut document, &patch);
         assert_eq!(document["nodes"], value_of(&fixture.snapshot().nodes));
     }
@@ -629,7 +668,11 @@ mod tests {
         fixture.tick(1);
         assert_eq!(
             paths(&builder.next(&fixture.snapshot())),
-            ["replace /nodes", "replace /generated_at", "replace /disk_alert_thresholds"]
+            [
+                "replace /nodes",
+                "replace /generated_at",
+                "replace /disk_alert_thresholds"
+            ]
         );
     }
 
@@ -686,7 +729,13 @@ mod tests {
             fixture = fixture.with(id, &window);
             let patch = builder.next(&fixture.snapshot());
             apply(&mut document, &patch);
-            if patch.0.len() == 2 {
+            if paths(&patch)
+                == [
+                    "replace /nodes",
+                    "replace /generated_at",
+                    "replace /disk_alert_thresholds",
+                ]
+            {
                 continue; // the periodic resnapshot
             }
             assert_eq!(
