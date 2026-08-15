@@ -11,12 +11,17 @@ use db::models::{
     workspace::{Workspace, WorkspacePlacement, WorkspacePlacementState},
 };
 use deployment::Deployment;
+use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
 
 use crate::{DeploymentImpl, error::ApiError};
+
+/// Maximum number of concurrent `git status --porcelain` / diff-stat jobs.
+/// Keeps I/O load bounded when many active workspaces are polled at once.
+const MAX_CONCURRENT_GIT_STATUS: usize = 4;
 
 /// Skip bulk `git status` for workspaces whose last real activity is older than this.
 /// Filesystem mtime is not used: the worktree poller keeps those timestamps fresh.
@@ -191,9 +196,10 @@ pub async fn get_workspace_summaries(
         .map(|worker| (worker.id, worker.hostname))
         .collect();
 
-    // 8. Compute diff stats for each workspace (in parallel).
+    // 8. Compute diff stats for each workspace (bounded concurrency).
     // Skip workspaces idle > 14 days so the sidebar poll does not `git status`
     // every stale worktree. On-demand single-workspace status is unchanged.
+    // Limit concurrent git operations to avoid I/O-bound host overload.
     let now = Utc::now();
     let diff_futures: Vec<_> = workspaces
         .iter()
@@ -216,9 +222,11 @@ pub async fn get_workspace_summaries(
         })
         .collect();
 
-    let diff_results: Vec<Option<(Uuid, DiffStats)>> =
-        futures_util::future::join_all(diff_futures).await;
-    let diff_stats: HashMap<Uuid, DiffStats> = diff_results.into_iter().flatten().collect();
+    let diff_stats: HashMap<Uuid, DiffStats> = stream::iter(diff_futures)
+        .buffer_unordered(MAX_CONCURRENT_GIT_STATUS)
+        .filter_map(|opt| async move { opt })
+        .collect()
+        .await;
 
     // 9. Assemble response
     let summaries: Vec<WorkspaceSummary> = workspaces
@@ -283,7 +291,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        WorkspaceAffinityKind, affinity_kind, last_workspace_activity, should_skip_idle_git_status,
+        MAX_CONCURRENT_GIT_STATUS, WorkspaceAffinityKind, affinity_kind, last_workspace_activity,
+        should_skip_idle_git_status,
     };
 
     fn placement(
@@ -390,6 +399,18 @@ mod tests {
             last_workspace_activity(recent, None, now),
             now
         ));
+    }
+
+    #[test]
+    fn concurrent_git_status_limit_is_bounded() {
+        assert!(
+            MAX_CONCURRENT_GIT_STATUS > 0,
+            "concurrency limit must be positive"
+        );
+        assert!(
+            MAX_CONCURRENT_GIT_STATUS <= 16,
+            "concurrency limit should be small to avoid I/O overload"
+        );
     }
 }
 
