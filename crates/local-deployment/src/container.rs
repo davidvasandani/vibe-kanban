@@ -1191,6 +1191,20 @@ impl LocalContainerService {
         }
     }
 
+    /// Remove a just-finished execution's in-memory store and push its
+    /// `Finished` sentinel — the shared tail every completion path in this
+    /// file runs. Caches the store's settled entries to disk first (VAS-440):
+    /// every call site here means the execution just left `Running`, so this
+    /// is the one place guaranteed to hold the complete history without
+    /// requiring a reader to ask for it before the store is gone.
+    async fn finish_msg_store(&self, id: &Uuid) {
+        let Some(store) = self.msg_stores.write().await.remove(id) else {
+            return;
+        };
+        self.cache_finished_execution(id, &store).await;
+        store.push_finished();
+    }
+
     /// Leave a detached process running across a server shutdown so the next
     /// boot can adopt it. Forgets the child handle (defusing kill_on_drop)
     /// and stops its monitor tasks without touching the DB row, which stays
@@ -1246,9 +1260,7 @@ impl LocalContainerService {
 
             container.take_adopted_pgid(&exec_id).await;
             container.finish_raw_log_tailer(&exec_id).await;
-            if let Some(msg) = container.msg_stores.write().await.remove(&exec_id) {
-                msg.push_finished();
-            }
+            container.finish_msg_store(&exec_id).await;
         })
     }
 
@@ -1279,9 +1291,7 @@ impl LocalContainerService {
             handle.abort();
         }
         self.finish_raw_log_tailer(&execution_process.id).await;
-        if let Some(msg) = self.msg_stores.write().await.remove(&execution_process.id) {
-            msg.push_finished();
-        }
+        self.finish_msg_store(&execution_process.id).await;
 
         self.update_after_head_commits(execution_process.id).await;
 
@@ -2030,9 +2040,7 @@ impl LocalContainerService {
             // for DB persistence to complete before cleaning up the MsgStore
             container.finish_raw_log_tailer(&exec_id).await;
             let db_stream_handle = container.take_db_stream_handle(&exec_id).await;
-            if let Some(msg_arc) = msg_stores.write().await.remove(&exec_id) {
-                msg_arc.push_finished();
-            }
+            container.finish_msg_store(&exec_id).await;
             if let Some(handle) = db_stream_handle {
                 let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
             }
@@ -2256,13 +2264,12 @@ impl LocalContainerService {
                         store.push(LogMsg::Stderr(
                             "Worker output replay gap; execution state is indeterminate".into(),
                         ));
-                        // Remove before finishing so a client that subscribes
-                        // after this point re-derives from disk instead of
-                        // attaching to a store whose live broadcast will never
-                        // carry another message (see the terminal arm below
-                        // for the full explanation).
-                        container.msg_stores.write().await.remove(&execution_id);
-                        store.push_finished();
+                        // Remove (and cache) before finishing so a client that
+                        // subscribes after this point re-derives from disk
+                        // instead of attaching to a store whose live broadcast
+                        // will never carry another message (see the terminal
+                        // arm below for the full explanation).
+                        container.finish_msg_store(&execution_id).await;
                         break;
                     }
                     Err(error) => {
@@ -2287,8 +2294,7 @@ impl LocalContainerService {
                                 continue 'poll;
                             }
                             container.finalize_remote_execution(execution_id).await;
-                            container.msg_stores.write().await.remove(&execution_id);
-                            store.push_finished();
+                            container.finish_msg_store(&execution_id).await;
                             break;
                         }
                         tokio::time::sleep(retry_delay).await;
@@ -2378,8 +2384,7 @@ impl LocalContainerService {
                                     }
                                 }
                             }
-                            container.msg_stores.write().await.remove(&execution_id);
-                            store.push_finished();
+                            container.finish_msg_store(&execution_id).await;
                             return;
                         }
                         ExecutionEventPayload::InteractionRequested(interaction) => {
@@ -2493,20 +2498,20 @@ impl LocalContainerService {
                         tracing::warn!(%execution_id, "Terminal worker acknowledgement failed after persistence: {error}");
                     }
                     container.finalize_remote_execution(execution_id).await;
-                    // Remove from the map before pushing Finished. Historic
-                    // replay (`stream_normalized_logs`) reads a resident store
-                    // via `history_plus_stream()`, which chains the buffered
-                    // history onto a *live* broadcast subscription. A late
-                    // subscriber's history replay includes this store's past
-                    // `Finished` entry, but the filter used by that replay
-                    // path drops non-JsonPatch entries — so the sentinel is
-                    // discarded and the replay falls through to the live half,
-                    // which never yields again for a store nothing will ever
-                    // push to. Removing the store here ensures any later
-                    // subscriber instead falls back to the on-disk/materialized
-                    // log path, which terminates correctly.
-                    container.msg_stores.write().await.remove(&execution_id);
-                    store.push_finished();
+                    // Remove (and cache) from the map before pushing Finished.
+                    // Historic replay (`stream_normalized_logs`) reads a
+                    // resident store via `history_plus_stream()`, which chains
+                    // the buffered history onto a *live* broadcast
+                    // subscription. A late subscriber's history replay
+                    // includes this store's past `Finished` entry, but the
+                    // filter used by that replay path drops non-JsonPatch
+                    // entries — so the sentinel is discarded and the replay
+                    // falls through to the live half, which never yields
+                    // again for a store nothing will ever push to. Removing
+                    // the store here ensures any later subscriber instead
+                    // falls back to the on-disk/materialized log path, which
+                    // terminates correctly.
+                    container.finish_msg_store(&execution_id).await;
                     break;
                 }
 
@@ -2581,8 +2586,7 @@ impl LocalContainerService {
                             .into(),
                     ));
                     container.finalize_remote_execution(execution_id).await;
-                    container.msg_stores.write().await.remove(&execution_id);
-                    store.push_finished();
+                    container.finish_msg_store(&execution_id).await;
                     break;
                 }
 
@@ -4105,9 +4109,7 @@ impl ContainerService for LocalContainerService {
                     mark_remote_execution_indeterminate(&self.db, execution_process.id).await?;
                 }
             }
-            if let Some(store) = self.msg_stores.write().await.remove(&execution_process.id) {
-                store.push_finished();
-            }
+            self.finish_msg_store(&execution_process.id).await;
             return Ok(());
         }
 
@@ -4175,9 +4177,7 @@ impl ContainerService for LocalContainerService {
         // Mark the process finished in the MsgStore and wait for DB persistence
         self.finish_raw_log_tailer(&execution_process.id).await;
         let db_stream_handle = self.take_db_stream_handle(&execution_process.id).await;
-        if let Some(msg) = self.msg_stores.write().await.remove(&execution_process.id) {
-            msg.push_finished();
-        }
+        self.finish_msg_store(&execution_process.id).await;
         if let Some(handle) = db_stream_handle {
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
