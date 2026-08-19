@@ -67,6 +67,17 @@
       "GMAIL_CREDENTIALS_PATH": "/absolute/path/to/credentials.json"
     }
   },
+  "brink": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "brink-pos-mcp-server"
+    ],
+    "env": {
+      "BRINK_ACCESS_TOKEN": "YOUR_TOKEN",
+      "BRINK_LOCATION_TOKEN": "YOUR_TOKEN"
+    }
+  },
   "meta": {
     "vibe_kanban": {
       "name": "Vibe Kanban",
@@ -113,6 +124,11 @@
       "name": "Gmail",
       "description": "Read, search, draft and send Gmail from your agent",
       "url": "https://github.com/davidvasandani/Gmail-MCP-Server"
+    },
+    "brink": {
+      "name": "Brink POS",
+      "description": "Send test orders and check OLO connectivity on Brink POS registers",
+      "url": "https://github.com/davidvasandani/mcp-brink"
     }
   }
 }

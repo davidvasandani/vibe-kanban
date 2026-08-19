@@ -264,6 +264,46 @@ only ever confirm that a hash equals itself. Note that the SHA pins the fork's
 source, not its dependency versions — installing from Git runs the package's own
 build, which resolves its dependencies from npm at that moment.
 
+### Brink POS connector
+
+The Brink POS template runs the `brink-pos-mcp-server` package over stdio. It is
+a SOAP client for [Brink POS](https://github.com/davidvasandani/mcp-brink) that
+lets an agent place test orders, read order details and status, test OLO
+(online-ordering) connectivity, and read a register's current business date:
+
+```json
+{
+  "command": "npx",
+  "args": ["-y", "brink-pos-mcp-server"],
+  "env": {
+    "BRINK_ACCESS_TOKEN": "YOUR_TOKEN",
+    "BRINK_LOCATION_TOKEN": "YOUR_TOKEN"
+  }
+}
+```
+
+Replace both placeholders before saving — Vibe Kanban does not check that you
+have. `BRINK_ACCESS_TOKEN` is required. `BRINK_LOCATION_TOKEN` is the default
+register for the connection; tools that accept a `location_token` argument can
+override it per request, so you can point one instance at several locations.
+
+<Warning>
+`BRINK_LOCATION_TOKEN` is a Base64 value and must keep its `==` padding. A token
+copied without it — for example `EXAMPLE_LOCATION_TOKEN` — fails authentication;
+restore the trailing `==` so it ends `EXAMPLE_LOCATION_TOKEN==`.
+</Warning>
+
+<Note>
+The server defaults to the Brink production API
+(`https://api13.brinkpos.net/Ordering.svc`). To target a different endpoint, add
+an optional `BRINK_API_URL` entry to `env`.
+</Note>
+
+Unlike the Slack and Gmail templates, this entry is an unpinned package launch,
+so `npx` must be able to resolve `brink-pos-mcp-server` on the agent host —
+publish it to the npm registry your deployment uses (public npm or a configured
+private registry) before adding the server.
+
 ## Adding Custom MCP Servers
 
 You can also add your own MCP servers by configuring them manually:
