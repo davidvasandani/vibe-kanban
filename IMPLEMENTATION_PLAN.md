@@ -1,43 +1,82 @@
-# Implementation Plan: Low-Disk Warnings and Issue Follow-Through
+# IMPLEMENTATION_PLAN — Add Brink MCP to VK (`vk/5f7c-add-brink-mcp-to`)
 
-1. Trace the existing metrics transport, filesystem DTO, right-sidebar
-   collapsible lifecycle, remote issue mutation, database schema, and Nix
-   service configuration. Record exact extension seams in the SpecKit research
-   and plan artifacts.
-2. Define validated low-disk threshold configuration with documented defaults:
-   warning `<10%` or `<5 GiB`; critical `<2%` or `<1 GiB`. Expose effective
-   values with the coordinator metrics contract and wire deployment overrides
-   only through `homelab/modules/vibe-kanban-rebuild.nix` if required.
-3. Add a pure shared classification model that safely derives filesystem and
-   node severity, honors the conservative OR rule, rejects absent/invalid
-   samples, applies critical precedence, and returns the worst affected
-   filesystem plus rollup counts. Cover exact boundaries and mixed nodes.
-4. Extend the Server Metrics UI with accessible row warnings containing icon,
-   severity text, filesystem, available capacity, use percentage, and
-   mountpoint. Add keyboard-safe activation, pending/error states, and
-   light/dark theme-compatible styling.
-5. Add a header-owned metrics subscriber that reuses the existing cache/query
-   identity and renders the worst severity plus affected-node count outside the
-   collapsible body. Preserve the existing rule that the live socket/detail
-   container is unmounted while collapsed.
-6. Add a coordinator resolve-or-create-low-disk-issue API. Validate that the
-   node/sample is current and authorized, generate canonical permanent-fix
-   Markdown, atomically reuse an existing open node incident, or create a new
-   issue in the selected/linked project. Return the issue ID and whether it was
-   created.
-7. Persist machine-readable incident identity and enforce one open low-disk
-   issue per node under concurrent requests. Permit a new issue after the old
-   one reaches a terminal/closed status. Add migrations and database/API tests.
-8. Connect warning activation to the API and navigate to the returned issue.
-   Add component tests for create/reuse, double activation, collapsed rollup,
-   facts, accessibility, and failure recovery.
-9. Regenerate derived types where source types changed, format, and run focused
-   frontend/backend/configuration tests followed by the repository's standard
-   checks in proportion to available disk and time.
-10. Run the mandated independent Codex review, fix confirmed findings, repeat
-    until no significant findings remain, then document reusable architecture
-    knowledge and update its index.
-11. Commit the implementation and knowledge-base updates intentionally, push
-    the task branch, open a pull request against the detected base branch,
-    monitor required checks, fix failures, and merge only when green.
+Small, additive change: one catalog entry + docs. Derived from `SPEC.md` and
+`PRIOR_KNOWLEDGE.md`.
 
+## Files to change
+
+1. `crates/executors/default_mcp.json`
+2. `docs/integrations/mcp-server-configuration.mdx`
+
+No Rust code, no generated types, no frontend code, no new assets (icon omitted).
+
+## Step 1 — Add the `brink` launch entry
+
+Insert after the `gmail` server block, before `meta`:
+
+```json
+"brink": {
+  "command": "npx",
+  "args": ["-y", "brink-pos-mcp-server"],
+  "env": {
+    "BRINK_ACCESS_TOKEN": "YOUR_TOKEN",
+    "BRINK_LOCATION_TOKEN": "YOUR_TOKEN"
+  }
+},
+```
+
+Rationale (see SPEC "Design decision"): the package ships a prebuilt `dist/`
+with a `bin` and no `prepare` script → plain unpinned npm launcher, like `exa`.
+`BRINK_API_URL` is optional and omitted (defaults to Brink production).
+
+## Step 2 — Add the `brink` meta entry
+
+Insert after the `gmail` meta block:
+
+```json
+"brink": {
+  "name": "Brink POS",
+  "description": "Send test orders and check OLO connectivity on Brink POS registers",
+  "url": "https://github.com/davidvasandani/mcp-brink"
+}
+```
+
+No `icon` (matches Slack/Gmail); UI falls back to no-icon rendering.
+
+## Step 3 — Document the connector
+
+Add a `### Brink POS connector` subsection to
+`docs/integrations/mcp-server-configuration.mdx` after the Gmail section:
+- what it is (stdio SOAP client for Brink POS test ordering / OLO health),
+- the launch entry,
+- env vars: `BRINK_ACCESS_TOKEN` (required), `BRINK_LOCATION_TOKEN`,
+  `BRINK_API_URL` (optional),
+- the LocationToken `==` Base64-padding gotcha,
+- note the plain-npx form assumes `brink-pos-mcp-server` is resolvable by `npx`
+  on the agent host (published to the npm registry the deployment uses).
+
+## Step 4 — Verify
+
+- `default_mcp.json` is valid JSON (`node -e "JSON.parse(...)"` or a parse
+  check) and diff-clean apart from the two additions.
+- `cargo test -p executors` (catalog parses via `PRECONFIGURED_MCP_SERVERS`;
+  no test regresses).
+- `pnpm run check` (frontend types/lint) — `preconfiguredMcpServers()` yields a
+  `brink` item.
+- `pnpm run format` before finishing.
+
+## Step 5 — Review, knowledge, PR (pipeline stages 11–13)
+
+- Codex review of the diff; address confirmed findings.
+- Record the reusable "how to add a bundled MCP server to VK" knowledge in the
+  KB, tagged `vk/5f7c-add-brink-mcp-to`; refresh the index; commit.
+- Open and merge the PR against the base branch.
+
+## Risks / notes
+
+- **External prerequisite:** `brink-pos-mcp-server` must be `npx`-resolvable on
+  agent hosts. If the user distributes it as a private fork instead, switch to
+  the Slack-style pinned release tarball + pin machinery (does not change the UI
+  wiring). Flagged as the spec's key open question for `/speckit.clarify`.
+- No catalog test enumerates all servers, so the addition cannot break existing
+  Rust/TS tests; risk is limited to JSON validity and doc accuracy.
