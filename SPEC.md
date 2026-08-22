@@ -1,70 +1,72 @@
-# Technical Spec: Repository-scoped PR state in the Git panel
+# Technical Spec: `list_all_messages` MCP tool
 
-## Problem
+**Task:** `vk/29d8-vk-list-all-mess`
 
-`GitPanelContainer` uses a workspace-level summary PR as a fallback for every
-repository while per-repository branch status is unavailable. In a multi-repo
-workspace, that broadcasts one repository's PR number, URL, and status to all
-rows. It also suppresses the primary create/link actions on unrelated rows.
+## Summary
 
-The persisted local PR model is already repository-scoped: each PR-derived
-`Merge` in `RepoBranchStatus.merges` belongs to the status entry identified by
-`repo_id`. The workspace summary intentionally represents only a single/latest
-workspace PR and cannot establish repository identity.
+Add a read-only `list_all_messages` tool to the Vibe Kanban MCP server alongside
+`list_recent_messages`. The new tool returns the complete normalized message
+history for either a session's latest coding-agent execution or a specific
+execution, while preserving workspace scoping, role filtering, message order,
+normalization, and per-message truncation.
 
-## Scope
+## Motivation
 
-Change only the Vibe Kanban frontend logic that derives Git panel repository
-rows, plus focused tests and reusable project documentation. No other service
-or homelab deployment behavior is changed.
+`list_recent_messages` is intentionally a bounded tail reader: its default is
+20 messages and the HTTP API clamps requests to 100. Orchestrators sometimes
+need the complete conversation to recover earlier decisions and context. Asking
+for a larger recent-message window cannot satisfy that requirement once a turn
+contains more than 100 normalized messages.
 
-## Requirements
+## Functional requirements
 
-1. A repository row may display a PR only when PR data is associated with that
-   repository's `RepoBranchStatus` entry.
-2. A PR belonging to one repository must never appear on another repository's
-   row, including during initial loading or refresh.
-3. Repositories without an associated PR must retain their normal per-repo
-   action affordances. Existing commit/change rules remain unchanged.
-4. Open PRs remain preferred over merged PRs when both are present for one
-   repository, preserving current behavior.
-5. Single-repository and multi-repository workspaces use the same safe
-   association rule; workspace summary data must not be guessed onto a repo.
-6. Focused automated tests must cover mixed multi-repo state and the loading
-   state where branch status is not yet available.
+1. Expose `list_all_messages` in both global and scoped/orchestrator MCP modes.
+2. Accept exactly the same target choices as `list_recent_messages`:
+   `session_id` (latest non-deleted coding-agent execution) or `execution_id`.
+   At least one target is required; when both are supplied, preserve the
+   existing execution-first behavior for compatibility.
+3. Accept the same optional comma-separated `roles` filter.
+4. Return the same response shape and message shape as
+   `list_recent_messages`, ordered oldest to newest, but without a caller limit
+   or the server's 100-message cap. `has_more` must be false for a successful
+   all-messages response.
+5. Reuse the existing normalized-log projection used by the UI and recent
+   messages. Do not read raw logs, open a websocket, or introduce another data
+   store.
+6. Enforce the owning session's workspace scope before reading messages.
+7. Preserve the existing per-message truncation and `final_message` behavior so
+   an unbounded message count does not also make individual entries unbounded.
+8. Leave `list_recent_messages` behavior and API compatibility unchanged.
+9. Document when callers should choose recent versus all messages.
 
-## Design
+## Technical design
 
-Extract the repo-to-panel transformation into a small pure helper colocated
-with `GitPanelContainer`. For each configured repository it finds the matching
-`RepoBranchStatus` by `repo_id`, selects that status entry's open PR or merged
-PR, and builds `RepoInfo`. If no matching status or merge exists, PR fields stay
-undefined.
+- Extend the messages HTTP query with an optional `all` boolean. The existing
+  endpoints continue to clamp `limit` when `all` is absent or false. When
+  `all=true`, the shared response builder retains every filtered normalized
+  message and reports `has_more: false`.
+- Generalize the MCP HTTP helper so it can request either a bounded `limit` or
+  `all=true` while continuing to pass the optional role filter.
+- Factor the shared target resolution and workspace authorization used by the
+  two MCP tools where practical, avoiding behavior drift.
+- Register the new tool through the sessions tool router and update the
+  orchestrator allow-list test.
 
-Remove the workspace-summary PR fallback and its dependency on active/archive
-workspace collections. This is deliberate: the summary exposes no `repo_id`,
-so applying it to any row would be an unverified association. The branch-status
-query is the authoritative repository-scoped source already used after load.
+## Tests and acceptance criteria
 
-The reported manually-created remote PR that never appeared is not repaired by
-guessing from issue-level or workspace-level PR lists. That path requires a
-separate explicit remote-repository-to-local-repo association and is outside
-this rendering fix.
+- Unit tests prove bounded responses still tail and set `has_more`, while the
+  all-messages mode returns more than 100 filtered messages in chronological
+  order with `has_more: false`.
+- MCP router tests prove `list_all_messages` is exposed to orchestrators.
+- Existing recent-message tests remain green.
+- Rust formatting and focused crate checks/tests pass.
+- An independent Codex diff review reports no significant findings.
 
-## Acceptance criteria
+## Out of scope
 
-- A two-or-more-repo fixture with a PR on exactly one repo produces PR fields
-  only on that repo's `RepoInfo`.
-- With branch status unavailable, no repo receives workspace summary PR data.
-- A repo with both open and merged PR records displays the open PR.
-- Existing Git panel type checking, formatting, and relevant tests pass.
-- Independent Codex review reports no significant findings.
-
-## Risks and mitigations
-
-- **Temporary blank PR state while branch status loads:** preferable to a
-  confidently wrong cross-repo link; the scoped status populates afterward.
-- **Manual remote PR discovery remains absent:** explicitly out of scope because
-  no trustworthy repo identity is present in the workspace summary fallback.
-- **Transformation regressions:** isolate the logic and exercise it with pure
-  unit tests rather than relying only on a rendered component test.
+- Changes to services other than Vibe Kanban.
+- Combining messages across multiple executions in a session; session targeting
+  continues to mean the latest coding-agent execution.
+- Removing truncation, changing normalized-log semantics, or changing the
+  existing `list_recent_messages` limit.
+- Frontend UI changes or homelab deployment changes.

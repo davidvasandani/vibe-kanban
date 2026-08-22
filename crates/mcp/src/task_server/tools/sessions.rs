@@ -143,15 +143,31 @@ struct GetExecutionResponse {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ListRecentMessagesRequest {
     #[schemars(
-        description = "Session ID to inspect (reads its latest coding-agent execution). Exactly one of session_id/execution_id is required."
+        description = "Session ID to inspect (reads its latest coding-agent execution). Required when execution_id is omitted."
     )]
     session_id: Option<Uuid>,
     #[schemars(
-        description = "Execution ID to inspect directly, instead of resolving a session's latest execution."
+        description = "Execution ID to inspect directly. Takes precedence when both identifiers are supplied."
     )]
     execution_id: Option<Uuid>,
     #[schemars(description = "Max messages to return, newest last. Default 20, max 100.")]
     limit: Option<usize>,
+    #[schemars(
+        description = "Optional comma-separated role filter, any of: user, assistant, system, tool."
+    )]
+    roles: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ListAllMessagesRequest {
+    #[schemars(
+        description = "Session ID to inspect (reads its latest coding-agent execution). Required when execution_id is omitted."
+    )]
+    session_id: Option<Uuid>,
+    #[schemars(
+        description = "Execution ID to inspect directly. Takes precedence when both identifiers are supplied."
+    )]
+    execution_id: Option<Uuid>,
     #[schemars(
         description = "Optional comma-separated role filter, any of: user, assistant, system, tool."
     )]
@@ -180,11 +196,9 @@ struct ListRecentMessagesResponse {
         description = "Last non-empty assistant text, or null if the turn never produced one"
     )]
     final_message: Option<String>,
-    #[schemars(description = "Newest-last window of normalized messages, truncated per-message")]
+    #[schemars(description = "Oldest-to-newest normalized messages, truncated per-message")]
     messages: Vec<RecentMessage>,
-    #[schemars(
-        description = "True if more matching messages existed than `limit` allowed through"
-    )]
+    #[schemars(description = "True if a bounded recent read omitted earlier matching messages")]
     has_more: bool,
 }
 
@@ -506,9 +520,9 @@ impl McpServer {
         // Only the last assistant text matters here, so ask for the smallest
         // window that still lets the backend compute it.
         let final_message = match self
-            .fetch_recent_messages(
+            .fetch_messages(
                 &format!("/api/execution-processes/{execution_id}/messages"),
-                1,
+                MessagesRequest::Recent(1),
                 None,
             )
             .await
@@ -544,34 +558,17 @@ impl McpServer {
             roles,
         }): Parameters<ListRecentMessagesRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (path, owning_session_id) = if let Some(execution_id) = execution_id {
-            let process_url = self.url(&format!("/api/execution-processes/{execution_id}"));
-            let execution_process: ExecutionProcess =
-                match self.send_json(self.client.get(&process_url)).await {
-                    Ok(value) => value,
-                    Err(error_result) => return Ok(Self::tool_error(error_result)),
-                };
-            (
-                format!("/api/execution-processes/{execution_id}/messages"),
-                execution_process.session_id,
-            )
-        } else if let Some(session_id) = session_id {
-            (format!("/api/sessions/{session_id}/messages"), session_id)
-        } else {
-            return Self::err("session_id or execution_id is required", None);
-        };
-
-        let session_url = self.url(&format!("/api/sessions/{owning_session_id}"));
-        let session: Session = match self.send_json(self.client.get(&session_url)).await {
-            Ok(value) => value,
+        let path = match self.messages_path(session_id, execution_id).await {
+            Ok(path) => path,
             Err(error_result) => return Ok(Self::tool_error(error_result)),
         };
-        if let Err(error_result) = self.scope_allows_workspace(session.workspace_id) {
-            return Ok(Self::tool_error(error_result));
-        }
 
         let payload = match self
-            .fetch_recent_messages(&path, limit.unwrap_or(20), roles.as_deref())
+            .fetch_messages(
+                &path,
+                MessagesRequest::Recent(limit.unwrap_or(20)),
+                roles.as_deref(),
+            )
             .await
         {
             Ok(value) => value,
@@ -580,6 +577,39 @@ impl McpServer {
 
         Self::success(&ListRecentMessagesResponse::from(payload))
     }
+
+    #[tool(
+        description = "Read every available normalized message (structured, not a raw log dump) for a session's latest coding-agent turn or a specific execution. Use this when context may fall outside list_recent_messages' bounded tail. Results preserve the backend's normalized-history safeguards and per-message truncation."
+    )]
+    async fn list_all_messages(
+        &self,
+        Parameters(ListAllMessagesRequest {
+            session_id,
+            execution_id,
+            roles,
+        }): Parameters<ListAllMessagesRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let path = match self.messages_path(session_id, execution_id).await {
+            Ok(path) => path,
+            Err(error_result) => return Ok(Self::tool_error(error_result)),
+        };
+
+        let payload = match self
+            .fetch_messages(&path, MessagesRequest::All, roles.as_deref())
+            .await
+        {
+            Ok(value) => value,
+            Err(error_result) => return Ok(Self::tool_error(error_result)),
+        };
+
+        Self::success(&ListRecentMessagesResponse::from(payload))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MessagesRequest {
+    Recent(usize),
+    All,
 }
 
 impl McpServer {
@@ -620,26 +650,57 @@ impl McpServer {
         })
     }
 
-    /// GETs a `.../messages` endpoint (either `/api/execution-processes/{id}/messages`
-    /// or `/api/sessions/{id}/messages`). Callers are responsible for having
-    /// already checked `scope_allows_workspace` on the owning session — this
-    /// only does the HTTP call, not auth.
-    async fn fetch_recent_messages(
+    async fn messages_path(
+        &self,
+        session_id: Option<Uuid>,
+        execution_id: Option<Uuid>,
+    ) -> Result<String, super::ToolError> {
+        let (path, owning_session_id) = if let Some(execution_id) = execution_id {
+            let process_url = self.url(&format!("/api/execution-processes/{execution_id}"));
+            let execution_process: ExecutionProcess =
+                self.send_json(self.client.get(&process_url)).await?;
+            (
+                format!("/api/execution-processes/{execution_id}/messages"),
+                execution_process.session_id,
+            )
+        } else if let Some(session_id) = session_id {
+            (format!("/api/sessions/{session_id}/messages"), session_id)
+        } else {
+            return Err(super::ToolError::message(
+                "session_id or execution_id is required",
+            ));
+        };
+
+        let session_url = self.url(&format!("/api/sessions/{owning_session_id}"));
+        let session: Session = self.send_json(self.client.get(&session_url)).await?;
+        self.scope_allows_workspace(session.workspace_id)?;
+        Ok(path)
+    }
+
+    /// GETs a `.../messages` endpoint after [`Self::messages_path`] has checked
+    /// the owning session's workspace scope.
+    async fn fetch_messages(
         &self,
         path: &str,
-        limit: usize,
+        request: MessagesRequest,
         roles: Option<&str>,
     ) -> Result<RecentMessagesPayload, super::ToolError> {
         #[derive(Serialize)]
         struct MessagesQuery {
-            limit: usize,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            limit: Option<usize>,
+            all: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             roles: Option<String>,
         }
 
         let url = self.url(path);
         let query = MessagesQuery {
-            limit,
+            limit: match request {
+                MessagesRequest::Recent(limit) => Some(limit),
+                MessagesRequest::All => None,
+            },
+            all: matches!(request, MessagesRequest::All),
             roles: roles.map(str::to_string),
         };
         self.send_json(self.client.get(&url).query(&query)).await

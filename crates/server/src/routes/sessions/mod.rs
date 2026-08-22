@@ -84,12 +84,12 @@ pub async fn get_session_messages(
             db::models::execution_process::ExecutionProcessError::ExecutionProcessNotFound,
         ))?;
 
-    let limit = crate::routes::execution_processes::clamp_message_limit(query.limit);
+    let selection = query.selection();
     let roles = crate::routes::execution_processes::parse_roles(query.roles.as_deref());
     let response = crate::routes::execution_processes::build_recent_messages_response(
         &deployment,
         &execution_process,
-        limit,
+        selection,
         roles.as_ref(),
     )
     .await;
