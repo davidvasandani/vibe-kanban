@@ -1,6 +1,6 @@
 # Lazy-loading normalized conversation history
 
-Tags: `65ab-lazy-load-vk-wor`, `vk/6df4-loading-chat-pin`
+Tags: `65ab-lazy-load-vk-wor`, `vk/6df4-loading-chat-pin`, `vk/29d8-vk-list-all-mess`
 
 ## Why frontend virtualization is insufficient
 
@@ -127,6 +127,22 @@ process normalization is bounded to the newest 2,000 normalizable messages, so
 an individual request no longer grows without limit, but durable materialized
 normalized state and the session-scoped cursor contract described above are
 still required for lossless history beyond that per-process boundary.
+
+## MCP settled-projection reads
+
+The MCP message tools are one-shot projections over
+`ContainerService::normalized_entries`, not independent log readers.
+`list_recent_messages` requests a clamped tail (default 20, maximum 100), while
+`list_all_messages` explicitly selects every entry in the available settled
+projection. Keep this distinction typed at the shared response builder rather
+than encoding “all” as a magic limit or weakening the recent-reader cap.
+
+“All” does not mean bypassing historical reconstruction safeguards. A fresh
+completed execution can serve its full atomically cached normalized history; a
+legacy cache miss still applies the newest-2,000-normalizable-raw-message bound
+and emits an omission notice. Both MCP reads preserve normalized patch
+materialization, chronological identity, role filtering, per-entry truncation,
+single-flight cache-miss coordination, and owning-workspace authorization.
 
 ## Design gates before product code
 
