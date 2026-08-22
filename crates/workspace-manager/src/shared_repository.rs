@@ -36,6 +36,7 @@ const STAGING_SUFFIX: &str = ".incoming";
 /// the real remotes so branches created by coordinator-local workspaces remain
 /// reachable, and so the store can be seeded without network access.
 const REGISTERED_REMOTE: &str = "vk-registered";
+const ORIGIN_FETCH_REFSPEC: &str = "+refs/heads/*:refs/remotes/origin/*";
 
 /// What [`SharedRepositoryStore::adopt`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +87,7 @@ impl SharedRepositoryStore {
         // Cheap path first: an existing store that already holds the branch
         // needs nothing. Proven with `cat-file -e`, not `rev-parse`.
         if Self::store_resolves(&store, target_branch)? {
+            Self::ensure_origin_fetch_refspec(&GitCli::new(), &store)?;
             debug!(
                 repo = %repo.name,
                 store = %store.display(),
@@ -538,7 +540,43 @@ impl SharedRepositoryStore {
                 })?;
             }
         }
+        Self::ensure_origin_fetch_refspec(cli, store)?;
 
+        Ok(())
+    }
+
+    /// Give libgit2 the mapping it needs to associate `origin/*` refs with the
+    /// `origin` remote. URL-only remotes work for explicit fetches and pushes,
+    /// but `git_branch_remote_name` cannot resolve them for pull-request flows.
+    fn ensure_origin_fetch_refspec(cli: &GitCli, store: &Path) -> Result<(), WorkspaceError> {
+        // A store without origin (for example, a registered local-only repo)
+        // has nothing to repair.
+        if cli.get_remote_url(store, "origin").is_err() {
+            return Ok(());
+        }
+
+        let configured = cli
+            .git(store, ["config", "--get-all", "remote.origin.fetch"])
+            .unwrap_or_default();
+        if configured.lines().any(|line| line == ORIGIN_FETCH_REFSPEC) {
+            return Ok(());
+        }
+
+        cli.git(
+            store,
+            [
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                ORIGIN_FETCH_REFSPEC,
+            ],
+        )
+        .map_err(|e| {
+            WorkspaceError::PartialCreation(format!(
+                "could not configure the origin fetch refspec on {}: {e}",
+                store.display()
+            ))
+        })?;
         Ok(())
     }
 
@@ -938,6 +976,13 @@ mod tests {
             Some(repo.to_string_lossy().as_ref()),
             "the registered checkout stays fetchable under its own name"
         );
+        assert_eq!(
+            cli()
+                .git(&store, ["config", "--get-all", "remote.origin.fetch"])
+                .unwrap()
+                .trim(),
+            ORIGIN_FETCH_REFSPEC
+        );
 
         for (key, expected) in [
             ("gc.auto", "0"),
@@ -951,6 +996,28 @@ mod tests {
                 "{key} must be set before any worktree is registered"
             );
         }
+    }
+
+    #[test]
+    fn origin_fetch_refspec_repair_is_idempotent() {
+        let fixture = TempDir::new().unwrap();
+        let repo = fixture.path().join("repo");
+        seed_repo(&repo);
+        cli()
+            .set_remote_url(&repo, "origin", "https://example.invalid/org/repo.git")
+            .unwrap();
+
+        SharedRepositoryStore::ensure_origin_fetch_refspec(&cli(), &repo).unwrap();
+        SharedRepositoryStore::ensure_origin_fetch_refspec(&cli(), &repo).unwrap();
+
+        assert_eq!(
+            cli()
+                .git(&repo, ["config", "--get-all", "remote.origin.fetch"])
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            vec![ORIGIN_FETCH_REFSPEC]
+        );
     }
 
     /// The production failure, end to end: a worktree created against a
