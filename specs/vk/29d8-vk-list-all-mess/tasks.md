@@ -43,7 +43,7 @@ layer because it touches independent files.
 - [x] T012 Update the relevant project knowledge page and
   `docs/knowledge-base/INDEX.md`, tagged `vk/29d8-vk-list-all-mess`, and commit
   the knowledge base. Depends on T011.
-- [ ] T013 Commit implementation/spec artifacts, push the task branch, open a
+- [x] T013 Commit implementation/spec artifacts, push the task branch, open a
   pull request against the base branch, wait for required checks, and merge.
   Depends on T012.
 
