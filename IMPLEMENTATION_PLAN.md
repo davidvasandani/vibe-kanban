@@ -1,82 +1,21 @@
-# IMPLEMENTATION_PLAN — Add Brink MCP to VK (`vk/5f7c-add-brink-mcp-to`)
+# Implementation Plan: Repository-scoped Git panel PR state
 
-Small, additive change: one catalog entry + docs. Derived from `SPEC.md` and
-`PRIOR_KNOWLEDGE.md`.
-
-## Files to change
-
-1. `crates/executors/default_mcp.json`
-2. `docs/integrations/mcp-server-configuration.mdx`
-
-No Rust code, no generated types, no frontend code, no new assets (icon omitted).
-
-## Step 1 — Add the `brink` launch entry
-
-Insert after the `gmail` server block, before `meta`:
-
-```json
-"brink": {
-  "command": "npx",
-  "args": ["-y", "brink-pos-mcp-server"],
-  "env": {
-    "BRINK_ACCESS_TOKEN": "YOUR_TOKEN",
-    "BRINK_LOCATION_TOKEN": "YOUR_TOKEN"
-  }
-},
-```
-
-Rationale (see SPEC "Design decision"): the package ships a prebuilt `dist/`
-with a `bin` and no `prepare` script → plain unpinned npm launcher, like `exa`.
-`BRINK_API_URL` is optional and omitted (defaults to Brink production).
-
-## Step 2 — Add the `brink` meta entry
-
-Insert after the `gmail` meta block:
-
-```json
-"brink": {
-  "name": "Brink POS",
-  "description": "Send test orders and check OLO connectivity on Brink POS registers",
-  "url": "https://github.com/davidvasandani/mcp-brink"
-}
-```
-
-No `icon` (matches Slack/Gmail); UI falls back to no-icon rendering.
-
-## Step 3 — Document the connector
-
-Add a `### Brink POS connector` subsection to
-`docs/integrations/mcp-server-configuration.mdx` after the Gmail section:
-- what it is (stdio SOAP client for Brink POS test ordering / OLO health),
-- the launch entry,
-- env vars: `BRINK_ACCESS_TOKEN` (required), `BRINK_LOCATION_TOKEN`,
-  `BRINK_API_URL` (optional),
-- the LocationToken `==` Base64-padding gotcha,
-- note the plain-npx form assumes `brink-pos-mcp-server` is resolvable by `npx`
-  on the agent host (published to the npm registry the deployment uses).
-
-## Step 4 — Verify
-
-- `default_mcp.json` is valid JSON (`node -e "JSON.parse(...)"` or a parse
-  check) and diff-clean apart from the two additions.
-- `cargo test -p executors` (catalog parses via `PRECONFIGURED_MCP_SERVERS`;
-  no test regresses).
-- `pnpm run check` (frontend types/lint) — `preconfiguredMcpServers()` yields a
-  `brink` item.
-- `pnpm run format` before finishing.
-
-## Step 5 — Review, knowledge, PR (pipeline stages 11–13)
-
-- Codex review of the diff; address confirmed findings.
-- Record the reusable "how to add a bundled MCP server to VK" knowledge in the
-  KB, tagged `vk/5f7c-add-brink-mcp-to`; refresh the index; commit.
-- Open and merge the PR against the base branch.
-
-## Risks / notes
-
-- **External prerequisite:** `brink-pos-mcp-server` must be `npx`-resolvable on
-  agent hosts. If the user distributes it as a private fork instead, switch to
-  the Slack-style pinned release tarball + pin machinery (does not change the UI
-  wiring). Flagged as the spec's key open question for `/speckit.clarify`.
-- No catalog test enumerates all servers, so the addition cannot break existing
-  Rust/TS tests; risk is limited to JSON validity and doc accuracy.
+1. Inspect the current Git panel transformation, branch-status query contract,
+   and test/tooling conventions.
+2. Establish the SpecKit constitution and produce the feature artifacts through
+   clarify, plan, tasks, and analyze.
+3. Extract a pure `RepoWithTargetBranch[]` + `RepoBranchStatus[]` to
+   `RepoInfo[]` transformation that joins only by `repo_id`.
+4. Remove the unscoped workspace-summary fallback and now-unused workspace
+   context dependencies from `GitPanelContainer`.
+5. Add focused unit tests for one-PR/multiple-repo state, unloaded status,
+   open-over-merged precedence, and ordinary branch metadata.
+6. Install locked dependencies if needed, format the repository, and run the
+   focused test plus frontend type/lint verification in proportion to the
+   change.
+7. Run an independent Codex diff review; fix confirmed significant findings and
+   repeat verification/review until clean.
+8. Add the repository-association invariant to the project knowledge base,
+   refresh its index, and commit the knowledge-base update.
+9. Commit all implementation artifacts, push the task branch, open a PR against
+   the repository's base branch, monitor required checks, and merge it.
