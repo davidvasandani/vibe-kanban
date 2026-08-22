@@ -453,6 +453,15 @@ because it is absent. Arrival of richer data may refine the projection, but ties
 and incomplete records remain deterministic through stable identity-based
 fallbacks. Regression coverage exercises both the base-only and enriched states.
 
+### XXXV. Entity projections require matching identity
+Aggregate or parent-level summaries MUST NOT be projected onto a child entity
+unless the data carries an identity that matches that child. In multi-entity
+views, a fact established for one repository, workspace, issue, worker, or
+execution remains scoped to that entity; convenience fallbacks may not broadcast
+it to siblings. While identity-scoped enrichment is loading or absent, render
+the fact as unknown rather than borrowing a plausible aggregate. Regression
+coverage includes mixed sibling state and the base-only loading state.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -474,7 +483,9 @@ fallbacks. Regression coverage exercises both the base-only and enriched states.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.28.0 (requires immutable historical reconstruction to be
+**Version**: 0.29.0 (requires UI/entity projections to preserve identity and
+render unknown rather than broadcasting aggregate facts across siblings; 0.28.0
+requires immutable historical reconstruction to be
 single-flight by durable identity, atomically materialized, bounded,
 cancellation-safe, observable, and kept off implicit affinity migration; also
 allows explicit metrics-to-remediation issue actions only with preserved
