@@ -74,6 +74,14 @@ Two tools close that gap (`src/task_server/tools/sessions.rs`):
   `session_id` (resolves the session's latest `CodingAgent` execution) or
   `execution_id` directly; `limit` defaults to 20 (max 100); `roles` optionally
   filters to a comma-separated subset of `user`/`assistant`/`system`/`tool`.
+- **`list_all_messages`** — the same response and target/filter behavior, but
+  returns every message in the selected execution's available settled
+  normalized projection and always reports `has_more: false`. Use it when a
+  decision may be older than the recent reader's 100-message maximum. This is
+  “all normalized messages Vibe Kanban has available,” not an unbounded raw-log
+  replay: an oversized legacy execution without a materialized cache still uses
+  the historical normalizer's newest-2,000-raw-message safety window and
+  includes its explicit earlier-messages-omitted notice.
 
 Both are read-only projections of the same normalized-logs pipeline the UI's
 conversation view and `.../normalized-logs/ws` already use
@@ -89,8 +97,9 @@ large diff or command dump in the conversation can't blow up the response —
 use the logs websocket in the UI for the full untruncated transcript.
 
 Use `list_recent_messages` (or `get_execution.final_message`) before every
-follow-up `run_session_prompt`: a nudge that ignores the agent's last message
-is the same blind retry regardless of how it's phrased.
+follow-up `run_session_prompt`; use `list_all_messages` when the recent window
+does not contain enough context. A nudge that ignores the agent's messages is
+the same blind retry regardless of how it's phrased.
 
 ## Backend resolution (important)
 

@@ -45,8 +45,28 @@ const MAX_MESSAGE_CHARS: usize = 4000;
 #[derive(Debug, Deserialize)]
 pub struct RecentMessagesQuery {
     pub limit: Option<usize>,
+    /// Return the complete available normalized projection instead of a
+    /// bounded recent tail. `limit` is ignored when this is true.
+    #[serde(default)]
+    pub all: bool,
     /// Comma-separated subset of `user`, `assistant`, `system`, `tool`.
     pub roles: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessagesSelection {
+    Recent(usize),
+    All,
+}
+
+impl RecentMessagesQuery {
+    pub fn selection(&self) -> MessagesSelection {
+        if self.all {
+            MessagesSelection::All
+        } else {
+            MessagesSelection::Recent(clamp_message_limit(self.limit))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -128,7 +148,7 @@ pub fn parse_roles(roles: Option<&str>) -> Option<HashSet<String>> {
 pub async fn build_recent_messages_response(
     deployment: &DeploymentImpl,
     execution_process: &ExecutionProcess,
-    limit: usize,
+    selection: MessagesSelection,
     roles: Option<&HashSet<String>>,
 ) -> RecentMessagesResponse {
     let entries = deployment
@@ -139,6 +159,25 @@ pub async fn build_recent_messages_response(
 
     let final_message = last_assistant_message(&entries);
 
+    let (messages, has_more) = project_messages(&entries, execution_process.id, selection, roles);
+
+    RecentMessagesResponse {
+        session_id: execution_process.session_id.to_string(),
+        execution_id: execution_process.id.to_string(),
+        status: execution_process.status.clone(),
+        exit_code: execution_process.exit_code,
+        final_message,
+        messages,
+        has_more,
+    }
+}
+
+fn project_messages(
+    entries: &[NormalizedEntry],
+    execution_id: Uuid,
+    selection: MessagesSelection,
+    roles: Option<&HashSet<String>>,
+) -> (Vec<SessionMessage>, bool) {
     let mut messages: Vec<SessionMessage> = entries
         .iter()
         .enumerate()
@@ -152,28 +191,24 @@ pub async fn build_recent_messages_response(
                 return None;
             }
             Some(SessionMessage {
-                id: format!("{}:{index}", execution_process.id),
+                id: format!("{execution_id}:{index}"),
                 role: role.to_string(),
                 text: truncate(text),
                 created_at: entry.timestamp.clone(),
-                execution_id: execution_process.id.to_string(),
+                execution_id: execution_id.to_string(),
             })
         })
         .collect();
 
-    let has_more = messages.len() > limit;
-    if has_more {
-        messages = messages.split_off(messages.len() - limit);
-    }
-
-    RecentMessagesResponse {
-        session_id: execution_process.session_id.to_string(),
-        execution_id: execution_process.id.to_string(),
-        status: execution_process.status.clone(),
-        exit_code: execution_process.exit_code,
-        final_message,
-        messages,
-        has_more,
+    match selection {
+        MessagesSelection::Recent(limit) => {
+            let has_more = messages.len() > limit;
+            if has_more {
+                messages = messages.split_off(messages.len() - limit);
+            }
+            (messages, has_more)
+        }
+        MessagesSelection::All => (messages, false),
     }
 }
 
@@ -203,10 +238,10 @@ async fn get_execution_process_messages(
     State(deployment): State<DeploymentImpl>,
     Query(query): Query<RecentMessagesQuery>,
 ) -> Result<ResponseJson<ApiResponse<RecentMessagesResponse>>, ApiError> {
-    let limit = clamp_message_limit(query.limit);
+    let selection = query.selection();
     let roles = parse_roles(query.roles.as_deref());
     let response =
-        build_recent_messages_response(&deployment, &execution_process, limit, roles.as_ref())
+        build_recent_messages_response(&deployment, &execution_process, selection, roles.as_ref())
             .await;
     Ok(ResponseJson(ApiResponse::success(response)))
 }
@@ -631,5 +666,89 @@ mod tests {
         assert_eq!(clamp_message_limit(Some(0)), 1);
         assert_eq!(clamp_message_limit(Some(9999)), MAX_MESSAGE_LIMIT);
         assert_eq!(clamp_message_limit(Some(5)), 5);
+    }
+
+    #[test]
+    fn query_selects_all_or_a_clamped_recent_tail() {
+        assert_eq!(
+            RecentMessagesQuery {
+                limit: Some(9999),
+                all: false,
+                roles: None,
+            }
+            .selection(),
+            MessagesSelection::Recent(MAX_MESSAGE_LIMIT)
+        );
+        assert_eq!(
+            RecentMessagesQuery {
+                limit: Some(1),
+                all: true,
+                roles: None,
+            }
+            .selection(),
+            MessagesSelection::All
+        );
+    }
+
+    #[test]
+    fn all_selection_returns_more_than_recent_cap_in_order() {
+        let execution_id = Uuid::new_v4();
+        let entries: Vec<_> = (0..125)
+            .map(|index| {
+                entry(
+                    NormalizedEntryType::AssistantMessage,
+                    &format!("message {index}"),
+                )
+            })
+            .collect();
+
+        let (all, all_has_more) =
+            project_messages(&entries, execution_id, MessagesSelection::All, None);
+        let (recent, recent_has_more) = project_messages(
+            &entries,
+            execution_id,
+            MessagesSelection::Recent(MAX_MESSAGE_LIMIT),
+            None,
+        );
+
+        assert_eq!(all.len(), 125);
+        assert_eq!(
+            all.first().map(|message| message.text.as_str()),
+            Some("message 0")
+        );
+        assert_eq!(
+            all.last().map(|message| message.text.as_str()),
+            Some("message 124")
+        );
+        assert!(!all_has_more);
+        assert_eq!(recent.len(), MAX_MESSAGE_LIMIT);
+        assert_eq!(
+            recent.first().map(|message| message.text.as_str()),
+            Some("message 25")
+        );
+        assert_eq!(
+            recent.last().map(|message| message.text.as_str()),
+            Some("message 124")
+        );
+        assert!(recent_has_more);
+    }
+
+    #[test]
+    fn all_selection_filters_roles_without_marking_more() {
+        let execution_id = Uuid::new_v4();
+        let entries = vec![
+            entry(NormalizedEntryType::UserMessage, "question"),
+            entry(NormalizedEntryType::AssistantMessage, "answer"),
+            entry(NormalizedEntryType::SystemMessage, "notice"),
+        ];
+        let roles = HashSet::from(["assistant".to_string()]);
+
+        let (messages, has_more) =
+            project_messages(&entries, execution_id, MessagesSelection::All, Some(&roles));
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[0].text, "answer");
+        assert!(!has_more);
     }
 }

@@ -1,118 +1,72 @@
-# SPEC: Add Brink POS MCP server to the Vibe Kanban catalog
+# Technical Spec: `list_all_messages` MCP tool
 
-**Task:** `vk/5f7c-add-brink-mcp-to` — "Add Brink MCP to Vk"
+**Task:** `vk/29d8-vk-list-all-mess`
 
 ## Summary
 
-Add the **Brink POS** MCP server to Vibe Kanban's bundled "Popular MCP Servers"
-catalog so users can add it to a coding agent from the MCP settings UI with one
-click, then fill in their own Brink credentials. The Brink server is a stdio
-MCP server (`brink-pos-mcp-server`) that talks to Brink POS over its SOAP API to
-place test orders, read order details/status, test OLO (online-ordering)
-connectivity, and read a register's current business date.
+Add a read-only `list_all_messages` tool to the Vibe Kanban MCP server alongside
+`list_recent_messages`. The new tool returns the complete normalized message
+history for either a session's latest coding-agent execution or a specific
+execution, while preserving workspace scoping, role filtering, message order,
+normalization, and per-message truncation.
 
-The catalog lives in `crates/executors/default_mcp.json`. Adding a server means
-adding (1) a launch entry keyed by a protocol-safe identifier and (2) a matching
-`meta` entry (display name, description, docs URL) that the settings UI reads.
+## Motivation
 
-## Background / what already exists
-
-- `crates/executors/default_mcp.json` holds every preconfigured server plus a
-  `meta` block. `PRECONFIGURED_MCP_SERVERS` in
-  `crates/executors/src/mcp_config.rs` parses this file at startup and applies
-  per-agent adapters; nothing enumerates the catalog exhaustively, so a new key
-  is additive and breaks no test.
-- The frontend helper `preconfiguredMcpServers()`
-  (`packages/web-core/src/shared/lib/sharedMcpSettingsState.ts`) lists every
-  top-level key except `meta`, reading `name`/`description`/`icon` from
-  `meta[key]` (all optional; `icon` may be omitted, as Slack and Gmail do).
-- Existing catalog precedents:
-  - Plain published npm packages launched unpinned via `npx -y <pkg>`
-    (`exa`, `dev_manager`, `playwright`, `chrome_devtools`, `vibe_kanban`).
-  - `slack` — a **pinned GitHub release tarball** with coordinated Rust
-    constants + a Renovate custom manager + a scheduled digest audit.
-  - `gmail` — a **pinned `github:` git spec** (fork builds itself via a
-    `prepare` script), hand-bumped.
-
-## The Brink server (from the provided source)
-
-- Package name: `brink-pos-mcp-server` (`package.json`), `type: module`,
-  `bin: dist/index.js`, `files: ["dist"]`. Prebuilt `dist/` ships in the
-  package; there is **no** `prepare` script and `dist/` is `.gitignore`d.
-- Transport: stdio (MCP SDK default) — no transport flag needed.
-- Environment (confirmed in `src/index.ts` / `src/services.ts`):
-  - `BRINK_ACCESS_TOKEN` — **required** (`process.env.BRINK_ACCESS_TOKEN`).
-  - `BRINK_LOCATION_TOKEN` — default LocationToken; per-request override is also
-    supported. LocationTokens are Base64 and must keep their `==` padding.
-  - `BRINK_API_URL` — **optional**, defaults to
-    `https://api13.brinkpos.net/Ordering.svc`.
-- Tools: `brink_send_order`, `brink_get_order`, `brink_get_order_status`,
-  `brink_test_olo`, `brink_get_current_business_date` (plus additional
-  order-listing tools in newer source).
+`list_recent_messages` is intentionally a bounded tail reader: its default is
+20 messages and the HTTP API clamps requests to 100. Orchestrators sometimes
+need the complete conversation to recover earlier decisions and context. Asking
+for a larger recent-message window cannot satisfy that requirement once a turn
+contains more than 100 normalized messages.
 
 ## Functional requirements
 
-- FR-1: `brink` appears in the bundled catalog and renders in the MCP settings
-  "Popular MCP Servers" list with a human name, a description, and a docs URL.
-- FR-2: Adding it writes a stdio launch entry an agent can run unmodified once
-  the user supplies real credentials: `npx -y brink-pos-mcp-server` with
-  `BRINK_ACCESS_TOKEN` and `BRINK_LOCATION_TOKEN` present as editable
-  placeholders (`YOUR_TOKEN`), mirroring how every other catalog entry ships
-  secret placeholders.
-- FR-3: The server identifier is `brink` — matches
-  `^[a-zA-Z0-9_-]+$` (`is_valid_server_identifier`) and supports the `_2`, `_3`
-  duplication suffixing used for multiple instances.
-- FR-4: `default_mcp.json` stays valid JSON; every existing server and its
-  `meta` entry are unchanged.
-- FR-5: Documentation in `docs/integrations/mcp-server-configuration.mdx`
-  describes the Brink connector, its env vars, and the LocationToken `==`
-  padding gotcha.
+1. Expose `list_all_messages` in both global and scoped/orchestrator MCP modes.
+2. Accept exactly the same target choices as `list_recent_messages`:
+   `session_id` (latest non-deleted coding-agent execution) or `execution_id`.
+   At least one target is required; when both are supplied, preserve the
+   existing execution-first behavior for compatibility.
+3. Accept the same optional comma-separated `roles` filter.
+4. Return the same response shape and message shape as
+   `list_recent_messages`, ordered oldest to newest, but without a caller limit
+   or the server's 100-message cap. `has_more` must be false for a successful
+   all-messages response.
+5. Reuse the existing normalized-log projection used by the UI and recent
+   messages. Do not read raw logs, open a websocket, or introduce another data
+   store.
+6. Enforce the owning session's workspace scope before reading messages.
+7. Preserve the existing per-message truncation and `final_message` behavior so
+   an unbounded message count does not also make individual entries unbounded.
+8. Leave `list_recent_messages` behavior and API compatibility unchanged.
+9. Document when callers should choose recent versus all messages.
 
-## Design decision: distribution / launch reference
+## Technical design
 
-The Brink package is built to be installed and run as `npx brink-pos-mcp-server`
-(it publishes a prebuilt `dist/` and exposes a `bin`). The catalog entry
-therefore uses the **plain unpinned npm launcher** form
-(`npx -y brink-pos-mcp-server`), consistent with the majority of catalog entries
-(`exa`, `dev_manager`, …).
+- Extend the messages HTTP query with an optional `all` boolean. The existing
+  endpoints continue to clamp `limit` when `all` is absent or false. When
+  `all=true`, the shared response builder retains every filtered normalized
+  message and reports `has_more: false`.
+- Generalize the MCP HTTP helper so it can request either a bounded `limit` or
+  `all=true` while continuing to pass the optional role filter.
+- Factor the shared target resolution and workspace authorization used by the
+  two MCP tools where practical, avoiding behavior drift.
+- Register the new tool through the sessions tool router and update the
+  orchestrator allow-list test.
 
-Rejected alternatives and why:
-- **`github:` git spec (Gmail-style)** — a `github:` install clones source and
-  runs `prepare` to build. Brink has no `prepare` script and `.gitignore`s
-  `dist/`, so this form would install unbuilt source and fail to launch.
-- **Pinned GitHub release tarball (Slack-style)** — works with a prebuilt
-  `dist/`, but requires a published release to *pin and verify* (constitution
-  principle 24: pin only what is proven to exist) plus the coordinated Rust
-  constant / Renovate manager / digest-audit machinery. That is disproportionate
-  to "add the catalog entry" and is only warranted if a fork must diverge from a
-  published package (Slack's reason). It remains the fallback if Brink is
-  distributed as a private fork instead of a published package.
+## Tests and acceptance criteria
 
-**External prerequisite (out of VK-repo scope):** `brink-pos-mcp-server` must be
-resolvable by `npx` on agent hosts — i.e. published to the npm registry the
-deployment uses (public npm or a configured private registry). If the user
-prefers a pinned private fork instead, switch the entry to the Slack-style
-release-tarball form and add the corresponding pin machinery. This choice does
-not change the UI wiring.
-
-`icon` is omitted (as with Slack and Gmail), so no asset is added.
+- Unit tests prove bounded responses still tail and set `has_more`, while the
+  all-messages mode returns more than 100 filtered messages in chronological
+  order with `has_more: false`.
+- MCP router tests prove `list_all_messages` is exposed to orchestrators.
+- Existing recent-message tests remain green.
+- Rust formatting and focused crate checks/tests pass.
+- An independent Codex diff review reports no significant findings.
 
 ## Out of scope
 
-- Publishing `brink-pos-mcp-server` to any registry.
-- Homelab deployment wiring / secret injection (credentials are entered per
-  server in the UI via the `YOUR_TOKEN` placeholders, like every other entry).
-- Any change to the Brink server source itself.
-- Adding Renovate/pin/digest-audit machinery (only needed for the rejected
-  tarball form).
-
-## Acceptance criteria
-
-- [ ] `crates/executors/default_mcp.json` parses as valid JSON and contains a
-      `brink` server entry and a `meta.brink` entry.
-- [ ] `preconfiguredMcpServers()` returns an item with `key: "brink"`, a
-      non-empty `name` and `description`.
-- [ ] `cargo test -p executors` and `pnpm run check` pass (no catalog test
-      regresses).
-- [ ] `docs/integrations/mcp-server-configuration.mdx` documents Brink.
-- [ ] Codex review of the diff reports no significant findings.
+- Changes to services other than Vibe Kanban.
+- Combining messages across multiple executions in a session; session targeting
+  continues to mean the latest coding-agent execution.
+- Removing truncation, changing normalized-log semantics, or changing the
+  existing `list_recent_messages` limit.
+- Frontend UI changes or homelab deployment changes.
