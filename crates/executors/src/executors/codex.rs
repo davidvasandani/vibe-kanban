@@ -25,6 +25,28 @@ pub fn codex_home() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".codex"))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::Codex;
+
+    #[test]
+    fn deployment_codex_command_is_fail_closed_and_blank_values_fall_back() {
+        assert_eq!(
+            Codex::base_command_from_deployment(Some(
+                "/nix/store/test-vibe-kanban-codex/bin/codex".to_string()
+            )),
+            (
+                "/nix/store/test-vibe-kanban-codex/bin/codex".to_string(),
+                true
+            )
+        );
+        assert_eq!(
+            Codex::base_command_from_deployment(Some("  ".to_string())),
+            (Codex::base_command().to_string(), false)
+        );
+    }
+}
+
 pub(crate) fn resolve_model(model: Option<&str>) -> (Option<&str>, bool) {
     match model.and_then(|m| m.strip_suffix("-fast")) {
         Some(base) => (Some(base), true),
@@ -480,14 +502,35 @@ impl Codex {
         "npx -y @openai/codex@0.144.1"
     }
 
+    fn configured_base_command() -> (String, bool) {
+        Self::base_command_from_deployment(env::var("VIBE_CODEX_COMMAND").ok())
+    }
+
+    fn base_command_from_deployment(deployment_command: Option<String>) -> (String, bool) {
+        deployment_command
+            .filter(|command| !command.trim().is_empty())
+            .map_or_else(
+                || (Self::base_command().to_string(), false),
+                |command| (command, true),
+            )
+    }
+
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        let mut builder = CommandBuilder::new(Self::base_command());
+        let (base_command, deployment_managed) = Self::configured_base_command();
+        let mut builder = CommandBuilder::new(base_command);
         builder = builder.extend_params(["app-server"]);
         if self.oss.unwrap_or(false) {
             builder = builder.extend_params(["--oss"]);
         }
 
-        apply_overrides(builder, &self.cmd)
+        let mut overrides = self.cmd.clone();
+        if deployment_managed {
+            // A supervised deployment may require a security-patched Codex
+            // build. A settings-level base command must not bypass it; other
+            // parameters and environment overrides remain supported.
+            overrides.base_command_override = None;
+        }
+        apply_overrides(builder, &overrides)
     }
 
     fn build_thread_start_params(&self, cwd: &Path) -> ThreadStartParams {

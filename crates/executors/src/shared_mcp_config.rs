@@ -855,10 +855,7 @@ pub fn canonical_definition(entry: &Value) -> McpServerDefinition {
             transport,
             value: compact_object([
                 ("url", Value::String(public_mcp_url_for_runtime(url))),
-                (
-                    "headers",
-                    normalize_string_map(obj, &["headers", "http_headers"]),
-                ),
+                ("headers", normalize_http_headers(obj)),
             ]),
             representable_in_form: true,
         };
@@ -869,6 +866,38 @@ pub fn canonical_definition(entry: &Value) -> McpServerDefinition {
         value: entry.clone(),
         representable_in_form: false,
     }
+}
+
+fn normalize_http_headers(obj: &Map<String, Value>) -> Value {
+    let mut headers = normalize_string_map(obj, &["headers", "http_headers"])
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if let Some(env_headers) = obj.get("env_http_headers").and_then(Value::as_object) {
+        for (name, env_name) in env_headers {
+            if !headers.contains_key(name)
+                && let Some(env_name) = env_name.as_str()
+                && valid_env_name(env_name)
+            {
+                headers.insert(name.clone(), Value::String(format!("${{{env_name}}}")));
+            }
+        }
+    }
+    Value::Object(headers)
+}
+
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn exact_env_template(value: &str) -> Option<&str> {
+    let name = value.strip_prefix("${")?.strip_suffix('}')?;
+    valid_env_name(name).then_some(name)
 }
 
 fn canonical_definition_for_server(name: &str, entry: &Value) -> McpServerDefinition {
@@ -994,11 +1023,10 @@ fn stable_json(value: &Value) -> String {
 }
 
 fn has_credentials(entry: &Value) -> bool {
-    entry
-        .get("headers")
-        .or_else(|| entry.get("http_headers"))
-        .and_then(Value::as_object)
-        .is_some_and(|headers| {
+    ["headers", "http_headers", "env_http_headers"]
+        .iter()
+        .filter_map(|key| entry.get(*key).and_then(Value::as_object))
+        .any(|headers| {
             headers
                 .keys()
                 .any(|key| key.eq_ignore_ascii_case("authorization"))
@@ -1148,19 +1176,26 @@ pub fn materialize_definition(
                 }
                 out.insert("url".to_string(), url);
             }
-            if let Some(headers) = obj
-                .get("headers")
-                .filter(|v| !v.as_object().is_some_and(Map::is_empty))
-            {
-                out.insert(
-                    if matches!(executor, BaseCodingAgent::Codex) {
-                        "http_headers"
-                    } else {
-                        "headers"
+            if let Some(headers) = obj.get("headers").and_then(Value::as_object) {
+                if matches!(executor, BaseCodingAgent::Codex) {
+                    let mut static_headers = Map::new();
+                    let mut env_headers = Map::new();
+                    for (name, value) in headers {
+                        if let Some(env_name) = value.as_str().and_then(exact_env_template) {
+                            env_headers.insert(name.clone(), Value::String(env_name.to_string()));
+                        } else {
+                            static_headers.insert(name.clone(), value.clone());
+                        }
                     }
-                    .to_string(),
-                    headers.clone(),
-                );
+                    if !static_headers.is_empty() {
+                        out.insert("http_headers".to_string(), Value::Object(static_headers));
+                    }
+                    if !env_headers.is_empty() {
+                        out.insert("env_http_headers".to_string(), Value::Object(env_headers));
+                    }
+                } else if !headers.is_empty() {
+                    out.insert("headers".to_string(), Value::Object(headers.clone()));
+                }
             }
             Ok(Value::Object(out))
         }
@@ -1290,6 +1325,44 @@ fn preserve_gateway_capability(
             .find(|entry| gateway_url(&canonical_definition(entry)) == Some(next_gateway_url))
     });
     let Some(current) = current else { return };
+    let current_env_auth = current
+        .get("env_http_headers")
+        .and_then(Value::as_object)
+        .and_then(|headers| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("authorization"))
+        })
+        .and_then(|(_, value)| value.as_str())
+        .filter(|name| valid_env_name(name))
+        .map(str::to_string);
+
+    if let Some(env_name) = current_env_auth {
+        let restored_name = next
+            .get_mut("http_headers")
+            .and_then(Value::as_object_mut)
+            .and_then(|headers| {
+                headers
+                    .iter()
+                    .find(|(name, value)| {
+                        name.eq_ignore_ascii_case("authorization")
+                            && value.as_str() == Some("Bearer [REDACTED]")
+                    })
+                    .map(|(name, _)| name.clone())
+                    .and_then(|name| headers.remove_entry(&name).map(|(name, _)| name))
+            });
+        if let Some(name) = restored_name {
+            next.as_object_mut()
+                .expect("materialized MCP definition is an object")
+                .entry("env_http_headers")
+                .or_insert_with(|| Value::Object(Map::new()))
+                .as_object_mut()
+                .expect("environment HTTP headers are an object")
+                .insert(name, Value::String(env_name));
+            return;
+        }
+    }
+
     let current_definition = canonical_definition(current);
     let current_auth = current_definition
         .value
@@ -1904,6 +1977,57 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
     }
 
     #[test]
+    fn codex_environment_http_headers_round_trip_as_settings_templates() {
+        let native = json!({
+            "url":"https://draw.example.test/mcp",
+            "http_headers":{"X-Static":"static"},
+            "env_http_headers":{
+                "CF-Access-Client-Id":"TLDRAW_CF_ACCESS_CLIENT_ID",
+                "CF-Access-Client-Secret":"TLDRAW_CF_ACCESS_CLIENT_SECRET"
+            }
+        });
+        let definition = canonical_definition(&native);
+
+        assert_eq!(
+            definition.value,
+            json!({
+                "url":"https://draw.example.test/mcp",
+                "headers":{
+                    "X-Static":"static",
+                    "CF-Access-Client-Id":"${TLDRAW_CF_ACCESS_CLIENT_ID}",
+                    "CF-Access-Client-Secret":"${TLDRAW_CF_ACCESS_CLIENT_SECRET}"
+                }
+            })
+        );
+        assert_eq!(
+            materialize_definition(BaseCodingAgent::Codex, &definition, None).unwrap(),
+            native
+        );
+    }
+
+    #[test]
+    fn codex_leaves_partial_or_invalid_templates_static() {
+        let definition = canonical_definition(&json!({
+            "url":"https://example.test/mcp",
+            "headers":{
+                "Authorization":"Bearer ${TOKEN}",
+                "X-Invalid":"${NOT-VALID}"
+            }
+        }));
+
+        assert_eq!(
+            materialize_definition(BaseCodingAgent::Codex, &definition, None).unwrap(),
+            json!({
+                "url":"https://example.test/mcp",
+                "http_headers":{
+                    "Authorization":"Bearer ${TOKEN}",
+                    "X-Invalid":"${NOT-VALID}"
+                }
+            })
+        );
+    }
+
+    #[test]
     fn maps_grok_http_to_native_toml_shape_and_rejects_sse() {
         let http = canonical_definition(&json!({
             "type":"http",
@@ -2088,6 +2212,63 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
             next["renamed-tools"]["headers"]["Authorization"],
             "Bearer local-secret"
         );
+    }
+
+    #[test]
+    fn codex_env_gateway_capability_is_preserved_on_save() {
+        let entry = json!({
+            "url":"http://127.0.0.1:3334/mcp-gateway/00000000-0000-0000-0000-000000000001",
+            "env_http_headers":{"Authorization":"GATEWAY_TOKEN"}
+        });
+        let response = reconcile_snapshots(vec![snapshot(
+            BaseCodingAgent::Codex,
+            HashMap::from([("tools".to_string(), entry.clone())]),
+        )]);
+        assert!(response.servers[0].assignments[0].has_credentials);
+        assert_eq!(
+            response.servers[0].definition.value["headers"]["Authorization"],
+            "Bearer [REDACTED]"
+        );
+
+        let request = SharedMcpWriteRequest {
+            servers: vec![SharedMcpServerInput {
+                name: "tools".to_string(),
+                display_name: None,
+                definition: response.servers[0].definition.clone(),
+                assignments: vec![BaseCodingAgent::Codex],
+                native_overrides: HashMap::new(),
+            }],
+            resolved_conflicts: Vec::new(),
+            removed_servers: Vec::new(),
+        };
+        let (next, _) = plan_servers_for_executor(
+            BaseCodingAgent::Codex,
+            &HashMap::from([("tools".to_string(), entry)]),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(
+            next["tools"]["env_http_headers"]["Authorization"],
+            "GATEWAY_TOKEN"
+        );
+        assert!(next["tools"]["http_headers"].get("Authorization").is_none());
+    }
+
+    #[test]
+    fn codex_env_authorization_is_reported_as_credentials() {
+        let response = reconcile_snapshots(vec![snapshot(
+            BaseCodingAgent::Codex,
+            HashMap::from([(
+                "tools".to_string(),
+                json!({
+                    "url":"https://example.test/mcp",
+                    "env_http_headers":{"Authorization":"TOOLS_TOKEN"}
+                }),
+            )]),
+        )]);
+
+        assert!(response.servers[0].assignments[0].has_credentials);
     }
 
     #[test]
