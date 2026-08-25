@@ -599,8 +599,22 @@ fn adapt_codex(mut servers: ServerMap, mut meta: Option<Value>) -> Value {
             && server.contains_key("url")
         {
             server.remove("type");
-            if let Some(headers) = server.remove("headers") {
-                server.insert("http_headers".to_string(), headers);
+            if let Some(Value::Object(headers)) = server.remove("headers") {
+                let mut static_headers = Map::new();
+                let mut env_headers = Map::new();
+                for (name, value) in headers {
+                    if let Some(env_name) = value.as_str().and_then(exact_env_template) {
+                        env_headers.insert(name, Value::String(env_name.to_string()));
+                    } else {
+                        static_headers.insert(name, value);
+                    }
+                }
+                if !static_headers.is_empty() {
+                    server.insert("http_headers".to_string(), Value::Object(static_headers));
+                }
+                if !env_headers.is_empty() {
+                    server.insert("env_http_headers".to_string(), Value::Object(env_headers));
+                }
             }
         }
     }
@@ -611,6 +625,19 @@ fn adapt_codex(mut servers: ServerMap, mut meta: Option<Value>) -> Value {
         meta = None; // already attached above
     }
     attach_meta(servers, meta)
+}
+
+fn exact_env_template(value: &str) -> Option<&str> {
+    let name = value.strip_prefix("${")?.strip_suffix('}')?;
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        Some(name)
+    } else {
+        None
+    }
 }
 
 fn adapt_opencode(servers: ServerMap, meta: Option<Value>) -> Value {
@@ -1174,6 +1201,39 @@ mod tests {
         );
         assert!(context7.get("type").is_none());
         assert!(context7.get("headers").is_some());
+    }
+
+    #[test]
+    fn codex_uses_environment_sourced_http_headers_for_exact_templates() {
+        let servers = Map::from_iter([(
+            "tldraw".to_string(),
+            serde_json::json!({
+                "type": "http",
+                "url": "https://draw.example.test/mcp",
+                "headers": {
+                    "CF-Access-Client-Id": "${TLDRAW_CF_ACCESS_CLIENT_ID}",
+                    "CF-Access-Client-Secret": "${TLDRAW_CF_ACCESS_CLIENT_SECRET}",
+                    "X-Static": "static",
+                    "Authorization": "Bearer ${NOT_AN_EXACT_TEMPLATE}"
+                }
+            }),
+        )]);
+
+        let adapted = adapt_codex(servers, None);
+        assert_eq!(
+            adapted["tldraw"]["env_http_headers"],
+            serde_json::json!({
+                "CF-Access-Client-Id": "TLDRAW_CF_ACCESS_CLIENT_ID",
+                "CF-Access-Client-Secret": "TLDRAW_CF_ACCESS_CLIENT_SECRET"
+            })
+        );
+        assert_eq!(
+            adapted["tldraw"]["http_headers"],
+            serde_json::json!({
+                "X-Static": "static",
+                "Authorization": "Bearer ${NOT_AN_EXACT_TEMPLATE}"
+            })
+        );
     }
 
     #[test]
