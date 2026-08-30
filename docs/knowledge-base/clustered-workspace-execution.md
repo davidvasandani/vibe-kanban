@@ -1,6 +1,6 @@
 # Clustered workspace execution and shared-storage safety
 
-Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`, `8475-bubblewrap-missi`, `2fe7-vk-coordinator-m`, `eef5-coordinator-miss`
+Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`, `8475-bubblewrap-missi`, `2fe7-vk-coordinator-m`, `eef5-coordinator-miss`, `VAS-448`
 
 ## Keep authority central and process ownership local
 
@@ -153,6 +153,17 @@ Cleanup must require positive evidence that no execution is active. An offline
 or unreachable worker means the workspace is indeterminate, not idle, so retain
 the files until reconciliation or operator intervention proves reclamation is
 safe.
+
+Cluster cleanup also needs a complete fence lifecycle. Claim cleanup with an
+atomic `ready → cleaning` transition so dispatch cannot race deletion. Keep the
+fence until filesystem cleanup succeeds and the database durably records
+`worktree_deleted`; then atomically return the placement to `ready`, allowing a
+later access to recreate the worktree. If cleanup fails, cancel the claim back
+to `ready` without setting the deletion flag so another sweep can retry. If the
+process crashes after recording deletion but before releasing the fence, an
+access may recover only the proven `cleaning + worktree_deleted` state. A
+one-way `ready → cleaning` transition strands expired workspaces permanently
+and surfaces as a generic follow-up-send 500.
 
 ## A worktree is only as portable as the repository behind it
 
