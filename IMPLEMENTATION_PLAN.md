@@ -1,28 +1,24 @@
-# Implementation Plan: `list_all_messages`
+# Implementation Plan for VAS-448
 
-1. Refresh the SpecKit constitution and create the task-scoped feature
-   artifacts from `SPEC.md` and `PRIOR_KNOWLEDGE.md`.
-2. Clarify the public meaning of “all”: all messages in the settled normalized
-   projection for the selected execution, subject to existing per-entry text
-   truncation and the documented legacy reconstruction bound.
-3. Extend the shared messages HTTP query with an explicit all-messages flag and
-   represent bounded-tail versus complete selection in the shared response
-   builder without changing the recent-message defaults or cap.
-4. Add focused server tests using more than 100 normalized entries to cover:
-   bounded tail ordering/`has_more`, complete ordering/`has_more`, role
-   filtering, and unchanged final-message semantics.
-5. Refactor the MCP sessions tool implementation to share target resolution,
-   workspace authorization, and HTTP fetching between `list_recent_messages`
-   and the new `list_all_messages` tool.
-6. Register `list_all_messages`, add it to the orchestrator exposure test, and
-   document its usage and normalized-history boundary in the MCP crate guide.
-7. Install locked dependencies if required, format the repository, and run
-   focused Rust tests/checks followed by proportionate broader verification.
-8. Run SpecKit analysis before implementation and execute the generated task
-   list in dependency order, checking off each completed task.
-9. Run an independent Codex diff review, address confirmed findings, and repeat
-   verification/review until no significant findings remain.
-10. Distill reusable architecture knowledge into the project knowledge base,
-    update its index with task id `vk/29d8-vk-list-all-mess`, and commit it.
-11. Commit the implementation, push the task branch, open a pull request against
-    the base branch, wait for required checks, and merge it.
+1. Confirm repository and deployment scope from `homelab/project-context.json`;
+   inventory current uncommitted changes so unrelated work is preserved.
+2. Trace `useSessionSend` through its API client, server route, session service,
+   queue/continuation logic, and clustered worker dispatch boundary.
+3. Resolve `VAS-448` to its Vibe Kanban task, workspace, session, current
+   execution, and assigned worker using read-only application/database queries.
+4. Correlate those identifiers with coordinator and worker service logs to find
+   the original server-side error hidden by `AppError` sanitization.
+5. Reproduce the failing state at the narrowest safe layer and identify whether
+   the cause is code, persisted lifecycle state, or the Vibe Kanban deployment
+   module.
+6. Implement the smallest in-scope remediation. Preserve safe public errors and
+   add structured server diagnostics if the failing boundary lacks them.
+7. Add regression coverage for the exact state transition/error classification;
+   regenerate derived types only if a source contract changes.
+8. Install dependencies if needed, format the Vibe Kanban repository, and run
+   focused tests followed by proportionate frontend/backend checks.
+9. Run an independent Codex review of the complete diff, address confirmed
+   findings, and repeat verification/review until no significant findings remain.
+10. Update the Vibe Kanban knowledge base with reusable findings tagged
+    `VAS-448`, refresh its index, and commit the knowledge-base update before
+    reporting readiness.

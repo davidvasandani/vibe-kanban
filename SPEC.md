@@ -1,72 +1,48 @@
-# Technical Spec: `list_all_messages` MCP tool
+# VAS-448 Message Send Failure Investigation
 
-**Task:** `vk/29d8-vk-list-all-mess`
+## Problem
 
-## Summary
+Sending a follow-up message from the Vibe Kanban workspace associated with task
+`VAS-448` fails in the web UI with:
 
-Add a read-only `list_all_messages` tool to the Vibe Kanban MCP server alongside
-`list_recent_messages`. The new tool returns the complete normalized message
-history for either a session's latest coding-agent execution or a specific
-execution, while preserving workspace scoping, role filtering, message order,
-normalization, and per-message truncation.
+> Failed to send: An internal error occurred. Please try again.
 
-## Motivation
+The displayed text is Vibe Kanban's sanitized response for an unclassified
+server-side error, so it does not identify the underlying failure.
 
-`list_recent_messages` is intentionally a bounded tail reader: its default is
-20 messages and the HTTP API clamps requests to 100. Orchestrators sometimes
-need the complete conversation to recover earlier decisions and context. Asking
-for a larger recent-message window cannot satisfy that requirement once a turn
-contains more than 100 normalized messages.
+## Scope
 
-## Functional requirements
+- Trace the workspace-chat send request from the web client through the Vibe
+  Kanban API and executor/session layers.
+- Correlate the failing request with available Vibe Kanban runtime logs and the
+  persisted workspace/session state for `VAS-448`.
+- Correct the Vibe Kanban source or its deployment configuration in
+  `homelab/modules/vibe-kanban-rebuild.nix` if a reproducible defect is found.
+- Preserve unrelated services and configuration.
 
-1. Expose `list_all_messages` in both global and scoped/orchestrator MCP modes.
-2. Accept exactly the same target choices as `list_recent_messages`:
-   `session_id` (latest non-deleted coding-agent execution) or `execution_id`.
-   At least one target is required; when both are supplied, preserve the
-   existing execution-first behavior for compatibility.
-3. Accept the same optional comma-separated `roles` filter.
-4. Return the same response shape and message shape as
-   `list_recent_messages`, ordered oldest to newest, but without a caller limit
-   or the server's 100-message cap. `has_more` must be false for a successful
-   all-messages response.
-5. Reuse the existing normalized-log projection used by the UI and recent
-   messages. Do not read raw logs, open a websocket, or introduce another data
-   store.
-6. Enforce the owning session's workspace scope before reading messages.
-7. Preserve the existing per-message truncation and `final_message` behavior so
-   an unbounded message count does not also make individual entries unbounded.
-8. Leave `list_recent_messages` behavior and API compatibility unchanged.
-9. Document when callers should choose recent versus all messages.
+## Requirements
 
-## Technical design
+1. Identify the concrete server-side error hidden by the generic API response.
+2. Determine why the error is specific to, or exposed by, the workspace for
+   `VAS-448`.
+3. Add regression coverage at the narrowest practical layer for any code fix.
+4. Keep externally returned errors sanitized while retaining actionable
+   diagnostics in server logs.
+5. Verify relevant formatting, tests, and static checks.
 
-- Extend the messages HTTP query with an optional `all` boolean. The existing
-  endpoints continue to clamp `limit` when `all` is absent or false. When
-  `all=true`, the shared response builder retains every filtered normalized
-  message and reports `has_more: false`.
-- Generalize the MCP HTTP helper so it can request either a bounded `limit` or
-  `all=true` while continuing to pass the optional role filter.
-- Factor the shared target resolution and workspace authorization used by the
-  two MCP tools where practical, avoiding behavior drift.
-- Register the new tool through the sessions tool router and update the
-  orchestrator allow-list test.
+## Acceptance Criteria
 
-## Tests and acceptance criteria
-
-- Unit tests prove bounded responses still tail and set `has_more`, while the
-  all-messages mode returns more than 100 filtered messages in chronological
-  order with `has_more: false`.
-- MCP router tests prove `list_all_messages` is exposed to orchestrators.
-- Existing recent-message tests remain green.
-- Rust formatting and focused crate checks/tests pass.
+- A message can be sent successfully to the affected active session, or the
+  investigation produces a precise, evidence-backed operational cause and an
+  in-scope remediation.
+- The UI no longer receives an unclassified internal error for the identified
+  condition.
+- Regression tests cover the failure mode when the remediation changes code.
 - An independent Codex diff review reports no significant findings.
+- Reusable findings are recorded in the project knowledge base and indexed.
 
-## Out of scope
+## Non-goals
 
 - Changes to services other than Vibe Kanban.
-- Combining messages across multiple executions in a session; session targeting
-  continues to mean the latest coding-agent execution.
-- Removing truncation, changing normalized-log semantics, or changing the
-  existing `list_recent_messages` limit.
-- Frontend UI changes or homelab deployment changes.
+- Broad redesign of workspace chat or executor protocols.
+- Exposing internal exception details to browser clients.

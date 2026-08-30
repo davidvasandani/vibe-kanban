@@ -1327,29 +1327,83 @@ impl LocalContainerService {
             }
         };
 
-        if workspace_inputs.is_empty() {
+        let cleanup_succeeded = if workspace_inputs.is_empty() {
             tracing::warn!(
                 "No repositories found for workspace {}, cleaning up workspace directory only",
                 workspace.id
             );
-            if workspace_dir.exists()
-                && let Err(e) = tokio::fs::remove_dir_all(&workspace_dir).await
-            {
-                tracing::warn!("Failed to remove workspace directory: {}", e);
+            if workspace_dir.exists() {
+                match tokio::fs::remove_dir_all(&workspace_dir).await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        tracing::warn!("Failed to remove workspace directory: {}", error);
+                        false
+                    }
+                }
+            } else {
+                true
             }
         } else {
-            WorkspaceManager::cleanup_workspace(&workspace_dir, &workspace_inputs)
-                .await
-                .unwrap_or_else(|e| {
+            match WorkspaceManager::cleanup_workspace(&workspace_dir, &workspace_inputs).await {
+                Ok(()) => true,
+                Err(error) => {
                     tracing::warn!(
                         "Failed to clean up workspace for workspace {}: {}",
                         workspace.id,
-                        e
+                        error
                     );
-                });
+                    false
+                }
+            }
+        };
+
+        if !cleanup_succeeded {
+            if self.cluster_config.enabled
+                && let Err(error) =
+                    WorkspacePlacement::cancel_cleanup(&self.db.pool, workspace.id).await
+            {
+                tracing::warn!(
+                    workspace_id = %workspace.id,
+                    %error,
+                    "Failed to release unsuccessful clustered workspace cleanup claim"
+                );
+            }
+            return;
         }
 
-        let _ = Workspace::mark_worktree_deleted(&self.db.pool, workspace.id).await;
+        if let Err(error) = Workspace::mark_worktree_deleted(&self.db.pool, workspace.id).await {
+            tracing::warn!(
+                workspace_id = %workspace.id,
+                %error,
+                "Failed to mark cleaned workspace worktree deleted"
+            );
+            if self.cluster_config.enabled
+                && let Err(cancel_error) =
+                    WorkspacePlacement::cancel_cleanup(&self.db.pool, workspace.id).await
+            {
+                tracing::warn!(
+                    workspace_id = %workspace.id,
+                    error = %cancel_error,
+                    "Failed to release cleanup claim after deletion-state persistence failed"
+                );
+            }
+            return;
+        }
+
+        if self.cluster_config.enabled {
+            match WorkspacePlacement::finish_cleanup(&self.db.pool, workspace.id).await {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    workspace_id = %workspace.id,
+                    "Cleaned clustered workspace did not hold the cleanup fence"
+                ),
+                Err(error) => tracing::warn!(
+                    workspace_id = %workspace.id,
+                    %error,
+                    "Failed to release clustered workspace cleanup fence"
+                ),
+            }
+        }
     }
 
     async fn cleanup_expired_workspaces(&self) -> Result<(), DeploymentError> {
@@ -3366,6 +3420,15 @@ impl ContainerService for LocalContainerService {
         workspace: &Workspace,
     ) -> Result<ContainerRef, ContainerError> {
         self.touch(workspace).await?;
+
+        // A process crash after deletion was recorded but before the cleanup
+        // fence was released leaves a recoverable `cleaning` row. Repair only
+        // that proven-complete state; an in-progress cleanup still has
+        // `worktree_deleted = false` and remains fenced.
+        if self.cluster_config.enabled && workspace.worktree_deleted {
+            WorkspacePlacement::finish_cleanup(&self.db.pool, workspace.id).await?;
+        }
+
         let (repositories, workspace_inputs) = self.workspace_repo_inputs(workspace.id).await?;
 
         let workspace_dir = if let Some(container_ref) = &workspace.container_ref {
