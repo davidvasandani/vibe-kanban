@@ -469,6 +469,30 @@ fn poller_summary(process: &ExecutionProcess) -> Option<PollerSummary> {
     })
 }
 
+/// Human-readable reason for a rejected poller start.
+///
+/// The typed `StartPollerError` is what the frontend matches on, but non-browser
+/// clients only receive `message` — an MCP tool reports a message-less error as
+/// "Unknown error", which tells a calling agent nothing about whether to change
+/// the interval, the working directory, or stop retrying. Each message names the
+/// failure and the corrective action (Constitution XXI).
+fn start_poller_error_message(error: &StartPollerError) -> &'static str {
+    match error {
+        StartPollerError::EmptyCommand => {
+            "Poller command is empty: supply the command to run on each tick."
+        }
+        StartPollerError::InvalidInterval => {
+            "Poller interval is out of range: interval_secs must be between 5 and 86400 seconds. It is never defaulted, because a defaulted interval is a hot loop."
+        }
+        StartPollerError::InvalidWorkingDir => {
+            "Poller working_dir is invalid: it must be relative to the workspace root and must not contain '..'."
+        }
+        StartPollerError::TooManyHelpers => {
+            "Too many background processes in this workspace: pollers and background helpers share one limit of 5. Stop an existing poller or helper first."
+        }
+    }
+}
+
 /// Start a poller: a background helper whose script is a generated loop running
 /// the agent's command on an interval. It shares the helper lifetime exactly —
 /// own process group, survives the turn-end reap and server restarts, stopped
@@ -481,7 +505,12 @@ pub async fn start_poller(
 ) -> Result<ResponseJson<ApiResponse<ExecutionProcess, StartPollerError>>, ApiError> {
     let spec = match poller_spec_from_request(request.command, request.interval_secs) {
         Ok(spec) => spec,
-        Err(error) => return Ok(ResponseJson(ApiResponse::error_with_data(error))),
+        Err(error) => {
+            let message = start_poller_error_message(&error);
+            return Ok(ResponseJson(ApiResponse::error_with_data_and_message(
+                error, message,
+            )));
+        }
     };
 
     let session = match prepare_helper_start(
@@ -493,7 +522,11 @@ pub async fn start_poller(
     {
         Ok(session) => session,
         Err(rejection) => {
-            return Ok(ResponseJson(ApiResponse::error_with_data(rejection.into())));
+            let error: StartPollerError = rejection.into();
+            let message = start_poller_error_message(&error);
+            return Ok(ResponseJson(ApiResponse::error_with_data_and_message(
+                error, message,
+            )));
         }
     };
 
@@ -723,6 +756,35 @@ mod tests {
             poller_spec_from_request("   ".to_string(), 60),
             Err(StartPollerError::EmptyCommand)
         ));
+    }
+
+    /// Asserting the typed variant is not enough: an MCP client only receives
+    /// `message`, so a rejection that carries only `error_data` reaches a
+    /// calling agent as "Unknown error" and it cannot tell what to change. This
+    /// was found by driving the shipped `spawn_poller` tool, not by the variant
+    /// assertions above — which passed the whole time.
+    #[test]
+    fn every_rejection_carries_a_message_that_names_the_problem() {
+        let cases = [
+            (StartPollerError::EmptyCommand, "empty"),
+            (StartPollerError::InvalidInterval, "interval_secs"),
+            (StartPollerError::InvalidWorkingDir, "working_dir"),
+            (StartPollerError::TooManyHelpers, "limit of 5"),
+        ];
+
+        for (error, expected_fragment) in cases {
+            let message = start_poller_error_message(&error);
+            assert!(
+                message.contains(expected_fragment),
+                "{error:?} message should name the problem ({expected_fragment:?}), got {message:?}"
+            );
+
+            // The message is what a non-browser client actually surfaces, so it
+            // has to survive onto the response envelope, not just exist.
+            let response: ApiResponse<ExecutionProcess, StartPollerError> =
+                ApiResponse::error_with_data_and_message(error, message);
+            assert_eq!(response.message(), Some(message));
+        }
     }
 
     #[test]
