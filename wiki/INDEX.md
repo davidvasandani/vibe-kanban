@@ -55,6 +55,15 @@ contributed to it.
   reap, the env gate, the Codex/ACP Phase-3 decisions, and why cleanup-skip early
   finalization must dispatch queued follow-ups before setting its finalized
   guard.
+- [codex-credential-refresh.md](codex-credential-refresh.md) — Why concurrent
+  `codex app-server` processes sharing one ChatGPT `auth.json` hit "refresh token
+  already used" (rotating single-use refresh tokens + Codex's guarded reload but
+  **no cross-process lock**), and the serialized up-front refresh that fixes it:
+  a JWT-expiry gate mirroring Codex's 5-min window, a per-path in-process async
+  mutex + `fd-lock`/`flock` on the shared `auth.json` inode (non-blocking
+  `try_write` poll), `get_account(refresh_token=true)` to drive Codex's guarded
+  refresh once, the shared-inode + lock-order invariants, fail-safe fallbacks,
+  and the rejected alternatives (external-auth bridge, blind retry).
 - [slack-shortcut-ai-summarization.md](slack-shortcut-ai-summarization.md) —
   Optional AI thread summarization for the Slack "Create issue from message"
   shortcut: the ack-fast/enrich-later shape (all slow work in the post-ack

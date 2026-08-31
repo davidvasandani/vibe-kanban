@@ -1,3 +1,4 @@
+pub mod auth_refresh;
 pub mod client;
 pub mod jsonrpc;
 pub mod normalize_logs;
@@ -672,7 +673,15 @@ impl Codex {
         combined_prompt: String,
         client: Arc<AppServerClient>,
     ) -> Result<(), ExecutorError> {
-        let account = client.get_account().await?;
+        // Serialize an up-front credential refresh across concurrent Codex
+        // processes so a near-expired ChatGPT token is rotated exactly once,
+        // before the turn, instead of racing (VAS-490). No-op for healthy
+        // tokens and non-ChatGPT auth.
+        if let Some(home) = codex_home() {
+            auth_refresh::refresh_credentials_if_stale(&home, &client).await;
+        }
+
+        let account = client.get_account(false).await?;
         if account.requires_openai_auth && account.account.is_none() {
             return Err(ExecutorError::AuthRequired(
                 "Codex authentication required".to_string(),
