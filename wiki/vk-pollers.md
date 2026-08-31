@@ -143,6 +143,37 @@ The collapsed header reports the running count **and** signals failure
 distinctly, because a bare running count renders "my only poller just died"
 identically to "I never had one".
 
+## Assert what the caller receives, not what the code returns
+
+The poller routes shipped with tests that asserted the rejection *variant* —
+`InvalidInterval`, `InvalidWorkingDir` — and those tests passed the whole time.
+Driving the shipped `spawn_poller` MCP tool against the running service showed
+every rejection arriving at the agent as:
+
+```json
+{"error": "VK API returned error", "details": "Unknown error"}
+```
+
+`ApiResponse::error_with_data` sets `message: None` by construction. The frontend
+matches on the typed `error_data`, but **non-browser clients only surface
+`message`** — so any route an MCP tool can reach must use
+`error_with_data_and_message`, or it is unusable at its own error boundary.
+
+Two transferable lessons:
+
+- A test that asserts an internal enum is not a test of the contract. The
+  contract is what crosses the boundary. Here the variant assertion and the user
+  experience disagreed completely, and only the variant was covered.
+- For an agent-facing denial this is not cosmetic. The whole feature exists to
+  redirect agents away from their CLI's in-turn mechanism; an agent told
+  "Unknown error" cannot tell whether to change the interval, the working
+  directory, or stop retrying, so the redirect fails exactly where it matters.
+  Constitution XXI ("failures say what failed") and the Principle IX requirement
+  that a denial name its replacement are the same rule applied at two layers.
+
+Note `spawn_background_helper` still has the message-less shape through the same
+constructor — pre-existing, and left for its own change rather than folded in.
+
 ## Not this: a wake-up scheduler
 
 A vk poller runs a **command**, not a turn; it never resumes the agent. Persisting
