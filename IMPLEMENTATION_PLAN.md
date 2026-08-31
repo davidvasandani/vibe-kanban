@@ -1,28 +1,56 @@
-# Implementation Plan: `list_all_messages`
+# Implementation Plan: serialized up-front Codex credential refresh (VAS-490)
 
-1. Refresh the SpecKit constitution and create the task-scoped feature
-   artifacts from `SPEC.md` and `PRIOR_KNOWLEDGE.md`.
-2. Clarify the public meaning of “all”: all messages in the settled normalized
-   projection for the selected execution, subject to existing per-entry text
-   truncation and the documented legacy reconstruction bound.
-3. Extend the shared messages HTTP query with an explicit all-messages flag and
-   represent bounded-tail versus complete selection in the shared response
-   builder without changing the recent-message defaults or cap.
-4. Add focused server tests using more than 100 normalized entries to cover:
-   bounded tail ordering/`has_more`, complete ordering/`has_more`, role
-   filtering, and unchanged final-message semantics.
-5. Refactor the MCP sessions tool implementation to share target resolution,
-   workspace authorization, and HTTP fetching between `list_recent_messages`
-   and the new `list_all_messages` tool.
-6. Register `list_all_messages`, add it to the orchestrator exposure test, and
-   document its usage and normalized-history boundary in the MCP crate guide.
-7. Install locked dependencies if required, format the repository, and run
-   focused Rust tests/checks followed by proportionate broader verification.
-8. Run SpecKit analysis before implementation and execute the generated task
-   list in dependency order, checking off each completed task.
-9. Run an independent Codex diff review, address confirmed findings, and repeat
-   verification/review until no significant findings remain.
-10. Distill reusable architecture knowledge into the project knowledge base,
-    update its index with task id `vk/29d8-vk-list-all-mess`, and commit it.
-11. Commit the implementation, push the task branch, open a pull request against
-    the base branch, wait for required checks, and merge it.
+## 1. Dependency
+- Add `fd-lock` (v4, already in `Cargo.lock`) to `crates/executors/Cargo.toml`.
+
+## 2. New module `crates/executors/src/executors/codex/auth_refresh.rs`
+- `pub(crate) async fn refresh_credentials_if_stale(codex_home, client)`:
+  1. `auth_path = codex_home.join("auth.json")`. If missing → return (no-op).
+  2. Read+parse `auth.json`; extract `tokens.access_token`. If absent (API-key
+     auth) → return.
+  3. `access_token_expires_within(jwt, window)` — decode JWT payload
+     (base64url middle segment), read `exp`, compare to `now + window`.
+     Parse failure → treat as "not stale" (fail safe) and return.
+  4. If not within the window → return (healthy token, unchanged behavior).
+  5. Acquire the in-process async mutex for `auth_path` (global
+     `Lazy<Mutex<HashMap<PathBuf, Arc<tokio::Mutex<()>>>>>`, keyed by the
+     canonicalized path).
+  6. Acquire `fd-lock` exclusive on `auth.json` via `spawn_blocking`, returning
+     the locked handle (held across the await).
+  7. Re-read expiry under the locks; if a sibling already refreshed (now fresh)
+     → drop lock, return.
+  8. Call `client.get_account(refresh_token = true)` → Codex's guarded
+     `refresh_token()`. Log+swallow errors (fail safe; the normal turn path
+     still surfaces genuine auth failures).
+  9. Drop file lock (spawn_blocking) and mutex.
+- Constants: refresh window (mirror Codex's proactive window; use 5 min).
+- Unit tests:
+  - `expires_within` true/false around the boundary; unparseable JWT → false.
+  - `auth.json` missing / no `tokens` → no-op (no panic).
+  - a fresh token → helper is a no-op (assert via the pure expiry function).
+
+## 3. `crates/executors/src/executors/codex/client.rs`
+- Change `get_account` to `get_account(&self, refresh: bool)` (or add
+  `get_account_refreshing`) setting `GetAccountParams { refresh_token: refresh }`.
+- Update existing callers to pass `false` (behavior unchanged there).
+
+## 4. Wire into startup — `codex.rs` and `codex/review.rs`
+- In `launch_codex_agent` (codex.rs) and `launch_codex_review` (review.rs),
+  before the existing `client.get_account().await?`:
+  `if let Some(home) = codex_home() { auth_refresh::refresh_credentials_if_stale(&home, &client).await; }`
+- Keep the existing `get_account(false)` account check afterwards.
+
+## 5. Module registration
+- Add `mod auth_refresh;` to `codex.rs`.
+
+## 6. Verify
+- `cargo test -p executors` (new unit tests + existing).
+- `pnpm run check`, `pnpm run lint`, `pnpm run format`.
+- `pnpm run generate-types` not needed (no shared types changed).
+
+## Notes / invariants
+- `codex_home()` in the parent/worker process resolves to the shared home whose
+  `auth.json` all scoped homes symlink to — so locking it coordinates both
+  deployments. No env threading needed.
+- Everything fails safe to today's behavior; the worst regression is one extra
+  network refresh per concurrent batch when the token is near expiry.
