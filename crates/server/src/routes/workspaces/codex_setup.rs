@@ -93,6 +93,7 @@ async fn get_setup_helper_action(codex: &Codex) -> Result<ExecutorAction, ApiErr
         language: ScriptRequestLanguage::Bash,
         context: ScriptContext::ToolInstallScript,
         working_dir: None,
+        poller: None,
     };
 
     Ok(ExecutorAction::new(

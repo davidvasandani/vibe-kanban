@@ -337,6 +337,17 @@ pub enum ContainerError {
     Other(#[from] AnyhowError), // Catches any unclassified errors
 }
 
+/// Run reasons whose running processes `archive_workspace` stops.
+///
+/// These are exactly the persistent ones. A poller has no entry of its own
+/// because a poller *is* a `BackgroundHelper` — it inherits the helper's whole
+/// lifetime, including this — and named here so that inheritance is something a
+/// test can assert rather than something a reader has to notice.
+const ARCHIVE_STOPPED_RUN_REASONS: [ExecutionProcessRunReason; 2] = [
+    ExecutionProcessRunReason::DevServer,
+    ExecutionProcessRunReason::BackgroundHelper,
+];
+
 #[async_trait]
 pub trait ContainerService {
     fn msg_stores(&self) -> &Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>;
@@ -926,6 +937,7 @@ pub trait ContainerService {
                 language: ScriptRequestLanguage::Bash,
                 context: ScriptContext::CleanupScript,
                 working_dir: Some(first.name.clone()),
+                poller: None,
             }),
             None,
         );
@@ -937,6 +949,7 @@ pub trait ContainerService {
                     language: ScriptRequestLanguage::Bash,
                     context: ScriptContext::CleanupScript,
                     working_dir: Some(repo.name.clone()),
+                    poller: None,
                 }),
                 None,
             ));
@@ -963,6 +976,7 @@ pub trait ContainerService {
                 language: ScriptRequestLanguage::Bash,
                 context: ScriptContext::ArchiveScript,
                 working_dir: Some(first.name.clone()),
+                poller: None,
             }),
             None,
         );
@@ -974,6 +988,7 @@ pub trait ContainerService {
                     language: ScriptRequestLanguage::Bash,
                     context: ScriptContext::ArchiveScript,
                     working_dir: Some(repo.name.clone()),
+                    poller: None,
                 }),
                 None,
             ));
@@ -1035,11 +1050,9 @@ pub trait ContainerService {
 
         Workspace::set_archived(pool, workspace_id, true).await?;
 
-        // Stop running dev servers and background helpers
-        for run_reason in [
-            ExecutionProcessRunReason::DevServer,
-            ExecutionProcessRunReason::BackgroundHelper,
-        ] {
+        // Stop running dev servers and background helpers (pollers included —
+        // a poller is a background helper, see ARCHIVE_STOPPED_RUN_REASONS).
+        for run_reason in ARCHIVE_STOPPED_RUN_REASONS {
             let Ok(processes) = ExecutionProcess::find_running_by_workspace_and_run_reason(
                 pool,
                 workspace_id,
@@ -1092,6 +1105,7 @@ pub trait ContainerService {
                 language: ScriptRequestLanguage::Bash,
                 context: ScriptContext::SetupScript,
                 working_dir: Some(first.name.clone()),
+                poller: None,
             }),
             None,
         );
@@ -1103,6 +1117,7 @@ pub trait ContainerService {
                     language: ScriptRequestLanguage::Bash,
                     context: ScriptContext::SetupScript,
                     working_dir: Some(repo.name.clone()),
+                    poller: None,
                 }),
                 None,
             ));
@@ -1119,6 +1134,7 @@ pub trait ContainerService {
                     language: ScriptRequestLanguage::Bash,
                     context: ScriptContext::SetupScript,
                     working_dir: Some(repo.name.clone()),
+                    poller: None,
                 }),
                 None,
             )
@@ -1138,6 +1154,7 @@ pub trait ContainerService {
                         language: ScriptRequestLanguage::Bash,
                         context: ScriptContext::SetupScript,
                         working_dir: Some(repo.name.clone()),
+                        poller: None,
                     }),
                     Some(Box::new(chained)),
                 );
@@ -2727,11 +2744,115 @@ mod tests {
                     language: ScriptRequestLanguage::Bash,
                     context: ScriptContext::SetupScript,
                     working_dir: None,
+                    poller: None,
                 }),
                 None,
             );
 
             assert!(executor_config_for_auto_resume(&action).is_none());
         }
+    }
+
+    /// A poller's whole lifetime is inherited from the background helper: it is
+    /// stopped on archive because `archive_workspace` sweeps
+    /// `ARCHIVE_STOPPED_RUN_REASONS`, and `BackgroundHelper` is in that list.
+    /// Inherited guarantees are exactly the ones that regress silently, so this
+    /// pins it: a running poller must be in the set archive collects to stop.
+    ///
+    /// This asserts the *selection*, not the kill — issuing the kill needs a
+    /// live `ContainerService` implementation and a real process group, which
+    /// is the local-deployment integration surface, not this one.
+    #[tokio::test]
+    async fn archiving_a_workspace_selects_a_running_poller_for_stopping() {
+        use db::models::{
+            execution_process::CreateExecutionProcess,
+            session::{CreateSession, Session},
+            workspace::{CreateWorkspace, Workspace},
+        };
+        use executors::actions::script::PollerSpec;
+
+        use super::ARCHIVE_STOPPED_RUN_REASONS;
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../db/migrations").run(&pool).await.unwrap();
+
+        let workspace = Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "vk/poller-archive-test".to_string(),
+                name: Some("poller-archive-test".to_string()),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+        let session = Session::create(
+            &pool,
+            &CreateSession {
+                executor: None,
+                name: None,
+            },
+            Uuid::new_v4(),
+            workspace.id,
+        )
+        .await
+        .unwrap();
+
+        let spec = PollerSpec {
+            command: "git fetch --dry-run origin main".to_string(),
+            interval_secs: 60,
+        };
+        let poller_id = Uuid::new_v4();
+        ExecutionProcess::create(
+            &pool,
+            &CreateExecutionProcess {
+                session_id: session.id,
+                executor_action: ExecutorAction::new(
+                    ExecutorActionType::ScriptRequest(ScriptRequest {
+                        script: executors::actions::script::compile_poller_script(&spec),
+                        language: ScriptRequestLanguage::Bash,
+                        context: ScriptContext::BackgroundHelper,
+                        working_dir: None,
+                        poller: Some(spec),
+                    }),
+                    None,
+                ),
+                run_reason: ExecutionProcessRunReason::BackgroundHelper,
+            },
+            poller_id,
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let mut selected = Vec::new();
+        for run_reason in ARCHIVE_STOPPED_RUN_REASONS {
+            selected.extend(
+                ExecutionProcess::find_running_by_workspace_and_run_reason(
+                    &pool,
+                    workspace.id,
+                    &run_reason,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+
+        let poller = selected
+            .iter()
+            .find(|p| p.id == poller_id)
+            .expect("archive must select the running poller for stopping");
+        let ExecutorActionType::ScriptRequest(script) = poller.executor_action().unwrap().typ()
+        else {
+            panic!("poller action should be a ScriptRequest");
+        };
+        assert!(
+            script.poller.is_some(),
+            "the selected process should still be identifiable as a poller"
+        );
     }
 }
