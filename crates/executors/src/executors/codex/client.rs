@@ -199,11 +199,18 @@ impl AppServerClient {
         }
     }
 
-    pub async fn get_account(&self) -> Result<GetAccountResponse, ExecutorError> {
+    /// Read the current account.
+    ///
+    /// When `refresh` is `true`, Codex performs its *guarded* token refresh
+    /// (reload `auth.json`; skip the network refresh if another actor already
+    /// rotated the token). We only pass `true` from the serialized pre-turn
+    /// refresh path (see `codex::auth_refresh`); the plain account check passes
+    /// `false` to preserve existing behavior.
+    pub async fn get_account(&self, refresh: bool) -> Result<GetAccountResponse, ExecutorError> {
         let request = ClientRequest::GetAccount {
             request_id: self.next_request_id(),
             params: GetAccountParams {
-                refresh_token: false,
+                refresh_token: refresh,
             },
         };
         self.send_request(request, "account/read").await

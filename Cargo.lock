@@ -2896,6 +2896,7 @@ dependencies = [
  "dirs 5.0.1",
  "enum_dispatch",
  "eventsource-stream",
+ "fd-lock",
  "futures",
  "futures-io",
  "git",
