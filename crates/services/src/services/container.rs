@@ -2765,11 +2765,16 @@ mod tests {
     #[tokio::test]
     async fn archiving_a_workspace_selects_a_running_poller_for_stopping() {
         use db::models::{
-            execution_process::CreateExecutionProcess,
+            execution_process::{
+                CreateExecutionProcess, ExecutionProcess, ExecutionProcessRunReason,
+            },
             session::{CreateSession, Session},
             workspace::{CreateWorkspace, Workspace},
         };
-        use executors::actions::script::PollerSpec;
+        use executors::actions::{
+            ExecutorAction, ExecutorActionType,
+            script::{PollerSpec, ScriptContext, ScriptRequest, ScriptRequestLanguage},
+        };
 
         use super::ARCHIVE_STOPPED_RUN_REASONS;
 

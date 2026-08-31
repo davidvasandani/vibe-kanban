@@ -14,7 +14,11 @@ import { WorkspaceNotesContainer } from './WorkspaceNotesContainer';
 import { useDiffs } from '@/shared/stores/useWorkspaceDiffStore';
 import { ArrowClockwiseIcon, ArrowsOutSimpleIcon } from '@phosphor-icons/react';
 import { useLogsPanel } from '@/shared/hooks/useLogsPanel';
-import type { RepoWithTargetBranch, Workspace } from 'shared/types';
+import type {
+  ExecutionProcess,
+  RepoWithTargetBranch,
+  Workspace,
+} from 'shared/types';
 import {
   PERSIST_KEYS,
   PersistKey,
@@ -32,6 +36,8 @@ import { DeployStatus } from '@vibe/ui/components/DeployStatus';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { GitBehindHeader } from './GitBehindHeader';
 import { ServerMetricsHeader } from './ServerMetricsHeader';
+import { PollersHeader } from './PollersHeader';
+import { PollersSectionContainer } from './PollersSectionContainer';
 
 type SectionDef = {
   title: string;
@@ -49,16 +55,25 @@ export interface RightSidebarProps {
   rightMainPanelMode: RightMainPanelMode | null;
   selectedWorkspace: Workspace | undefined;
   repos: RepoWithTargetBranch[];
+  /**
+   * Execution processes already streamed for the selected session by the
+   * layout. Passed down rather than re-subscribed so the Pollers section — which
+   * must show a summary while collapsed — adds no request or socket of its own.
+   */
+  executionProcesses?: ExecutionProcess[];
   linkedIssueForWorkspace?: { remoteProjectId: string; issueId: string } | null;
   showDeployStatus?: boolean;
   deployUpdateAvailable?: boolean;
   onDeployRefresh?: () => void;
 }
 
+const NO_EXECUTION_PROCESSES: ExecutionProcess[] = [];
+
 export const RightSidebar = memo(function RightSidebar({
   rightMainPanelMode,
   selectedWorkspace,
   repos,
+  executionProcesses = NO_EXECUTION_PROCESSES,
   linkedIssueForWorkspace,
   showDeployStatus = false,
   deployUpdateAvailable = false,
@@ -116,6 +131,10 @@ export const RightSidebar = memo(function RightSidebar({
   );
   const [notesExpanded] = usePersistedExpanded(
     PERSIST_KEYS.notesSection,
+    false
+  );
+  const [pollersExpanded] = usePersistedExpanded(
+    PERSIST_KEYS.pollersSection,
     false
   );
 
@@ -246,6 +265,18 @@ export const RightSidebar = memo(function RightSidebar({
         actions: [],
       },
       {
+        title: 'Pollers',
+        persistKey: PERSIST_KEYS.pollersSection,
+        visible: !!selectedWorkspace,
+        expanded: pollersExpanded,
+        fillAvailableSpace: true,
+        headerExtra: <PollersHeader executionProcesses={executionProcesses} />,
+        content: (
+          <PollersSectionContainer executionProcesses={executionProcesses} />
+        ),
+        actions: [],
+      },
+      {
         title: 'Terminal',
         persistKey: PERSIST_KEYS.terminalSection,
         visible: isTerminalVisible && !isTerminalExpanded,
@@ -358,6 +389,8 @@ export const RightSidebar = memo(function RightSidebar({
     selectedWorkspaceSummary?.isRunning,
     terminalExpanded,
     notesExpanded,
+    pollersExpanded,
+    executionProcesses,
     isTerminalVisible,
     isTerminalExpanded,
     hasUpperContent,

@@ -890,6 +890,26 @@ script: string,
  */
 working_dir: string | null, };
 
+export type StartPollerError = { "type": "empty_command" } | { "type": "invalid_interval" } | { "type": "invalid_working_dir" } | { "type": "too_many_helpers" };
+
+export type StartPollerRequest = { 
+/**
+ * Command to run on each tick.
+ */
+command: string, 
+/**
+ * Seconds between ticks.
+ */
+interval_secs: number, 
+/**
+ * Optional path to run the command in, relative to the workspace root.
+ */
+working_dir: string | null, };
+
+export type PollerSummary = { id: string, status: ExecutionProcessStatus, command: string, interval_secs: number, working_dir: string | null, started_at: string, };
+
+export type ListPollersResponse = { pollers: Array<PollerSummary>, count: number, };
+
 export type AssociateWorkspaceAttachmentsRequest = { attachment_ids: Array<string>, };
 
 export type ImportIssueAttachmentsRequest = { issue_id: string, };
@@ -1262,6 +1282,17 @@ reasoning_id?: string | null,
  */
 permission_policy?: PermissionPolicy | null, };
 
+export type PollerSpec = { 
+/**
+ * The command run on each tick, as supplied by the agent.
+ */
+command: string, 
+/**
+ * Seconds between ticks. Validated to
+ * `[MIN_POLLER_INTERVAL_SECS, MAX_POLLER_INTERVAL_SECS]`; zero is rejected.
+ */
+interval_secs: number, };
+
 export type ScriptContext = "SetupScript" | "CleanupScript" | "ArchiveScript" | "DevServer" | "ToolInstallScript" | "BackgroundHelper";
 
 export type ScriptRequest = { script: string, language: ScriptRequestLanguage, context: ScriptContext, 
@@ -1269,7 +1300,14 @@ export type ScriptRequest = { script: string, language: ScriptRequestLanguage, c
  * Optional relative path to execute the script in (relative to container_ref).
  * If None, uses the container_ref directory directly.
  */
-working_dir: string | null, };
+working_dir: string | null, 
+/**
+ * Set when this script is a generated poller loop; `None` for every other
+ * script. Absent from rows written before pollers existed, which is why it
+ * is `#[serde(default)]` — `executor_action` is JSON in a TEXT column, so
+ * this stays migration-free.
+ */
+poller: PollerSpec | null, };
 
 export type ScriptRequestLanguage = "Bash";
 

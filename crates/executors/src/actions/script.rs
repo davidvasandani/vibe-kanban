@@ -130,8 +130,16 @@ while [ "$__vk_tick" -lt "$__vk_max_ticks" ]; do
     # the scratch file bounded at cap+1 rather than at whatever the command
     # decided to emit.
     : > "$__vk_rc"
-    {{ __vk_poller_tick; printf '%s' "$?" > "$__vk_rc"; }} 2>&1 \
-        | head -c "$((__vk_cap + 1))" > "$__vk_out"
+    # The tick runs in a subshell, because it is the left-hand side of a
+    # pipeline. An agent command containing `exit N` therefore terminates that
+    # subshell outright, so the status is captured from an EXIT trap rather than
+    # from a statement placed after the call: a trailing statement is skipped by
+    # `exit`, which would silently swallow exactly the failure a poller exists to
+    # surface.
+    (
+        trap 'printf "%s" "$?" > "$__vk_rc"' EXIT
+        __vk_poller_tick
+    ) 2>&1 | head -c "$((__vk_cap + 1))" > "$__vk_out"
 
     __vk_bytes=$(wc -c < "$__vk_out")
     if [ "$((__vk_bytes))" -gt "$__vk_cap" ]; then

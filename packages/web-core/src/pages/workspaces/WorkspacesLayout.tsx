@@ -430,6 +430,7 @@ export function WorkspacesLayout() {
                     rightMainPanelMode={rightMainPanelMode}
                     selectedWorkspace={selectedWorkspace}
                     repos={repos}
+                    executionProcesses={executionProcesses}
                     linkedIssueForWorkspace={linkedIssueForWorkspace}
                   />
                 </LinkedIssueProvider>
@@ -552,6 +553,7 @@ export function WorkspacesLayout() {
                   rightMainPanelMode={rightMainPanelMode}
                   selectedWorkspace={selectedWorkspace}
                   repos={repos}
+                  executionProcesses={executionProcesses}
                   linkedIssueForWorkspace={linkedIssueForWorkspace}
                   showDeployStatus
                   deployUpdateAvailable={deployUpdateAvailable}
