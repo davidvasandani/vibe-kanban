@@ -76,6 +76,7 @@ mod issue_relationships;
 mod issue_tags;
 mod organizations;
 mod pipelines;
+mod pollers;
 mod remote_issues;
 mod remote_projects;
 mod repos;
@@ -88,6 +89,7 @@ impl McpServer {
         Self::context_tools_router()
             + Self::workspaces_tools_router()
             + Self::background_helpers_tools_router()
+            + Self::pollers_tools_router()
             + Self::organizations_tools_router()
             + Self::repos_tools_router()
             + Self::remote_projects_tools_router()
@@ -105,6 +107,7 @@ impl McpServer {
         let mut router = Self::context_tools_router()
             + Self::workspaces_tools_router()
             + Self::background_helpers_tools_router()
+            + Self::pollers_tools_router()
             + Self::session_tools_router()
             + Self::browser_tools_router();
         router.remove_route("list_workspaces");
@@ -624,12 +627,15 @@ mod tests {
             "get_execution".to_string(),
             "list_background_helpers".to_string(),
             "list_all_messages".to_string(),
+            "list_pollers".to_string(),
             "list_recent_messages".to_string(),
             "list_sessions".to_string(),
             "refresh_mcp_tools".to_string(),
             "run_session_prompt".to_string(),
             "spawn_background_helper".to_string(),
+            "spawn_poller".to_string(),
             "stop_background_helper".to_string(),
+            "stop_poller".to_string(),
             "update_session".to_string(),
             "update_workspace".to_string(),
         ]);

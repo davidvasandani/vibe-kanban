@@ -19,6 +19,46 @@ use crate::{
     profile::ExecutorConfig,
 };
 
+// ---------------------------------------------------------------------------
+// Decision record: Grok has no VK-hosted in-turn poller to close.
+//
+// Claude (`claude.rs`) and Codex (`codex.rs`) each carry a rule disabling their
+// harness-native background/polling execution, because a VK turn is one OS
+// process group reaped at turn end (`wiki/agent-process-lifecycle.md`) and
+// anything backgrounded inside it dies with the turn. Grok deliberately has no
+// equivalent rule, and that absence is a finding rather than an oversight:
+//
+//   * ACP does define terminal methods — `terminal/create`, `terminal/output`,
+//     `terminal/release`, `terminal/wait_for_exit`, `terminal/kill` — which
+//     together would be exactly such a poller.
+//   * They are gated on the *client* advertising the capability.
+//     `ClientCapabilities.terminal` is a `bool` defaulting to `false` via
+//     `#[derive(Default)]`; `InitializeRequest::new()` builds its capabilities
+//     with `ClientCapabilities::default()`; and `acp/harness.rs` never mutates
+//     them — it reads the initialize response only for `auth_methods`. A
+//     repo-wide grep for `ClientCapabilities` finds no VK call site at all.
+//   * `acp/client.rs` additionally stubs all five `terminal/*` methods as
+//     `Err(acp::Error::method_not_found())`, so even an agent that ignored the
+//     capability flag would get nothing.
+//
+// There is therefore no VK-hosted terminal for Grok to poll from and nothing to
+// replace with `spawn_poller`. A rule here would be a control with no mechanism
+// behind it. ACP also offers no per-tool allow/deny surface —
+// `NewSessionRequest` is `cwd`/`mcp_servers`/`meta`, `PromptRequest` is
+// `session_id`/`prompt`/`meta` — so there is nowhere to put one.
+//
+// Residual, deliberately *not* guessed (Constitution IX): Grok may still
+// background work through its own in-process shell tool. That tool's name could
+// not be confirmed against any Grok binary, fixture, or transcript available
+// here, and VK is near-blind to it regardless (ACP tool calls are classified by
+// `ToolKind`, never by name). Naming a string on a hunch would ship an inert
+// control that looks real; tracked as a residual risk instead.
+//
+// Verified against `agent-client-protocol` 0.8.0 /
+// `agent-client-protocol-schema` 0.9.1; see
+// `specs/vk/869c-vk-background-po/research.md`.
+// ---------------------------------------------------------------------------
+
 const AUTH_METHODS: [&str; 2] = ["cached_token", "xai.api_key"];
 const AUTO_MODE: &str = "auto";
 const ASK_MODE: &str = "ask";

@@ -55,6 +55,16 @@ contributed to it.
   reap, the env gate, the Codex/ACP Phase-3 decisions, and why cleanup-skip early
   finalization must dispatch queued follow-ups before setting its finalized
   guard.
+- [vk-pollers.md](vk-pollers.md) — Replacing each agent CLI's in-turn background
+  poller with a VK-owned one: why a poller is deliberately a background helper
+  (migration-free `Option<PollerSpec>`, one shared concurrency budget), why
+  denying tool *names* is insufficient when the vendor's real path runs through a
+  **parameter** (`Bash(run_in_background)` plus an undeniable `Read` on the
+  output file), the verify-the-executing-artifact rule (the Claude npm package is
+  a stub whose `sdk-tools.d.ts` lists schema titles rather than wire tool names;
+  Codex config keys fail open and so are pinned by test), Grok's evidenced
+  no-op, the `exit N`-in-a-subshell trap that would silently swallow tick
+  failures, and the drawer summary that rides a stream the layout already had.
 - [codex-credential-refresh.md](codex-credential-refresh.md) — Why concurrent
   `codex app-server` processes sharing one ChatGPT `auth.json` hit "refresh token
   already used" (rotating single-use refresh tokens + Codex's guarded reload but
