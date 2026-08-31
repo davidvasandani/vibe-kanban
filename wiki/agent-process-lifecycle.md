@@ -178,6 +178,18 @@ be designed alongside VAS-132 ("Issue Background Tasks as Sub-Issues"), which
 covers the same gap (agent-initiated work that outlives the current turn) from
 the background-subagent angle.
 
+**Generalized to the whole background-poller class** — see [[vk-pollers]].
+`ScheduleWakeup` is one member of it; the others (Claude's
+`Bash(run_in_background)` + `Monitor`/`TaskOutput`/`TaskStop`, Codex's
+`unified_exec` `exec_command`/`write_stdin` session) are closed the same way, and
+the replacement is a VK-owned poller riding this page's background-helper/pgid
+substrate. Two findings from that work generalize back here: denying tool *names*
+is insufficient when the vendor's real path runs through a **parameter**
+(`run_in_background`) plus an undeniable tool (`Read` on the output file); and a
+vendor identifier must be read from the artifact that actually executes — the
+Claude npm package is a stub whose `sdk-tools.d.ts` lists schema titles, not wire
+tool names. Option B remains deferred: a vk poller runs a command, not a turn.
+
 ## What already survives restarts (reuse, don't reinvent)
 
 `ExecutionProcess.pgid` is persisted at spawn; boot-time adoption
@@ -202,3 +214,4 @@ the stored `base_url` + password. Codex (stdio JSON-RPC; turn end currently
 - vk/1a64-coding-agent-pro
 - vk/826e-coding-agent-war
 - vk/9f36-vk-queued-messag
+- vk/869c-vk-background-po

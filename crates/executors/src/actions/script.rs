@@ -111,8 +111,18 @@ pub fn compile_poller_script(spec: &PollerSpec) -> String {
 __vk_interval={interval}
 __vk_max_ticks={max_ticks}
 __vk_cap={cap}
-__vk_out=$(mktemp 2>/dev/null || echo "${{TMPDIR:-/tmp}}/vk-poller-$$.out")
-__vk_rc=$(mktemp 2>/dev/null || echo "${{TMPDIR:-/tmp}}/vk-poller-$$.rc")
+# Fail loudly rather than falling back to a guessable path such as
+# "$TMPDIR/vk-poller-$$.out": the scratch files are truncated and rewritten every
+# tick, so a pre-planted symlink at a predictable name would be written through
+# for the life of the poller. A poller that cannot get a private temp file should
+# not start.
+__vk_out=$(mktemp 2>/dev/null) || __vk_out=""
+__vk_rc=$(mktemp 2>/dev/null) || __vk_rc=""
+if [ -z "$__vk_out" ] || [ -z "$__vk_rc" ]; then
+    printf '=== vk-poller aborted: could not create a private temp file ===\n' >&2
+    rm -f "$__vk_out" "$__vk_rc"
+    exit 1
+fi
 trap 'rm -f "$__vk_out" "$__vk_rc"' EXIT
 
 # The agent's command, as a shell body.

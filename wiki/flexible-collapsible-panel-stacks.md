@@ -87,15 +87,34 @@ Omit the destination on the workspace-less landing and in create mode, and
 recover an already-active `git` value to `workspaces` or `chat` respectively so
 the layout cannot remain on hidden empty content.
 
+## A collapsed header's data must already exist
+
+A section whose collapsed state carries a summary (Constitution XXVI) must not
+open a request or socket to produce it. `headerExtra` renders in the header row,
+which survives collapse — so the *data source*, not the markup, is the design
+problem.
+
+Check what the layout already holds before adding anything. When the Pollers
+section needed a live count ([[vk-pollers]]), the two obvious routes were both
+wrong: copying `ServerMetricsHeader`'s private 30s `useQuery` violates XXVI
+outright, and mounting `ExecutionProcessesProvider` in `WorkspacesLayout` opens a
+**second** socket for a session the layout is already streaming
+(`useExecutionProcesses(selectedSession?.id)`) while looking compliant. Passing
+the already-fetched array down as a prop — as `repos` and `diffs` already are —
+costs nothing and is trivially assertable: a test stubs `fetch` and asserts it is
+never called.
+
 ## Verification
 
 Rendered-DOM coverage should assert the shared primitive's opt-in expanded,
 collapsed, intrinsic non-collapsible, and default root classes. Also inspect the
 feature composition for a complete `min-h-0` chain and the absence of fixed
-height caps.
+height caps. For a section with a collapsed summary, assert the summary survives
+a header click and that the section issues no request of its own.
 
 ## Contributed by
 
 - vk/b74a-right-drawer-exp
 - vk/a12b-right-drawer-on
 - VAS-377
+- vk/869c-vk-background-po
