@@ -30,8 +30,8 @@ use workspace_utils::{
 
 use self::{
     client::{
-        AUTO_APPROVE_CALLBACK_ID, ClaudeAgentClient, DENY_SCHEDULE_WAKEUP_CALLBACK_ID,
-        STOP_GIT_CHECK_CALLBACK_ID,
+        AUTO_APPROVE_CALLBACK_ID, ClaudeAgentClient, DENY_BACKGROUND_BASH_CALLBACK_ID,
+        DENY_SCHEDULE_WAKEUP_CALLBACK_ID, STOP_GIT_CHECK_CALLBACK_ID,
     },
     protocol::ProtocolPeer,
     types::{ControlRequestType, ControlResponseType, PermissionMode},
@@ -126,6 +126,81 @@ const SCHEDULE_WAKEUP_TOOL: &str = "ScheduleWakeup";
 /// Anchored regex matching exactly [`SCHEDULE_WAKEUP_TOOL`] for PreToolUse hooks.
 const SCHEDULE_WAKEUP_MATCHER: &str = "^ScheduleWakeup$";
 
+/// Claude Code harness tools for driving an *in-turn* background poller:
+/// starting a long-running watch, reading a background task's output, and
+/// killing it. Disallowed under VK for the same reason as
+/// [`SCHEDULE_WAKEUP_TOOL`] — a VK turn is one OS process group that is reaped
+/// at turn end (`wiki/agent-process-lifecycle.md`), so anything the agent
+/// backgrounds inside the turn dies with it. The supported replacement is the
+/// `spawn_poller` MCP tool, which runs the command in a surviving process
+/// group.
+///
+/// Both the canonical names and their aliases are listed. The harness
+/// normalizes aliases to canonical names before matching permission rules, so
+/// listing the canonical name alone would already suffice; the aliases are
+/// defence-in-depth in case that normalization changes, and they are free.
+///
+/// # Verification source (Constitution IX)
+///
+/// These are **wire tool names**, read out of the native binary shipped in
+/// `@anthropic-ai/claude-code-linux-x64@2.1.200` — the platform package behind
+/// the `@anthropic-ai/claude-code@2.1.200` pin in [`base_command`]. The npm
+/// package itself is a ~20KB stub; its `sdk-tools.d.ts` lists JSON-Schema
+/// *titles* (`FileReadInput`, `FileEditInput`, …), **not** wire tool names
+/// (`Read`, `Edit`, …). A deny list derived from that file would name tools
+/// that do not exist and would silently match nothing. The alias→canonical
+/// table was read from the binary's own alias map. See
+/// `specs/vk/869c-vk-background-po/research.md`.
+///
+/// Because `@anthropic-ai/claude-code` is a `needs-review` Renovate carve-out,
+/// re-verify these names against the binary when the pin moves.
+///
+/// **This list is not sufficient on its own.** `TaskOutput` is marked
+/// deprecated in-binary in favour of `Read` on the background task's output
+/// file path, and `Read` cannot be denied. The load-bearing control is
+/// therefore the parameter-level `PreToolUse` deny on `Bash` with
+/// `run_in_background: true` — see
+/// [`DENY_BACKGROUND_BASH_CALLBACK_ID`][client::DENY_BACKGROUND_BASH_CALLBACK_ID].
+const BACKGROUND_POLLER_TOOLS: &[&str] = &[
+    // Canonical names confirmed in-binary.
+    "Monitor",
+    "TaskOutput",
+    "TaskStop",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    // Aliases the harness normalizes onto `TaskOutput` / `TaskStop`.
+    "BashOutput",
+    "BashOutputTool",
+    "AgentOutput",
+    "AgentOutputTool",
+    "KillShell",
+    "KillBash",
+];
+
+/// Anchored regex matching exactly the `Bash` tool for PreToolUse hooks. The
+/// hook fires on every `Bash` call; the callback denies only the ones that ask
+/// for a background spawn.
+const BACKGROUND_BASH_MATCHER: &str = "^Bash$";
+
+/// Builds a PreToolUse catch-all matcher (a negative lookahead) that excludes
+/// `mode_specific` names plus **every tool VK denies or disallows by name**, so
+/// a deny decision can never be overridden by a catch-all approve/ask hook.
+///
+/// Deriving the exclusions from [`SCHEDULE_WAKEUP_TOOL`] and
+/// [`BACKGROUND_POLLER_TOOLS`] rather than hand-writing them keeps the two
+/// lists from drifting apart when a name is added.
+fn catch_all_matcher_excluding(mode_specific: &[&str]) -> String {
+    let excluded = mode_specific
+        .iter()
+        .copied()
+        .chain(std::iter::once(SCHEDULE_WAKEUP_TOOL))
+        .chain(BACKGROUND_POLLER_TOOLS.iter().copied())
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("^(?!({excluded})$).*")
+}
+
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
 pub struct ClaudeCode {
@@ -190,6 +265,16 @@ impl ClaudeCode {
         // PreToolUse deny hook in `get_hooks` is the belt-and-suspenders that
         // returns an actionable error if the CLI still surfaces the tool.
         builder = builder.extend_params([format!("--disallowedTools={SCHEDULE_WAKEUP_TOOL}")]);
+        // Same treatment, same reasoning, for the harness's in-turn
+        // background-poller tooling: VK reaps the turn's process group at turn
+        // end, so a poller driven from inside the turn cannot outlive it. Note
+        // this layer is *not* the enforcement point — see
+        // `BACKGROUND_POLLER_TOOLS` — it only removes the ergonomic path; the
+        // `^Bash$` PreToolUse hook below closes the real one.
+        builder = builder.extend_params([format!(
+            "--disallowedTools={}",
+            BACKGROUND_POLLER_TOOLS.join(",")
+        )]);
         if self.dangerously_skip_permissions.unwrap_or(false) {
             builder = builder.extend_params(["--dangerously-skip-permissions"]);
         }
@@ -238,7 +323,14 @@ impl ClaudeCode {
         // Add PreToolUse hooks based on plan/approvals settings. `ScheduleWakeup`
         // is denied first in every mode (VAS-283) and excluded from the
         // catch-all approve/ask matchers so the deny decision is unambiguous
-        // regardless of hook precedence.
+        // regardless of hook precedence. The background-`Bash` deny is
+        // registered next, in every mode, for the same reason.
+        //
+        // `Bash` is deliberately *not* excluded from the catch-all matchers:
+        // unlike the tool-name denials this rule is conditional on
+        // `run_in_background`, so foreground `Bash` must keep reaching its
+        // mode's normal approve/ask path. `deny` wins over a catch-all `allow`
+        // when both hooks match, which is exactly the behaviour we want.
         if self.plan.unwrap_or(false) {
             hooks.insert(
                 "PreToolUse".to_string(),
@@ -248,11 +340,15 @@ impl ClaudeCode {
                         "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
                     },
                     {
+                        "matcher": BACKGROUND_BASH_MATCHER,
+                        "hookCallbackIds": [DENY_BACKGROUND_BASH_CALLBACK_ID],
+                    },
+                    {
                         "matcher": "^(ExitPlanMode|AskUserQuestion)$",
                         "hookCallbackIds": ["tool_approval"],
                     },
                     {
-                        "matcher": "^(?!(ExitPlanMode|AskUserQuestion|ScheduleWakeup)$).*",
+                        "matcher": catch_all_matcher_excluding(&["ExitPlanMode", "AskUserQuestion"]),
                         "hookCallbackIds": [AUTO_APPROVE_CALLBACK_ID],
                     }
                 ]),
@@ -266,7 +362,18 @@ impl ClaudeCode {
                         "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
                     },
                     {
-                        "matcher": "^(?!(Glob|Grep|NotebookRead|Read|Task|TodoWrite|ScheduleWakeup)$).*",
+                        "matcher": BACKGROUND_BASH_MATCHER,
+                        "hookCallbackIds": [DENY_BACKGROUND_BASH_CALLBACK_ID],
+                    },
+                    {
+                        "matcher": catch_all_matcher_excluding(&[
+                            "Glob",
+                            "Grep",
+                            "NotebookRead",
+                            "Read",
+                            "Task",
+                            "TodoWrite",
+                        ]),
                         "hookCallbackIds": ["tool_approval"],
                     }
                 ]),
@@ -278,6 +385,10 @@ impl ClaudeCode {
                     {
                         "matcher": SCHEDULE_WAKEUP_MATCHER,
                         "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
+                    },
+                    {
+                        "matcher": BACKGROUND_BASH_MATCHER,
+                        "hookCallbackIds": [DENY_BACKGROUND_BASH_CALLBACK_ID],
                     },
                     {
                         "matcher": "^AskUserQuestion$",
@@ -3113,6 +3224,16 @@ mod tests {
             .collect()
     }
 
+    /// Split a `^(?!(A|B|C)$).*` catch-all matcher into its excluded names.
+    fn catch_all_excluded_names(matcher: &str) -> Vec<&str> {
+        matcher
+            .strip_prefix("^(?!(")
+            .and_then(|rest| rest.strip_suffix(")$).*"))
+            .expect("catch-all matcher shape")
+            .split('|')
+            .collect()
+    }
+
     // VAS-283: every permission mode must deny ScheduleWakeup via a dedicated
     // PreToolUse hook so it cannot silently no-op.
     #[test]
@@ -3167,6 +3288,156 @@ mod tests {
                 "{label} mode command must disallow ScheduleWakeup; got {params:?}"
             );
         }
+    }
+
+    // A VK turn's process group is reaped at turn end, so every permission mode
+    // must deny a background `Bash` spawn and point the agent at `spawn_poller`.
+    #[test]
+    fn background_bash_denied_in_all_hook_modes() {
+        let modes = [
+            ("auto", claude_with(None, None)),
+            ("plan", claude_with(Some(true), None)),
+            ("approvals", claude_with(None, Some(true))),
+        ];
+        for (label, claude) in modes {
+            let hooks = claude.get_hooks(false).expect("hooks present");
+            let deny_matchers = matchers_for_callback(&hooks, DENY_BACKGROUND_BASH_CALLBACK_ID);
+            assert_eq!(
+                deny_matchers,
+                vec![BACKGROUND_BASH_MATCHER.to_string()],
+                "{label} mode must route Bash to the background-spawn deny hook exactly once"
+            );
+        }
+    }
+
+    // The deny is conditional on `run_in_background`, so `Bash` must keep
+    // reaching its mode's normal approve/ask catch-all. Excluding it there
+    // would silently turn every plan-mode shell command into a user prompt.
+    #[test]
+    fn foreground_bash_still_reaches_the_catch_all_in_every_mode() {
+        for (label, claude, catch_all_callback) in [
+            (
+                "plan",
+                claude_with(Some(true), None),
+                AUTO_APPROVE_CALLBACK_ID,
+            ),
+            ("approvals", claude_with(None, Some(true)), "tool_approval"),
+        ] {
+            let hooks = claude.get_hooks(false).expect("hooks present");
+            let matchers = matchers_for_callback(&hooks, catch_all_callback);
+            let catch_alls: Vec<_> = matchers
+                .iter()
+                .filter(|matcher| matcher.starts_with("^(?!"))
+                .collect();
+            assert!(
+                !catch_alls.is_empty(),
+                "{label} mode should still have a catch-all matcher"
+            );
+            for matcher in catch_alls {
+                // Compare against the alternation *tokens*, not a substring —
+                // `BashOutput` / `KillBash` legitimately contain "Bash".
+                assert!(
+                    !catch_all_excluded_names(matcher).contains(&"Bash"),
+                    "{label} catch-all matcher {matcher:?} must NOT exclude Bash"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn poller_tools_excluded_from_catch_all_matchers_in_all_hook_modes() {
+        let modes = [
+            ("auto", claude_with(None, None)),
+            ("plan", claude_with(Some(true), None)),
+            ("approvals", claude_with(None, Some(true))),
+        ];
+        for (label, claude) in modes {
+            let hooks = claude.get_hooks(false).expect("hooks present");
+            let approve = matchers_for_callback(&hooks, AUTO_APPROVE_CALLBACK_ID);
+            let ask = matchers_for_callback(&hooks, "tool_approval");
+            for matcher in approve.iter().chain(ask.iter()) {
+                if matcher.starts_with("^(?!") {
+                    let excluded = catch_all_excluded_names(matcher);
+                    for tool in BACKGROUND_POLLER_TOOLS {
+                        assert!(
+                            excluded.contains(tool),
+                            "{label} catch-all matcher {matcher:?} must exclude {tool}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn poller_tools_disallowed_in_all_command_modes() {
+        let modes = [
+            ("auto", claude_with(None, None)),
+            ("plan", claude_with(Some(true), None)),
+            ("approvals", claude_with(None, Some(true))),
+        ];
+        for (label, claude) in modes {
+            let builder = claude
+                .build_command_builder()
+                .await
+                .expect("command builder");
+            let params = builder.params.unwrap_or_default();
+            let disallowed: Vec<&String> = params
+                .iter()
+                .filter(|p| p.starts_with("--disallowedTools="))
+                .collect();
+            for tool in BACKGROUND_POLLER_TOOLS {
+                assert!(
+                    disallowed.iter().any(|p| p
+                        .trim_start_matches("--disallowedTools=")
+                        .split(',')
+                        .any(|name| name == *tool)),
+                    "{label} mode command must disallow {tool}; got {disallowed:?}"
+                );
+            }
+            // `Bash` must never be blanket-disallowed — the background rule is
+            // parameter-level and lives in the PreToolUse hook.
+            assert!(
+                !disallowed.iter().any(|p| p
+                    .trim_start_matches("--disallowedTools=")
+                    .split(',')
+                    .any(|name| name == "Bash")),
+                "{label} mode must not disallow Bash outright; got {disallowed:?}"
+            );
+        }
+    }
+
+    /// The names are wire tool names read from the
+    /// `@anthropic-ai/claude-code-linux-x64@2.1.200` native binary, not from
+    /// the npm stub's `sdk-tools.d.ts` (which lists JSON-Schema titles). A
+    /// misspelling would silently match nothing, so the exact spellings are
+    /// pinned here.
+    #[test]
+    fn background_poller_tool_names_are_pinned() {
+        assert_eq!(
+            BACKGROUND_POLLER_TOOLS,
+            &[
+                "Monitor",
+                "TaskOutput",
+                "TaskStop",
+                "CronCreate",
+                "CronDelete",
+                "CronList",
+                "BashOutput",
+                "BashOutputTool",
+                "AgentOutput",
+                "AgentOutputTool",
+                "KillShell",
+                "KillBash",
+            ]
+        );
+        assert_eq!(BACKGROUND_BASH_MATCHER, "^Bash$");
+        // The pin above is only meaningful while the CLI pin it was read from
+        // is in force.
+        assert!(
+            base_command(false).contains("@anthropic-ai/claude-code@2.1.200"),
+            "tool names were verified against 2.1.200; re-verify against the binary if this pin moves"
+        );
     }
 
     #[test]

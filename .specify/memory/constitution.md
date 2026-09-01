@@ -81,6 +81,27 @@ adjacency, and completion state are proven; failures stay visible, stale event
 updates cannot overwrite newer occurrences, and compact indicators remain
 bounded under arbitrarily long streams.
 
+Controls we impose on a vendor CLI are held to the same standard as data we
+receive from it. A deny rule, permission matcher, or configuration key that
+disables a vendor capability MUST be built from an identifier verified against
+the **pinned artifact that actually executes** — not vendor documentation, not a
+shipped type-definition or schema file, and not recollection. Type declarations
+and schema titles are not wire identifiers. The verification source and the
+version it was read from are recorded next to the rule, because a dependency bump
+can rename the identifier and silently reopen the gap.
+
+A control must fail loud, not inert. Where the vendor silently ignores unknown
+keys or unmatched names, the spelling is pinned by a test, and the control is
+treated as unproven until a live run shows it took effect. Where the enforcement
+point is a parameter rather than a tool name, the rule is placed at the parameter
+— a tool-granular rule that leaves the real path open is a control that looks
+complete and is not. A denial that removes a capability names the supported
+replacement, so the agent redirects instead of stalling.
+
+Where no identifier can be verified, shipping no rule is the correct outcome. The
+absence is recorded as a decision with its evidence, so a later reader does not
+mistake it for an oversight and does not "fix" it with a guess.
+
 ### X. Dialogs hold provisional state; containers hold confirmed state
 Settings dialogs and edit modals own a private snapshot of the data they mutate.
 On open, the dialog is seeded from the current saved state (or blank for "add").
@@ -483,7 +504,14 @@ coverage includes mixed sibling state and the base-only loading state.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.29.0 (requires UI/entity projections to preserve identity and
+**Version**: 0.30.0 (extends IX so controls imposed on a vendor CLI — deny rules,
+permission matchers, capability-disabling config keys — are built from
+identifiers verified against the pinned executing artifact rather than docs or
+type declarations, record that source and version, pin the spelling by test where
+the vendor ignores unknown keys, sit at the parameter when that is the real
+enforcement point, name the supported replacement when denying, and record a
+verified-absence as an evidenced decision instead of guessing a rule; 0.29.0
+required UI/entity projections to preserve identity and
 render unknown rather than broadcasting aggregate facts across siblings; 0.28.0
 requires immutable historical reconstruction to be
 single-flight by durable identity, atomically materialized, bounded,

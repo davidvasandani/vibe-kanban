@@ -51,6 +51,7 @@ fn helper_action() -> ExecutorAction {
             language: ScriptRequestLanguage::Bash,
             context: ScriptContext::BackgroundHelper,
             working_dir: None,
+            poller: None,
         }),
         None,
     )

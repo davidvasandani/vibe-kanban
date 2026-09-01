@@ -57,6 +57,30 @@ survives server restarts like a dev server, and is stopped on workspace archive.
 Agents should use these instead of `setsid`/`nohup` tricks, which leak untracked
 orphans.
 
+Both modes also include the poller tools (`spawn_poller`, `list_pollers`,
+`stop_poller`, `src/task_server/tools/pollers.rs`). A poller *is* a background
+helper — the backend compiles the agent's command and interval into a loop
+script and starts it as the same tracked `BackgroundHelper` execution process —
+so it inherits the whole lifetime story above, and the two share one concurrency
+budget rather than getting a cap each. What pollers add is the repeating-interval
+shape agents otherwise reach for their CLI's own monitor/watch tools to get; those
+are terminated when the turn ends, so `spawn_poller` is the sanctioned
+replacement, exactly as the helper tools are for `setsid`/`nohup`. That durability
+sentence lives in the `spawn_poller` tool description on purpose: it is what makes
+an agent pick this over its CLI's mechanism, so keep it there if the wording is
+revised. `interval_secs` is required and never defaulted — a defaulted interval
+is a hot loop — and out-of-range values are refused rather than clamped.
+
+`list_pollers` reads `GET /api/workspaces/{id}/execution/pollers`, which filters
+on `run_reason == BackgroundHelper && poller.is_some()`, so plain helpers stay on
+their own endpoint and the two lists do not overlap. Stopping goes through the
+generic `POST /api/execution-processes/{id}/stop` — there is deliberately no
+poller-specific stop route. Note that `stop_poller` and `stop_background_helper`
+both skip the `resolve_workspace_id` + `scope_allows_workspace` check their
+spawn/list siblings run; that asymmetry is intentional parity between the two
+tools, tracked for a separate decision covering both rather than fixed on one
+side.
+
 ## Reading a session before following up
 
 An orchestrator that calls `run_session_prompt` and then only polls

@@ -46,6 +46,58 @@ mod tests {
             (Codex::base_command().to_string(), false)
         );
     }
+
+    /// Pins the *exact* config key that disables Codex's persistent-PTY
+    /// background execution.
+    ///
+    /// This is not redundant with reading the code: upstream's `ConfigToml` has
+    /// no `serde(deny_unknown_fields)` and VK does not pass `--strict-config`,
+    /// so an unknown key is silently ignored. A misspelling would leave a
+    /// control that is present in review, present on the wire, and completely
+    /// inert. The literal is therefore written out here rather than referenced
+    /// through a constant.
+    #[test]
+    fn unified_exec_feature_key_is_pinned_and_disabled() {
+        let codex: Codex =
+            serde_json::from_value(serde_json::json!({})).expect("default Codex config");
+        let params = codex.build_thread_start_params(std::path::Path::new("/tmp"));
+        let config = params.config.expect("config overrides present");
+
+        assert_eq!(
+            config.get("features.unified_exec"),
+            Some(&serde_json::Value::Bool(false)),
+            "exact key `features.unified_exec` must be set to false; got {config:?}"
+        );
+
+        // `features.shell_tool` would disable ordinary execution entirely and
+        // must never be touched here.
+        assert!(
+            !config.keys().any(|key| key.contains("shell_tool")),
+            "shell_tool must not be configured; got {config:?}"
+        );
+    }
+
+    /// The key is unconditional — it must not depend on approval policy,
+    /// sandbox, or any other user-facing setting.
+    #[test]
+    fn unified_exec_disabled_regardless_of_other_settings() {
+        for settings in [
+            serde_json::json!({}),
+            serde_json::json!({"sandbox": "danger-full-access"}),
+            serde_json::json!({"ask_for_approval": "never"}),
+            serde_json::json!({"ask_for_approval": "on-request", "profile": "custom"}),
+        ] {
+            let codex: Codex =
+                serde_json::from_value(settings.clone()).expect("Codex config deserializes");
+            let params = codex.build_thread_start_params(std::path::Path::new("/tmp"));
+            let config = params.config.expect("config overrides present");
+            assert_eq!(
+                config.get("features.unified_exec"),
+                Some(&serde_json::Value::Bool(false)),
+                "settings {settings} must still disable unified_exec"
+            );
+        }
+    }
 }
 
 pub(crate) fn resolve_model(model: Option<&str>) -> (Option<&str>, bool) {
@@ -572,6 +624,33 @@ impl Codex {
                 .get_or_insert_with(HashMap::new)
                 .insert("compact_prompt".to_string(), Value::String(compact.clone()));
         }
+        // Close Codex's in-turn background path. `features.unified_exec`
+        // (default **true** on Linux/macOS) swaps the one-shot `shell_command`
+        // tool for the persistent-PTY `exec_command` / `write_stdin` pair:
+        // `exec_command` returns a `session_id` while the process is still
+        // running and `write_stdin` with empty `chars` polls it without
+        // writing. That is a hand-rolled in-turn poller, and a VK turn is one
+        // OS process group that is reaped at turn end
+        // (`wiki/agent-process-lifecycle.md`), so it cannot outlive the turn
+        // that created it. Disabling the feature falls back to `shell_command`;
+        // the supported way to keep something running is the `spawn_poller`
+        // MCP tool.
+        //
+        // `features.shell_tool` is deliberately left alone — turning that off
+        // would disable ordinary command execution.
+        //
+        // Verified against the upstream source Cargo vendored for the
+        // `codex-app-server-protocol` git pin `rust-v0.144.1` (see
+        // `crates/executors/Cargo.toml`): `ThreadStartParams` /
+        // `TurnStartParams` expose no tools allow/deny field, so this `config`
+        // map is the only lever. It **fails open** — `ConfigToml` has no
+        // `serde(deny_unknown_fields)` and VK does not pass `--strict-config`,
+        // so a misspelled key is silently ignored and the control would look
+        // present while doing nothing. The exact spelling is pinned by
+        // `unified_exec_feature_key_is_pinned_and_disabled`.
+        config
+            .get_or_insert_with(HashMap::new)
+            .insert("features.unified_exec".to_string(), Value::Bool(false));
         if !matches!(approval_policy, None | Some(V2AskForApproval::Never)) {
             let map = config.get_or_insert_with(HashMap::new);
             map.insert(

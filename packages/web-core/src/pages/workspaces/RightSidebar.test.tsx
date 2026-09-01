@@ -48,6 +48,7 @@ vi.mock('@/shared/stores/useUiPreferencesStore', () => ({
     serverAffinitySection: 'server-affinity',
     terminalSection: 'terminal',
     notesSection: 'notes',
+    pollersSection: 'pollers',
     rightPanelprocesses: 'right-processes',
     rightPanelPreview: 'right-preview',
   },
@@ -101,7 +102,53 @@ vi.mock('./serverAffinityLabel', () => ({
   getServerAffinityLabel: () => null,
 }));
 
+// The body is stubbed, but PollersHeader is deliberately NOT mocked: the point
+// of these tests is that the real header derives its summary from the streamed
+// processes and survives collapse.
+vi.mock('./PollersSectionContainer', () => ({
+  PollersSectionContainer: () => <div>Poller rows</div>,
+}));
+
 import { RightSidebar } from './RightSidebar';
+import { ExecutionProcessStatus, type ExecutionProcess } from 'shared/types';
+
+function pollerProcess(
+  id: string,
+  status: ExecutionProcessStatus = ExecutionProcessStatus.running
+): ExecutionProcess {
+  return {
+    id,
+    session_id: 'session-1',
+    run_reason: 'backgroundhelper',
+    executor_action: {
+      typ: {
+        type: 'ScriptRequest',
+        script: 'generated',
+        language: 'Bash',
+        context: 'BackgroundHelper',
+        working_dir: null,
+        poller: { command: 'git fetch', interval_secs: 60 },
+      },
+      next_action: null,
+    },
+    status,
+    exit_code: null,
+    pgid: null,
+    dropped: false,
+    started_at: '2026-08-31T05:00:00Z',
+    completed_at: null,
+    created_at: '2026-08-31T05:00:00Z',
+    updated_at: '2026-08-31T05:00:00Z',
+  } as unknown as ExecutionProcess;
+}
+
+function pollersHeaderText(): string | undefined {
+  return (
+    container.querySelector<HTMLElement>(
+      '[data-testid="pollers-header-summary"]'
+    )?.textContent ?? undefined
+  );
+}
 
 let container: HTMLDivElement;
 let root: Root;
@@ -287,5 +334,92 @@ describe('RightSidebar section sizing', () => {
     expect(
       container.querySelector('[data-testid="git-behind-header"]')
     ).not.toBeNull();
+  });
+});
+
+describe('RightSidebar pollers section', () => {
+  const renderWithPollers = (executionProcesses: ExecutionProcess[]) => {
+    act(() => {
+      root.render(
+        <RightSidebar
+          rightMainPanelMode={null}
+          selectedWorkspace={selectedWorkspace}
+          repos={[]}
+          executionProcesses={executionProcesses}
+        />
+      );
+    });
+  };
+
+  const pollersButton = () =>
+    Array.from(container.querySelectorAll('button')).find((candidate) =>
+      candidate.textContent?.includes('Pollers')
+    );
+
+  it('shows the running poller count in the collapsed header', () => {
+    renderWithPollers([pollerProcess('a'), pollerProcess('b')]);
+
+    expect(pollersHeaderText()).toBe('2');
+  });
+
+  it('shows nothing when there are no running or failed pollers', () => {
+    renderWithPollers([]);
+
+    expect(pollersButton()).toBeInstanceOf(HTMLButtonElement);
+    expect(pollersHeaderText()).toBeUndefined();
+  });
+
+  it('surfaces a failed poller distinctly from the running count', () => {
+    renderWithPollers([
+      pollerProcess('a'),
+      pollerProcess('b', ExecutionProcessStatus.failed),
+    ]);
+
+    expect(pollersHeaderText()).toBe('1 · 1 failed');
+  });
+
+  it('keeps the summary visible when the section is collapsed', () => {
+    renderWithPollers([pollerProcess('a')]);
+
+    const button = pollersButton();
+    const indicator = container.querySelector(
+      '[data-testid="pollers-header-summary"]'
+    );
+    expect(button?.contains(indicator)).toBe(true);
+
+    act(() => button?.click());
+
+    expect(pollersHeaderText()).toBe('1');
+  });
+
+  it('gives the expanded section the shared flex contract', () => {
+    renderWithPollers([pollerProcess('a')]);
+
+    const button = pollersButton();
+    // Sections start collapsed, so open it before asserting the expanded shape.
+    act(() => button?.click());
+
+    const section = pollersButton()?.parentElement?.parentElement;
+    expect(section?.classList).toContain('flex-1');
+    expect(section?.classList).toContain('min-h-0');
+    expect(section?.className).not.toContain('min-h-[');
+  });
+
+  it('issues no request of its own to label the collapsed header', () => {
+    // Constitution XXVI: a closed section must not stay mounted or issue a
+    // private request solely to label itself. The summary is derived from the
+    // execution processes the layout already streams.
+    const fetchSpy = vi.fn(() =>
+      Promise.reject(new Error('no fetch expected'))
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+
+    try {
+      renderWithPollers([pollerProcess('a')]);
+      expect(pollersHeaderText()).toBe('1');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
