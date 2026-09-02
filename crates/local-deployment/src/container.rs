@@ -3190,16 +3190,13 @@ const RESERVED_ENV_NAMES: &[&str] = &[
     "OPENCODE_SERVER_PASSWORD",
 ];
 
-fn workspace_go_environment(workspace_root: &Path) -> HashMap<String, String> {
+fn workspace_go_environment(
+    workspace_root: &Path,
+    inherited_path: Option<&std::ffi::OsStr>,
+) -> HashMap<String, String> {
     let root = workspace_root.join(".vibe-kanban/go");
     let gobin = root.join("bin");
-    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
-    let path = std::env::join_paths(
-        std::iter::once(gobin.clone()).chain(std::env::split_paths(&inherited_path)),
-    )
-    .unwrap_or(inherited_path);
-
-    HashMap::from([
+    let mut environment = HashMap::from([
         ("GOBIN".into(), gobin.to_string_lossy().into_owned()),
         (
             "GOCACHE".into(),
@@ -3214,8 +3211,15 @@ fn workspace_go_environment(workspace_root: &Path) -> HashMap<String, String> {
             root.join("path").to_string_lossy().into_owned(),
         ),
         ("GOTOOLCHAIN".into(), "auto".into()),
-        ("PATH".into(), path.to_string_lossy().into_owned()),
-    ])
+    ]);
+    if let Some(inherited_path) = inherited_path {
+        let path = std::env::join_paths(
+            std::iter::once(gobin).chain(std::env::split_paths(inherited_path)),
+        )
+        .unwrap_or_else(|_| inherited_path.to_os_string());
+        environment.insert("PATH".into(), path.to_string_lossy().into_owned());
+    }
+    environment
 }
 
 fn is_reserved_env_name(name: &str) -> bool {
@@ -3747,7 +3751,10 @@ impl ContainerService for LocalContainerService {
 
         let mut environment = BTreeMap::new();
         environment.extend(self.resolve_org_env_vars(workspace).await);
-        environment.extend(workspace_go_environment(Path::new(&workspace_path)));
+        // Send only workspace-relative Go state. The worker must construct PATH
+        // from its own supervised environment; coordinator Nix store paths are
+        // not necessarily valid on a heterogeneous worker.
+        environment.extend(workspace_go_environment(Path::new(&workspace_path), None));
         environment.insert("VK_WORKSPACE_ID".into(), workspace.id.to_string());
         environment.insert("VK_WORKSPACE_BRANCH".into(), workspace.branch.clone());
 
@@ -4018,7 +4025,11 @@ impl ContainerService for LocalContainerService {
         if !org_env_vars.is_empty() {
             env.merge(&org_env_vars);
         }
-        env.merge(&workspace_go_environment(&current_dir));
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        env.merge(&workspace_go_environment(
+            &current_dir,
+            Some(&inherited_path),
+        ));
 
         // Always inject workspace/session context (wins over any org var above).
         env.insert("VK_WORKSPACE_ID", workspace.id.to_string());
@@ -5028,9 +5039,13 @@ mod warm_tests {
 
     #[test]
     fn go_environment_is_stable_and_workspace_scoped() {
-        let first = workspace_go_environment(std::path::Path::new("/workspaces/first"));
-        let first_again = workspace_go_environment(std::path::Path::new("/workspaces/first"));
-        let second = workspace_go_environment(std::path::Path::new("/workspaces/second"));
+        let inherited = std::ffi::OsStr::new("/host/bin:/usr/bin");
+        let first =
+            workspace_go_environment(std::path::Path::new("/workspaces/first"), Some(inherited));
+        let first_again =
+            workspace_go_environment(std::path::Path::new("/workspaces/first"), Some(inherited));
+        let second =
+            workspace_go_environment(std::path::Path::new("/workspaces/second"), Some(inherited));
 
         assert_eq!(first, first_again);
         assert_eq!(first["GOTOOLCHAIN"], "auto");
@@ -5045,6 +5060,9 @@ mod warm_tests {
                 .unwrap(),
             std::path::PathBuf::from(&first["GOBIN"])
         );
+
+        let dispatched = workspace_go_environment(std::path::Path::new("/workspaces/first"), None);
+        assert!(!dispatched.contains_key("PATH"));
     }
 
     // The exit-monitor keeps a persistent app-server warm only on a clean turn

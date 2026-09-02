@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::{
@@ -1029,6 +1029,7 @@ async fn run_job(
     timeout_seconds: Option<u64>,
 ) {
     set_state(&job, JobState::Starting, ExecutionEventPayload::Starting).await;
+    prepend_workspace_gobin_to_path(&mut environment);
     let inherited_path = environment
         .get("PATH")
         .map(std::ffi::OsString::from)
@@ -1142,6 +1143,21 @@ async fn run_job(
             return;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn prepend_workspace_gobin_to_path(environment: &mut BTreeMap<String, String>) {
+    let Some(gobin) = environment.get("GOBIN").cloned() else {
+        return;
+    };
+    let inherited = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+    if let Ok(path) = std::env::join_paths(
+        std::iter::once(PathBuf::from(gobin)).chain(std::env::split_paths(&inherited)),
+    ) {
+        environment.insert("PATH".into(), path.to_string_lossy().into_owned());
     }
 }
 
@@ -1365,6 +1381,30 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn dispatched_gobin_is_prepended_to_worker_path() {
+        let mut environment = BTreeMap::from([
+            (
+                "GOBIN".into(),
+                "/shared/workspace/.vibe-kanban/go/bin".into(),
+            ),
+            ("PATH".into(), "/worker/nix/bin:/usr/bin".into()),
+        ]);
+
+        prepend_workspace_gobin_to_path(&mut environment);
+
+        let paths: Vec<_> =
+            std::env::split_paths(std::ffi::OsStr::new(&environment["PATH"])).collect();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/shared/workspace/.vibe-kanban/go/bin"),
+                PathBuf::from("/worker/nix/bin"),
+                PathBuf::from("/usr/bin"),
+            ]
+        );
+    }
 
     fn fixture() -> (TempDir, ExecutionSupervisor, PathBuf) {
         let temp = TempDir::new().unwrap();
