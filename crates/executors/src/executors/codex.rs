@@ -67,11 +67,10 @@ mod tests {
     /// background execution.
     ///
     /// This is not redundant with reading the code: upstream's `ConfigToml` has
-    /// no `serde(deny_unknown_fields)` and VK does not pass `--strict-config`,
-    /// so an unknown key is silently ignored. A misspelling would leave a
-    /// control that is present in review, present on the wire, and completely
-    /// inert. The literal is therefore written out here rather than referenced
-    /// through a constant.
+    /// no `serde(deny_unknown_fields)`, so the `--strict-config` launch flag is
+    /// what makes an unknown key fail loudly. The literal remains written out
+    /// here rather than referenced through a constant so this test also pins
+    /// the vendor-facing spelling.
     #[test]
     fn unified_exec_feature_key_is_pinned_and_disabled() {
         let codex: Codex =
@@ -659,11 +658,10 @@ impl Codex {
         // `codex-app-server-protocol` git pin `rust-v0.144.1` (see
         // `crates/executors/Cargo.toml`): `ThreadStartParams` /
         // `TurnStartParams` expose no tools allow/deny field, so this `config`
-        // map is the only lever. It **fails open** — `ConfigToml` has no
-        // `serde(deny_unknown_fields)` and VK does not pass `--strict-config`,
-        // so a misspelled key is silently ignored and the control would look
-        // present while doing nothing. The exact spelling is pinned by
-        // `unified_exec_feature_key_is_pinned_and_disabled`.
+        // map is the only lever. `ConfigToml` itself has no
+        // `serde(deny_unknown_fields)`, so `app-server --strict-config` is the
+        // fail-loud boundary for a misspelling. The exact spelling is also
+        // pinned by `unified_exec_feature_key_is_pinned_and_disabled`.
         config
             .get_or_insert_with(HashMap::new)
             .insert("features.unified_exec".to_string(), Value::Bool(false));

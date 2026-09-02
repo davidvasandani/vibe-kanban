@@ -26,31 +26,31 @@ together within their layer.
 - [x] T007 [P] Remove the dead Codex field/config emission and add verified
   `--strict-config` launch behavior in
   `crates/executors/src/executors/codex.rs` (depends on T004).
-- [ ] T008 Regenerate `shared/types.ts` and `shared/schemas/codex.json` with the
+- [x] T008 Regenerate `shared/types.ts` and `shared/schemas/codex.json` with the
   repository generator (depends on T007).
 
 ## Phase 3: Focused verification
 
-- [ ] T009 [P] Run the full requested i18n reproduction and placeholder/key-set
+- [x] T009 [P] Run the full requested i18n reproduction and placeholder/key-set
   assertions (depends on T005).
-- [ ] T010 [P] Run focused server execution-route tests (depends on T006).
-- [ ] T011 [P] Run focused executor Codex tests and generated-contract checks
+- [x] T010 [P] Run focused server execution-route tests (depends on T006).
+- [x] T011 [P] Run focused executor Codex tests and generated-contract checks
   (depends on T008).
-- [ ] T012 Record the bounded MCP-reachable `error_with_data` audit disposition
+- [x] T012 Record the bounded MCP-reachable `error_with_data` audit disposition
   in `research.md` (depends on T006).
 
 ## Phase 4: Broad verification and review
 
-- [ ] T013 Run `pnpm run format`, relevant frontend checks, backend checks, and
+- [x] T013 Run `pnpm run format`, relevant frontend checks, backend checks, and
   lint/tests proportionate to the changed surfaces; record results in
   `verification.md` (depends on T009, T010, T011, T012).
-- [ ] T014 Run independent Codex CLI review, address confirmed findings, re-run
+- [x] T014 Run independent Codex CLI review, address confirmed findings, re-run
   affected checks, and write `review.md` until no significant findings remain
   (depends on T013).
 
 ## Phase 5: Knowledge and delivery
 
-- [ ] T015 Update reusable knowledge under `docs/knowledge-base/`, tag it
+- [x] T015 Update reusable knowledge under `docs/knowledge-base/`, tag it
   `vk/94c0-three-loose-ends`, refresh `docs/knowledge-base/INDEX.md`, and commit
   the knowledge-base update (depends on T014).
 - [ ] T016 Recheck the latest base, commit remaining scoped work, push
