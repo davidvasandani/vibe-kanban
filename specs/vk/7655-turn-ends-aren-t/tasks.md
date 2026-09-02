@@ -29,9 +29,9 @@ Rust module, so they are intentionally serial rather than marked `[P]`.
 
 - [x] T005 [P] Record implementation/verification evidence in
   `specs/vk/7655-turn-ends-aren-t/verification.md` (depends on T004).
-- [ ] T006 Run independent Codex review and record the clean result in
+- [x] T006 Run independent Codex review and record the clean result in
   `specs/vk/7655-turn-ends-aren-t/review.md` (depends on T004).
-- [ ] T007 Update the relevant reusable lifecycle topic and index in
+- [x] T007 Update the relevant reusable lifecycle topic and index in
   `wiki/agent-process-lifecycle.md` and `wiki/INDEX.md`, tagged with
   `vk/7655-turn-ends-aren-t` (depends on T006).
 - [ ] T008 Open and merge the pull request after the implementation, review,
