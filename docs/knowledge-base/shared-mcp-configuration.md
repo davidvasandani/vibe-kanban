@@ -3,7 +3,7 @@
 Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`,
 `c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`, `d893-fix-slack-mcp`,
 `067cb434-mcp-tools`, `4daf-gmail-mcp`, `vk/a5f8-concat-repeating`,
-`967a-migrate-slack-mc`, `VAS-356`
+`967a-migrate-slack-mc`, `VAS-356`, `vk/802c-register-servicenow`
 
 Vibe Kanban derives shared MCP settings from each base executor's native config
 file. There is no separate registry: the native files remain the source consumed

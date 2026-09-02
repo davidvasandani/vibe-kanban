@@ -840,6 +840,23 @@ mod tests {
     }
 
     #[test]
+    fn personal_servicenow_catalog_uses_the_fleet_installed_stdio_wrapper() {
+        let value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        let server = &value["personal_servicenow"];
+        assert_eq!(
+            server,
+            &serde_json::json!({
+                "command": "personal-servicenow-mcp",
+                "args": []
+            })
+        );
+        assert_eq!(
+            value["meta"]["personal_servicenow"]["name"],
+            serde_json::json!("Personal ServiceNow")
+        );
+    }
+
+    #[test]
     fn override_points_vibe_kanban_at_our_build_and_leaves_others_untouched() {
         let mut value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
         let playwright_before = value["playwright"].clone();
