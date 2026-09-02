@@ -3178,12 +3178,45 @@ const ORG_ENV_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// case-sensitive to match process env semantics on Unix.
 const RESERVED_ENV_PREFIXES: &[&str] = &["VK_"];
 const RESERVED_ENV_NAMES: &[&str] = &[
+    "GOBIN",
+    "GOCACHE",
+    "GOMODCACHE",
+    "GOPATH",
+    "GOTOOLCHAIN",
     "PATH",
     "HOME",
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
     "OPENCODE_SERVER_PASSWORD",
 ];
+
+fn workspace_go_environment(workspace_root: &Path) -> HashMap<String, String> {
+    let root = workspace_root.join(".vibe-kanban/go");
+    let gobin = root.join("bin");
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(gobin.clone()).chain(std::env::split_paths(&inherited_path)),
+    )
+    .unwrap_or(inherited_path);
+
+    HashMap::from([
+        ("GOBIN".into(), gobin.to_string_lossy().into_owned()),
+        (
+            "GOCACHE".into(),
+            root.join("build").to_string_lossy().into_owned(),
+        ),
+        (
+            "GOMODCACHE".into(),
+            root.join("mod").to_string_lossy().into_owned(),
+        ),
+        (
+            "GOPATH".into(),
+            root.join("path").to_string_lossy().into_owned(),
+        ),
+        ("GOTOOLCHAIN".into(), "auto".into()),
+        ("PATH".into(), path.to_string_lossy().into_owned()),
+    ])
+}
 
 fn is_reserved_env_name(name: &str) -> bool {
     RESERVED_ENV_PREFIXES
@@ -3714,6 +3747,7 @@ impl ContainerService for LocalContainerService {
 
         let mut environment = BTreeMap::new();
         environment.extend(self.resolve_org_env_vars(workspace).await);
+        environment.extend(workspace_go_environment(Path::new(&workspace_path)));
         environment.insert("VK_WORKSPACE_ID".into(), workspace.id.to_string());
         environment.insert("VK_WORKSPACE_BRANCH".into(), workspace.branch.clone());
 
@@ -3984,6 +4018,7 @@ impl ContainerService for LocalContainerService {
         if !org_env_vars.is_empty() {
             env.merge(&org_env_vars);
         }
+        env.merge(&workspace_go_environment(&current_dir));
 
         // Always inject workspace/session context (wins over any org var above).
         env.insert("VK_WORKSPACE_ID", workspace.id.to_string());
@@ -4966,7 +5001,7 @@ mod warm_tests {
         WARM_IDLE_TIMEOUT, WarmAppServer, WarmRegistry, WarmReuseHandle, is_reserved_env_name,
         parse_keep_warm, reap_all_warm_entries, reap_warm_entry, reap_warm_entry_if_unchanged,
         register_warm_entry, should_keep_warm, sweep_idle_warm_entries, take_live_warm_entry,
-        warm_entry_is_idle,
+        warm_entry_is_idle, workspace_go_environment,
     };
 
     #[test]
@@ -4974,6 +5009,11 @@ mod warm_tests {
         for name in [
             "VK_WORKSPACE_ID",
             "VK_WORKSPACE_BRANCH",
+            "GOBIN",
+            "GOCACHE",
+            "GOMODCACHE",
+            "GOPATH",
+            "GOTOOLCHAIN",
             "PATH",
             "HOME",
             "LD_PRELOAD",
@@ -4984,6 +5024,27 @@ mod warm_tests {
         }
         assert!(!is_reserved_env_name("GITHUB_TOKEN"));
         assert!(!is_reserved_env_name("AZURE_CLIENT_ID"));
+    }
+
+    #[test]
+    fn go_environment_is_stable_and_workspace_scoped() {
+        let first = workspace_go_environment(std::path::Path::new("/workspaces/first"));
+        let first_again = workspace_go_environment(std::path::Path::new("/workspaces/first"));
+        let second = workspace_go_environment(std::path::Path::new("/workspaces/second"));
+
+        assert_eq!(first, first_again);
+        assert_eq!(first["GOTOOLCHAIN"], "auto");
+        for name in ["GOBIN", "GOCACHE", "GOMODCACHE", "GOPATH"] {
+            assert!(first[name].starts_with("/workspaces/first/.vibe-kanban/go/"));
+            assert!(second[name].starts_with("/workspaces/second/.vibe-kanban/go/"));
+            assert_ne!(first[name], second[name]);
+        }
+        assert_eq!(
+            std::env::split_paths(std::ffi::OsStr::new(&first["PATH"]))
+                .next()
+                .unwrap(),
+            std::path::PathBuf::from(&first["GOBIN"])
+        );
     }
 
     // The exit-monitor keeps a persistent app-server warm only on a clean turn
