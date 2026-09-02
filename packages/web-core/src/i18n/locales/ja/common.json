@@ -628,6 +628,18 @@
     "failedTitle": "ワークスペースの作成に失敗しました",
     "failedFallback": "新しいワークスペースを作成して、もう一度お試しください。"
   },
+  "metricsDiskAlerts": {
+    "warning": "ディスク容量低下",
+    "critical": "ディスク容量が危険",
+    "available": "空き",
+    "used": "使用済み",
+    "resolving": "問題を解決中…",
+    "action": "修復用の課題を作成または開く",
+    "noProject": "課題を作成するには、このワークスペースをプロジェクトにリンクしてください。",
+    "resolveFailed": "ディスク容量低下の課題を解決できませんでした: {{error}}",
+    "nodeCount_one": "{{severity}} · {{count}} ノード",
+    "nodeCount_other": "{{severity}} · {{count}} ノード"
+  },
   "speckit": {
     "title": "SpecKit",
     "stageProgress": "{{done}}/{{total}} stages",

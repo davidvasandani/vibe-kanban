@@ -4,6 +4,11 @@
 # Initial implementation: This script will show high violation counts until enforcement is enabled
 set -eo pipefail
 
+# `comm` and both key-list producers must use the same collation. Without this,
+# `sort` used byte order while `comm` inherited (for example) C.UTF-8 and
+# rejected otherwise valid inputs as unsorted.
+export LC_ALL=C
+
 RULE="i18next/no-literal-string"
 
 # Function that outputs violation count to stdout
