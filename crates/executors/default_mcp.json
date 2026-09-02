@@ -78,6 +78,10 @@
       "BRINK_LOCATION_TOKEN": "YOUR_TOKEN"
     }
   },
+  "personal_servicenow": {
+    "command": "personal-servicenow-mcp",
+    "args": []
+  },
   "meta": {
     "vibe_kanban": {
       "name": "Vibe Kanban",
@@ -129,6 +133,10 @@
       "name": "Brink POS",
       "description": "Send test orders and check OLO connectivity on Brink POS registers",
       "url": "https://github.com/davidvasandani/mcp-brink"
+    },
+    "personal_servicenow": {
+      "name": "Personal ServiceNow",
+      "description": "Query and manage ServiceNow incidents, requests, changes, knowledge, CMDB and catalog records"
     }
   }
 }
