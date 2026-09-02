@@ -45,7 +45,8 @@ contributed to it.
 - [agent-process-lifecycle.md](agent-process-lifecycle.md) — How a coding-agent
   turn ends at the process level: the one-turn-one-`ExecutionProcess` identity
   chain, the implicit app-server marker (`exit_signal: Some` vs `None`, distinct
-  from `is_persistent()`), the exit monitor's **two** kill points (exit-signal
+  from `is_persistent()`), why process liveness is turn evidence only for
+  natural-exit executors, the exit monitor's **two** kill points (exit-signal
   `killpg` + tail `start_kill`/`kill_on_drop`), the 250ms OS-exit-watcher
   poll-loop gotcha, why teardown skips `Completed` executions (warm-process
   trap), the pgid re-adoption substrate, the keep-warm enablement order, **and

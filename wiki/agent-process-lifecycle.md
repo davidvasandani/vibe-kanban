@@ -28,6 +28,22 @@ boot re-adoption by pgid. `CodingAgent` is deliberately **non**-persistent
 streaming behavior. Use the narrow `SpawnedChild.keep_warm` capability
 instead.
 
+## Process liveness is not always turn liveness
+
+The same `SpawnedChild.exit_signal` split governs final-output reconciliation.
+For a natural-exit executor (`exit_signal: None`), a still-live owned child is
+positive evidence that the turn remains active, so quiet final assistant output
+must not trigger cleanup. For a signal-driven executor (`exit_signal: Some`),
+the app-server child may legitimately outlive the protocol turn; child liveness
+therefore proves only process liveness, not turn liveness.
+
+If final assistant output becomes quiet and the signal-driven terminal event is
+lost, the bounded reconciliation timer must be allowed to expire even while the
+child lives. The exit monitor then reaps the exact owned group and records
+`indeterminate`—never `completed`—so the authoritative process stream clears
+the UI's stale Stop state. Applying the natural-exit liveness rule to both
+lifecycle shapes re-arms the timer forever for Codex-style app servers.
+
 ## The exit monitor kills twice
 
 `spawn_exit_monitor` has **two** kill points; guarding only the obvious one
@@ -215,3 +231,4 @@ the stored `base_url` + password. Codex (stdio JSON-RPC; turn end currently
 - vk/826e-coding-agent-war
 - vk/9f36-vk-queued-messag
 - vk/869c-vk-background-po
+- vk/7655-turn-ends-aren-t

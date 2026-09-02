@@ -127,6 +127,7 @@ async fn wait_for_unfinalized_output(
     msg_stores: Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>,
     child_store: Option<AsyncChildStore>,
     exec_id: Uuid,
+    live_child_is_turn_evidence: bool,
 ) {
     let mut observed_final_at = None;
     loop {
@@ -148,7 +149,8 @@ async fn wait_for_unfinalized_output(
             tokio::time::Instant::now().duration_since(observed)
                 >= FINAL_OUTPUT_RECONCILIATION_TIMEOUT
         }) {
-            if let Some(child_store) = &child_store
+            if live_child_is_turn_evidence
+                && let Some(child_store) = &child_store
                 && let Some(child) = child_store.read().await.get(&exec_id).cloned()
                 && matches!(child.write().await.try_wait(), Ok(None))
             {
@@ -304,7 +306,12 @@ mod final_output_reconciliation_tests {
         ));
         let stores = Arc::new(RwLock::new(HashMap::from([(execution_id, store)])));
 
-        let reconciliation = tokio::spawn(wait_for_unfinalized_output(stores, None, execution_id));
+        let reconciliation = tokio::spawn(wait_for_unfinalized_output(
+            stores,
+            None,
+            execution_id,
+            true,
+        ));
         tokio::time::advance(Duration::from_secs(44)).await;
         assert!(!reconciliation.is_finished());
         tokio::time::advance(Duration::from_secs(2)).await;
@@ -332,6 +339,7 @@ mod final_output_reconciliation_tests {
             stores,
             Some(children),
             execution_id,
+            true,
         ));
         tokio::time::advance(Duration::from_secs(46)).await;
         assert!(!reconciliation.is_finished());
@@ -341,6 +349,41 @@ mod final_output_reconciliation_tests {
         reconciliation
             .await
             .expect("dead child permits reconciliation");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn signal_driven_turn_does_not_treat_live_child_as_turn_liveness() {
+        let execution_id = Uuid::new_v4();
+        let store = Arc::new(MsgStore::new());
+        store.push(normalized_message(
+            NormalizedEntryType::AssistantMessage,
+            "Final answer",
+        ));
+        let stores = Arc::new(RwLock::new(HashMap::from([(execution_id, store)])));
+        let child = Arc::new(RwLock::new(
+            tokio::process::Command::new("sleep")
+                .arg("300")
+                .group_spawn()
+                .expect("spawn live app-server child"),
+        ));
+        let children = Arc::new(RwLock::new(HashMap::from([(execution_id, child.clone())])));
+
+        let reconciliation = tokio::spawn(wait_for_unfinalized_output(
+            stores,
+            Some(children),
+            execution_id,
+            false,
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(46)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            reconciliation.is_finished(),
+            "an app-server child can outlive its turn and must not defer forever"
+        );
+
+        child.write().await.kill().await.expect("kill child");
+        reconciliation.await.expect("reconciliation task completes");
     }
 }
 
@@ -1715,14 +1758,23 @@ impl LocalContainerService {
         let mut process_exit_rx = self.spawn_os_exit_watcher(exec_id);
 
         tokio::spawn(async move {
+            // For natural-exit executors the child lifetime is the turn
+            // lifetime. App-server executors report turn completion through a
+            // separate signal, so their still-live child does not prove the
+            // protocol turn remains active.
+            let live_child_is_turn_evidence = exit_signal.is_none();
             let mut exit_signal_future = exit_signal
                 .map(|rx| rx.boxed()) // wait for result
                 .unwrap_or_else(|| std::future::pending().boxed()); // no signal, stall forever
 
             let status_result: std::io::Result<std::process::ExitStatus>;
             let mut reconciliation_timed_out = false;
-            let final_output_timeout =
-                wait_for_unfinalized_output(msg_stores.clone(), Some(child_store.clone()), exec_id);
+            let final_output_timeout = wait_for_unfinalized_output(
+                msg_stores.clone(),
+                Some(child_store.clone()),
+                exec_id,
+                live_child_is_turn_evidence,
+            );
             tokio::pin!(final_output_timeout);
             // True when a persistent app-server finished a turn cleanly and is
             // being left alive for reuse; also guards the tail cleanup below so
