@@ -34,5 +34,5 @@ Rust module, so they are intentionally serial rather than marked `[P]`.
 - [x] T007 Update the relevant reusable lifecycle topic and index in
   `wiki/agent-process-lifecycle.md` and `wiki/INDEX.md`, tagged with
   `vk/7655-turn-ends-aren-t` (depends on T006).
-- [ ] T008 Open and merge the pull request after the implementation, review,
+- [x] T008 Open and merge the pull request after the implementation, review,
   verification, and knowledge commits are ready (depends on T005, T007).
