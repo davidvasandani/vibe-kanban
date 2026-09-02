@@ -352,8 +352,10 @@ pub async fn start_background_helper(
     Json(request): Json<StartBackgroundHelperRequest>,
 ) -> Result<ResponseJson<ApiResponse<ExecutionProcess, StartBackgroundHelperError>>, ApiError> {
     if request.script.trim().is_empty() {
-        return Ok(ResponseJson(ApiResponse::error_with_data(
-            StartBackgroundHelperError::EmptyScript,
+        let error = StartBackgroundHelperError::EmptyScript;
+        let message = start_background_helper_error_message(&error);
+        return Ok(ResponseJson(ApiResponse::error_with_data_and_message(
+            error, message,
         )));
     }
 
@@ -366,7 +368,11 @@ pub async fn start_background_helper(
     {
         Ok(session) => session,
         Err(rejection) => {
-            return Ok(ResponseJson(ApiResponse::error_with_data(rejection.into())));
+            let error = rejection.into();
+            let message = start_background_helper_error_message(&error);
+            return Ok(ResponseJson(ApiResponse::error_with_data_and_message(
+                error, message,
+            )));
         }
     };
 
@@ -401,6 +407,25 @@ pub async fn start_background_helper(
         .await;
 
     Ok(ResponseJson(ApiResponse::success(execution_process)))
+}
+
+/// Human-readable reason and correction for a rejected background-helper start.
+///
+/// Browser clients retain the typed error, while MCP clients surface only the
+/// response message. Keeping both prevents a valid rejection from reaching an
+/// agent as an unactionable "Unknown error".
+fn start_background_helper_error_message(error: &StartBackgroundHelperError) -> &'static str {
+    match error {
+        StartBackgroundHelperError::EmptyScript => {
+            "Background helper script is empty: supply the shell script to run."
+        }
+        StartBackgroundHelperError::InvalidWorkingDir => {
+            "Background helper working_dir is invalid: it must be relative to the workspace root and must not contain '..'."
+        }
+        StartBackgroundHelperError::TooManyHelpers => {
+            "Too many background processes in this workspace: pollers and background helpers share one limit of 5. Stop an existing poller or helper first."
+        }
+    }
 }
 
 /// List the workspace's running pollers.
@@ -782,6 +807,30 @@ mod tests {
             // The message is what a non-browser client actually surfaces, so it
             // has to survive onto the response envelope, not just exist.
             let response: ApiResponse<ExecutionProcess, StartPollerError> =
+                ApiResponse::error_with_data_and_message(error, message);
+            assert_eq!(response.message(), Some(message));
+        }
+    }
+
+    #[test]
+    fn every_background_helper_rejection_reaches_the_response_envelope() {
+        let cases = [
+            (StartBackgroundHelperError::EmptyScript, "script is empty"),
+            (
+                StartBackgroundHelperError::InvalidWorkingDir,
+                "working_dir is invalid",
+            ),
+            (StartBackgroundHelperError::TooManyHelpers, "limit of 5"),
+        ];
+
+        for (error, expected_fragment) in cases {
+            let message = start_background_helper_error_message(&error);
+            assert!(
+                message.contains(expected_fragment),
+                "{error:?} message should name the problem ({expected_fragment:?}), got {message:?}"
+            );
+
+            let response: ApiResponse<ExecutionProcess, StartBackgroundHelperError> =
                 ApiResponse::error_with_data_and_message(error, message);
             assert_eq!(response.message(), Some(message));
         }

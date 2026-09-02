@@ -628,6 +628,18 @@
     "failedTitle": "Échec de la création de l’espace de travail",
     "failedFallback": "Créez un nouvel espace de travail pour réessayer."
   },
+  "metricsDiskAlerts": {
+    "warning": "Espace disque faible",
+    "critical": "Espace disque critique",
+    "available": "disponible",
+    "used": "utilisé",
+    "resolving": "Résolution du problème…",
+    "action": "Créer ou ouvrir un ticket de résolution",
+    "noProject": "Associez cet espace de travail à un projet pour créer un ticket.",
+    "resolveFailed": "Échec de la résolution du problème d’espace disque faible : {{error}}",
+    "nodeCount_one": "{{severity}} · {{count}} nœud",
+    "nodeCount_other": "{{severity}} · {{count}} nœuds"
+  },
   "speckit": {
     "title": "SpecKit",
     "stageProgress": "{{done}}/{{total}} stages",

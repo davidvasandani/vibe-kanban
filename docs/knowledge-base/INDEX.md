@@ -6,6 +6,8 @@ update pages (and this index) when a task ships something reusable.
 
 | Page | Summary | Contributing tasks |
 | --- | --- | --- |
+| [agent-facing-fail-loud-boundaries](agent-facing-fail-loud-boundaries.md) | Test typed API failures at the envelope surfaced by MCP, provide corrective messages, trace dead vendor fields through history, and enforce verified strict config at process launch | `vk/94c0-three-loose-ends` |
+| [locale-key-consistency](locale-key-consistency.md) | Trustworthy locale key-set gates: one collation for `sort` and `comm`, parse-failure preservation, placeholder identity, plural conventions, and full CI-boundary verification | `vk/94c0-three-loose-ends` |
 | [repository-scoped-ui-projections](repository-scoped-ui-projections.md) | Identity-keyed child enrichment, truthful unknown loading state, why aggregate PR summaries cannot label repository rows, and pure association testing | `vk/63e0-git-panel-shows` |
 | [metrics-alert-to-issue-follow-through](metrics-alert-to-issue-follow-through.md) | Server-owned alert policy, host-scoped collapsed rollups, coordinator re-resolution, durable issue deduplication, and Electric-safe create/reuse navigation | `vk/32f3-server-metrics-w` |
 | [workspace-summary-ordering](workspace-summary-ordering.md) | Deterministic workspace ordering while asynchronous summaries load: persisted base timestamp fallback, missing-last semantics, stable identity ties, and shared active/archive application | `vk/9391-workspace-order` |

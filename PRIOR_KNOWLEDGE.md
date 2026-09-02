@@ -1,49 +1,75 @@
-# Prior Knowledge: Codex/ChatGPT refresh-token race (VAS-490)
+# Prior Knowledge: Three rollout loose ends
 
-Searched the project knowledge base (`wiki/`) and its `INDEX.md` for anything
-about Codex auth, credentials, tokens, concurrency, and the scoped/worktree
-home layout.
+Task: `vk/94c0-three-loose-ends`
 
-## No existing page covers Codex credentials
+Searched `docs/knowledge-base/`, its `INDEX.md`, and the legacy `wiki/` pages
+for i18n consistency, API envelope errors, MCP caller behavior, Codex config,
+strict validation, and verification boundaries.
 
-There is **no** knowledge-base page about Codex/OpenAI authentication,
-`auth.json`, token refresh, or credential sharing across executions. This task
-will create the first one (see stage 12). The pages below are the closest
-adjacent context.
+## Directly relevant knowledge
 
-## Relevant matches
+### `wiki/vk-pollers.md`
 
-1. **`agent-process-lifecycle.md`** — the strongest match.
-   - "One turn = one `ExecutionProcess` row = (today) one OS process lifetime."
-     So each concurrent task attempt / follow-up / review is its own
-     `codex app-server` OS process. That is the concurrency source that makes
-     several processes hit the shared `auth.json` at once.
-   - Codex is a **stdio JSON-RPC** app-server whose turn end is coupled to the
-     reader-loop teardown; it is deliberately **not** kept warm (Phase 3
-     deferred). So we cannot assume a single long-lived Codex process funnels
-     all refreshes — each turn spawns anew and re-reads credentials.
-   - The lifecycle doc is full of "no cross-actor lock ⇒ race" gotchas
-     (insert-before-remove, generation-conditional reap). Same failure family
-     as this bug: a shared resource (`auth.json`) mutated by concurrent actors
-     with no cross-process serialization. The fix should add exactly that
-     serialization for the auth handshake.
+This is the primary design record for items 2 and 3.
 
-2. **`managed-cli-tool-catalog.md`** — "host-first PATH propagation across local
-   and clustered workspace process boundaries." Confirms the two deployment
-   shapes (local in-process vs clustered worker processes) that any
-   cross-process mechanism must cover. Our lock must work for both — an
-   in-process async mutex is insufficient alone; a file lock is required.
+- A typed rejection is not the MCP contract. `ApiResponse::error_with_data`
+  omits `message`, while the MCP client surfaces only that field, so tests must
+  assert the message on the response envelope.
+- Agent-facing denials must state both the problem and corrective action; an
+  `Unknown error` prevents self-correction.
+- Codex `features.unified_exec=false` is a verified exact config identifier.
+  Codex's deserializer accepts unknown fields unless strict config is requested,
+  so a plausible-looking misspelling can be completely inert.
+- Authoritative Codex identifiers must be checked against the source/artifact
+  corresponding to the pinned executable, not inferred from stale types or UI.
 
-3. **`self-hosted-deployment.md`** — deploy/hosting lives in the homelab repo
-   (`modules/vibe-kanban-rebuild.nix`); cross-repo sequencing is guarded. Not
-   directly needed for this code change, but confirms deployment is external.
+### `docs/knowledge-base/worktree-formatting-prerequisites.md`
 
-## How this shapes the plan
+- A fresh worktree must run `pnpm install --frozen-lockfile` before repository
+  formatting or frontend verification.
+- Run the dependency preflight before mutating formatting stages and verify the
+  package-local frontend tools rather than assuming a root shim.
 
-- Serialize the refresh **across processes** (file lock), not just in-process,
-  because clustered deployment runs executions as separate worker processes.
-- Do it in the brief startup handshake, never across a turn — the lifecycle doc
-  shows turns are the expensive, concurrency-critical unit.
-- The shared `auth.json` is a single inode (same file locally, symlink target
-  in the worker scoped home), so one lock coordinates all actors.
-- Record the new credential knowledge as a fresh KB page at the end.
+### `docs/knowledge-base/prompt-driven-agent-pipelines.md`
+
+- Pipeline prompts are executable contracts and their required artifacts and
+  order must be followed literally.
+- The durable convention is task-scoped artifacts under
+  `specs/vk/<task-id>/`, though this task's injected pipeline explicitly names
+  root `SPEC.md`, `PRIOR_KNOWLEDGE.md`, and `IMPLEMENTATION_PLAN.md`; the explicit
+  task instruction is authoritative for these three files.
+- Constitution numbering must be rechecked against the latest base immediately
+  before merge if the constitution itself changes.
+
+### `docs/knowledge-base/codex-rollout-transfer.md` and
+`docs/knowledge-base/active-mcp-refresh.md`
+
+- Codex runs through the stdio app-server protocol and receives execution-scoped
+  configuration. The actual app-server launch and thread-start boundaries are
+  therefore the correct places to verify fail-loud CLI flags and emitted config
+  keys.
+- Avoid widening a focused executor-config correction into changes to Codex home,
+  credentials, rollout persistence, or MCP configuration ownership.
+
+## Adjacent findings
+
+- No durable `docs/knowledge-base` topic currently records the i18n key-set
+  comparison/sort-order invariant or the API envelope lesson. Those are
+  candidates for stage 12 if confirmed by implementation.
+- `wiki/kanban-issue-panel-sections.md` notes that i18n tests without a provider
+  may return raw keys. This task instead tests locale JSON/key consistency and
+  should not mistake component fallback behavior for translation coverage.
+- `wiki/project-context-map.md` records the broader fail-loud principle: reject
+  unknown keys at the boundary rather than accepting and discarding meaning.
+
+## Consequences for implementation
+
+1. Fix and test the i18n comparison algorithm itself, not merely the currently
+   missing translations.
+2. Extract one helper-error message mapping parallel to the poller mapping and
+   assert every variant reaches `ApiResponse.message`.
+3. Trace `include_apply_patch_tool` history before removal, verify the pinned
+   Codex CLI's strict-config support, and pin the exact adopted launch contract
+   in tests.
+4. Keep all work inside the Vibe Kanban repository and use focused verification
+   before the full frontend/backend gates.

@@ -47,15 +47,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn app_server_always_uses_strict_config() {
+        let codex: Codex = serde_json::from_value(serde_json::json!({}))
+            .expect("default Codex config deserializes");
+        let builder = codex.build_command_builder().expect("valid Codex command");
+
+        assert_eq!(
+            builder.params,
+            Some(vec![
+                "app-server".to_string(),
+                "--strict-config".to_string()
+            ]),
+            "the pinned app-server must reject unknown configuration fields"
+        );
+    }
+
     /// Pins the *exact* config key that disables Codex's persistent-PTY
     /// background execution.
     ///
     /// This is not redundant with reading the code: upstream's `ConfigToml` has
-    /// no `serde(deny_unknown_fields)` and VK does not pass `--strict-config`,
-    /// so an unknown key is silently ignored. A misspelling would leave a
-    /// control that is present in review, present on the wire, and completely
-    /// inert. The literal is therefore written out here rather than referenced
-    /// through a constant.
+    /// no `serde(deny_unknown_fields)`, so the `--strict-config` launch flag is
+    /// what makes an unknown key fail loudly. The literal remains written out
+    /// here rather than referenced through a constant so this test also pins
+    /// the vendor-facing spelling.
     #[test]
     fn unified_exec_feature_key_is_pinned_and_disabled() {
         let codex: Codex =
@@ -67,6 +82,10 @@ mod tests {
             config.get("features.unified_exec"),
             Some(&serde_json::Value::Bool(false)),
             "exact key `features.unified_exec` must be set to false; got {config:?}"
+        );
+        assert!(
+            !config.contains_key("include_apply_patch_tool"),
+            "removed V1 field must never be emitted as an inert config key"
         );
 
         // `features.shell_tool` would disable ordinary execution entirely and
@@ -249,8 +268,6 @@ pub struct Codex {
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_instructions: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub include_apply_patch_tool: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -571,7 +588,10 @@ impl Codex {
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
         let (base_command, deployment_managed) = Self::configured_base_command();
         let mut builder = CommandBuilder::new(base_command);
-        builder = builder.extend_params(["app-server"]);
+        // Pinned Codex 0.144.1 accepts this app-server flag and propagates it
+        // through thread config loading. Unknown config must fail visibly rather
+        // than leave a reviewed control silently inert (Constitution IX).
+        builder = builder.extend_params(["app-server", "--strict-config"]);
         if self.oss.unwrap_or(false) {
             builder = builder.extend_params(["--oss"]);
         }
@@ -614,11 +634,6 @@ impl Codex {
                 .get_or_insert_with(HashMap::new)
                 .insert("profile".to_string(), Value::String(profile.clone()));
         }
-        if let Some(include) = self.include_apply_patch_tool {
-            config
-                .get_or_insert_with(HashMap::new)
-                .insert("include_apply_patch_tool".to_string(), Value::Bool(include));
-        }
         if let Some(compact) = &self.compact_prompt {
             config
                 .get_or_insert_with(HashMap::new)
@@ -643,11 +658,10 @@ impl Codex {
         // `codex-app-server-protocol` git pin `rust-v0.144.1` (see
         // `crates/executors/Cargo.toml`): `ThreadStartParams` /
         // `TurnStartParams` expose no tools allow/deny field, so this `config`
-        // map is the only lever. It **fails open** — `ConfigToml` has no
-        // `serde(deny_unknown_fields)` and VK does not pass `--strict-config`,
-        // so a misspelled key is silently ignored and the control would look
-        // present while doing nothing. The exact spelling is pinned by
-        // `unified_exec_feature_key_is_pinned_and_disabled`.
+        // map is the only lever. `ConfigToml` itself has no
+        // `serde(deny_unknown_fields)`, so `app-server --strict-config` is the
+        // fail-loud boundary for a misspelling. The exact spelling is also
+        // pinned by `unified_exec_feature_key_is_pinned_and_disabled`.
         config
             .get_or_insert_with(HashMap::new)
             .insert("features.unified_exec".to_string(), Value::Bool(false));

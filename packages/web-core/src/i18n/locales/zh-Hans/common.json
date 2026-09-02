@@ -628,6 +628,18 @@
     "failedTitle": "工作区创建失败",
     "failedFallback": "请创建新的工作区后重试。"
   },
+  "metricsDiskAlerts": {
+    "warning": "磁盘空间不足",
+    "critical": "磁盘空间严重不足",
+    "available": "可用",
+    "used": "已用",
+    "resolving": "正在解决问题…",
+    "action": "创建或打开修复问题",
+    "noProject": "请将此工作区关联到项目以创建问题。",
+    "resolveFailed": "无法解决磁盘空间不足问题：{{error}}",
+    "nodeCount_one": "{{severity}} · {{count}} 个节点",
+    "nodeCount_other": "{{severity}} · {{count}} 个节点"
+  },
   "speckit": {
     "title": "SpecKit",
     "stageProgress": "{{done}}/{{total}} stages",

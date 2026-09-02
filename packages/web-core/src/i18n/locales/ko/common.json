@@ -628,6 +628,18 @@
     "failedTitle": "워크스페이스 생성 실패",
     "failedFallback": "새 워크스페이스를 만들어 다시 시도하세요."
   },
+  "metricsDiskAlerts": {
+    "warning": "디스크 공간 부족",
+    "critical": "디스크 공간 위험",
+    "available": "사용 가능",
+    "used": "사용됨",
+    "resolving": "문제 해결 중…",
+    "action": "복구 이슈 만들기 또는 열기",
+    "noProject": "이슈를 만들려면 이 워크스페이스를 프로젝트에 연결하세요.",
+    "resolveFailed": "디스크 공간 부족 이슈를 해결하지 못했습니다: {{error}}",
+    "nodeCount_one": "{{severity}} · 노드 {{count}}개",
+    "nodeCount_other": "{{severity}} · 노드 {{count}}개"
+  },
   "speckit": {
     "title": "SpecKit",
     "stageProgress": "{{done}}/{{total}} stages",
