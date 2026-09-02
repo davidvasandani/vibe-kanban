@@ -5,11 +5,10 @@ Reviewed on 2026-09-02 with Codex CLI 0.146.0 using
 
 Result:
 
-> The change correctly distinguishes signal-driven turn completion from
-> process lifetime when applying final-output reconciliation, while preserving
-> live-child evidence for natural-exit executors. The focused regression
-> coverage validates both behaviors, and no blocking correctness issues were
-> identified.
+> The change correctly distinguishes natural-exit processes from signal-driven
+> turns when evaluating child-process liveness, preventing persistent
+> app-server children from indefinitely blocking reconciliation. The focused
+> reconciliation tests pass, and no actionable regressions were identified.
 
 No significant findings were reported and no review-driven code changes were
 required.
