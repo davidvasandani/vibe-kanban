@@ -376,6 +376,7 @@ mod final_output_reconciliation_tests {
         ));
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(46)).await;
+        tokio::task::yield_now().await;
         assert!(
             reconciliation.is_finished(),
             "an app-server child can outlive its turn and must not defer forever"

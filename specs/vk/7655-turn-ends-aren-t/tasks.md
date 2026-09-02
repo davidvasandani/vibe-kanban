@@ -7,27 +7,27 @@ Rust module, so they are intentionally serial rather than marked `[P]`.
 
 ## Phase 1: Regression contract
 
-- [ ] T001 Update the paused-time final-output reconciliation tests to cover a
+- [x] T001 Update the paused-time final-output reconciliation tests to cover a
   live natural-exit child and a live signal-driven child in
   `crates/local-deployment/src/container.rs`.
 
 ## Phase 2: Core lifecycle fix
 
-- [ ] T002 Qualify live-child turn evidence by executor terminal mechanism in
+- [x] T002 Qualify live-child turn evidence by executor terminal mechanism in
   `wait_for_unfinalized_output` and `spawn_exit_monitor` in
   `crates/local-deployment/src/container.rs` (depends on T001).
 
 ## Phase 3: Verification
 
-- [ ] T003 Run focused and crate-level Rust tests for
+- [x] T003 Run focused and crate-level Rust tests for
   `crates/local-deployment/src/container.rs` and fix any regressions (depends on
   T002).
-- [ ] T004 Run repository formatting and required checks for the files governed
+- [x] T004 Run repository formatting and required checks for the files governed
   by `AGENTS.md` (depends on T003).
 
 ## Phase 4: Delivery
 
-- [ ] T005 [P] Record implementation/verification evidence in
+- [x] T005 [P] Record implementation/verification evidence in
   `specs/vk/7655-turn-ends-aren-t/verification.md` (depends on T004).
 - [ ] T006 Run independent Codex review and record the clean result in
   `specs/vk/7655-turn-ends-aren-t/review.md` (depends on T004).
