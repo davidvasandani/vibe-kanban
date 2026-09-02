@@ -53,6 +53,6 @@ together within their layer.
 - [x] T015 Update reusable knowledge under `docs/knowledge-base/`, tag it
   `vk/94c0-three-loose-ends`, refresh `docs/knowledge-base/INDEX.md`, and commit
   the knowledge-base update (depends on T014).
-- [ ] T016 Recheck the latest base, commit remaining scoped work, push
+- [x] T016 Recheck the latest base, commit remaining scoped work, push
   `vk/94c0-three-loose-ends`, open a PR to `main`, wait for required CI, fix any
   failures, and merge (depends on T015).
