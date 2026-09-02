@@ -24,6 +24,33 @@ const filesystem = (available: number, total = 100 * 1024 ** 3) =>
   }) as FilesystemSample;
 
 describe('classifyFilesystem', () => {
+  it.each(['/boot', '/boot/', '/boot/efi'])(
+    'ignores boot filesystem mounted at %s',
+    (mountPoint) => {
+      expect(
+        classifyFilesystem(
+          {
+            ...filesystem(512 * 1024 ** 2),
+            mount_point: mountPoint,
+          },
+          thresholds
+        )
+      ).toBeNull();
+    }
+  );
+
+  it('keeps similarly named and constrained non-boot mounts eligible', () => {
+    expect(
+      classifyFilesystem(
+        {
+          ...filesystem(512 * 1024 ** 2),
+          mount_point: '/bootstrap',
+        },
+        thresholds
+      )?.severity
+    ).toBe('critical');
+  });
+
   it('uses the more conservative percent or byte rule', () => {
     expect(
       classifyFilesystem(filesystem(6 * 1024 ** 3), thresholds)?.severity
@@ -98,5 +125,24 @@ describe('classifyNode availability', () => {
         thresholds
       )?.severity
     ).toBe('warning');
+  });
+
+  it('omits a node whose only constrained filesystem is a boot mount', () => {
+    expect(
+      classifyNode(
+        {
+          ...node({ status: 'available' }),
+          latest: {
+            filesystems: [
+              {
+                ...filesystem(512 * 1024 ** 2),
+                mount_point: '/boot',
+              },
+            ],
+          },
+        } as MetricsNode,
+        thresholds
+      )
+    ).toBeNull();
   });
 });

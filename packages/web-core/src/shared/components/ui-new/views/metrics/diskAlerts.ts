@@ -32,10 +32,17 @@ const finiteNumber = (value: unknown): number | null => {
   return Number.isFinite(number) && number >= 0 ? number : null;
 };
 
+const isDiskAlertEligible = (filesystem: FilesystemSample): boolean => {
+  const mountPoint = filesystem.mount_point.replace(/\/+$/, '');
+  return mountPoint !== '/boot' && !mountPoint.startsWith('/boot/');
+};
+
 export function classifyFilesystem(
   filesystem: FilesystemSample,
   thresholds: DiskAlertThresholds
 ): FilesystemDiskAlert | null {
+  if (!isDiskAlertEligible(filesystem)) return null;
+
   const total = finiteNumber(filesystem.total_bytes);
   const used = finiteNumber(filesystem.used_bytes);
   const available = finiteNumber(filesystem.available_bytes);

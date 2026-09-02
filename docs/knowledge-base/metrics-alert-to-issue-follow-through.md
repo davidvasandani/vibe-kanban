@@ -1,6 +1,6 @@
 # Metrics alert to issue follow-through
 
-Tags: `vk/32f3-server-metrics-w`
+Tags: `vk/32f3-server-metrics-w`, `vk/9a0b-boot-disk-warnin`
 
 ## Keep alert policy server-owned
 
@@ -16,6 +16,15 @@ ordering, and filesystem facts (`used <= total`, `available <= total`) before
 classification. Retained readings from unavailable nodes must not alert; an
 explicit stale reading may remain a timestamped warning but must not retain a
 critical claim.
+
+Telemetry inclusion and alert eligibility are separate decisions. Keep samples
+available for inspection even when they are not meaningful inputs to a
+workload-oriented alert. In particular, small dedicated boot mounts (`/boot`
+and descendants) can sit below an absolute free-byte threshold by design while
+having ample proportional headroom; exclude them at the shared classification
+boundary instead of weakening the percentage-or-bytes OR rule or filtering the
+metrics payload. Match mount paths on segment boundaries so an unrelated name
+such as `/bootstrap` remains eligible.
 
 ## A collapsed rollup owns a bounded snapshot query
 
