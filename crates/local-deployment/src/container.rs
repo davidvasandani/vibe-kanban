@@ -3180,6 +3180,7 @@ const RESERVED_ENV_PREFIXES: &[&str] = &["VK_"];
 const RESERVED_ENV_NAMES: &[&str] = &[
     "GOBIN",
     "GOCACHE",
+    "GOENV",
     "GOMODCACHE",
     "GOPATH",
     "GOTOOLCHAIN",
@@ -3201,6 +3202,10 @@ fn workspace_go_environment(
         (
             "GOCACHE".into(),
             root.join("build").to_string_lossy().into_owned(),
+        ),
+        (
+            "GOENV".into(),
+            root.join("env").to_string_lossy().into_owned(),
         ),
         (
             "GOMODCACHE".into(),
@@ -5022,6 +5027,7 @@ mod warm_tests {
             "VK_WORKSPACE_BRANCH",
             "GOBIN",
             "GOCACHE",
+            "GOENV",
             "GOMODCACHE",
             "GOPATH",
             "GOTOOLCHAIN",
@@ -5049,7 +5055,7 @@ mod warm_tests {
 
         assert_eq!(first, first_again);
         assert_eq!(first["GOTOOLCHAIN"], "auto");
-        for name in ["GOBIN", "GOCACHE", "GOMODCACHE", "GOPATH"] {
+        for name in ["GOBIN", "GOCACHE", "GOENV", "GOMODCACHE", "GOPATH"] {
             assert!(first[name].starts_with("/workspaces/first/.vibe-kanban/go/"));
             assert!(second[name].starts_with("/workspaces/second/.vibe-kanban/go/"));
             assert_ne!(first[name], second[name]);
