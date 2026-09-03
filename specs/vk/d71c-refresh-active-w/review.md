@@ -16,10 +16,16 @@ though capability discovery was unavailable. Those evidence fields now remain
 `None` for `FailedUnavailable`, matching the failure-retention contract instead
 of implying deliberate tool removal.
 
+The next repeat review found a rolling-upgrade compatibility issue: older
+workers omit the new optional evidence fields, which caused deserialization to
+drop their complete snapshot. Both fields now use serde defaults, and a fixture
+proves an older worker payload decodes with unknown evidence instead of becoming
+an empty successful server list.
+
 Post-fix verification:
 
 - `cargo fmt --all --check`: passed.
 - `cargo test -p executors mcp_inventory_tests --lib -j1`: 4 passed.
 - `cargo clippy -p executors --lib -j1 -- -D warnings`: passed.
 
-Final clean review result is recorded below after the repeat pass.
+Final repeat result: **no actionable correctness defects identified**.
