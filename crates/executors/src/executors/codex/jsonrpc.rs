@@ -259,16 +259,77 @@ where
                 "failed to decode {label} response: {err}",
             )))
         }),
-        Ok(PendingResponse::Error(error)) => Err(ExecutorError::Io(io::Error::other(format!(
-            "{label} request failed: {}",
-            error.error.message
-        )))),
+        Ok(PendingResponse::Error(error)) => Err(ExecutorError::JsonRpc {
+            label: label.to_string(),
+            code: error.error.code,
+            message: error.error.message,
+            data: error.error.data,
+        }),
         Ok(PendingResponse::Shutdown) => Err(ExecutorError::Io(io::Error::other(format!(
             "server was shutdown while waiting for {label} response",
         )))),
         Err(_) => Err(ExecutorError::Io(io::Error::other(format!(
             "{label} request was dropped",
         )))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use codex_app_server_protocol::{JSONRPCError, JSONRPCErrorError, RequestId};
+    use serde_json::Value;
+    use tokio::sync::oneshot;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{PendingResponse, await_response};
+    use crate::executors::ExecutorError;
+
+    #[tokio::test]
+    async fn preserves_structured_json_rpc_errors() {
+        let (sender, receiver) = oneshot::channel();
+        sender
+            .send(PendingResponse::Error(JSONRPCError {
+                id: RequestId::Integer(7),
+                error: JSONRPCErrorError {
+                    code: -32600,
+                    message: "no rollout found for thread id deadbeef".to_string(),
+                    data: Some(serde_json::json!({"kind": "missing"})),
+                },
+            }))
+            .unwrap();
+
+        let error = await_response::<Value>(receiver, "thread/fork", CancellationToken::new())
+            .await
+            .unwrap_err();
+
+        match error {
+            ExecutorError::JsonRpc {
+                label,
+                code,
+                message,
+                data,
+            } => {
+                assert_eq!(label, "thread/fork");
+                assert_eq!(code, -32600);
+                assert_eq!(message, "no rollout found for thread id deadbeef");
+                assert_eq!(data, Some(serde_json::json!({"kind": "missing"})));
+            }
+            other => panic!("expected structured JSON-RPC error, got {other:?}"),
+        }
+        assert_eq!(
+            error_text(-32600, "missing"),
+            "thread/fork request failed: missing"
+        );
+    }
+
+    fn error_text(code: i64, message: &str) -> String {
+        ExecutorError::JsonRpc {
+            label: "thread/fork".to_string(),
+            code,
+            message: message.to_string(),
+            data: None,
+        }
+        .to_string()
     }
 }
 

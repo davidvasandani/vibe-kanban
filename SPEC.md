@@ -1,74 +1,64 @@
-# Technical Spec: Stop control clears when a Vibe Kanban turn ends
+# Technical Spec: Recover Missing Codex Conversations
 
-**Task:** `vk/7655-turn-ends-aren-t` — “Turn Ends aren't Stopping Vk UI”
+**Task:** `vk/af0d-no-conversation`
 
 ## Problem
 
-The workspace chat composer continues to show the running-turn Stop control and
-spinner after the agent has emitted its final response and the turn is over.
-This leaves the composer in a false running state and makes it appear that Vibe
-Kanban is still doing work or waiting for a stop operation.
-
-The screenshot shows a completed assistant response while the composer footer
-still renders `Stop` with the running spinner. In the current UI,
-`SessionChatBoxContainer` derives that control from
-`isAttemptRunningVisible`, which in turn is true while any visible agent or
-workspace-script execution process streamed for the selected session retains
-the `running` status.
+When Vibe Kanban sends a follow-up to a Codex session, the executor forks the
+persisted Codex conversation ID. If the local Codex rollout is no longer
+available, Codex app-server returns `No conversation found with session ID:
+<id>` and the follow-up fails. The user is left with an error even though the
+Vibe Kanban workspace, its chat history, and the new prompt are still usable.
 
 ## Goal
 
-Make the authoritative execution-process lifecycle transition reach the VK UI
-when a turn terminates, so the composer returns from the running Stop control to
-its idle Send/continue state without a reload or manual stop.
+Treat a missing resumable Codex conversation as a recoverable loss of executor
+state: start a new Codex conversation in the same workspace and submit the
+follow-up there, while retaining strict failure behavior for unrelated fork
+errors.
 
-## Functional requirements
+## Requirements
 
-1. When a coding-agent turn reaches a terminal outcome, its execution process
-   must stop being reported as `running` to the selected session's execution
-   process stream.
-2. The composer must stop rendering the running Stop control after the relevant
-   terminal process update is received.
-3. All terminal outcomes (`completed`, `failed`, `killed`, `interrupted`, and
-   `indeterminate`) must be treated as non-running; active coding-agent and
-   workspace-script processes must remain cancellable.
-4. Completion must reconcile correctly across the local and clustered/remote
-   execution paths used by the Vibe Kanban service. Any deployment change must
-   be limited to `homelab/modules/vibe-kanban-rebuild.nix` and only if required
-   by the source fix.
-5. Existing conversation output, queued follow-ups, approvals, dropped-process
-   filtering, session switching, and reconnect behavior must not regress.
+1. A Codex follow-up first attempts the existing `thread/fork` behavior.
+2. If and only if Codex reports that the requested conversation is absent, the
+   executor starts a new thread using the same thread-start parameters and
+   submits the current prompt to it.
+3. The replacement thread is registered normally so its new external session
+   ID is persisted and subsequent follow-ups resume it.
+4. Authentication, configuration, model selection, approval/collaboration
+   mode, working directory, prompt content, and MCP configuration are identical
+   to an ordinary new thread in that workspace.
+5. Other `thread/fork` failures remain visible and do not silently create a new
+   conversation.
+6. Review and slash-command semantics are unchanged unless their existing
+   normal-chat path shares the narrowly scoped recovery helper safely.
+7. Focused tests cover the exact missing-conversation classification, the
+   fallback, successful forks, and non-matching errors.
 
-## Technical approach
+## Technical direction
 
-Trace the process from executor termination through persistence and the
-execution-process JSON Patch WebSocket stream to
-`ExecutionProcessesProvider`. Identify where the terminal status is missing,
-delayed, or hidden. Fix the earliest authoritative lifecycle boundary rather
-than inferring completion from rendered conversation text. Preserve the UI's
-existing `hasRunningAttempt` semantics and add focused regression coverage at
-the layer where the stale running state originates, plus UI/provider coverage
-where useful.
-
-The detailed design will be refined after the required project-knowledge search
-and SpecKit clarification/research stages.
+Preserve structured JSON-RPC error information through the Codex client instead
+of relying on an unbounded user-facing string match where practical. Add a
+narrow classifier for the upstream missing-conversation response and use it at
+the normal chat fork boundary. Because thread-start parameters are consumed by
+either fork or start, arrange ownership so the same parameters can be used by
+the fallback without changing successful behavior.
 
 ## Acceptance criteria
 
-- A naturally completed agent turn changes the composer from Stop/spinner to
-  its idle action without refreshing the page.
-- Failed, killed, interrupted, and indeterminate turns likewise do not leave a
-  stale running Stop control.
-- A genuinely running agent/setup/cleanup/archive process still presents Stop.
-- Focused automated tests reproduce the stale-state scenario before the fix and
-  pass afterward.
-- Relevant frontend and/or Rust checks, formatting, and the independent Codex
-  diff review pass with no significant findings.
+- Reproducing a follow-up with a nonexistent Codex session ID creates a new
+  Codex thread in the same workspace and runs the prompt.
+- The emitted replacement session ID becomes the durable session used by the
+  next follow-up.
+- A genuine permission, protocol, configuration, or app-server failure still
+  fails visibly.
+- Focused Rust tests and the relevant executor checks pass.
+- No service outside Vibe Kanban is changed. Deployment configuration in
+  `homelab/modules/vibe-kanban-rebuild.nix` is changed only if the source fix
+  requires it.
 
-## Scope
+## Out of scope
 
-In scope: Vibe Kanban source and, only if necessary for deploying that source,
-`homelab/modules/vibe-kanban-rebuild.nix`.
-
-Out of scope: changes to any other service, broad redesign of the chat composer,
-or treating assistant message text as the source of truth for process state.
+- Reconstructing lost Codex-private conversation context.
+- Changing other executors' resume behavior.
+- Modifying unrelated homelab services.

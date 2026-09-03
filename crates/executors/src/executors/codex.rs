@@ -28,7 +28,11 @@ pub fn codex_home() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Codex, POLLER_DEVELOPER_INSTRUCTIONS, compose_developer_instructions};
+    use super::{
+        Codex, POLLER_DEVELOPER_INSTRUCTIONS, compose_developer_instructions,
+        is_missing_conversation_error,
+    };
+    use crate::executors::ExecutorError;
 
     #[test]
     fn deployment_codex_command_is_fail_closed_and_blank_values_fall_back() {
@@ -176,6 +180,58 @@ mod tests {
             Some(POLLER_DEVELOPER_INSTRUCTIONS.to_string())
         );
     }
+
+    #[test]
+    fn identifies_only_known_missing_conversation_errors_for_requested_thread() {
+        let session_id = "27254d1c-bde6-48aa-a980-3e136b9d35bf";
+        for message in [
+            format!("no rollout found for thread id {session_id}"),
+            format!("No conversation found with session ID: {session_id}"),
+        ] {
+            let error = rpc_error(-32600, &message, None);
+            assert!(is_missing_conversation_error(&error, session_id));
+        }
+
+        for error in [
+            rpc_error(
+                -32603,
+                &format!("no rollout found for thread id {session_id}"),
+                None,
+            ),
+            rpc_error(-32600, "thread not found", None),
+            rpc_error(
+                -32600,
+                "No conversation found with session ID: 11111111-1111-4111-8111-111111111111",
+                None,
+            ),
+            rpc_error(
+                -32600,
+                &format!("no rollout found for thread id {session_id}"),
+                Some(serde_json::json!({"reason": "permission_denied"})),
+            ),
+        ] {
+            assert!(!is_missing_conversation_error(&error, session_id));
+        }
+    }
+
+    #[test]
+    fn rejects_missing_conversation_error_for_invalid_requested_id() {
+        let error = rpc_error(
+            -32600,
+            "No conversation found with session ID: not-a-uuid",
+            None,
+        );
+        assert!(!is_missing_conversation_error(&error, "not-a-uuid"));
+    }
+
+    fn rpc_error(code: i64, message: &str, data: Option<serde_json::Value>) -> ExecutorError {
+        ExecutorError::JsonRpc {
+            label: "thread/fork".to_string(),
+            code,
+            message: message.to_string(),
+            data,
+        }
+    }
 }
 
 pub(crate) fn resolve_model(model: Option<&str>) -> (Option<&str>, bool) {
@@ -243,6 +299,34 @@ pub(crate) fn fork_params_from(thread_id: String, params: ThreadStartParams) -> 
         service_tier: params.service_tier,
         ..Default::default()
     }
+}
+
+const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
+
+fn is_missing_conversation_error(error: &ExecutorError, requested_thread_id: &str) -> bool {
+    if uuid::Uuid::parse_str(requested_thread_id).is_err() {
+        return false;
+    }
+
+    let ExecutorError::JsonRpc {
+        label,
+        code,
+        message,
+        data,
+    } = error
+    else {
+        return false;
+    };
+
+    if label != "thread/fork"
+        || *code != INVALID_REQUEST_ERROR_CODE
+        || data.as_ref().is_some_and(|value| !value.is_null())
+    {
+        return false;
+    }
+
+    message == &format!("no rollout found for thread id {requested_thread_id}")
+        || message == &format!("No conversation found with session ID: {requested_thread_id}")
 }
 
 use async_trait::async_trait;
@@ -892,11 +976,28 @@ impl Codex {
                 (response.thread.id, response.model)
             }
             Some(session_id) => {
-                let response = client
-                    .thread_fork(fork_params_from(session_id, thread_start_params))
-                    .await?;
-                tracing::debug!("forked thread, new thread_id={}", response.thread.id);
-                (response.thread.id, response.model)
+                match client
+                    .thread_fork(fork_params_from(
+                        session_id.clone(),
+                        thread_start_params.clone(),
+                    ))
+                    .await
+                {
+                    Ok(response) => {
+                        tracing::debug!("forked thread, new thread_id={}", response.thread.id);
+                        (response.thread.id, response.model)
+                    }
+                    Err(error) if is_missing_conversation_error(&error, &session_id) => {
+                        let response = client.thread_start(thread_start_params).await?;
+                        tracing::warn!(
+                            missing_thread_id = %session_id,
+                            replacement_thread_id = %response.thread.id,
+                            "Codex conversation was missing; started a replacement in the same workspace"
+                        );
+                        (response.thread.id, response.model)
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         };
 

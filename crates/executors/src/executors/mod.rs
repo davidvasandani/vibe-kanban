@@ -74,6 +74,13 @@ pub enum ExecutorError {
     UnknownExecutorType(String),
     #[error("I/O error: {0}")]
     Io(std::io::Error),
+    #[error("{label} request failed: {message}")]
+    JsonRpc {
+        label: String,
+        code: i64,
+        message: String,
+        data: Option<serde_json::Value>,
+    },
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
