@@ -65,3 +65,18 @@ Independent review identified and the implementation now preserves a concurrent
 `Cancelling` state when the executor completion channel closes, preventing a
 user stop from being misclassified as `Failed`. The full 63-test worker suite
 passed again after that correction.
+
+## Worker output-drain follow-up (2026-09-03)
+
+The preceding end-to-end attempt was interrupted by a Comin-driven NixOS
+activation, not a worker crash. After that restart, recovery state exposed a
+separate execution whose child no longer existed but whose worker record still
+said `running`. The worker published executor terminal state only after awaiting
+both output-reader tasks, so a descendant retaining an inherited pipe could
+block terminal persistence indefinitely.
+
+The worker now abandons output draining after a two-second bound, preserving
+normally buffered output before terminal journal closure while preventing an
+inherited pipe from blocking the terminal transition indefinitely. The focused
+`output_drain_does_not_wait_forever_for_inherited_pipe` and
+`executor_signal_maps_to_terminal_state_without_os_exit` tests pass.

@@ -43,6 +43,7 @@ use crate::{
 };
 
 const DEFAULT_JOURNAL_CAPACITY: usize = 4_096;
+const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Deserialize)]
 struct WorkerCommandAction {
@@ -1283,11 +1284,29 @@ async fn await_output_tasks(
     stdout: Option<tokio::task::JoinHandle<()>>,
     stderr: Option<tokio::task::JoinHandle<()>>,
 ) {
-    if let Some(stdout) = stdout {
-        let _ = stdout.await;
-    }
-    if let Some(stderr) = stderr {
-        let _ = stderr.await;
+    await_output_tasks_with_timeout(stdout, stderr, OUTPUT_DRAIN_TIMEOUT).await;
+}
+
+async fn await_output_tasks_with_timeout(
+    mut stdout: Option<tokio::task::JoinHandle<()>>,
+    mut stderr: Option<tokio::task::JoinHandle<()>>,
+    timeout: Duration,
+) {
+    let drain = async {
+        if let Some(stdout) = stdout.as_mut() {
+            let _ = stdout.await;
+        }
+        if let Some(stderr) = stderr.as_mut() {
+            let _ = stderr.await;
+        }
+    };
+    if tokio::time::timeout(timeout, drain).await.is_err() {
+        if let Some(stdout) = stdout {
+            stdout.abort();
+        }
+        if let Some(stderr) = stderr {
+            stderr.abort();
+        }
     }
 }
 
@@ -1491,6 +1510,18 @@ mod tests {
             executor_terminal_state(&JobState::Cancelling, ExecutorExitResult::Success),
             TerminalState::Killed
         );
+    }
+
+    #[tokio::test]
+    async fn output_drain_does_not_wait_forever_for_inherited_pipe() {
+        let pending = tokio::spawn(std::future::pending());
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            await_output_tasks_with_timeout(Some(pending), None, Duration::from_millis(10)),
+        )
+        .await
+        .expect("a retained output pipe must be abandoned after the drain deadline");
     }
 
     fn fixture() -> (TempDir, ExecutionSupervisor, PathBuf) {

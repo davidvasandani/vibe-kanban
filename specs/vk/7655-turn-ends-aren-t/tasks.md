@@ -56,3 +56,15 @@ Rust module, so they are intentionally serial rather than marked `[P]`.
 - [x] T015 Run the focused regression and complete worker unit suite.
 - [x] T016 Run independent review, update knowledge, open a PR, pass CI, merge,
   and confirm deployment.
+
+## Worker output-drain follow-up
+
+- [x] T017 Correlate the interrupted verification turn with host activation
+  logs and identify a post-restart worker record that remained `running` after
+  its child exited.
+- [x] T018 Bound output-task draining in `crates/worker/src/execution.rs` while
+  preserving buffered output before terminal journal closure.
+- [x] T019 Add regression coverage for an inherited output pipe that never
+  reaches EOF and run focused worker tests.
+- [x] T020 Run the full worker suite and independent review, update knowledge,
+  open a follow-up PR, pass CI, merge, and confirm deployment.

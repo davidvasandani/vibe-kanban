@@ -223,6 +223,20 @@ vendor identifier must be read from the artifact that actually executes — the
 Claude npm package is a stub whose `sdk-tools.d.ts` lists schema titles, not wire
 tool names. Option B remains deferred: a vk poller runs a command, not a turn.
 
+## Output cleanup must not block terminal evidence indefinitely
+
+For signal-driven executors, the protocol completion signal is the turn
+boundary. Descendants can retain inherited stdout or stderr file descriptors
+after the app-server is stopped, preventing a reader from ever observing EOF.
+Output draining therefore needs a short bound followed by task cancellation;
+cleanup liveness must never become unbounded user-visible turn liveness. Normal
+draining remains before terminal journal closure so already-buffered final
+output is retained.
+
+This ordering matters independently of reconciliation timers: until the worker
+record becomes terminal, the coordinator has authoritative positive ownership
+evidence and correctly keeps Stop visible.
+
 ## What already survives restarts (reuse, don't reinvent)
 
 `ExecutionProcess.pgid` is persisted at spawn; boot-time adoption
