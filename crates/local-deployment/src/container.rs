@@ -23,6 +23,7 @@ use db::{
         coding_agent_turn::CodingAgentTurn,
         execution_process::{
             ExecutionContext, ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus,
+            ExecutorActionField,
         },
         execution_process_repo_state::ExecutionProcessRepoState,
         execution_worker_job::{ExecutionWorkerDispatchState, ExecutionWorkerJob},
@@ -193,8 +194,31 @@ fn should_ack_worker_batch(cursor: u64, has_terminal: bool) -> bool {
     cursor > 0 && !has_terminal
 }
 
-fn worker_job_has_positive_liveness(job: &ExecutionWorkerJob, now: DateTime<Utc>) -> bool {
-    !job.dispatch_state.is_terminal() && job.lease_expires_at.is_some_and(|lease| lease > now)
+fn worker_job_has_positive_liveness(
+    job: &ExecutionWorkerJob,
+    now: DateTime<Utc>,
+    live_lease_is_turn_evidence: bool,
+) -> bool {
+    live_lease_is_turn_evidence
+        && !job.dispatch_state.is_terminal()
+        && job.lease_expires_at.is_some_and(|lease| lease > now)
+}
+
+fn worker_lease_is_turn_evidence(base_executor: Option<BaseCodingAgent>) -> bool {
+    // Keep this aligned with executors whose SpawnedChild carries
+    // `exit_signal: Some(_)`. Their worker process can stay alive independently
+    // of the protocol turn, so a renewed lease is not evidence of turn work.
+    !matches!(
+        base_executor,
+        Some(
+            BaseCodingAgent::Codex
+                | BaseCodingAgent::Opencode
+                | BaseCodingAgent::Gemini
+                | BaseCodingAgent::QwenCode
+                | BaseCodingAgent::Copilot
+                | BaseCodingAgent::Grok
+        )
+    )
 }
 
 #[cfg(test)]
@@ -210,6 +234,7 @@ mod final_output_reconciliation_tests {
     use super::{
         history_has_final_assistant_message, normalized_final_assistant_state,
         should_ack_worker_batch, wait_for_unfinalized_output, worker_job_has_positive_liveness,
+        worker_lease_is_turn_evidence,
     };
 
     fn normalized_message(entry_type: NormalizedEntryType, content: &str) -> LogMsg {
@@ -286,14 +311,43 @@ mod final_output_reconciliation_tests {
             created_at: now,
             updated_at: now,
         };
-        assert!(worker_job_has_positive_liveness(&job, now));
+        assert!(worker_job_has_positive_liveness(&job, now, true));
+        assert!(
+            !worker_job_has_positive_liveness(&job, now, false),
+            "a signal-driven worker lease is process liveness, not turn liveness"
+        );
 
         job.lease_expires_at = Some(now - chrono::Duration::seconds(1));
-        assert!(!worker_job_has_positive_liveness(&job, now));
+        assert!(!worker_job_has_positive_liveness(&job, now, true));
         job.lease_expires_at = Some(now + chrono::Duration::seconds(30));
         job.dispatch_state =
             db::models::execution_worker_job::ExecutionWorkerDispatchState::Completed;
-        assert!(!worker_job_has_positive_liveness(&job, now));
+        assert!(!worker_job_has_positive_liveness(&job, now, true));
+    }
+
+    #[test]
+    fn signal_driven_worker_lease_is_not_turn_liveness() {
+        use executors::executors::BaseCodingAgent;
+
+        for executor in [
+            BaseCodingAgent::Codex,
+            BaseCodingAgent::Opencode,
+            BaseCodingAgent::Gemini,
+            BaseCodingAgent::QwenCode,
+            BaseCodingAgent::Copilot,
+            BaseCodingAgent::Grok,
+        ] {
+            assert!(!worker_lease_is_turn_evidence(Some(executor)));
+        }
+        for executor in [
+            BaseCodingAgent::ClaudeCode,
+            BaseCodingAgent::Amp,
+            BaseCodingAgent::CursorAgent,
+            BaseCodingAgent::Droid,
+        ] {
+            assert!(worker_lease_is_turn_evidence(Some(executor)));
+        }
+        assert!(worker_lease_is_turn_evidence(None));
     }
 
     #[tokio::test(start_paused = true)]
@@ -2327,6 +2381,11 @@ impl LocalContainerService {
             ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
         })?;
         let execution_id = execution_process.id;
+        let base_executor = match &execution_process.executor_action.0 {
+            ExecutorActionField::ExecutorAction(action) => action.base_executor(),
+            ExecutorActionField::Other(_) => None,
+        };
+        let live_worker_lease_is_turn_evidence = worker_lease_is_turn_evidence(base_executor);
         let store = Arc::new(MsgStore::new());
         self.msg_stores
             .write()
@@ -2625,7 +2684,13 @@ impl LocalContainerService {
                     .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
                 {
                     match ExecutionWorkerJob::find_by_execution_id(&db.pool, execution_id).await {
-                        Ok(Some(job)) if worker_job_has_positive_liveness(&job, Utc::now()) => {
+                        Ok(Some(job))
+                            if worker_job_has_positive_liveness(
+                                &job,
+                                Utc::now(),
+                                live_worker_lease_is_turn_evidence,
+                            ) =>
+                        {
                             // A current job lease is authoritative positive
                             // liveness. Do not turn quiet final text into a
                             // cancellation while the worker still owns work.
