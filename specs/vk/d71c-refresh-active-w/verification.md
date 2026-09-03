@@ -12,6 +12,9 @@ Verified on 2026-09-03.
 - `cargo test -p executors mcp_inventory_tests --lib -j1`: 4 passed. Covers
   stdio add/remove/same-name schema-change generations, stable map and nested
   JSON object ordering, and unavailable authentication evidence.
+- `cargo test -p executors older_worker_snapshot_defaults_new_inventory_evidence
+  --lib -j1`: 1 passed. Covers rolling-upgrade deserialization from workers that
+  predate the new optional fields.
 - `cargo test -p services mcp_refresh --lib`: 4 passed. Covers busy,
   unsupported, failure truthfulness, and complete exact-evidence replacement.
 - `cargo test -p executors supports_streamable_http_assignments_for_codex --lib`:
