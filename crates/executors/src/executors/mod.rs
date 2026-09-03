@@ -79,7 +79,7 @@ pub enum ExecutorError {
         label: String,
         code: i64,
         message: String,
-        data: Option<serde_json::Value>,
+        data: Option<Box<serde_json::Value>>,
     },
     #[error(transparent)]
     Json(#[from] serde_json::Error),

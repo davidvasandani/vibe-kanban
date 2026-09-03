@@ -229,7 +229,7 @@ mod tests {
             label: "thread/fork".to_string(),
             code,
             message: message.to_string(),
-            data,
+            data: data.map(Box::new),
         }
     }
 }

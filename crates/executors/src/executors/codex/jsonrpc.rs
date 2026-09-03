@@ -263,7 +263,7 @@ where
             label: label.to_string(),
             code: error.error.code,
             message: error.error.message,
-            data: error.error.data,
+            data: error.error.data.map(Box::new),
         }),
         Ok(PendingResponse::Shutdown) => Err(ExecutorError::Io(io::Error::other(format!(
             "server was shutdown while waiting for {label} response",
@@ -272,6 +272,39 @@ where
             "{label} request was dropped",
         )))),
     }
+}
+
+#[async_trait]
+pub trait JsonRpcCallbacks: Send + Sync {
+    async fn on_request(
+        &self,
+        peer: &JsonRpcPeer,
+        raw: &str,
+        request: JSONRPCRequest,
+    ) -> Result<(), ExecutorError>;
+
+    async fn on_response(
+        &self,
+        peer: &JsonRpcPeer,
+        raw: &str,
+        response: &JSONRPCResponse,
+    ) -> Result<(), ExecutorError>;
+
+    async fn on_error(
+        &self,
+        peer: &JsonRpcPeer,
+        raw: &str,
+        error: &JSONRPCError,
+    ) -> Result<(), ExecutorError>;
+
+    async fn on_notification(
+        &self,
+        peer: &JsonRpcPeer,
+        raw: &str,
+        notification: JSONRPCNotification,
+    ) -> Result<bool, ExecutorError>;
+
+    async fn on_non_json(&self, _raw: &str) -> Result<(), ExecutorError>;
 }
 
 #[cfg(test)]
@@ -312,7 +345,10 @@ mod tests {
                 assert_eq!(label, "thread/fork");
                 assert_eq!(code, -32600);
                 assert_eq!(message, "no rollout found for thread id deadbeef");
-                assert_eq!(data, Some(serde_json::json!({"kind": "missing"})));
+                assert_eq!(
+                    data.as_deref(),
+                    Some(&serde_json::json!({"kind": "missing"}))
+                );
             }
             other => panic!("expected structured JSON-RPC error, got {other:?}"),
         }
@@ -331,37 +367,4 @@ mod tests {
         }
         .to_string()
     }
-}
-
-#[async_trait]
-pub trait JsonRpcCallbacks: Send + Sync {
-    async fn on_request(
-        &self,
-        peer: &JsonRpcPeer,
-        raw: &str,
-        request: JSONRPCRequest,
-    ) -> Result<(), ExecutorError>;
-
-    async fn on_response(
-        &self,
-        peer: &JsonRpcPeer,
-        raw: &str,
-        response: &JSONRPCResponse,
-    ) -> Result<(), ExecutorError>;
-
-    async fn on_error(
-        &self,
-        peer: &JsonRpcPeer,
-        raw: &str,
-        error: &JSONRPCError,
-    ) -> Result<(), ExecutorError>;
-
-    async fn on_notification(
-        &self,
-        peer: &JsonRpcPeer,
-        raw: &str,
-        notification: JSONRPCNotification,
-    ) -> Result<bool, ExecutorError>;
-
-    async fn on_non_json(&self, _raw: &str) -> Result<(), ExecutorError>;
 }
