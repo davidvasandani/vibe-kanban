@@ -46,3 +46,13 @@ Rust module, so they are intentionally serial rather than marked `[P]`.
 - [x] T011 Run crate verification and an independent Codex review.
 - [x] T012 Update reusable knowledge, open the follow-up pull request, pass CI,
   and merge it.
+
+## Worker signal follow-up
+
+- [x] T013 Inspect persisted affected-workspace jobs and trace cluster worker
+  spawn/monitor behavior to the owning terminal boundary.
+- [x] T014 Retain and consume `SpawnedChild.exit_signal` in worker execution,
+  preserving OS-exit, timeout, failure, and cancellation semantics.
+- [x] T015 Run the focused regression and complete worker unit suite.
+- [ ] T016 Run independent review, update knowledge, open a PR, pass CI, merge,
+  and confirm deployment.

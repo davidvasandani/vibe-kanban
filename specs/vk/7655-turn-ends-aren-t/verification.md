@@ -43,3 +43,25 @@ The follow-up makes worker leases turn-liveness evidence only for natural-exit
 executors. The focused suite now includes seven passing tests, including the
 worker-lease predicate and exhaustive classification of the current
 signal-driven and natural-exit executor variants.
+
+## Worker terminal-signal follow-up (2026-09-03)
+
+The coordinator fallback still could not arm in production because clustered
+executor stdout reaches it as raw worker bytes, not normalized JSON patches.
+The actual owning failure was in `crates/worker`: `run_job` discarded
+`SpawnedChild.exit_signal` and polled only the OS child. Codex therefore emitted
+its final answer and signalled completion while the worker waited forever for
+the intentionally long-lived app-server process.
+
+After retaining and consuming the executor signal:
+
+- `cargo test -p worker executor_signal_maps_to_terminal_state_without_os_exit --lib`:
+  1 passed.
+- `cargo test -p worker --lib`: 63 passed.
+- `cargo fmt --all`: passed.
+- `git diff --check`: passed.
+
+Independent review identified and the implementation now preserves a concurrent
+`Cancelling` state when the executor completion channel closes, preventing a
+user stop from being misclassified as `Failed`. The full 63-test worker suite
+passed again after that correction.
