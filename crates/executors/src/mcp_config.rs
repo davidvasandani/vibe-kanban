@@ -195,12 +195,22 @@ const MCP_ARGS_ENV: &str = "VIBE_KANBAN_MCP_ARGS";
 /// connector. Self-hosted clusters use one supervised server instead of
 /// putting a Slack token and stdio launcher in every agent config.
 const SLACK_MCP_URL_ENV: &str = "VIBE_KANBAN_SLACK_MCP_URL";
+/// Optional deployment-owned Streamable HTTP endpoint exposing the
+/// Entra-authenticated CLIs (az, mgc-beta, graph-powershell).
+///
+/// Those CLIs are signed in on one host. Authenticating every cluster worker
+/// would put a keyring, an MSAL cache and a rotating refresh token on each —
+/// and MSAL caches are not multi-writer, so two hosts renewing the same
+/// identity can invalidate each other. Pointing agents at one server keeps the
+/// credential in a single place while every worker keeps the capability.
+const ENTRA_MCP_URL_ENV: &str = "VIBE_KANBAN_ENTRA_MCP_URL";
 
 pub static PRECONFIGURED_MCP_SERVERS: LazyLock<Value> = LazyLock::new(|| {
     let mut value =
         serde_json::from_str::<Value>(DEFAULT_MCP_JSON).expect("Failed to parse default MCP JSON");
     apply_vibe_kanban_command_override(&mut value);
     apply_slack_http_override(&mut value);
+    apply_entra_http_override(&mut value);
     value
 });
 
@@ -253,6 +263,29 @@ fn set_slack_http_url(value: &mut Value, url: &str) {
     if let Some(servers) = value.as_object_mut() {
         servers.insert(
             "slack".to_string(),
+            serde_json::json!({ "type": "http", "url": url }),
+        );
+    }
+}
+
+fn apply_entra_http_override(value: &mut Value) {
+    let Ok(url) = std::env::var(ENTRA_MCP_URL_ENV) else {
+        return;
+    };
+    let url = url.trim();
+    if url.is_empty() {
+        return;
+    }
+    set_entra_http_url(value, url);
+}
+
+/// Adds the shared Entra CLI endpoint. Unlike the Slack override there is no
+/// bundled stdio launcher to replace — without the endpoint the servers simply
+/// are not offered, because there is nothing local to fall back to.
+fn set_entra_http_url(value: &mut Value, url: &str) {
+    if let Some(servers) = value.as_object_mut() {
+        servers.insert(
+            "entra".to_string(),
             serde_json::json!({ "type": "http", "url": url }),
         );
     }
@@ -951,6 +984,42 @@ mod tests {
         assert!(!serialized.contains("SLACK_MCP"));
         assert!(!serialized.contains("slack-mcp-server"));
         assert!(!serialized.contains("command"));
+    }
+
+    #[test]
+    fn entra_endpoint_is_absent_unless_configured() {
+        // No local launcher exists for these CLIs, so an unset endpoint must
+        // leave the server out entirely rather than offering a broken entry.
+        let value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        assert!(value.get("entra").is_none());
+    }
+
+    #[test]
+    fn entra_override_adds_only_the_shared_endpoint() {
+        let mut value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        set_entra_http_url(&mut value, "http://172.16.100.102:13081/mcp");
+
+        assert_eq!(
+            value["entra"],
+            serde_json::json!({
+                "type": "http",
+                "url": "http://172.16.100.102:13081/mcp"
+            })
+        );
+        // No credential or launcher may ride along into an agent's config.
+        let serialized = serde_json::to_string(&value["entra"]).unwrap();
+        assert!(!serialized.contains("command"));
+        assert!(!serialized.contains("env"));
+    }
+
+    #[test]
+    fn entra_override_leaves_other_preconfigured_servers_untouched() {
+        let mut value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
+        let before = value.clone();
+        set_entra_http_url(&mut value, "http://example/mcp");
+        for key in before.as_object().unwrap().keys() {
+            assert_eq!(value[key], before[key], "{key} must be unchanged");
+        }
     }
 
     /// Splits `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>`
