@@ -52,6 +52,15 @@ natural-exit executor. Otherwise a lost terminal event plus regular lease
 renewals re-arms the coordinator timer forever even after the worker-side child
 rule is correct.
 
+The worker must also retain `SpawnedChild.exit_signal`. Its generic execution
+loop originally destructured `SpawnedChild` down to only `child` and
+`mcp_refresh`, silently dropping the terminal channel, then polled only
+`child.try_wait()`. That makes every signal-driven executor permanently running
+on a cluster worker because its app-server is expected to stay alive. Worker
+execution must select/poll both authorities: an executor signal classifies the
+turn and reaps the process, while natural-exit commands and executors continue
+to classify from OS exit status.
+
 ## The exit monitor kills twice
 
 `spawn_exit_monitor` has **two** kill points; guarding only the obvious one

@@ -20,7 +20,7 @@ use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use executors::{
     actions::{Executable, ExecutorAction, ExecutorActionType},
     env::{ExecutionEnv, RepoContext},
-    executors::{BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor},
+    executors::{BaseCodingAgent, CodingAgent, ExecutorExitResult, StandardCodingAgentExecutor},
     mcp_config::write_coding_agent_mcp_servers_to_path,
     mcp_refresh::McpRefreshHandle,
     profile::{ExecutorConfig, ExecutorProfile},
@@ -1053,7 +1053,7 @@ async fn run_job(
                 .stderr(Stdio::piped());
             command
                 .group_spawn()
-                .map(|child| (child, None))
+                .map(|child| (child, None, None))
                 .map_err(|error| error.to_string())
         }
         WorkerAction::Executor(action) => {
@@ -1080,11 +1080,17 @@ async fn run_job(
                     &env,
                 )
                 .await
-                .map(|mut spawned| (spawned.child, spawned.mcp_refresh.take()))
+                .map(|mut spawned| {
+                    (
+                        spawned.child,
+                        spawned.exit_signal.take(),
+                        spawned.mcp_refresh.take(),
+                    )
+                })
                 .map_err(|error| error.to_string())
         }
     };
-    let (mut child, mcp_refresh) = match spawned {
+    let (mut child, mut exit_signal, mcp_refresh) = match spawned {
         Ok(spawned) => spawned,
         Err(error) => {
             finish_failed(&job, None, format!("failed to start process: {error}")).await;
@@ -1114,6 +1120,32 @@ async fn run_job(
     let deadline =
         timeout_seconds.map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
     loop {
+        if let Some(signal) = exit_signal.as_mut() {
+            match signal.try_recv() {
+                Ok(result) => {
+                    stop_child(&job).await;
+                    await_output_tasks(stdout_task.take(), stderr_task.take()).await;
+                    finish_executor_result(&job, result).await;
+                    return;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    stop_child(&job).await;
+                    await_output_tasks(stdout_task.take(), stderr_task.take()).await;
+                    if job.state().await == JobState::Cancelling {
+                        finish_executor_result(&job, ExecutorExitResult::Success).await;
+                    } else {
+                        finish_failed(
+                            &job,
+                            None,
+                            "executor completion channel closed without terminal evidence".into(),
+                        )
+                        .await;
+                    }
+                    return;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            }
+        }
         let status = {
             let mut child = job.child.lock().await;
             match child
@@ -1143,6 +1175,13 @@ async fn run_job(
             return;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn stop_child(job: &WorkerJob) {
+    if let Some(child) = job.child.lock().await.as_mut() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
     }
 }
 
@@ -1303,6 +1342,38 @@ async fn finish_status(job: &WorkerJob, status: ExitStatus) {
     *job.mcp_config.lock().await = None;
 }
 
+async fn finish_executor_result(job: &WorkerJob, result: ExecutorExitResult) {
+    let terminal_state = executor_terminal_state(&job.state().await, result);
+    let exit_code = match terminal_state {
+        TerminalState::Completed => Some(0),
+        TerminalState::Failed => Some(1),
+        _ => None,
+    };
+    let evidence = terminal_evidence(terminal_state.clone(), exit_code, None);
+    let (state, payload) = match terminal_state {
+        TerminalState::Completed => (
+            JobState::Completed,
+            ExecutionEventPayload::Completed(evidence),
+        ),
+        TerminalState::Killed => (JobState::Killed, ExecutionEventPayload::Killed(evidence)),
+        _ => (JobState::Failed, ExecutionEventPayload::Failed(evidence)),
+    };
+    set_state(job, state, payload).await;
+    *job.mcp_refresh.write().await = None;
+    *job.mcp_config.lock().await = None;
+}
+
+fn executor_terminal_state(current: &JobState, result: ExecutorExitResult) -> TerminalState {
+    if *current == JobState::Cancelling {
+        TerminalState::Killed
+    } else {
+        match result {
+            ExecutorExitResult::Success => TerminalState::Completed,
+            ExecutorExitResult::Failure => TerminalState::Failed,
+        }
+    }
+}
+
 async fn finish_failed(job: &WorkerJob, exit_code: Option<i32>, reason: String) {
     let _ = job.journal.lock().await.append(
         SystemTime::now(),
@@ -1403,6 +1474,22 @@ mod tests {
                 PathBuf::from("/worker/nix/bin"),
                 PathBuf::from("/usr/bin"),
             ]
+        );
+    }
+
+    #[test]
+    fn executor_signal_maps_to_terminal_state_without_os_exit() {
+        assert_eq!(
+            executor_terminal_state(&JobState::Running, ExecutorExitResult::Success),
+            TerminalState::Completed
+        );
+        assert_eq!(
+            executor_terminal_state(&JobState::Running, ExecutorExitResult::Failure),
+            TerminalState::Failed
+        );
+        assert_eq!(
+            executor_terminal_state(&JobState::Cancelling, ExecutorExitResult::Success),
+            TerminalState::Killed
         );
     }
 
