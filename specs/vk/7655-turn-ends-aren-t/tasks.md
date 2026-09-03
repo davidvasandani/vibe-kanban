@@ -54,5 +54,5 @@ Rust module, so they are intentionally serial rather than marked `[P]`.
 - [x] T014 Retain and consume `SpawnedChild.exit_signal` in worker execution,
   preserving OS-exit, timeout, failure, and cancellation semantics.
 - [x] T015 Run the focused regression and complete worker unit suite.
-- [ ] T016 Run independent review, update knowledge, open a PR, pass CI, merge,
+- [x] T016 Run independent review, update knowledge, open a PR, pass CI, merge,
   and confirm deployment.
