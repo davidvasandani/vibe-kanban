@@ -1,7 +1,7 @@
 # Active MCP refresh
 
 Contributing tasks: `8c27-refresh-mcp-tool`, `9151-reloading-mcp-no`,
-`cc71-refresh-mcp-shou`, `mcp-agent-restart`
+`cc71-refresh-mcp-shou`, `mcp-agent-restart`, `vk/d71c-refresh-active-w`
 
 ## Executor-neutral restart fallback
 
@@ -111,3 +111,36 @@ Worker `busy` and `unsupported` outcomes preserve those public statuses rather
 than passing through a generic failure transition. Old workers without the
 refresh route, recovered jobs without live control, and terminal jobs are
 unsupported—not successful and not retryable bootstrap failures.
+
+## Exact inventory evidence and rolling compatibility
+
+A tool count cannot prove that a refreshed inventory matches the prior one.
+Remove-plus-add can keep the count constant, and an input/output schema can
+change without changing either the server or tool identifier. Thread-scoped,
+full-detail Codex status is therefore reduced to bounded evidence:
+
+- sorted tool identifiers, for exact addition/removal visibility;
+- a SHA-256 fingerprint of each tool identifier plus its input/output schemas,
+  for schema-only change visibility.
+
+Canonicalize every JSON object recursively before hashing. This repository
+enables serde_json `preserve_order`, and provider-supplied JSON object order is
+not semantic; hashing serialized input directly turns harmless key reordering
+into a false inventory change. Array order remains significant.
+
+Only publish this evidence when capability discovery succeeded. In particular,
+`NotLoggedIn` commonly accompanies an empty tool map, but that is unavailable
+inventory—not proof that every tool was removed. Leave names and fingerprint
+unknown on authentication failure.
+
+New optional fields crossing the coordinator/worker protocol need serde
+defaults. During a rolling deployment, an older worker omits them; failure to
+default would reject the entire otherwise-valid server snapshot and could make
+a successful refresh appear to have no servers. Test deserialization from the
+old payload shape whenever extending a distributed snapshot.
+
+The user-facing correctness boundary remains **Restart agent for MCP changes**.
+It starts a new app-server/MCP process from current native configuration while
+preserving the logical workspace and conversation. Settings connectivity tests
+and plugin-manager installation status are separate views: neither refreshes an
+already-running agent's callable schema.

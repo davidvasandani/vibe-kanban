@@ -1250,7 +1250,15 @@ export type McpRefreshError = { category: McpRefreshErrorCategory, message: stri
 
 export type McpServerRefreshStatus = "ready" | "failed_retained" | "failed_unavailable" | "removed" | "disabled";
 
-export type McpServerRefreshSnapshot = { server_id: string, status: McpServerRefreshStatus, tool_count: number | null, resource_count: number | null, prompt_count: number | null, restart_occurred: boolean | null, error: McpRefreshError | null, };
+export type McpServerRefreshSnapshot = { server_id: string, status: McpServerRefreshStatus, tool_count: number | null, 
+/**
+ * Sorted tool identifiers from the executor-owned, post-start inventory.
+ */
+tool_names: Array<string> | null, 
+/**
+ * SHA-256 of sorted tool identifiers and their input/output schemas.
+ */
+tool_schema_fingerprint: string | null, resource_count: number | null, prompt_count: number | null, restart_occurred: boolean | null, error: McpRefreshError | null, };
 
 export type McpRefreshResult = { status: McpRefreshStatus, retryable: boolean, generation: bigint, requested_at: string, last_successful_refresh_at: string | null, servers: Array<McpServerRefreshSnapshot>, error: McpRefreshError | null, };
 

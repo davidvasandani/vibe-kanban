@@ -1688,12 +1688,10 @@ mod tests {
     #[test]
     fn only_durably_verifiable_tools_offer_login() {
         // Vendor login driven in a PTY.
-        for id in [CliToolId::Gam] {
-            assert!(matches!(
-                entry(id).auth,
-                CliToolAuthStrategy::Command { .. }
-            ));
-        }
+        assert!(matches!(
+            entry(CliToolId::Gam).auth,
+            CliToolAuthStrategy::Command { .. }
+        ));
         // Entra tools: their own headless login is Conditional-Access blocked,
         // so vibe-kanban mints the token and writes it to their credential
         // store instead. Still login-capable, and still durably verifiable.

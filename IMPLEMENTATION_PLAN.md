@@ -1,35 +1,45 @@
-# Implementation Plan: Recover Missing Codex Conversations
+# Implementation Plan: Refresh Active Workspace MCP Inventories
 
-**Task:** `vk/af0d-no-conversation`
+**Task:** `vk/d71c-refresh-active-w`
 
-1. Refresh the Vibe Kanban constitution and write the task-scoped SpecKit
-   specification artifacts.
-2. Confirm the pinned Codex app-server's exact JSON-RPC response for a missing
-   thread and inspect how `JsonRpcPeer` currently erases error structure.
-3. Clarify the recovery boundary: normal chat follow-ups recover; unrelated
-   errors and semantically different operations remain fail-loud.
-4. Preserve enough JSON-RPC error detail in `ExecutorError` or a narrowly scoped
-   client result to classify the upstream not-found case without broad string
-   matching.
-5. Extract/test the resume-or-start decision so a successful fork is unchanged,
-   an exact missing-conversation response invokes `thread/start` with the same
-   parameters, and all other failures propagate.
-6. Keep the common post-resolution path unchanged: set resolved model, register
-   the replacement thread (which emits/persists its ID), select collaboration
-   mode, and submit the current prompt.
-7. Add focused Rust regression tests for classifier false positives and the
-   fallback request sequence. Run formatting and targeted executor tests, then
-   broader checks proportionate to the changed boundary.
-8. Run SpecKit analysis, execute and tick the dependency-ordered tasks, and
-   record verification evidence.
-9. Run an independent Codex diff review, address confirmed findings, and repeat
-   until no significant findings remain.
-10. Update the Vibe Kanban knowledge base with the reusable recovery/error-
-    classification rule (or explicitly record that none emerged), refresh its
-    index, and commit it.
-11. Push the task branch, open a pull request against the current base branch,
-    verify the latest base tip immediately before merge, and merge the pull
-    request.
+1. Establish the SpecKit constitution and task-scoped feature artifacts, using
+   the technical spec and prior-knowledge distillation as inputs.
+2. Trace the current refresh path from settings/connector mutation and UI action
+   through server coordination, worker rematerialization, Codex app-server
+   reload, next-turn confirmation, and model-visible tool registration.
+3. Reproduce the stale-inventory failure with focused fixtures or a protocol
+   harness that changes a stdio server's `tools/list` response while retaining
+   one workspace session. Separately pin current HTTP/SSE behavior.
+4. Identify the narrow broken boundary: effective-config selection, process
+   ownership/routing, reload timing, stale control handoff, next-turn adoption,
+   or status-source mismatch. Record protocol limitations rather than inferring
+   unsupported generation/restart guarantees.
+5. Implement the smallest end-to-end correction. Prefer a safe next-turn live
+   reload when the executor demonstrably supports it; otherwise route the UI
+   through the explicit restart fallback while preserving workspace and queued
+   prompt state.
+6. Make connector inventory and installation/enablement status derive from the
+   effective assigned configuration, or make any intentional catalog-versus-
+   installation distinction explicit and non-contradictory.
+7. Add dependency-local tests for stdio tool addition, removal, and input-schema
+   replacement, asserting the next model turn sees the new registry. Add failure
+   retention/invalidating behavior, coordinator-worker routing coverage where
+   applicable, UI state/restart coverage, and a non-stdio transport regression.
+8. Regenerate checked-in types only through the repository generators if Rust
+   API types change. Run dependency installation before formatting, then focused
+   tests, generated-type checks, formatting, lint/check, and broader Rust tests
+   proportionate to the diff.
+9. Run SpecKit analysis, execute the dependency-ordered tasks via
+   `/speckit.implement`, and tick each completed task with verification evidence.
+10. Run an independent Codex diff review, address every confirmed significant
+    finding, re-run affected checks, and repeat review until clean.
+11. Update the Vibe Kanban knowledge base with reusable findings from the shipped
+    fix (or state that none emerged), refresh its index, and commit the knowledge
+    changes.
+12. Rebase or otherwise verify against the latest base branch, push the task
+    branch, open a pull request, monitor required checks, address failures, and
+    merge the pull request. Do not change any non-Vibe-Kanban service.
 
-No change to `homelab/modules/vibe-kanban-rebuild.nix` is planned because the
-fix is expected to be entirely within the Vibe Kanban executor.
+No deployment change is planned unless investigation proves
+`homelab/modules/vibe-kanban-rebuild.nix` must provide additional Vibe Kanban
+runtime wiring.

@@ -1483,6 +1483,8 @@ mod tests {
                 server_id: "snapshot-b".into(),
                 status: McpServerRefreshStatus::Ready,
                 tool_count: Some(1),
+                tool_names: Some(vec!["snapshot-b-tool".into()]),
+                tool_schema_fingerprint: Some("snapshot-b-schema".into()),
                 resource_count: Some(0),
                 prompt_count: Some(0),
                 restart_occurred: Some(true),
