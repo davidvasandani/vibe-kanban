@@ -744,6 +744,7 @@ pub async fn login_plan(id: CliToolId) -> Result<CliToolLoginPlan, CliToolError>
             effective_binary(e)
                 .await
                 .ok_or_else(|| unsupported("tool is not available"))?;
+            write_runtime_wrapper(e)?;
             Ok(CliToolLoginPlan::EntraNativeBrowser {
                 args: login_args.iter().map(|a| (*a).to_string()).collect(),
             })
@@ -1021,22 +1022,7 @@ pub async fn install(id: CliToolId) -> Result<CliToolStatus, CliToolError> {
         serde_json::to_string_pretty(&manifest).expect("manifest serializes"),
     )?;
 
-    // Tools that need a runtime environment get a wrapper; `bin/` then points
-    // at that rather than the binary, so every invocation is covered and not
-    // just the sign-in.
-    if let Some(RuntimeWrapper::GraphCliSecretService) = e.runtime_wrapper {
-        let wrapper = wrapper_path(e);
-        let password_file = tool_dir(e.id).join(".keyring-password");
-        std::fs::write(
-            &wrapper,
-            graph_cli_wrapper_script(&installed_binary_path(e), &password_file),
-        )?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
-        }
-    }
+    write_runtime_wrapper(e)?;
 
     // Expose last: symlink into a temp name, then atomically rename over the
     // final name.
@@ -1155,6 +1141,43 @@ exec "$VK_ENTRA_DBUS_RUN_SESSION" -- sh -c '
         bin = q(binary),
         pw = q(password_file),
     )
+}
+
+/// Write the generated runtime wrapper, if this tool declares one.
+///
+/// Also called before a sign-in: a copy installed by an older build has no
+/// wrapper, and without one the tool cannot reach its own credential store.
+/// Healing here means an upgrade does not silently leave the tool broken until
+/// someone happens to reinstall it.
+fn write_runtime_wrapper(e: &CliToolCatalogEntry) -> Result<(), CliToolError> {
+    let Some(RuntimeWrapper::GraphCliSecretService) = e.runtime_wrapper else {
+        return Ok(());
+    };
+    let binary = installed_binary_path(e);
+    if !binary.is_file() {
+        // Host-provided copy, or not installed: nothing of ours to wrap.
+        return Ok(());
+    }
+    let wrapper = wrapper_path(e);
+    let password_file = tool_dir(e.id).join(".keyring-password");
+    std::fs::write(&wrapper, graph_cli_wrapper_script(&binary, &password_file))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
+    }
+    // Point bin/ at the wrapper; an older install still links the binary.
+    #[cfg(unix)]
+    {
+        let link = bin_link_path(e.id);
+        if link.read_link().ok().as_deref() != Some(wrapper.as_path()) {
+            let tmp = cli_tools_bin_dir().join(format!(".tmp-{}", e.binary_name));
+            let _ = std::fs::remove_file(&tmp);
+            std::os::unix::fs::symlink(&wrapper, &tmp)?;
+            std::fs::rename(&tmp, link)?;
+        }
+    }
+    Ok(())
 }
 
 /// Per-tool staging root, so concurrent installs of *different* tools never
