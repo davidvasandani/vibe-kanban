@@ -64,6 +64,36 @@ Two invariants for anyone touching it:
 The deny reason names `spawn_poller`. A denial that removes a capability without
 offering the replacement converts a silent failure into a stuck agent.
 
+## A block is not a redirect — deliver both, per agent
+
+Shipped first time for Claude and **missed for Codex**, which is why "Codex isn't
+using the poller" was reported after the feature landed.
+
+Claude's control is self-announcing: the `PreToolUse` deny fires at the exact
+moment the agent reaches for the wrong tool, and its reason names `spawn_poller`.
+Block and redirect arrive together.
+
+Codex's control is **silent**. `features.unified_exec=false` just swaps the
+persistent-PTY `exec_command`/`write_stdin` pair for one-shot `shell_command` —
+no error, no message, nothing for the agent to notice. Codex sees a command that
+returns immediately, has no idea a poller exists, and carries on. The block
+landed; the redirect never did.
+
+The delivery channel is `ThreadStartParams.developer_instructions`, which the
+protocol offers alongside `base_instructions`. Two constraints:
+
+- **Compose, never clobber.** `developer_instructions` is a user-facing config
+  field; VK is a guest in it. The notice is prepended and the operator's text
+  goes last, so it is the most recent thing Codex reads and can override.
+- **Don't use `base_instructions`** to carry this — it replaces Codex's whole
+  system prompt.
+
+The general rule: when a capability is removed, check *how the agent finds out*.
+If the mechanism is a config flag rather than a refusal, nothing tells it, and a
+correct block still produces the behaviour you were trying to fix. Constitution IX
+requires the replacement to be named — that obligation is per-agent, and it is
+easy to satisfy for the agent with a deny hook and forget for the one without.
+
 ## Verify vendor identifiers against the artifact that executes
 
 This task nearly shipped two inert controls. Constitution IX was extended
