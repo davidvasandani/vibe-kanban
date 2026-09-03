@@ -700,7 +700,9 @@ async fn effective_binary(e: &CliToolCatalogEntry) -> Option<PathBuf> {
     if let Some(host) = detect_host_copy(e).await {
         return Some(PathBuf::from(host.path));
     }
-    detect_app_copy(e).map(|_| installed_binary_path(e))
+    // link_target, not the raw binary: a wrapped tool is only usable through
+    // its wrapper, which supplies the runtime its credential store needs.
+    detect_app_copy(e).map(|_| link_target(e))
 }
 
 /// Effective binary for a catalog tool (host copy wins over the app-managed
@@ -1644,6 +1646,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_wrapped_tool_is_reached_through_its_wrapper() {
+        // Running the bare binary skips the environment its credential store
+        // needs, so it fails auth before it can even open a browser.
+        let mgc = entry(CliToolId::MgcBeta);
+        assert_eq!(link_target(mgc), wrapper_path(mgc));
+        assert_ne!(link_target(mgc), installed_binary_path(mgc));
+        // Unwrapped tools are unaffected.
+        let aws = entry(CliToolId::Aws);
+        assert_eq!(link_target(aws), installed_binary_path(aws));
     }
 
     #[test]
