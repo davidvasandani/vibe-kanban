@@ -9,9 +9,9 @@ Verified on 2026-09-03.
 
 ## Focused contract tests
 
-- `cargo test -p executors mcp_inventory_tests --lib`: 3 passed. Covers stdio
-  add/remove/same-name schema-change generations plus stable map and nested JSON
-  object ordering.
+- `cargo test -p executors mcp_inventory_tests --lib -j1`: 4 passed. Covers
+  stdio add/remove/same-name schema-change generations, stable map and nested
+  JSON object ordering, and unavailable authentication evidence.
 - `cargo test -p services mcp_refresh --lib`: 4 passed. Covers busy,
   unsupported, failure truthfulness, and complete exact-evidence replacement.
 - `cargo test -p executors supports_streamable_http_assignments_for_codex --lib`:
@@ -31,8 +31,8 @@ Verified on 2026-09-03.
 - `pnpm run check`: passed, including local-web, remote-web, web-core, UI, the
   complete main Rust workspace, and the remote Rust workspace.
 - `cargo fmt --all --check`: passed.
-- `cargo clippy -p executors --lib -- -D warnings`: passed after the independent
-  review correction.
+- `cargo clippy -p executors --lib -j1 -- -D warnings`: passed after both
+  independent review corrections.
 - `pnpm run lint`: frontend/UI lint passed; backend Clippy reached two existing,
   unchanged failures in `crates/services/src/services/entra_mint.rs:477`
   (`collapsible_if`) and `crates/services/src/services/cli_tools.rs:1468`

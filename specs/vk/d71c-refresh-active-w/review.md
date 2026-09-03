@@ -19,7 +19,7 @@ of implying deliberate tool removal.
 Post-fix verification:
 
 - `cargo fmt --all --check`: passed.
-- `cargo test -p executors mcp_inventory_tests --lib`: 3 passed.
-- `cargo clippy -p executors --lib -- -D warnings`: passed.
+- `cargo test -p executors mcp_inventory_tests --lib -j1`: 4 passed.
+- `cargo clippy -p executors --lib -j1 -- -D warnings`: passed.
 
 Final clean review result is recorded below after the repeat pass.
