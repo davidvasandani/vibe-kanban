@@ -8,6 +8,7 @@ pub mod cluster;
 pub mod config;
 pub mod container;
 pub mod diff_stream;
+pub mod entra_mint;
 pub mod events;
 pub mod execution_process;
 pub mod file;

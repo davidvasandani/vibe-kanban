@@ -11,7 +11,10 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
-use services::services::cli_tools::{self, CliToolId, CliToolStatus};
+use services::services::{
+    cli_tools::{self, CliToolId, CliToolStatus},
+    entra_mint,
+};
 use utils::response::ApiResponse;
 
 use crate::{
@@ -79,10 +82,108 @@ async fn login_cli_tool(
     Path(id): Path<CliToolId>,
     Query(query): Query<LoginQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let command = cli_tools::login_command(id)
+    let plan = cli_tools::login_plan(id)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(ws.on_upgrade(move |socket| handle_login(socket, deployment, id, command, query)))
+    Ok(ws.on_upgrade(move |socket| async move {
+        match plan {
+            cli_tools::CliToolLoginPlan::Command(command) => {
+                handle_login(socket, deployment, id, command, query).await
+            }
+            cli_tools::CliToolLoginPlan::EntraMint { client_id, scope } => {
+                handle_entra_login(socket, id, client_id, scope).await
+            }
+        }
+    }))
+}
+
+/// Entra sign-in has no PTY to attach to — it runs in-process and drives a
+/// remote browser. Its progress is streamed over the same socket as terminal
+/// output so the settings UI renders it exactly like a vendor login.
+async fn handle_entra_login(
+    mut socket: MaybeSignedWebSocket,
+    id: CliToolId,
+    client_id: &'static str,
+    scope: &'static str,
+) {
+    let Some(_guard) = cli_tools::try_begin_login(id) else {
+        send_message(
+            &mut socket,
+            &LoginMessage::Error {
+                code: "session_conflict",
+                message: "Login is already active for this tool".to_string(),
+            },
+        )
+        .await;
+        return;
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let progress = entra_mint::Progress::new(tx);
+    let mut task = Box::pin(cli_tools::run_entra_login(id, client_id, scope, &progress));
+
+    let timeout = tokio::time::sleep(LOGIN_TIMEOUT);
+    tokio::pin!(timeout);
+    let mut outcome = "cancelled";
+
+    loop {
+        tokio::select! {
+            Some(line) = rx.recv() => {
+                send_message(&mut socket, &LoginMessage::Output { data: BASE64.encode(line) }).await;
+            }
+            result = &mut task => {
+                // Drain anything the mint emitted just before finishing.
+                while let Ok(line) = rx.try_recv() {
+                    send_message(&mut socket, &LoginMessage::Output { data: BASE64.encode(line) }).await;
+                }
+                outcome = match result {
+                    Ok(()) => "succeeded",
+                    Err(e) => {
+                        send_message(
+                            &mut socket,
+                            &LoginMessage::Output { data: BASE64.encode(format!("\r\n{e}\r\n")) },
+                        )
+                        .await;
+                        "command_failed"
+                    }
+                };
+                break;
+            }
+            _ = &mut timeout => {
+                outcome = "timed_out";
+                break;
+            }
+            inbound = socket.recv() => match inbound {
+                Ok(Some(Message::Text(text))) => {
+                    if let Ok(LoginCommand::Cancel) = serde_json::from_str::<LoginCommand>(text.as_str()) {
+                        break;
+                    }
+                }
+                _ => break,
+            },
+        }
+    }
+
+    let tool = cli_tools::status(id).await;
+    if outcome == "succeeded" && tool.auth_state != cli_tools::CliToolAuthState::Authenticated {
+        outcome = "verification_failed";
+    }
+    send_message(
+        &mut socket,
+        &LoginMessage::Exit {
+            outcome,
+            exit_code: None,
+        },
+    )
+    .await;
+    send_message(
+        &mut socket,
+        &LoginMessage::Status {
+            tool: Box::new(tool),
+        },
+    )
+    .await;
+    let _ = socket.close().await;
 }
 
 async fn handle_login(

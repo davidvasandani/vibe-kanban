@@ -26,6 +26,8 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use ts_rs::TS;
 use utils::{assets::cli_tools_dir, shell::resolve_executable_path};
 
+use crate::services::entra_mint;
+
 // Version pins. Bumping a version REQUIRES refreshing the matching
 // per-platform sha256 pins below — a stale hash makes installs fail loudly
 // (nothing is written), it never installs an unverified artifact. The
@@ -54,6 +56,12 @@ const MICROSOFT_GRAPH_PS_VERSION: &str = "2.38.1";
 
 /// How long a `<tool> --version` probe of a host-provided copy may run.
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Auth checks get their own, longer budget: unlike `--version` they can start
+/// a whole runtime and talk to the network. `graph-powershell` in particular
+/// pays pwsh startup, a Graph SDK module import, and a token refresh before it
+/// can answer — comfortably past the version-probe budget, and timing out here
+/// would report a successful sign-in as unverified.
+const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, thiserror::Error)]
 pub enum CliToolError {
@@ -73,6 +81,8 @@ pub enum CliToolError {
     Extract(String),
     #[error("install failed: {0}")]
     Install(String),
+    #[error("sign-in failed: {0}")]
+    Login(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -177,7 +187,30 @@ pub enum CliToolAuthStrategy {
         login_args: &'static [&'static str],
         probe_args: &'static [&'static str],
     },
+    /// Delegated Entra sign-in performed by [`crate::services::entra_mint`] and
+    /// then written into the tool's own credential store.
+    ///
+    /// Used where the tool's built-in headless login cannot work: this tenant's
+    /// Conditional Access refuses the device-code flow outright (AADSTS53003,
+    /// even from a Compliant device), so `az login --use-device-code` and
+    /// `Connect-MgGraph -UseDeviceAuthentication` are both dead ends. The
+    /// authorization-code flow is not restricted, so we run that instead.
+    EntraMint {
+        client_id: &'static str,
+        scope: &'static str,
+        probe_args: &'static [&'static str],
+    },
     Unsupported(&'static str),
+}
+
+/// Args used to check whether a tool is authenticated, or the reason it has no
+/// such check.
+fn probe_args_of(e: &CliToolCatalogEntry) -> Result<&'static [&'static str], &'static str> {
+    match e.auth {
+        CliToolAuthStrategy::Command { probe_args, .. }
+        | CliToolAuthStrategy::EntraMint { probe_args, .. } => Ok(probe_args),
+        CliToolAuthStrategy::Unsupported(reason) => Err(reason),
+    }
 }
 
 pub fn catalog() -> &'static [CliToolCatalogEntry] {
@@ -226,8 +259,11 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 package: "azure-cli",
             },
             docs_url: "https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli",
-            auth: CliToolAuthStrategy::Command {
-                login_args: &["login", "--use-device-code"],
+            // NOT `login --use-device-code`: Conditional Access refuses that
+            // flow tenant-wide. See CliToolAuthStrategy::EntraMint.
+            auth: CliToolAuthStrategy::EntraMint {
+                client_id: crate::services::entra_mint::AZ_CLIENT_ID,
+                scope: crate::services::entra_mint::AZ_SCOPE,
                 probe_args: &["account", "show", "--output", "none"],
             },
         },
@@ -427,9 +463,18 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 module: "Microsoft.Graph",
             },
             docs_url: "https://learn.microsoft.com/en-us/powershell/microsoftgraph/installation?view=graph-powershell-1.0",
-            auth: CliToolAuthStrategy::Unsupported(
-                "Microsoft Graph sign-in is owned by the SDK's user-scoped token cache; run Connect-MgGraph (e.g. -UseDeviceAuthentication) externally",
-            ),
+            // `Connect-MgGraph -AccessToken` authenticates only the current
+            // process, so the mint also writes a profile block that reconnects
+            // (refreshing first) at pwsh startup. `-NoProfile` skips that.
+            auth: CliToolAuthStrategy::EntraMint {
+                client_id: crate::services::entra_mint::GRAPH_CLIENT_ID,
+                scope: crate::services::entra_mint::GRAPH_SCOPE,
+                probe_args: &[
+                    "-NoLogo",
+                    "-Command",
+                    "if (Get-MgContext) { exit 0 } else { exit 1 }",
+                ],
+            },
         },
     ];
     CATALOG
@@ -624,35 +669,129 @@ pub async fn effective_binary_for(id: CliToolId) -> Option<PathBuf> {
     effective_binary(entry(id)).await
 }
 
-pub async fn login_command(id: CliToolId) -> Result<CliToolLoginCommand, CliToolError> {
+/// How a tool's "Authenticate" action is carried out.
+pub enum CliToolLoginPlan {
+    /// Run the vendor's own login command in a PTY and let the user drive it.
+    Command(CliToolLoginCommand),
+    /// Mint a delegated Entra token in-process and write it into the tool's
+    /// credential store; there is no interactive terminal to attach to.
+    EntraMint {
+        client_id: &'static str,
+        scope: &'static str,
+    },
+}
+
+pub async fn login_plan(id: CliToolId) -> Result<CliToolLoginPlan, CliToolError> {
     let e = entry(id);
-    let CliToolAuthStrategy::Command { login_args, .. } = e.auth else {
-        let CliToolAuthStrategy::Unsupported(reason) = e.auth else {
-            unreachable!()
-        };
-        return Err(CliToolError::Unsupported(
-            e.display_name.to_string(),
-            reason.to_string(),
-        ));
-    };
-    let executable = effective_binary(e).await.ok_or_else(|| {
-        CliToolError::Unsupported(
-            e.display_name.to_string(),
-            "tool is not available".to_string(),
-        )
-    })?;
-    Ok(CliToolLoginCommand {
-        executable,
-        args: login_args.iter().map(|arg| (*arg).to_string()).collect(),
+    let unsupported =
+        |reason: &str| CliToolError::Unsupported(e.display_name.to_string(), reason.to_string());
+    match e.auth {
+        CliToolAuthStrategy::Unsupported(reason) => Err(unsupported(reason)),
+        CliToolAuthStrategy::EntraMint {
+            client_id, scope, ..
+        } => {
+            // The tool must exist before we can write credentials into it.
+            effective_binary(e)
+                .await
+                .ok_or_else(|| unsupported("tool is not available"))?;
+            Ok(CliToolLoginPlan::EntraMint { client_id, scope })
+        }
+        CliToolAuthStrategy::Command { login_args, .. } => {
+            let executable = effective_binary(e)
+                .await
+                .ok_or_else(|| unsupported("tool is not available"))?;
+            Ok(CliToolLoginPlan::Command(CliToolLoginCommand {
+                executable,
+                args: login_args.iter().map(|arg| (*arg).to_string()).collect(),
+            }))
+        }
+    }
+}
+
+/// Directory `az` keeps its MSAL cache and subscription profile in.
+fn az_config_dir() -> PathBuf {
+    std::env::var_os("AZURE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".azure")))
+        .unwrap_or_else(|| PathBuf::from(".azure"))
+}
+
+/// The interpreter inside az's app-managed venv. It already has `msal`, which
+/// is what writes the token cache — so this path only exists for an app-owned
+/// az, not a host-provided one.
+fn az_venv_python() -> Option<PathBuf> {
+    let e = entry(CliToolId::Az);
+    let python = tool_dir(e.id).join(e.version).join("venv/bin/python3");
+    python.is_file().then_some(python)
+}
+
+fn graph_token_path() -> PathBuf {
+    tool_dir(CliToolId::GraphPowershell10).join("entra-token.json")
+}
+
+fn powershell_profile_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| {
+        PathBuf::from(h)
+            .join(".config/powershell")
+            .join("Microsoft.PowerShell_profile.ps1")
     })
 }
 
+/// Mint a delegated Entra token for `id` and write it into that tool's own
+/// credential store, streaming progress to the caller.
+pub async fn run_entra_login(
+    id: CliToolId,
+    client_id: &str,
+    scope: &str,
+    progress: &entra_mint::Progress,
+) -> Result<(), CliToolError> {
+    let e = entry(id);
+    let cfg = entra_mint::EntraConfig::from_env()
+        .map_err(|err| CliToolError::Unsupported(e.display_name.to_string(), err.to_string()))?;
+    let token = entra_mint::mint(&cfg, client_id, scope, progress)
+        .await
+        .map_err(|err| CliToolError::Login(err.to_string()))?;
+
+    match id {
+        CliToolId::Az => {
+            let python = az_venv_python().ok_or_else(|| {
+                CliToolError::Unsupported(
+                    e.display_name.to_string(),
+                    "signing in writes az's MSAL cache using the venv this app installs; \
+                     install the app-managed az first"
+                        .to_string(),
+                )
+            })?;
+            entra_mint::apply_az(&token, &python, &az_config_dir(), &cfg, progress)
+                .await
+                .map_err(|err| CliToolError::Login(err.to_string()))?;
+        }
+        CliToolId::GraphPowershell10 => {
+            let profile = powershell_profile_path()
+                .ok_or_else(|| CliToolError::Login("HOME is not set".to_string()))?;
+            entra_mint::apply_graph_powershell(
+                &token,
+                &graph_token_path(),
+                &profile,
+                &cfg,
+                progress,
+            )
+            .await
+            .map_err(|err| CliToolError::Login(err.to_string()))?;
+        }
+        other => {
+            return Err(CliToolError::Login(format!(
+                "{other:?} has no Entra credential store wired up"
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn probe_auth(e: &CliToolCatalogEntry) -> (CliToolAuthState, Option<String>) {
-    let CliToolAuthStrategy::Command { probe_args, .. } = e.auth else {
-        let CliToolAuthStrategy::Unsupported(reason) = e.auth else {
-            unreachable!()
-        };
-        return (CliToolAuthState::Unsupported, Some(reason.to_string()));
+    let probe_args = match probe_args_of(e) {
+        Ok(args) => args,
+        Err(reason) => return (CliToolAuthState::Unsupported, Some(reason.to_string())),
     };
     let Some(executable) = effective_binary(e).await else {
         return (
@@ -690,7 +829,7 @@ async fn probe_auth(e: &CliToolCatalogEntry) -> (CliToolAuthState, Option<String
             command.env(key, value);
         }
     }
-    match tokio::time::timeout(VERSION_PROBE_TIMEOUT, command.kill_on_drop(true).output()).await {
+    match tokio::time::timeout(AUTH_PROBE_TIMEOUT, command.kill_on_drop(true).output()).await {
         Ok(Ok(output)) if output.status.success() => (CliToolAuthState::Authenticated, None),
         Ok(Ok(_)) => (CliToolAuthState::Unauthenticated, None),
         Ok(Err(_)) => (
@@ -757,7 +896,10 @@ pub async fn status(id: CliToolId) -> CliToolStatus {
         host: detect_host_copy(e).await,
         app: detect_app_copy(e),
         docs_url: e.docs_url.to_string(),
-        login_supported: matches!(e.auth, CliToolAuthStrategy::Command { .. }),
+        login_supported: matches!(
+            e.auth,
+            CliToolAuthStrategy::Command { .. } | CliToolAuthStrategy::EntraMint { .. }
+        ),
         auth_state,
         auth_message,
     }
@@ -1322,10 +1464,20 @@ mod tests {
 
     #[test]
     fn only_durably_verifiable_tools_offer_login() {
-        for id in [CliToolId::Az, CliToolId::Gam] {
+        // Vendor login driven in a PTY.
+        for id in [CliToolId::Gam] {
             assert!(matches!(
                 entry(id).auth,
                 CliToolAuthStrategy::Command { .. }
+            ));
+        }
+        // Entra tools: their own headless login is Conditional-Access blocked,
+        // so vibe-kanban mints the token and writes it to their credential
+        // store instead. Still login-capable, and still durably verifiable.
+        for id in [CliToolId::Az, CliToolId::GraphPowershell10] {
+            assert!(matches!(
+                entry(id).auth,
+                CliToolAuthStrategy::EntraMint { .. }
             ));
         }
         for id in [
@@ -1334,7 +1486,6 @@ mod tests {
             CliToolId::MgcBeta,
             CliToolId::Acli,
             CliToolId::Gws,
-            CliToolId::GraphPowershell10,
         ] {
             assert!(matches!(
                 entry(id).auth,
@@ -1375,7 +1526,15 @@ mod tests {
                 module: "Microsoft.Graph"
             }
         ));
-        assert!(matches!(e.auth, CliToolAuthStrategy::Unsupported(_)));
+        // Sign-in is minted by vibe-kanban rather than delegated to the SDK:
+        // the device-code flow it would otherwise use is refused tenant-wide.
+        assert!(matches!(
+            e.auth,
+            CliToolAuthStrategy::EntraMint {
+                client_id: crate::services::entra_mint::GRAPH_CLIENT_ID,
+                ..
+            }
+        ));
     }
 
     #[test]
