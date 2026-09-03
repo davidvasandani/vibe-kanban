@@ -64,8 +64,10 @@ pub struct McpServerRefreshSnapshot {
     pub status: McpServerRefreshStatus,
     pub tool_count: Option<u32>,
     /// Sorted tool identifiers from the executor-owned, post-start inventory.
+    #[serde(default)]
     pub tool_names: Option<Vec<String>>,
     /// SHA-256 of sorted tool identifiers and their input/output schemas.
+    #[serde(default)]
     pub tool_schema_fingerprint: Option<String>,
     pub resource_count: Option<u32>,
     pub prompt_count: Option<u32>,
@@ -207,5 +209,22 @@ mod tests {
             assert!(!encoded.contains("http://"));
             assert!(!encoded.contains("https://"));
         }
+    }
+
+    #[test]
+    fn older_worker_snapshot_defaults_new_inventory_evidence() {
+        let snapshot: McpServerRefreshSnapshot = serde_json::from_value(serde_json::json!({
+            "server_id": "personal_servicenow",
+            "status": "ready",
+            "tool_count": 62,
+            "resource_count": 0,
+            "prompt_count": null,
+            "restart_occurred": null,
+            "error": null
+        }))
+        .expect("snapshot from an older worker must remain compatible");
+
+        assert_eq!(snapshot.tool_names, None);
+        assert_eq!(snapshot.tool_schema_fingerprint, None);
     }
 }
