@@ -48,6 +48,32 @@ idle “restart” can fork/resume a Codex thread in a way that reuses stale MCP
 state, or whether current Codex startup reliably creates a fresh app-server and
 reloads the native config before `thread/start`/`thread/fork`.
 
+## Audit result
+
+The restart boundary is correct. Every `spawn_inner` call invokes
+`spawn_app_server`, which starts a new `codex app-server --strict-config`
+process. Only after app-server initialization does the normal chat path call
+`thread/start` or `thread/fork`, register the resolved thread, and call
+`turn/start`. The MCP restart route also reaps a retained warm process before it
+enters this normal follow-up path. A fork preserves conversation lineage inside
+the newly started app-server; it does not reuse the previous app-server process
+or its stdio MCP children.
+
+The internal live-refresh chain also rematerializes current profile settings for
+the assigned worker before queuing Codex reload. Its post-start confirmation was
+weaker than the requested contract because `McpServerRefreshSnapshot` retained
+only tool counts. Equal counts could not distinguish remove-plus-add or a
+schema-only update. The implementation now carries sorted tool identifiers and
+a stable SHA-256 of their input/output schemas from thread-scoped, full-detail
+`mcpServerStatus/list` results. The coordinator replaces the complete evidence
+vector for each successful generation.
+
+The management UI does not label MCP assignments as plugin installations. The
+reported external plugin-manager message is a separate domain. No Vibe Kanban
+UI conflation was found. The integration guide was stale, however: it still
+described the removed **Refresh MCP tools** toolbar instead of the shipped
+**Restart agent for MCP changes** action, so the guide was corrected.
+
 ## Decisions
 
 - Preserve the explicit restart as the primary UI contract.
