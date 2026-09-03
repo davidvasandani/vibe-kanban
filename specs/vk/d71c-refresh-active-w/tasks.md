@@ -70,7 +70,7 @@ run in parallel within their layer.
 - [x] T012 Cross-check the final spec, plan, tasks, and diff against the
   constitution and record the result in
   `specs/vk/d71c-refresh-active-w/analysis.md` (depends on T011).
-- [ ] T013 Run independent Codex diff review, address confirmed findings, repeat
+- [x] T013 Run independent Codex diff review, address confirmed findings, repeat
   affected verification, and record the clean result in
   `specs/vk/d71c-refresh-active-w/review.md` (depends on T012).
 - [ ] T014 Update `docs/knowledge-base/active-mcp-refresh.md` and

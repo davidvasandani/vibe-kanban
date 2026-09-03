@@ -924,8 +924,8 @@ fn tool_inventory_evidence(
             serde_json::json!({
                 "key": key,
                 "name": tool.name,
-                "input_schema": tool.input_schema,
-                "output_schema": tool.output_schema,
+                "input_schema": canonical_json(&tool.input_schema),
+                "output_schema": tool.output_schema.as_ref().map(canonical_json),
             })
         })
         .collect();
@@ -933,6 +933,22 @@ fn tool_inventory_evidence(
         .expect("Codex MCP tool schemas are JSON-serializable protocol values");
     let digest = Sha256::digest(encoded);
     (tool_names, format!("{digest:x}"))
+}
+
+fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut keys: Vec<_> = object.keys().collect();
+            keys.sort();
+            Value::Object(
+                keys.into_iter()
+                    .map(|key| (key.clone(), canonical_json(&object[key])))
+                    .collect(),
+            )
+        }
+        Value::Array(values) => Value::Array(values.iter().map(canonical_json).collect()),
+        _ => value.clone(),
+    }
 }
 
 #[async_trait]
@@ -1207,6 +1223,27 @@ mod mcp_inventory_tests {
         assert_eq!(
             tool_inventory_evidence(&first),
             tool_inventory_evidence(&second)
+        );
+    }
+
+    #[test]
+    fn evidence_is_stable_across_schema_object_key_order() {
+        let first_schema: Value = serde_json::from_str(
+            r#"{"type":"object","properties":{"b":{"type":"integer"},"a":{"type":"string"}}}"#,
+        )
+        .unwrap();
+        let second_schema: Value = serde_json::from_str(
+            r#"{"properties":{"a":{"type":"string"},"b":{"type":"integer"}},"type":"object"}"#,
+        )
+        .unwrap();
+        let mut first_tool = tool("lookup", "string");
+        first_tool.input_schema = first_schema;
+        let mut second_tool = tool("lookup", "string");
+        second_tool.input_schema = second_schema;
+
+        assert_eq!(
+            tool_inventory_evidence(&HashMap::from([("lookup".to_string(), first_tool)])),
+            tool_inventory_evidence(&HashMap::from([("lookup".to_string(), second_tool)]))
         );
     }
 }
