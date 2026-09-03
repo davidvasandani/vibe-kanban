@@ -10,6 +10,12 @@ The implementation now recursively sorts every JSON object key before hashing
 input/output schemas. A regression test supplies equivalent nested schemas in
 different key orders and proves their inventory evidence is identical.
 
+The repeat review found a second significant issue: authentication-failed
+servers could publish an empty names list and empty-inventory fingerprint even
+though capability discovery was unavailable. Those evidence fields now remain
+`None` for `FailedUnavailable`, matching the failure-retention contract instead
+of implying deliberate tool removal.
+
 Post-fix verification:
 
 - `cargo fmt --all --check`: passed.

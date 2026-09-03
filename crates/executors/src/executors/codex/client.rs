@@ -17,7 +17,7 @@ use codex_app_server_protocol::{
     GetAccountResponse, InitializeCapabilities, InitializeParams, InitializeResponse,
     ItemCompletedNotification, JSONRPCError, JSONRPCNotification, JSONRPCRequest, JSONRPCResponse,
     ListMcpServerStatusParams, ListMcpServerStatusResponse, McpAuthStatus,
-    McpServerRefreshResponse, McpServerStatusDetail, RequestId, ReviewStartParams,
+    McpServerRefreshResponse, McpServerStatus, McpServerStatusDetail, RequestId, ReviewStartParams,
     ReviewStartResponse, ReviewTarget, ServerRequest, ThreadCompactStartParams,
     ThreadCompactStartResponse, ThreadForkParams, ThreadForkResponse, ThreadItem, ThreadReadParams,
     ThreadReadResponse, ThreadStartParams, ThreadStartResponse, ToolRequestUserInputAnswer,
@@ -879,33 +879,36 @@ impl McpRefreshControl for AppServerClient {
         .await
         .map_err(|_| McpRefreshErrorCategory::Timeout)?
         .map_err(|_| McpRefreshErrorCategory::CapabilityListFailed)?;
-        Ok(servers
-            .into_iter()
-            .map(|server| {
-                let auth_failed = matches!(server.auth_status, McpAuthStatus::NotLoggedIn);
-                let (tool_names, tool_schema_fingerprint) = tool_inventory_evidence(&server.tools);
-                McpServerRefreshSnapshot {
-                    server_id: server.name,
-                    status: if auth_failed {
-                        McpServerRefreshStatus::FailedUnavailable
-                    } else {
-                        McpServerRefreshStatus::Ready
-                    },
-                    tool_count: Some(server.tools.len() as u32),
-                    tool_names: Some(tool_names),
-                    tool_schema_fingerprint: Some(tool_schema_fingerprint),
-                    resource_count: Some(
-                        (server.resources.len() + server.resource_templates.len()) as u32,
-                    ),
-                    prompt_count: None,
-                    // The pinned status protocol does not expose reuse/restart.
-                    restart_occurred: None,
-                    error: auth_failed.then(|| {
-                        safe_executor_error(McpRefreshErrorCategory::AuthenticationFailed)
-                    }),
-                }
-            })
-            .collect())
+        Ok(servers.into_iter().map(mcp_refresh_snapshot).collect())
+    }
+}
+
+fn mcp_refresh_snapshot(server: McpServerStatus) -> McpServerRefreshSnapshot {
+    let auth_failed = matches!(server.auth_status, McpAuthStatus::NotLoggedIn);
+    let (tool_names, tool_schema_fingerprint) = if auth_failed {
+        // An empty map from an unavailable server is not evidence that its
+        // tools were deliberately removed.
+        (None, None)
+    } else {
+        let (names, fingerprint) = tool_inventory_evidence(&server.tools);
+        (Some(names), Some(fingerprint))
+    };
+    McpServerRefreshSnapshot {
+        server_id: server.name,
+        status: if auth_failed {
+            McpServerRefreshStatus::FailedUnavailable
+        } else {
+            McpServerRefreshStatus::Ready
+        },
+        tool_count: Some(server.tools.len() as u32),
+        tool_names,
+        tool_schema_fingerprint,
+        resource_count: Some((server.resources.len() + server.resource_templates.len()) as u32),
+        prompt_count: None,
+        // The pinned status protocol does not expose reuse/restart.
+        restart_occurred: None,
+        error: auth_failed
+            .then(|| safe_executor_error(McpRefreshErrorCategory::AuthenticationFailed)),
     }
 }
 
@@ -1245,5 +1248,22 @@ mod mcp_inventory_tests {
             tool_inventory_evidence(&HashMap::from([("lookup".to_string(), first_tool)])),
             tool_inventory_evidence(&HashMap::from([("lookup".to_string(), second_tool)]))
         );
+    }
+
+    #[test]
+    fn authentication_failure_does_not_claim_empty_inventory_evidence() {
+        let snapshot = mcp_refresh_snapshot(McpServerStatus {
+            name: "personal_servicenow".to_string(),
+            server_info: None,
+            tools: HashMap::new(),
+            resources: Vec::new(),
+            resource_templates: Vec::new(),
+            auth_status: McpAuthStatus::NotLoggedIn,
+        });
+
+        assert_eq!(snapshot.status, McpServerRefreshStatus::FailedUnavailable);
+        assert_eq!(snapshot.tool_count, Some(0));
+        assert_eq!(snapshot.tool_names, None);
+        assert_eq!(snapshot.tool_schema_fingerprint, None);
     }
 }
