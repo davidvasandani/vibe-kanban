@@ -44,5 +44,5 @@ Rust module, so they are intentionally serial rather than marked `[P]`.
 - [x] T010 Apply the signal-driven lifecycle distinction to coordinator worker
   leases and add focused regression coverage.
 - [x] T011 Run crate verification and an independent Codex review.
-- [ ] T012 Update reusable knowledge, open the follow-up pull request, pass CI,
+- [x] T012 Update reusable knowledge, open the follow-up pull request, pass CI,
   and merge it.
