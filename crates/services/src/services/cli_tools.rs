@@ -899,6 +899,13 @@ async fn probe_auth(e: &CliToolCatalogEntry) -> (CliToolAuthState, Option<String
         "XDG_CONFIG_HOME",
         "AZURE_CONFIG_DIR",
         "GAMCFGDIR",
+        // A wrapped tool cannot start without the toolchain its wrapper
+        // requires; dropping these makes the wrapper abort, and a tool that
+        // just signed in successfully reports back unauthenticated.
+        "VK_ENTRA_CHROMIUM",
+        "VK_ENTRA_DBUS_RUN_SESSION",
+        "VK_ENTRA_KEYRING_DAEMON",
+        "VK_ENTRA_LIBSECRET_LIB",
     ] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
