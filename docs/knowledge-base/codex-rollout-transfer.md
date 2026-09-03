@@ -1,6 +1,6 @@
 # Codex rollout transfer across workers
 
-Tags: `c8a9-transfer-codex-r`
+Tags: `c8a9-transfer-codex-r`, `vk/af0d-no-conversation`
 
 ## Transfer artifacts, not executor homes
 
@@ -70,3 +70,21 @@ proof that an idle resumable session no longer references them. A worker may
 delete verified lineage only when coordinator state proves there is no active
 execution, resumable session, or recoverable migration reference; otherwise it
 must retain the file.
+
+## Recover a genuinely absent rollout at the conversation boundary
+
+Even outside an affinity migration, a persisted Vibe Kanban turn can reference
+a Codex thread whose rollout no longer exists. A normal chat follow-up should
+try `thread/fork` first, then start a replacement thread in the same workspace
+only when the structured app-server error proves that exact requested UUID is
+absent. Register the replacement through the ordinary session-ID path before
+starting the turn so later follow-ups naturally continue it.
+
+Preserve JSON-RPC code, message, and data at the client boundary. Match the
+complete, pinned missing-rollout response (plus any exact production-observed
+legacy form) rather than `contains("not found")`; the same invalid-request code
+and similar phrases cover archived sessions, malformed IDs, and operations on
+unloaded live threads. Every nonmatching error remains fail-loud. This recovery
+keeps the Vibe workspace usable but cannot reconstruct lost Codex-private
+context, and context-dependent operations such as review or compaction should
+not silently become fresh conversations.
