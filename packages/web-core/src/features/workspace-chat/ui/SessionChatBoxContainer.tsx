@@ -5,7 +5,7 @@ import {
   type AskUserQuestionItem,
   BaseAgentCapability,
   type Session,
-  type BaseCodingAgent,
+  BaseCodingAgent,
   ExecutionProcessStatus,
   PermissionPolicy,
 } from 'shared/types';
@@ -72,6 +72,7 @@ import { ArrowsClockwiseIcon } from '@phosphor-icons/react';
 import { ConfirmDialog } from '@/shared/dialogs/shared/ConfirmDialog';
 import { toast } from 'sonner';
 import { restartAgentForMcpChanges } from '../model/restartAgentForMcpChanges';
+import { useMcpRefresh } from '../model/useMcpRefresh';
 
 /**
  * Follow-up prompt sent when resuming a run interrupted by a server restart.
@@ -189,6 +190,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     mode === 'existing-session' ? props.onStartNewSession : undefined;
 
   const sessionId = session?.id;
+  const mcpRefresh = useMcpRefresh(workspaceId, sessionId);
   const queryClient = useQueryClient();
   const hostId = useHostId();
 
@@ -908,23 +910,33 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     [actionCtx]
   );
 
-  const toolbarActionItems = useMemo(
-    () => [
+  const toolbarActionItems = useMemo(() => {
+    const canUseCodexRefresh =
+      effectiveExecutor === BaseCodingAgent.CODEX &&
+      mcpRefresh.result?.status !== 'unsupported';
+    return [
       ...(workspaceId && sessionId
         ? [
             {
               id: 'refresh-mcp-tools',
               icon: ArrowsClockwiseIcon,
-              label: 'Restart agent for MCP changes',
-              tooltip: sessionHasRunningAgent
-                ? 'Queue a fresh agent process after the current turn finishes'
-                : 'Start a fresh agent process with the latest MCP configuration',
-              disabled:
-                !executorConfig ||
-                isSending ||
-                isQueueLoading ||
-                isRestartingForMcp,
-              onClick: handleRestartForMcpChanges,
+              label: canUseCodexRefresh
+                ? 'Refresh MCP tools'
+                : 'Restart agent for MCP changes',
+              tooltip: canUseCodexRefresh
+                ? mcpRefresh.tooltip
+                : sessionHasRunningAgent
+                  ? 'Queue a fresh agent process after the current turn finishes'
+                  : 'Start a fresh agent process with the latest MCP configuration',
+              disabled: canUseCodexRefresh
+                ? mcpRefresh.isRefreshing
+                : !executorConfig ||
+                  isSending ||
+                  isQueueLoading ||
+                  isRestartingForMcp,
+              onClick: canUseCodexRefresh
+                ? mcpRefresh.refresh
+                : handleRestartForMcpChanges,
             },
           ]
         : []),
@@ -946,21 +958,22 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
           },
         ];
       }),
-    ],
-    [
-      toolbarActionsList,
-      actionCtx,
-      handleToolbarAction,
-      executorConfig,
-      handleRestartForMcpChanges,
-      isQueueLoading,
-      isRestartingForMcp,
-      isSending,
-      sessionHasRunningAgent,
-      sessionId,
-      workspaceId,
-    ]
-  );
+    ];
+  }, [
+    toolbarActionsList,
+    actionCtx,
+    handleToolbarAction,
+    executorConfig,
+    effectiveExecutor,
+    handleRestartForMcpChanges,
+    isQueueLoading,
+    isRestartingForMcp,
+    isSending,
+    mcpRefresh,
+    sessionHasRunningAgent,
+    sessionId,
+    workspaceId,
+  ]);
 
   // Handle approve action
   const handleApprove = useCallback(async () => {

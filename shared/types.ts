@@ -1252,7 +1252,13 @@ export type McpServerRefreshStatus = "ready" | "failed_retained" | "failed_unava
 
 export type McpServerRefreshSnapshot = { server_id: string, status: McpServerRefreshStatus, tool_count: number | null, resource_count: number | null, prompt_count: number | null, restart_occurred: boolean | null, error: McpRefreshError | null, };
 
-export type McpRefreshResult = { status: McpRefreshStatus, retryable: boolean, generation: bigint, requested_at: string, last_successful_refresh_at: string | null, servers: Array<McpServerRefreshSnapshot>, error: McpRefreshError | null, };
+export type McpRefreshResult = { status: McpRefreshStatus, retryable: boolean, generation: bigint, requested_at: string, last_successful_refresh_at: string | null, 
+/**
+ * Settings-owned server identifiers expected for the selected executor.
+ * This is definition metadata only; definitions, headers, and env values
+ * must never cross this status boundary.
+ */
+configured_server_ids: Array<string>, servers: Array<McpServerRefreshSnapshot>, error: McpRefreshError | null, };
 
 export type ExecutorActionType = { "type": "CodingAgentInitialRequest" } & CodingAgentInitialRequest | { "type": "CodingAgentFollowUpRequest" } & CodingAgentFollowUpRequest | { "type": "ScriptRequest" } & ScriptRequest | { "type": "ReviewRequest" } & ReviewRequest;
 

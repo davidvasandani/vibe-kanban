@@ -77,6 +77,10 @@ pub struct McpRefreshResult {
     pub generation: u64,
     pub requested_at: DateTime<Utc>,
     pub last_successful_refresh_at: Option<DateTime<Utc>>,
+    /// Settings-owned server identifiers expected for the selected executor.
+    /// This is definition metadata only; definitions, headers, and env values
+    /// must never cross this status boundary.
+    pub configured_server_ids: Vec<String>,
     pub servers: Vec<McpServerRefreshSnapshot>,
     pub error: Option<McpRefreshError>,
 }
