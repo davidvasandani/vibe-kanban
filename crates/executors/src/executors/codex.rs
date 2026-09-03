@@ -28,7 +28,7 @@ pub fn codex_home() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::Codex;
+    use super::{Codex, POLLER_DEVELOPER_INSTRUCTIONS, compose_developer_instructions};
 
     #[test]
     fn deployment_codex_command_is_fail_closed_and_blank_values_fall_back() {
@@ -117,12 +117,115 @@ mod tests {
             );
         }
     }
+
+    /// Disabling `unified_exec` is silent — Codex is told nothing. Without a
+    /// notice the block lands and the redirect never does, which is how "Codex
+    /// isn't using the poller" happens even though the config key is correct.
+    #[test]
+    fn every_thread_start_tells_codex_about_spawn_poller() {
+        let codex: Codex =
+            serde_json::from_value(serde_json::json!({})).expect("default Codex config");
+        let params = codex.build_thread_start_params(std::path::Path::new("/tmp"));
+
+        let instructions = params
+            .developer_instructions
+            .expect("developer instructions must be set even with none configured");
+
+        assert!(
+            instructions.contains("spawn_poller"),
+            "the notice must name the replacement tool; got {instructions:?}"
+        );
+    }
+
+    /// `developer_instructions` belongs to the operator. VK composes into it and
+    /// must never clobber a configured value.
+    #[test]
+    fn configured_developer_instructions_are_preserved() {
+        let configured = "Always write commit messages in haiku.";
+        let codex: Codex =
+            serde_json::from_value(serde_json::json!({"developer_instructions": configured}))
+                .expect("Codex config with developer instructions");
+        let params = codex.build_thread_start_params(std::path::Path::new("/tmp"));
+
+        let instructions = params.developer_instructions.expect("instructions present");
+
+        assert!(
+            instructions.contains(configured),
+            "the operator's text must survive; got {instructions:?}"
+        );
+        assert!(
+            instructions.contains("spawn_poller"),
+            "the poller notice must still be present; got {instructions:?}"
+        );
+        // The operator's text goes last so it can override VK's guidance.
+        assert!(
+            instructions.find("spawn_poller") < instructions.find(configured),
+            "the operator's text should come after VK's; got {instructions:?}"
+        );
+    }
+
+    /// A blank configured value must not produce a dangling separator.
+    #[test]
+    fn blank_configured_instructions_collapse_to_the_notice() {
+        assert_eq!(
+            compose_developer_instructions(Some("   ")),
+            Some(POLLER_DEVELOPER_INSTRUCTIONS.to_string())
+        );
+        assert_eq!(
+            compose_developer_instructions(None),
+            Some(POLLER_DEVELOPER_INSTRUCTIONS.to_string())
+        );
+    }
 }
 
 pub(crate) fn resolve_model(model: Option<&str>) -> (Option<&str>, bool) {
     match model.and_then(|m| m.strip_suffix("-fast")) {
         Some(base) => (Some(base), true),
         None => (model, false),
+    }
+}
+
+/// Told to Codex whenever a thread starts, because closing its in-turn
+/// background path is otherwise **silent**.
+///
+/// Claude gets a `PreToolUse` deny whose reason names `spawn_poller`, so the
+/// redirect is delivered at the moment the agent reaches for the wrong tool.
+/// Codex has no equivalent hook: `features.unified_exec=false` just swaps the
+/// persistent-PTY `exec_command`/`write_stdin` pair for one-shot
+/// `shell_command`, with no error and no explanation. Without this notice Codex
+/// sees a command that returns immediately, has no idea a poller exists, and
+/// carries on — so the block lands but the redirect never does.
+///
+/// Constitution IX: "A denial that removes a capability names the supported
+/// replacement, so the agent redirects instead of stalling."
+pub(crate) const POLLER_DEVELOPER_INSTRUCTIONS: &str = "\
+Background execution inside a turn is disabled in Vibe Kanban. A turn is one OS \
+process group and it is terminated when the turn ends, so anything you background \
+inside it is killed with it — the persistent-session behaviour of `exec_command` \
+is switched off for this reason, and `shell_command` runs one-shot.
+
+If you need something to keep running after this turn — a watcher, a log tail, a \
+build or test loop, polling for a condition — use the `spawn_poller` MCP tool \
+from the `vibe_kanban` server. It takes a `command` and an `interval_secs` \
+(5-86400), runs in its own process group, survives the end of this turn and Vibe \
+Kanban restarts, and is visible and stoppable in the workspace UI. Companion \
+tools: `list_pollers`, `stop_poller`.
+
+Do not try to work around this with `nohup`, `setsid`, `&`, `disown`, or a \
+detached subshell: those are reaped with the turn just the same. Prefer running \
+the command in the foreground when you only need its result now, and reach for \
+`spawn_poller` when the work genuinely has to outlive this turn.";
+
+/// Prepend the poller notice to any operator-configured `developer_instructions`.
+///
+/// `developer_instructions` is a **user-facing config field**, so this composes
+/// rather than replaces: VK is a guest in that field. The user's text goes last
+/// so it is the most recent thing Codex reads and can override the guidance
+/// above it.
+pub(crate) fn compose_developer_instructions(configured: Option<&str>) -> Option<String> {
+    match configured.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => Some(format!("{POLLER_DEVELOPER_INSTRUCTIONS}\n\n{text}")),
+        None => Some(POLLER_DEVELOPER_INSTRUCTIONS.to_string()),
     }
 }
 
@@ -692,7 +795,9 @@ impl Codex {
             config,
             base_instructions: self.base_instructions.clone(),
             model_provider: self.model_provider.clone(),
-            developer_instructions: self.developer_instructions.clone(),
+            developer_instructions: compose_developer_instructions(
+                self.developer_instructions.as_deref(),
+            ),
             service_tier,
             ..Default::default()
         }
