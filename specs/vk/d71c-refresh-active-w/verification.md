@@ -36,10 +36,13 @@ Verified on 2026-09-03.
 - `cargo fmt --all --check`: passed.
 - `cargo clippy -p executors --lib -j1 -- -D warnings`: passed after both
   independent review corrections.
-- `pnpm run lint`: frontend/UI lint passed; backend Clippy reached two existing,
-  unchanged failures in `crates/services/src/services/entra_mint.rs:477`
-  (`collapsible_if`) and `crates/services/src/services/cli_tools.rs:1468`
-  (`single_element_loop`). Neither file differs from `origin/main` in this task.
+- Initial `pnpm run lint`: frontend/UI lint passed; backend Clippy reached two
+  pre-existing failures in `crates/services/src/services/entra_mint.rs`
+  (`collapsible_if`) and `crates/services/src/services/cli_tools.rs`
+  (`single_element_loop`). PR CI reproduced only those findings. Both were
+  corrected mechanically so the required repository check could pass.
+- `cargo clippy -p services --all-targets -j1 -- -D warnings`: passed after the
+  CI corrections.
 
 ## Evidence boundary
 

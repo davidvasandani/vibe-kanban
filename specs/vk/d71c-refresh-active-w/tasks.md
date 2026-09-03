@@ -76,5 +76,5 @@ run in parallel within their layer.
 - [x] T014 Update `docs/knowledge-base/active-mcp-refresh.md` and
   `docs/knowledge-base/INDEX.md` with reusable shipped knowledge, or record “no
   new knowledge to record,” then commit it (depends on T013).
-- [ ] T015 Verify the latest base, push the task branch, open a pull request, wait
+- [x] T015 Verify the latest base, push the task branch, open a pull request, wait
   for required checks, address failures, and merge it (depends on T014).
