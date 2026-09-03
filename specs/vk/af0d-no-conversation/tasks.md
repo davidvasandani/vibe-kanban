@@ -45,6 +45,6 @@ may run together within their layer.
   `docs/knowledge-base/codex-rollout-transfer.md`, tag it
   `vk/af0d-no-conversation`, refresh `docs/knowledge-base/INDEX.md`, and commit
   the knowledge base (depends on T009).
-- [ ] T011 Commit the remaining implementation and task artifacts
+- [x] T011 Commit the remaining implementation and task artifacts
   intentionally, push `vk/af0d-no-conversation`, open a pull request against
   the latest base branch, pass required checks, and merge it (depends on T010).
