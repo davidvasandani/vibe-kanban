@@ -165,6 +165,16 @@ pub struct PlatformSource {
     pub binary_path_in_archive: &'static str,
 }
 
+/// Extra runtime a tool needs that a bare exec does not provide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeWrapper {
+    /// The .NET Graph CLI keeps its MSAL cache in the D-Bus secret service and
+    /// refuses to start without one, and NixOS ships no libicu for it. Every
+    /// invocation needs that environment, not just the sign-in, so `bin/`
+    /// points at a wrapper rather than the binary.
+    GraphCliSecretService,
+}
+
 pub struct CliToolCatalogEntry {
     pub id: CliToolId,
     pub binary_name: &'static str,
@@ -179,11 +189,24 @@ pub struct CliToolCatalogEntry {
     /// credentials for these tools.
     pub docs_url: &'static str,
     pub auth: CliToolAuthStrategy,
+    /// When set, `bin/<name>` is a generated wrapper instead of a symlink.
+    pub runtime_wrapper: Option<RuntimeWrapper>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum CliToolAuthStrategy {
     Command {
+        login_args: &'static [&'static str],
+        probe_args: &'static [&'static str],
+    },
+    /// The tool runs its OWN browser sign-in; vibe-kanban only supplies a
+    /// browser that can reach the loopback listener it opens.
+    ///
+    /// The remote browser cannot — it runs in a sandbox with no route to this
+    /// host — so this path drives a local one, seeded with the shared
+    /// profile's Entra session. The tool then writes its own native
+    /// credential store, so there is no cache format to reproduce here.
+    EntraNativeBrowser {
         login_args: &'static [&'static str],
         probe_args: &'static [&'static str],
     },
@@ -208,7 +231,8 @@ pub enum CliToolAuthStrategy {
 fn probe_args_of(e: &CliToolCatalogEntry) -> Result<&'static [&'static str], &'static str> {
     match e.auth {
         CliToolAuthStrategy::Command { probe_args, .. }
-        | CliToolAuthStrategy::EntraMint { probe_args, .. } => Ok(probe_args),
+        | CliToolAuthStrategy::EntraMint { probe_args, .. }
+        | CliToolAuthStrategy::EntraNativeBrowser { probe_args, .. } => Ok(probe_args),
         CliToolAuthStrategy::Unsupported(reason) => Err(reason),
     }
 }
@@ -243,6 +267,7 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::Zip,
             },
             docs_url: "https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html",
+            runtime_wrapper: None,
             auth: CliToolAuthStrategy::Unsupported(
                 "AWS SSO login is profile-specific; manage SSO profiles and sign in from the AWS section in Settings",
             ),
@@ -259,6 +284,7 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 package: "azure-cli",
             },
             docs_url: "https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli",
+            runtime_wrapper: None,
             // NOT `login --use-device-code`: Conditional Access refuses that
             // flow tenant-wide. See CliToolAuthStrategy::EntraMint.
             auth: CliToolAuthStrategy::EntraMint {
@@ -301,6 +327,7 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::Zip,
             },
             docs_url: "https://developer.1password.com/docs/cli/get-started/",
+            runtime_wrapper: None,
             auth: CliToolAuthStrategy::Unsupported(
                 "1Password sign-in sessions are shell-scoped; authenticate the host CLI using the vendor setup guide",
             ),
@@ -339,6 +366,7 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::TarXz,
             },
             docs_url: "https://github.com/GAM-team/GAM/wiki",
+            runtime_wrapper: None,
             auth: CliToolAuthStrategy::Command {
                 login_args: &["oauth", "create"],
                 probe_args: &["oauth", "verify"],
@@ -371,9 +399,20 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::TarGz,
             },
             docs_url: "https://learn.microsoft.com/en-us/graph/cli/overview",
-            auth: CliToolAuthStrategy::Unsupported(
-                "This pinned Graph CLI has no non-secret authentication status command; run mgc-beta login externally",
-            ),
+            runtime_wrapper: Some(RuntimeWrapper::GraphCliSecretService),
+            // Its own InteractiveBrowser flow works — it just needs a browser
+            // that can reach the loopback listener it opens, which the remote
+            // one cannot. Device code is refused tenant-wide, so that is out.
+            auth: CliToolAuthStrategy::EntraNativeBrowser {
+                login_args: &[
+                    "login",
+                    "--strategy",
+                    "InteractiveBrowser",
+                    "--scopes",
+                    "User.Read",
+                ],
+                probe_args: &["users", "list", "--top", "1", "--select", "id"],
+            },
         },
         CliToolCatalogEntry {
             id: CliToolId::Acli,
@@ -402,6 +441,7 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::TarGz,
             },
             docs_url: "https://developer.atlassian.com/cloud/acli/guides/install-acli/",
+            runtime_wrapper: None,
             auth: CliToolAuthStrategy::Unsupported(
                 "Atlassian CLI authentication is site and account specific; use the vendor setup guide",
             ),
@@ -447,6 +487,7 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 archive: ArchiveKind::TarGz,
             },
             docs_url: "https://github.com/googleworkspace/cli#authentication",
+            runtime_wrapper: None,
             auth: CliToolAuthStrategy::Unsupported(
                 "gws auth status exits successfully even when unauthenticated; run gws auth login externally",
             ),
@@ -463,6 +504,7 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
                 module: "Microsoft.Graph",
             },
             docs_url: "https://learn.microsoft.com/en-us/powershell/microsoftgraph/installation?view=graph-powershell-1.0",
+            runtime_wrapper: None,
             // `Connect-MgGraph -AccessToken` authenticates only the current
             // process, so the mint also writes a profile block that reconnects
             // (refreshing first) at pwsh startup. `-NoProfile` skips that.
@@ -679,6 +721,8 @@ pub enum CliToolLoginPlan {
         client_id: &'static str,
         scope: &'static str,
     },
+    /// Run the tool's own browser sign-in, supplying a local browser.
+    EntraNativeBrowser { args: Vec<String> },
 }
 
 pub async fn login_plan(id: CliToolId) -> Result<CliToolLoginPlan, CliToolError> {
@@ -695,6 +739,14 @@ pub async fn login_plan(id: CliToolId) -> Result<CliToolLoginPlan, CliToolError>
                 .await
                 .ok_or_else(|| unsupported("tool is not available"))?;
             Ok(CliToolLoginPlan::EntraMint { client_id, scope })
+        }
+        CliToolAuthStrategy::EntraNativeBrowser { login_args, .. } => {
+            effective_binary(e)
+                .await
+                .ok_or_else(|| unsupported("tool is not available"))?;
+            Ok(CliToolLoginPlan::EntraNativeBrowser {
+                args: login_args.iter().map(|a| (*a).to_string()).collect(),
+            })
         }
         CliToolAuthStrategy::Command { login_args, .. } => {
             let executable = effective_binary(e)
@@ -786,6 +838,26 @@ pub async fn run_entra_login(
         }
     }
     Ok(())
+}
+
+/// Run a tool's own browser sign-in, supplying a local browser that can reach
+/// the loopback listener it opens.
+pub async fn run_entra_native_browser_login(
+    id: CliToolId,
+    args: &[String],
+    progress: &entra_mint::Progress,
+) -> Result<(), CliToolError> {
+    let e = entry(id);
+    let unsupported = |m: String| CliToolError::Unsupported(e.display_name.to_string(), m);
+    let cfg = entra_mint::EntraConfig::from_env().map_err(|err| unsupported(err.to_string()))?;
+    let tools =
+        entra_mint::LocalBrowserTools::from_env().map_err(|err| unsupported(err.to_string()))?;
+    let executable = effective_binary(e)
+        .await
+        .ok_or_else(|| unsupported("tool is not available".to_string()))?;
+    entra_mint::native_browser_login(&cfg, &tools, &executable, args, progress)
+        .await
+        .map_err(|err| CliToolError::Login(err.to_string()))
 }
 
 async fn probe_auth(e: &CliToolCatalogEntry) -> (CliToolAuthState, Option<String>) {
@@ -898,7 +970,9 @@ pub async fn status(id: CliToolId) -> CliToolStatus {
         docs_url: e.docs_url.to_string(),
         login_supported: matches!(
             e.auth,
-            CliToolAuthStrategy::Command { .. } | CliToolAuthStrategy::EntraMint { .. }
+            CliToolAuthStrategy::Command { .. }
+                | CliToolAuthStrategy::EntraMint { .. }
+                | CliToolAuthStrategy::EntraNativeBrowser { .. }
         ),
         auth_state,
         auth_message,
@@ -947,13 +1021,30 @@ pub async fn install(id: CliToolId) -> Result<CliToolStatus, CliToolError> {
         serde_json::to_string_pretty(&manifest).expect("manifest serializes"),
     )?;
 
+    // Tools that need a runtime environment get a wrapper; `bin/` then points
+    // at that rather than the binary, so every invocation is covered and not
+    // just the sign-in.
+    if let Some(RuntimeWrapper::GraphCliSecretService) = e.runtime_wrapper {
+        let wrapper = wrapper_path(e);
+        let password_file = tool_dir(e.id).join(".keyring-password");
+        std::fs::write(
+            &wrapper,
+            graph_cli_wrapper_script(&installed_binary_path(e), &password_file),
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
+        }
+    }
+
     // Expose last: symlink into a temp name, then atomically rename over the
     // final name.
     #[cfg(unix)]
     {
         let bin_dir = cli_tools_bin_dir();
         std::fs::create_dir_all(&bin_dir)?;
-        let target = installed_binary_path(e);
+        let target = link_target(e);
         let tmp = bin_dir.join(format!(".tmp-{}", e.binary_name));
         let _ = std::fs::remove_file(&tmp);
         std::os::unix::fs::symlink(&target, &tmp)?;
@@ -994,6 +1085,76 @@ fn installed_binary_path(e: &CliToolCatalogEntry) -> PathBuf {
         // The generated pwsh wrapper sits at the version dir's root.
         InstallStrategy::PowerShellModule { .. } => version_dir.join(e.binary_name),
     }
+}
+
+/// Path of the generated runtime wrapper for a tool that declares one.
+fn wrapper_path(e: &CliToolCatalogEntry) -> PathBuf {
+    tool_dir(e.id)
+        .join(e.version)
+        .join(format!("{}-wrapper", e.binary_name))
+}
+
+/// What `bin/<name>` should point at: the wrapper when the tool needs a
+/// runtime it cannot get from a bare exec, otherwise the binary itself.
+fn link_target(e: &CliToolCatalogEntry) -> PathBuf {
+    match e.runtime_wrapper {
+        Some(_) => wrapper_path(e),
+        None => installed_binary_path(e),
+    }
+}
+
+/// Wrapper for the .NET Graph CLI.
+///
+/// Three things this host does not provide by default, all required on *every*
+/// invocation rather than just at sign-in:
+///   * invariant globalization — NixOS ships no libicu, and the CLI aborts
+///     on startup without one;
+///   * libsecret on the loader path — it lives in the store, so the dynamic
+///     loader cannot find it unaided;
+///   * a D-Bus session with an unlocked keyring — the MSAL cache is stored
+///     through the secret service, and its persistence check fails without it.
+///
+/// The keyring password is generated once and kept beside the tool; it guards
+/// a local token cache on a host the service user already owns.
+fn graph_cli_wrapper_script(binary: &Path, password_file: &Path) -> String {
+    let q = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', r"'\''"));
+    format!(
+        r#"#!/bin/sh
+# Generated by vibe-kanban; do not edit.
+set -e
+BIN={bin}
+PW={pw}
+: "${{VK_ENTRA_DBUS_RUN_SESSION:?vibe-kanban: VK_ENTRA_DBUS_RUN_SESSION is not set}}"
+: "${{VK_ENTRA_KEYRING_DAEMON:?vibe-kanban: VK_ENTRA_KEYRING_DAEMON is not set}}"
+: "${{VK_ENTRA_LIBSECRET_LIB:?vibe-kanban: VK_ENTRA_LIBSECRET_LIB is not set}}"
+
+DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT
+LD_LIBRARY_PATH="$VK_ENTRA_LIBSECRET_LIB${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
+export LD_LIBRARY_PATH
+
+# dbus-run-session wants a runtime dir it owns; fall back to a private one.
+if [ -z "${{XDG_RUNTIME_DIR:-}}" ] || [ ! -w "${{XDG_RUNTIME_DIR:-/nonexistent}}" ]; then
+  XDG_RUNTIME_DIR="${{TMPDIR:-/tmp}}/vk-runtime-$(id -u)"
+  mkdir -p "$XDG_RUNTIME_DIR"
+  chmod 700 "$XDG_RUNTIME_DIR"
+  export XDG_RUNTIME_DIR
+fi
+
+if [ ! -f "$PW" ]; then
+  (umask 077; od -An -tx1 -N32 /dev/urandom | tr -d ' 
+' > "$PW")
+fi
+
+exec "$VK_ENTRA_DBUS_RUN_SESSION" -- sh -c '
+  printf %s "$(cat "$2")" | "$VK_ENTRA_KEYRING_DAEMON" --daemonize --unlock --components=secrets >/dev/null 2>&1 || true
+  shift 2
+  exec "$0" "$@"
+' "$BIN" x "$PW" "$@"
+"#,
+        bin = q(binary),
+        pw = q(password_file),
+    )
 }
 
 /// Per-tool staging root, so concurrent installs of *different* tools never
@@ -1480,10 +1641,20 @@ mod tests {
                 CliToolAuthStrategy::EntraMint { .. }
             ));
         }
+        // mgc-beta's own browser flow does work; it only needed a browser that
+        // could reach its loopback listener. It carries a runtime wrapper
+        // because that flow's credential store needs a secret service.
+        assert!(matches!(
+            entry(CliToolId::MgcBeta).auth,
+            CliToolAuthStrategy::EntraNativeBrowser { .. }
+        ));
+        assert_eq!(
+            entry(CliToolId::MgcBeta).runtime_wrapper,
+            Some(RuntimeWrapper::GraphCliSecretService),
+        );
         for id in [
             CliToolId::Aws,
             CliToolId::Op,
-            CliToolId::MgcBeta,
             CliToolId::Acli,
             CliToolId::Gws,
         ] {

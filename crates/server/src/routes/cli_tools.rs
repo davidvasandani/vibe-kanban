@@ -3,6 +3,8 @@
 //! All outcomes — including download/verification failures — are returned
 //! in-band via the ApiResponse envelope so the settings UI can surface them.
 
+use std::future::Future;
+
 use axum::{
     Router,
     extract::{Path, Query, State, ws::Message},
@@ -91,7 +93,10 @@ async fn login_cli_tool(
                 handle_login(socket, deployment, id, command, query).await
             }
             cli_tools::CliToolLoginPlan::EntraMint { client_id, scope } => {
-                handle_entra_login(socket, id, client_id, scope).await
+                handle_entra_login(socket, id, EntraFlow::Mint { client_id, scope }).await
+            }
+            cli_tools::CliToolLoginPlan::EntraNativeBrowser { args } => {
+                handle_entra_login(socket, id, EntraFlow::NativeBrowser { args }).await
             }
         }
     }))
@@ -100,12 +105,19 @@ async fn login_cli_tool(
 /// Entra sign-in has no PTY to attach to — it runs in-process and drives a
 /// remote browser. Its progress is streamed over the same socket as terminal
 /// output so the settings UI renders it exactly like a vendor login.
-async fn handle_entra_login(
-    mut socket: MaybeSignedWebSocket,
-    id: CliToolId,
-    client_id: &'static str,
-    scope: &'static str,
-) {
+/// Which Entra sign-in shape a tool uses: we mint the token ourselves, or the
+/// tool runs its own flow and we only supply the browser.
+enum EntraFlow {
+    Mint {
+        client_id: &'static str,
+        scope: &'static str,
+    },
+    NativeBrowser {
+        args: Vec<String>,
+    },
+}
+
+async fn handle_entra_login(mut socket: MaybeSignedWebSocket, id: CliToolId, flow: EntraFlow) {
     let Some(_guard) = cli_tools::try_begin_login(id) else {
         send_message(
             &mut socket,
@@ -120,7 +132,16 @@ async fn handle_entra_login(
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let progress = entra_mint::Progress::new(tx);
-    let mut task = Box::pin(cli_tools::run_entra_login(id, client_id, scope, &progress));
+    let mut task: std::pin::Pin<
+        Box<dyn Future<Output = Result<(), cli_tools::CliToolError>> + Send>,
+    > = match &flow {
+        EntraFlow::Mint { client_id, scope } => {
+            Box::pin(cli_tools::run_entra_login(id, client_id, scope, &progress))
+        }
+        EntraFlow::NativeBrowser { args } => Box::pin(cli_tools::run_entra_native_browser_login(
+            id, args, &progress,
+        )),
+    };
 
     let timeout = tokio::time::sleep(LOGIN_TIMEOUT);
     tokio::pin!(timeout);

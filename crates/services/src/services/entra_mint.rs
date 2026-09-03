@@ -797,6 +797,399 @@ with open(os.path.join(config_dir, "azureProfile.json"), "w", encoding="utf-8-si
 print("wrote azureProfile.json with %d subscription(s)" % len(subs))
 "#;
 
+// ---------------------------------------------------------------------------
+// Local-browser sign-in (for tools that run their own OAuth flow)
+// ---------------------------------------------------------------------------
+
+/// Toolchain for the local-browser path, supplied by Nix rather than guessed.
+pub struct LocalBrowserTools {
+    pub chromium: PathBuf,
+}
+
+impl LocalBrowserTools {
+    pub fn from_env() -> Result<Self, EntraError> {
+        Ok(Self {
+            chromium: env_var("VK_ENTRA_CHROMIUM")
+                .map(PathBuf::from)
+                .ok_or_else(|| EntraError::Config("VK_ENTRA_CHROMIUM is not set".into()))?,
+        })
+    }
+}
+
+/// Export the Entra cookies held by the shared browser profile.
+///
+/// This is what lets the local browser skip the sign-in entirely: it inherits
+/// the session the profile already holds, so no password or TOTP is spent.
+async fn export_profile_cookies(
+    cfg: &EntraConfig,
+    http: &reqwest::Client,
+) -> Result<Vec<serde_json::Value>, EntraError> {
+    let session = BrowserSession::open(cfg, http.clone(), false).await?;
+    let result = session.execute("return await context.cookies()").await;
+    session.close().await;
+    Ok(result?.as_array().cloned().unwrap_or_default())
+}
+
+/// The bits of Chrome DevTools Protocol this needs, and nothing more.
+struct LocalChrome {
+    child: tokio::process::Child,
+    ws: futures::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::Message,
+    >,
+    rx: tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    session_id: String,
+    next_id: i64,
+}
+
+impl LocalChrome {
+    /// Launch headless chromium on an ephemeral profile and attach to a tab.
+    async fn launch(
+        tools: &LocalBrowserTools,
+        port: u16,
+        dir: &std::path::Path,
+    ) -> Result<Self, EntraError> {
+        use futures::StreamExt;
+
+        let child = tokio::process::Command::new(&tools.chromium)
+            .args([
+                "--headless=new",
+                &format!("--remote-debugging-port={port}"),
+                &format!("--user-data-dir={}", dir.display()),
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "about:blank",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+
+        // Poll for the debugger endpoint; chromium takes a moment to bind.
+        let http = reqwest::Client::new();
+        let mut ws_url = None;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Ok(resp) = http
+                .get(format!("http://127.0.0.1:{port}/json/version"))
+                .send()
+                .await
+                && let Ok(v) = resp.json::<serde_json::Value>().await
+                && let Some(u) = v.get("webSocketDebuggerUrl").and_then(|u| u.as_str())
+            {
+                ws_url = Some(u.to_string());
+                break;
+            }
+        }
+        let ws_url =
+            ws_url.ok_or_else(|| EntraError::Browser("chromium never exposed CDP".into()))?;
+        let (stream, _) = tokio_tungstenite::connect_async(&ws_url)
+            .await
+            .map_err(|e| EntraError::Browser(format!("CDP connect: {e}")))?;
+        let (sink, mut source) = stream.split();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(Ok(msg)) = source.next().await {
+                if let Ok(text) = msg.into_text()
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+                {
+                    let _ = tx.send(v);
+                }
+            }
+        });
+
+        let mut me = Self {
+            child,
+            ws: sink,
+            rx,
+            session_id: String::new(),
+            next_id: 0,
+        };
+        let target = me
+            .call(
+                "Target.createTarget",
+                serde_json::json!({"url": "about:blank"}),
+            )
+            .await?;
+        let target_id = target
+            .get("targetId")
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| EntraError::Browser("no targetId".into()))?
+            .to_string();
+        let attached = me
+            .call(
+                "Target.attachToTarget",
+                serde_json::json!({"targetId": target_id, "flatten": true}),
+            )
+            .await?;
+        me.session_id = attached
+            .get("sessionId")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| EntraError::Browser("no sessionId".into()))?
+            .to_string();
+        me.call("Network.enable", serde_json::json!({})).await?;
+        me.call("Page.enable", serde_json::json!({})).await?;
+        Ok(me)
+    }
+
+    async fn call(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, EntraError> {
+        use futures::SinkExt;
+        self.next_id += 1;
+        let id = self.next_id;
+        let mut msg = serde_json::json!({"id": id, "method": method, "params": params});
+        if !self.session_id.is_empty() {
+            msg["sessionId"] = serde_json::Value::String(self.session_id.clone());
+        }
+        self.ws
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                msg.to_string().into(),
+            ))
+            .await
+            .map_err(|e| EntraError::Browser(format!("CDP send: {e}")))?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout_at(deadline, self.rx.recv()).await {
+                Ok(Some(v)) => {
+                    if v.get("id").and_then(|i| i.as_i64()) == Some(id) {
+                        if let Some(err) = v.get("error") {
+                            return Err(EntraError::Browser(format!("{method}: {err}")));
+                        }
+                        return Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null));
+                    }
+                }
+                _ => break,
+            }
+        }
+        Err(EntraError::Browser(format!("{method}: timed out")))
+    }
+
+    /// Transplant the shared profile's cookies so Entra recognises the session.
+    async fn seed_cookies(&mut self, cookies: &[serde_json::Value]) -> Result<usize, EntraError> {
+        let mapped: Vec<serde_json::Value> = cookies
+            .iter()
+            .map(|c| {
+                let mut o = serde_json::json!({
+                    "name": c.get("name").cloned().unwrap_or_default(),
+                    "value": c.get("value").cloned().unwrap_or_default(),
+                    "domain": c.get("domain").cloned().unwrap_or_default(),
+                    "path": c.get("path").cloned().unwrap_or_else(|| "/".into()),
+                    "secure": c.get("secure").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "httpOnly": c.get("httpOnly").and_then(|v| v.as_bool()).unwrap_or(false),
+                });
+                // A negative/zero expiry means "session cookie"; CDP wants the
+                // field omitted rather than a sentinel.
+                if let Some(exp) = c.get("expires").and_then(|v| v.as_f64())
+                    && exp > 0.0
+                {
+                    o["expires"] = serde_json::json!(exp);
+                }
+                if let Some(ss) = c.get("sameSite").and_then(|v| v.as_str())
+                    && matches!(ss, "Strict" | "Lax" | "None")
+                {
+                    o["sameSite"] = serde_json::json!(ss);
+                }
+                o
+            })
+            .collect();
+        let n = mapped.len();
+        self.call(
+            "Network.setCookies",
+            serde_json::json!({ "cookies": mapped }),
+        )
+        .await?;
+        Ok(n)
+    }
+
+    async fn navigate(&mut self, url: &str) -> Result<(), EntraError> {
+        self.call("Page.navigate", serde_json::json!({ "url": url }))
+            .await?;
+        Ok(())
+    }
+
+    /// Click the account tile if a picker rendered; otherwise report the URL.
+    async fn nudge(&mut self, email: &str) -> Result<String, EntraError> {
+        let expr = format!(
+            "(() => {{ const email = {}; \
+             const tile = [...document.querySelectorAll('div,small,button')].find(e => e.textContent.trim() === email); \
+             if (tile) {{ tile.click(); return 'account tile'; }} \
+             const next = document.querySelector('#idSIButton9'); \
+             if (next) {{ next.click(); return 'continue'; }} \
+             return 'waiting'; }})()",
+            js_string(email)
+        );
+        let r = self
+            .call(
+                "Runtime.evaluate",
+                serde_json::json!({"expression": expr, "returnByValue": true}),
+            )
+            .await?;
+        Ok(r.get("result")
+            .and_then(|v| v.get("value"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string())
+    }
+}
+
+/// Run a tool's *own* browser sign-in, supplying a browser that can reach the
+/// loopback listener it opens.
+///
+/// The remote browser cannot: it runs in a sandbox with no route to this host,
+/// which is why this path exists at all. A local chromium can, so the tool's
+/// redirect completes normally and the tool writes its own native credential
+/// store — no cache format to reverse-engineer, and nothing to intercept.
+#[allow(clippy::too_many_arguments)]
+pub async fn native_browser_login(
+    cfg: &EntraConfig,
+    tools: &LocalBrowserTools,
+    executable: &std::path::Path,
+    args: &[String],
+    progress: &Progress,
+) -> Result<(), EntraError> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|e| EntraError::Browser(e.to_string()))?;
+
+    progress.say("Exporting the Entra session from the shared browser profile…");
+    let cookies = export_profile_cookies(cfg, &http).await?;
+    progress.say(format!("  {} cookies", cookies.len()));
+
+    // Scratch space: a shim that captures the URL the tool wants to open, and
+    // an ephemeral chromium profile.
+    let work = std::env::temp_dir().join(format!("vk-entra-{}", uuid::Uuid::new_v4()));
+    let shim_dir = work.join("shim");
+    let chrome_dir = work.join("chrome");
+    std::fs::create_dir_all(&shim_dir)?;
+    std::fs::create_dir_all(&chrome_dir)?;
+    let url_file = work.join("auth-url");
+    let shim = shim_dir.join("xdg-open");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$1\" > {}\nexit 0\n",
+            url_file.display()
+        ),
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    let result = async {
+        progress.say("Starting the tool's own sign-in…");
+        let path = format!(
+            "{}:{}",
+            shim_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut child = tokio::process::Command::new(executable)
+            .args(args)
+            .env("PATH", path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+
+        // Wait for the tool to hand us its authorize URL.
+        let mut auth = None;
+        for _ in 0..60 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if let Ok(v) = std::fs::read_to_string(&url_file)
+                && !v.trim().is_empty()
+            {
+                auth = Some(v.trim().to_string());
+                break;
+            }
+            if child.try_wait()?.is_some() {
+                break;
+            }
+        }
+        let auth =
+            auth.ok_or_else(|| EntraError::Auth("the tool never opened a sign-in URL".into()))?;
+
+        // MSAL asks for select_account, which parks on the picker even with a
+        // live session. Drop it and hint the account so Entra goes straight
+        // through; the redirect then lands on the tool's own listener.
+        let auth = rewrite_authorize_url(&auth, &cfg.email);
+        progress.say("Completing it in a local browser (it can reach the tool's listener)…");
+
+        let port = 9333;
+        let mut chrome = LocalChrome::launch(tools, port, &chrome_dir).await?;
+        let n = chrome.seed_cookies(&cookies).await?;
+        progress.say(format!("  seeded {n} cookies into the local browser"));
+        chrome.navigate(&auth).await?;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        let mut status = None;
+        while tokio::time::Instant::now() < deadline {
+            if let Some(s) = child.try_wait()? {
+                status = Some(s);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let _ = chrome.nudge(&cfg.email).await;
+        }
+        let _ = chrome.child.kill().await;
+
+        let status = match status {
+            Some(s) => s,
+            None => {
+                let _ = child.kill().await;
+                return Err(EntraError::Auth("the tool's sign-in timed out".into()));
+            }
+        };
+        if !status.success() {
+            let out = child.wait_with_output().await?;
+            let tail = String::from_utf8_lossy(&out.stdout);
+            return Err(EntraError::Auth(format!(
+                "the tool reported: {}",
+                tail.trim()
+                    .chars()
+                    .rev()
+                    .take(300)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect::<String>()
+            )));
+        }
+        progress.say("The tool completed its sign-in and wrote its own credential store.");
+        Ok(())
+    }
+    .await;
+
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+/// Strip MSAL's `prompt=select_account` and hint the account, so an existing
+/// session resolves without rendering a picker.
+fn rewrite_authorize_url(url: &str, email: &str) -> String {
+    let (base, query) = match url.split_once('?') {
+        Some((b, q)) => (b, q),
+        None => return url.to_string(),
+    };
+    let mut parts: Vec<String> = query
+        .split('&')
+        .filter(|p| {
+            let key = p.split_once('=').map(|(k, _)| k).unwrap_or(p);
+            key != "prompt" && key != "login_hint"
+        })
+        .map(|s| s.to_string())
+        .collect();
+    parts.push(format!("login_hint={}", urlencode(email)));
+    format!("{base}?{}", parts.join("&"))
+}
+
 /// Marker delimiting the block vibe-kanban owns inside the PowerShell profile.
 const PS_BLOCK_BEGIN: &str = "# >>> vibe-kanban Entra auth >>>";
 const PS_BLOCK_END: &str = "# <<< vibe-kanban Entra auth <<<";
@@ -907,6 +1300,27 @@ if (Test-Path $VkGraphTokenFile) {{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authorize_rewrite_drops_the_picker_and_hints_the_account() {
+        let url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize                   ?scope=User.Read&redirect_uri=http%3A%2F%2Flocalhost%3A1234                   &prompt=select_account&state=abc";
+        let out = rewrite_authorize_url(url, "a@b.com");
+        // select_account parks on a picker even with a live session cookie.
+        assert!(!out.contains("prompt="), "prompt must be dropped: {out}");
+        assert!(out.contains("login_hint=a%40b.com"));
+        // Everything the tool put there must survive, especially its listener.
+        assert!(out.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1234"));
+        assert!(out.contains("state=abc"));
+        assert!(out.contains("scope=User.Read"));
+    }
+
+    #[test]
+    fn authorize_rewrite_replaces_an_existing_login_hint() {
+        let out = rewrite_authorize_url("https://x/y?login_hint=old%40x.com&a=1", "new@x.com");
+        assert!(out.contains("login_hint=new%40x.com"));
+        assert!(!out.contains("old%40x.com"));
+        assert_eq!(out.matches("login_hint=").count(), 1);
+    }
 
     #[test]
     fn ps_block_is_idempotent_and_preserves_user_content() {
