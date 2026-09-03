@@ -73,7 +73,7 @@ run in parallel within their layer.
 - [x] T013 Run independent Codex diff review, address confirmed findings, repeat
   affected verification, and record the clean result in
   `specs/vk/d71c-refresh-active-w/review.md` (depends on T012).
-- [ ] T014 Update `docs/knowledge-base/active-mcp-refresh.md` and
+- [x] T014 Update `docs/knowledge-base/active-mcp-refresh.md` and
   `docs/knowledge-base/INDEX.md` with reusable shipped knowledge, or record “no
   new knowledge to record,” then commit it (depends on T013).
 - [ ] T015 Verify the latest base, push the task branch, open a pull request, wait
