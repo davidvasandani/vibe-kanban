@@ -1104,7 +1104,7 @@ fn link_target(e: &CliToolCatalogEntry) -> PathBuf {
 ///
 /// The keyring password is generated once and kept beside the tool; it guards
 /// a local token cache on a host the service user already owns.
-fn graph_cli_wrapper_script(binary: &Path, password_file: &Path) -> String {
+fn graph_cli_wrapper_script(binary: &Path, password_file: &Path, state_dir: &Path) -> String {
     let q = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', r"'\''"));
     format!(
         r#"#!/bin/sh
@@ -1120,6 +1120,18 @@ DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
 export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT
 LD_LIBRARY_PATH="$VK_ENTRA_LIBSECRET_LIB${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
 export LD_LIBRARY_PATH
+
+# Keep the keyring in a directory we own. gnome-keyring unlocks the *login*
+# keyring under $XDG_DATA_HOME, and it can only do so with the password that
+# created it -- so a keyring left by anything else is one we can never open,
+# and the failure surfaces as MSAL's opaque "data was written but it could not
+# be read". Pointing XDG_DATA_HOME here means the keyring is always ours. The
+# tool's own cache lives alongside it, which is what we want: the credential
+# and the keyring that protects it stay together.
+XDG_DATA_HOME={state}
+mkdir -p "$XDG_DATA_HOME"
+chmod 700 "$XDG_DATA_HOME"
+export XDG_DATA_HOME
 
 # dbus-run-session wants a runtime dir it owns; fall back to a private one.
 if [ -z "${{XDG_RUNTIME_DIR:-}}" ] || [ ! -w "${{XDG_RUNTIME_DIR:-/nonexistent}}" ]; then
@@ -1142,6 +1154,7 @@ exec "$VK_ENTRA_DBUS_RUN_SESSION" -- sh -c '
 "#,
         bin = q(binary),
         pw = q(password_file),
+        state = q(state_dir),
     )
 }
 
@@ -1162,7 +1175,12 @@ fn write_runtime_wrapper(e: &CliToolCatalogEntry) -> Result<(), CliToolError> {
     }
     let wrapper = wrapper_path(e);
     let password_file = tool_dir(e.id).join(".keyring-password");
-    std::fs::write(&wrapper, graph_cli_wrapper_script(&binary, &password_file))?;
+    let state_dir = tool_dir(e.id).join("state");
+    std::fs::create_dir_all(&state_dir)?;
+    std::fs::write(
+        &wrapper,
+        graph_cli_wrapper_script(&binary, &password_file, &state_dir),
+    )?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
