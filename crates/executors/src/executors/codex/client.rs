@@ -28,6 +28,7 @@ use codex_protocol::config_types::{CollaborationMode, ModeKind, Settings};
 use futures::TryFutureExt;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{self, Value};
+use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncWrite, AsyncWriteExt, BufWriter},
     sync::Mutex,
@@ -882,6 +883,7 @@ impl McpRefreshControl for AppServerClient {
             .into_iter()
             .map(|server| {
                 let auth_failed = matches!(server.auth_status, McpAuthStatus::NotLoggedIn);
+                let (tool_names, tool_schema_fingerprint) = tool_inventory_evidence(&server.tools);
                 McpServerRefreshSnapshot {
                     server_id: server.name,
                     status: if auth_failed {
@@ -890,6 +892,8 @@ impl McpRefreshControl for AppServerClient {
                         McpServerRefreshStatus::Ready
                     },
                     tool_count: Some(server.tools.len() as u32),
+                    tool_names: Some(tool_names),
+                    tool_schema_fingerprint: Some(tool_schema_fingerprint),
                     resource_count: Some(
                         (server.resources.len() + server.resource_templates.len()) as u32,
                     ),
@@ -903,6 +907,32 @@ impl McpRefreshControl for AppServerClient {
             })
             .collect())
     }
+}
+
+/// Produce bounded evidence for the exact tool generation Codex reports for a
+/// loaded thread. Reload acknowledgement alone does not prove adoption.
+fn tool_inventory_evidence(
+    tools: &HashMap<String, codex_protocol::mcp::Tool>,
+) -> (Vec<String>, String) {
+    let mut tool_names: Vec<_> = tools.keys().cloned().collect();
+    tool_names.sort();
+
+    let schemas: Vec<_> = tool_names
+        .iter()
+        .map(|key| {
+            let tool = &tools[key];
+            serde_json::json!({
+                "key": key,
+                "name": tool.name,
+                "input_schema": tool.input_schema,
+                "output_schema": tool.output_schema,
+            })
+        })
+        .collect();
+    let encoded = serde_json::to_vec(&schemas)
+        .expect("Codex MCP tool schemas are JSON-serializable protocol values");
+    let digest = Sha256::digest(encoded);
+    (tool_names, format!("{digest:x}"))
 }
 
 #[async_trait]
@@ -1097,5 +1127,86 @@ impl LogWriter {
         guard.write_all(b"\n").await.map_err(ExecutorError::Io)?;
         guard.flush().await.map_err(ExecutorError::Io)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod mcp_inventory_tests {
+    use codex_protocol::mcp::Tool;
+
+    use super::*;
+
+    fn tool(name: &str, property_type: &str) -> Tool {
+        Tool {
+            name: name.to_string(),
+            title: None,
+            description: None,
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"value": {"type": property_type}}
+            }),
+            output_schema: None,
+            annotations: None,
+            icons: None,
+            meta: None,
+        }
+    }
+
+    #[test]
+    fn evidence_detects_stdio_add_remove_and_schema_change() {
+        let original = HashMap::from([(
+            "sn_access_cycle_report".to_string(),
+            tool("sn_access_cycle_report", "string"),
+        )]);
+        let added = HashMap::from([
+            (
+                "sn_access_cycle_report".to_string(),
+                tool("sn_access_cycle_report", "string"),
+            ),
+            (
+                "entra_user_lookup".to_string(),
+                tool("entra_user_lookup", "string"),
+            ),
+        ]);
+        let removed = HashMap::from([(
+            "entra_user_lookup".to_string(),
+            tool("entra_user_lookup", "string"),
+        )]);
+        let schema_changed = HashMap::from([(
+            "entra_user_lookup".to_string(),
+            tool("entra_user_lookup", "integer"),
+        )]);
+
+        let original_evidence = tool_inventory_evidence(&original);
+        let added_evidence = tool_inventory_evidence(&added);
+        let removed_evidence = tool_inventory_evidence(&removed);
+        let changed_evidence = tool_inventory_evidence(&schema_changed);
+
+        assert_eq!(
+            added_evidence.0,
+            vec!["entra_user_lookup", "sn_access_cycle_report"]
+        );
+        assert_eq!(removed_evidence.0, vec!["entra_user_lookup"]);
+        assert_ne!(original_evidence.1, added_evidence.1);
+        assert_ne!(added_evidence.1, removed_evidence.1);
+        assert_ne!(removed_evidence.1, changed_evidence.1);
+        assert_eq!(removed_evidence.0, changed_evidence.0);
+    }
+
+    #[test]
+    fn evidence_is_stable_across_hash_map_order() {
+        let first = HashMap::from([
+            ("b".to_string(), tool("b", "integer")),
+            ("a".to_string(), tool("a", "string")),
+        ]);
+        let second = HashMap::from([
+            ("a".to_string(), tool("a", "string")),
+            ("b".to_string(), tool("b", "integer")),
+        ]);
+
+        assert_eq!(
+            tool_inventory_evidence(&first),
+            tool_inventory_evidence(&second)
+        );
     }
 }

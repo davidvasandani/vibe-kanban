@@ -63,6 +63,10 @@ pub struct McpServerRefreshSnapshot {
     pub server_id: String,
     pub status: McpServerRefreshStatus,
     pub tool_count: Option<u32>,
+    /// Sorted tool identifiers from the executor-owned, post-start inventory.
+    pub tool_names: Option<Vec<String>>,
+    /// SHA-256 of sorted tool identifiers and their input/output schemas.
+    pub tool_schema_fingerprint: Option<String>,
     pub resource_count: Option<u32>,
     pub prompt_count: Option<u32>,
     pub restart_occurred: Option<bool>,

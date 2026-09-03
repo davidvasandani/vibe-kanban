@@ -170,6 +170,8 @@ mod tests {
                     server_id: "slack".to_string(),
                     status: McpServerRefreshStatus::Ready,
                     tool_count: Some(7),
+                    tool_names: Some(vec!["attachment_get_data".to_string()]),
+                    tool_schema_fingerprint: Some("generation-a".to_string()),
                     resource_count: Some(2),
                     prompt_count: None,
                     restart_occurred: None,
@@ -185,6 +187,8 @@ mod tests {
                     server_id: "slack".to_string(),
                     status: McpServerRefreshStatus::FailedUnavailable,
                     tool_count: Some(0),
+                    tool_names: None,
+                    tool_schema_fingerprint: None,
                     resource_count: Some(0),
                     prompt_count: None,
                     restart_occurred: None,
@@ -201,5 +205,56 @@ mod tests {
             McpServerRefreshStatus::FailedUnavailable
         );
         assert_eq!(result.servers[0].tool_count, Some(0));
+    }
+
+    #[tokio::test]
+    async fn each_confirmed_generation_replaces_exact_tool_evidence() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+
+        for (names, fingerprint) in [
+            (
+                vec!["sn_access_cycle_report".to_string()],
+                "generation-original",
+            ),
+            (
+                vec![
+                    "entra_user_lookup".to_string(),
+                    "sn_access_cycle_report".to_string(),
+                ],
+                "generation-added",
+            ),
+            (vec!["entra_user_lookup".to_string()], "generation-removed"),
+            (
+                vec!["entra_user_lookup".to_string()],
+                "generation-schema-changed",
+            ),
+        ] {
+            coordinator.request(session, true).await;
+            let result = coordinator
+                .confirm(
+                    session,
+                    vec![McpServerRefreshSnapshot {
+                        server_id: "personal_servicenow".to_string(),
+                        status: McpServerRefreshStatus::Ready,
+                        tool_count: Some(names.len() as u32),
+                        tool_names: Some(names.clone()),
+                        tool_schema_fingerprint: Some(fingerprint.to_string()),
+                        resource_count: Some(0),
+                        prompt_count: None,
+                        restart_occurred: None,
+                        error: None,
+                    }],
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(result.servers.len(), 1);
+            assert_eq!(result.servers[0].tool_names.as_ref(), Some(&names));
+            assert_eq!(
+                result.servers[0].tool_schema_fingerprint.as_deref(),
+                Some(fingerprint)
+            );
+        }
     }
 }
