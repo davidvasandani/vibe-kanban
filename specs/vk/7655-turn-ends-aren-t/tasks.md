@@ -36,3 +36,13 @@ Rust module, so they are intentionally serial rather than marked `[P]`.
   `vk/7655-turn-ends-aren-t` (depends on T006).
 - [x] T008 Open and merge the pull request after the implementation, review,
   verification, and knowledge commits are ready (depends on T005, T007).
+
+## Cluster regression follow-up
+
+- [x] T009 Confirm the merged release is deployed and inspect persisted worker
+  state for the affected workspace.
+- [x] T010 Apply the signal-driven lifecycle distinction to coordinator worker
+  leases and add focused regression coverage.
+- [x] T011 Run crate verification and an independent Codex review.
+- [x] T012 Update reusable knowledge, open the follow-up pull request, pass CI,
+  and merge it.

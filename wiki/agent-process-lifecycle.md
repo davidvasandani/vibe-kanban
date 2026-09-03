@@ -18,9 +18,9 @@ per-turn and must be rebuilt, not shared.
 ## Persistent app-server vs one-shot is implicit
 
 There is no trait method or enum flag. The split is encoded solely as
-`SpawnedChild.exit_signal: Some(..)` (Codex, OpenCode, ACP — long-lived
-process, signals turn end over the wire) vs `None` (Claude, Gemini, Amp,
-Cursor, Qwen, Copilot, Droid — exit naturally).
+`SpawnedChild.exit_signal: Some(..)` (Codex, OpenCode, and the ACP-backed
+Gemini, Qwen, Copilot, and Grok executors — signals turn end over the wire) vs
+`None` (Claude, Amp, Cursor, and Droid — exit naturally).
 `ExecutionProcessRunReason::is_persistent()` is a *different* axis (true only
 for `DevServer`/`BackgroundHelper`): it gates raw-log-to-file streaming and
 boot re-adoption by pgid. `CodingAgent` is deliberately **non**-persistent
@@ -43,6 +43,14 @@ child lives. The exit monitor then reaps the exact owned group and records
 `indeterminate`—never `completed`—so the authoritative process stream clears
 the UI's stale Stop state. Applying the natural-exit liveness rule to both
 lifecycle shapes re-arms the timer forever for Codex-style app servers.
+
+Cluster execution has the same split at a second boundary. The coordinator's
+worker-job lease proves that the worker process still owns the dispatch, but for
+a signal-driven executor it does not prove that the protocol turn is active.
+After quiet final output, a current lease may defer reconciliation only for a
+natural-exit executor. Otherwise a lost terminal event plus regular lease
+renewals re-arms the coordinator timer forever even after the worker-side child
+rule is correct.
 
 ## The exit monitor kills twice
 

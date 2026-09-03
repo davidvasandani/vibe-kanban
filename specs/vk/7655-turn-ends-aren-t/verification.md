@@ -30,3 +30,16 @@ not turn liveness.
 
 No frontend, API, schema, generated type, dependency, or homelab deployment
 change was required.
+
+## Cluster follow-up (2026-09-03)
+
+The first release fixed local child-process liveness but the symptom persisted
+for clustered executions. Runtime worker state confirmed the affected workspace
+execution remained `running` until an external kill. The coordinator had a
+second indefinite deferral: every current worker lease re-armed final-output
+reconciliation, including leases for signal-driven Codex app servers.
+
+The follow-up makes worker leases turn-liveness evidence only for natural-exit
+executors. The focused suite now includes seven passing tests, including the
+worker-lease predicate and exhaustive classification of the current
+signal-driven and natural-exit executor variants.
