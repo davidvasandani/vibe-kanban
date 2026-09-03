@@ -23,6 +23,14 @@ Codex CLI 0.146.0 independently reviewed the follow-up against `origin/main`:
 
 No review-driven changes were required.
 
+## Worker output-drain follow-up (2026-09-03)
+
+Codex CLI 0.146.0 independently reviewed the bounded output-drain change,
+including terminal ordering, cancellation behavior, and the regression test.
+The completed review reported:
+
+> No significant findings exist.
+
 ## Worker terminal-signal follow-up (2026-09-03)
 
 The first review identified a cancellation race in the closed-channel path. It
