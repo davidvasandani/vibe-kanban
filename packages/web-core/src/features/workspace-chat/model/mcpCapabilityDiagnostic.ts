@@ -27,6 +27,14 @@ export function mcpCapabilityDiagnostic(
       message: `${serverId} is configured; adoption is waiting for the next Codex turn.`,
     };
   }
+  if (result.status === 'failed') {
+    return {
+      state: 'unavailable',
+      message:
+        result.error?.message ??
+        `${serverId} availability could not be confirmed after the MCP refresh failed.`,
+    };
+  }
   const server = result.servers.find((item) => item.server_id === serverId);
   if (!server) {
     return {

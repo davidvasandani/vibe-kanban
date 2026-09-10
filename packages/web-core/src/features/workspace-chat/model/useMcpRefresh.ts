@@ -47,34 +47,62 @@ export function useMcpRefresh(
   activeSessionKey.current = sessionKey;
   const [result, setResult] = useState<McpRefreshResult | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isReconcilingBusy, setIsReconcilingBusy] = useState(false);
   const operation = useRef(0);
+  const activeRefreshOperation = useRef<{
+    sessionKey: string;
+    operation: number;
+  } | null>(null);
+
+  const applyResult = useCallback(
+    (
+      expectedSessionKey: string,
+      expectedOperation: number,
+      next: McpRefreshResult | null
+    ) => {
+      if (
+        activeSessionKey.current !== expectedSessionKey ||
+        operation.current !== expectedOperation
+      ) {
+        return false;
+      }
+      setResult(next);
+      setIsReconcilingBusy(false);
+      return true;
+    },
+    []
+  );
 
   const readStatus = useCallback(async () => {
     if (!workspaceId || !sessionId || !sessionKey) return null;
     const currentOperation = ++operation.current;
     const next = await api.getMcpRefreshStatus(workspaceId, sessionId);
-    if (
-      activeSessionKey.current === sessionKey &&
-      operation.current === currentOperation
-    ) {
-      setResult(next);
-    }
+    applyResult(sessionKey, currentOperation, next);
     return next;
-  }, [api, sessionId, sessionKey, workspaceId]);
+  }, [api, applyResult, sessionId, sessionKey, workspaceId]);
 
   useEffect(() => {
     setResult(null);
     setIsRefreshing(false);
+    setIsReconcilingBusy(false);
+    activeRefreshOperation.current = null;
     if (sessionKey) void readStatus().catch(() => undefined);
   }, [readStatus, sessionKey]);
 
   useEffect(() => {
-    if (!sessionKey || result?.status !== 'pending_next_turn') return;
+    if (
+      !sessionKey ||
+      (result?.status !== 'pending_next_turn' && !isReconcilingBusy)
+    )
+      return;
     let cancelled = false;
     let timer: number;
     const poll = async () => {
       const next = await readStatus().catch(() => result);
-      if (!cancelled && next?.status === 'pending_next_turn') {
+      if (
+        !cancelled &&
+        (next?.status === 'pending_next_turn' || isReconcilingBusy)
+      ) {
         timer = window.setTimeout(poll, pollIntervalMs);
       }
     };
@@ -83,21 +111,40 @@ export function useMcpRefresh(
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [pollIntervalMs, readStatus, result, sessionKey]);
+  }, [isReconcilingBusy, pollIntervalMs, readStatus, result, sessionKey]);
 
   const refresh = useCallback(async () => {
-    if (!workspaceId || !sessionId || isRefreshing) return;
+    if (!workspaceId || !sessionId || !sessionKey || isRefreshing) return;
     setIsRefreshing(true);
+    const currentOperation = ++operation.current;
+    const refreshOperation = { sessionKey, operation: currentOperation };
+    activeRefreshOperation.current = refreshOperation;
     try {
       const next = await api.refreshMcpTools(workspaceId, sessionId);
-      setResult(next.status === 'busy' ? await readStatus() : next);
-      notifyResult(next);
+      if (next.status === 'busy') {
+        setIsReconcilingBusy(true);
+        await readStatus().catch(() => undefined);
+      } else {
+        applyResult(sessionKey, currentOperation, next);
+      }
+      if (activeSessionKey.current === sessionKey) notifyResult(next);
     } catch {
       toast.error('MCP refresh failed.');
     } finally {
-      setIsRefreshing(false);
+      if (activeRefreshOperation.current === refreshOperation) {
+        activeRefreshOperation.current = null;
+        setIsRefreshing(false);
+      }
     }
-  }, [api, isRefreshing, readStatus, sessionId, workspaceId]);
+  }, [
+    api,
+    applyResult,
+    isRefreshing,
+    readStatus,
+    sessionId,
+    sessionKey,
+    workspaceId,
+  ]);
 
   const tooltip = useMemo(() => {
     if (!result) {
@@ -107,5 +154,10 @@ export function useMcpRefresh(
     return `MCP refresh: ${result.status}. ${slack.message}`;
   }, [result]);
 
-  return { isRefreshing, refresh, result, tooltip };
+  return {
+    isRefreshing: isRefreshing || isReconcilingBusy,
+    refresh,
+    result,
+    tooltip,
+  };
 }

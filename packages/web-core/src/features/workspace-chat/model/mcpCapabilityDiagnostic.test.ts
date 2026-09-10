@@ -66,6 +66,20 @@ describe('mcpCapabilityDiagnostic', () => {
     });
   });
 
+  it('does not report retained snapshots as available after refresh failure', () => {
+    const failed = result('failed', [ready]);
+    failed.error = {
+      category: 'reload_failed',
+      message: 'MCP reload failed.',
+      remediation: 'Retry the refresh.',
+      retryable: true,
+    };
+    expect(mcpCapabilityDiagnostic(failed, 'slack')).toEqual({
+      state: 'unavailable',
+      message: 'MCP reload failed.',
+    });
+  });
+
   it('distinguishes a server that is not assigned', () => {
     expect(
       mcpCapabilityDiagnostic(result('refreshed', [], []), 'slack').state

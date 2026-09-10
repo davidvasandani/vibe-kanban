@@ -172,6 +172,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_exposes_only_sorted_configured_server_ids() {
+        let result = McpRefreshCoordinator::default()
+            .request(
+                Uuid::new_v4(),
+                true,
+                vec!["slack".into(), "logmein".into(), "slack".into()],
+            )
+            .await;
+        assert_eq!(result.configured_server_ids, ["logmein", "slack"]);
+        assert!(result.servers.is_empty());
+    }
+
+    #[tokio::test]
     async fn failed_server_is_not_claimed_as_retained_without_executor_support() {
         let coordinator = McpRefreshCoordinator::default();
         let session = Uuid::new_v4();

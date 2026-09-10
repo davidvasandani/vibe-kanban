@@ -3335,14 +3335,32 @@ impl ContainerService for LocalContainerService {
             && let Some(worker_job) =
                 ExecutionWorkerJob::find_by_execution_id(&self.db.pool, execution.id).await?
         {
-            let Some(servers) = configured_servers else {
+            let Some(profile_id) = profile.as_ref() else {
+                return Ok(self
+                    .mcp_refresh_coordinator
+                    .fail(session_id, McpRefreshErrorCategory::Unsupported)
+                    .await
+                    .unwrap_or(result));
+            };
+            let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id) else {
                 return Ok(self
                     .mcp_refresh_coordinator
                     .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
                     .await
                     .unwrap_or(result));
             };
-            let servers = servers.into_iter().collect();
+            // Re-read after worker resolution. The earlier read is status-only;
+            // settings may have changed while affinity was being resolved.
+            let servers = match read_coding_agent_mcp_servers(&agent).await {
+                Ok(servers) => servers.into_iter().collect(),
+                Err(_) => {
+                    return Ok(self
+                        .mcp_refresh_coordinator
+                        .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                        .await
+                        .unwrap_or(result));
+                }
+            };
             let snapshot = match validated_mcp_snapshot(BaseCodingAgent::Codex, servers) {
                 Ok(snapshot) => snapshot,
                 Err(_) => {
