@@ -52,6 +52,15 @@ natural-exit executor. Otherwise a lost terminal event plus regular lease
 renewals re-arms the coordinator timer forever even after the worker-side child
 rule is correct.
 
+The worker must also retain `SpawnedChild.exit_signal`. Its generic execution
+loop originally destructured `SpawnedChild` down to only `child` and
+`mcp_refresh`, silently dropping the terminal channel, then polled only
+`child.try_wait()`. That makes every signal-driven executor permanently running
+on a cluster worker because its app-server is expected to stay alive. Worker
+execution must select/poll both authorities: an executor signal classifies the
+turn and reaps the process, while natural-exit commands and executors continue
+to classify from OS exit status.
+
 ## The exit monitor kills twice
 
 `spawn_exit_monitor` has **two** kill points; guarding only the obvious one
@@ -213,6 +222,20 @@ is insufficient when the vendor's real path runs through a **parameter**
 vendor identifier must be read from the artifact that actually executes — the
 Claude npm package is a stub whose `sdk-tools.d.ts` lists schema titles, not wire
 tool names. Option B remains deferred: a vk poller runs a command, not a turn.
+
+## Output cleanup must not block terminal evidence indefinitely
+
+For signal-driven executors, the protocol completion signal is the turn
+boundary. Descendants can retain inherited stdout or stderr file descriptors
+after the app-server is stopped, preventing a reader from ever observing EOF.
+Output draining therefore needs a short bound followed by task cancellation;
+cleanup liveness must never become unbounded user-visible turn liveness. Normal
+draining remains before terminal journal closure so already-buffered final
+output is retained.
+
+This ordering matters independently of reconciliation timers: until the worker
+record becomes terminal, the coordinator has authoritative positive ownership
+evidence and correctly keeps Stop visible.
 
 ## What already survives restarts (reuse, don't reinvent)
 

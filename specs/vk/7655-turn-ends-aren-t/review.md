@@ -22,3 +22,20 @@ Codex CLI 0.146.0 independently reviewed the follow-up against `origin/main`:
 > pass. No actionable correctness regressions were identified.
 
 No review-driven changes were required.
+
+## Worker output-drain follow-up (2026-09-03)
+
+Codex CLI 0.146.0 independently reviewed the bounded output-drain change,
+including terminal ordering, cancellation behavior, and the regression test.
+The completed review reported:
+
+> No significant findings exist.
+
+## Worker terminal-signal follow-up (2026-09-03)
+
+The first review identified a cancellation race in the closed-channel path. It
+was corrected and all worker tests were rerun. The clean second review reported:
+
+> The worker now retains and consumes executor completion signals while
+> preserving OS-exit, timeout, failure, and cancellation handling. No
+> actionable correctness regressions were identified in the changed code.

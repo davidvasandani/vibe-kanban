@@ -50,6 +50,9 @@ must remain stoppable.
   approvals, and session switches must not create false running or idle states.
 - **FR-10**: Automated regression coverage must reproduce the owning stale
   lifecycle sequence and prove convergence from running to terminal state.
+- **FR-11**: Once an executor emits authoritative terminal evidence,
+  output-pipe draining must be bounded when descendants retain inherited file
+  descriptors so cleanup cannot delay publishing that evidence indefinitely.
 
 ## Out of Scope
 
