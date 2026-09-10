@@ -34,6 +34,15 @@ function notifyResult(result: McpRefreshResult) {
   }
 }
 
+export function mcpRefreshTooltip(result: McpRefreshResult | null) {
+  if (!result) {
+    return 'Reload MCP configuration and verify the active Codex tool registry';
+  }
+  const slack = mcpCapabilityDiagnostic(result, 'slack');
+  const entra = mcpCapabilityDiagnostic(result, 'entra');
+  return `MCP refresh: ${result.status}. ${slack.message} ${entra.message}`;
+}
+
 export function useMcpRefresh(
   workspaceId: string | undefined,
   sessionId: string | undefined,
@@ -147,11 +156,7 @@ export function useMcpRefresh(
   ]);
 
   const tooltip = useMemo(() => {
-    if (!result) {
-      return 'Reload MCP configuration and verify the active Codex tool registry';
-    }
-    const slack = mcpCapabilityDiagnostic(result, 'slack');
-    return `MCP refresh: ${result.status}. ${slack.message}`;
+    return mcpRefreshTooltip(result);
   }, [result]);
 
   return {
