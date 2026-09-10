@@ -7,7 +7,7 @@ description: "Install app-managed, version-pinned vendor CLI tools that Vibe Kan
 
 The **CLI Tools** section in Settings installs a curated catalogue of vendor
 command-line tools into an app-owned directory. Only the catalogue's `bin`
-directory is added to spawned agents' PATH, and it is appended *after* host
+directory is added to spawned agents' PATH, and it is appended _after_ host
 paths — a host-provided copy (for example from Nix) always wins over an
 app-installed one. Installs are atomic: an interrupted install leaves either
 the previous version fully working or nothing on PATH.
@@ -25,6 +25,21 @@ other deployments can install the pinned app-managed copy from this page. In a
 clustered setup, install and authenticate the host that can actually own the
 workspace — an installation or login on the settings/coordinator host does not
 authenticate a different worker.
+
+The managed homelab also assigns a shared MCP server named `entra` to agents.
+It keeps the delegated credential on one host and exposes three tools to every
+cluster node:
+
+| MCP tool           | Underlying Vibe Kanban wrapper |
+| ------------------ | ------------------------------ |
+| `az`               | `az`                           |
+| `mgc_beta`         | `mgc-beta`                     |
+| `graph_powershell` | `graph-powershell-1.0`         |
+
+These are alternative access paths, not three different permission grants. A
+local `az` executable is already a Microsoft Graph client: `az rest` can issue
+both the Entra and Intune GET requests below. The Graph CLI and PowerShell SDK
+provide their native command surfaces when that is more convenient.
 
 Use **Login** on the Azure CLI card to run the vendor-owned device flow (`az
 login --use-device-code`). Azure CLI stores its tokens in the runtime user's
@@ -57,16 +72,47 @@ this workflow. See Microsoft's
 and
 [permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference#devicereadall).
 
+To verify the separate Intune managed-device record, the tenant must have an
+active Intune license and the delegated identity needs
+`DeviceManagementManagedDevices.Read.All`. This permission is distinct from
+`Device.Read.All`; Vibe Kanban does not add or consent it automatically.
+
+```bash
+az rest --method GET \
+  --url "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?\$filter=deviceName%20eq%20'EXACT-HOSTNAME'&\$select=id,deviceName,azureADDeviceId,operatingSystem,osVersion,complianceState,managementAgent,lastSyncDateTime" \
+  --output json
+```
+
+This is also GET-only and deliberately selects a bounded field set. Confirm
+that a returned record's `deviceName` exactly matches the requested hostname.
+See Microsoft's
+[list managedDevices contract](https://learn.microsoft.com/en-us/graph/api/intune-devices-manageddevice-list?view=graph-rest-1.0).
+
 ### Azure troubleshooting
 
 - `command -v az` is empty: rebuild/restart the Vibe Kanban execution host, or
   install Azure CLI for that exact host from **CLI Tools**.
+- Local `az` exists but the `entra` / `az`, `mgc_beta`, and
+  `graph_powershell` MCP tools are absent: use the workspace's **Refresh MCP
+  tools** action (or restart the agent) so an older active Codex registry adopts
+  the current preconfigured server.
+- The `entra` server is registered but exposes no tools: its readiness check is
+  failing because at least one underlying wrapper is missing or not executable
+  on the credential-owning host. Repair/install that catalogue entry on the
+  owner host, then refresh the agent's MCP tools.
 - The tool card is authenticated but `az account show --output none` fails in a
   workspace: confirm the workspace is running on the same host and runtime
   principal that performed the login, then reauthenticate that host.
 - Account status works but the device query returns 403: the Azure session is
   valid, but Graph permission or the signed-in user's Entra role is insufficient.
   Grant only `Device.Read.All` and the least-privileged supported role.
+- The Entra device query works but the Intune query returns 403: verify the
+  tenant has an active Intune license and consent
+  `DeviceManagementManagedDevices.Read.All`; do not grant the read-write
+  alternative for this workflow.
+- A successful query with an empty `value` array means the client and
+  authorization worked but no visible exact-name record matched. It is not a
+  missing-client error.
 - A device query succeeds on the coordinator but not in the workspace: inspect
   workspace worker affinity and repeat the checks on that worker. Coordinator
   success is not worker evidence.
@@ -78,7 +124,7 @@ The `graph-powershell-1.0` tool installs the stable
 (`Microsoft.Graph` module) at a pinned version. The `1.0` refers to the stable
 Graph API channel — Microsoft recommends it for production — not the SDK
 package version, which is 2.x. The beta channel is a separate module and is
-not installed; for the beta Graph *CLI*, see the `mgc-beta` catalogue entry.
+not installed; for the beta Graph _CLI_, see the `mgc-beta` catalogue entry.
 
 ### Prerequisites
 
