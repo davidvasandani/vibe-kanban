@@ -1,7 +1,8 @@
 # Active MCP refresh
 
 Contributing tasks: `8c27-refresh-mcp-tool`, `9151-reloading-mcp-no`,
-`cc71-refresh-mcp-shou`, `mcp-agent-restart`, `vk/d71c-refresh-active-w`
+`cc71-refresh-mcp-shou`, `mcp-agent-restart`, `vk/d71c-refresh-active-w`,
+`vk/84ef-restore-slack-mc`
 
 ## Executor-neutral restart fallback
 
@@ -90,6 +91,14 @@ Public failures are allow-listed category/message/remediation tuples. Never pass
 through executor errors, commands, environment values, authenticated URLs, or
 raw subprocess output. Tool/resource counts remain optional, and the
 last-successful timestamp advances only after a fully successful confirmation.
+
+Configured state and agent-visible state are separate facts. A secret-safe
+status response may expose only sorted server identifiers from the selected
+profile alongside live server snapshots. The browser can then distinguish
+"not assigned", "assigned but awaiting adoption", "missing or zero tools", and
+"ready with tools" without receiving definitions, headers, or environment
+values. Treat an aggregate refresh failure before retained snapshots so stale
+last-successful inventory cannot be presented as current availability.
 
 ## Clustered refresh rematerialization
 

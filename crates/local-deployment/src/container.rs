@@ -3303,9 +3303,20 @@ impl ContainerService for LocalContainerService {
         let supported = profile
             .as_ref()
             .is_some_and(|profile| profile.executor == BaseCodingAgent::Codex);
+        let configured_servers = if let Some(profile_id) = profile.as_ref()
+            && let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id)
+        {
+            read_coding_agent_mcp_servers(&agent).await.ok()
+        } else {
+            None
+        };
+        let configured_server_ids = configured_servers
+            .as_ref()
+            .map(|servers| servers.keys().cloned().collect())
+            .unwrap_or_default();
         let result = self
             .mcp_refresh_coordinator
-            .request(session_id, supported)
+            .request(session_id, supported, configured_server_ids)
             .await;
         if result.status != McpRefreshStatus::PendingNextTurn {
             return Ok(result);
@@ -3324,20 +3335,22 @@ impl ContainerService for LocalContainerService {
             && let Some(worker_job) =
                 ExecutionWorkerJob::find_by_execution_id(&self.db.pool, execution.id).await?
         {
-            let Some(profile_id) = profile else {
+            let Some(profile_id) = profile.as_ref() else {
                 return Ok(self
                     .mcp_refresh_coordinator
                     .fail(session_id, McpRefreshErrorCategory::Unsupported)
                     .await
                     .unwrap_or(result));
             };
-            let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(&profile_id) else {
+            let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id) else {
                 return Ok(self
                     .mcp_refresh_coordinator
                     .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
                     .await
                     .unwrap_or(result));
             };
+            // Re-read after worker resolution. The earlier read is status-only;
+            // settings may have changed while affinity was being resolved.
             let servers = match read_coding_agent_mcp_servers(&agent).await {
                 Ok(servers) => servers.into_iter().collect(),
                 Err(_) => {

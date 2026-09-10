@@ -1,45 +1,65 @@
-# Implementation Plan: Refresh Active Workspace MCP Inventories
+# Implementation plan: Codex Slack MCP and Azure/Entra capabilities
 
-**Task:** `vk/d71c-refresh-active-w`
+**Task:** `vk/84ef-restore-slack-mc`
 
-1. Establish the SpecKit constitution and task-scoped feature artifacts, using
-   the technical spec and prior-knowledge distillation as inputs.
-2. Trace the current refresh path from settings/connector mutation and UI action
-   through server coordination, worker rematerialization, Codex app-server
-   reload, next-turn confirmation, and model-visible tool registration.
-3. Reproduce the stale-inventory failure with focused fixtures or a protocol
-   harness that changes a stdio server's `tools/list` response while retaining
-   one workspace session. Separately pin current HTTP/SSE behavior.
-4. Identify the narrow broken boundary: effective-config selection, process
-   ownership/routing, reload timing, stale control handoff, next-turn adoption,
-   or status-source mismatch. Record protocol limitations rather than inferring
-   unsupported generation/restart guarantees.
-5. Implement the smallest end-to-end correction. Prefer a safe next-turn live
-   reload when the executor demonstrably supports it; otherwise route the UI
-   through the explicit restart fallback while preserving workspace and queued
-   prompt state.
-6. Make connector inventory and installation/enablement status derive from the
-   effective assigned configuration, or make any intentional catalog-versus-
-   installation distinction explicit and non-contradictory.
-7. Add dependency-local tests for stdio tool addition, removal, and input-schema
-   replacement, asserting the next model turn sees the new registry. Add failure
-   retention/invalidating behavior, coordinator-worker routing coverage where
-   applicable, UI state/restart coverage, and a non-stdio transport regression.
-8. Regenerate checked-in types only through the repository generators if Rust
-   API types change. Run dependency installation before formatting, then focused
-   tests, generated-type checks, formatting, lint/check, and broader Rust tests
-   proportionate to the diff.
-9. Run SpecKit analysis, execute the dependency-ordered tasks via
-   `/speckit.implement`, and tick each completed task with verification evidence.
-10. Run an independent Codex diff review, address every confirmed significant
-    finding, re-run affected checks, and repeat review until clean.
-11. Update the Vibe Kanban knowledge base with reusable findings from the shipped
-    fix (or state that none emerged), refresh its index, and commit the knowledge
-    changes.
-12. Rebase or otherwise verify against the latest base branch, push the task
-    branch, open a pull request, monitor required checks, address failures, and
-    merge the pull request. Do not change any non-Vibe-Kanban service.
+1. Establish the current capability boundaries.
+   - Trace shared MCP persistence, Codex native materialization, fresh-session
+     launch, clustered dispatch, and the existing MCP reload/restart action.
+   - Trace app-managed CLI installation and PATH construction for local agents,
+     remote workers, setup/dev processes, and workspace PTYs.
+   - Inspect the Vibe Kanban Nix module for Slack URL convergence and any
+     existing Azure package/auth state.
 
-No deployment change is planned unless investigation proves
-`homelab/modules/vibe-kanban-rebuild.nix` must provide additional Vibe Kanban
-runtime wiring.
+2. Define truthful capability diagnostics.
+   - Add a backend read model that compares configured Slack assignment,
+     executor-native persistence, active-session MCP status/tool inventory, `az`
+     executable discovery, and Azure account probe state without returning
+     credentials or raw subprocess output.
+   - Represent unavailable, stale/restart-required, unauthenticated, connected,
+     and failed states distinctly with allowlisted remediation.
+   - Surface the result beside the existing MCP refresh/restart workflow.
+
+3. Restore Slack for new and active Codex sessions.
+   - Ensure settings-owned Slack HTTP MCP definitions reach the exact Codex home
+     used by fresh local and remote executions.
+   - Reuse the supported Codex reload/next-turn confirmation where available and
+     the existing safe agent-restart fallback otherwise.
+   - Make reconnect completion invalidate/refetch the relevant state so the
+     refresh action is discoverable without recreating the task.
+
+4. Restore Azure CLI and read-only Entra authentication.
+   - Put the pinned/host-managed Azure CLI on the supervised coordinator and
+     worker agent PATH, retaining the app-managed CLI fallback where applicable.
+   - Reuse the existing durable Azure CLI authentication model and expose only
+     non-secret account status to agents/diagnostics. If deployment provisioning
+     is required, load it through systemd credentials or an equivalent protected
+     runtime store and grant only read-only Graph device permissions.
+   - Ensure the same context is available at each actual workspace execution
+     boundary, including execution-scoped homes where vendor state must be
+     linked rather than copied.
+
+5. Add regression coverage.
+   - Backend tests: configured/connected Slack with absent native/live agent
+     state, stale state requiring refresh, successful tool registration, missing
+     `az`, unauthenticated Azure, and authenticated secret-free probe output.
+   - Executor/cluster tests: fresh Codex config materialization and refresh
+     rematerialization on the owning worker.
+   - Nix tests: Azure CLI appears in coordinator and worker service PATH and
+     runtime auth wiring contains references/paths but no credential contents.
+   - Frontend tests: mismatch diagnostic and supported refresh action rendering.
+
+6. Document and verify.
+   - Document required Slack app/connection permissions, Codex assignment,
+     Azure login/auth ownership and minimum Graph permissions, restart/refresh
+     steps, and layered troubleshooting.
+   - Run focused Rust/TypeScript/Nix tests, formatting, generated-type checks,
+     and broader checks proportionate to touched code.
+   - Validate read-only exact-hostname searches for the four supplied candidates
+     across Slack and Entra, then correlate with LogMeIn when the live connected
+     capabilities are available.
+
+7. Review and ship.
+   - Run an independent Codex diff review, fix confirmed findings, rerun relevant
+     checks until no significant findings remain, update the project knowledge
+     base and index, commit both repositories as needed, then open and merge the
+     pull request(s) against their base branches.

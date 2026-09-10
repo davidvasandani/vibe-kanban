@@ -17,6 +17,60 @@ install/update/remove actions, and its authentication state. Vibe Kanban never
 manages credentials for these tools; each card links to the vendor's own
 authentication guide.
 
+## Azure CLI and Microsoft Entra device lookup
+
+Vibe Kanban exposes `az` from the selected execution host. The managed homelab
+NixOS deployment installs Azure CLI on every coordinator and worker agent PATH;
+other deployments can install the pinned app-managed copy from this page. In a
+clustered setup, install and authenticate the host that can actually own the
+workspace — an installation or login on the settings/coordinator host does not
+authenticate a different worker.
+
+Use **Login** on the Azure CLI card to run the vendor-owned device flow (`az
+login --use-device-code`). Azure CLI stores its tokens in the runtime user's
+host-local `~/.azure` cache. Vibe Kanban does not copy that cache between hosts,
+put Azure credentials in agent configuration, or print command output while
+checking authentication. The card's authenticated state comes from `az account
+show --output none`.
+
+For an exact, read-only Entra device lookup, the signed-in identity needs the
+Microsoft Graph delegated `Device.Read.All` permission and a supported Entra
+role. Microsoft documents `Device.Read.All` as the least-privileged delegated
+permission for listing devices. Tenant consent and role assignment remain
+operator steps; Vibe Kanban does not grant them.
+
+Run these secret-safe checks inside the target workspace:
+
+```bash
+command -v az
+az account show --output none
+az rest --method GET \
+  --url "https://graph.microsoft.com/v1.0/devices?\$filter=displayName%20eq%20'EXACT-HOSTNAME'&\$select=id,deviceId,displayName,accountEnabled,operatingSystem,operatingSystemVersion,approximateLastSignInDateTime" \
+  --output json
+```
+
+The final command is GET-only and requests a bounded field set. Verify that its
+single result's `displayName` exactly equals the requested hostname; an empty
+array means no visible match. Do not use a write-capable Graph permission for
+this workflow. See Microsoft's
+[list devices contract](https://learn.microsoft.com/en-us/graph/api/device-list?view=graph-rest-1.0)
+and
+[permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference#devicereadall).
+
+### Azure troubleshooting
+
+- `command -v az` is empty: rebuild/restart the Vibe Kanban execution host, or
+  install Azure CLI for that exact host from **CLI Tools**.
+- The tool card is authenticated but `az account show --output none` fails in a
+  workspace: confirm the workspace is running on the same host and runtime
+  principal that performed the login, then reauthenticate that host.
+- Account status works but the device query returns 403: the Azure session is
+  valid, but Graph permission or the signed-in user's Entra role is insufficient.
+  Grant only `Device.Read.All` and the least-privileged supported role.
+- A device query succeeds on the coordinator but not in the workspace: inspect
+  workspace worker affinity and repeat the checks on that worker. Coordinator
+  success is not worker evidence.
+
 ## Microsoft Graph PowerShell (v1.0)
 
 The `graph-powershell-1.0` tool installs the stable
