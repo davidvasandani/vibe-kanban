@@ -52,6 +52,28 @@ export type MachineTarget =
       label: string;
     };
 
+export interface ManagedSkill {
+  name: string;
+  description: string;
+  instructions: string;
+}
+
+export interface SkillsCatalog {
+  available: boolean;
+  repositoryPath: string | null;
+  baseBranch: string;
+  skills: ManagedSkill[];
+}
+
+export type SkillChange =
+  | ({ operation: 'upsert'; previous?: ManagedSkill } & ManagedSkill)
+  | { operation: 'delete'; name: string; previous: ManagedSkill };
+
+export interface SkillProposalResult {
+  pullRequestUrl: string;
+  branch: string;
+}
+
 export interface MachineClient {
   target: MachineTarget;
   queryScopeKey: readonly ['machine', string];
@@ -106,6 +128,12 @@ export interface MachineClient {
   saveAwsProfile: (profile: AwsSsoProfile) => Promise<AwsSsoProfile>;
   deleteAwsProfile: (name: string) => Promise<void>;
   openAwsProfileLogin: (name: string) => Promise<WebSocket>;
+  loadSkills: () => Promise<SkillsCatalog>;
+  createSkillProposal: (request: {
+    title: string;
+    body: string;
+    changes: SkillChange[];
+  }) => Promise<SkillProposalResult>;
   listAwsSsoSessions: () => Promise<AwsSsoSession[]>;
   prepareAwsSsoSession: (session: AwsSsoSession) => Promise<AwsSsoSession>;
   discoverAwsSsoCatalog: (name: string) => Promise<AwsSsoAccount[]>;
@@ -416,6 +444,19 @@ export function createMachineClient(
       openLocalApiWebSocket(
         `/api/aws/profiles/${encodeURIComponent(name)}/login/ws`,
         getMachineRequestOptions(runtime, target)
+      ),
+    loadSkills: async () =>
+      handleApiResponse<SkillsCatalog>(
+        await makeMachineRequest(runtime, target, '/api/skills', {
+          cache: 'no-store',
+        })
+      ),
+    createSkillProposal: async (request) =>
+      handleApiResponse<SkillProposalResult>(
+        await makeMachineRequest(runtime, target, '/api/skills/proposals', {
+          method: 'POST',
+          body: JSON.stringify(request),
+        })
       ),
     listAwsSsoSessions: async () =>
       handleApiResponse<AwsSsoSession[]>(
