@@ -65,7 +65,7 @@ fn base_command(claude_code_router: bool) -> &'static str {
     if claude_code_router {
         "npx -y @musistudio/claude-code-router@1.0.66 code"
     } else {
-        "npx -y @anthropic-ai/claude-code@2.1.200"
+        "npx -y @anthropic-ai/claude-code@2.1.268"
     }
 }
 
@@ -143,13 +143,13 @@ const SCHEDULE_WAKEUP_MATCHER: &str = "^ScheduleWakeup$";
 /// # Verification source (Constitution IX)
 ///
 /// These are **wire tool names**, read out of the native binary shipped in
-/// `@anthropic-ai/claude-code-linux-x64@2.1.200` — the platform package behind
-/// the `@anthropic-ai/claude-code@2.1.200` pin in [`base_command`]. The npm
-/// package itself is a ~20KB stub; its `sdk-tools.d.ts` lists JSON-Schema
-/// *titles* (`FileReadInput`, `FileEditInput`, …), **not** wire tool names
-/// (`Read`, `Edit`, …). A deny list derived from that file would name tools
-/// that do not exist and would silently match nothing. The alias→canonical
-/// table was read from the binary's own alias map. See
+/// `@anthropic-ai/claude-code-linux-x64@2.1.268` — the platform package behind
+/// the `@anthropic-ai/claude-code@2.1.268` pin in [`base_command`]. The wrapper's
+/// `sdk-tools.d.ts` lists JSON-Schema *titles* (`FileReadInput`,
+/// `FileEditInput`, …), **not** wire tool names (`Read`, `Edit`, …). A deny list
+/// derived from that file would name tools that do not exist and would silently
+/// match nothing. The alias→canonical table was read from the binary's own
+/// alias map. See
 /// `specs/vk/869c-vk-background-po/research.md`.
 ///
 /// Because `@anthropic-ai/claude-code` is a `needs-review` Renovate carve-out,
@@ -426,6 +426,7 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
                 ("opus[1m]", "Opus (1M context)"),
                 ("claude-opus-5", "Opus 5"),
                 ("claude-sonnet-5", "Sonnet 5"),
+                ("claude-fable-5-1", "Fable 5.1"),
                 ("sonnet", "Sonnet"),
                 ("fable", "Fable"),
                 ("haiku", "Haiku"),
@@ -879,12 +880,17 @@ const CLAUDE_1M_CONTEXT_WINDOW: u32 = 1_000_000;
 
 /// Infer a model's max context window from its name or alias.
 ///
-/// Different models have different max contexts. Opus 5 has a 1M-token context
-/// by default; older models requesting the 1M-token context beta carry a `[1m]`
+/// Different models have different max contexts. The current Opus, Sonnet, and
+/// Fable aliases and their explicit catalog models have a 1M-token context by
+/// default; older models requesting the 1M-token context beta carry a `[1m]`
 /// suffix (e.g. `opus[1m]`). We rely on the configured/reported model string
 /// because the end-of-turn usage report is only available once a turn finishes.
 fn context_window_for_model(model: &str) -> u32 {
-    if model == "claude-opus-5" || model.contains("[1m]") {
+    if matches!(
+        model,
+        "opus" | "sonnet" | "fable" | "claude-opus-5" | "claude-sonnet-5" | "claude-fable-5-1"
+    ) || model.contains("[1m]")
+    {
         CLAUDE_1M_CONTEXT_WINDOW
     } else {
         DEFAULT_CLAUDE_CONTEXT_WINDOW
@@ -3408,7 +3414,7 @@ mod tests {
     }
 
     /// The names are wire tool names read from the
-    /// `@anthropic-ai/claude-code-linux-x64@2.1.200` native binary, not from
+    /// `@anthropic-ai/claude-code-linux-x64@2.1.268` native binary, not from
     /// the npm stub's `sdk-tools.d.ts` (which lists JSON-Schema titles). A
     /// misspelling would silently match nothing, so the exact spellings are
     /// pinned here.
@@ -3435,8 +3441,8 @@ mod tests {
         // The pin above is only meaningful while the CLI pin it was read from
         // is in force.
         assert!(
-            base_command(false).contains("@anthropic-ai/claude-code@2.1.200"),
-            "tool names were verified against 2.1.200; re-verify against the binary if this pin moves"
+            base_command(false).contains("@anthropic-ai/claude-code@2.1.268"),
+            "tool names were verified against 2.1.268; re-verify against the binary if this pin moves"
         );
     }
 
@@ -4213,20 +4219,23 @@ mod tests {
 
     #[test]
     fn test_context_window_for_model() {
-        assert_eq!(
-            context_window_for_model("opus"),
-            DEFAULT_CLAUDE_CONTEXT_WINDOW
-        );
-        assert_eq!(
-            context_window_for_model("sonnet"),
-            DEFAULT_CLAUDE_CONTEXT_WINDOW
-        );
+        assert_eq!(context_window_for_model("opus"), CLAUDE_1M_CONTEXT_WINDOW);
+        assert_eq!(context_window_for_model("sonnet"), CLAUDE_1M_CONTEXT_WINDOW);
+        assert_eq!(context_window_for_model("fable"), CLAUDE_1M_CONTEXT_WINDOW);
         assert_eq!(
             context_window_for_model("claude-opus-4-8"),
             DEFAULT_CLAUDE_CONTEXT_WINDOW
         );
         assert_eq!(
             context_window_for_model("claude-opus-5"),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-fable-5-1"),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-sonnet-5"),
             CLAUDE_1M_CONTEXT_WINDOW
         );
         assert_eq!(
@@ -4304,6 +4313,31 @@ mod tests {
         assert!(
             !opus5.reasoning_options.is_empty(),
             "claude-opus-5 must have reasoning options (supports_effort coverage)"
+        );
+    }
+
+    #[test]
+    fn test_claude_fable_5_1_in_discovered_options() {
+        let options = super::default_discovered_options();
+        let fable = options
+            .model_selector
+            .models
+            .iter()
+            .find(|model| model.id == "claude-fable-5-1")
+            .expect("claude-fable-5-1 must be in model catalog");
+
+        assert_eq!(fable.name, "Fable 5.1");
+        assert_eq!(
+            fable
+                .reasoning_options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            options.model_selector.default_model.as_deref(),
+            Some("opus")
         );
     }
 }
