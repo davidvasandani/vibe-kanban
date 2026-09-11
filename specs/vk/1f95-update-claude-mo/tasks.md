@@ -48,5 +48,5 @@ same dependency layer without overlapping files.
 - [x] **T014** Complete acceptance/task status and final verification evidence,
   commit remaining scoped changes, and confirm the actual base tip and
   constitution before delivery (depends on T013).
-- [ ] **T015** Push the task branch, open a pull request against the base branch,
+- [x] **T015** Push the task branch, open a pull request against the base branch,
   wait for required checks, and merge it (depends on T014).
