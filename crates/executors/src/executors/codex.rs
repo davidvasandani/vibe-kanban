@@ -28,11 +28,80 @@ pub fn codex_home() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use futures::StreamExt;
+
     use super::{
         Codex, POLLER_DEVELOPER_INSTRUCTIONS, compose_developer_instructions,
         is_missing_conversation_error,
     };
-    use crate::executors::ExecutorError;
+    use crate::executors::{ExecutorError, StandardCodingAgentExecutor};
+
+    #[tokio::test]
+    async fn discovered_models_match_current_chatgpt_catalog() {
+        let codex: Codex =
+            serde_json::from_value(serde_json::json!({})).expect("default Codex config");
+        let patches: Vec<_> = codex
+            .discover_options(None, None)
+            .await
+            .expect("Codex model discovery succeeds")
+            .collect()
+            .await;
+        let value = serde_json::to_value(patches.first().expect("one discovery patch"))
+            .expect("discovery patch serializes");
+        let models = value
+            .pointer("/0/value/model_selector/models")
+            .and_then(serde_json::Value::as_array)
+            .expect("discovery patch contains models");
+
+        let actual: Vec<_> = models
+            .iter()
+            .map(|model| {
+                let efforts = model["reasoning_options"]
+                    .as_array()
+                    .expect("model reasoning options")
+                    .iter()
+                    .map(|option| option["id"].as_str().expect("reasoning option id"))
+                    .collect::<Vec<_>>();
+                (
+                    model["id"].as_str().expect("model id"),
+                    model["name"].as_str().expect("model name"),
+                    efforts,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    "gpt-6-astra",
+                    "GPT-6 Astra",
+                    vec!["low", "medium", "high", "xhigh", "max"],
+                ),
+                (
+                    "gpt-5.6-sol",
+                    "GPT-5.6 Sol",
+                    vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+                ),
+                (
+                    "gpt-5.6-terra",
+                    "GPT-5.6 Terra",
+                    vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+                ),
+                (
+                    "gpt-5.6-luna",
+                    "GPT-5.6 Luna",
+                    vec!["low", "medium", "high", "xhigh", "max"],
+                ),
+                ("gpt-5.5", "GPT-5.5", vec!["low", "medium", "high", "xhigh"],),
+                (
+                    "gpt-5.3-codex-spark",
+                    "GPT-5.3 Codex Spark",
+                    vec!["low", "medium", "high", "xhigh"],
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn deployment_codex_command_is_fail_closed_and_blank_values_fall_back() {
@@ -631,14 +700,14 @@ impl StandardCodingAgentExecutor for Codex {
             model_selector: ModelSelectorConfig {
                 models: vec![
                     ModelInfo {
-                        id: "gpt-5.6-sol".to_string(),
-                        name: "GPT-5.6 Sol".to_string(),
+                        id: "gpt-6-astra".to_string(),
+                        name: "GPT-6 Astra".to_string(),
                         provider_id: None,
-                        reasoning_options: ultra_reasoning_options.clone(),
+                        reasoning_options: max_reasoning_options.clone(),
                     },
                     ModelInfo {
-                        id: "gpt-5.6-sol-fast".to_string(),
-                        name: "GPT-5.6 Sol Fast".to_string(),
+                        id: "gpt-5.6-sol".to_string(),
+                        name: "GPT-5.6 Sol".to_string(),
                         provider_id: None,
                         reasoning_options: ultra_reasoning_options.clone(),
                     },
@@ -655,38 +724,14 @@ impl StandardCodingAgentExecutor for Codex {
                         reasoning_options: max_reasoning_options,
                     },
                     ModelInfo {
-                        id: "gpt-5.4".to_string(),
-                        name: "GPT-5.4".to_string(),
+                        id: "gpt-5.5".to_string(),
+                        name: "GPT-5.5".to_string(),
                         provider_id: None,
                         reasoning_options: xhigh_reasoning_options.clone(),
                     },
                     ModelInfo {
-                        id: "gpt-5.4-fast".to_string(),
-                        name: "GPT-5.4 Fast".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.3-codex".to_string(),
-                        name: "GPT-5.3 Codex".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.2-codex".to_string(),
-                        name: "GPT-5.2 Codex".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.2".to_string(),
-                        name: "GPT-5.2".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.1-codex-max".to_string(),
-                        name: "GPT-5.1 Codex Max".to_string(),
+                        id: "gpt-5.3-codex-spark".to_string(),
+                        name: "GPT-5.3 Codex Spark".to_string(),
                         provider_id: None,
                         reasoning_options: xhigh_reasoning_options,
                     },
