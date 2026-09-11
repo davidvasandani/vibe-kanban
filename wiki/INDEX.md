@@ -18,6 +18,11 @@ contributed to it.
 
 ## Pages
 
+- [executor-model-catalogs.md](executor-model-catalogs.md) — Executor discovery
+  is the authoritative source for model pickers; verify current IDs and
+  reasoning boundaries against provider sources, keep Default implicit, test
+  exact ordered catalogs, and keep catalog refreshes separate from managed CLI
+  upgrades.
 - [browser-title-selection.md](browser-title-selection.md) — Browser-tab titles
   select one meaningful label from an ordered fallback chain, trim metadata
   whitespace, use product branding only as the empty-state fallback, and remain
