@@ -1,65 +1,35 @@
-# Implementation plan: Codex Slack MCP and Azure/Entra capabilities
+# Implementation Plan: Stop Workspace Chat Viewport Shaking
 
-**Task:** `vk/84ef-restore-slack-mc`
+1. Reconstruct the failure from the recording and current conversation-list
+   code, tracing live timeline updates through row derivation, the
+   virtualized/unvirtualized tail boundary, TanStack measurement, at-bottom
+   detection, and bottom-lock correction.
+2. Run the required SpecKit constitution, specification, clarification,
+   planning, task decomposition, and analysis stages. Record the exact
+   invariant responsible for the oscillation before changing product code.
+3. Extract the smallest pure state transition or scroll-policy seam needed for
+   deterministic tests. Cover continuous streaming at the bottom, streaming
+   after reader scroll-up, and transitions between active and settled tails.
+4. Implement the minimal conversation-list/virtualizer change that makes tail
+   ownership and bottom correction stable across live updates, without changing
+   semantic row identity, history-prepend anchoring, interaction anchoring, or
+   programmatic navigation.
+5. Run focused regression tests first, then install dependencies if required and
+   run repository formatting, frontend type checks, linting, and relevant test
+   suites. Perform a visual/browser reproduction when the local fixture path can
+   exercise the affected transcript.
+6. Run an independent Codex CLI review of the diff. Address every confirmed
+   significant finding and repeat verification/review until clear.
+7. Distill reusable scroll/virtualization guidance into the Vibe Kanban
+   knowledge base, update its index and task tag, and commit those docs.
+8. Commit the implementation, push the task branch, open a pull request against
+   the repository's base branch, monitor required checks, resolve failures, and
+   merge the pull request.
 
-1. Establish the current capability boundaries.
-   - Trace shared MCP persistence, Codex native materialization, fresh-session
-     launch, clustered dispatch, and the existing MCP reload/restart action.
-   - Trace app-managed CLI installation and PATH construction for local agents,
-     remote workers, setup/dev processes, and workspace PTYs.
-   - Inspect the Vibe Kanban Nix module for Slack URL convergence and any
-     existing Azure package/auth state.
+## Guardrails
 
-2. Define truthful capability diagnostics.
-   - Add a backend read model that compares configured Slack assignment,
-     executor-native persistence, active-session MCP status/tool inventory, `az`
-     executable discovery, and Azure account probe state without returning
-     credentials or raw subprocess output.
-   - Represent unavailable, stale/restart-required, unauthenticated, connected,
-     and failed states distinctly with allowlisted remediation.
-   - Surface the result beside the existing MCP refresh/restart workflow.
-
-3. Restore Slack for new and active Codex sessions.
-   - Ensure settings-owned Slack HTTP MCP definitions reach the exact Codex home
-     used by fresh local and remote executions.
-   - Reuse the supported Codex reload/next-turn confirmation where available and
-     the existing safe agent-restart fallback otherwise.
-   - Make reconnect completion invalidate/refetch the relevant state so the
-     refresh action is discoverable without recreating the task.
-
-4. Restore Azure CLI and read-only Entra authentication.
-   - Put the pinned/host-managed Azure CLI on the supervised coordinator and
-     worker agent PATH, retaining the app-managed CLI fallback where applicable.
-   - Reuse the existing durable Azure CLI authentication model and expose only
-     non-secret account status to agents/diagnostics. If deployment provisioning
-     is required, load it through systemd credentials or an equivalent protected
-     runtime store and grant only read-only Graph device permissions.
-   - Ensure the same context is available at each actual workspace execution
-     boundary, including execution-scoped homes where vendor state must be
-     linked rather than copied.
-
-5. Add regression coverage.
-   - Backend tests: configured/connected Slack with absent native/live agent
-     state, stale state requiring refresh, successful tool registration, missing
-     `az`, unauthenticated Azure, and authenticated secret-free probe output.
-   - Executor/cluster tests: fresh Codex config materialization and refresh
-     rematerialization on the owning worker.
-   - Nix tests: Azure CLI appears in coordinator and worker service PATH and
-     runtime auth wiring contains references/paths but no credential contents.
-   - Frontend tests: mismatch diagnostic and supported refresh action rendering.
-
-6. Document and verify.
-   - Document required Slack app/connection permissions, Codex assignment,
-     Azure login/auth ownership and minimum Graph permissions, restart/refresh
-     steps, and layered troubleshooting.
-   - Run focused Rust/TypeScript/Nix tests, formatting, generated-type checks,
-     and broader checks proportionate to touched code.
-   - Validate read-only exact-hostname searches for the four supplied candidates
-     across Slack and Entra, then correlate with LogMeIn when the live connected
-     capabilities are available.
-
-7. Review and ship.
-   - Run an independent Codex diff review, fix confirmed findings, rerun relevant
-     checks until no significant findings remain, update the project knowledge
-     base and index, commit both repositories as needed, then open and merge the
-     pull request(s) against their base branches.
+- Do not change another service or homelab deployment configuration.
+- Do not replace the single conversation scroller or remove bounded history.
+- Do not rely on timing-only suppression as the primary correctness mechanism.
+- Preserve user-controlled scroll position and accessibility of existing
+  navigation/load controls.

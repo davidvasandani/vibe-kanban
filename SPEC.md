@@ -1,89 +1,68 @@
-# Technical specification: Codex Slack MCP and Azure/Entra capabilities
+# Stop Workspace Chat Viewport Shaking
 
-**Task:** `vk/84ef-restore-slack-mc`
+## Problem
 
-## Objective
+While a workspace agent is actively streaming a turn, the conversation viewport
+can jump repeatedly between substantially different vertical positions even
+though the user is not scrolling. In the supplied 13.38-second recording, the
+same recent-turn content alternates between the upper and lower portions of the
+chat roughly every half-second. The message composer and surrounding workspace
+panels stay fixed, isolating the defect to conversation-list layout/scroll
+correction.
 
-Make the Slack connector and the Azure CLI-backed Microsoft Entra read path that
-an operator enables for Codex actually available inside Vibe Kanban Codex
-workspaces. Availability must be consistent for fresh sessions and must be
-refreshable for a workspace whose agent process started before a connector was
-enabled.
+This makes live output difficult to read and can make controls move away while
+the user is trying to interact with them.
 
 ## Scope
 
-Changes are limited to the Vibe Kanban application and its deployment/runtime
-configuration in `homelab/modules/vibe-kanban-rebuild.nix`. The work may update
-Codex executor configuration, workspace process lifecycle and diagnostics,
-deployment packages and runtime authentication wiring, focused tests, and Vibe
-Kanban documentation. It must not change Slack, Entra, LogMeIn, Automox, or any
-other hosted service, and validation operations must remain read-only.
+- Diagnose the feedback loop between live conversation updates, mixed
+  virtualized/unvirtualized row layout, row measurement, and bottom locking.
+- Stabilize the workspace conversation viewport during active streaming.
+- Preserve intentional behavior: following new output when bottom-locked,
+  retaining a reader's position after scrolling upward, turn navigation,
+  expanding/collapsing entries, and lazy-loading earlier history.
+- Add focused regression coverage for the state transition or scroll decision
+  responsible for the oscillation.
+- Change only the Vibe Kanban source repository. Homelab deployment and other
+  services are out of scope.
 
-## Required behavior
+## Functional Requirements
 
-1. A Slack MCP definition connected and assigned to Codex is included in the
-   native Codex MCP configuration read by every newly started workspace agent.
-   It exposes a read-only Slack message-search tool capable of exact-hostname
-   searches.
-2. The workspace execution environment includes an `az` executable on `PATH`.
-3. The workspace receives a non-secret-bearing Azure authentication context
-   suitable for `az account show` and read-only Microsoft Graph device queries.
-   Credentials remain in the existing runtime secret boundary and are never
-   copied into repositories, prompts, logs, or diagnostics.
-4. A supported refresh action restarts the agent process for an existing task,
-   preserves task/chat continuity, and reloads the current native MCP
-   configuration. Enabling or reconnecting Slack therefore does not require
-   recreating the task or workspace.
-5. The UI reports a useful mismatch diagnostic when its configured/connected
-   Slack state does not agree with the MCP definition or runtime capability
-   visible to the selected Codex executor. Azure diagnostics distinguish a
-   missing executable, missing runtime auth context, and failed account/Graph
-   access without disclosing sensitive values.
+1. A bottom-locked conversation follows appended or growing live output without
+   oscillating between old and new scroll positions.
+2. A user who scrolls upward during streaming remains anchored to the content
+   they chose; live updates must not pull them back to the bottom.
+3. Moving rows across the virtualized-tail boundary must not introduce a
+   repeating height/scroll correction loop.
+4. Existing programmatic navigation and interaction-anchor corrections must
+   continue to work.
+5. Initial load, settled conversations, and earlier-history pagination must
+   retain their current behavior.
 
-## Security and operational constraints
+## Acceptance Criteria
 
-- Slack and Entra validation is read-only; no messages, users, groups, devices,
-  memberships, or inventory records are created, modified, or deleted.
-- Slack tokens and Azure client credentials are loaded through protected
-  runtime credential files or equivalent opaque references, never emitted as
-  environment values visible in diagnostics.
-- Microsoft Graph permissions are the minimum application/delegated read scopes
-  required for exact device lookup.
-- Refresh affects the active agent process only after the current turn exits
-  safely; it must not discard Vibe Kanban task history.
-- Existing custom MCP definitions must not be silently overwritten.
+- A deterministic regression test reproduces the implicated streaming/layout
+  transition and fails before the fix.
+- During continuous live updates, the viewport has a single stable scroll
+  policy: it stays at the bottom when locked or stays on the reader's content
+  when unlocked; it does not alternate between those states without user input.
+- Focused frontend tests, type checking, linting, and formatting pass.
+- Independent Codex review reports no significant findings.
+- The change is documented in the project knowledge base if it yields reusable
+  guidance, then delivered through a merged pull request.
 
-## Acceptance criteria
+## Non-Goals
 
-- In a fresh Codex workspace, the connected Slack MCP exposes a read-only
-  message-search tool and an exact search for each validation hostname can run.
-- In that workspace, `command -v az` returns an executable path and
-  `az account show` succeeds without secrets in output or logs.
-- A read-only Graph/Entra device lookup by exact hostname succeeds.
-- Reconnecting or enabling Slack after workspace creation becomes visible after
-  the supported agent refresh action, without recreating the task.
-- A regression test covers a user-visible enabled/connected state whose agent
-  tool registry or runtime capability is absent and verifies the diagnostic.
-- Documentation states the required Slack connection and permissions, Azure
-  authentication mechanism and Graph read permissions, refresh procedure, and
-  troubleshooting checks.
-- The four hostnames `USSG01RG0300221`, `USSG01RG0200047`,
-  `USSG01RG0100047`, and `USSG01PM0100047` can be searched read-only across
-  Slack and Entra and correlated with the already available LogMeIn MCP.
+- Redesigning chat presentation or message rendering.
+- Changing backend streaming protocols or persisted conversation data.
+- Modifying homelab deployment configuration.
 
-## Open questions for clarification
+## Evidence and Initial Technical Direction
 
-- Which existing deployment-owned Azure identity and secret source is intended
-  for the read-only Entra device lookup?
-- Whether the mismatch diagnostic should be computed from configuration and
-  executor-native state only, or additionally perform bounded live probes.
-- Whether Azure CLI access is required on coordinator and all worker roles, or
-  only hosts that execute Codex workspaces.
-
-## Non-goals
-
-- Automox cleanup or any mutation of inventory candidates.
-- Changes to LogMeIn MCP behavior.
-- General-purpose Azure administration or broad Microsoft Graph permissions.
-- Hot-injecting new tools into a currently running Codex process without a safe
-  process restart.
+The recording shows large vertical jumps confined to the chat scroller while a
+turn is running. The current list combines a TanStack Virtual head with a normal
+DOM tail and recalculates the boundary based on active-streaming state. It also
+performs bottom-lock corrections in a layout effect on row-count and total-size
+changes. Investigation should determine which boundary or measurement change
+makes the scroll height alternate, then make that transition monotonic or keep
+the reader anchored without weakening the existing bottom-follow behavior.
