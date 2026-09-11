@@ -13,6 +13,7 @@ import {
   KeyIcon,
   ListChecksIcon,
   HardDrivesIcon,
+  BookOpenTextIcon,
 } from '@phosphor-icons/react';
 import type { Icon } from '@phosphor-icons/react';
 import { useParams } from '@tanstack/react-router';
@@ -31,6 +32,7 @@ import { JiraSyncSettingsSection } from './JiraSyncSettingsSection';
 import { SlackSettingsSection } from './SlackSettingsSection';
 import { PipelinesSettingsSection } from './PipelinesSettingsSection';
 import { WorkersSettingsSection } from './WorkersSettingsSection';
+import { SkillsSettingsSection } from './SkillsSettingsSection';
 
 export type SettingsSectionType =
   | 'general'
@@ -38,6 +40,7 @@ export type SettingsSectionType =
   | 'organizations'
   | 'remote-projects'
   | 'agents'
+  | 'skills'
   | 'mcp'
   | 'cli-tools'
   | 'aws'
@@ -58,6 +61,7 @@ export type SettingsSectionInitialState = {
     | { organizationId?: string; projectId?: string }
     | undefined;
   agents: { executor?: string; variant?: string } | undefined;
+  skills: undefined;
   mcp: undefined;
   'cli-tools': undefined;
   aws: undefined;
@@ -79,6 +83,7 @@ export const SETTINGS_SECTION_DEFINITIONS: SettingsSectionDefinition[] = [
   { id: 'general', icon: GearIcon, group: 'host' },
   { id: 'repos', icon: GitBranchIcon, group: 'host' },
   { id: 'agents', icon: CpuIcon, group: 'host' },
+  { id: 'skills', icon: BookOpenTextIcon, group: 'host' },
   { id: 'mcp', icon: PlugIcon, group: 'host' },
   { id: 'cli-tools', icon: WrenchIcon, group: 'host' },
   { id: 'aws', icon: KeyIcon, group: 'host' },
@@ -139,6 +144,8 @@ export function renderSettingsSection(
       );
     case 'agents':
       return <AgentsSettingsSection />;
+    case 'skills':
+      return <SkillsSettingsSection />;
     case 'mcp':
       return <RouteScopedMcpSettingsSection />;
     case 'cli-tools':
