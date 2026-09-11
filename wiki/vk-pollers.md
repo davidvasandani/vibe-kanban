@@ -42,7 +42,7 @@ Consequences to preserve:
 
 The important finding, and the one most likely to be re-litigated.
 
-Claude Code 2.1.200's background poll loop is
+Claude Code 2.1.268's background poll loop is
 `Bash(run_in_background: true)` → `Read(<output file path>)`. `TaskOutput` is
 *deprecated* in favour of reading that path directly, and `Read` cannot be denied
 — it is essential. So denying `Monitor` / `TaskOutput` / `TaskStop` / `Cron*`
@@ -99,14 +99,14 @@ easy to satisfy for the agent with a deny hook and forget for the one without.
 This task nearly shipped two inert controls. Constitution IX was extended
 (0.30.0) to require the discipline.
 
-- **Claude:** `@anthropic-ai/claude-code@2.1.200` on npm is a ~20KB **stub**; the
-  CLI is a native binary in `@anthropic-ai/claude-code-linux-x64`. The stub ships
-  `sdk-tools.d.ts`, which looks authoritative but lists **JSON-Schema titles, not
-  wire tool names** (`FileReadInput` → real tool `Read`). A deny-list built from
-  it would match nothing and fail silently. Names must be read from the binary.
-  It also contains an alias→canonical map (`BashOutput`/`KillShell` → `TaskOutput`/`TaskStop`),
-  and the permission parser normalizes through it, so denying canonical names
-  covers aliases.
+- **Claude:** `@anthropic-ai/claude-code@2.1.268` installs the platform package
+  such as `@anthropic-ai/claude-code-linux-x64`; that package's native binary is
+  what executes. The wrapper ships `sdk-tools.d.ts`, which looks authoritative
+  but lists **JSON-Schema titles, not wire tool names** (`FileReadInput` → real
+  tool `Read`). A deny-list built from it would match nothing and fail silently.
+  Names must be read from the binary. It also contains an alias→canonical map
+  (`BashOutput`/`KillShell` → `TaskOutput`/`TaskStop`), and the permission parser
+  normalizes through it, so denying canonical names covers aliases.
 - **Codex:** `unified_exec` is a *feature flag*, not a tool; the tools are
   `exec_command` and `write_stdin` (an empty `chars` polls without writing). There
   is no per-turn tool allow/deny field, so the lever is
