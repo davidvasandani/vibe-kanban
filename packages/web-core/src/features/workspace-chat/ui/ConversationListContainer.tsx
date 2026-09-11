@@ -22,6 +22,7 @@ import { useScrollCommandExecutor } from '../model/useScrollCommandExecutor';
 import { coalesceConversationAddType } from '../model/plan-reveal-transition';
 
 import DisplayConversationEntry from './DisplayConversationEntry';
+import { EarlierHistoryControl } from './EarlierHistoryControl';
 import { ApprovalFormProvider } from '@/shared/hooks/ApprovalForm';
 import { useEntriesActions } from '../model/contexts/EntriesContext';
 import {
@@ -944,52 +945,11 @@ export const ConversationList = forwardRef<
 
           {(hasEarlierHistory || isLoadingEarlier || loadEarlierError) &&
             !showLoader && (
-              <div className="flex flex-col items-center gap-2 px-double py-3">
-                {isLoadingEarlier ? (
-                  <>
-                    <div className="flex w-full max-w-md flex-col gap-1.5">
-                      <div className="flex items-center gap-2">
-                        <div className="h-2.5 w-16 animate-pulse rounded-full bg-foreground/10" />
-                        <div className="h-2.5 flex-1 animate-pulse rounded-full bg-foreground/[0.06]" />
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div
-                          className="h-2.5 w-24 animate-pulse rounded-full bg-foreground/[0.07]"
-                          style={{ animationDelay: '150ms' }}
-                        />
-                        <div
-                          className="h-2.5 w-32 animate-pulse rounded-full bg-foreground/[0.05]"
-                          style={{ animationDelay: '150ms' }}
-                        />
-                      </div>
-                    </div>
-                    <span className="text-xs text-low">
-                      {t('conversation.loadingEarlierMessages')}
-                    </span>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    className="rounded px-base py-half text-xs text-low hover:text-normal focus:outline-none focus:ring-1 focus:ring-brand"
-                    onClick={() => void requestEarlierHistory()}
-                  >
-                    {loadEarlierError
-                      ? t('conversation.retryEarlierMessages', {
-                          defaultValue: 'Retry loading earlier messages',
-                        })
-                      : t('conversation.loadEarlierMessages', {
-                          defaultValue: 'Load earlier messages',
-                        })}
-                  </button>
-                )}
-                {loadEarlierError && !isLoadingEarlier && (
-                  <span className="text-xs text-error" role="status">
-                    {t('conversation.loadEarlierMessagesError', {
-                      defaultValue: 'Earlier messages could not be loaded.',
-                    })}
-                  </span>
-                )}
-              </div>
+              <EarlierHistoryControl
+                isLoading={isLoadingEarlier}
+                error={loadEarlierError}
+                onLoad={() => void requestEarlierHistory()}
+              />
             )}
 
           {showEmptyState && (

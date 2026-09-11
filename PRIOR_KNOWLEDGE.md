@@ -1,75 +1,70 @@
-# Prior Knowledge: Three rollout loose ends
+# Prior Knowledge: Streaming Conversation Viewport Stability
 
-Task: `vk/94c0-three-loose-ends`
+Task: `vk/9c15-still-shaking`
 
-Searched `docs/knowledge-base/`, its `INDEX.md`, and the legacy `wiki/` pages
-for i18n consistency, API envelope errors, MCP caller behavior, Codex config,
-strict validation, and verification boundaries.
+Searched `docs/knowledge-base/`, its index, and the legacy `wiki/` for
+conversation scrolling, viewport anchoring, virtualization, streaming, and
+layout ownership.
 
-## Directly relevant knowledge
+## Directly Relevant Knowledge
 
-### `wiki/vk-pollers.md`
+### `docs/knowledge-base/edge-triggered-chat-scroll-intents.md`
 
-This is the primary design record for items 2 and 3.
+- Conversation callbacks contain snapshots, not lifecycle events. A persistent
+  snapshot fact must be converted to a one-shot intent using stable semantic
+  identity.
+- PR #268 applied this to `ExitPlanMode`: remember the handled `patchKey`, carry
+  the one-shot `plan` annotation through animation-frame batching, and clear the
+  batch synchronously when claimed.
+- This fixed the large oscillation between plan alignment and bottom alignment.
+  The new recording shows smaller continuous motion, so the next fix must not
+  undo or duplicate that event-boundary work.
+- Regression coverage should cross pure state rules and the consuming ref /
+  render lifecycle because a correct helper can still become sticky in its
+  caller.
 
-- A typed rejection is not the MCP contract. `ApiResponse::error_with_data`
-  omits `message`, while the MCP client surfaces only that field, so tests must
-  assert the message on the response envelope.
-- Agent-facing denials must state both the problem and corrective action; an
-  `Unknown error` prevents self-correction.
-- Codex `features.unified_exec=false` is a verified exact config identifier.
-  Codex's deserializer accepts unknown fields unless strict config is requested,
-  so a plausible-looking misspelling can be completely inert.
-- Authoritative Codex identifiers must be checked against the source/artifact
-  corresponding to the pinned executable, not inferred from stale types or UI.
+### `docs/knowledge-base/lazy-loading-normalized-conversation-history.md`
 
-### `docs/knowledge-base/worktree-formatting-prerequisites.md`
+- Conversation history is a bounded recent window with explicit earlier-page
+  loading and release. Stable semantic keys are required to preserve the
+  reader's visible anchor across prepend/release transitions.
+- Live revisions must remain authoritative while historical materialization is
+  in flight. A viewport fix must not conflate history-window mutation with
+  streaming-tail mutation.
 
-- A fresh worktree must run `pnpm install --frozen-lockfile` before repository
-  formatting or frontend verification.
-- Run the dependency preflight before mutating formatting stages and verify the
-  package-local frontend tools rather than assuming a root shim.
+### `docs/knowledge-base/nested-flex-scroll-containment.md`
+
+- A scroll surface should have one clear owner. Competing containment or
+  measurement mechanisms create unstable behavior and broaden the blast radius.
+- JSDOM does not calculate browser layout. Pure state tests and rendered
+  structural assertions are deterministic, but pixel-level behavior still
+  requires browser/manual evidence.
 
 ### `docs/knowledge-base/prompt-driven-agent-pipelines.md`
 
-- Pipeline prompts are executable contracts and their required artifacts and
-  order must be followed literally.
-- The durable convention is task-scoped artifacts under
-  `specs/vk/<task-id>/`, though this task's injected pipeline explicitly names
-  root `SPEC.md`, `PRIOR_KNOWLEDGE.md`, and `IMPLEMENTATION_PLAN.md`; the explicit
-  task instruction is authoritative for these three files.
-- Constitution numbering must be rechecked against the latest base immediately
-  before merge if the constitution itself changes.
+- Pipeline stages and named artifacts are an executable contract. Follow the
+  supplied stage order literally and keep task-scoped SpecKit artifacts under
+  `specs/vk/<task-id>/`.
 
-### `docs/knowledge-base/codex-rollout-transfer.md` and
-`docs/knowledge-base/active-mcp-refresh.md`
+## Adjacent Knowledge
 
-- Codex runs through the stdio app-server protocol and receives execution-scoped
-  configuration. The actual app-server launch and thread-start boundaries are
-  therefore the correct places to verify fail-loud CLI flags and emitted config
-  keys.
-- Avoid widening a focused executor-config correction into changes to Codex home,
-  credentials, rollout persistence, or MCP configuration ownership.
+- `wiki/workspace-carousel-view.md` records that each mounted conversation owns
+  its vertical scroller and that unnecessary remounting loses scroll state.
+- `docs/knowledge-base/authoritative-snapshot-stream-handoffs.md` reinforces
+  that retained state should reset only when its logical stream scope changes,
+  not on ordinary patch snapshots.
+- The knowledge base does not yet document a durable rule for partitioning a
+  conversation between a virtualized head and an unvirtualized live tail. That
+  is a stage-12 candidate if the implementation confirms a reusable invariant.
 
-## Adjacent findings
+## Consequences for the Spec and Plan
 
-- No durable `docs/knowledge-base` topic currently records the i18n key-set
-  comparison/sort-order invariant or the API envelope lesson. Those are
-  candidates for stage 12 if confirmed by implementation.
-- `wiki/kanban-issue-panel-sections.md` notes that i18n tests without a provider
-  may return raw keys. This task instead tests locale JSON/key consistency and
-  should not mistake component fallback behavior for translation coverage.
-- `wiki/project-context-map.md` records the broader fail-loud principle: reject
-  unknown keys at the boundary rather than accepting and discarding meaning.
-
-## Consequences for implementation
-
-1. Fix and test the i18n comparison algorithm itself, not merely the currently
-   missing translations.
-2. Extract one helper-error message mapping parallel to the poller mapping and
-   assert every variant reaches `ApiResponse.message`.
-3. Trace `include_apply_patch_tool` history before removal, verify the pinned
-   Codex CLI's strict-config support, and pin the exact adopted launch contract
-   in tests.
-4. Keep all work inside the Vibe Kanban repository and use focused verification
-   before the full frontend/backend gates.
+1. Treat PR #268's edge-triggered plan reveal as a preserved invariant.
+2. Model the virtualized/tail split as lifecycle state with an explicit scope
+   reset, rather than deriving ownership anew from every streaming snapshot.
+3. Ensure one mechanism owns bottom following; measurement compensation must
+   not fight it while bottom lock is active.
+4. Test active/settled transitions and scope resets with pure deterministic
+   helpers, then run focused frontend checks and inspect browser-visible motion.
+5. Keep all changes in the Vibe Kanban repository; homelab deployment is out of
+   scope.
