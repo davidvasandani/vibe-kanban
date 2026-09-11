@@ -19,6 +19,7 @@ import { deriveConversationEntries } from '../model/deriveConversationEntries';
 import { deriveConversationTimeline } from '../model/deriveConversationTimeline';
 import { useConversationVirtualizer } from '../model/useConversationVirtualizer';
 import { useScrollCommandExecutor } from '../model/useScrollCommandExecutor';
+import { coalesceConversationAddType } from '../model/plan-reveal-transition';
 
 import DisplayConversationEntry from './DisplayConversationEntry';
 import { ApprovalFormProvider } from '@/shared/hooks/ApprovalForm';
@@ -344,6 +345,7 @@ export const ConversationList = forwardRef<
     rafIdRef.current = null;
     const pending = pendingUpdateRef.current;
     if (!pending) return;
+    pendingUpdateRef.current = null;
 
     const derivedEntries = deriveConversationEntries({
       source: pending.source,
@@ -380,9 +382,10 @@ export const ConversationList = forwardRef<
     addType: AddEntryType,
     newLoading: boolean
   ) => {
+    const pendingAddType = pendingUpdateRef.current?.addType;
     pendingUpdateRef.current = {
       source,
-      addType,
+      addType: coalesceConversationAddType(pendingAddType, addType),
       loading: newLoading,
       isInitialLoad: addType === 'initial',
     };

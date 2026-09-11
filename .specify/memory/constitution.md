@@ -483,6 +483,16 @@ it to siblings. While identity-scoped enrichment is loading or absent, render
 the fact as unknown rather than borrowing a plausible aggregate. Regression
 coverage includes mixed sibling state and the base-only loading state.
 
+### XXXVI. Dynamic viewports have one scroll authority
+Live, virtualized, or incrementally paged views MUST assign scroll correction to
+one explicit policy at a time: follow the live tail, preserve a reader-selected
+anchor, or execute a named navigation command. Layout measurement and estimated
+size changes are evidence for that policy, not competing scroll owners. A
+render-boundary transition must be monotonic for the lifetime of a live update;
+rows cannot oscillate between layout strategies as derived loading markers
+appear and disappear. Regression coverage exercises continuous updates both at
+the live tail and after the reader scrolls away.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -504,7 +514,8 @@ coverage includes mixed sibling state and the base-only loading state.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.30.0 (extends IX so controls imposed on a vendor CLI — deny rules,
+**Version**: 0.31.0 (adds a single-authority, monotonic-boundary contract for
+dynamic viewport scroll correction; 0.30.0 extended IX so controls imposed on a vendor CLI — deny rules,
 permission matchers, capability-disabling config keys — are built from
 identifiers verified against the pinned executing artifact rather than docs or
 type declarations, record that source and version, pin the spelling by test where
