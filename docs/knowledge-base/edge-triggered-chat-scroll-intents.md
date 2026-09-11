@@ -1,6 +1,6 @@
 # Edge-triggered chat scroll intents
 
-Tags: `vk/9ba3-stop-the-chat-fr`
+Tags: `vk/9ba3-stop-the-chat-fr`, `vk/9c15-still-shaking`
 
 ## Snapshot facts are not lifecycle events
 
@@ -51,3 +51,27 @@ Keep the transition and coalescing rules pure and cover:
 The last rule crosses the pure helper and its ref lifecycle, so independent diff
 review is valuable even when helper-level tests pass; it caught both “event
 erased before render” and “consumed event never cleared” during this task.
+
+## Async status UI must not become a layout authority
+
+Fixing repeated semantic navigation can expose a second source of motion. The
+earlier-history loader sits in normal flow above conversation rows. Its idle
+button was shorter than its loading skeleton and label, while semantic anchor
+correction began only after the page request completed. Each automatic page
+therefore moved visible rows down during loading and back after correction.
+
+Keep asynchronous status presentations geometrically invariant when they sit
+inside a scroll surface. For responsive text and translations, avoid relying on
+a guessed `min-height`: overlay hidden, `aria-hidden`, noninteractive sizing
+copies of every state in one grid cell so the largest intrinsic state reserves
+space continuously. Render the active interactive state separately so hiding a
+focused button cannot leave focus inside an inaccessible element. Reserve error
+feedback geometry too, because retry commonly clears the error while entering
+loading.
+
+Sizing copies must be inert in performance as well as interaction. Do not run
+invisible pulse animations; apply animation only to the active loading state.
+Rendered-DOM coverage can assert shared grid ownership, persistent sizing
+layers, active-button removal during loading, error-row reservation, and the
+absence of animation on invisible copies. Browser evidence remains necessary
+for the pixel-level outcome because JSDOM does not calculate layout.

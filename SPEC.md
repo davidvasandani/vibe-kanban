@@ -1,68 +1,74 @@
-# Stop Workspace Chat Viewport Shaking
+# Stabilize the Streaming Conversation Viewport
 
 ## Problem
 
-While a workspace agent is actively streaming a turn, the conversation viewport
-can jump repeatedly between substantially different vertical positions even
-though the user is not scrolling. In the supplied 13.38-second recording, the
-same recent-turn content alternates between the upper and lower portions of the
-chat roughly every half-second. The message composer and surrounding workspace
-panels stay fixed, isolating the defect to conversation-list layout/scroll
-correction.
+PR #268 made `ExitPlanMode` navigation edge-triggered, removing the large
+plan-reveal/bottom-follow oscillation. The supplied 7.44-second, 3160×2034
+recording shows a second defect remains: while the agent is streaming and the
+viewport is following the tail, already-rendered conversation content repeatedly
+moves vertically by a smaller but visible amount. The composer and surrounding
+workspace chrome remain stationary, isolating the motion to conversation-list
+layout and scroll correction.
 
-This makes live output difficult to read and can make controls move away while
-the user is trying to interact with them.
+Frame-by-frame review shows this is continuous tail-follow jitter rather than a
+new user scroll or a repeat of the large plan reveal jump fixed in PR #268.
 
 ## Scope
 
-- Diagnose the feedback loop between live conversation updates, mixed
-  virtualized/unvirtualized row layout, row measurement, and bottom locking.
-- Stabilize the workspace conversation viewport during active streaming.
-- Preserve intentional behavior: following new output when bottom-locked,
-  retaining a reader's position after scrolling upward, turn navigation,
-  expanding/collapsing entries, and lazy-loading earlier history.
-- Add focused regression coverage for the state transition or scroll decision
-  responsible for the oscillation.
-- Change only the Vibe Kanban source repository. Homelab deployment and other
-  services are out of scope.
+- Diagnose the interaction among automatic earlier-history pagination, its
+  loading presentation, semantic anchoring, and streaming updates.
+- Keep the conversation viewport stable while new content streams.
+- Preserve initial positioning, explicit navigation, plan reveal, expansion
+  anchoring, and earlier-history anchoring.
+- Add deterministic frontend regression coverage for the implicated layout or
+  scroll-policy transition.
+- Change only the Vibe Kanban source repository. Homelab deployment and all
+  other services are out of scope.
 
-## Functional Requirements
+## Requirements
 
-1. A bottom-locked conversation follows appended or growing live output without
-   oscillating between old and new scroll positions.
-2. A user who scrolls upward during streaming remains anchored to the content
-   they chose; live updates must not pull them back to the bottom.
-3. Moving rows across the virtualized-tail boundary must not introduce a
-   repeating height/scroll correction loop.
-4. Existing programmatic navigation and interaction-anchor corrections must
-   continue to work.
-5. Initial load, settled conversations, and earlier-history pagination must
-   retain their current behavior.
+1. When bottom-locked, appended or growing live output follows the bottom with
+   one coherent correction policy; already-rendered content must not bounce
+   because the list alternates between competing measurements or boundaries.
+2. When the reader scrolls upward, streaming updates must preserve the chosen
+   viewport and must not re-acquire bottom lock without an explicit user action.
+3. Entering and leaving the earlier-history loading state must not change the
+   vertical position of already-visible conversation rows.
+4. Consecutive automatically loaded history pages must keep one stable anchor
+   throughout their loading and commit phases.
+5. PR #268's one-shot plan reveal semantics must remain intact.
+6. Existing previous-message navigation, entry navigation, interaction-anchor
+   correction, and earlier-history pagination must retain their behavior.
 
 ## Acceptance Criteria
 
-- A deterministic regression test reproduces the implicated streaming/layout
-  transition and fails before the fix.
-- During continuous live updates, the viewport has a single stable scroll
-  policy: it stays at the bottom when locked or stays on the reader's content
-  when unlocked; it does not alternate between those states without user input.
-- Focused frontend tests, type checking, linting, and formatting pass.
+- A deterministic regression test fails on the pre-fix behavior and covers the
+  state sequence visible in the recording.
+- During continuous live updates, sampled viewport positions are monotonic when
+  content grows at the bottom and do not alternate between two offsets.
+- The earlier-history control has stable layout geometry across idle, loading,
+  retry, and success transitions.
+- The focused frontend suite, type checks, lint, formatting, and diff checks
+  pass.
 - Independent Codex review reports no significant findings.
-- The change is documented in the project knowledge base if it yields reusable
-  guidance, then delivered through a merged pull request.
+- Reusable knowledge is recorded in the project knowledge base and the change
+  is delivered through a merged pull request.
 
 ## Non-Goals
 
-- Redesigning chat presentation or message rendering.
-- Changing backend streaming protocols or persisted conversation data.
-- Modifying homelab deployment configuration.
+- Redesigning conversation presentation or changing entry rendering.
+- Changing backend streaming, persistence, or execution lifecycle semantics.
+- Modifying `homelab/modules/vibe-kanban-rebuild.nix` or any other service.
 
-## Evidence and Initial Technical Direction
+## Initial Technical Hypothesis
 
-The recording shows large vertical jumps confined to the chat scroller while a
-turn is running. The current list combines a TanStack Virtual head with a normal
-DOM tail and recalculates the boundary based on active-streaming state. It also
-performs bottom-lock corrections in a layout effect on row-count and total-size
-changes. Investigation should determine which boundary or measurement change
-makes the scroll height alternate, then make that transition monotonic or keep
-the reader anchored without weakening the existing bottom-follow behavior.
+The remaining jitter is downstream of PR #268. In the recording, the centered
+“Loading earlier messages” presentation repeatedly appears as the conversation
+moves downward, then disappears as the content returns upward. In
+`ConversationListContainer`, the idle load-earlier button and loading skeleton
+occupy different normal-flow heights. The history anchor is captured before
+`loadEarlier()`, but its correction loop begins only after the awaited request
+finishes, so the intermediate loading render is visibly uncorrected. Automatic
+pagination can repeat the down/up cycle for consecutive pages. The narrow fix
+should keep the control region's block geometry invariant across loading states,
+leaving semantic anchoring to correct only actual history insertion.

@@ -1,35 +1,46 @@
-# Implementation Plan: Stop Workspace Chat Viewport Shaking
+# Implementation Plan: Streaming Conversation Viewport Stability
 
-1. Reconstruct the failure from the recording and current conversation-list
-   code, tracing live timeline updates through row derivation, the
-   virtualized/unvirtualized tail boundary, TanStack measurement, at-bottom
-   detection, and bottom-lock correction.
-2. Run the required SpecKit constitution, specification, clarification,
-   planning, task decomposition, and analysis stages. Record the exact
-   invariant responsible for the oscillation before changing product code.
-3. Extract the smallest pure state transition or scroll-policy seam needed for
-   deterministic tests. Cover continuous streaming at the bottom, streaming
-   after reader scroll-up, and transitions between active and settled tails.
-4. Implement the minimal conversation-list/virtualizer change that makes tail
-   ownership and bottom correction stable across live updates, without changing
-   semantic row identity, history-prepend anchoring, interaction anchoring, or
-   programmatic navigation.
-5. Run focused regression tests first, then install dependencies if required and
-   run repository formatting, frontend type checks, linting, and relevant test
-   suites. Perform a visual/browser reproduction when the local fixture path can
-   exercise the affected transcript.
-6. Run an independent Codex CLI review of the diff. Address every confirmed
-   significant finding and repeat verification/review until clear.
-7. Distill reusable scroll/virtualization guidance into the Vibe Kanban
-   knowledge base, update its index and task tag, and commit those docs.
-8. Commit the implementation, push the task branch, open a pull request against
-   the repository's base branch, monitor required checks, resolve failures, and
-   merge the pull request.
+1. Preserve the task boundary
+   - Work only in the Vibe Kanban repository.
+   - Retain PR #268's edge-triggered plan reveal behavior.
 
-## Guardrails
+2. Establish the SpecKit records
+   - Refresh the constitution.
+   - Create and clarify the task specification.
+   - Record research, data model/state transitions, contracts, technical plan,
+     tasks, and cross-artifact analysis under `specs/vk/9c15-still-shaking/`.
 
-- Do not change another service or homelab deployment configuration.
-- Do not replace the single conversation scroller or remove bounded history.
-- Do not rely on timing-only suppression as the primary correctness mechanism.
-- Preserve user-controlled scroll position and accessibility of existing
-  navigation/load controls.
+3. Reproduce and isolate the remaining jitter
+   - Compare the recording frame by frame with PR #268's change.
+   - Trace automatic earlier-history pagination, control rendering, anchor
+     capture/correction timing, and streaming updates.
+   - Identify the loading-state geometry change visible in the recording.
+
+4. Add a failing regression
+   - Add a rendered-DOM test for invariant earlier-history control geometry and
+     relevant idle/loading/retry states.
+   - Demonstrate that the focused test fails before the production fix.
+
+5. Implement the narrow fix
+   - Make the history-control region reserve invariant block space as its visual
+     state changes.
+   - Preserve existing semantic anchoring for actual page insertion.
+
+6. Verify behavior
+   - Run focused Vitest coverage first.
+   - Install locked dependencies if required, then run relevant web-core type
+     checks and lint, repository formatting, and `git diff --check`.
+   - Recheck plan reveal, explicit navigation, interaction anchoring, and
+     earlier-history behavior through existing tests.
+
+7. Review and document
+   - Run an independent Codex CLI review of the complete diff.
+   - Address confirmed findings and repeat verification/review until no
+     significant findings remain.
+   - Update the project knowledge base with the stable mixed-virtualization
+     invariant and task tag if confirmed.
+
+8. Deliver
+   - Commit the implementation and knowledge-base changes.
+   - Push the task branch, open a pull request against the base branch, wait for
+     required checks, address failures, and merge the pull request.
