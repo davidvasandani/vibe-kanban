@@ -260,7 +260,9 @@ mod tests {
                 "generation-schema-changed",
             ),
         ] {
-            coordinator.request(session, true).await;
+            coordinator
+                .request(session, true, vec!["personal_servicenow".to_string()])
+                .await;
             let result = coordinator
                 .confirm(
                     session,
