@@ -113,26 +113,30 @@ occurs when the session metadata has `history_mode=paginated` but no
 When a fork fails due to lineage issues:
 
 1. Check whether the leaf rollout file exists locally for the requested thread.
-2. If the leaf exists, attempt to resume the thread directly by starting a new
-   turn with `turn/start` using the original thread ID.
-3. If `turn/start` fails with "thread not found" (the Codex app-server doesn't
-   have the thread loaded in memory even though the file exists on disk), fall
-   back to starting a replacement thread.
-4. If the leaf is absent, fall back to the existing replacement-thread behavior.
+2. If the leaf exists, call `thread/resume` with the original thread ID to load
+   the thread from the on-disk rollout into the app-server's memory. The
+   `thread/resume` method is designed to load an existing thread by thread_id
+   without requiring full ancestry resolution like `thread/fork` does.
+3. If `thread/resume` succeeds, the resumed thread is used for the turn. The
+   conversation text from the leaf is preserved.
+4. If `thread/resume` also fails (e.g., the same lineage error or other issue),
+   or if the leaf is absent, fall back to the replacement-thread behavior.
 
-This preserves conversation context when the underlying problem is an ancestry
-artifact that never existed rather than actual data loss. The replacement-thread
-fallback remains for genuinely missing rollouts and for cases where the Codex
-app-server cannot load the thread from its local rollout file.
+This two-stage approach (`thread/fork` → `thread/resume` → replacement) gives
+the best chance of preserving conversation context. The replacement-thread
+fallback remains as the last resort for genuinely irrecoverable rollouts.
 
-### Known turn/start error formats
+### Protocol methods tried for lineage-unusable leaves
 
-The following `turn/start` error messages (JSON-RPC code `-32600`) indicate the
-Codex app-server doesn't have the thread loaded and recovery should fall back to
-a replacement thread:
+The following methods were evaluated for loading paginated leaves with no
+`history_base`:
 
-1. `thread not found: <uuid>` — the thread is not loaded in the app-server
-   memory, even though the rollout file may exist on disk.
-
-The `<uuid>` in the message must match the exact thread ID that was requested.
-A mismatch or wrong JSON-RPC code means the error is not eligible for recovery.
+1. **`thread/fork`**: Fails with "invalid paginated history lineage" because it
+   requires full ancestry resolution for paginated history mode.
+2. **`thread/resume`**: Loads the thread from disk by thread_id. This is the
+   preferred recovery path when the leaf exists locally.
+3. **`turn/start` directly**: Does not work; the app-server must have the thread
+   loaded in memory first. Calling `turn/start` on an unloaded thread returns
+   "thread not found".
+4. **Replacement thread via `thread/start`**: Loses Codex-private history but
+   keeps the Vibe workspace usable. Used as last resort.
