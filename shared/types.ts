@@ -119,7 +119,7 @@ project_id: string,
  */
 parent_issue_id: string | null, };
 
-export type PreviewSettingsData = { url: string, screen_size: string | null, responsive_width: number | null, responsive_height: number | null, };
+export type PreviewSettingsData = { url: string, current_route: string | null, screen_size: string | null, responsive_width: number | null, responsive_height: number | null, };
 
 export type WorkspaceNotesData = { content: string, };
 

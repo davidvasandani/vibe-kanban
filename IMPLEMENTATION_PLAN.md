@@ -1,11 +1,21 @@
-# Implementation plan: Polling workspace group
+# Implementation Plan: Preserve Preview App Navigation URLs
 
-1. Follow the workspace-scoped SpecKit commands in `.claude/commands`; their exact artifact directory is `homelab/specs/vk/dc76-add-polling-to-w/`. These documents concern only Vibe Kanban; application code remains in its own repo.
-2. Refresh the constitution, specify behavior, resolve precedence, write the technical plan and dependency-ordered tasks, then analyze coverage before implementation.
-3. Extend the existing workspace summary with active-poller presence, computed across the workspace's sessions from running BackgroundHelper processes with poller metadata. Regenerate shared types.
-4. Map the summary into workspace UI data. Extend the shared sidebar partition with Polling, preserving pending approval and active run/creation precedence. Add a persistent collapsible section and all locale labels.
-5. Add regression tests for query filtering, grouping precedence/exclusivity, terminal poller transitions, and rendered section behavior.
-6. Install frozen dependencies; format; run focused tests, type generation/check, checks and lint. Address failures in scope and document environmental blockers precisely.
-7. Run independent Codex review and resolve significant findings. Update and commit the Vibe Kanban wiki, then open and merge PRs for the service change and its required SpecKit artifacts.
-
-Prior knowledge: see `../PRIOR_KNOWLEDGE.md`.
+1. Trace the current preview URL lifecycle from dev-server detection through
+   proxy URL construction, iframe navigation reporting, and preview scratch
+   settings restoration.
+2. Establish the persistence semantics that distinguish the latest navigated app
+   URL from an explicit user override, including local/proxy URL normalization.
+3. Extend the smallest existing preview state boundary needed to save and restore
+   the latest accepted navigation URL per workspace.
+4. Prevent duplicate writes, stale bridge messages, workspace cross-talk, and
+   leakage of preview-only query parameters.
+5. Add focused automated tests for route components (path/query/hash), remount
+   restoration, workspace isolation, and override compatibility.
+6. Run focused tests, frontend checks, formatting, and linting; repair any
+   regressions.
+7. Independently review the complete diff, address significant findings, and
+   repeat verification.
+8. Document reusable preview persistence invariants in the project knowledge
+   base and refresh its index.
+9. Commit the implementation, open a pull request against the base branch, wait
+   for required checks, and merge it.

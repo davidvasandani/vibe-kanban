@@ -31,6 +31,11 @@ import { PreviewDevToolsBridge } from '@/shared/lib/previewDevToolsBridge';
 import { useInspectModeStore } from '@/features/workspace-chat/model/store/useInspectModeStore';
 import type { PreviewDevToolsMessage } from '@/shared/types/previewDevTools';
 import { executionProcessesApi } from '@/shared/lib/api';
+import {
+  applyPreviewRoute,
+  getPreviewRoute,
+  stripPreviewTransportParams,
+} from './previewUrlState';
 
 const MIN_RESPONSIVE_WIDTH = 320;
 const MIN_RESPONSIVE_HEIGHT = 480;
@@ -94,16 +99,6 @@ function parsePreviewUrl(rawUrl: string, baseUrl?: string): URL | null {
 
 function normalizePreviewUrl(rawUrl: string, baseUrl?: string): string | null {
   return parsePreviewUrl(rawUrl, baseUrl)?.toString() ?? null;
-}
-
-function stripPreviewRefreshParam(rawUrl: string): string | null {
-  try {
-    const url = new URL(rawUrl);
-    url.searchParams.delete('_refresh');
-    return url.toString();
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -188,6 +183,7 @@ export function PreviewBrowserContainer({
     (s) => s.triggerPreviewRefresh
   );
   const { repos, workspaceId: activeWorkspaceId } = useWorkspaceContext();
+  const previewWorkspaceId = activeWorkspaceId ?? workspaceId;
   const { previewProxyPort } = useUserSystem();
   const hostId = useHostId();
 
@@ -198,7 +194,7 @@ export function PreviewBrowserContainer({
     isStopping,
     runningDevServers,
     devServerProcesses,
-  } = usePreviewDevServer(activeWorkspaceId ?? workspaceId);
+  } = usePreviewDevServer(previewWorkspaceId);
 
   const primaryDevServer = useMemo(() => {
     if (runningDevServers.length === 0) return undefined;
@@ -232,18 +228,58 @@ export function PreviewBrowserContainer({
     hasOverride,
     setOverrideUrl,
     clearOverride,
+    currentRoute,
+    setCurrentRoute,
     screenSize,
     responsiveDimensions,
     setScreenSize,
     setResponsiveDimensions,
-  } = usePreviewSettings(activeWorkspaceId ?? workspaceId);
+    isLoading: isPreviewSettingsLoading,
+  } = usePreviewSettings(previewWorkspaceId);
 
   // ─── URL Bar State ──────────────────────────────────────────────────────────
   // effectiveUrl:       The override URL (if set) or the auto-detected dev server URL.
   // urlInputValue:      Local state for the URL bar text. Decoupled from effectiveUrl
   //                     so that external URL changes don't disrupt the user while typing.
   // Use override URL if set, otherwise fall back to auto-detected
-  const effectiveUrl = hasOverride ? overrideUrl : urlInfo?.url;
+  const previousHasOverrideRef = useRef(hasOverride);
+  const iframeMountMode = screenSize === 'mobile' ? 'mobile' : 'standard';
+  const restorationScope = `${previewWorkspaceId}:${primaryDevServer?.id ?? 'none'}:${iframeMountMode}`;
+  const restoredRouteRef = useRef<{
+    scope: string;
+    route: string | null;
+    initialized: boolean;
+  }>({ scope: restorationScope, route: null, initialized: false });
+  if (restoredRouteRef.current.scope !== restorationScope) {
+    restoredRouteRef.current = {
+      scope: restorationScope,
+      route: null,
+      initialized: false,
+    };
+  }
+  if (!isPreviewSettingsLoading && !restoredRouteRef.current.initialized) {
+    restoredRouteRef.current.route = currentRoute;
+    restoredRouteRef.current.initialized = true;
+  }
+  if (
+    previousHasOverrideRef.current &&
+    !hasOverride &&
+    !isPreviewSettingsLoading
+  ) {
+    restoredRouteRef.current.route = currentRoute;
+    restoredRouteRef.current.initialized = true;
+  }
+  const restoredRoute = restoredRouteRef.current.route;
+
+  const autoDetectedUrl = useMemo(() => {
+    if (isPreviewSettingsLoading || !urlInfo?.url) return undefined;
+    return applyPreviewRoute(urlInfo.url, restoredRoute) ?? urlInfo.url;
+  }, [isPreviewSettingsLoading, restoredRoute, urlInfo?.url]);
+  const effectiveUrl = isPreviewSettingsLoading
+    ? undefined
+    : hasOverride
+      ? overrideUrl
+      : autoDetectedUrl;
   const effectiveParsedUrl = useMemo(
     () =>
       effectiveUrl
@@ -311,7 +347,8 @@ export function PreviewBrowserContainer({
       return undefined;
     }
 
-    const path = effectiveParsedUrl.pathname + effectiveParsedUrl.search;
+    const path = getPreviewRoute(effectiveParsedUrl.toString());
+    if (!path) return undefined;
 
     // Subdomain-based routing: the proxy extracts the port from the Host header
     let hostToken =
@@ -388,14 +425,21 @@ export function PreviewBrowserContainer({
     reset: resetNavigation,
   } = usePreviewNavigation();
   const bridgeRef = useRef<PreviewDevToolsBridge | null>(null);
+  const navigationWorkspaceIdRef = useRef(previewWorkspaceId);
+  const previousWorkspaceIdRef = useRef(previewWorkspaceId);
+  const lastPersistedNavigationRef = useRef<{
+    workspaceId: string;
+    url: string;
+  } | null>(null);
+  const canPersistNavigation = !hasOverride && !previousHasOverrideRef.current;
   const displayedPreviewUrl = useMemo(() => {
     if (navigation?.url) {
       // Non-loopback (direct) URLs: strip _refresh param and show as-is
       if (!isLoopbackPreview) {
-        return stripPreviewRefreshParam(navigation.url) ?? navigation.url;
+        return stripPreviewTransportParams(navigation.url) ?? navigation.url;
       }
       if (hostId != null) {
-        return stripPreviewRefreshParam(navigation.url) ?? navigation.url;
+        return stripPreviewTransportParams(navigation.url) ?? navigation.url;
       }
       if (devServerPort) {
         const transformed = transformProxyUrlToDevUrl(
@@ -409,7 +453,7 @@ export function PreviewBrowserContainer({
     }
 
     if (hostId != null && iframeUrl) {
-      return stripPreviewRefreshParam(iframeUrl) ?? iframeUrl;
+      return stripPreviewTransportParams(iframeUrl) ?? iframeUrl;
     }
 
     return effectiveUrl ?? null;
@@ -422,11 +466,62 @@ export function PreviewBrowserContainer({
     navigation?.url,
   ]);
 
+  useEffect(() => {
+    if (previousHasOverrideRef.current && !hasOverride) {
+      resetNavigation();
+    }
+    previousHasOverrideRef.current = hasOverride;
+  }, [hasOverride, resetNavigation]);
+
+  useEffect(() => {
+    if (previousWorkspaceIdRef.current !== previewWorkspaceId) {
+      resetNavigation();
+      lastPersistedNavigationRef.current = null;
+      previousWorkspaceIdRef.current = previewWorkspaceId;
+    }
+  }, [previewWorkspaceId, resetNavigation]);
+
+  useEffect(() => {
+    if (
+      !canPersistNavigation ||
+      isPreviewSettingsLoading ||
+      navigationWorkspaceIdRef.current !== previewWorkspaceId ||
+      !navigation?.url
+    )
+      return;
+
+    const lastPersistedNavigation = lastPersistedNavigationRef.current;
+    if (
+      lastPersistedNavigation?.workspaceId === previewWorkspaceId &&
+      lastPersistedNavigation.url === navigation.url
+    )
+      return;
+    lastPersistedNavigationRef.current = {
+      workspaceId: previewWorkspaceId,
+      url: navigation.url,
+    };
+
+    const route = getPreviewRoute(navigation.url);
+    if (!route || route === currentRoute) return;
+
+    setCurrentRoute(route);
+  }, [
+    canPersistNavigation,
+    currentRoute,
+    isPreviewSettingsLoading,
+    navigation?.url,
+    previewWorkspaceId,
+    setCurrentRoute,
+  ]);
+
   const handleBridgeMessage = useCallback(
     (message: PreviewDevToolsMessage) => {
+      if (message.type === 'navigation') {
+        navigationWorkspaceIdRef.current = previewWorkspaceId;
+      }
       handleNavigationMessage(message);
     },
-    [handleNavigationMessage]
+    [handleNavigationMessage, previewWorkspaceId]
   );
 
   // ─── URL Sync Effect ──────────────────────────────────────────────────────
@@ -950,6 +1045,7 @@ export function PreviewBrowserContainer({
 
   return (
     <PreviewBrowser
+      key={previewWorkspaceId}
       url={iframeUrl}
       autoDetectedUrl={urlInfo?.url}
       urlInputValue={urlInputValue}

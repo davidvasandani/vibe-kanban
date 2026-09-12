@@ -561,3 +561,9 @@ surface; 0.16.0 added affinity-bound, evidence-backed distributed execution)
 (preserve work and coordinator-owned shared Git administration), XXI (safe,
 identifying failures), and XXVIII (request-independent creation with no replay of
 partially committed startup). No new principle or version change is required.
+
+`vk/4aeb-app-urls-for-mad`: reaffirm II (test the observable URL persistence
+contract), III/VI (extend existing preview settings and navigation machinery),
+IV (implement shared behavior in `web-core` for both frontends), and XXI (reuse
+the existing proxy/development URL normalization convention). No new principle
+or version change is required.

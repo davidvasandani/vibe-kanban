@@ -146,6 +146,7 @@ export const useLocalStorageScratch = (
       const next = buildScratchEntry(id, update, readFromStorage(storageKey));
       writeToStorage(storageKey, next);
       setScratch(next);
+      return next;
     },
     [storageKey, id]
   );

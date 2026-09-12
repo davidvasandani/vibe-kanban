@@ -1,33 +1,84 @@
-# Feature specification: reliable workspace creation
+# Feature Specification: Preserve Preview App Navigation URLs
 
-Task: vk/40fb-workspace-creati
-Feature directory: specs/vk/c89d-address-fable-fo/ (exact path named by repository SpecKit commands)
-Status: specified
+**Feature dir**: `specs/vk/c89d-address-fable-fo/`
+**Status**: Clarified
 
 ## Summary
-Investigate and correct intermittent workspace creation failures so valid requests complete reliably and failures remain useful to diagnose without risking existing work or duplicate agents.
 
-## User stories
-- As a user, I can create a workspace from valid repositories and start its initial agent without intermittent internal failures.
-- As an operator, I can correlate a creation failure to its workspace and cause.
-- As a user, failed creation never destroys existing work or starts duplicate agents.
+Preserve the latest page selected inside a workspace's application preview so a
+user returning to that preview resumes the same worksheet or application view,
+instead of being returned to the detected development-server root. This makes
+Vibe Kanban's displayed app URL a reliable representation of the previewed
+application's current state.
 
-## Functional requirements
-- FR-1: Correct the cause demonstrated by creation logs and reproducible code behavior.
-- FR-2: Preserve single-consumer lifecycle transitions and request-independent execution.
-- FR-3: Preserve repository/branch identity and shared-worktree ownership; retries must not replay committed startup side effects.
-- FR-4: Keep permanent failures visible and safely diagnosable by workspace identity; never expose credentials.
-- FR-5: Verify the corrected failure scenario and successful creation behavior with focused regression coverage.
+## User Stories
 
-## Out of scope
-Other services, speculative retries, unrelated UI redesign, dependency upgrades, and destructive recovery of failed workspaces.
+- As a user previewing Mad Minutes, I want the worksheet I selected to remain
+  selected after I leave and return to the preview so that I can continue work
+  without finding it again.
+- As a user, I want the preview URL bar, copy action, and open action to represent
+  the same current application page so that links do not silently lose route
+  state.
+- As a user working in multiple workspaces, I want each workspace to remember
+  only its own preview page so that navigation never leaks between tasks.
 
-## Acceptance criteria
-- [x] A documented causal chain connects operational or reproducible evidence to the correction.
-- [x] Regression tests reproduce the defect and pass with the correction.
-- [x] Successful creation, permanent failure, and no-duplicate behavior remain correct.
-- [x] Required formatting/checks and independent review have recorded outcomes.
-- [x] Knowledge is committed and [task PR #279](https://github.com/davidvasandani/vibe-kanban/pull/279) is open. The final merge is recorded by GitHub during pipeline stage 13.
+## Functional Requirements
 
-## Open questions
-Resolved from coordinator logs: Sep 12 failures name repository administration lock contention; Sep 11 failures report a rejected Provisioning-to-Ready transition. Investigate both mechanisms, fixing those supported by reproducible evidence. Unsupported CURSOR_AGENT placement also appears in older logs and must remain a visible permanent failure. No user product decisions remain open.
+- FR-1: The system must recognize an accepted navigation event from the embedded
+  application as the current preview URL.
+- FR-2: The current preview URL must preserve its pathname, query string, and URL
+  fragment.
+- FR-3: The system must retain the current preview URL when the preview UI is
+  unmounted and later remounted for the same workspace.
+- FR-4: Retained preview URLs must be scoped to one workspace.
+- FR-5: Internal preview transport metadata must not appear in the retained or
+  user-visible application URL.
+- FR-6: A retained navigation URL must not change the established meaning or
+  lifecycle of an explicit manual URL override.
+- FR-7: A newly detected development server must remain able to establish the
+  preview's origin and port while the retained application route restores the
+  user's last in-app location when compatible.
+- FR-8: Stale or duplicate navigation reports must not overwrite a newer retained
+  URL.
+- FR-9: Preview navigation, refresh, back, forward, copied URLs, and external-open
+  actions must continue to operate on the same canonical current URL.
+
+## Out of Scope
+
+- Changes to Mad Minutes or any application other than Vibe Kanban.
+- Synchronizing preview history across different workspaces or users.
+- Persisting the full browser back/forward history across application sessions.
+- Treating arbitrary cross-origin pages as injectable preview applications.
+
+## Acceptance Criteria
+
+- [ ] Navigating from the Mad Minutes root to a selected worksheet and remounting
+      the preview restores that worksheet.
+- [ ] A selected URL containing path, query, and fragment data retains all three.
+- [ ] The preview URL bar, copy action, and open action expose the restored URL
+      without `_refresh` or other Vibe Kanban transport parameters.
+- [ ] Navigating workspace A does not change the restored preview URL of
+      workspace B.
+- [ ] Manual override behavior and development-server URL auto-detection remain
+      functional.
+- [ ] Duplicate or stale bridge events cannot replace the latest accepted route.
+- [ ] Focused automated regression tests pass in both shared frontend usage
+      contexts.
+
+## Open Questions
+
+No open questions remain.
+
+## Clarifications
+
+- The latest in-app URL is durable per-workspace state and must survive both a
+  preview remount and a Vibe Kanban page reload.
+- Auto-detected previews retain the selected route (pathname, query, and
+  fragment) separately from the detected server origin. When the same workspace
+  starts its app on a new compatible local origin or port, Vibe Kanban applies
+  the retained route to that newly detected origin instead of pinning the stale
+  full origin. Explicit manual overrides continue to retain their complete URL.
+- A retained auto-detected route is considered compatible with the next
+  auto-detected application for that same workspace; clearing or replacing an
+  explicit override does not promote the override's route into auto-detected
+  state.
