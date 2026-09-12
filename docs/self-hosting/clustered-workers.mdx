@@ -1,0 +1,179 @@
+---
+title: "Operate clustered Vibe Kanban workers"
+description: "Roll out, validate, drain, recover, and roll back Vibe Kanban workers that use shared NFS workspace storage"
+---
+
+Clustered Vibe Kanban keeps one coordinator and coordinator-local SQLite database while running workspace processes on assigned workers. Every node sees the same workspace files through one NFS export mounted at the same absolute path.
+
+<Warning>
+  Do not place `db.v2.sqlite` on NFS and do not run multiple coordinators
+  against one database. A missing NFS mount must make a worker unavailable
+  rather than expose an empty local directory at the shared path.
+</Warning>
+
+## Prerequisites
+
+Before you enable clustering, confirm that:
+
+- the workers validate the storage-side numeric UID/GID produced by the NFS export policy;
+- `172.16.0.99:/var/nfs/shared/VibeKanban` is snapshot-backed;
+- every node mounts it at `/srv/vibe-kanban-shared`;
+- each worker has a stable UUID and reachable LAN address;
+- the coordinator and each worker have separate signing credentials;
+- TCP port `8086` is allowed only on the trusted cluster LAN; and
+- the worker binary and coordinator come from the same Vibe Kanban release.
+
+The Nix options live under `services.vibe-kanban-rebuild`. Use `clusterRole = "coordinator"` on the coordinator and `clusterRole = "worker"` on worker nodes. The module mounts the export at `sharedMount`, creates `sharedRoot` (by default `/srv/vibe-kanban-shared/cluster`) inside it, orders both services after that preparation, and delivers worker credentials through systemd credentials. `worker.expectedSharedUid` and `worker.expectedSharedGid` describe storage-side ownership and are intentionally independent of the worker's local account UID/GID.
+
+## Run the two-node Slice 2 trial
+
+Use disposable or snapshot-protected nodes for the first trial. Start with one coordinator and one worker before adding the remaining cluster nodes.
+
+<Steps>
+<Step title="Prepare shared storage">
+  The coordinator creates the cluster root inside the NFS mount. Create the `repositories`, `workspaces`, and `execution-logs` directories there, verify their storage-side UID/GID, then take a baseline snapshot.
+
+On both nodes, verify the source and filesystem type:
+
+```bash
+findmnt --target /srv/vibe-kanban-shared --output SOURCE,FSTYPE,TARGET
+```
+
+The source must be `172.16.0.99:/var/nfs/shared/VibeKanban`. UniFi Drive serves
+this export over NFSv3. Stop if the command reports a local filesystem.
+
+</Step>
+
+<Step title="Deploy one worker">
+  Configure a stable `worker.nodeId`, the coordinator URL, both credential files, and the executor profiles installed on that node. Apply the worker configuration, then inspect its service:
+
+```bash
+systemctl status vibe-kanban-worker.service
+curl --fail http://127.0.0.1:8086/health
+```
+
+  <Check>
+  The service is active and health reports a healthy shared mount before the worker becomes schedulable.
+  </Check>
+</Step>
+
+<Step title="Enable the coordinator">
+  Configure the stable coordinator UUID and the worker's LAN endpoint. Keep the coordinator data directory outside `/srv/vibe-kanban-shared`, apply the configuration, and open **Settings → Workers**.
+
+Confirm the worker hostname, version, mount health, resource snapshot, executor profiles, and online state.
+
+</Step>
+
+<Step title="Run one coding-agent workspace">
+  Create a test workspace and manually select the disposable worker. Confirm that:
+
+1. the workspace receives that worker's node ID;
+2. its files appear immediately under the shared workspace root;
+3. setup and coding-agent processes run on the worker;
+4. output streams live and remains visible after completion;
+5. a follow-up keeps the same worker; and
+6. cancellation terminates the worker process group and reaches a confirmed final state.
+   </Step>
+
+<Step title="Exercise disconnect recovery">
+  During a disposable execution, interrupt coordinator-to-worker connectivity without unmounting storage. Restore connectivity and confirm ordered log replay resumes without duplicate execution.
+
+Restart the coordinator and confirm it reconciles the worker inventory. Then restart the worker during another disposable run and confirm the UI reports **Interrupted** or **Indeterminate**, never **Completed** without terminal evidence.
+
+</Step>
+</Steps>
+
+Do not add more workers until output replay, cancellation, restart reconciliation, and shared Git worktree operations all pass.
+
+## Drain a worker
+
+Set the worker to **Draining** before maintenance. Draining prevents new placements but does not move existing workspaces.
+
+1. Wait for ordinary executions to finish.
+2. Stop persistent dev servers and terminals for workspaces assigned to the worker.
+3. Confirm no active worker jobs remain.
+4. Stop `vibe-kanban-worker.service`.
+5. Perform maintenance without deleting shared workspace directories.
+
+If a worker is unreachable, preserve its workspaces. Do not run cleanup until reconciliation proves that no process is active.
+
+## Rotate worker credentials
+
+Rotate one worker at a time so scheduling capacity remains available.
+
+<Steps>
+<Step title="Drain the worker">
+  Drain it and wait for active jobs to reach confirmed terminal states.
+</Step>
+
+<Step title="Stage both sides of trust">
+  Install the replacement worker signing credential in the worker's protected credential source. Add the corresponding worker public identity to coordinator trust before removing the old identity.
+
+For coordinator-key rotation, stage the replacement coordinator public key on the worker before the coordinator begins signing with the replacement private key.
+
+</Step>
+
+<Step title="Restart and verify">
+  Restart the worker, confirm registration and mount health, then run a
+  disposable execution and cancellation test.
+</Step>
+
+<Step title="Retire the old key">
+  Remove the old trust entry only after the replacement has passed registration, dispatch, streaming, and cancellation checks.
+</Step>
+</Steps>
+
+Never store private keys in the shared volume or repository.
+
+## Respond to shared-mount loss
+
+If NFS disappears or becomes read-only:
+
+1. drain or stop affected workers;
+2. confirm `findmnt` still reports the expected remote export and not a local fallback;
+3. preserve all workspace records and mark running work as interrupted or indeterminate;
+4. restore storage connectivity and verify a coordinator-issued probe is visible and writable;
+5. reconcile worker inventory before resuming scheduling; and
+6. inspect affected repositories before cleanup or pruning.
+
+Do not create the missing mountpoint as a writable local directory. Do not infer that a process completed merely because its worker disconnected.
+
+## Recover workspace data
+
+Take frequent snapshots and retain recently deleted workspaces. To recover:
+
+1. drain every worker that can access the affected repository;
+2. stop workspace cleanup and Git worktree administration;
+3. restore the required files or workspace into a separate recovery location;
+4. compare uncommitted files and Git metadata before copying data back;
+5. let only the coordinator repair worktree administration under its repository lock; and
+6. run a disposable Git status, diff, agent, and cleanup cycle before reopening scheduling.
+
+Never restore coordinator SQLite over a running coordinator. Restore its local database only as part of a stopped, separately verified coordinator recovery.
+
+## Reconcile after outages
+
+After a coordinator restart, workers report their active jobs and last event sequences. Investigate these outcomes:
+
+- a worker job matching a running SQLite execution resumes from the last acknowledged event;
+- a SQLite execution absent from worker inventory becomes interrupted or indeterminate;
+- an unknown worker job is quarantined or terminated according to policy; and
+- an output replay gap sets the output-incomplete warning in process details.
+
+Keep the worker unavailable if its versions, identity, mount health, or executor capabilities do not match the configured deployment.
+
+## Roll back
+
+Use the normal immutable-release rollback for binary regressions. Coordinator and workers should run matching releases.
+
+For a cluster-wide rollback:
+
+1. drain workers and stop new workspace creation;
+2. stop worker services;
+3. roll the coordinator back and verify its local database migration compatibility;
+4. roll workers back to the same release;
+5. start the coordinator, then one worker;
+6. reconcile existing jobs and run the Slice 2 smoke test; and
+7. restore the remaining workers gradually.
+
+To disable clustering without deleting data, return the coordinator to `clusterRole = "standalone"` only after all clustered executions are terminal and worker services are stopped. Keep the shared volume and snapshots until every workspace has been verified or deliberately retired.

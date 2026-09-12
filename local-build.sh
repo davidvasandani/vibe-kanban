@@ -14,6 +14,11 @@ umask 002
 # serialized — both builds can compile in parallel against their own
 # CARGO_TARGET_DIRs.
 BUILD_ID="$$-$(date +%s)"
+# One timestamp describes this immutable release everywhere it is surfaced:
+# in the running server's /api/info response and in release.json. Exporting it
+# also makes Cargo rerun the server build script for each release build.
+VK_BUILD_TIMESTAMP="$(date -u +%FT%TZ)"
+export VK_BUILD_TIMESTAMP
 
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -78,22 +83,12 @@ trap 'rm -rf "$DIST_STAGING" 2>/dev/null || true' EXIT
 echo "🔨 Building web app..."
 (cd packages/local-web && npm run build)
 
-# Build the remote deployment frontend in the SAME script that compiles the
-# `remote` binary, so the served UI and the backend are always from one
-# commit. The remote binary embeds the git sha at compile time (shown in the
-# app's corner); previously nothing here built packages/remote-web, so that
-# sha advanced every deploy while the served frontend stayed frozen. Always
-# building it (not just on the deploy host) also means CI/local builds catch
-# remote-web breakage instead of shipping a stale UI.
-echo "🔨 Building remote web app..."
-(cd packages/remote-web && npm run build)
-
 echo "🔨 Building Rust binaries..."
 # Build only the CLI binaries. Building the whole workspace pulls in
 # crates/tauri-app, whose GTK/glib system deps aren't installed on the
 # headless Linux CI runner. The Tauri build is opt-in below via --desktop.
 cargo build --release --manifest-path Cargo.toml \
-  --bin server --bin vibe-kanban-mcp --bin review
+  --bin server --bin vibe-kanban-mcp --bin review --bin vibe-kanban-worker
 
 echo "Building Remote API binary..."
 # crates/remote is excluded from the cargo workspace (exclude = [...]), so it
@@ -138,6 +133,10 @@ chmod +x "$DIST_STAGING/$PLATFORM/remote"
 # Run directly by the relay service, so it ships unzipped + executable.
 cp ${CARGO_TARGET_DIR}/release/relay-server "$DIST_STAGING/$PLATFORM/relay-server"
 chmod +x "$DIST_STAGING/$PLATFORM/relay-server"
+
+# Cluster worker daemon, deployed directly by the homelab worker units.
+cp ${CARGO_TARGET_DIR}/release/vibe-kanban-worker "$DIST_STAGING/$PLATFORM/vibe-kanban-worker"
+chmod +x "$DIST_STAGING/$PLATFORM/vibe-kanban-worker"
 
 echo "✅ CLI build complete!"
 echo "📁 Files created:"
@@ -233,24 +232,17 @@ chmod -R g+rwX,o+rX npx-cli/dist || true
 #
 #   $VK_RELEASES_DIR/
 #     build-<id>/bin/{vibe-kanban,vibe-kanban-mcp,vibe-kanban-review,
-#                     remote,relay-server}
+#                     remote,relay-server,vibe-kanban-worker}
 #     build-<id>/release.json      {"sha", "build_id", "built_at"}
 #     current  -> build-<id>       (atomic rename flip)
 #     previous -> old current      (single-step rollback target)
 #
-# This extends the VK_REMOTE_STATIC_RELEASES pattern (see the remote-web
-# publish below) to the binaries.
 # Deployed services stop running out of npx-cli/dist inside the source
 # checkout — where a repo reset/chmod/wipe can take the running deployment
 # down — and instead exec extracted binaries behind a `current` symlink.
 #
-# The publish is split in two around the remote-web publish below:
-# STAGING (here) happens before the remote-web `current` flips, the binary
-# `current` FLIP happens after it. Any failure therefore leaves the deployed
-# system fully consistent — either nothing flipped, or (in the few-symlink-op
-# window between the two flips) a version drift the deploy reconciler detects
-# and retries. `current` always resolves to a release whose every binary
-# built.
+# Staging completes before the atomic live flip below. Any failure therefore
+# leaves `current` resolving to the previous complete release.
 if [ -n "${VK_RELEASES_DIR:-}" ]; then
   # Symlink targets are resolved relative to the symlink's own directory, so
   # a relative VK_RELEASES_DIR would produce a self-prefixed, dangling
@@ -267,6 +259,7 @@ if [ -n "${VK_RELEASES_DIR:-}" ]; then
   cp "${CARGO_TARGET_DIR}/release/review" "$RELEASE/bin/vibe-kanban-review"
   cp "${CARGO_TARGET_DIR}/release/remote" "$RELEASE/bin/remote"
   cp "${CARGO_TARGET_DIR}/release/relay-server" "$RELEASE/bin/relay-server"
+  cp "${CARGO_TARGET_DIR}/release/vibe-kanban-worker" "$RELEASE/bin/vibe-kanban-worker"
   chmod 755 "$RELEASE/bin/"*
 
   # Self-describing release: a deploy reconciler compares `sha` against its
@@ -275,7 +268,7 @@ if [ -n "${VK_RELEASES_DIR:-}" ]; then
 {
   "sha": "$(git rev-parse HEAD)",
   "build_id": "${BUILD_ID}",
-  "built_at": "$(date -u +%FT%TZ)"
+  "built_at": "${VK_BUILD_TIMESTAMP}"
 }
 EOF
 
@@ -284,42 +277,8 @@ EOF
   chmod -R g+rwX,o+rX "$RELEASE" || true
 fi
 
-# --- Publish remote web frontend ------------------------------------------
-# The remote service (crates/remote) serves the UI from a fixed path via
-# ServeDir, where that path is a symlink the deploy host points at the
-# "current" release below. Publishing here — from the same build that just
-# compiled the `remote` binary — is what guarantees the served frontend and
-# the backend binary are always the same commit.
-#
-# Gated on VK_REMOTE_STATIC_RELEASES (set by the deploy host) so CI and local
-# developer builds, which have no such directory, are unaffected. The builder
-# only writes inside this releases dir, so it needs no privileges on the
-# served symlink's parent.
-if [ -n "${VK_REMOTE_STATIC_RELEASES:-}" ]; then
-  echo "📦 Publishing remote web to ${VK_REMOTE_STATIC_RELEASES}..."
-  REMOTE_RELEASE="${VK_REMOTE_STATIC_RELEASES}/build-${BUILD_ID}"
-  rm -rf "$REMOTE_RELEASE"
-  mkdir -p "$REMOTE_RELEASE"
-  cp -a packages/remote-web/dist/. "$REMOTE_RELEASE/"
-  # World-readable so the (non-builder) remote service user can serve it
-  # regardless of the build umask.
-  chmod -R g+rwX,o+rX "$REMOTE_RELEASE" || true
-  # Atomic repoint: stage a new "current" symlink, then rename it over the old
-  # one. rename(2) is atomic, so the live site never resolves to a half-copied
-  # tree. Both paths live in the releases dir (same filesystem, builder-owned).
-  ln -sfn "$REMOTE_RELEASE" "${VK_REMOTE_STATIC_RELEASES}/.current-${BUILD_ID}"
-  mv -Tf "${VK_REMOTE_STATIC_RELEASES}/.current-${BUILD_ID}" \
-    "${VK_REMOTE_STATIC_RELEASES}/current"
-  # Retain the 3 most recent builds; prune older ones so the releases dir
-  # doesn't grow without bound.
-  ls -1dt "${VK_REMOTE_STATIC_RELEASES}"/build-* 2>/dev/null \
-    | tail -n +4 \
-    | xargs -r rm -rf
-  echo "✅ Remote web published: $REMOTE_RELEASE"
-fi
-
 # --- Flip the binary release live --------------------------------------------
-if [ -n "${VK_RELEASES_DIR:-}" ]; then
+if [ -n "${VK_RELEASES_DIR:-}" ] && [ "${VK_RELEASES_DEFER_FLIP:-0}" != "1" ]; then
   # Serialize the previous-repoint + current-flip + prune across concurrent
   # builders (CI + local rebuild can race): without the lock, one builder's
   # prune could snapshot current/previous, lose the race to another's flip,
@@ -338,8 +297,8 @@ if [ -n "${VK_RELEASES_DIR:-}" ]; then
         "${VK_RELEASES_DIR}/previous"
     fi
 
-    # Atomic repoint, same protocol as the remote-web publish above: readers
-    # always resolve either the old or the new complete release.
+    # Atomic repoint: readers always resolve either the old or the new complete
+    # release.
     ln -sfn "$RELEASE" "${VK_RELEASES_DIR}/.current-${BUILD_ID}"
     mv -Tf "${VK_RELEASES_DIR}/.current-${BUILD_ID}" "${VK_RELEASES_DIR}/current"
 
@@ -357,6 +316,8 @@ if [ -n "${VK_RELEASES_DIR:-}" ]; then
         done
   ) 200>"${VK_RELEASES_DIR}/.publish-lock"
   echo "✅ Binary release published: $RELEASE"
+elif [ -n "${VK_RELEASES_DIR:-}" ]; then
+  echo "✅ Binary release staged (live flip deferred): $RELEASE"
 fi
 
 echo ""

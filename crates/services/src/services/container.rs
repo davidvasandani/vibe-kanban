@@ -1,7 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc, LazyLock, Mutex as StdMutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
 };
 
 use anyhow::{Error as AnyhowError, anyhow};
@@ -17,6 +21,7 @@ use db::{
         execution_process_repo_state::{
             CreateExecutionProcessRepoState, ExecutionProcessRepoState,
         },
+        execution_worker_job::ExecutionWorkerJob,
         repo::Repo,
         session::{CreateSession, Session, SessionError},
         workspace::{Workspace, WorkspaceError},
@@ -39,7 +44,10 @@ use executors::{
         NormalizedEntry, NormalizedEntryError, NormalizedEntryType,
         utils::{
             ConversationPatch,
-            patch::{fix_patch_ops, is_add_or_replace, patch_entry_path},
+            patch::{
+                fix_patch_ops, is_add_or_replace, normalized_entry_from_patch_value,
+                patch_entry_path,
+            },
         },
     },
     mcp_refresh::McpRefreshResult,
@@ -50,7 +58,10 @@ use git::{GitService, GitServiceError};
 use json_patch::Patch;
 use sqlx::Error as SqlxError;
 use thiserror::Error;
-use tokio::{sync::RwLock, task::JoinHandle};
+use tokio::{
+    sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, RwLock, Semaphore},
+    task::{AbortHandle, JoinHandle},
+};
 use utils::{
     log_msg::LogMsg,
     msg_store::MsgStore,
@@ -59,8 +70,208 @@ use utils::{
 use uuid::Uuid;
 use worktree_manager::WorktreeError;
 
-use crate::services::{execution_process, notification::NotificationService};
+use crate::services::{execution_process, normalized_log_cache, notification::NotificationService};
+
+/// Store the settled entries a historical replay produced, so the next reader
+/// replays them instead of re-normalizing the raw log.
+///
+/// Best-effort throughout: this is a cache over a source of truth that is still
+/// there. A failure to materialize costs the next reader time, which is the
+/// situation before this existed — so it is logged and dropped rather than
+/// failing a read that has already succeeded.
+async fn materialize_normalized_log(
+    cache_path: &std::path::Path,
+    patches: &[Patch],
+    truncated: bool,
+) -> bool {
+    if patches.is_empty() {
+        return false;
+    }
+
+    let entries = match normalized_log_cache::materialize_entries(patches) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("Could not materialize normalized log: {e}");
+            return false;
+        }
+    };
+
+    let header = normalized_log_cache::CacheHeader {
+        version: normalized_log_cache::CACHE_VERSION,
+        entry_count: entries.len(),
+        truncated,
+    };
+    if let Err(e) = normalized_log_cache::write(cache_path, header, &entries).await {
+        tracing::warn!("Could not store materialized normalized log: {e}");
+        return false;
+    }
+    true
+}
+
+/// The database-free half of [`ContainerService::cache_finished_execution`]:
+/// pull `/entries/<index>` patches out of a store's buffered history and
+/// hand them to [`materialize_normalized_log`]. Split out so a finished
+/// turn's write-on-completion path can be exercised without a database —
+/// the store already holds everything needed once the caller has confirmed
+/// the execution left `Running`.
+async fn cache_execution_from_history(cache_path: &std::path::Path, msg_store: &MsgStore) -> bool {
+    let patches: Vec<Patch> = msg_store
+        .get_history()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            LogMsg::JsonPatch(patch) if is_indexed_entry_patch(&patch) => Some(patch),
+            _ => None,
+        })
+        .collect();
+    materialize_normalized_log(cache_path, &patches, false).await
+}
+
+async fn replay_materialized_log(
+    cache_path: &Path,
+    execution_id: Uuid,
+    cache_stage: &'static str,
+) -> Option<BoxStream<'static, Result<LogMsg, std::io::Error>>> {
+    let (_, entries) = normalized_log_cache::read(cache_path).await?;
+    match normalized_log_cache::entries_as_patches(&entries) {
+        Ok(patches) => {
+            tracing::info!(
+                execution_id = %execution_id,
+                entry_count = patches.len(),
+                cache_stage,
+                "Serving normalized log from its materialized view"
+            );
+            Some(
+                futures::stream::iter(patches)
+                    .map(|patch| Ok::<_, std::io::Error>(LogMsg::JsonPatch(patch)))
+                    .chain(futures::stream::once(async {
+                        Ok::<_, std::io::Error>(LogMsg::Finished)
+                    }))
+                    .boxed(),
+            )
+        }
+        Err(e) => {
+            tracing::warn!(
+                execution_id = %execution_id,
+                cache_stage,
+                "Materialized normalized log could not be replayed, re-deriving it: {e}"
+            );
+            None
+        }
+    }
+}
+
+/// True for a patch targeting `/entries/<numeric index>` — a conversation
+/// entry, as opposed to a repo-diff patch (`/entries/<repo>/<file>`), which
+/// targets a nested object `materialize_entries` can't apply against the
+/// `{"entries": []}` array document.
+fn is_indexed_entry_patch(patch: &Patch) -> bool {
+    patch_entry_path(patch)
+        .and_then(|path| path.strip_prefix("/entries/").map(str::to_string))
+        .is_some_and(|rest| rest.parse::<usize>().is_ok())
+}
+
 pub type ContainerRef = String;
+
+// Historical normalization temporarily holds raw logs, parsed messages, and
+// normalized patches. Serialize it so reconnects or multiple browser tabs
+// cannot multiply that memory inside the server process.
+static HISTORICAL_NORMALIZATION_PERMITS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(1)));
+
+struct HistoricalNormalizationRegistry {
+    cells: Arc<StdMutex<HashMap<Uuid, Weak<Mutex<()>>>>>,
+}
+
+struct HistoricalNormalizationLease {
+    _guard: OwnedMutexGuard<()>,
+    cells: Arc<StdMutex<HashMap<Uuid, Weak<Mutex<()>>>>>,
+    execution_id: Uuid,
+    cell: Weak<Mutex<()>>,
+    joined_existing: bool,
+    wait_started: Instant,
+}
+
+impl Default for HistoricalNormalizationRegistry {
+    fn default() -> Self {
+        Self {
+            cells: Arc::new(StdMutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl HistoricalNormalizationRegistry {
+    async fn acquire(&self, execution_id: Uuid) -> HistoricalNormalizationLease {
+        let wait_started = Instant::now();
+        let (cell, joined_existing) = {
+            let mut cells = self.cells.lock().unwrap_or_else(|e| e.into_inner());
+            // Weak values mean completed executions do not accumulate forever.
+            // Retaining here leaves at most the active cells plus this request's
+            // cell, without needing async cleanup from a Drop implementation.
+            cells.retain(|_, cell| cell.strong_count() > 0);
+            match cells.get(&execution_id).and_then(Weak::upgrade) {
+                Some(cell) => (cell, true),
+                None => {
+                    let cell = Arc::new(Mutex::new(()));
+                    cells.insert(execution_id, Arc::downgrade(&cell));
+                    (cell, false)
+                }
+            }
+        };
+        let cell_weak = Arc::downgrade(&cell);
+        let guard = cell.lock_owned().await;
+        HistoricalNormalizationLease {
+            _guard: guard,
+            cells: self.cells.clone(),
+            execution_id,
+            cell: cell_weak,
+            joined_existing,
+            wait_started,
+        }
+    }
+}
+
+impl Drop for HistoricalNormalizationLease {
+    fn drop(&mut self) {
+        // The owned mutex guard is the cell's final strong reference when no
+        // waiter exists. Remove only our exact generation: a new request may
+        // already have installed a replacement cell for this execution ID.
+        if self.cell.strong_count() != 1 {
+            return;
+        }
+        let mut cells = self.cells.lock().unwrap_or_else(|e| e.into_inner());
+        if cells
+            .get(&self.execution_id)
+            .is_some_and(|cell| Weak::ptr_eq(cell, &self.cell))
+        {
+            cells.remove(&self.execution_id);
+        }
+    }
+}
+
+static HISTORICAL_NORMALIZATIONS: LazyLock<HistoricalNormalizationRegistry> =
+    LazyLock::new(HistoricalNormalizationRegistry::default);
+
+struct HistoricalNormalizationLifetime {
+    _permit: OwnedSemaphorePermit,
+    _lease: HistoricalNormalizationLease,
+    tasks: Vec<AbortHandle>,
+    execution_id: Uuid,
+    completed: Arc<AtomicBool>,
+}
+
+impl Drop for HistoricalNormalizationLifetime {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+        if !self.completed.load(Ordering::Relaxed) {
+            tracing::info!(
+                execution_id = %self.execution_id,
+                "Historical log normalization canceled before materialization completed"
+            );
+        }
+    }
+}
 
 /// Follow-up prompt sent when resuming a coding-agent run that was
 /// interrupted by a server shutdown/restart. Keep in sync with
@@ -117,9 +328,25 @@ pub enum ContainerError {
     Io(#[from] std::io::Error),
     #[error("Failed to kill process: {0}")]
     KillFailed(std::io::Error),
+    /// A clustered workspace could not be provisioned from its shared
+    /// repository store. Distinct from `Other` so the message survives to the
+    /// API instead of being rendered as a generic internal error.
+    #[error("{0}")]
+    SharedStore(String),
     #[error(transparent)]
     Other(#[from] AnyhowError), // Catches any unclassified errors
 }
+
+/// Run reasons whose running processes `archive_workspace` stops.
+///
+/// These are exactly the persistent ones. A poller has no entry of its own
+/// because a poller *is* a `BackgroundHelper` — it inherits the helper's whole
+/// lifetime, including this — and named here so that inheritance is something a
+/// test can assert rather than something a reader has to notice.
+const ARCHIVE_STOPPED_RUN_REASONS: [ExecutionProcessRunReason; 2] = [
+    ExecutionProcessRunReason::DevServer,
+    ExecutionProcessRunReason::BackgroundHelper,
+];
 
 #[async_trait]
 pub trait ContainerService {
@@ -285,6 +512,7 @@ pub trait ContainerService {
             ExecutionProcessStatus::Failed
                 | ExecutionProcessStatus::Killed
                 | ExecutionProcessStatus::Interrupted
+                | ExecutionProcessStatus::Indeterminate
         ) {
             return true;
         }
@@ -299,7 +527,9 @@ pub trait ContainerService {
         // or interrupted by a server shutdown/restart
         if matches!(
             ctx.execution_process.status,
-            ExecutionProcessStatus::Killed | ExecutionProcessStatus::Interrupted
+            ExecutionProcessStatus::Killed
+                | ExecutionProcessStatus::Interrupted
+                | ExecutionProcessStatus::Indeterminate
         ) {
             return;
         }
@@ -338,6 +568,20 @@ pub trait ContainerService {
         let running_processes = ExecutionProcess::find_running(&self.db().pool).await?;
         let mut interrupted = Vec::new();
         for process in running_processes {
+            // A running row owned by a worker is not a coordinator-local
+            // orphan. Reconciliation is authoritative for that row; if it
+            // remained running, evidence was unavailable and cleanup must
+            // preserve both the process and workspace state.
+            if ExecutionWorkerJob::find_by_execution_id(&self.db().pool, process.id)
+                .await?
+                .is_some()
+            {
+                tracing::info!(
+                    execution_id = %process.id,
+                    "Retaining worker-owned running execution during orphan cleanup"
+                );
+                continue;
+            }
             // Detached processes (dev servers) are left running across
             // restarts; if still alive, re-attach instead of killing.
             if self.try_adopt_execution(&process).await {
@@ -693,6 +937,7 @@ pub trait ContainerService {
                 language: ScriptRequestLanguage::Bash,
                 context: ScriptContext::CleanupScript,
                 working_dir: Some(first.name.clone()),
+                poller: None,
             }),
             None,
         );
@@ -704,6 +949,7 @@ pub trait ContainerService {
                     language: ScriptRequestLanguage::Bash,
                     context: ScriptContext::CleanupScript,
                     working_dir: Some(repo.name.clone()),
+                    poller: None,
                 }),
                 None,
             ));
@@ -730,6 +976,7 @@ pub trait ContainerService {
                 language: ScriptRequestLanguage::Bash,
                 context: ScriptContext::ArchiveScript,
                 working_dir: Some(first.name.clone()),
+                poller: None,
             }),
             None,
         );
@@ -741,6 +988,7 @@ pub trait ContainerService {
                     language: ScriptRequestLanguage::Bash,
                     context: ScriptContext::ArchiveScript,
                     working_dir: Some(repo.name.clone()),
+                    poller: None,
                 }),
                 None,
             ));
@@ -802,11 +1050,9 @@ pub trait ContainerService {
 
         Workspace::set_archived(pool, workspace_id, true).await?;
 
-        // Stop running dev servers and background helpers
-        for run_reason in [
-            ExecutionProcessRunReason::DevServer,
-            ExecutionProcessRunReason::BackgroundHelper,
-        ] {
+        // Stop running dev servers and background helpers (pollers included —
+        // a poller is a background helper, see ARCHIVE_STOPPED_RUN_REASONS).
+        for run_reason in ARCHIVE_STOPPED_RUN_REASONS {
             let Ok(processes) = ExecutionProcess::find_running_by_workspace_and_run_reason(
                 pool,
                 workspace_id,
@@ -859,6 +1105,7 @@ pub trait ContainerService {
                 language: ScriptRequestLanguage::Bash,
                 context: ScriptContext::SetupScript,
                 working_dir: Some(first.name.clone()),
+                poller: None,
             }),
             None,
         );
@@ -870,6 +1117,7 @@ pub trait ContainerService {
                     language: ScriptRequestLanguage::Bash,
                     context: ScriptContext::SetupScript,
                     working_dir: Some(repo.name.clone()),
+                    poller: None,
                 }),
                 None,
             ));
@@ -886,6 +1134,7 @@ pub trait ContainerService {
                     language: ScriptRequestLanguage::Bash,
                     context: ScriptContext::SetupScript,
                     working_dir: Some(repo.name.clone()),
+                    poller: None,
                 }),
                 None,
             )
@@ -905,6 +1154,7 @@ pub trait ContainerService {
                         language: ScriptRequestLanguage::Bash,
                         context: ScriptContext::SetupScript,
                         working_dir: Some(repo.name.clone()),
+                        poller: None,
                     }),
                     Some(Box::new(chained)),
                 );
@@ -1057,6 +1307,19 @@ pub trait ContainerService {
         executor_action: &ExecutorAction,
     ) -> Result<(), ContainerError>;
 
+    /// Selects the process owner for an execution. Local implementations keep
+    /// their existing spawn path by default; clustered implementations may
+    /// override this to dispatch to the workspace's persisted worker.
+    async fn dispatch_execution(
+        &self,
+        workspace: &Workspace,
+        execution_process: &ExecutionProcess,
+        executor_action: &ExecutorAction,
+    ) -> Result<(), ContainerError> {
+        self.start_execution_inner(workspace, execution_process, executor_action)
+            .await
+    }
+
     async fn stop_execution(
         &self,
         execution_process: &ExecutionProcess,
@@ -1119,7 +1382,7 @@ pub trait ContainerService {
                     .filter(|msg| {
                         future::ready(matches!(
                             msg,
-                            Ok(LogMsg::Stdout(..) | LogMsg::Stderr(..) | LogMsg::Finished)
+                            Ok(LogMsg::Stdout(..) | LogMsg::Stderr(..) | LogMsg::Finished) | Err(_)
                         ))
                     })
                     .boxed(),
@@ -1149,29 +1412,13 @@ pub trait ContainerService {
             Some(
                 store
                     .history_plus_stream() // BoxStream<Result<LogMsg, io::Error>>
-                    .filter(|msg| future::ready(matches!(msg, Ok(LogMsg::JsonPatch(..)))))
+                    .filter(|msg| future::ready(matches!(msg, Ok(LogMsg::JsonPatch(..)) | Err(_))))
                     .chain(futures::stream::once(async {
                         Ok::<_, std::io::Error>(LogMsg::Finished)
                     }))
                     .boxed(),
             )
         } else {
-            let raw_messages =
-                execution_process::load_raw_log_messages(&self.db().pool, *id).await?;
-
-            // Create temporary store and populate
-            // Include JsonPatch messages (already normalized) and Stdout/Stderr (need normalization)
-            let temp_store = Arc::new(MsgStore::new());
-            for msg in raw_messages {
-                if matches!(
-                    msg,
-                    LogMsg::Stdout(_) | LogMsg::Stderr(_) | LogMsg::JsonPatch(_)
-                ) {
-                    temp_store.push(msg);
-                }
-            }
-            temp_store.push_finished();
-
             let process = match ExecutionProcess::find_by_id(&self.db().pool, *id).await {
                 Ok(Some(process)) => process,
                 Ok(None) => {
@@ -1183,6 +1430,90 @@ pub trait ContainerService {
                     return None;
                 }
             };
+
+            // A finished process that has already been materialized is served
+            // from its settled entries. Deliberately before the permit is taken:
+            // a cache hit does no normalization, so making it queue behind the
+            // runs that do would reintroduce the wait this exists to remove. It
+            // also skips `ensure_container_exists` below — recreating a worktree
+            // to read a conversation is pure cost once the answer is stored.
+            let cache_path =
+                utils::execution_logs::process_normalized_log_file_path(process.session_id, *id);
+            if let Some(stream) = replay_materialized_log(&cache_path, *id, "optimistic").await {
+                return Some(stream);
+            }
+
+            tracing::info!(
+                execution_id = %id,
+                "Normalized log cache missed; waiting for execution materialization ownership"
+            );
+            let lease = HISTORICAL_NORMALIZATIONS.acquire(*id).await;
+            let ownership_wait = lease.wait_started.elapsed();
+            tracing::info!(
+                execution_id = %id,
+                joined_existing = lease.joined_existing,
+                wait_ms = ownership_wait.as_millis(),
+                "Acquired historical log materialization ownership"
+            );
+
+            // Another reader may have completed and atomically published the
+            // sidecar while this reader waited for execution ownership.
+            if let Some(stream) = replay_materialized_log(&cache_path, *id, "after_wait").await {
+                return Some(stream);
+            }
+
+            let capacity_wait_started = Instant::now();
+            let permit = HISTORICAL_NORMALIZATION_PERMITS
+                .clone()
+                .acquire_owned()
+                .await
+                .ok()?;
+            tracing::info!(
+                execution_id = %id,
+                wait_ms = capacity_wait_started.elapsed().as_millis(),
+                "Acquired historical log normalization capacity"
+            );
+            let raw_messages =
+                execution_process::load_raw_log_messages(&self.db().pool, *id).await?;
+            let total_messages = raw_messages.len();
+            // Bound the history before anything is materialized. Without this a
+            // single long run can exhaust the server's memory every time a
+            // client reconnects to its log stream.
+            let (messages, dropped) = utils::execution_logs::cap_normalizable_history(
+                raw_messages,
+                utils::execution_logs::MAX_HISTORICAL_NORMALIZATION_MSGS,
+            );
+            tracing::info!(
+                execution_id = %id,
+                message_count = messages.len(),
+                total_messages,
+                dropped_messages = dropped,
+                "Starting bounded historical log normalization"
+            );
+
+            // Create temporary store and populate. Messages are pre-filtered to
+            // the normalizable variants (Stdout/Stderr, plus JsonPatch which is
+            // already normalized) and capped to the newest window.
+            let temp_store = Arc::new(MsgStore::new());
+            if dropped > 0 {
+                tracing::warn!(
+                    execution_id = %id,
+                    dropped_messages = dropped,
+                    total_messages,
+                    "Historical log too large to normalize in full; showing the most recent messages"
+                );
+                // Tell the reader their view is partial rather than silently
+                // starting mid-conversation.
+                temp_store.push(LogMsg::Stdout(format!(
+                    "[vibe-kanban] {dropped} earlier log messages omitted \
+                     (showing the most recent {} of {total_messages}).\n",
+                    messages.len()
+                )));
+            }
+            for msg in messages {
+                temp_store.push(msg);
+            }
+            temp_store.push_finished();
 
             // Get the workspace to determine correct directory
             let (workspace, _session) =
@@ -1287,15 +1618,26 @@ pub trait ContainerService {
 
             // Await all normalizer tasks, then push Ready so the dedup
             // stream knows when to flush its buffer and terminate.
+            let mut task_abort_handles: Vec<_> =
+                handles.iter().map(JoinHandle::abort_handle).collect();
             {
                 let store = temp_store.clone();
-                tokio::spawn(async move {
+                let completion_task = tokio::spawn(async move {
                     for handle in handles {
                         let _ = handle.await;
                     }
                     store.push(LogMsg::Ready);
                 });
+                task_abort_handles.push(completion_task.abort_handle());
             }
+            let completed = Arc::new(AtomicBool::new(false));
+            let lifetime = HistoricalNormalizationLifetime {
+                _permit: permit,
+                _lease: lease,
+                tasks: task_abort_handles,
+                execution_id: *id,
+                completed: completed.clone(),
+            };
 
             // Stream normalized patches, deduplicating consecutive patches
             // that target the same path (only the final state matters for
@@ -1349,12 +1691,145 @@ pub trait ContainerService {
             )
             .filter_map(|opt| async move { opt })
             .map(|p| Ok::<_, std::io::Error>(LogMsg::JsonPatch(p)))
-            .chain(futures::stream::once(async {
-                Ok::<_, std::io::Error>(LogMsg::Finished)
-            }));
+            // The closure owns the permit and abort handles. Dropping the
+            // WebSocket stream therefore cancels replay instead of leaving
+            // detached normalizers consuming memory.
+            .map(move |item| {
+                let _keep_alive = &lifetime;
+                item
+            });
+
+            // Materialize what this replay produced, so the next reader pays
+            // none of it. Collected as the reader consumes the stream, and
+            // written only when the stream reaches its end: a reader that
+            // disconnects halfway has seen a partial conversation, and storing
+            // that would turn a transient disconnect into a permanently short
+            // transcript.
+            let collected: Arc<std::sync::Mutex<Vec<Patch>>> = Arc::default();
+            let collector = collected.clone();
+            let was_truncated = dropped > 0;
+            // Only a process that has actually stopped is safe to store. Being
+            // on this branch does not prove it has: a process whose in-memory
+            // store did not survive a server restart reaches here while still
+            // running, and caching that would freeze a live conversation at
+            // whatever had been written when the server came back.
+            let is_finished = process.status != ExecutionProcessStatus::Running;
+            let execution_id = *id;
+            let deduped = deduped
+                .map(move |item| {
+                    if let Ok(LogMsg::JsonPatch(patch)) = &item
+                        && let Ok(mut patches) = collector.lock()
+                    {
+                        patches.push(patch.clone());
+                    }
+                    item
+                })
+                .chain(futures::stream::once(async move {
+                    if is_finished {
+                        let patches = collected
+                            .lock()
+                            .map(|patches| patches.clone())
+                            .unwrap_or_default();
+                        let patch_count = patches.len();
+                        let stored =
+                            materialize_normalized_log(&cache_path, &patches, was_truncated).await;
+                        tracing::info!(
+                            execution_id = %execution_id,
+                            patch_count,
+                            stored,
+                            truncated = was_truncated,
+                            "Historical log normalization completed"
+                        );
+                    }
+                    completed.store(true, Ordering::Relaxed);
+                    Ok::<_, std::io::Error>(LogMsg::Finished)
+                }));
 
             Some(deduped.boxed())
         }
+    }
+
+    /// Returns the settled normalized entries for an execution, for callers
+    /// that want a `Vec` rather than a live stream (e.g. an MCP tool
+    /// answering "what did this turn say").
+    ///
+    /// Reuses [`Self::stream_normalized_logs`] rather than a second read
+    /// path: the same in-memory store / on-disk materialized cache / bounded
+    /// historical re-normalization decision it makes applies here too. Only
+    /// `/entries/<index>` patches are kept before materializing — repo-diff
+    /// patches (`/entries/<repo>/<file>`) target a nested object, not the
+    /// `{"entries": []}` array `materialize_entries` applies against, and
+    /// they aren't messages anyway.
+    async fn normalized_entries(&self, id: &Uuid) -> Option<Vec<NormalizedEntry>> {
+        let mut stream = self.stream_normalized_logs(id).await?;
+        let mut patches = Vec::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(LogMsg::JsonPatch(patch)) => {
+                    if is_indexed_entry_patch(&patch) {
+                        patches.push(patch);
+                    }
+                }
+                Ok(LogMsg::Finished) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+
+        match normalized_log_cache::materialize_entries(&patches) {
+            Ok(values) => Some(
+                values
+                    .iter()
+                    .filter_map(normalized_entry_from_patch_value)
+                    .collect(),
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    execution_id = %id,
+                    "Could not materialize normalized entries: {e}"
+                );
+                None
+            }
+        }
+    }
+
+    /// Write the normalized-log cache for an execution the moment it leaves
+    /// `Running`, straight from its in-memory patches — every caller here is
+    /// removing the execution's `MsgStore` from the map because the process
+    /// just finished, and that store already holds its complete history.
+    ///
+    /// Without this, a sidecar is only ever produced as a side effect of
+    /// [`Self::stream_normalized_logs`]'s historical-replay branch, which
+    /// only runs once the in-memory store is already gone *and* a reader
+    /// asks for this execution's log. If nothing asks before a server
+    /// restart drops the in-memory store, no sidecar is ever written, and
+    /// every later read pays for a full historical re-normalization — for a
+    /// large enough raw log, repeatedly and slowly enough to time out.
+    ///
+    /// Best-effort and idempotent, like [`materialize_normalized_log`]: a
+    /// store with no indexed entry patches writes nothing, a write failure
+    /// is logged and dropped rather than fatal, and a cache already written
+    /// by the historical-replay path is simply overwritten with the same
+    /// settled entries.
+    async fn cache_finished_execution(&self, id: &Uuid, msg_store: &MsgStore) {
+        let process = match ExecutionProcess::find_by_id(&self.db().pool, *id).await {
+            Ok(Some(process)) => process,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(execution_id = %id, "Could not load execution process to cache its normalized log: {e}");
+                return;
+            }
+        };
+        // Guards against a caller racing this in before the row's status
+        // transition is visible; a running process still has entries to
+        // come, and caching it now would freeze a moving target.
+        if process.status == ExecutionProcessStatus::Running {
+            return;
+        }
+
+        let cache_path =
+            utils::execution_logs::process_normalized_log_file_path(process.session_id, *id);
+        cache_execution_from_history(&cache_path, msg_store).await;
     }
 
     async fn start_workspace(
@@ -1455,6 +1930,28 @@ pub trait ContainerService {
         executor_action: &ExecutorAction,
         run_reason: &ExecutionProcessRunReason,
     ) -> Result<ExecutionProcess, ContainerError> {
+        self.start_execution_with_id(
+            workspace,
+            session,
+            executor_action,
+            run_reason,
+            Uuid::new_v4(),
+        )
+        .await
+    }
+
+    /// Start an execution with a caller-owned durable identity. Lifecycle
+    /// transitions that cross an HTTP retry boundary use this to make process
+    /// creation idempotent instead of creating a second agent after a lost
+    /// response.
+    async fn start_execution_with_id(
+        &self,
+        workspace: &Workspace,
+        session: &Session,
+        executor_action: &ExecutorAction,
+        run_reason: &ExecutionProcessRunReason,
+        execution_process_id: Uuid,
+    ) -> Result<ExecutionProcess, ContainerError> {
         // Create new execution process record
         // Capture current HEAD per repository as the "before" commit for this execution
         let repositories =
@@ -1491,7 +1988,7 @@ pub trait ContainerService {
         let execution_process = ExecutionProcess::create(
             &self.db().pool,
             &create_execution_process,
-            Uuid::new_v4(),
+            execution_process_id,
             &repo_states,
         )
         .await?;
@@ -1527,7 +2024,7 @@ pub trait ContainerService {
         }
 
         if let Err(start_error) = self
-            .start_execution_inner(workspace, &execution_process, executor_action)
+            .dispatch_execution(workspace, &execution_process, executor_action)
             .await
         {
             // Mark process as failed
@@ -1775,13 +2272,342 @@ fn scope_initial_prompt_to_working_dir(prompt: String, repos: &[Repo]) -> String
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        path::PathBuf,
+        sync::{Arc, atomic::AtomicBool},
+    };
 
     use chrono::Utc;
     use db::models::repo::Repo;
+    use executors::logs::utils::ConversationPatch;
+    use futures::StreamExt;
+    use serde_json::json;
+    use tokio::{sync::Semaphore, time::Duration};
     use uuid::Uuid;
 
-    use super::{reset_would_discard_uncommitted_work, scope_initial_prompt_to_working_dir};
+    use super::{
+        HistoricalNormalizationLifetime, HistoricalNormalizationRegistry, LogMsg,
+        cache_execution_from_history, is_indexed_entry_patch, replay_materialized_log,
+        reset_would_discard_uncommitted_work, scope_initial_prompt_to_working_dir,
+    };
+
+    #[test]
+    fn indexed_entry_patches_are_kept_and_repo_diff_patches_are_not() {
+        let entry_patch = ConversationPatch::add_stdout(3, "hello".to_string());
+        assert!(is_indexed_entry_patch(&entry_patch));
+
+        let diff_patch = ConversationPatch::add_repo_diff(
+            "repo",
+            "src/main.rs",
+            utils::diff::Diff {
+                change: utils::diff::DiffChangeKind::Added,
+                old_path: None,
+                new_path: Some("src/main.rs".to_string()),
+                old_content: None,
+                new_content: None,
+                content_omitted: false,
+                additions: None,
+                deletions: None,
+                repo_id: None,
+            },
+        );
+        assert!(!is_indexed_entry_patch(&diff_patch));
+
+        let removed_diff_patch = ConversationPatch::remove_diff("repo/src/main.rs".to_string());
+        assert!(!is_indexed_entry_patch(&removed_diff_patch));
+    }
+
+    #[tokio::test]
+    async fn dropping_historical_normalization_aborts_its_tasks() {
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let lifetime = HistoricalNormalizationLifetime {
+            _permit: permit,
+            _lease: HistoricalNormalizationRegistry::default()
+                .acquire(Uuid::new_v4())
+                .await,
+            tasks: vec![task.abort_handle()],
+            execution_id: Uuid::new_v4(),
+            completed: Arc::new(AtomicBool::new(false)),
+        };
+
+        drop(lifetime);
+
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn historical_normalization_is_single_flight_per_execution() {
+        let registry = Arc::new(HistoricalNormalizationRegistry::default());
+        let execution_id = Uuid::new_v4();
+        let leader = registry.acquire(execution_id).await;
+        assert!(!leader.joined_existing);
+
+        let waiter_registry = registry.clone();
+        let waiter = tokio::spawn(async move { waiter_registry.acquire(execution_id).await });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        drop(leader);
+        let waiter = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(waiter.joined_existing);
+    }
+
+    #[tokio::test]
+    async fn historical_normalization_does_not_serialize_different_executions() {
+        let registry = HistoricalNormalizationRegistry::default();
+        let _first = registry.acquire(Uuid::new_v4()).await;
+
+        tokio::time::timeout(Duration::from_millis(100), registry.acquire(Uuid::new_v4()))
+            .await
+            .expect("a different execution must acquire independently");
+    }
+
+    #[tokio::test]
+    async fn canceled_waiter_does_not_release_the_leader() {
+        let registry = Arc::new(HistoricalNormalizationRegistry::default());
+        let execution_id = Uuid::new_v4();
+        let leader = registry.acquire(execution_id).await;
+
+        let waiter_registry = registry.clone();
+        let waiter = tokio::spawn(async move { waiter_registry.acquire(execution_id).await });
+        tokio::task::yield_now().await;
+        waiter.abort();
+        assert!(matches!(waiter.await, Err(error) if error.is_cancelled()));
+
+        let retry_registry = registry.clone();
+        let retry = tokio::spawn(async move { retry_registry.acquire(execution_id).await });
+        tokio::task::yield_now().await;
+        assert!(!retry.is_finished());
+        drop(leader);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), retry)
+                .await
+                .unwrap()
+                .unwrap()
+                .joined_existing
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoned_leader_allows_a_waiter_to_retry() {
+        let registry = Arc::new(HistoricalNormalizationRegistry::default());
+        let execution_id = Uuid::new_v4();
+        let leader = registry.acquire(execution_id).await;
+        let waiter_registry = registry.clone();
+        let waiter = tokio::spawn(async move { waiter_registry.acquire(execution_id).await });
+        tokio::task::yield_now().await;
+
+        drop(leader);
+
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dead_historical_normalization_cells_are_reclaimed() {
+        let registry = HistoricalNormalizationRegistry::default();
+        let first_id = Uuid::new_v4();
+        drop(registry.acquire(first_id).await);
+
+        let _second = registry.acquire(Uuid::new_v4()).await;
+        let cells = registry.cells.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(cells.len(), 1);
+        assert!(!cells.contains_key(&first_id));
+    }
+
+    #[tokio::test]
+    async fn waiter_replays_the_sidecar_published_by_the_leader() {
+        let registry = Arc::new(HistoricalNormalizationRegistry::default());
+        let execution_id = Uuid::new_v4();
+        let leader = registry.acquire(execution_id).await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("execution.normalized.jsonl");
+
+        let waiter_registry = registry.clone();
+        let waiter_path = cache_path.clone();
+        let waiter = tokio::spawn(async move {
+            let _lease = waiter_registry.acquire(execution_id).await;
+            replay_materialized_log(&waiter_path, execution_id, "test_after_wait").await
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        let entries = vec![json!({"type": "NORMALIZED_ENTRY", "content": "complete"})];
+        super::normalized_log_cache::write(
+            &cache_path,
+            super::normalized_log_cache::CacheHeader {
+                version: super::normalized_log_cache::CACHE_VERSION,
+                entry_count: entries.len(),
+                truncated: false,
+            },
+            &entries,
+        )
+        .await
+        .unwrap();
+        drop(leader);
+
+        let mut stream = waiter.await.unwrap().expect("waiter should replay cache");
+        let mut patches = Vec::new();
+        while let Some(message) = stream.next().await {
+            if let LogMsg::JsonPatch(patch) = message.unwrap() {
+                patches.push(patch);
+            }
+        }
+        assert_eq!(
+            super::normalized_log_cache::materialize_entries(&patches).unwrap(),
+            entries
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_materialized_log_is_immediately_replayable() {
+        let execution_id = Uuid::new_v4();
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("execution.normalized.jsonl");
+        let entries = vec![json!("cached")];
+        super::normalized_log_cache::write(
+            &cache_path,
+            super::normalized_log_cache::CacheHeader {
+                version: super::normalized_log_cache::CACHE_VERSION,
+                entry_count: entries.len(),
+                truncated: false,
+            },
+            &entries,
+        )
+        .await
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let mut stream = replay_materialized_log(&cache_path, execution_id, "test_optimistic")
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            LogMsg::JsonPatch(_)
+        ));
+    }
+
+    /// Regression test for VAS-440: a cache hit replays the settled entry as
+    /// a `{"type": "NORMALIZED_ENTRY", "content": {...}}` patch value — the
+    /// same shape `PatchType` serializes to — not a bare `NormalizedEntry`.
+    /// `normalized_entries` must unwrap that wrapper before deserializing,
+    /// or every cached turn's messages silently disappear.
+    #[tokio::test]
+    async fn a_cached_normalized_entry_survives_the_read_pipeline_normalized_entries_uses() {
+        let execution_id = Uuid::new_v4();
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("execution.normalized.jsonl");
+
+        let entry = super::NormalizedEntry {
+            timestamp: None,
+            entry_type: super::NormalizedEntryType::AssistantMessage,
+            content: "the fix is deployed".to_string(),
+            metadata: None,
+        };
+        let patches = vec![ConversationPatch::add_normalized_entry(0, entry.clone())];
+        let materialized = super::normalized_log_cache::materialize_entries(&patches).unwrap();
+        super::normalized_log_cache::write(
+            &cache_path,
+            super::normalized_log_cache::CacheHeader {
+                version: super::normalized_log_cache::CACHE_VERSION,
+                entry_count: materialized.len(),
+                truncated: false,
+            },
+            &materialized,
+        )
+        .await
+        .unwrap();
+
+        // Mirrors `normalized_entries`: consume the replayed stream, keep
+        // only `/entries/<index>` patches, materialize, then deserialize.
+        let mut stream = replay_materialized_log(&cache_path, execution_id, "test")
+            .await
+            .expect("a fresh cache must replay");
+        let mut replayed = Vec::new();
+        while let Some(message) = stream.next().await {
+            match message.unwrap() {
+                LogMsg::JsonPatch(patch) if is_indexed_entry_patch(&patch) => replayed.push(patch),
+                LogMsg::Finished => break,
+                _ => {}
+            }
+        }
+        let values = super::normalized_log_cache::materialize_entries(&replayed).unwrap();
+        let entries: Vec<_> = values
+            .iter()
+            .filter_map(super::normalized_entry_from_patch_value)
+            .collect();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, entry.content);
+        assert!(matches!(
+            entries[0].entry_type,
+            super::NormalizedEntryType::AssistantMessage
+        ));
+    }
+
+    /// Regression test for VAS-440's second half: a finished turn writes its
+    /// sidecar straight from the in-memory store — no reader ever has to
+    /// open `stream_normalized_logs` first for the cache to exist.
+    #[tokio::test]
+    async fn a_finished_turn_writes_its_sidecar_without_anyone_opening_logs_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("execution.normalized.jsonl");
+
+        let store = utils::msg_store::MsgStore::new();
+        let entry = super::NormalizedEntry {
+            timestamp: None,
+            entry_type: super::NormalizedEntryType::AssistantMessage,
+            content: "turn finished".to_string(),
+            metadata: None,
+        };
+        store.push_patch(ConversationPatch::add_normalized_entry(0, entry.clone()));
+
+        assert!(
+            super::normalized_log_cache::read(&cache_path)
+                .await
+                .is_none()
+        );
+
+        let wrote = cache_execution_from_history(&cache_path, &store).await;
+
+        assert!(wrote);
+        let (_, cached) = super::normalized_log_cache::read(&cache_path)
+            .await
+            .expect("the sidecar must exist as soon as the store is written, unread");
+        let entries: Vec<_> = cached
+            .iter()
+            .filter_map(super::normalized_entry_from_patch_value)
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, entry.content);
+    }
+
+    /// A store with nothing to say (e.g. a turn that errored before any
+    /// entry was produced) must not write an empty sidecar that a reader
+    /// could mistake for "materialized, zero messages" versus "never
+    /// materialized, ask again."
+    #[tokio::test]
+    async fn an_empty_store_writes_no_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("execution.normalized.jsonl");
+        let store = utils::msg_store::MsgStore::new();
+
+        let wrote = cache_execution_from_history(&cache_path, &store).await;
+
+        assert!(!wrote);
+        assert!(
+            super::normalized_log_cache::read(&cache_path)
+                .await
+                .is_none()
+        );
+    }
 
     #[test]
     fn dirty_git_reset_requires_explicit_force() {
@@ -1918,11 +2744,120 @@ mod tests {
                     language: ScriptRequestLanguage::Bash,
                     context: ScriptContext::SetupScript,
                     working_dir: None,
+                    poller: None,
                 }),
                 None,
             );
 
             assert!(executor_config_for_auto_resume(&action).is_none());
         }
+    }
+
+    /// A poller's whole lifetime is inherited from the background helper: it is
+    /// stopped on archive because `archive_workspace` sweeps
+    /// `ARCHIVE_STOPPED_RUN_REASONS`, and `BackgroundHelper` is in that list.
+    /// Inherited guarantees are exactly the ones that regress silently, so this
+    /// pins it: a running poller must be in the set archive collects to stop.
+    ///
+    /// This asserts the *selection*, not the kill — issuing the kill needs a
+    /// live `ContainerService` implementation and a real process group, which
+    /// is the local-deployment integration surface, not this one.
+    #[tokio::test]
+    async fn archiving_a_workspace_selects_a_running_poller_for_stopping() {
+        use db::models::{
+            execution_process::{
+                CreateExecutionProcess, ExecutionProcess, ExecutionProcessRunReason,
+            },
+            session::{CreateSession, Session},
+            workspace::{CreateWorkspace, Workspace},
+        };
+        use executors::actions::{
+            ExecutorAction, ExecutorActionType,
+            script::{PollerSpec, ScriptContext, ScriptRequest, ScriptRequestLanguage},
+        };
+
+        use super::ARCHIVE_STOPPED_RUN_REASONS;
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../db/migrations").run(&pool).await.unwrap();
+
+        let workspace = Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "vk/poller-archive-test".to_string(),
+                name: Some("poller-archive-test".to_string()),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+        let session = Session::create(
+            &pool,
+            &CreateSession {
+                executor: None,
+                name: None,
+            },
+            Uuid::new_v4(),
+            workspace.id,
+        )
+        .await
+        .unwrap();
+
+        let spec = PollerSpec {
+            command: "git fetch --dry-run origin main".to_string(),
+            interval_secs: 60,
+        };
+        let poller_id = Uuid::new_v4();
+        ExecutionProcess::create(
+            &pool,
+            &CreateExecutionProcess {
+                session_id: session.id,
+                executor_action: ExecutorAction::new(
+                    ExecutorActionType::ScriptRequest(ScriptRequest {
+                        script: executors::actions::script::compile_poller_script(&spec),
+                        language: ScriptRequestLanguage::Bash,
+                        context: ScriptContext::BackgroundHelper,
+                        working_dir: None,
+                        poller: Some(spec),
+                    }),
+                    None,
+                ),
+                run_reason: ExecutionProcessRunReason::BackgroundHelper,
+            },
+            poller_id,
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let mut selected = Vec::new();
+        for run_reason in ARCHIVE_STOPPED_RUN_REASONS {
+            selected.extend(
+                ExecutionProcess::find_running_by_workspace_and_run_reason(
+                    &pool,
+                    workspace.id,
+                    &run_reason,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+
+        let poller = selected
+            .iter()
+            .find(|p| p.id == poller_id)
+            .expect("archive must select the running poller for stopping");
+        let ExecutorActionType::ScriptRequest(script) = poller.executor_action().unwrap().typ()
+        else {
+            panic!("poller action should be a ScriptRequest");
+        };
+        assert!(
+            script.poller.is_some(),
+            "the selected process should still be identifiable as a poller"
+        );
     }
 }

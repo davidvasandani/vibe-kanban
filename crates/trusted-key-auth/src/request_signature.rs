@@ -12,6 +12,7 @@ use crate::trusted_keys::load_trusted_public_keys;
 
 pub const SIGNATURE_HEADER: &str = "x-vk-signature";
 pub const TIMESTAMP_HEADER: &str = "x-vk-timestamp";
+pub const CONTENT_DIGEST_HEADER: &str = "x-vk-content-sha256";
 pub const MAX_TIMESTAMP_DRIFT_SECONDS: i64 = 30;
 
 #[derive(Debug, Clone, Copy)]
@@ -81,8 +82,69 @@ pub async fn verify_trusted_ed25519_signature(
     })
 }
 
+pub async fn verify_trusted_ed25519_signature_with_content_digest(
+    headers: &HeaderMap,
+    method: &Method,
+    path: &str,
+    content_digest: &str,
+    trusted_keys_path: &Path,
+) -> Result<VerifiedRequestSignature, SignatureVerificationError> {
+    verify_trusted_ed25519_signature_for_message(
+        headers,
+        build_signed_message_with_content_digest(
+            parse_timestamp(headers)?,
+            method,
+            path,
+            content_digest,
+        ),
+        trusted_keys_path,
+    )
+    .await
+}
+
+async fn verify_trusted_ed25519_signature_for_message(
+    headers: &HeaderMap,
+    message: String,
+    trusted_keys_path: &Path,
+) -> Result<VerifiedRequestSignature, SignatureVerificationError> {
+    let timestamp = parse_timestamp(headers)?;
+    let now = current_unix_timestamp().map_err(|_| SignatureVerificationError::ClockUnavailable)?;
+    let drift_seconds = now.saturating_sub(timestamp).abs();
+    if !timestamp_is_within_drift(timestamp, now) {
+        return Err(SignatureVerificationError::TimestampOutOfDrift {
+            timestamp,
+            now,
+            drift_seconds,
+            max_drift_seconds: MAX_TIMESTAMP_DRIFT_SECONDS,
+        });
+    }
+    let signature = parse_signature(headers)?;
+    let trusted_keys = load_trusted_public_keys(trusted_keys_path)
+        .await
+        .map_err(|_| SignatureVerificationError::TrustedKeysUnavailable)?;
+    let trusted_key_count = trusted_keys.len();
+    if !verify_signature(&message, &signature, &trusted_keys) {
+        return Err(SignatureVerificationError::SignatureMismatch { trusted_key_count });
+    }
+    Ok(VerifiedRequestSignature {
+        timestamp,
+        now,
+        drift_seconds,
+        trusted_key_count,
+    })
+}
+
 fn build_signed_message(timestamp: i64, method: &Method, path: &str) -> String {
     format!("{timestamp}.{}.{}", method.as_str(), path)
+}
+
+fn build_signed_message_with_content_digest(
+    timestamp: i64,
+    method: &Method,
+    path: &str,
+    content_digest: &str,
+) -> String {
+    format!("{timestamp}.{}.{}.{content_digest}", method.as_str(), path)
 }
 
 fn parse_timestamp(headers: &HeaderMap) -> Result<i64, SignatureVerificationError> {

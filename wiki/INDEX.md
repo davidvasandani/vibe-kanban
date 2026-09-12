@@ -18,6 +18,15 @@ contributed to it.
 
 ## Pages
 
+- [executor-model-catalogs.md](executor-model-catalogs.md) — Executor discovery
+  is the authoritative source for model pickers; verify current IDs and
+  reasoning boundaries against provider sources, keep Default implicit, test
+  exact ordered catalogs, and keep catalog refreshes separate from managed CLI
+  upgrades.
+- [browser-title-selection.md](browser-title-selection.md) — Browser-tab titles
+  select one meaningful label from an ordered fallback chain, trim metadata
+  whitespace, use product branding only as the empty-state fallback, and remain
+  separate from visible breadcrumb identity.
 - [browser-session-control-arbiter.md](browser-session-control-arbiter.md) —
   Workspace browser sessions with shared human/agent control: the
   three-lock concurrency shape (control mutex / command gate / Arc'd driver
@@ -35,12 +44,14 @@ contributed to it.
 - [managed-cli-tool-catalog.md](managed-cli-tool-catalog.md) — How to extend
   the app-managed CLI catalog: stable wire ids, complete catalog registration,
   immutable artifact URLs and SHA-256 pins, per-platform archive executable
-  paths, generated TypeScript types, generic route/UI behavior, and the focused
-  validation sequence.
+  paths, generated TypeScript types, generic route/UI behavior, focused
+  validation, and host-first PATH propagation across local and clustered
+  workspace process boundaries.
 - [agent-process-lifecycle.md](agent-process-lifecycle.md) — How a coding-agent
   turn ends at the process level: the one-turn-one-`ExecutionProcess` identity
   chain, the implicit app-server marker (`exit_signal: Some` vs `None`, distinct
-  from `is_persistent()`), the exit monitor's **two** kill points (exit-signal
+  from `is_persistent()`), why process liveness is turn evidence only for
+  natural-exit executors, the exit monitor's **two** kill points (exit-signal
   `killpg` + tail `start_kill`/`kill_on_drop`), the 250ms OS-exit-watcher
   poll-loop gotcha, why teardown skips `Completed` executions (warm-process
   trap), the pgid re-adoption substrate, the keep-warm enablement order, **and
@@ -50,6 +61,25 @@ contributed to it.
   reap, the env gate, the Codex/ACP Phase-3 decisions, and why cleanup-skip early
   finalization must dispatch queued follow-ups before setting its finalized
   guard.
+- [vk-pollers.md](vk-pollers.md) — Replacing each agent CLI's in-turn background
+  poller with a VK-owned one: why a poller is deliberately a background helper
+  (migration-free `Option<PollerSpec>`, one shared concurrency budget), why
+  denying tool *names* is insufficient when the vendor's real path runs through a
+  **parameter** (`Bash(run_in_background)` plus an undeniable `Read` on the
+  output file), the verify-the-executing-artifact rule (the Claude npm package is
+  a stub whose `sdk-tools.d.ts` lists schema titles rather than wire tool names;
+  Codex config keys fail open and so are pinned by test), Grok's evidenced
+  no-op, the `exit N`-in-a-subshell trap that would silently swallow tick
+  failures, and the drawer summary that rides a stream the layout already had.
+- [codex-credential-refresh.md](codex-credential-refresh.md) — Why concurrent
+  `codex app-server` processes sharing one ChatGPT `auth.json` hit "refresh token
+  already used" (rotating single-use refresh tokens + Codex's guarded reload but
+  **no cross-process lock**), and the serialized up-front refresh that fixes it:
+  a JWT-expiry gate mirroring Codex's 5-min window, a per-path in-process async
+  mutex + `fd-lock`/`flock` on the shared `auth.json` inode (non-blocking
+  `try_write` poll), `get_account(refresh_token=true)` to drive Codex's guarded
+  refresh once, the shared-inode + lock-order invariants, fail-safe fallbacks,
+  and the rejected alternatives (external-auth bridge, blind retry).
 - [slack-shortcut-ai-summarization.md](slack-shortcut-ai-summarization.md) —
   Optional AI thread summarization for the Slack "Create issue from message"
   shortcut: the ack-fast/enrich-later shape (all slow work in the post-ack
@@ -89,7 +119,9 @@ contributed to it.
   and the gotchas — remote-prefixed branch names (`origin/main`, not `main`),
   `get_all_branches` sorting current-first (so `branches[0]` ≠ mainline),
   NULL-at-registration `default_target_branch`, and the dormant importer-less
-  `useRepoBranchSelection`/`RepoBranchSelector` stack with divergent defaults.
+  `useRepoBranchSelection`/`RepoBranchSelector` stack with divergent defaults —
+  plus the contract this places on every *backend* consumer of `target_branch`:
+  resolve local-then-remote, never normalise the prefix away.
 - [kanban-issue-panel-sections.md](kanban-issue-panel-sections.md) — The
   issue detail/create panel (`KanbanIssuePanel.tsx`): section order is owned
   by the `packages/ui` component (containers only supply render props), the
@@ -111,7 +143,9 @@ contributed to it.
 - [self-hosted-deployment.md](self-hosted-deployment.md) — Versioned-release
   deploy contract (`VK_RELEASES_DIR`), why services must not run from the
   source checkout, deploy-loop invariants (reconciler over edge triggers,
-  health-gated rollback, paging), health endpoints, rejected alternatives.
+  health-gated rollback, paging), one-source artifact identity (`sha` plus an
+  optional build/publish timestamp surfaced through `/api/info`), health
+  endpoints, rejected alternatives.
 - [project-context-map.md](project-context-map.md) — Giving a spawned issue its
   scope in a monorepo: a machine-readable `project-context.json` mapping service
   → source path → governing IaC (JSON+jq not YAML, empty-list = no IaC, single
@@ -139,3 +173,15 @@ contributed to it.
   signal; key markSeen and order-freeze off pointer/keydown), the
   starvation-safe debounced re-sort, needs-feedback tiering incl.
   `interrupted`, and per-column error boundaries.
+- [workspace-context-bar-responsive-visibility.md](workspace-context-bar-responsive-visibility.md)
+  — Why the floating workspace context bar is desktop-only, how responsive
+  layout state and physical-device detection combine as a visibility truth
+  table, and where to keep the policy without changing desktop drag/snap
+  behavior or the presentational UI component.
+- [flexible-collapsible-panel-stacks.md](flexible-collapsible-panel-stacks.md)
+  — How bounded vertical panel stacks let expanded collapsibles share remaining
+  height: expansion-owned flex participation, the complete `min-h-0` chain,
+  content-scroll ownership, the outer short-window header-scroll fallback, and
+  desktop-only fixed chrome in a drawer component also reused on mobile; plus
+  discoverable mobile access, stable persisted tab identifiers, truthful button
+  semantics, and route-owned availability during async workspace loading.

@@ -13,6 +13,7 @@ import { Button } from '@vibe/ui/components/Button';
 import { Input } from '@vibe/ui/components/Input';
 import { PrimaryButton } from '@vibe/ui/components/PrimaryButton';
 import type {
+  AwsAuthStatus,
   AwsProfileImportResult,
   AwsSsoProfile,
   AwsSsoProfileStatus,
@@ -21,6 +22,8 @@ import type {
 import {
   canEditAwsProfile,
   getAwsProfileLoginAction,
+  groupAwsProfilesByAuthScope,
+  type AwsAuthScopeGroup,
 } from '@/shared/lib/awsProfileActions';
 import {
   buildAwsImportRequest,
@@ -66,7 +69,7 @@ export function AwsSettingsSection() {
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [editor, setEditor] = useState<EditorState>(null);
-  const [loginProfile, setLoginProfile] = useState<string | null>(null);
+  const [loginScope, setLoginScope] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -86,12 +89,13 @@ export function AwsSettingsSection() {
     setProfiles(null);
     setLoadError(null);
     setEditor(null);
-    setLoginProfile(null);
+    setLoginScope(null);
     void refresh();
   }, [refresh]);
 
   const cliMissing =
     profiles?.some((p) => p.auth.status === 'cli_missing') ?? false;
+  const authGroups = groupAwsProfilesByAuthScope(profiles ?? []);
 
   const applyStatus = (updated: AwsSsoProfileStatus) => {
     setProfiles(
@@ -204,40 +208,62 @@ export function AwsSettingsSection() {
         />
       )}
 
-      {profiles?.map((status) => (
-        <AwsProfileRow
-          key={status.profile.name}
-          status={status}
-          busy={busy}
-          editing={
-            editor?.mode === 'edit' &&
-            editor.profile.name === status.profile.name
-          }
-          loginOpen={loginProfile === status.profile.name}
-          onEdit={() => setEditor({ mode: 'edit', profile: status.profile })}
-          onCloseEdit={() => setEditor(null)}
-          onSaved={() => {
-            setEditor(null);
-            void refresh();
-          }}
-          onDelete={() => void handleDelete(status.profile.name)}
+      {authGroups.map((group) => (
+        <AwsAuthScopeRow
+          key={group.scope.key}
+          group={group}
+          loginOpen={loginScope === group.scope.key}
           onLogin={() =>
-            setLoginProfile((current) =>
-              current === status.profile.name ? null : status.profile.name
+            setLoginScope((current) =>
+              current === group.scope.key ? null : group.scope.key
             )
           }
           onStatus={applyStatus}
+          onLoginComplete={() => void refresh()}
         />
       ))}
+
+      {profiles !== null && profiles.length > 0 && (
+        <details className="rounded-sm border border-border">
+          <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-high">
+            {t('settings.aws.manageProfiles', {
+              ns: 'settings',
+              count: profiles.length,
+            })}
+          </summary>
+          <div className="space-y-2 border-t border-border p-3">
+            {profiles.map((status) => (
+              <AwsProfileRow
+                key={status.profile.name}
+                status={status}
+                busy={busy}
+                editing={
+                  editor?.mode === 'edit' &&
+                  editor.profile.name === status.profile.name
+                }
+                onEdit={() =>
+                  setEditor({ mode: 'edit', profile: status.profile })
+                }
+                onCloseEdit={() => setEditor(null)}
+                onSaved={() => {
+                  setEditor(null);
+                  void refresh();
+                }}
+                onDelete={() => void handleDelete(status.profile.name)}
+              />
+            ))}
+          </div>
+        </details>
+      )}
     </SettingsCard>
   );
 }
 
 function authBadge(
-  status: AwsSsoProfileStatus,
+  auth: AwsAuthStatus,
   t: ReturnType<typeof useTranslation>['t']
 ) {
-  switch (status.auth.status) {
+  switch (auth.status) {
     case 'authenticated':
       return (
         <span className="flex items-center gap-1 text-success">
@@ -648,31 +674,99 @@ function AwsProfileImport({
   );
 }
 
+function AwsAuthScopeRow({
+  group,
+  loginOpen,
+  onLogin,
+  onStatus,
+  onLoginComplete,
+}: {
+  group: AwsAuthScopeGroup;
+  loginOpen: boolean;
+  onLogin: () => void;
+  onStatus: (status: AwsSsoProfileStatus) => void;
+  onLoginComplete: () => void;
+}) {
+  const { t } = useTranslation(['settings']);
+  const loginAction = getAwsProfileLoginAction({
+    ...group.representative,
+    auth: group.auth,
+  });
+
+  return (
+    <div className="rounded-sm border border-border p-3 space-y-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-xs text-low">
+            {group.scope.session_name
+              ? t('settings.aws.scope.session', { ns: 'settings' })
+              : t('settings.aws.scope.legacy', { ns: 'settings' })}
+          </p>
+          <p className="mt-1 break-all text-sm font-medium text-high">
+            {group.scope.label}
+          </p>
+          <p className="mt-1 text-sm text-low">
+            {t('settings.aws.scope.profiles', {
+              ns: 'settings',
+              count: group.profiles.length,
+            })}
+          </p>
+        </div>
+        {loginAction && (
+          <Button
+            size="sm"
+            variant="secondary"
+            className="shrink-0"
+            onClick={onLogin}
+          >
+            {loginAction === 'reauthenticate'
+              ? t('settings.aws.actions.reauthenticate', { ns: 'settings' })
+              : t('settings.aws.actions.signIn', { ns: 'settings' })}
+          </Button>
+        )}
+      </div>
+      <div className="text-sm">
+        {authBadge(group.auth, t)}
+        {group.auth.status === 'authenticated' && (
+          <p className="mt-1 break-all text-xs text-low">
+            {group.auth.identity}
+          </p>
+        )}
+        {group.auth.status === 'unknown' && (
+          <p className="mt-1 break-all text-xs text-low">
+            {group.auth.message}
+          </p>
+        )}
+      </div>
+      {loginOpen && (
+        <AwsLoginTerminal
+          name={group.representative.profile.name}
+          onStatus={onStatus}
+          onComplete={onLoginComplete}
+        />
+      )}
+    </div>
+  );
+}
+
 function AwsProfileRow({
   status,
   busy,
   editing,
-  loginOpen,
   onEdit,
   onCloseEdit,
   onSaved,
   onDelete,
-  onLogin,
-  onStatus,
 }: {
   status: AwsSsoProfileStatus;
   busy: boolean;
   editing: boolean;
-  loginOpen: boolean;
   onEdit: () => void;
   onCloseEdit: () => void;
   onSaved: () => void;
   onDelete: () => void;
-  onLogin: () => void;
-  onStatus: (status: AwsSsoProfileStatus) => void;
 }) {
   const { t } = useTranslation(['settings']);
-  const loginAction = getAwsProfileLoginAction(status);
   const editable = canEditAwsProfile(status);
 
   return (
@@ -695,13 +789,6 @@ function AwsProfileRow({
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {loginAction && (
-            <Button size="sm" variant="secondary" onClick={onLogin}>
-              {loginAction === 'reauthenticate'
-                ? t('settings.aws.actions.reauthenticate', { ns: 'settings' })
-                : t('settings.aws.actions.signIn', { ns: 'settings' })}
-            </Button>
-          )}
           {editable && (
             <Button
               size="sm"
@@ -726,19 +813,6 @@ function AwsProfileRow({
           )}
         </div>
       </div>
-      <div className="text-sm">
-        {authBadge(status, t)}
-        {status.auth.status === 'authenticated' && (
-          <p className="text-xs text-low mt-1 break-all">
-            {status.auth.identity}
-          </p>
-        )}
-        {status.auth.status === 'unknown' && (
-          <p className="text-xs text-low mt-1 break-all">
-            {status.auth.message}
-          </p>
-        )}
-      </div>
       {editing && (
         <AwsProfileForm
           initial={status.profile}
@@ -747,9 +821,6 @@ function AwsProfileRow({
           onClose={onCloseEdit}
           onSaved={onSaved}
         />
-      )}
-      {loginOpen && (
-        <AwsLoginTerminal name={status.profile.name} onStatus={onStatus} />
       )}
     </div>
   );

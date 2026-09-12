@@ -57,6 +57,74 @@ survives server restarts like a dev server, and is stopped on workspace archive.
 Agents should use these instead of `setsid`/`nohup` tricks, which leak untracked
 orphans.
 
+Both modes also include the poller tools (`spawn_poller`, `list_pollers`,
+`stop_poller`, `src/task_server/tools/pollers.rs`). A poller *is* a background
+helper — the backend compiles the agent's command and interval into a loop
+script and starts it as the same tracked `BackgroundHelper` execution process —
+so it inherits the whole lifetime story above, and the two share one concurrency
+budget rather than getting a cap each. What pollers add is the repeating-interval
+shape agents otherwise reach for their CLI's own monitor/watch tools to get; those
+are terminated when the turn ends, so `spawn_poller` is the sanctioned
+replacement, exactly as the helper tools are for `setsid`/`nohup`. That durability
+sentence lives in the `spawn_poller` tool description on purpose: it is what makes
+an agent pick this over its CLI's mechanism, so keep it there if the wording is
+revised. `interval_secs` is required and never defaulted — a defaulted interval
+is a hot loop — and out-of-range values are refused rather than clamped.
+
+`list_pollers` reads `GET /api/workspaces/{id}/execution/pollers`, which filters
+on `run_reason == BackgroundHelper && poller.is_some()`, so plain helpers stay on
+their own endpoint and the two lists do not overlap. Stopping goes through the
+generic `POST /api/execution-processes/{id}/stop` — there is deliberately no
+poller-specific stop route. Note that `stop_poller` and `stop_background_helper`
+both skip the `resolve_workspace_id` + `scope_allows_workspace` check their
+spawn/list siblings run; that asymmetry is intentional parity between the two
+tools, tracked for a separate decision covering both rather than fixed on one
+side.
+
+## Reading a session before following up
+
+An orchestrator that calls `run_session_prompt` and then only polls
+`get_execution` for `status`/`exit_code` is driving blind — it never sees what
+the agent actually said, so a follow-up nudge can't respond to anything real.
+Two tools close that gap (`src/task_server/tools/sessions.rs`):
+
+- **`get_execution.final_message`** — the last non-empty `AssistantMessage`
+  text for that execution, or `null` if the turn never produced one (e.g. it
+  errored before responding). Populated on every `get_execution` call, so a
+  routine status poll is enough for "what did it just say?".
+- **`list_recent_messages`** — the last N normalized messages (newest last),
+  structured as `{ role, text, created_at, execution_id }` plus the same
+  `final_message`/`status`/`exit_code` `get_execution` returns. Accepts
+  `session_id` (resolves the session's latest `CodingAgent` execution) or
+  `execution_id` directly; `limit` defaults to 20 (max 100); `roles` optionally
+  filters to a comma-separated subset of `user`/`assistant`/`system`/`tool`.
+- **`list_all_messages`** — the same response and target/filter behavior, but
+  returns every message in the selected execution's available settled
+  normalized projection and always reports `has_more: false`. Use it when a
+  decision may be older than the recent reader's 100-message maximum. This is
+  “all normalized messages Vibe Kanban has available,” not an unbounded raw-log
+  replay: an oversized legacy execution without a materialized cache still uses
+  the historical normalizer's newest-2,000-raw-message safety window and
+  includes its explicit earlier-messages-omitted notice.
+
+Both are read-only projections of the same normalized-logs pipeline the UI's
+conversation view and `.../normalized-logs/ws` already use
+(`ContainerService::normalized_entries`,
+`crates/services/src/services/container.rs`) — served via
+`GET /api/execution-processes/{id}/messages` and
+`GET /api/sessions/{id}/messages` (`crates/server/src/routes/execution_processes.rs`,
+`crates/server/src/routes/sessions/mod.rs`). Neither tool opens a websocket or
+adds a second store: for a finished process this reads the on-disk normalized
+log cache; for a running one it reads the in-memory `MsgStore`. Tool-result and
+message text is truncated (4000 chars) before it leaves the backend, so a
+large diff or command dump in the conversation can't blow up the response —
+use the logs websocket in the UI for the full untruncated transcript.
+
+Use `list_recent_messages` (or `get_execution.final_message`) before every
+follow-up `run_session_prompt`; use `list_all_messages` when the recent window
+does not contain enough context. A nudge that ignores the agent's messages is
+the same blind retry regardless of how it's phrased.
+
 ## Backend resolution (important)
 
 `resolve_base_url` (`src/bin/vibe_kanban_mcp.rs:100-134`) decides which backend the

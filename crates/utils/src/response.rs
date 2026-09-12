@@ -30,12 +30,28 @@ impl<T, E> ApiResponse<T, E> {
         }
     }
     /// Creates an error response, with no `data`, no `message`, but with arbitrary `error_data`.
+    ///
+    /// Prefer [`ApiResponse::error_with_data_and_message`] for anything an MCP
+    /// tool can reach: non-browser clients only receive `message`, so a typed
+    /// `error_data` with no message reaches the caller as "Unknown error".
     pub fn error_with_data(data: E) -> Self {
         ApiResponse {
             success: false,
             data: None,
             error_data: Some(data),
             message: None,
+        }
+    }
+
+    /// Creates an error response carrying both a typed `error_data` (for the
+    /// frontend, which matches on the variant) and a human `message` (for every
+    /// other client, notably the MCP tools, which only surface `message`).
+    pub fn error_with_data_and_message(data: E, message: &str) -> Self {
+        ApiResponse {
+            success: false,
+            data: None,
+            error_data: Some(data),
+            message: Some(message.to_string()),
         }
     }
 

@@ -1,6 +1,6 @@
 # Claude executor log normalization
 
-Tags: `4095-thinking-tokens`
+Tags: `4095-thinking-tokens`, `6aac-grok-same-comman`
 
 ## Pipeline shape
 
@@ -31,6 +31,11 @@ indices are globally ordered across streams.
   frequently (e.g. `thinking_tokens` during long thinking blocks), so anything in the
   catch-all path must tolerate high-frequency repeats — see
   [collapsing-repeated-log-entries](collapsing-repeated-log-entries.md).
+- **Compacted tool calls still need unique lifecycle identity.** Multiple
+  completed identical Grok `Bash` calls may share one visible entry index, but
+  `tool_map` must retain each tool-call ID. The latest call owns replacements of
+  that shared row; stale results are ignored. Repeated stream updates for the
+  same ID preserve ticks without incrementing the repeat count.
 
 ## Gotcha: AmpResume resets entry indices
 
@@ -40,6 +45,7 @@ it emits N remove patches, calls `entry_index_provider.reset()`, and clears `too
 (`tool_map` and `repeated_system_message` both are). A stale stored index otherwise causes a
 `replace` that overwrites whatever entry got reallocated at that index after the reset —
 this exact bug was caught by Codex review in task `4095-thinking-tokens`.
+The same reset also clears `repeated_grok_command`.
 
 ## Testing pattern
 

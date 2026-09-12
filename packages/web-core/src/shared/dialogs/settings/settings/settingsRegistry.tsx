@@ -12,6 +12,8 @@ import {
   WrenchIcon,
   KeyIcon,
   ListChecksIcon,
+  HardDrivesIcon,
+  BookOpenTextIcon,
 } from '@phosphor-icons/react';
 import type { Icon } from '@phosphor-icons/react';
 import { useParams } from '@tanstack/react-router';
@@ -29,6 +31,8 @@ import { AwsSettingsSection } from './AwsSettingsSection';
 import { JiraSyncSettingsSection } from './JiraSyncSettingsSection';
 import { SlackSettingsSection } from './SlackSettingsSection';
 import { PipelinesSettingsSection } from './PipelinesSettingsSection';
+import { WorkersSettingsSection } from './WorkersSettingsSection';
+import { SkillsSettingsSection } from './SkillsSettingsSection';
 
 export type SettingsSectionType =
   | 'general'
@@ -36,10 +40,12 @@ export type SettingsSectionType =
   | 'organizations'
   | 'remote-projects'
   | 'agents'
+  | 'skills'
   | 'mcp'
   | 'cli-tools'
   | 'aws'
   | 'pipelines'
+  | 'workers'
   | 'relay'
   | 'attachments'
   | 'jira-sync'
@@ -55,10 +61,12 @@ export type SettingsSectionInitialState = {
     | { organizationId?: string; projectId?: string }
     | undefined;
   agents: { executor?: string; variant?: string } | undefined;
+  skills: undefined;
   mcp: undefined;
   'cli-tools': undefined;
   aws: undefined;
   pipelines: undefined;
+  workers: undefined;
   relay: { hostId?: string } | undefined;
   attachments: undefined;
   'jira-sync': { organizationId?: string; projectId?: string } | undefined;
@@ -75,10 +83,12 @@ export const SETTINGS_SECTION_DEFINITIONS: SettingsSectionDefinition[] = [
   { id: 'general', icon: GearIcon, group: 'host' },
   { id: 'repos', icon: GitBranchIcon, group: 'host' },
   { id: 'agents', icon: CpuIcon, group: 'host' },
+  { id: 'skills', icon: BookOpenTextIcon, group: 'host' },
   { id: 'mcp', icon: PlugIcon, group: 'host' },
   { id: 'cli-tools', icon: WrenchIcon, group: 'host' },
   { id: 'aws', icon: KeyIcon, group: 'host' },
   { id: 'pipelines', icon: ListChecksIcon, group: 'host' },
+  { id: 'workers', icon: HardDrivesIcon, group: 'host' },
   { id: 'organizations', icon: BuildingsIcon, group: 'universal' },
   { id: 'remote-projects', icon: CloudIcon, group: 'universal' },
   { id: 'relay', icon: BroadcastIcon, group: 'universal' },
@@ -134,6 +144,8 @@ export function renderSettingsSection(
       );
     case 'agents':
       return <AgentsSettingsSection />;
+    case 'skills':
+      return <SkillsSettingsSection />;
     case 'mcp':
       return <RouteScopedMcpSettingsSection />;
     case 'cli-tools':
@@ -142,6 +154,8 @@ export function renderSettingsSection(
       return <AwsSettingsSection />;
     case 'pipelines':
       return <PipelinesSettingsSection />;
+    case 'workers':
+      return <WorkersSettingsSection />;
     case 'relay':
       return (
         <RelaySettingsSectionContent

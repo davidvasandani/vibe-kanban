@@ -26,6 +26,7 @@ export type SectionAction = {
   icon: Icon;
   onClick: () => void;
   isActive?: boolean;
+  label?: string;
 };
 
 interface CollapsibleSectionHeaderProps {
@@ -37,6 +38,8 @@ interface CollapsibleSectionHeaderProps {
   headerExtra?: ReactNode;
   children?: ReactNode;
   className?: string;
+  fillAvailableSpace?: boolean;
+  intrinsicHeight?: boolean;
 }
 
 export function CollapsibleSectionHeader({
@@ -48,6 +51,8 @@ export function CollapsibleSectionHeader({
   headerExtra,
   children,
   className,
+  fillAvailableSpace = false,
+  intrinsicHeight = false,
 }: CollapsibleSectionHeaderProps) {
   const [expanded, setExpanded] = useState(() =>
     getInitialExpanded(persistKey, defaultExpanded)
@@ -101,14 +106,19 @@ export function CollapsibleSectionHeader({
               key={index}
               role="button"
               tabIndex={0}
+              aria-label={action.label}
+              title={action.label}
               onClick={(e) => handleActionClick(e, action.onClick)}
               onKeyDown={(e) => handleActionKeyDown(e, action.onClick)}
               className={cn(
-                'hover:text-normal',
+                'flex items-center gap-1 hover:text-normal',
                 action.isActive ? 'text-brand' : 'text-low'
               )}
             >
               <ActionIcon className="size-icon-xs" weight="bold" />
+              {action.label && (
+                <span className="text-xs font-medium">{action.label}</span>
+              )}
             </span>
           );
         })}
@@ -126,7 +136,19 @@ export function CollapsibleSectionHeader({
   );
 
   return (
-    <div className={cn('flex flex-col h-full min-h-0', className)}>
+    <div
+      className={cn(
+        'flex flex-col',
+        intrinsicHeight
+          ? 'flex-none h-auto'
+          : fillAvailableSpace
+            ? collapsible && isExpanded
+              ? 'flex-1 min-h-0'
+              : 'flex-none h-auto'
+            : 'h-full min-h-0',
+        className
+      )}
+    >
       <div className="">
         {collapsible ? (
           <button

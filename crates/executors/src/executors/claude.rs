@@ -30,8 +30,8 @@ use workspace_utils::{
 
 use self::{
     client::{
-        AUTO_APPROVE_CALLBACK_ID, ClaudeAgentClient, DENY_SCHEDULE_WAKEUP_CALLBACK_ID,
-        STOP_GIT_CHECK_CALLBACK_ID,
+        AUTO_APPROVE_CALLBACK_ID, ClaudeAgentClient, DENY_BACKGROUND_BASH_CALLBACK_ID,
+        DENY_SCHEDULE_WAKEUP_CALLBACK_ID, STOP_GIT_CHECK_CALLBACK_ID,
     },
     protocol::ProtocolPeer,
     types::{ControlRequestType, ControlResponseType, PermissionMode},
@@ -65,7 +65,7 @@ fn base_command(claude_code_router: bool) -> &'static str {
     if claude_code_router {
         "npx -y @musistudio/claude-code-router@1.0.66 code"
     } else {
-        "npx -y @anthropic-ai/claude-code@2.1.200"
+        "npx -y @anthropic-ai/claude-code@2.1.268"
     }
 }
 
@@ -125,6 +125,81 @@ pub enum ClaudeEffort {
 const SCHEDULE_WAKEUP_TOOL: &str = "ScheduleWakeup";
 /// Anchored regex matching exactly [`SCHEDULE_WAKEUP_TOOL`] for PreToolUse hooks.
 const SCHEDULE_WAKEUP_MATCHER: &str = "^ScheduleWakeup$";
+
+/// Claude Code harness tools for driving an *in-turn* background poller:
+/// starting a long-running watch, reading a background task's output, and
+/// killing it. Disallowed under VK for the same reason as
+/// [`SCHEDULE_WAKEUP_TOOL`] — a VK turn is one OS process group that is reaped
+/// at turn end (`wiki/agent-process-lifecycle.md`), so anything the agent
+/// backgrounds inside the turn dies with it. The supported replacement is the
+/// `spawn_poller` MCP tool, which runs the command in a surviving process
+/// group.
+///
+/// Both the canonical names and their aliases are listed. The harness
+/// normalizes aliases to canonical names before matching permission rules, so
+/// listing the canonical name alone would already suffice; the aliases are
+/// defence-in-depth in case that normalization changes, and they are free.
+///
+/// # Verification source (Constitution IX)
+///
+/// These are **wire tool names**, read out of the native binary shipped in
+/// `@anthropic-ai/claude-code-linux-x64@2.1.268` — the platform package behind
+/// the `@anthropic-ai/claude-code@2.1.268` pin in [`base_command`]. The wrapper's
+/// `sdk-tools.d.ts` lists JSON-Schema *titles* (`FileReadInput`,
+/// `FileEditInput`, …), **not** wire tool names (`Read`, `Edit`, …). A deny list
+/// derived from that file would name tools that do not exist and would silently
+/// match nothing. The alias→canonical table was read from the binary's own
+/// alias map. See
+/// `specs/vk/869c-vk-background-po/research.md`.
+///
+/// Because `@anthropic-ai/claude-code` is a `needs-review` Renovate carve-out,
+/// re-verify these names against the binary when the pin moves.
+///
+/// **This list is not sufficient on its own.** `TaskOutput` is marked
+/// deprecated in-binary in favour of `Read` on the background task's output
+/// file path, and `Read` cannot be denied. The load-bearing control is
+/// therefore the parameter-level `PreToolUse` deny on `Bash` with
+/// `run_in_background: true` — see
+/// [`DENY_BACKGROUND_BASH_CALLBACK_ID`][client::DENY_BACKGROUND_BASH_CALLBACK_ID].
+const BACKGROUND_POLLER_TOOLS: &[&str] = &[
+    // Canonical names confirmed in-binary.
+    "Monitor",
+    "TaskOutput",
+    "TaskStop",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    // Aliases the harness normalizes onto `TaskOutput` / `TaskStop`.
+    "BashOutput",
+    "BashOutputTool",
+    "AgentOutput",
+    "AgentOutputTool",
+    "KillShell",
+    "KillBash",
+];
+
+/// Anchored regex matching exactly the `Bash` tool for PreToolUse hooks. The
+/// hook fires on every `Bash` call; the callback denies only the ones that ask
+/// for a background spawn.
+const BACKGROUND_BASH_MATCHER: &str = "^Bash$";
+
+/// Builds a PreToolUse catch-all matcher (a negative lookahead) that excludes
+/// `mode_specific` names plus **every tool VK denies or disallows by name**, so
+/// a deny decision can never be overridden by a catch-all approve/ask hook.
+///
+/// Deriving the exclusions from [`SCHEDULE_WAKEUP_TOOL`] and
+/// [`BACKGROUND_POLLER_TOOLS`] rather than hand-writing them keeps the two
+/// lists from drifting apart when a name is added.
+fn catch_all_matcher_excluding(mode_specific: &[&str]) -> String {
+    let excluded = mode_specific
+        .iter()
+        .copied()
+        .chain(std::iter::once(SCHEDULE_WAKEUP_TOOL))
+        .chain(BACKGROUND_POLLER_TOOLS.iter().copied())
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("^(?!({excluded})$).*")
+}
 
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
@@ -190,6 +265,16 @@ impl ClaudeCode {
         // PreToolUse deny hook in `get_hooks` is the belt-and-suspenders that
         // returns an actionable error if the CLI still surfaces the tool.
         builder = builder.extend_params([format!("--disallowedTools={SCHEDULE_WAKEUP_TOOL}")]);
+        // Same treatment, same reasoning, for the harness's in-turn
+        // background-poller tooling: VK reaps the turn's process group at turn
+        // end, so a poller driven from inside the turn cannot outlive it. Note
+        // this layer is *not* the enforcement point — see
+        // `BACKGROUND_POLLER_TOOLS` — it only removes the ergonomic path; the
+        // `^Bash$` PreToolUse hook below closes the real one.
+        builder = builder.extend_params([format!(
+            "--disallowedTools={}",
+            BACKGROUND_POLLER_TOOLS.join(",")
+        )]);
         if self.dangerously_skip_permissions.unwrap_or(false) {
             builder = builder.extend_params(["--dangerously-skip-permissions"]);
         }
@@ -238,7 +323,14 @@ impl ClaudeCode {
         // Add PreToolUse hooks based on plan/approvals settings. `ScheduleWakeup`
         // is denied first in every mode (VAS-283) and excluded from the
         // catch-all approve/ask matchers so the deny decision is unambiguous
-        // regardless of hook precedence.
+        // regardless of hook precedence. The background-`Bash` deny is
+        // registered next, in every mode, for the same reason.
+        //
+        // `Bash` is deliberately *not* excluded from the catch-all matchers:
+        // unlike the tool-name denials this rule is conditional on
+        // `run_in_background`, so foreground `Bash` must keep reaching its
+        // mode's normal approve/ask path. `deny` wins over a catch-all `allow`
+        // when both hooks match, which is exactly the behaviour we want.
         if self.plan.unwrap_or(false) {
             hooks.insert(
                 "PreToolUse".to_string(),
@@ -248,11 +340,15 @@ impl ClaudeCode {
                         "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
                     },
                     {
+                        "matcher": BACKGROUND_BASH_MATCHER,
+                        "hookCallbackIds": [DENY_BACKGROUND_BASH_CALLBACK_ID],
+                    },
+                    {
                         "matcher": "^(ExitPlanMode|AskUserQuestion)$",
                         "hookCallbackIds": ["tool_approval"],
                     },
                     {
-                        "matcher": "^(?!(ExitPlanMode|AskUserQuestion|ScheduleWakeup)$).*",
+                        "matcher": catch_all_matcher_excluding(&["ExitPlanMode", "AskUserQuestion"]),
                         "hookCallbackIds": [AUTO_APPROVE_CALLBACK_ID],
                     }
                 ]),
@@ -266,7 +362,18 @@ impl ClaudeCode {
                         "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
                     },
                     {
-                        "matcher": "^(?!(Glob|Grep|NotebookRead|Read|Task|TodoWrite|ScheduleWakeup)$).*",
+                        "matcher": BACKGROUND_BASH_MATCHER,
+                        "hookCallbackIds": [DENY_BACKGROUND_BASH_CALLBACK_ID],
+                    },
+                    {
+                        "matcher": catch_all_matcher_excluding(&[
+                            "Glob",
+                            "Grep",
+                            "NotebookRead",
+                            "Read",
+                            "Task",
+                            "TodoWrite",
+                        ]),
                         "hookCallbackIds": ["tool_approval"],
                     }
                 ]),
@@ -278,6 +385,10 @@ impl ClaudeCode {
                     {
                         "matcher": SCHEDULE_WAKEUP_MATCHER,
                         "hookCallbackIds": [DENY_SCHEDULE_WAKEUP_CALLBACK_ID],
+                    },
+                    {
+                        "matcher": BACKGROUND_BASH_MATCHER,
+                        "hookCallbackIds": [DENY_BACKGROUND_BASH_CALLBACK_ID],
                     },
                     {
                         "matcher": "^AskUserQuestion$",
@@ -315,6 +426,7 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
                 ("opus[1m]", "Opus (1M context)"),
                 ("claude-opus-5", "Opus 5"),
                 ("claude-sonnet-5", "Sonnet 5"),
+                ("claude-fable-5-1", "Fable 5.1"),
                 ("sonnet", "Sonnet"),
                 ("fable", "Fable"),
                 ("haiku", "Haiku"),
@@ -768,12 +880,17 @@ const CLAUDE_1M_CONTEXT_WINDOW: u32 = 1_000_000;
 
 /// Infer a model's max context window from its name or alias.
 ///
-/// Different models have different max contexts. Opus 5 has a 1M-token context
-/// by default; older models requesting the 1M-token context beta carry a `[1m]`
+/// Different models have different max contexts. The current Opus, Sonnet, and
+/// Fable aliases and their explicit catalog models have a 1M-token context by
+/// default; older models requesting the 1M-token context beta carry a `[1m]`
 /// suffix (e.g. `opus[1m]`). We rely on the configured/reported model string
 /// because the end-of-turn usage report is only available once a turn finishes.
 fn context_window_for_model(model: &str) -> u32 {
-    if model == "claude-opus-5" || model.contains("[1m]") {
+    if matches!(
+        model,
+        "opus" | "sonnet" | "fable" | "claude-opus-5" | "claude-sonnet-5" | "claude-fable-5-1"
+    ) || model.contains("[1m]")
+    {
         CLAUDE_1M_CONTEXT_WINDOW
     } else {
         DEFAULT_CLAUDE_CONTEXT_WINDOW
@@ -797,6 +914,9 @@ pub struct ClaudeLogProcessor {
     // Last catch-all system message, so uninterrupted repeats (e.g. `thinking_tokens`)
     // collapse into one ticked entry instead of a new line each time.
     repeated_system_message: Option<RepeatedSystemMessage>,
+    // Last Grok Bash command, so completed uninterrupted repeats share one
+    // ticked command entry instead of flooding the conversation.
+    repeated_grok_command: Option<RepeatedGrokCommand>,
 }
 
 struct RepeatedSystemMessage {
@@ -805,7 +925,17 @@ struct RepeatedSystemMessage {
     count: usize,
 }
 
+struct RepeatedGrokCommand {
+    entry_index: usize,
+    command: String,
+    count: usize,
+    latest_tool_call_id: String,
+    latest_completed: bool,
+}
+
 impl ClaudeLogProcessor {
+    const MAX_INLINE_REPEAT_TICKS: usize = 8;
+
     #[cfg(test)]
     fn new() -> Self {
         Self::new_with_strategy(HistoryStrategy::Default)
@@ -823,7 +953,103 @@ impl ClaudeLogProcessor {
             main_model_context_window: DEFAULT_CLAUDE_CONTEXT_WINDOW,
             context_tokens_used: 0,
             repeated_system_message: None,
+            repeated_grok_command: None,
         }
+    }
+
+    fn is_grok_command(command: &str) -> bool {
+        command
+            .split_whitespace()
+            .next()
+            .map(|token| token.trim_matches(['\'', '"']))
+            .and_then(|token| token.rsplit('/').next())
+            == Some("grok")
+    }
+
+    fn repeat_ticks(count: usize) -> String {
+        let repeat_count = count.saturating_sub(1);
+        if repeat_count <= Self::MAX_INLINE_REPEAT_TICKS {
+            "✓".repeat(repeat_count)
+        } else {
+            format!("✓ ×{repeat_count}")
+        }
+    }
+
+    fn add_grok_repeat_ticks(entry: &mut NormalizedEntry, count: usize) {
+        if count > 1 {
+            entry.content = format!("{} {}", entry.content, Self::repeat_ticks(count));
+        }
+    }
+
+    fn allocate_tool_entry_index(
+        &mut self,
+        id: &str,
+        tool_data: &ClaudeToolData,
+        entry_index_provider: &EntryIndexProvider,
+    ) -> (usize, usize) {
+        let ClaudeToolData::Bash { command, .. } = tool_data else {
+            return (entry_index_provider.next(), 1);
+        };
+        if !Self::is_grok_command(command) {
+            return (entry_index_provider.next(), 1);
+        }
+
+        if let Some(repeated) = self.repeated_grok_command.as_mut()
+            && repeated.command == *command
+            && repeated.latest_completed
+            && entry_index_provider.current() == repeated.entry_index + 1
+        {
+            repeated.count += 1;
+            repeated.latest_tool_call_id = id.to_string();
+            repeated.latest_completed = false;
+            return (repeated.entry_index, repeated.count);
+        }
+
+        let entry_index = entry_index_provider.next();
+        self.repeated_grok_command = Some(RepeatedGrokCommand {
+            entry_index,
+            command: command.clone(),
+            count: 1,
+            latest_tool_call_id: id.to_string(),
+            latest_completed: false,
+        });
+        (entry_index, 1)
+    }
+
+    fn grok_repeat_count_for_result(
+        &mut self,
+        tool_call_id: &str,
+        info: &ClaudeToolCallInfo,
+        succeeded: bool,
+    ) -> Option<usize> {
+        let ClaudeToolData::Bash { command, .. } = &info.tool_data else {
+            return Some(1);
+        };
+        if !Self::is_grok_command(command) {
+            return Some(1);
+        }
+
+        let Some(repeated) = self.repeated_grok_command.as_mut() else {
+            return Some(1);
+        };
+        if repeated.entry_index != info.entry_index {
+            return Some(1);
+        }
+        if repeated.latest_tool_call_id != tool_call_id {
+            return None;
+        }
+
+        repeated.latest_completed = succeeded;
+        Some(if succeeded { repeated.count } else { 1 })
+    }
+
+    fn grok_repeat_count_for_update(&self, tool_call_id: &str, entry_index: usize) -> usize {
+        self.repeated_grok_command
+            .as_ref()
+            .filter(|repeated| {
+                repeated.entry_index == entry_index && repeated.latest_tool_call_id == tool_call_id
+            })
+            .map_or(1, |repeated| repeated.count)
     }
 
     /// Add a system message entry, collapsing uninterrupted repeats of the same
@@ -842,7 +1068,7 @@ impl ClaudeLogProcessor {
             let entry = NormalizedEntry {
                 timestamp: None,
                 entry_type: NormalizedEntryType::SystemMessage,
-                content: format!("{content} {}", "✓".repeat(repeated.count - 1)),
+                content: format!("{content} {}", Self::repeat_ticks(repeated.count)),
                 metadata,
             };
             return ConversationPatch::replace(repeated.entry_index, entry);
@@ -952,11 +1178,36 @@ impl ClaudeLogProcessor {
                                 _ => {}
                             }
 
-                            let patches = processor.normalize_entries(
-                                &claude_json,
-                                &worktree_path,
-                                &entry_index_provider,
-                            );
+                            let contains_hosted_image = serde_json::to_value(&claude_json)
+                                .ok()
+                                .is_some_and(|value| {
+                                    crate::logs::image_extraction::contains_hosted_image_resource_link(
+                                        &value,
+                                    )
+                                });
+                            let patches = if contains_hosted_image {
+                                let blocking_worktree_path = worktree_path.clone();
+                                let blocking_entry_index_provider = entry_index_provider.clone();
+                                let (next_processor, patches) =
+                                    tokio::task::spawn_blocking(move || {
+                                        let patches = processor.normalize_entries(
+                                            &claude_json,
+                                            &blocking_worktree_path,
+                                            &blocking_entry_index_provider,
+                                        );
+                                        (processor, patches)
+                                    })
+                                    .await
+                                    .expect("Claude image-result normalization task panicked");
+                                processor = next_processor;
+                                patches
+                            } else {
+                                processor.normalize_entries(
+                                    &claude_json,
+                                    &worktree_path,
+                                    &entry_index_provider,
+                                )
+                            };
                             for patch in patches {
                                 msg_store.push_patch(patch);
                             }
@@ -1531,8 +1782,17 @@ impl ClaudeLogProcessor {
                             let existing_idx = entry_index
                                 .or_else(|| self.tool_map.get(id).map(|info| info.entry_index));
                             let is_new = existing_idx.is_none();
-                            let id_num =
-                                existing_idx.unwrap_or_else(|| entry_index_provider.next());
+                            let (id_num, repeat_count) = existing_idx
+                                .map(|idx| (idx, self.grok_repeat_count_for_update(id, idx)))
+                                .unwrap_or_else(|| {
+                                    self.allocate_tool_entry_index(
+                                        id,
+                                        tool_data,
+                                        entry_index_provider,
+                                    )
+                                });
+                            let mut entry = entry;
+                            Self::add_grok_repeat_ticks(&mut entry, repeat_count);
                             self.tool_map.insert(
                                 id.clone(),
                                 ClaudeToolCallInfo {
@@ -1542,7 +1802,7 @@ impl ClaudeLogProcessor {
                                     content: content_text,
                                 },
                             );
-                            let patch = if is_new {
+                            let patch = if is_new && repeat_count == 1 {
                                 ConversationPatch::add_normalized_entry(id_num, entry)
                             } else {
                                 ConversationPatch::replace(id_num, entry)
@@ -1598,6 +1858,7 @@ impl ClaudeLogProcessor {
                         // Indices are reallocated from 0 after the reset, so the
                         // tracked collapse target no longer points at its entry.
                         self.repeated_system_message = None;
+                        self.repeated_grok_command = None;
                     }
 
                     for item in message.content.items() {
@@ -1702,7 +1963,14 @@ impl ClaudeLogProcessor {
                                 ToolStatus::Success
                             };
 
-                            let entry = Self::tool_use_entry(
+                            let Some(repeat_count) = self.grok_repeat_count_for_result(
+                                tool_use_id,
+                                &info,
+                                !is_error.unwrap_or(false),
+                            ) else {
+                                continue;
+                            };
+                            let mut entry = Self::tool_use_entry(
                                 info.tool_name.clone(),
                                 ActionType::CommandRun {
                                     command: info.content.clone(),
@@ -1712,6 +1980,7 @@ impl ClaudeLogProcessor {
                                 status,
                                 info.content.clone(),
                             );
+                            Self::add_grok_repeat_ticks(&mut entry, repeat_count);
                             patches.push(ConversationPatch::replace(info.entry_index, entry));
                         } else if matches!(info.tool_data, ClaudeToolData::Task { .. }) {
                             // Handle Task tool results - capture subagent output
@@ -1819,13 +2088,21 @@ impl ClaudeLogProcessor {
             ClaudeJson::ToolUse { tool_data, id, .. } => {
                 let (entry, tool_name_value, content_text) =
                     Self::build_tool_use_entry(tool_data, worktree_path, ToolStatus::Created);
-                let existing = self.tool_map.get(id);
-                let (idx, is_new) = if let Some(info) = existing {
-                    (info.entry_index, false)
+                let existing_idx = self.tool_map.get(id).map(|info| info.entry_index);
+                let (idx, is_new, repeat_count) = if let Some(entry_index) = existing_idx {
+                    (
+                        entry_index,
+                        false,
+                        self.grok_repeat_count_for_update(id, entry_index),
+                    )
                 } else {
-                    (entry_index_provider.next(), true)
+                    let (entry_index, repeat_count) =
+                        self.allocate_tool_entry_index(id, tool_data, entry_index_provider);
+                    (entry_index, true, repeat_count)
                 };
-                let patch = if is_new {
+                let mut entry = entry;
+                Self::add_grok_repeat_ticks(&mut entry, repeat_count);
+                let patch = if is_new && repeat_count == 1 {
                     ConversationPatch::add_normalized_entry(idx, entry)
                 } else {
                     ConversationPatch::replace(idx, entry)
@@ -2953,6 +3230,16 @@ mod tests {
             .collect()
     }
 
+    /// Split a `^(?!(A|B|C)$).*` catch-all matcher into its excluded names.
+    fn catch_all_excluded_names(matcher: &str) -> Vec<&str> {
+        matcher
+            .strip_prefix("^(?!(")
+            .and_then(|rest| rest.strip_suffix(")$).*"))
+            .expect("catch-all matcher shape")
+            .split('|')
+            .collect()
+    }
+
     // VAS-283: every permission mode must deny ScheduleWakeup via a dedicated
     // PreToolUse hook so it cannot silently no-op.
     #[test]
@@ -3007,6 +3294,156 @@ mod tests {
                 "{label} mode command must disallow ScheduleWakeup; got {params:?}"
             );
         }
+    }
+
+    // A VK turn's process group is reaped at turn end, so every permission mode
+    // must deny a background `Bash` spawn and point the agent at `spawn_poller`.
+    #[test]
+    fn background_bash_denied_in_all_hook_modes() {
+        let modes = [
+            ("auto", claude_with(None, None)),
+            ("plan", claude_with(Some(true), None)),
+            ("approvals", claude_with(None, Some(true))),
+        ];
+        for (label, claude) in modes {
+            let hooks = claude.get_hooks(false).expect("hooks present");
+            let deny_matchers = matchers_for_callback(&hooks, DENY_BACKGROUND_BASH_CALLBACK_ID);
+            assert_eq!(
+                deny_matchers,
+                vec![BACKGROUND_BASH_MATCHER.to_string()],
+                "{label} mode must route Bash to the background-spawn deny hook exactly once"
+            );
+        }
+    }
+
+    // The deny is conditional on `run_in_background`, so `Bash` must keep
+    // reaching its mode's normal approve/ask catch-all. Excluding it there
+    // would silently turn every plan-mode shell command into a user prompt.
+    #[test]
+    fn foreground_bash_still_reaches_the_catch_all_in_every_mode() {
+        for (label, claude, catch_all_callback) in [
+            (
+                "plan",
+                claude_with(Some(true), None),
+                AUTO_APPROVE_CALLBACK_ID,
+            ),
+            ("approvals", claude_with(None, Some(true)), "tool_approval"),
+        ] {
+            let hooks = claude.get_hooks(false).expect("hooks present");
+            let matchers = matchers_for_callback(&hooks, catch_all_callback);
+            let catch_alls: Vec<_> = matchers
+                .iter()
+                .filter(|matcher| matcher.starts_with("^(?!"))
+                .collect();
+            assert!(
+                !catch_alls.is_empty(),
+                "{label} mode should still have a catch-all matcher"
+            );
+            for matcher in catch_alls {
+                // Compare against the alternation *tokens*, not a substring —
+                // `BashOutput` / `KillBash` legitimately contain "Bash".
+                assert!(
+                    !catch_all_excluded_names(matcher).contains(&"Bash"),
+                    "{label} catch-all matcher {matcher:?} must NOT exclude Bash"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn poller_tools_excluded_from_catch_all_matchers_in_all_hook_modes() {
+        let modes = [
+            ("auto", claude_with(None, None)),
+            ("plan", claude_with(Some(true), None)),
+            ("approvals", claude_with(None, Some(true))),
+        ];
+        for (label, claude) in modes {
+            let hooks = claude.get_hooks(false).expect("hooks present");
+            let approve = matchers_for_callback(&hooks, AUTO_APPROVE_CALLBACK_ID);
+            let ask = matchers_for_callback(&hooks, "tool_approval");
+            for matcher in approve.iter().chain(ask.iter()) {
+                if matcher.starts_with("^(?!") {
+                    let excluded = catch_all_excluded_names(matcher);
+                    for tool in BACKGROUND_POLLER_TOOLS {
+                        assert!(
+                            excluded.contains(tool),
+                            "{label} catch-all matcher {matcher:?} must exclude {tool}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn poller_tools_disallowed_in_all_command_modes() {
+        let modes = [
+            ("auto", claude_with(None, None)),
+            ("plan", claude_with(Some(true), None)),
+            ("approvals", claude_with(None, Some(true))),
+        ];
+        for (label, claude) in modes {
+            let builder = claude
+                .build_command_builder()
+                .await
+                .expect("command builder");
+            let params = builder.params.unwrap_or_default();
+            let disallowed: Vec<&String> = params
+                .iter()
+                .filter(|p| p.starts_with("--disallowedTools="))
+                .collect();
+            for tool in BACKGROUND_POLLER_TOOLS {
+                assert!(
+                    disallowed.iter().any(|p| p
+                        .trim_start_matches("--disallowedTools=")
+                        .split(',')
+                        .any(|name| name == *tool)),
+                    "{label} mode command must disallow {tool}; got {disallowed:?}"
+                );
+            }
+            // `Bash` must never be blanket-disallowed — the background rule is
+            // parameter-level and lives in the PreToolUse hook.
+            assert!(
+                !disallowed.iter().any(|p| p
+                    .trim_start_matches("--disallowedTools=")
+                    .split(',')
+                    .any(|name| name == "Bash")),
+                "{label} mode must not disallow Bash outright; got {disallowed:?}"
+            );
+        }
+    }
+
+    /// The names are wire tool names read from the
+    /// `@anthropic-ai/claude-code-linux-x64@2.1.268` native binary, not from
+    /// the npm stub's `sdk-tools.d.ts` (which lists JSON-Schema titles). A
+    /// misspelling would silently match nothing, so the exact spellings are
+    /// pinned here.
+    #[test]
+    fn background_poller_tool_names_are_pinned() {
+        assert_eq!(
+            BACKGROUND_POLLER_TOOLS,
+            &[
+                "Monitor",
+                "TaskOutput",
+                "TaskStop",
+                "CronCreate",
+                "CronDelete",
+                "CronList",
+                "BashOutput",
+                "BashOutputTool",
+                "AgentOutput",
+                "AgentOutputTool",
+                "KillShell",
+                "KillBash",
+            ]
+        );
+        assert_eq!(BACKGROUND_BASH_MATCHER, "^Bash$");
+        // The pin above is only meaningful while the CLI pin it was read from
+        // is in force.
+        assert!(
+            base_command(false).contains("@anthropic-ai/claude-code@2.1.268"),
+            "tool names were verified against 2.1.268; re-verify against the binary if this pin moves"
+        );
     }
 
     #[test]
@@ -3077,6 +3514,160 @@ mod tests {
             NormalizedEntryType::Thinking
         ));
         assert_eq!(entries[0].content, "Let me think about this...");
+    }
+
+    fn bash_tool_use(id: &str, command: &str) -> ClaudeJson {
+        serde_json::from_value(serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": id,
+                    "name": "Bash",
+                    "input": {"command": command}
+                }]
+            }
+        }))
+        .unwrap()
+    }
+
+    fn bash_tool_result(id: &str, is_error: bool) -> ClaudeJson {
+        serde_json::from_value(serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": id,
+                    "content": "finished",
+                    "is_error": is_error
+                }]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn repeated_completed_grok_commands_share_a_ticked_entry() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::test_new();
+        let command = "grok --cwd /tmp/work -p test";
+
+        let first = processor.normalize_entries(&bash_tool_use("grok-1", command), "", &provider);
+        let (_, first_entry) = extract_normalized_entry_from_patch(&first[0]).unwrap();
+        assert_eq!(first_entry.content, command);
+        assert!(matches!(
+            first[0].0.first(),
+            Some(json_patch::PatchOperation::Add(_))
+        ));
+
+        processor.normalize_entries(&bash_tool_result("grok-1", false), "", &provider);
+        let second = processor.normalize_entries(&bash_tool_use("grok-2", command), "", &provider);
+        let (second_index, second_entry) = extract_normalized_entry_from_patch(&second[0]).unwrap();
+        assert_eq!(second_index, 0);
+        assert_eq!(second_entry.content, format!("{command} ✓"));
+        assert!(matches!(
+            second[0].0.first(),
+            Some(json_patch::PatchOperation::Replace(_))
+        ));
+
+        processor.normalize_entries(&bash_tool_result("grok-2", false), "", &provider);
+        let third = processor.normalize_entries(&bash_tool_use("grok-3", command), "", &provider);
+        let (third_index, third_entry) = extract_normalized_entry_from_patch(&third[0]).unwrap();
+        assert_eq!(third_index, 0);
+        assert_eq!(third_entry.content, format!("{command} ✓✓"));
+        assert_eq!(provider.current(), 1);
+    }
+
+    #[test]
+    fn repeat_ticks_are_bounded_for_large_counts() {
+        assert_eq!(ClaudeLogProcessor::repeat_ticks(1), "");
+        assert_eq!(ClaudeLogProcessor::repeat_ticks(9), "✓✓✓✓✓✓✓✓");
+        assert_eq!(ClaudeLogProcessor::repeat_ticks(10), "✓ ×9");
+        assert_eq!(
+            ClaudeLogProcessor::repeat_ticks(usize::MAX),
+            format!("✓ ×{}", usize::MAX - 1)
+        );
+    }
+
+    #[test]
+    fn grok_command_run_is_broken_by_changed_or_intervening_entries() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::test_new();
+        let first_command = "grok --cwd /tmp/work -p first";
+
+        processor.normalize_entries(&bash_tool_use("grok-1", first_command), "", &provider);
+        processor.normalize_entries(&bash_tool_result("grok-1", false), "", &provider);
+        let changed = processor.normalize_entries(
+            &bash_tool_use("grok-2", "grok --cwd /tmp/work -p second"),
+            "",
+            &provider,
+        );
+        assert_eq!(
+            extract_normalized_entry_from_patch(&changed[0]).unwrap().0,
+            1
+        );
+        processor.normalize_entries(&bash_tool_result("grok-2", false), "", &provider);
+
+        let text: ClaudeJson = serde_json::from_value(serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "next"}]}
+        }))
+        .unwrap();
+        processor.normalize_entries(&text, "", &provider);
+
+        let repeated = processor.normalize_entries(
+            &bash_tool_use("grok-3", "grok --cwd /tmp/work -p second"),
+            "",
+            &provider,
+        );
+        assert_eq!(
+            extract_normalized_entry_from_patch(&repeated[0]).unwrap().0,
+            3
+        );
+    }
+
+    #[test]
+    fn identical_non_grok_commands_are_not_collapsed() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::test_new();
+        let command = "codex exec --skip-git-repo-check";
+
+        processor.normalize_entries(&bash_tool_use("codex-1", command), "", &provider);
+        processor.normalize_entries(&bash_tool_result("codex-1", false), "", &provider);
+        let second = processor.normalize_entries(&bash_tool_use("codex-2", command), "", &provider);
+
+        assert_eq!(
+            extract_normalized_entry_from_patch(&second[0]).unwrap().0,
+            1
+        );
+        assert!(matches!(
+            second[0].0.first(),
+            Some(json_patch::PatchOperation::Add(_))
+        ));
+    }
+
+    #[test]
+    fn failed_repeated_grok_command_stays_visibly_failed_without_a_tick() {
+        let mut processor = ClaudeLogProcessor::new();
+        let provider = EntryIndexProvider::test_new();
+        let command = "grok --cwd /tmp/work -p test";
+
+        processor.normalize_entries(&bash_tool_use("grok-1", command), "", &provider);
+        processor.normalize_entries(&bash_tool_result("grok-1", false), "", &provider);
+        processor.normalize_entries(&bash_tool_use("grok-2", command), "", &provider);
+        let failed = processor.normalize_entries(&bash_tool_result("grok-2", true), "", &provider);
+        let (_, entry) = extract_normalized_entry_from_patch(&failed[0]).unwrap();
+
+        assert_eq!(entry.content, command);
+        assert!(matches!(
+            entry.entry_type,
+            NormalizedEntryType::ToolUse {
+                status: ToolStatus::Failed,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3628,20 +4219,23 @@ mod tests {
 
     #[test]
     fn test_context_window_for_model() {
-        assert_eq!(
-            context_window_for_model("opus"),
-            DEFAULT_CLAUDE_CONTEXT_WINDOW
-        );
-        assert_eq!(
-            context_window_for_model("sonnet"),
-            DEFAULT_CLAUDE_CONTEXT_WINDOW
-        );
+        assert_eq!(context_window_for_model("opus"), CLAUDE_1M_CONTEXT_WINDOW);
+        assert_eq!(context_window_for_model("sonnet"), CLAUDE_1M_CONTEXT_WINDOW);
+        assert_eq!(context_window_for_model("fable"), CLAUDE_1M_CONTEXT_WINDOW);
         assert_eq!(
             context_window_for_model("claude-opus-4-8"),
             DEFAULT_CLAUDE_CONTEXT_WINDOW
         );
         assert_eq!(
             context_window_for_model("claude-opus-5"),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-fable-5-1"),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-sonnet-5"),
             CLAUDE_1M_CONTEXT_WINDOW
         );
         assert_eq!(
@@ -3719,6 +4313,31 @@ mod tests {
         assert!(
             !opus5.reasoning_options.is_empty(),
             "claude-opus-5 must have reasoning options (supports_effort coverage)"
+        );
+    }
+
+    #[test]
+    fn test_claude_fable_5_1_in_discovered_options() {
+        let options = super::default_discovered_options();
+        let fable = options
+            .model_selector
+            .models
+            .iter()
+            .find(|model| model.id == "claude-fable-5-1")
+            .expect("claude-fable-5-1 must be in model catalog");
+
+        assert_eq!(fable.name, "Fable 5.1");
+        assert_eq!(
+            fable
+                .reasoning_options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            options.model_selector.default_model.as_deref(),
+            Some("opus")
         );
     }
 }

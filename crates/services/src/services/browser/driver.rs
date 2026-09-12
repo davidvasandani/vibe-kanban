@@ -49,6 +49,12 @@ pub trait DriverHandle: Send + Sync {
     /// Screencast frames; every observer subscribes to the same stream.
     fn subscribe_frames(&self) -> broadcast::Receiver<BrowserFrame>;
     async fn close(&self);
+    /// OS process group id of the driver's spawned process, if any — used to
+    /// persist a startup-reaper target. `None` for drivers with no OS
+    /// process (mock, unavailable).
+    fn pgid(&self) -> Option<i32> {
+        None
+    }
 }
 
 /// Test/dev driver: no real browser. Records performed actions, keeps a

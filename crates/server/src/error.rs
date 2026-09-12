@@ -86,6 +86,11 @@ pub enum ApiError {
     PayloadTooLarge,
     #[error("Bad gateway: {0}")]
     BadGateway(String),
+    /// A clustered workspace could not be provisioned. Unlike `Container`, the
+    /// message is shown to the user: it names the repository and branch that
+    /// could not be served, which is the whole diagnosis.
+    #[error("{0}")]
+    ClusterProvisioning(String),
     #[error(transparent)]
     CommandBuilder(#[from] CommandBuildError),
     #[error(transparent)]
@@ -136,6 +141,15 @@ impl From<WorkspaceManagerError> for ApiError {
                 ApiError::BadRequest("Workspace has no repositories configured".to_string())
             }
             WorkspaceManagerError::PartialCreation(msg) => ApiError::Conflict(msg),
+            err @ WorkspaceManagerError::SharedStore { .. } => {
+                ApiError::ClusterProvisioning(err.to_string())
+            }
+            WorkspaceManagerError::WorktreeNotPortable { repo_name, detail } => ApiError::Conflict(
+                format!("Repository '{repo_name}' has a worktree other nodes cannot use: {detail}"),
+            ),
+            WorkspaceManagerError::InvalidSharedRoot(path) => {
+                ApiError::BadRequest(format!("Invalid shared workspace root: {}", path.display()))
+            }
         }
     }
 }
@@ -158,6 +172,9 @@ impl From<ContainerError> for ApiError {
             ContainerError::ExecutionProcess(e) => ApiError::ExecutionProcess(e),
             ContainerError::ExecutorError(e) => ApiError::Executor(e),
             ContainerError::Worktree(e) => e.into(),
+            // Must stay above the catch-all: falling into `Container` is what
+            // renders a failure as "An internal error occurred".
+            ContainerError::SharedStore(msg) => ApiError::ClusterProvisioning(msg),
             other => ApiError::Container(other),
         }
     }
@@ -506,6 +523,15 @@ impl IntoResponse for ApiError {
             ApiError::BadGateway(msg) => {
                 ErrorInfo::with_status(StatusCode::BAD_GATEWAY, "BadGateway", msg.clone())
             }
+            // A server error, so it is still logged by the `is_server_error()`
+            // branch below — but one that carries its own message, the way
+            // `ApiError::Worktree` does. The caller sent a branch this API
+            // offered it; failing to provision that branch is ours, not theirs.
+            ApiError::ClusterProvisioning(msg) => ErrorInfo::with_status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ClusterProvisioningError",
+                msg.clone(),
+            ),
             ApiError::Multipart(_) => ErrorInfo::bad_request(
                 "MultipartError",
                 "Failed to upload file. Please ensure the file is valid and try again.",
@@ -645,6 +671,56 @@ impl From<RelayPairingClientError> for ApiError {
                 ApiError::BadGateway(err.to_string())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cluster_provisioning_error_tests {
+    use axum::{body::to_bytes, http::StatusCode, response::IntoResponse};
+    use services::services::container::ContainerError;
+
+    use super::ApiError;
+
+    /// The whole point of the shared-store error channel is what reaches the
+    /// operator. Two one-line match arms stand between the store and the
+    /// response — `map_workspace_manager_error` and the `From<ContainerError>`
+    /// arm above the `other =>` catch-all — and either one silently re-routing
+    /// into `ApiError::Container` restores the generic message without failing
+    /// anything else.
+    #[tokio::test]
+    async fn shared_store_failures_keep_their_message_instead_of_going_generic() {
+        let detail = "shared repository store for 'homelab' cannot serve branch 'origin/main'";
+        let response =
+            ApiError::from(ContainerError::SharedStore(detail.to_string())).into_response();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "it stays a server error, so it is still logged server-side"
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains(detail), "{body}");
+        assert!(
+            !body.contains("An internal error occurred"),
+            "the generic message defeats the purpose of the variant: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unclassified_container_errors_stay_generic() {
+        let response = ApiError::from(ContainerError::Other(anyhow::anyhow!(
+            "some internal detail not written for users"
+        )))
+        .into_response();
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("An internal error occurred"),
+            "widening is scoped to the shared-store failure: {body}"
+        );
     }
 }
 

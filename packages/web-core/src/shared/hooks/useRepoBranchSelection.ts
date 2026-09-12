@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback } from 'react';
 import { useQueries } from '@tanstack/react-query';
 import { repoApi } from '@/shared/lib/api';
 import { repoBranchKeys } from '@/shared/hooks/useRepoBranches';
+import { resolveDefaultBranch } from '@/shared/lib/defaultBranch';
 import type { GitBranch, Repo } from 'shared/types';
 
 export type RepoBranchConfig = {
@@ -57,14 +58,11 @@ export function useRepoBranchSelection({
       if (targetBranch === null) {
         if (initialBranch && branches.some((b) => b.name === initialBranch)) {
           targetBranch = initialBranch;
-        } else if (
-          repo.default_target_branch &&
-          branches.some((b) => b.name === repo.default_target_branch)
-        ) {
-          targetBranch = repo.default_target_branch;
         } else {
-          const currentBranch = branches.find((b) => b.is_current);
-          targetBranch = currentBranch?.name ?? branches[0]?.name ?? null;
+          targetBranch = resolveDefaultBranch(
+            branches,
+            repo.default_target_branch
+          );
         }
       }
 

@@ -173,6 +173,97 @@ impl GitCli {
         Ok(())
     }
 
+    /// Clone `source` into `destination` as a bare repository.
+    ///
+    /// `destination` must not exist. Callers that publish onto shared storage
+    /// clone into a staging path and rename the result into place, so a
+    /// half-written repository is never observable as a usable one.
+    pub fn clone_bare(&self, source: &Path, destination: &Path) -> Result<(), GitCliError> {
+        self.ensure_available()?;
+        let parent = destination.parent().unwrap_or(Path::new("."));
+        let args: Vec<OsString> = vec![
+            // Applied as a clone-time `-c`, not afterwards: the objects, refs
+            // and directories git creates *during* the clone take their modes
+            // from this setting, and setting it later would leave every one of
+            // them at the cloning process's umask. A store another node's
+            // account has to write into cannot be fixed up after the fact
+            // without walking the whole tree.
+            "-c".into(),
+            "core.sharedRepository=group".into(),
+            "clone".into(),
+            "--bare".into(),
+            source.as_os_str().into(),
+            destination.as_os_str().into(),
+        ];
+        self.git(parent, args)?;
+        Ok(())
+    }
+
+    /// Set a repository-local config value.
+    pub fn set_config(&self, repo_path: &Path, key: &str, value: &str) -> Result<(), GitCliError> {
+        self.git(repo_path, ["config", key, value])?;
+        Ok(())
+    }
+
+    /// Add a remote, or update its URL when it already exists.
+    pub fn set_remote_url(
+        &self,
+        repo_path: &Path,
+        name: &str,
+        url: &str,
+    ) -> Result<(), GitCliError> {
+        if self
+            .git(repo_path, ["remote", "set-url", name, url])
+            .is_err()
+        {
+            self.git(repo_path, ["remote", "add", name, url])?;
+        }
+        Ok(())
+    }
+
+    /// Whether `revision` names a commit whose object is actually present.
+    ///
+    /// `git rev-parse` happily echoes any well-formed 40-hex string whether or
+    /// not the repository holds it, so it cannot answer this. `cat-file -e`
+    /// dereferences the object and fails when it is missing — which is the
+    /// difference between "this store has the workspace's commits" and "this
+    /// store merely knows their names".
+    pub fn commit_exists(&self, repo_path: &Path, revision: &str) -> Result<bool, GitCliError> {
+        self.ensure_available()?;
+        match self.git(
+            repo_path,
+            ["cat-file", "-e", &format!("{revision}^{{commit}}")],
+        ) {
+            Ok(_) => Ok(true),
+            Err(GitCliError::CommandFailed(_)) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Resolve a revision to its commit id, or `None` when it does not resolve.
+    pub fn resolve_commit(
+        &self,
+        repo_path: &Path,
+        revision: &str,
+    ) -> Result<Option<String>, GitCliError> {
+        self.ensure_available()?;
+        match self.git(
+            repo_path,
+            ["rev-parse", "--verify", &format!("{revision}^{{commit}}")],
+        ) {
+            Ok(out) => {
+                let oid = out.trim().to_string();
+                if oid.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(oid))
+                }
+            }
+            Err(GitCliError::CommandFailed(_)) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Return true if there are any changes in the working tree (staged or unstaged).
     pub fn has_changes(&self, worktree_path: &Path) -> Result<bool, GitCliError> {
         let out = self.git(
@@ -362,6 +453,15 @@ impl GitCli {
         Ok(())
     }
     /// Fetch a branch to the given remote using native git authentication.
+    ///
+    /// One refspec per invocation, deliberately. `git fetch` is atomic across
+    /// its refspecs: if any one of them is refused — notably
+    /// `refusing to fetch into branch '<b>' checked out at ...`, which a
+    /// repository with linked worktrees hits routinely — the whole command
+    /// aborts and *nothing* is written, including the refspecs that would have
+    /// succeeded. A caller mirroring several namespaces must therefore issue
+    /// them separately and handle each failure on its own, or a refusal in one
+    /// silently discards the others.
     pub fn fetch_with_refspec(
         &self,
         repo_path: &Path,

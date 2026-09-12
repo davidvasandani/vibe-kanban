@@ -40,6 +40,7 @@ import { PreviewBrowserContainer } from './PreviewBrowserContainer';
 import { BrowserPanelContainer } from './BrowserPanelContainer';
 import { WorkspacesGuideDialog } from '@/shared/dialogs/shared/WorkspacesGuideDialog';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
+import { useDeployUpdateAvailable } from '@/shared/hooks/useDeployUpdateAvailable';
 import { LinkedIssueProvider } from '@/shared/providers/remote/LinkedIssueContext';
 
 import {
@@ -49,10 +50,12 @@ import {
   RIGHT_MAIN_PANEL_MODES,
 } from '@/shared/stores/useUiPreferencesStore';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
+import { getWorkspaceMobileTabFallback } from '@/shared/components/ui-new/containers/workspaceMobileTabs';
 
 const WORKSPACES_GUIDE_ID = 'workspaces-guide';
 
 export function WorkspacesLayout() {
+  const { updateAvailable: deployUpdateAvailable } = useDeployUpdateAvailable();
   const appNavigation = useAppNavigation();
   const {
     workspaceId,
@@ -164,6 +167,8 @@ export function WorkspacesLayout() {
         },
         prompt,
         attachment_ids: null,
+        run_on_coordinator: false,
+        requested_worker_node_id: null,
       });
 
       await workspacesApi.update(workspaceId, { archived: true });
@@ -197,6 +202,18 @@ export function WorkspacesLayout() {
     }
     wasWorkspacesLandingRef.current = isWorkspacesLanding;
   }, [isMobile, isWorkspacesLanding, setMobileActiveTab]);
+
+  useEffect(() => {
+    if (!isMobile) return;
+
+    const availableTab = getWorkspaceMobileTabFallback(mobileTab, {
+      hasWorkspaceRoute: Boolean(workspaceId),
+      isCreateMode,
+    });
+    if (availableTab !== mobileTab) {
+      setMobileActiveTab(availableTab);
+    }
+  }, [isCreateMode, isMobile, mobileTab, setMobileActiveTab, workspaceId]);
 
   const handleScrollToBottom = useCallback(
     (behavior: 'auto' | 'smooth' = 'smooth') => {
@@ -413,6 +430,7 @@ export function WorkspacesLayout() {
                     rightMainPanelMode={rightMainPanelMode}
                     selectedWorkspace={selectedWorkspace}
                     repos={repos}
+                    executionProcesses={executionProcesses}
                     linkedIssueForWorkspace={linkedIssueForWorkspace}
                   />
                 </LinkedIssueProvider>
@@ -535,7 +553,11 @@ export function WorkspacesLayout() {
                   rightMainPanelMode={rightMainPanelMode}
                   selectedWorkspace={selectedWorkspace}
                   repos={repos}
+                  executionProcesses={executionProcesses}
                   linkedIssueForWorkspace={linkedIssueForWorkspace}
+                  showDeployStatus
+                  deployUpdateAvailable={deployUpdateAvailable}
+                  onDeployRefresh={() => window.location.reload()}
                 />
               </LinkedIssueProvider>
             </div>

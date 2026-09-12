@@ -203,6 +203,7 @@ export function createImageNode(options: CreateImageNodeOptions) {
     const [editor] = useLexicalComposerContext();
 
     const isVibeImage = src.startsWith('.vibe-attachments/');
+    const isRemoteImage = /^https?:\/\//i.test(src);
     const isPendingAttachment = src.startsWith('pending-attachment://');
     const isAttachment = isPendingAttachment || src.startsWith('attachment://');
     const attachmentId =
@@ -282,6 +283,15 @@ export function createImageNode(options: CreateImageNodeOptions) {
           } else {
             window.open(metadata.proxy_url, '_blank', 'noopener,noreferrer');
           }
+          return;
+        }
+
+        if (isRemoteImage) {
+          options.openImagePreview({
+            imageUrl: src,
+            altText,
+            fileName: altText || undefined,
+          });
         }
       },
       [
@@ -292,6 +302,8 @@ export function createImageNode(options: CreateImageNodeOptions) {
         thumbnailUrl,
         metadata,
         isWorkspaceImage,
+        isRemoteImage,
+        src,
         altText,
       ]
     );
@@ -440,6 +452,17 @@ export function createImageNode(options: CreateImageNodeOptions) {
         );
         displayName = truncatePath(src);
       }
+    } else if (isRemoteImage) {
+      thumbnailContent = (
+        <img
+          src={src}
+          alt={altText}
+          className="w-10 h-10 object-cover rounded flex-shrink-0"
+          draggable={false}
+          referrerPolicy="no-referrer"
+        />
+      );
+      displayName = truncatePath(altText || src);
     } else if (!isVibeImage) {
       thumbnailContent = (
         <div className="w-10 h-10 flex items-center justify-center bg-muted rounded flex-shrink-0">

@@ -1,5 +1,10 @@
-import type { ButtonHTMLAttributes, ReactNode } from 'react';
-import type { Icon } from '@phosphor-icons/react';
+import {
+  createElement,
+  forwardRef,
+  type ButtonHTMLAttributes,
+  type ReactNode,
+} from 'react';
+import type { Icon, IconProps } from '@phosphor-icons/react';
 import {
   Layout as LayoutIcon,
   ChatsTeardrop as ChatsTeardropIcon,
@@ -7,7 +12,6 @@ import {
   Terminal as TerminalIcon,
   Desktop as DesktopIcon,
   Globe as GlobeIcon,
-  GitFork as GitForkIcon,
   List as ListIcon,
   Gear as GearIcon,
   Kanban as KanbanIcon,
@@ -16,6 +20,7 @@ import {
   SidebarSimple as SidebarSimpleIcon,
 } from '@phosphor-icons/react';
 import { cn } from '../lib/cn';
+import { DeployStatus } from './DeployStatus';
 import { Tooltip } from './Tooltip';
 import {
   SyncErrorIndicator,
@@ -102,14 +107,36 @@ export type MobileTabId =
   | 'browser'
   | 'git';
 
-export const MOBILE_TABS: { id: MobileTabId; icon: Icon; label: string }[] = [
+export interface MobileTabDefinition {
+  id: MobileTabId;
+  icon: Icon;
+  label: string;
+  accessibleLabel?: string;
+}
+
+const RightSidebarIcon: Icon = forwardRef<SVGSVGElement, IconProps>(
+  (props, ref) =>
+    createElement(SidebarSimpleIcon, {
+      ref,
+      ...props,
+      style: { transform: 'scaleX(-1)', ...props.style },
+    })
+);
+RightSidebarIcon.displayName = 'RightSidebarIcon';
+
+export const MOBILE_TABS: MobileTabDefinition[] = [
   { id: 'workspaces', icon: LayoutIcon, label: 'Wksps' },
   { id: 'chat', icon: ChatsTeardropIcon, label: 'Chat' },
   { id: 'changes', icon: GitDiffIcon, label: 'Diff' },
   { id: 'logs', icon: TerminalIcon, label: 'Logs' },
   { id: 'preview', icon: DesktopIcon, label: 'Preview' },
   { id: 'browser', icon: GlobeIcon, label: 'Browser' },
-  { id: 'git', icon: GitForkIcon, label: 'Git' },
+  {
+    id: 'git',
+    icon: RightSidebarIcon,
+    label: 'Sidebar',
+    accessibleLabel: 'Right sidebar',
+  },
 ];
 
 export interface NavbarBreadcrumbItem {
@@ -182,13 +209,15 @@ export interface NavbarProps {
   isOnProjectSubRoute?: boolean;
   mobileActiveTab?: MobileTabId;
   onMobileTabChange?: (tab: MobileTabId) => void;
-  mobileTabs?: { id: MobileTabId; icon: Icon; label: string }[];
+  mobileTabs?: MobileTabDefinition[];
   showMobileTabs?: boolean;
   mobileShowBack?: boolean;
   // Reserve leading space in the mobile top row for OS window controls (the
   // iPadOS Stage Manager grabber / traffic lights) so they don't cover the
   // drawer button.
   reserveWindowControls?: boolean;
+  appVersion?: string | null;
+  deploymentTimestamp?: string | null;
 }
 
 export function Navbar({
@@ -216,6 +245,8 @@ export function Navbar({
   showMobileTabs,
   mobileShowBack,
   reserveWindowControls = false,
+  appVersion,
+  deploymentTimestamp,
 }: NavbarProps) {
   // Width reserved at the leading edge for OS window controls (matches the
   // desktop traffic-light spacer in SharedAppLayout). Never smaller than the
@@ -300,7 +331,10 @@ export function Navbar({
               {afterTitleSlot}
             </div>
           ) : (
-            <div className="flex items-center gap-0.5 overflow-x-auto">
+            <div
+              data-testid="mobile-workspace-toolbar"
+              className="flex flex-1 min-w-0 items-center gap-0.5 overflow-x-auto"
+            >
               {mobileShowBack && onNavigateBack ? (
                 <>
                   <button
@@ -328,32 +362,40 @@ export function Navbar({
                   </>
                 )
               )}
-              {showMobileTabs !== false &&
-                (mobileTabs ?? MOBILE_TABS).map((tab) => {
-                  const TabIcon = tab.icon;
-                  const isActive = mobileActiveTab === tab.id;
-                  return (
-                    <button
-                      key={tab.id}
-                      type="button"
-                      className={cn(
-                        'flex items-center gap-1 px-1.5 py-1 text-xs whitespace-nowrap transition-colors',
-                        isActive
-                          ? 'text-normal border-b-2 border-brand'
-                          : 'text-low hover:text-normal'
-                      )}
-                      onClick={() => onMobileTabChange?.(tab.id)}
-                    >
-                      <TabIcon
-                        className="size-icon-sm"
-                        weight={isActive ? 'fill' : 'regular'}
-                      />
-                      <span className="hidden min-[480px]:inline">
-                        {tab.label}
-                      </span>
-                    </button>
-                  );
-                })}
+              {showMobileTabs !== false && (
+                <div
+                  data-testid="mobile-workspace-tabs"
+                  className="flex flex-1 min-w-fit items-center gap-0.5"
+                >
+                  {(mobileTabs ?? MOBILE_TABS).map((tab) => {
+                    const TabIcon = tab.icon;
+                    const isActive = mobileActiveTab === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        aria-label={tab.accessibleLabel ?? tab.label}
+                        aria-pressed={isActive}
+                        className={cn(
+                          'flex flex-1 min-w-10 items-center justify-center gap-1 px-1.5 py-1 text-xs whitespace-nowrap transition-colors',
+                          isActive
+                            ? 'text-normal border-b-2 border-brand'
+                            : 'text-low hover:text-normal'
+                        )}
+                        onClick={() => onMobileTabChange?.(tab.id)}
+                      >
+                        <TabIcon
+                          className="size-icon-sm"
+                          weight={isActive ? 'fill' : 'regular'}
+                        />
+                        <span className="hidden min-[480px]:inline">
+                          {tab.label}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
               {onNavigateToBoard && (
                 <button
                   type="button"
@@ -368,7 +410,16 @@ export function Navbar({
           )}
 
           {/* Right side: sync indicator + action buttons + user slot */}
-          <div className="flex items-center gap-1 shrink-0">
+          <div
+            data-testid="mobile-navbar-actions"
+            className="flex items-center gap-1 shrink-0"
+          >
+            <DeployStatus
+              version={appVersion ?? null}
+              deploymentTimestamp={deploymentTimestamp}
+              stacked
+              className="mr-0.5"
+            />
             <SyncErrorIndicator errors={syncErrors} />
             {isOnProjectPage &&
               rightItems

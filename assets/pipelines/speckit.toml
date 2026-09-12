@@ -5,7 +5,7 @@ description = "Spec-Driven Development flow: run the /speckit.* slash commands i
 id = "speckit-constitution"
 label = "SpecKit: Constitution"
 default_enabled = true
-prompt = "SpecKit: establish or refresh the project constitution by running `/speckit.constitution` before specifying."
+prompt = "SpecKit: establish or refresh the project constitution by running `/speckit.constitution` before specifying. Treat any new principle number assigned while drafting as provisional: the unmerged task must recheck it against the latest tip of its actual base branch (for example, `main`) immediately before merge, choose the next free number after the highest existing principle number, and renumber its own addition if the provisional number is already present. Never renumber an already-merged principle to resolve a collision."
 
 [[stage]]
 id = "speckit-specify"
@@ -53,4 +53,4 @@ prompt = "After implementing, run an independent Codex review of the task's diff
 id = "merge"
 label = "Merge to base"
 default_enabled = false
-prompt = "When the work is implemented and reviewed, merge this task's branch into the base branch."
+prompt = "When the work is implemented and reviewed, merge this task's branch into the base branch. Immediately before merging a constitution change, inspect the latest base-branch tip for the highest existing principle number; if this task's provisional number is already present, renumber the unmerged principle to the next free number and update its internal references before merging. Never renumber an already-merged principle to resolve a collision."

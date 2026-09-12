@@ -276,6 +276,7 @@ export function KanbanIssuePanel({
 
   return (
     <div
+      data-testid="kanban-issue-panel"
       className="flex flex-col h-full overflow-hidden outline-none"
       onKeyDown={handleKeyDown}
       tabIndex={-1}
@@ -325,7 +326,10 @@ export function KanbanIssuePanel({
       </div>
 
       {/* Scrollable Content */}
-      <div className="flex-1 overflow-y-auto">
+      <div
+        data-testid="kanban-issue-panel-scroll-region"
+        className="min-h-0 flex-1 overflow-y-auto"
+      >
         {/* Property Row */}
         <div className="px-base py-base border-b">
           <IssuePropertyRow

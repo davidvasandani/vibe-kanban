@@ -142,6 +142,8 @@ impl BrowserDriver for CdpDriver {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| DriverError::Unavailable(format!("failed to spawn chromium: {e}")))?;
+        // The group leader's pid doubles as the pgid for grouped spawns.
+        let pgid = child.id().map(|pid| pid as i32);
 
         // Chromium prints "DevTools listening on ws://..." to stderr once the
         // debugging endpoint is up.
@@ -222,6 +224,7 @@ impl BrowserDriver for CdpDriver {
             conn,
             session_id: session_id.clone(),
             child: AsyncMutex::new(Some(child)),
+            pgid,
             frames: frames_tx,
             console,
             reader,
@@ -386,6 +389,7 @@ pub struct CdpHandle {
     conn: Arc<CdpConnection>,
     session_id: String,
     child: AsyncMutex<Option<command_group::AsyncGroupChild>>,
+    pgid: Option<i32>,
     frames: broadcast::Sender<BrowserFrame>,
     console: Arc<Mutex<VecDeque<String>>>,
     reader: tokio::task::JoinHandle<()>,
@@ -558,6 +562,10 @@ impl DriverHandle for CdpHandle {
 
     fn subscribe_frames(&self) -> broadcast::Receiver<BrowserFrame> {
         self.frames.subscribe()
+    }
+
+    fn pgid(&self) -> Option<i32> {
+        self.pgid
     }
 
     async fn close(&self) {

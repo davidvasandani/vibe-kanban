@@ -24,6 +24,7 @@ import type {
   SharedMcpAssignmentTestResult,
   SharedMcpReadResponse,
   SharedMcpServer,
+  SharedMcpServerInput,
 } from 'shared/types';
 import { BaseCodingAgent as BaseCodingAgentValue } from 'shared/types';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
@@ -34,6 +35,10 @@ import {
   summarizeMcpToolCounts,
 } from '@/shared/lib/mcpCheckSummary';
 import { codecForAgent, transportOf } from '@/shared/lib/mcpServerCodec';
+import {
+  isValidMcpServerIdentifier,
+  suggestMcpServerIdentifier,
+} from '@/shared/lib/mcpServerIdentifier';
 import {
   acquireMcpDebugCreation,
   buildMcpDebugIssueRequest,
@@ -46,13 +51,16 @@ import {
 import {
   definitionFromEntry,
   draftFromSharedRead,
+  draftServersFromInputs,
   indexAssignmentTests,
   inputsFromDraft,
   mergeOAuthRefresh,
+  nextAvailableServerName,
   preconfiguredMcpServers,
   removedServerNames,
   resolveConflictVariant,
   sharedMcpSnapshot,
+  takenServerNames,
   testKey,
   testTargetsForDraft,
   type SharedMcpDraftServer,
@@ -442,6 +450,7 @@ export function McpSettingsSection() {
       setCopyStates({});
       setDebugStates({});
       setConnectErrors({});
+      setError(response.metadata_error);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : t('settings.mcp.errors.loadFailed')
@@ -492,14 +501,14 @@ export function McpSettingsSection() {
       setCopyStates({});
       setDebugStates({});
       setConnectErrors({});
-      setSuccess(response.status === 'success');
-      if (response.status !== 'success') {
-        setError(
-          response.outcomes
-            .filter((outcome) => outcome.status === 'failed')
-            .map((outcome) => `${outcome.executor}: ${outcome.error}`)
-            .join('\n') || t('settings.mcp.errors.saveFailed')
-        );
+      setSuccess(response.status === 'success' && !fresh.metadata_error);
+      if (response.status !== 'success' || fresh.metadata_error) {
+        const failures = response.outcomes
+          .filter((outcome) => outcome.status === 'failed')
+          .map((outcome) => `${outcome.executor}: ${outcome.error}`);
+        if (response.metadata_error) failures.push(response.metadata_error);
+        if (fresh.metadata_error) failures.push(fresh.metadata_error);
+        setError(failures.join('\n') || t('settings.mcp.errors.saveFailed'));
       }
       setTimeout(() => setSuccess(false), 3000);
     } catch (err) {
@@ -571,12 +580,15 @@ export function McpSettingsSection() {
       const result = await McpServerDialog.show({
         codec,
         profiles,
-        existingNames: draft.servers
-          .map((s) => s.name)
-          .filter((n) => n !== server?.name),
+        // Conflicts included: renaming onto a conflicting name collides just as
+        // destructively as renaming onto another server's name.
+        existingNames: takenServerNames(draft).filter(
+          (n) => n !== server?.name
+        ),
         initial: server
           ? {
               name: server.name,
+              displayName: server.displayName,
               entry: entryForDialog(server.definition),
               assignments: server.assignments,
             }
@@ -585,18 +597,29 @@ export function McpSettingsSection() {
       if (!result) return;
       if (server && server.name !== result.name) {
         invalidateServerCheck(server.name);
+        invalidateServerCheck(result.name);
         setDraft((prev) => ({
           ...prev,
-          servers: prev.servers.filter((s) => s.name !== server.name),
+          servers: [
+            ...prev.servers.filter((item) => item.name !== server.name),
+            {
+              name: result.name,
+              displayName: result.displayName,
+              definition: definitionFromEntry(result.entry),
+              assignments: result.assignments,
+            },
+          ].sort((a, b) => a.name.localeCompare(b.name)),
         }));
+        return;
       }
       setServer({
         name: result.name,
+        displayName: result.displayName,
         definition: definitionFromEntry(result.entry),
         assignments: result.assignments,
       });
     },
-    [draft.servers, invalidateServerCheck, profiles, setServer]
+    [draft, invalidateServerCheck, profiles, setServer]
   );
 
   const removeServer = useCallback((name: string) => {
@@ -607,7 +630,10 @@ export function McpSettingsSection() {
   }, []);
 
   const addPreconfigured = useCallback(
-    (key: string, entry: JsonValue) => {
+    (key: string, entry: JsonValue, displayName?: string) => {
+      const identifier = isValidMcpServerIdentifier(key)
+        ? key
+        : suggestMcpServerIdentifier(key);
       const definition = definitionFromEntry(entry);
       const assignments = profiles
         .filter(
@@ -621,9 +647,24 @@ export function McpSettingsSection() {
         )
         .slice(0, 1)
         .map((profile) => profile.executor);
-      setServer({ name: key, definition, assignments });
+      // A template may be added more than once (two Slack workspaces, one Gmail
+      // server per mailbox), so the catalog key is only a starting point. Allocate
+      // against the current draft: `setServer` de-duplicates by name, so reusing a
+      // taken name would silently replace that server instead of adding one.
+      //
+      // Conflicting servers count as taken even though they are not in
+      // `draft.servers`: the backend puts a name in `servers` XOR `conflicts`, so
+      // reusing a conflict's name would attach this new definition to an
+      // unresolved conflict and drop the native entry it was still arbitrating.
+      const name = nextAvailableServerName(identifier, takenServerNames(draft));
+      setServer({
+        name,
+        displayName: displayName && displayName !== name ? displayName : null,
+        definition,
+        assignments,
+      });
     },
-    [profiles, setServer]
+    [draft, profiles, setServer]
   );
 
   const disconnectGateway = useCallback(
@@ -979,8 +1020,11 @@ export function McpSettingsSection() {
     (text: string) => {
       setJsonText(text);
       try {
-        const parsed = JSON.parse(text) as SharedMcpDraftServer[];
-        setDraft({ servers: parsed, conflicts: draft.conflicts });
+        const parsed = JSON.parse(text) as SharedMcpServerInput[];
+        setDraft({
+          servers: draftServersFromInputs(parsed),
+          conflicts: draft.conflicts,
+        });
         setTestResults({});
         setCheckedAtByServer({});
         setJsonError(null);
@@ -1101,8 +1145,15 @@ export function McpSettingsSection() {
                 </p>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {catalogServers.map((server) => {
+                    // Marks the template as already used — it dims the tile and
+                    // swaps the icon, but must not disable it: a template can be
+                    // instantiated more than once, and later instances are named
+                    // by `nextAvailableServerName`.
+                    const identifier = isValidMcpServerIdentifier(server.key)
+                      ? server.key
+                      : suggestMcpServerIdentifier(server.key);
                     const added = draft.servers.some(
-                      (draftServer) => draftServer.name === server.key
+                      (draftServer) => draftServer.name === identifier
                     );
                     const icon = server.icon ? `/${server.icon}` : null;
                     return (
@@ -1110,14 +1161,15 @@ export function McpSettingsSection() {
                         key={server.key}
                         type="button"
                         onClick={() =>
-                          addPreconfigured(server.key, server.entry)
+                          addPreconfigured(
+                            server.key,
+                            server.entry,
+                            server.name
+                          )
                         }
-                        disabled={added}
                         className={cn(
-                          'flex items-start gap-3 rounded-sm border border-border/50 bg-secondary/30 p-3 text-left transition-colors',
-                          added
-                            ? 'cursor-default opacity-60'
-                            : 'hover:border-border hover:bg-secondary'
+                          'flex items-start gap-3 rounded-sm border border-border/50 bg-secondary/30 p-3 text-left transition-colors hover:border-border hover:bg-secondary',
+                          added && 'opacity-60'
                         )}
                       >
                         <div className="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-sm border border-border bg-secondary">
@@ -1265,7 +1317,7 @@ export function McpSettingsSection() {
                       <div className="min-w-0">
                         <div className="flex min-w-0 flex-wrap items-center gap-2">
                           <span className="truncate font-medium text-high">
-                            {server.name}
+                            {server.displayName || server.name}
                           </span>
                           <span className="rounded-sm bg-primary px-1.5 py-0.5 font-mono text-xs text-low">
                             {transportBadge(server.definition)}
@@ -1285,6 +1337,12 @@ export function McpSettingsSection() {
                             </span>
                           )}
                         </div>
+                        {server.displayName &&
+                          server.displayName !== server.name && (
+                            <div className="truncate font-mono text-xs text-low">
+                              {server.name}
+                            </div>
+                          )}
                         {server.assignments.length === 0 ? (
                           <span className="text-xs text-low italic">
                             {t('settings.mcp.labels.noAssignments')}

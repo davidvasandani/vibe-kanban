@@ -130,6 +130,17 @@ pub struct MaybeSignedWebSocket {
 }
 
 impl MaybeSignedWebSocket {
+    /// Whether this socket wraps every frame in a signed envelope.
+    ///
+    /// Callers need this to know whether WebSocket **control** frames are
+    /// usable: the signed wrapper encodes an outgoing frame as an application
+    /// binary message and drops incoming `Ping`/`Pong` on receipt
+    /// (`crates/relay-ws/src/signed.rs`), so a ping/pong liveness check works
+    /// only on the plain path and would time out on a healthy relayed one.
+    pub fn is_signed(&self) -> bool {
+        matches!(self.inner, WebSocketInner::Signed(_))
+    }
+
     pub async fn send(&mut self, message: Message) -> anyhow::Result<()> {
         match &mut self.inner {
             WebSocketInner::Plain(ws) => SinkExt::send(ws, message)

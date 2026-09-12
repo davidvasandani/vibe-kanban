@@ -44,6 +44,52 @@ pub fn schedule_wakeup_deny_response() -> serde_json::Value {
         }
     })
 }
+
+/// PreToolUse callback id used to deny `Bash` calls that request a background
+/// spawn (`run_in_background: true`).
+///
+/// Registered on a `^Bash$` matcher rather than on a dedicated tool name
+/// because the control is *parameter*-granular: `Bash` itself must keep
+/// working. See [`super::BACKGROUND_POLLER_TOOLS`] for why denying the
+/// background-polling tool names alone is not sufficient.
+pub const DENY_BACKGROUND_BASH_CALLBACK_ID: &str = "DENY_BACKGROUND_BASH_CALLBACK_ID";
+/// Reason surfaced to the agent when it tries to start a background process
+/// inside a VK turn. A turn is one OS process group and VK reaps it at turn end
+/// (see `wiki/agent-process-lifecycle.md`), so anything started with
+/// `run_in_background` dies with the turn and the output the agent planned to
+/// poll is silently lost. The message names the supported replacement
+/// (`spawn_poller`, which runs the command in its own surviving process group)
+/// and — mirroring [`SCHEDULE_WAKEUP_DENY_REASON`] — tells the agent to keep
+/// working rather than park its turn.
+pub const BACKGROUND_BASH_DENY_REASON: &str = "Background processes are not supported inside a Vibe Kanban turn: this turn's process group is terminated when the turn ends, so anything started with run_in_background is reaped with it and any output you meant to poll is silently lost. Run the command in the foreground instead. If it genuinely needs to outlive this turn, use the `spawn_poller` MCP tool, which runs it in its own process group that survives the turn and is visible in the workspace UI. Either way, keep working in this turn instead of waiting on a background process.";
+
+/// True only when a `PreToolUse` hook input explicitly asks for a background
+/// `Bash` spawn.
+///
+/// Deliberately conservative: an absent, non-boolean, or otherwise malformed
+/// `tool_input` yields `false` (i.e. allow). An over-broad deny here would
+/// break every `Bash` call in every Claude execution, so ambiguity resolves to
+/// the permissive answer.
+pub fn is_background_bash_input(input: &serde_json::Value) -> bool {
+    input
+        .get("tool_input")
+        .and_then(|tool_input| tool_input.get("run_in_background"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+/// PreToolUse hook response that denies a background `Bash` spawn with an
+/// actionable reason naming `spawn_poller`. Extracted so it can be unit-tested
+/// directly.
+pub fn background_bash_deny_response() -> serde_json::Value {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": BACKGROUND_BASH_DENY_REASON,
+        }
+    })
+}
 // Prefix for denial messages from the user, mirrors claude code CLI behavior
 const TOOL_DENY_PREFIX: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said: ";
 
@@ -380,6 +426,17 @@ impl ClaudeAgentClient {
             return Ok(schedule_wakeup_deny_response());
         }
 
+        // Deny *background* `Bash` spawns, for the same reason and in the same
+        // place: checked before `auto_approve` so it also fires in
+        // bypass/yolo mode. Unlike `ScheduleWakeup` this is a parameter-level
+        // rule — only `run_in_background: true` is denied, and anything else
+        // (absent, `false`, or malformed `tool_input`) falls through to the
+        // normal decision path below. `Bash` is the workhorse tool; an
+        // over-broad deny here would break every Claude execution.
+        if callback_id == DENY_BACKGROUND_BASH_CALLBACK_ID && is_background_bash_input(&input) {
+            return Ok(background_bash_deny_response());
+        }
+
         if self.auto_approve {
             Ok(serde_json::json!({
                 "hookSpecificOutput": {
@@ -397,6 +454,13 @@ impl ClaudeAgentClient {
                         "permissionDecisionReason": "Approved by SDK"
                     }
                 })),
+                // A *foreground* `Bash` call that reached this hook. Return no
+                // permission decision at all so the mode's own catch-all
+                // matcher decides exactly as it did before this hook existed
+                // (auto-approve in plan mode, `tool_approval` in approvals
+                // mode). Forwarding to can_use_tool here instead would turn
+                // every plan-mode `Bash` into a user prompt.
+                DENY_BACKGROUND_BASH_CALLBACK_ID => Ok(serde_json::json!({})),
                 _ => {
                     // Hook callbacks is only used to forward approval requests to can_use_tool.
                     // This works because `ask` decision in hook callback triggers a can_use_tool request
@@ -421,7 +485,10 @@ impl ClaudeAgentClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{env::RepoContext, executors::codex::client::LogWriter};
+    use crate::{
+        approvals::NoopExecutorApprovalService, env::RepoContext,
+        executors::codex::client::LogWriter,
+    };
 
     fn auto_approve_client() -> Arc<ClaudeAgentClient> {
         // `approvals: None` => auto_approve = true, the mode the VAS-283
@@ -433,6 +500,30 @@ mod tests {
             String::new(),
             CancellationToken::new(),
         )
+    }
+
+    /// A client with an approval service attached (`auto_approve = false`) —
+    /// the shape used by both plan mode and approvals mode.
+    fn approval_client() -> Arc<ClaudeAgentClient> {
+        ClaudeAgentClient::new(
+            LogWriter::new(tokio::io::sink()),
+            Some(Arc::new(NoopExecutorApprovalService)),
+            RepoContext::default(),
+            String::new(),
+            CancellationToken::new(),
+        )
+    }
+
+    fn permission_decision(resp: &serde_json::Value) -> Option<&str> {
+        resp["hookSpecificOutput"]["permissionDecision"].as_str()
+    }
+
+    fn bash_hook_input(tool_input: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": tool_input,
+        })
     }
 
     #[test]
@@ -458,6 +549,153 @@ mod tests {
         // Denied despite auto_approve — the deny is checked before the
         // auto-approve short-circuit, so a parked turn cannot slip through.
         assert_eq!(resp["hookSpecificOutput"]["permissionDecision"], "deny");
+    }
+
+    #[test]
+    fn background_bash_deny_response_is_a_deny_naming_spawn_poller() {
+        let resp = background_bash_deny_response();
+        let out = &resp["hookSpecificOutput"];
+        assert_eq!(out["hookEventName"], "PreToolUse");
+        assert_eq!(out["permissionDecision"], "deny");
+        assert_eq!(out["permissionDecisionReason"], BACKGROUND_BASH_DENY_REASON);
+        // The denial must name its replacement, otherwise the agent has no
+        // supported way to do what it was trying to do.
+        assert!(
+            BACKGROUND_BASH_DENY_REASON.contains("spawn_poller"),
+            "deny reason must name the replacement tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_bash_denied_even_in_auto_approve() {
+        let client = auto_approve_client();
+        let resp = client
+            .on_hook_callback(
+                DENY_BACKGROUND_BASH_CALLBACK_ID.to_string(),
+                bash_hook_input(serde_json::json!({
+                    "command": "sleep 600",
+                    "run_in_background": true,
+                })),
+                None,
+            )
+            .await
+            .expect("callback ok");
+        // Denied despite auto_approve — the check sits before the auto-approve
+        // short-circuit, so bypass/yolo (the mode incidents occur in) is
+        // covered.
+        assert_eq!(permission_decision(&resp), Some("deny"));
+    }
+
+    /// **Release gate for the background-`Bash` rule.** An over-broad deny here
+    /// breaks every Claude execution, so foreground `Bash` must survive in all
+    /// three permission modes, and any `tool_input` we cannot confidently read
+    /// as "background" must fall through rather than deny.
+    #[tokio::test]
+    async fn foreground_bash_is_never_denied_in_any_permission_mode() {
+        // `tool_input` shapes that must all be treated as *not* background.
+        let inputs = [
+            ("absent", serde_json::json!({"command": "ls"})),
+            (
+                "explicit false",
+                serde_json::json!({"command": "ls", "run_in_background": false}),
+            ),
+            (
+                "non-boolean",
+                serde_json::json!({"command": "ls", "run_in_background": "true"}),
+            ),
+            (
+                "null",
+                serde_json::json!({"command": "ls", "run_in_background": null}),
+            ),
+            ("empty tool_input", serde_json::json!({})),
+        ];
+
+        // bypass/yolo is `auto_approve`; plan and approvals both attach an
+        // approval service.
+        let clients: [(&str, Arc<ClaudeAgentClient>); 2] = [
+            ("bypass", auto_approve_client()),
+            ("plan/approvals", approval_client()),
+        ];
+
+        for (mode, client) in clients {
+            for (label, tool_input) in &inputs {
+                let resp = client
+                    .on_hook_callback(
+                        DENY_BACKGROUND_BASH_CALLBACK_ID.to_string(),
+                        bash_hook_input(tool_input.clone()),
+                        None,
+                    )
+                    .await
+                    .expect("callback ok");
+                assert_ne!(
+                    permission_decision(&resp),
+                    Some("deny"),
+                    "{mode} mode must not deny foreground Bash ({label}); got {resp}"
+                );
+            }
+        }
+
+        // A completely malformed hook input (no `tool_input` at all, wrong
+        // type) must also fall through to allow rather than deny.
+        let client = auto_approve_client();
+        for malformed in [
+            serde_json::json!({}),
+            serde_json::json!({"tool_input": "not-an-object"}),
+            serde_json::json!({"tool_input": null}),
+            serde_json::json!([]),
+        ] {
+            let resp = client
+                .on_hook_callback(
+                    DENY_BACKGROUND_BASH_CALLBACK_ID.to_string(),
+                    malformed.clone(),
+                    None,
+                )
+                .await
+                .expect("callback ok");
+            assert_eq!(
+                permission_decision(&resp),
+                Some("allow"),
+                "malformed input {malformed} must fall through to allow"
+            );
+        }
+    }
+
+    #[test]
+    fn is_background_bash_input_only_matches_explicit_true() {
+        assert!(is_background_bash_input(&bash_hook_input(
+            serde_json::json!({"run_in_background": true})
+        )));
+        assert!(!is_background_bash_input(&bash_hook_input(
+            serde_json::json!({"run_in_background": false})
+        )));
+        assert!(!is_background_bash_input(&bash_hook_input(
+            serde_json::json!({"run_in_background": "true"})
+        )));
+        assert!(!is_background_bash_input(&bash_hook_input(
+            serde_json::json!({})
+        )));
+        assert!(!is_background_bash_input(&serde_json::json!({})));
+        assert!(!is_background_bash_input(&serde_json::json!(
+            "not-an-object"
+        )));
+    }
+
+    #[tokio::test]
+    async fn foreground_bash_defers_to_the_mode_catch_all_when_approvals_are_on() {
+        // With an approval service attached, a foreground Bash must return *no*
+        // permission decision so plan mode's auto-approve catch-all still
+        // allows it. Returning "ask" here would prompt the user for every
+        // plan-mode shell command.
+        let client = approval_client();
+        let resp = client
+            .on_hook_callback(
+                DENY_BACKGROUND_BASH_CALLBACK_ID.to_string(),
+                bash_hook_input(serde_json::json!({"command": "ls"})),
+                None,
+            )
+            .await
+            .expect("callback ok");
+        assert_eq!(resp, serde_json::json!({}), "expected a no-decision result");
     }
 
     #[tokio::test]

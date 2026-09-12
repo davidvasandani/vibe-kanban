@@ -9,6 +9,22 @@ type WsReadyMsg = { Ready: true };
 type WsFinishedMsg = { finished: boolean };
 type WsMsg = WsJsonPatchMsg | WsReadyMsg | WsFinishedMsg;
 
+const MAX_RECONNECT_DELAY_MS = 8_000;
+
+export function getReconnectDelay(
+  attempt: number,
+  random: () => number = Math.random
+): number {
+  const exponential = Math.min(
+    MAX_RECONNECT_DELAY_MS,
+    1_000 * 2 ** Math.max(0, attempt)
+  );
+  // ±20% jitter prevents every stream and browser tab from reconnecting in a
+  // synchronized burst when the replacement server becomes available.
+  const jitter = 0.8 + Math.min(1, Math.max(0, random())) * 0.4;
+  return Math.min(MAX_RECONNECT_DELAY_MS, Math.round(exponential * jitter));
+}
+
 interface UseJsonPatchStreamOptions<T> {
   /**
    * Called once when the stream starts to inject initial data
@@ -51,11 +67,25 @@ export const useJsonPatchWsStream = <T extends object>(
   const injectInitialEntry = options?.injectInitialEntry;
   const deduplicatePatches = options?.deduplicatePatches;
 
+  // Endpoint changes are a different execution stream and must reset the
+  // snapshot. A reconnect attempt to the *same* endpoint is not: keeping the
+  // last good snapshot rendered is what makes a server restart a recoverable
+  // transport outage instead of a blank page.
+  useEffect(() => {
+    retryAttemptsRef.current = 0;
+    finishedRef.current = false;
+    dataRef.current = undefined;
+    initializedForEndpointRef.current = undefined;
+    setData(undefined);
+    setIsConnected(false);
+    setIsInitialized(false);
+    setError(null);
+  }, [endpoint, enabled]);
+
   function scheduleReconnect() {
     if (retryTimerRef.current) return; // already scheduled
-    // Exponential backoff with cap: 1s, 2s, 4s, 8s (max), then stay at 8s
     const attempt = retryAttemptsRef.current;
-    const delay = Math.min(8000, 1000 * Math.pow(2, attempt));
+    const delay = getReconnectDelay(attempt);
     retryTimerRef.current = window.setTimeout(() => {
       retryTimerRef.current = null;
       setRetryNonce((n) => n + 1);
@@ -110,10 +140,9 @@ export const useJsonPatchWsStream = <T extends object>(
           }
 
           ws.onopen = () => {
-            setError(null);
             setIsConnected(true);
-            // Reset backoff on successful connection
-            retryAttemptsRef.current = 0;
+            // Opening the transport does not prove this patch stream is
+            // authoritative. Only Ready resets failure pressure.
             if (retryTimerRef.current) {
               window.clearTimeout(retryTimerRef.current);
               retryTimerRef.current = null;
@@ -146,6 +175,7 @@ export const useJsonPatchWsStream = <T extends object>(
               // Handle Ready messages (initial data has been sent)
               if ('Ready' in msg) {
                 initializedForEndpointRef.current = endpoint;
+                retryAttemptsRef.current = 0;
                 setIsInitialized(true);
                 setError(null);
               }
@@ -185,8 +215,12 @@ export const useJsonPatchWsStream = <T extends object>(
 
             // Otherwise, reconnect on unexpected/error closures
             retryAttemptsRef.current += 1;
-            // Only show error if we haven't received any data yet
-            if (!dataRef.current && retryAttemptsRef.current > 6) {
+            // InitialData is only a local placeholder. A bounded connection
+            // error depends on whether an authoritative Ready was received.
+            if (
+              initializedForEndpointRef.current !== endpoint &&
+              retryAttemptsRef.current > 6
+            ) {
               setError('Connection failed');
             }
             scheduleReconnect();
@@ -200,6 +234,12 @@ export const useJsonPatchWsStream = <T extends object>(
 
           console.error('Failed to open WebSocket stream:', error);
           retryAttemptsRef.current += 1;
+          if (
+            initializedForEndpointRef.current !== endpoint &&
+            retryAttemptsRef.current > 6
+          ) {
+            setError('Connection failed');
+          }
           scheduleReconnect();
         }
       })();
@@ -225,9 +265,7 @@ export const useJsonPatchWsStream = <T extends object>(
         retryTimerRef.current = null;
       }
       finishedRef.current = false;
-      dataRef.current = undefined;
-      setData(undefined);
-      setIsInitialized(false);
+      setIsConnected(false);
     };
   }, [
     endpoint,

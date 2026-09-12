@@ -1,7 +1,9 @@
+pub mod auth_refresh;
 pub mod client;
 pub mod jsonrpc;
 pub mod normalize_logs;
 pub mod review;
+pub mod rollout_transfer;
 pub mod slash_commands;
 use std::{
     collections::HashMap,
@@ -24,10 +26,331 @@ pub fn codex_home() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".codex"))
 }
 
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt;
+
+    use super::{
+        Codex, POLLER_DEVELOPER_INSTRUCTIONS, compose_developer_instructions,
+        is_missing_conversation_error,
+    };
+    use crate::executors::{ExecutorError, StandardCodingAgentExecutor};
+
+    #[tokio::test]
+    async fn discovered_models_match_current_chatgpt_catalog() {
+        let codex: Codex =
+            serde_json::from_value(serde_json::json!({})).expect("default Codex config");
+        let patches: Vec<_> = codex
+            .discover_options(None, None)
+            .await
+            .expect("Codex model discovery succeeds")
+            .collect()
+            .await;
+        let value = serde_json::to_value(patches.first().expect("one discovery patch"))
+            .expect("discovery patch serializes");
+        let models = value
+            .pointer("/0/value/model_selector/models")
+            .and_then(serde_json::Value::as_array)
+            .expect("discovery patch contains models");
+
+        let actual: Vec<_> = models
+            .iter()
+            .map(|model| {
+                let efforts = model["reasoning_options"]
+                    .as_array()
+                    .expect("model reasoning options")
+                    .iter()
+                    .map(|option| option["id"].as_str().expect("reasoning option id"))
+                    .collect::<Vec<_>>();
+                (
+                    model["id"].as_str().expect("model id"),
+                    model["name"].as_str().expect("model name"),
+                    efforts,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    "gpt-6-astra",
+                    "GPT-6 Astra",
+                    vec!["low", "medium", "high", "xhigh", "max"],
+                ),
+                (
+                    "gpt-5.6-sol",
+                    "GPT-5.6 Sol",
+                    vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+                ),
+                (
+                    "gpt-5.6-terra",
+                    "GPT-5.6 Terra",
+                    vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+                ),
+                (
+                    "gpt-5.6-luna",
+                    "GPT-5.6 Luna",
+                    vec!["low", "medium", "high", "xhigh", "max"],
+                ),
+                ("gpt-5.5", "GPT-5.5", vec!["low", "medium", "high", "xhigh"],),
+                (
+                    "gpt-5.3-codex-spark",
+                    "GPT-5.3 Codex Spark",
+                    vec!["low", "medium", "high", "xhigh"],
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn deployment_codex_command_is_fail_closed_and_blank_values_fall_back() {
+        assert_eq!(
+            Codex::base_command_from_deployment(Some(
+                "/nix/store/test-vibe-kanban-codex/bin/codex".to_string()
+            )),
+            (
+                "/nix/store/test-vibe-kanban-codex/bin/codex".to_string(),
+                true
+            )
+        );
+        assert_eq!(
+            Codex::base_command_from_deployment(Some("  ".to_string())),
+            (Codex::base_command().to_string(), false)
+        );
+    }
+
+    #[test]
+    fn app_server_always_uses_strict_config() {
+        let codex: Codex = serde_json::from_value(serde_json::json!({}))
+            .expect("default Codex config deserializes");
+        let builder = codex.build_command_builder().expect("valid Codex command");
+
+        assert_eq!(
+            builder.params,
+            Some(vec![
+                "app-server".to_string(),
+                "--strict-config".to_string()
+            ]),
+            "the pinned app-server must reject unknown configuration fields"
+        );
+    }
+
+    /// Pins the *exact* config key that disables Codex's persistent-PTY
+    /// background execution.
+    ///
+    /// This is not redundant with reading the code: upstream's `ConfigToml` has
+    /// no `serde(deny_unknown_fields)`, so the `--strict-config` launch flag is
+    /// what makes an unknown key fail loudly. The literal remains written out
+    /// here rather than referenced through a constant so this test also pins
+    /// the vendor-facing spelling.
+    #[test]
+    fn unified_exec_feature_key_is_pinned_and_disabled() {
+        let codex: Codex =
+            serde_json::from_value(serde_json::json!({})).expect("default Codex config");
+        let params = codex.build_thread_start_params(std::path::Path::new("/tmp"));
+        let config = params.config.expect("config overrides present");
+
+        assert_eq!(
+            config.get("features.unified_exec"),
+            Some(&serde_json::Value::Bool(false)),
+            "exact key `features.unified_exec` must be set to false; got {config:?}"
+        );
+        assert!(
+            !config.contains_key("include_apply_patch_tool"),
+            "removed V1 field must never be emitted as an inert config key"
+        );
+
+        // `features.shell_tool` would disable ordinary execution entirely and
+        // must never be touched here.
+        assert!(
+            !config.keys().any(|key| key.contains("shell_tool")),
+            "shell_tool must not be configured; got {config:?}"
+        );
+    }
+
+    /// The key is unconditional — it must not depend on approval policy,
+    /// sandbox, or any other user-facing setting.
+    #[test]
+    fn unified_exec_disabled_regardless_of_other_settings() {
+        for settings in [
+            serde_json::json!({}),
+            serde_json::json!({"sandbox": "danger-full-access"}),
+            serde_json::json!({"ask_for_approval": "never"}),
+            serde_json::json!({"ask_for_approval": "on-request", "profile": "custom"}),
+        ] {
+            let codex: Codex =
+                serde_json::from_value(settings.clone()).expect("Codex config deserializes");
+            let params = codex.build_thread_start_params(std::path::Path::new("/tmp"));
+            let config = params.config.expect("config overrides present");
+            assert_eq!(
+                config.get("features.unified_exec"),
+                Some(&serde_json::Value::Bool(false)),
+                "settings {settings} must still disable unified_exec"
+            );
+        }
+    }
+
+    /// Disabling `unified_exec` is silent — Codex is told nothing. Without a
+    /// notice the block lands and the redirect never does, which is how "Codex
+    /// isn't using the poller" happens even though the config key is correct.
+    #[test]
+    fn every_thread_start_tells_codex_about_spawn_poller() {
+        let codex: Codex =
+            serde_json::from_value(serde_json::json!({})).expect("default Codex config");
+        let params = codex.build_thread_start_params(std::path::Path::new("/tmp"));
+
+        let instructions = params
+            .developer_instructions
+            .expect("developer instructions must be set even with none configured");
+
+        assert!(
+            instructions.contains("spawn_poller"),
+            "the notice must name the replacement tool; got {instructions:?}"
+        );
+    }
+
+    /// `developer_instructions` belongs to the operator. VK composes into it and
+    /// must never clobber a configured value.
+    #[test]
+    fn configured_developer_instructions_are_preserved() {
+        let configured = "Always write commit messages in haiku.";
+        let codex: Codex =
+            serde_json::from_value(serde_json::json!({"developer_instructions": configured}))
+                .expect("Codex config with developer instructions");
+        let params = codex.build_thread_start_params(std::path::Path::new("/tmp"));
+
+        let instructions = params.developer_instructions.expect("instructions present");
+
+        assert!(
+            instructions.contains(configured),
+            "the operator's text must survive; got {instructions:?}"
+        );
+        assert!(
+            instructions.contains("spawn_poller"),
+            "the poller notice must still be present; got {instructions:?}"
+        );
+        // The operator's text goes last so it can override VK's guidance.
+        assert!(
+            instructions.find("spawn_poller") < instructions.find(configured),
+            "the operator's text should come after VK's; got {instructions:?}"
+        );
+    }
+
+    /// A blank configured value must not produce a dangling separator.
+    #[test]
+    fn blank_configured_instructions_collapse_to_the_notice() {
+        assert_eq!(
+            compose_developer_instructions(Some("   ")),
+            Some(POLLER_DEVELOPER_INSTRUCTIONS.to_string())
+        );
+        assert_eq!(
+            compose_developer_instructions(None),
+            Some(POLLER_DEVELOPER_INSTRUCTIONS.to_string())
+        );
+    }
+
+    #[test]
+    fn identifies_only_known_missing_conversation_errors_for_requested_thread() {
+        let session_id = "27254d1c-bde6-48aa-a980-3e136b9d35bf";
+        for message in [
+            format!("no rollout found for thread id {session_id}"),
+            format!("No conversation found with session ID: {session_id}"),
+        ] {
+            let error = rpc_error(-32600, &message, None);
+            assert!(is_missing_conversation_error(&error, session_id));
+        }
+
+        for error in [
+            rpc_error(
+                -32603,
+                &format!("no rollout found for thread id {session_id}"),
+                None,
+            ),
+            rpc_error(-32600, "thread not found", None),
+            rpc_error(
+                -32600,
+                "No conversation found with session ID: 11111111-1111-4111-8111-111111111111",
+                None,
+            ),
+            rpc_error(
+                -32600,
+                &format!("no rollout found for thread id {session_id}"),
+                Some(serde_json::json!({"reason": "permission_denied"})),
+            ),
+        ] {
+            assert!(!is_missing_conversation_error(&error, session_id));
+        }
+    }
+
+    #[test]
+    fn rejects_missing_conversation_error_for_invalid_requested_id() {
+        let error = rpc_error(
+            -32600,
+            "No conversation found with session ID: not-a-uuid",
+            None,
+        );
+        assert!(!is_missing_conversation_error(&error, "not-a-uuid"));
+    }
+
+    fn rpc_error(code: i64, message: &str, data: Option<serde_json::Value>) -> ExecutorError {
+        ExecutorError::JsonRpc {
+            label: "thread/fork".to_string(),
+            code,
+            message: message.to_string(),
+            data: data.map(Box::new),
+        }
+    }
+}
+
 pub(crate) fn resolve_model(model: Option<&str>) -> (Option<&str>, bool) {
     match model.and_then(|m| m.strip_suffix("-fast")) {
         Some(base) => (Some(base), true),
         None => (model, false),
+    }
+}
+
+/// Told to Codex whenever a thread starts, because closing its in-turn
+/// background path is otherwise **silent**.
+///
+/// Claude gets a `PreToolUse` deny whose reason names `spawn_poller`, so the
+/// redirect is delivered at the moment the agent reaches for the wrong tool.
+/// Codex has no equivalent hook: `features.unified_exec=false` just swaps the
+/// persistent-PTY `exec_command`/`write_stdin` pair for one-shot
+/// `shell_command`, with no error and no explanation. Without this notice Codex
+/// sees a command that returns immediately, has no idea a poller exists, and
+/// carries on — so the block lands but the redirect never does.
+///
+/// Constitution IX: "A denial that removes a capability names the supported
+/// replacement, so the agent redirects instead of stalling."
+pub(crate) const POLLER_DEVELOPER_INSTRUCTIONS: &str = "\
+Background execution inside a turn is disabled in Vibe Kanban. A turn is one OS \
+process group and it is terminated when the turn ends, so anything you background \
+inside it is killed with it — the persistent-session behaviour of `exec_command` \
+is switched off for this reason, and `shell_command` runs one-shot.
+
+If you need something to keep running after this turn — a watcher, a log tail, a \
+build or test loop, polling for a condition — use the `spawn_poller` MCP tool \
+from the `vibe_kanban` server. It takes a `command` and an `interval_secs` \
+(5-86400), runs in its own process group, survives the end of this turn and Vibe \
+Kanban restarts, and is visible and stoppable in the workspace UI. Companion \
+tools: `list_pollers`, `stop_poller`.
+
+Do not try to work around this with `nohup`, `setsid`, `&`, `disown`, or a \
+detached subshell: those are reaped with the turn just the same. Prefer running \
+the command in the foreground when you only need its result now, and reach for \
+`spawn_poller` when the work genuinely has to outlive this turn.";
+
+/// Prepend the poller notice to any operator-configured `developer_instructions`.
+///
+/// `developer_instructions` is a **user-facing config field**, so this composes
+/// rather than replaces: VK is a guest in that field. The user's text goes last
+/// so it is the most recent thing Codex reads and can override the guidance
+/// above it.
+pub(crate) fn compose_developer_instructions(configured: Option<&str>) -> Option<String> {
+    match configured.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => Some(format!("{POLLER_DEVELOPER_INSTRUCTIONS}\n\n{text}")),
+        None => Some(POLLER_DEVELOPER_INSTRUCTIONS.to_string()),
     }
 }
 
@@ -45,6 +368,34 @@ pub(crate) fn fork_params_from(thread_id: String, params: ThreadStartParams) -> 
         service_tier: params.service_tier,
         ..Default::default()
     }
+}
+
+const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
+
+fn is_missing_conversation_error(error: &ExecutorError, requested_thread_id: &str) -> bool {
+    if uuid::Uuid::parse_str(requested_thread_id).is_err() {
+        return false;
+    }
+
+    let ExecutorError::JsonRpc {
+        label,
+        code,
+        message,
+        data,
+    } = error
+    else {
+        return false;
+    };
+
+    if label != "thread/fork"
+        || *code != INVALID_REQUEST_ERROR_CODE
+        || data.as_ref().is_some_and(|value| !value.is_null())
+    {
+        return false;
+    }
+
+    message == &format!("no rollout found for thread id {requested_thread_id}")
+        || message == &format!("No conversation found with session ID: {requested_thread_id}")
 }
 
 use async_trait::async_trait;
@@ -173,8 +524,6 @@ pub struct Codex {
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_instructions: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub include_apply_patch_tool: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -351,14 +700,14 @@ impl StandardCodingAgentExecutor for Codex {
             model_selector: ModelSelectorConfig {
                 models: vec![
                     ModelInfo {
-                        id: "gpt-5.6-sol".to_string(),
-                        name: "GPT-5.6 Sol".to_string(),
+                        id: "gpt-6-astra".to_string(),
+                        name: "GPT-6 Astra".to_string(),
                         provider_id: None,
-                        reasoning_options: ultra_reasoning_options.clone(),
+                        reasoning_options: max_reasoning_options.clone(),
                     },
                     ModelInfo {
-                        id: "gpt-5.6-sol-fast".to_string(),
-                        name: "GPT-5.6 Sol Fast".to_string(),
+                        id: "gpt-5.6-sol".to_string(),
+                        name: "GPT-5.6 Sol".to_string(),
                         provider_id: None,
                         reasoning_options: ultra_reasoning_options.clone(),
                     },
@@ -375,38 +724,14 @@ impl StandardCodingAgentExecutor for Codex {
                         reasoning_options: max_reasoning_options,
                     },
                     ModelInfo {
-                        id: "gpt-5.4".to_string(),
-                        name: "GPT-5.4".to_string(),
+                        id: "gpt-5.5".to_string(),
+                        name: "GPT-5.5".to_string(),
                         provider_id: None,
                         reasoning_options: xhigh_reasoning_options.clone(),
                     },
                     ModelInfo {
-                        id: "gpt-5.4-fast".to_string(),
-                        name: "GPT-5.4 Fast".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.3-codex".to_string(),
-                        name: "GPT-5.3 Codex".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.2-codex".to_string(),
-                        name: "GPT-5.2 Codex".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.2".to_string(),
-                        name: "GPT-5.2".to_string(),
-                        provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
-                    },
-                    ModelInfo {
-                        id: "gpt-5.1-codex-max".to_string(),
-                        name: "GPT-5.1 Codex Max".to_string(),
+                        id: "gpt-5.3-codex-spark".to_string(),
+                        name: "GPT-5.3 Codex Spark".to_string(),
                         provider_id: None,
                         reasoning_options: xhigh_reasoning_options,
                     },
@@ -479,14 +804,38 @@ impl Codex {
         "npx -y @openai/codex@0.144.1"
     }
 
+    fn configured_base_command() -> (String, bool) {
+        Self::base_command_from_deployment(env::var("VIBE_CODEX_COMMAND").ok())
+    }
+
+    fn base_command_from_deployment(deployment_command: Option<String>) -> (String, bool) {
+        deployment_command
+            .filter(|command| !command.trim().is_empty())
+            .map_or_else(
+                || (Self::base_command().to_string(), false),
+                |command| (command, true),
+            )
+    }
+
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        let mut builder = CommandBuilder::new(Self::base_command());
-        builder = builder.extend_params(["app-server"]);
+        let (base_command, deployment_managed) = Self::configured_base_command();
+        let mut builder = CommandBuilder::new(base_command);
+        // Pinned Codex 0.144.1 accepts this app-server flag and propagates it
+        // through thread config loading. Unknown config must fail visibly rather
+        // than leave a reviewed control silently inert (Constitution IX).
+        builder = builder.extend_params(["app-server", "--strict-config"]);
         if self.oss.unwrap_or(false) {
             builder = builder.extend_params(["--oss"]);
         }
 
-        apply_overrides(builder, &self.cmd)
+        let mut overrides = self.cmd.clone();
+        if deployment_managed {
+            // A supervised deployment may require a security-patched Codex
+            // build. A settings-level base command must not bypass it; other
+            // parameters and environment overrides remain supported.
+            overrides.base_command_override = None;
+        }
+        apply_overrides(builder, &overrides)
     }
 
     fn build_thread_start_params(&self, cwd: &Path) -> ThreadStartParams {
@@ -517,16 +866,37 @@ impl Codex {
                 .get_or_insert_with(HashMap::new)
                 .insert("profile".to_string(), Value::String(profile.clone()));
         }
-        if let Some(include) = self.include_apply_patch_tool {
-            config
-                .get_or_insert_with(HashMap::new)
-                .insert("include_apply_patch_tool".to_string(), Value::Bool(include));
-        }
         if let Some(compact) = &self.compact_prompt {
             config
                 .get_or_insert_with(HashMap::new)
                 .insert("compact_prompt".to_string(), Value::String(compact.clone()));
         }
+        // Close Codex's in-turn background path. `features.unified_exec`
+        // (default **true** on Linux/macOS) swaps the one-shot `shell_command`
+        // tool for the persistent-PTY `exec_command` / `write_stdin` pair:
+        // `exec_command` returns a `session_id` while the process is still
+        // running and `write_stdin` with empty `chars` polls it without
+        // writing. That is a hand-rolled in-turn poller, and a VK turn is one
+        // OS process group that is reaped at turn end
+        // (`wiki/agent-process-lifecycle.md`), so it cannot outlive the turn
+        // that created it. Disabling the feature falls back to `shell_command`;
+        // the supported way to keep something running is the `spawn_poller`
+        // MCP tool.
+        //
+        // `features.shell_tool` is deliberately left alone — turning that off
+        // would disable ordinary command execution.
+        //
+        // Verified against the upstream source Cargo vendored for the
+        // `codex-app-server-protocol` git pin `rust-v0.144.1` (see
+        // `crates/executors/Cargo.toml`): `ThreadStartParams` /
+        // `TurnStartParams` expose no tools allow/deny field, so this `config`
+        // map is the only lever. `ConfigToml` itself has no
+        // `serde(deny_unknown_fields)`, so `app-server --strict-config` is the
+        // fail-loud boundary for a misspelling. The exact spelling is also
+        // pinned by `unified_exec_feature_key_is_pinned_and_disabled`.
+        config
+            .get_or_insert_with(HashMap::new)
+            .insert("features.unified_exec".to_string(), Value::Bool(false));
         if !matches!(approval_policy, None | Some(V2AskForApproval::Never)) {
             let map = config.get_or_insert_with(HashMap::new);
             map.insert(
@@ -554,7 +924,9 @@ impl Codex {
             config,
             base_instructions: self.base_instructions.clone(),
             model_provider: self.model_provider.clone(),
-            developer_instructions: self.developer_instructions.clone(),
+            developer_instructions: compose_developer_instructions(
+                self.developer_instructions.as_deref(),
+            ),
             service_tier,
             ..Default::default()
         }
@@ -628,7 +1000,15 @@ impl Codex {
         combined_prompt: String,
         client: Arc<AppServerClient>,
     ) -> Result<(), ExecutorError> {
-        let account = client.get_account().await?;
+        // Serialize an up-front credential refresh across concurrent Codex
+        // processes so a near-expired ChatGPT token is rotated exactly once,
+        // before the turn, instead of racing (VAS-490). No-op for healthy
+        // tokens and non-ChatGPT auth.
+        if let Some(home) = codex_home() {
+            auth_refresh::refresh_credentials_if_stale(&home, &client).await;
+        }
+
+        let account = client.get_account(false).await?;
         if account.requires_openai_auth && account.account.is_none() {
             return Err(ExecutorError::AuthRequired(
                 "Codex authentication required".to_string(),
@@ -641,11 +1021,28 @@ impl Codex {
                 (response.thread.id, response.model)
             }
             Some(session_id) => {
-                let response = client
-                    .thread_fork(fork_params_from(session_id, thread_start_params))
-                    .await?;
-                tracing::debug!("forked thread, new thread_id={}", response.thread.id);
-                (response.thread.id, response.model)
+                match client
+                    .thread_fork(fork_params_from(
+                        session_id.clone(),
+                        thread_start_params.clone(),
+                    ))
+                    .await
+                {
+                    Ok(response) => {
+                        tracing::debug!("forked thread, new thread_id={}", response.thread.id);
+                        (response.thread.id, response.model)
+                    }
+                    Err(error) if is_missing_conversation_error(&error, &session_id) => {
+                        let response = client.thread_start(thread_start_params).await?;
+                        tracing::warn!(
+                            missing_thread_id = %session_id,
+                            replacement_thread_id = %response.thread.id,
+                            "Codex conversation was missing; started a replacement in the same workspace"
+                        );
+                        (response.thread.id, response.model)
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         };
 

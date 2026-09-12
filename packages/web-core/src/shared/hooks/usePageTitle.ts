@@ -3,7 +3,7 @@ import { useEffect } from 'react';
 const BASE_TITLE = 'Vibe Kanban';
 
 /**
- * Sets the document title based on the given parts.
+ * Sets the document title from the first meaningful candidate.
  * Multiple callers can coexist — the most specific (deepest) component wins
  * because React runs child effects after parent effects.
  *
@@ -11,12 +11,9 @@ const BASE_TITLE = 'Vibe Kanban';
  * (e.g. the legacy ProjectProvider) provides a stable fallback without
  * competing with page-level callers.
  */
-export function usePageTitle(...parts: (string | null | undefined)[]) {
-  const filtered = parts.filter(Boolean) as string[];
+export function usePageTitle(...candidates: (string | null | undefined)[]) {
   const title =
-    filtered.length > 0
-      ? `${filtered.join(' - ')} | ${BASE_TITLE}`
-      : BASE_TITLE;
+    candidates.find((candidate) => candidate?.trim())?.trim() ?? BASE_TITLE;
 
   useEffect(() => {
     document.title = title;

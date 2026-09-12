@@ -223,11 +223,8 @@ export function AppBar({
   orgSlot,
   onOpenSettings,
   onOpenCommandBar,
-  appVersion,
   updateVersion,
   onUpdateClick,
-  deployUpdateAvailable,
-  onReloadClick,
 }: AppBarProps) {
   const { t } = useTranslation('common');
   const sections: AppBarSection[] = [];
@@ -587,46 +584,7 @@ export function AppBar({
               Update
             </button>
           </Tooltip>
-        ) : deployUpdateAvailable ? (
-          <Tooltip
-            content="A new version was deployed — click to refresh"
-            side="right"
-          >
-            <button
-              type="button"
-              onClick={onReloadClick}
-              className={cn(
-                'flex items-center justify-center py-1 rounded-md w-10',
-                'text-[9px] font-ibm-plex-mono font-medium leading-none',
-                'bg-brand text-on-brand hover:bg-brand-hover',
-                'transition-colors cursor-pointer animate-pulse'
-              )}
-            >
-              Refresh
-            </button>
-          </Tooltip>
-        ) : (
-          appVersion &&
-          (appVersion === 'dev' ? (
-            <p
-              className="text-[9px] font-ibm-plex-mono text-low leading-none truncate max-w-10 text-center"
-              title={appVersion}
-            >
-              {appVersion}
-            </p>
-          ) : (
-            <Tooltip content={`View commit ${appVersion}`} side="right">
-              <a
-                href={`https://github.com/davidvasandani/vibe-kanban/commit/${appVersion}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-[9px] font-ibm-plex-mono text-low hover:text-normal leading-none truncate max-w-10 text-center transition-colors cursor-pointer"
-              >
-                {appVersion}
-              </a>
-            </Tooltip>
-          ))
-        )}
+        ) : null}
       </div>
     </div>
   );

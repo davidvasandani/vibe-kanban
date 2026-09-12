@@ -1,3 +1,4 @@
+pub mod affinity;
 pub mod attachments;
 pub mod codex_setup;
 pub mod core;
@@ -17,7 +18,7 @@ pub mod workspace_summary;
 use axum::{
     Router,
     middleware::from_fn_with_state,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 
 use crate::{DeploymentImpl, middleware::load_workspace_middleware};
@@ -31,6 +32,8 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
                 .delete(core::delete_workspace),
         )
         .route("/messages/first", get(core::get_first_user_message))
+        .route("/placement", get(core::get_workspace_placement))
+        .route("/affinity", patch(affinity::update_workspace_affinity))
         .route("/seen", axum::routing::put(core::mark_seen))
         .nest("/git", git::router())
         .nest("/execution", execution::router())

@@ -314,6 +314,28 @@ async fn lease_expiry_releases_control() {
 }
 
 #[tokio::test]
+async fn lazy_control_state_consumes_expiry_leaving_nothing_to_audit() {
+    // Regression guard (VAS-280 audit gap): `control_state` lazily expires a
+    // lapsed lease but only *broadcasts* the transition — it cannot audit
+    // (no DB handle). `expire_if_lapsed` is consume-once, so if a reader
+    // observes the lapse via `control_state` first, the auditable hook
+    // `expire_lease_if_lapsed` is left with nothing to report and the
+    // `Expired` transition never reaches the audit log. The service layer must
+    // therefore audit *before* touching `control_state` (see
+    // `BrowserSessionService::expire_and_audit`).
+    let rt = runtime_with_ttl(Duration::milliseconds(10)).await;
+    rt.acquire(&agent(Uuid::new_v4()), false, false, None)
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    // Reader path first: the lapse is consumed here, unaudited.
+    assert!(rt.control_state().controller.is_none());
+    // The auditable expiry hook now has nothing left — exactly the gap the
+    // service closes by calling it before control_state().
+    assert!(rt.expire_lease_if_lapsed().is_none());
+}
+
+#[tokio::test]
 async fn observers_receive_state_through_transfers() {
     let rt = runtime().await;
     let mut watch = rt.watch_state();

@@ -75,6 +75,8 @@ mod issue_assignees;
 mod issue_relationships;
 mod issue_tags;
 mod organizations;
+mod pipelines;
+mod pollers;
 mod remote_issues;
 mod remote_projects;
 mod repos;
@@ -87,10 +89,12 @@ impl McpServer {
         Self::context_tools_router()
             + Self::workspaces_tools_router()
             + Self::background_helpers_tools_router()
+            + Self::pollers_tools_router()
             + Self::organizations_tools_router()
             + Self::repos_tools_router()
             + Self::remote_projects_tools_router()
             + Self::remote_issues_tools_router()
+            + Self::pipelines_tools_router()
             + Self::issue_assignees_tools_router()
             + Self::issue_tags_tools_router()
             + Self::issue_relationships_tools_router()
@@ -103,6 +107,7 @@ impl McpServer {
         let mut router = Self::context_tools_router()
             + Self::workspaces_tools_router()
             + Self::background_helpers_tools_router()
+            + Self::pollers_tools_router()
             + Self::session_tools_router()
             + Self::browser_tools_router();
         router.remove_route("list_workspaces");
@@ -560,6 +565,7 @@ impl McpServer {
             ExecutionProcessStatus::Failed => "failed",
             ExecutionProcessStatus::Killed => "killed",
             ExecutionProcessStatus::Interrupted => "interrupted",
+            ExecutionProcessStatus::Indeterminate => "indeterminate",
         }
     }
 }
@@ -568,10 +574,18 @@ impl McpServer {
 mod tests {
     use std::{collections::BTreeSet, sync::Once};
 
+    #[test]
+    fn indeterminate_execution_status_has_a_stable_label() {
+        assert_eq!(
+            McpServer::execution_process_status_label(&ExecutionProcessStatus::Indeterminate),
+            "indeterminate"
+        );
+    }
+
     use rmcp::handler::server::tool::ToolRouter;
     use uuid::Uuid;
 
-    use super::McpServer;
+    use super::{ExecutionProcessStatus, McpServer};
     use crate::task_server::{McpContext, McpMode, McpRepoContext};
 
     static RUSTLS_PROVIDER: Once = Once::new();
@@ -612,11 +626,16 @@ mod tests {
             "get_context".to_string(),
             "get_execution".to_string(),
             "list_background_helpers".to_string(),
+            "list_all_messages".to_string(),
+            "list_pollers".to_string(),
+            "list_recent_messages".to_string(),
             "list_sessions".to_string(),
             "refresh_mcp_tools".to_string(),
             "run_session_prompt".to_string(),
             "spawn_background_helper".to_string(),
+            "spawn_poller".to_string(),
             "stop_background_helper".to_string(),
+            "stop_poller".to_string(),
             "update_session".to_string(),
             "update_workspace".to_string(),
         ]);

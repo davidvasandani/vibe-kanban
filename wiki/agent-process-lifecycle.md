@@ -18,15 +18,48 @@ per-turn and must be rebuilt, not shared.
 ## Persistent app-server vs one-shot is implicit
 
 There is no trait method or enum flag. The split is encoded solely as
-`SpawnedChild.exit_signal: Some(..)` (Codex, OpenCode, ACP — long-lived
-process, signals turn end over the wire) vs `None` (Claude, Gemini, Amp,
-Cursor, Qwen, Copilot, Droid — exit naturally).
+`SpawnedChild.exit_signal: Some(..)` (Codex, OpenCode, and the ACP-backed
+Gemini, Qwen, Copilot, and Grok executors — signals turn end over the wire) vs
+`None` (Claude, Amp, Cursor, and Droid — exit naturally).
 `ExecutionProcessRunReason::is_persistent()` is a *different* axis (true only
 for `DevServer`/`BackgroundHelper`): it gates raw-log-to-file streaming and
 boot re-adoption by pgid. `CodingAgent` is deliberately **non**-persistent
 (asserted in tests) — don't flip that to keep an agent alive; it changes
 streaming behavior. Use the narrow `SpawnedChild.keep_warm` capability
 instead.
+
+## Process liveness is not always turn liveness
+
+The same `SpawnedChild.exit_signal` split governs final-output reconciliation.
+For a natural-exit executor (`exit_signal: None`), a still-live owned child is
+positive evidence that the turn remains active, so quiet final assistant output
+must not trigger cleanup. For a signal-driven executor (`exit_signal: Some`),
+the app-server child may legitimately outlive the protocol turn; child liveness
+therefore proves only process liveness, not turn liveness.
+
+If final assistant output becomes quiet and the signal-driven terminal event is
+lost, the bounded reconciliation timer must be allowed to expire even while the
+child lives. The exit monitor then reaps the exact owned group and records
+`indeterminate`—never `completed`—so the authoritative process stream clears
+the UI's stale Stop state. Applying the natural-exit liveness rule to both
+lifecycle shapes re-arms the timer forever for Codex-style app servers.
+
+Cluster execution has the same split at a second boundary. The coordinator's
+worker-job lease proves that the worker process still owns the dispatch, but for
+a signal-driven executor it does not prove that the protocol turn is active.
+After quiet final output, a current lease may defer reconciliation only for a
+natural-exit executor. Otherwise a lost terminal event plus regular lease
+renewals re-arms the coordinator timer forever even after the worker-side child
+rule is correct.
+
+The worker must also retain `SpawnedChild.exit_signal`. Its generic execution
+loop originally destructured `SpawnedChild` down to only `child` and
+`mcp_refresh`, silently dropping the terminal channel, then polled only
+`child.try_wait()`. That makes every signal-driven executor permanently running
+on a cluster worker because its app-server is expected to stay alive. Worker
+execution must select/poll both authorities: an executor signal classifies the
+turn and reaps the process, while natural-exit commands and executors continue
+to classify from OS exit status.
 
 ## The exit monitor kills twice
 
@@ -178,6 +211,32 @@ be designed alongside VAS-132 ("Issue Background Tasks as Sub-Issues"), which
 covers the same gap (agent-initiated work that outlives the current turn) from
 the background-subagent angle.
 
+**Generalized to the whole background-poller class** — see [[vk-pollers]].
+`ScheduleWakeup` is one member of it; the others (Claude's
+`Bash(run_in_background)` + `Monitor`/`TaskOutput`/`TaskStop`, Codex's
+`unified_exec` `exec_command`/`write_stdin` session) are closed the same way, and
+the replacement is a VK-owned poller riding this page's background-helper/pgid
+substrate. Two findings from that work generalize back here: denying tool *names*
+is insufficient when the vendor's real path runs through a **parameter**
+(`run_in_background`) plus an undeniable tool (`Read` on the output file); and a
+vendor identifier must be read from the artifact that actually executes — the
+Claude npm package is a stub whose `sdk-tools.d.ts` lists schema titles, not wire
+tool names. Option B remains deferred: a vk poller runs a command, not a turn.
+
+## Output cleanup must not block terminal evidence indefinitely
+
+For signal-driven executors, the protocol completion signal is the turn
+boundary. Descendants can retain inherited stdout or stderr file descriptors
+after the app-server is stopped, preventing a reader from ever observing EOF.
+Output draining therefore needs a short bound followed by task cancellation;
+cleanup liveness must never become unbounded user-visible turn liveness. Normal
+draining remains before terminal journal closure so already-buffered final
+output is retained.
+
+This ordering matters independently of reconciliation timers: until the worker
+record becomes terminal, the coordinator has authoritative positive ownership
+evidence and correctly keeps Stop visible.
+
 ## What already survives restarts (reuse, don't reinvent)
 
 `ExecutionProcess.pgid` is persisted at spawn; boot-time adoption
@@ -202,3 +261,5 @@ the stored `base_url` + password. Codex (stdio JSON-RPC; turn end currently
 - vk/1a64-coding-agent-pro
 - vk/826e-coding-agent-war
 - vk/9f36-vk-queued-messag
+- vk/869c-vk-background-po
+- vk/7655-turn-ends-aren-t

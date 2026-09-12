@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use api_types::{
     CreateIssueRequest, Issue, IssuePriority, IssueRelationshipType, IssueSortField,
@@ -13,7 +13,10 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{McpServer, ToolError};
+use super::{
+    McpServer, ToolError,
+    pipelines::{McpPipeline, append_pipeline_block, compose_pipeline_block},
+};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct McpCreateIssueRequest {
@@ -33,6 +36,18 @@ struct McpCreateIssueRequest {
         description = "Optional parent issue to create a subissue under. Accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
     )]
     parent_issue_id: Option<String>,
+    #[schemars(
+        description = "Optional task pipeline id(s) to attach (see `list_pipelines`). Composes a `## Pipeline` block appended to the description, instructing the execution agent which stages to run and in what order."
+    )]
+    pipeline_ids: Option<Vec<String>>,
+    #[schemars(
+        description = "Stage ids to enable across the selected `pipeline_ids`. Defaults to each pipeline's default-enabled stages (see `list_pipelines`) when omitted."
+    )]
+    pipeline_stage_ids: Option<Vec<String>>,
+    #[schemars(
+        description = "Optional coding agent to pin this task's execution to (a BaseCodingAgent key, e.g. 'CLAUDE_CODE', 'CODEX'). Embedded in the pipeline block so `start_workspace` can be called with a matching `executor` when the task is picked up."
+    )]
+    executor: Option<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -276,6 +291,9 @@ impl McpServer {
             description,
             priority,
             parent_issue_id,
+            pipeline_ids,
+            pipeline_stage_ids,
+            executor,
         }): Parameters<McpCreateIssueRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         let project_id = match self.resolve_project_id(project_id) {
@@ -283,10 +301,64 @@ impl McpServer {
             Err(e) => return Ok(McpServer::tool_error(e)),
         };
 
+        let executor = match executor.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+            Some(executor) => match Self::parse_executor_agent(executor) {
+                Ok(agent) => Some(agent.to_string()),
+                Err(_) => {
+                    return Self::err(format!("Unknown executor '{executor}'."), None::<String>);
+                }
+            },
+            None => None,
+        };
+
+        let pipeline_ids = pipeline_ids.unwrap_or_default();
+        let selected_pipelines: Vec<McpPipeline> = if pipeline_ids.is_empty() {
+            Vec::new()
+        } else {
+            let url = self.url("/api/pipelines");
+            let all_pipelines: Vec<McpPipeline> = match self.send_json(self.client.get(&url)).await
+            {
+                Ok(p) => p,
+                Err(e) => return Ok(McpServer::tool_error(e)),
+            };
+            let mut selected = Vec::with_capacity(pipeline_ids.len());
+            for id in &pipeline_ids {
+                match all_pipelines.iter().find(|p| &p.id == id) {
+                    Some(p) => selected.push(p.clone()),
+                    None => {
+                        return Self::err(
+                            format!(
+                                "Unknown pipeline '{id}'. Use list_pipelines to see available pipelines."
+                            ),
+                            None::<String>,
+                        );
+                    }
+                }
+            }
+            selected
+        };
+
+        let enabled_stage_ids: HashSet<String> = match pipeline_stage_ids {
+            Some(ids) => ids.into_iter().collect(),
+            None => selected_pipelines
+                .iter()
+                .flat_map(|p| {
+                    p.stages
+                        .iter()
+                        .filter(|s| s.default_enabled)
+                        .map(|s| s.id.clone())
+                })
+                .collect(),
+        };
+
+        let pipeline_block =
+            compose_pipeline_block(&selected_pipelines, &enabled_stage_ids, executor.as_deref());
+
         let expanded_description = match description {
             Some(desc) => Some(self.expand_tags(&desc).await),
             None => None,
         };
+        let expanded_description = append_pipeline_block(expanded_description, &pipeline_block);
 
         let status_id = match self.default_status_id(project_id).await {
             Ok(id) => id,

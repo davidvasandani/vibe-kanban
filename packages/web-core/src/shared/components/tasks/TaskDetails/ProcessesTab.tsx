@@ -14,7 +14,11 @@ import { ProfileVariantBadge } from '@/shared/components/common/ProfileVariantBa
 import { useExecutionProcesses } from '@/shared/hooks/useExecutionProcesses';
 import { useLogStream } from '@/shared/hooks/useLogStream';
 import { ProcessLogsViewerContent } from './ProcessLogsViewer';
-import type { ExecutionProcessStatus, ExecutionProcess } from 'shared/types';
+import type {
+  ExecutionProcessStatus,
+  ExecutionProcess,
+  ExecutionWorkerJob,
+} from 'shared/types';
 
 import { useProcessSelection } from '@/shared/hooks/ProcessSelectionContext';
 import { useRetryUi } from '@/shared/hooks/useRetryUi';
@@ -38,6 +42,7 @@ function ProcessesTab({ sessionId }: ProcessesTabProps) {
     Record<string, ExecutionProcess>
   >({});
   const [copied, setCopied] = useState(false);
+  const [workerJob, setWorkerJob] = useState<ExecutionWorkerJob | null>(null);
 
   const selectedProcess = selectedProcessId
     ? localProcessDetails[selectedProcessId] ||
@@ -45,6 +50,21 @@ function ProcessesTab({ sessionId }: ProcessesTabProps) {
     : null;
 
   const { logs, error: logsError } = useLogStream(selectedProcess?.id ?? '');
+
+  useEffect(() => {
+    let cancelled = false;
+    setWorkerJob(null);
+    if (!selectedProcess?.id) return;
+    executionProcessesApi
+      .getWorkerJob(selectedProcess.id)
+      .then((job) => {
+        if (!cancelled) setWorkerJob(job);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProcess?.id]);
 
   useEffect(() => {
     setLocalProcessDetails({});
@@ -76,6 +96,8 @@ function ProcessesTab({ sessionId }: ProcessesTabProps) {
         return <Square className="h-4 w-4 text-gray-500" />;
       case 'interrupted':
         return <AlertCircle className="h-4 w-4 text-amber-500" />;
+      case 'indeterminate':
+        return <AlertCircle className="h-4 w-4 text-orange-600" />;
       default:
         return <Clock className="h-4 w-4 text-gray-400" />;
     }
@@ -93,6 +115,8 @@ function ProcessesTab({ sessionId }: ProcessesTabProps) {
         return 'bg-gray-50 border-gray-200 text-gray-800';
       case 'interrupted':
         return 'bg-amber-50 border-amber-200 text-amber-800';
+      case 'indeterminate':
+        return 'bg-orange-50 border-orange-300 text-orange-900';
       default:
         return 'bg-gray-50 border-gray-200 text-gray-800';
     }
@@ -308,6 +332,11 @@ function ProcessesTab({ sessionId }: ProcessesTabProps) {
             </div>
           </div>
           <div className="flex-1 min-h-0 flex flex-col">
+            {workerJob && !workerJob.output_complete && (
+              <div className="border-b border-warning/30 bg-warning/5 px-4 py-2 text-sm text-warning">
+                {t('processes.outputIncomplete')}
+              </div>
+            )}
             {selectedProcess ? (
               <ProcessLogsViewerContent logs={logs} error={logsError} />
             ) : loadingProcessId === selectedProcessId ? (

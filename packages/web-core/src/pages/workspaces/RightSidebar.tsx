@@ -6,12 +6,19 @@ import { ProcessListContainer } from './ProcessListContainer';
 import { PreviewControlsContainer } from './PreviewControlsContainer';
 import { BrowserControlsContainer } from './BrowserControlsContainer';
 import { GitPanelContainer } from './GitPanelContainer';
+import { ServerMetricsSectionContainer } from './ServerMetricsSectionContainer';
+import { ServerAffinitySectionContainer } from './ServerAffinitySectionContainer';
+import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { TerminalPanelContainer } from '@/shared/components/TerminalPanelContainer';
 import { WorkspaceNotesContainer } from './WorkspaceNotesContainer';
 import { useDiffs } from '@/shared/stores/useWorkspaceDiffStore';
-import { ArrowsOutSimpleIcon } from '@phosphor-icons/react';
+import { ArrowClockwiseIcon, ArrowsOutSimpleIcon } from '@phosphor-icons/react';
 import { useLogsPanel } from '@/shared/hooks/useLogsPanel';
-import type { RepoWithTargetBranch, Workspace } from 'shared/types';
+import type {
+  ExecutionProcess,
+  RepoWithTargetBranch,
+  Workspace,
+} from 'shared/types';
 import {
   PERSIST_KEYS,
   PersistKey,
@@ -24,34 +31,67 @@ import {
   CollapsibleSectionHeader,
   type SectionAction,
 } from '@vibe/ui/components/CollapsibleSectionHeader';
+import { getServerAffinityLabel } from './serverAffinityLabel';
+import { DeployStatus } from '@vibe/ui/components/DeployStatus';
+import { useUserSystem } from '@/shared/hooks/useUserSystem';
+import { GitBehindHeader } from './GitBehindHeader';
+import { ServerMetricsHeader } from './ServerMetricsHeader';
+import { PollersHeader } from './PollersHeader';
+import { PollersSectionContainer } from './PollersSectionContainer';
 
 type SectionDef = {
   title: string;
   persistKey: PersistKey;
   visible: boolean;
   expanded: boolean;
+  fillAvailableSpace: boolean;
   collapsible?: boolean;
   content: React.ReactNode;
   actions: SectionAction[];
+  headerExtra?: React.ReactNode;
 };
 
 export interface RightSidebarProps {
   rightMainPanelMode: RightMainPanelMode | null;
   selectedWorkspace: Workspace | undefined;
   repos: RepoWithTargetBranch[];
+  /**
+   * Execution processes already streamed for the selected session by the
+   * layout. Passed down rather than re-subscribed so the Pollers section — which
+   * must show a summary while collapsed — adds no request or socket of its own.
+   */
+  executionProcesses?: ExecutionProcess[];
   linkedIssueForWorkspace?: { remoteProjectId: string; issueId: string } | null;
+  showDeployStatus?: boolean;
+  deployUpdateAvailable?: boolean;
+  onDeployRefresh?: () => void;
 }
+
+const NO_EXECUTION_PROCESSES: ExecutionProcess[] = [];
 
 export const RightSidebar = memo(function RightSidebar({
   rightMainPanelMode,
   selectedWorkspace,
   repos,
+  executionProcesses = NO_EXECUTION_PROCESSES,
   linkedIssueForWorkspace,
+  showDeployStatus = false,
+  deployUpdateAvailable = false,
+  onDeployRefresh,
 }: RightSidebarProps) {
   const { t } = useTranslation(['tasks', 'common']);
+  const { appVersion, deploymentTimestamp } = useUserSystem();
   const diffs = useDiffs();
   const isTerminalVisible = useUiPreferencesStore((s) => s.isTerminalVisible);
   const { expandTerminal, isTerminalExpanded } = useLogsPanel();
+  const { activeWorkspaces } = useWorkspaceContext();
+  const selectedWorkspaceSummary = activeWorkspaces.find(
+    (workspace) => workspace.id === selectedWorkspace?.id
+  );
+  const serverAffinityLabel = getServerAffinityLabel(
+    selectedWorkspaceSummary?.serverAffinity,
+    (kind) => t(`common:workspaces.serverAffinity.${kind}`)
+  );
 
   const [changesExpanded] = usePersistedExpanded(
     PERSIST_KEYS.changesSection,
@@ -73,12 +113,28 @@ export const RightSidebar = memo(function RightSidebar({
     PERSIST_KEYS.gitPanelRepositories,
     true
   );
+  const [serverMetricsExpanded] = usePersistedExpanded(
+    PERSIST_KEYS.serverMetricsSection,
+    false
+  );
+  const [deployStatusExpanded] = usePersistedExpanded(
+    PERSIST_KEYS.deployStatusSection,
+    false
+  );
+  const [serverAffinityExpanded] = usePersistedExpanded(
+    PERSIST_KEYS.serverAffinitySection,
+    false
+  );
   const [terminalExpanded] = usePersistedExpanded(
     PERSIST_KEYS.terminalSection,
     false
   );
   const [notesExpanded] = usePersistedExpanded(
     PERSIST_KEYS.notesSection,
+    false
+  );
+  const [pollersExpanded] = usePersistedExpanded(
+    PERSIST_KEYS.pollersSection,
     false
   );
 
@@ -101,12 +157,46 @@ export const RightSidebar = memo(function RightSidebar({
   })();
 
   const sections: SectionDef[] = useMemo(() => {
+    const deployStatusSection: SectionDef = {
+      title: 'Deploy Status',
+      persistKey: PERSIST_KEYS.deployStatusSection,
+      visible: showDeployStatus,
+      expanded: deployStatusExpanded,
+      fillAvailableSpace: false,
+      headerExtra: (
+        <DeployStatus
+          version={appVersion}
+          deploymentTimestamp={deploymentTimestamp}
+          alwaysShowAge
+          className="max-w-none"
+        />
+      ),
+      content: (
+        <p className="px-base py-half text-xs text-low">
+          {deployUpdateAvailable
+            ? 'A newer deployment is available.'
+            : 'No newer deployment detected.'}
+        </p>
+      ),
+      actions:
+        deployUpdateAvailable && onDeployRefresh
+          ? [
+              {
+                icon: ArrowClockwiseIcon,
+                label: 'Refresh',
+                onClick: onDeployRefresh,
+                isActive: true,
+              },
+            ]
+          : [],
+    };
     const result: SectionDef[] = [
       {
         title: 'Issue',
         persistKey: PERSIST_KEYS.issueSection,
         visible: !!linkedIssueForWorkspace,
         expanded: true,
+        fillAvailableSpace: true,
         collapsible: false,
         content: (
           <IssueSectionContainer
@@ -120,6 +210,10 @@ export const RightSidebar = memo(function RightSidebar({
         persistKey: PERSIST_KEYS.gitPanelRepositories,
         visible: true,
         expanded: gitExpanded,
+        fillAvailableSpace: true,
+        headerExtra: (
+          <GitBehindHeader workspaceId={selectedWorkspace?.id} repos={repos} />
+        ),
         content: (
           <GitPanelContainer
             selectedWorkspace={selectedWorkspace}
@@ -129,10 +223,65 @@ export const RightSidebar = memo(function RightSidebar({
         actions: [],
       },
       {
+        title: t('common:sections.serverAffinity', {
+          defaultValue: 'Server Affinity',
+        }),
+        persistKey: PERSIST_KEYS.serverAffinitySection,
+        visible: !!selectedWorkspace,
+        expanded: serverAffinityExpanded,
+        fillAvailableSpace: false,
+        headerExtra: serverAffinityLabel ? (
+          <span
+            className="min-w-0 max-w-28 truncate text-sm text-low"
+            title={serverAffinityLabel}
+          >
+            {serverAffinityLabel}
+          </span>
+        ) : null,
+        content: selectedWorkspace ? (
+          <ServerAffinitySectionContainer
+            workspaceId={selectedWorkspace.id}
+            isRunning={selectedWorkspaceSummary?.isRunning ?? false}
+          />
+        ) : null,
+        actions: [],
+      },
+      {
+        // The section body is unmounted while collapsed, which is what keeps
+        // a closed section from holding the metrics socket open.
+        title: t('common:sections.serverMetrics', {
+          defaultValue: 'Server Metrics',
+        }),
+        persistKey: PERSIST_KEYS.serverMetricsSection,
+        visible: true,
+        expanded: serverMetricsExpanded,
+        fillAvailableSpace: true,
+        headerExtra: <ServerMetricsHeader />,
+        content: (
+          <ServerMetricsSectionContainer
+            projectId={linkedIssueForWorkspace?.remoteProjectId}
+          />
+        ),
+        actions: [],
+      },
+      {
+        title: 'Pollers',
+        persistKey: PERSIST_KEYS.pollersSection,
+        visible: !!selectedWorkspace,
+        expanded: pollersExpanded,
+        fillAvailableSpace: true,
+        headerExtra: <PollersHeader executionProcesses={executionProcesses} />,
+        content: (
+          <PollersSectionContainer executionProcesses={executionProcesses} />
+        ),
+        actions: [],
+      },
+      {
         title: 'Terminal',
         persistKey: PERSIST_KEYS.terminalSection,
         visible: isTerminalVisible && !isTerminalExpanded,
         expanded: terminalExpanded,
+        fillAvailableSpace: true,
         content: <TerminalPanelContainer />,
         actions: [{ icon: ArrowsOutSimpleIcon, onClick: expandTerminal }],
       },
@@ -141,6 +290,7 @@ export const RightSidebar = memo(function RightSidebar({
         persistKey: PERSIST_KEYS.notesSection,
         visible: true,
         expanded: notesExpanded,
+        fillAvailableSpace: true,
         content: <WorkspaceNotesContainer />,
         actions: [],
       },
@@ -154,6 +304,7 @@ export const RightSidebar = memo(function RightSidebar({
             persistKey: PERSIST_KEYS.changesSection,
             visible: hasUpperContent,
             expanded: upperExpanded,
+            fillAvailableSpace: true,
             content: (
               <FileTreeContainer
                 key={selectedWorkspace.id}
@@ -172,6 +323,7 @@ export const RightSidebar = memo(function RightSidebar({
           persistKey: PERSIST_KEYS.rightPanelprocesses,
           visible: hasUpperContent,
           expanded: upperExpanded,
+          fillAvailableSpace: true,
           content: <ProcessListContainer />,
           actions: [],
         });
@@ -183,6 +335,7 @@ export const RightSidebar = memo(function RightSidebar({
             persistKey: PERSIST_KEYS.rightPanelPreview,
             visible: hasUpperContent,
             expanded: upperExpanded,
+            fillAvailableSpace: true,
             content: (
               <PreviewControlsContainer
                 workspaceId={selectedWorkspace.id}
@@ -200,6 +353,7 @@ export const RightSidebar = memo(function RightSidebar({
             persistKey: PERSIST_KEYS.rightPanelBrowser,
             visible: hasUpperContent,
             expanded: upperExpanded,
+            fillAvailableSpace: true,
             content: (
               <BrowserControlsContainer
                 workspaceId={selectedWorkspace.id}
@@ -214,19 +368,29 @@ export const RightSidebar = memo(function RightSidebar({
         break;
     }
 
+    result.unshift(deployStatusSection);
     return result;
   }, [
     rightMainPanelMode,
     selectedWorkspace,
+    linkedIssueForWorkspace,
+    showDeployStatus,
+    deployStatusExpanded,
+    deployUpdateAvailable,
+    onDeployRefresh,
+    appVersion,
+    deploymentTimestamp,
     repos,
     diffs,
     gitExpanded,
+    serverMetricsExpanded,
+    serverAffinityExpanded,
+    serverAffinityLabel,
+    selectedWorkspaceSummary?.isRunning,
     terminalExpanded,
     notesExpanded,
-    changesExpanded,
-    processesExpanded,
-    devServerExpanded,
-    browserExpanded,
+    pollersExpanded,
+    executionProcesses,
     isTerminalVisible,
     isTerminalExpanded,
     hasUpperContent,
@@ -236,33 +400,26 @@ export const RightSidebar = memo(function RightSidebar({
   ]);
 
   return (
-    <div className="h-full border-l bg-secondary overflow-y-auto">
-      <div className="divide-y border-b">
+    <div className="h-full min-h-0 border-l bg-secondary overflow-x-hidden overflow-y-auto">
+      <div className="flex h-full min-h-0 flex-col divide-y border-b">
         {sections
           .filter((section) => section.visible)
           .map((section) => (
-            <div
+            <CollapsibleSectionHeader
               key={section.persistKey}
-              className="max-h-[max(50vh,400px)] flex flex-col overflow-hidden"
+              title={section.title}
+              persistKey={section.persistKey}
+              defaultExpanded={section.expanded}
+              collapsible={section.collapsible ?? true}
+              actions={section.actions}
+              headerExtra={section.headerExtra}
+              fillAvailableSpace={section.fillAvailableSpace}
+              intrinsicHeight={!section.fillAvailableSpace}
             >
-              <CollapsibleSectionHeader
-                title={section.title}
-                persistKey={section.persistKey}
-                defaultExpanded={section.expanded}
-                collapsible={section.collapsible ?? true}
-                actions={section.actions}
-              >
-                <div
-                  className={`flex flex-1 border-t w-full overflow-auto ${
-                    (section.collapsible ?? true)
-                      ? 'min-h-[200px]'
-                      : 'min-h-[1px]'
-                  }`}
-                >
-                  {section.content}
-                </div>
-              </CollapsibleSectionHeader>
-            </div>
+              <div className="flex min-h-0 flex-1 border-t w-full overflow-auto">
+                {section.content}
+              </div>
+            </CollapsibleSectionHeader>
           ))}
       </div>
     </div>

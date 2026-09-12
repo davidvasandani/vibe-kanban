@@ -57,16 +57,25 @@ jobs:
               - '.github/actions/**'
             backend:
               - 'crates/api-types/**'
+              # cluster-protocol, node-metrics and worker are workspace members
+              # whose tests run in backend-test; without them here a change
+              # touching only those crates skips the job entirely and reads as
+              # a pass.
+              - 'crates/cluster-protocol/**'
               - 'crates/db/**'
               - 'crates/deployment/**'
               - 'crates/executors/**'
               - 'crates/git/**'
               - 'crates/local-deployment/**'
+              - 'crates/node-metrics/**'
               - 'crates/remote/**'
               - 'crates/review/**'
               - 'crates/server/**'
               - 'crates/services/**'
               - 'crates/utils/**'
+              - 'crates/worker/**'
+              - 'crates/workspace-manager/**'
+              - 'crates/worktree-manager/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'shared/**'

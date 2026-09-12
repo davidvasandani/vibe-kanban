@@ -7,8 +7,6 @@ use ts_rs::TS;
 
 #[cfg(not(feature = "qa-mode"))]
 use crate::executors::CodingAgent;
-#[cfg(not(feature = "qa-mode"))]
-use crate::profile::ExecutorConfigs;
 use crate::{
     actions::Executable,
     approvals::ExecutorApprovalService,
@@ -66,14 +64,7 @@ impl CodingAgentFollowUpRequest {
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
         let effective_dir = self.effective_dir(current_dir);
-        let profile_id = self.executor_config.profile_id();
-        let mut agent = ExecutorConfigs::get_cached()
-            .get_coding_agent(&profile_id)
-            .ok_or(ExecutorError::UnknownExecutorType(profile_id.to_string()))?;
-
-        if self.executor_config.has_overrides() {
-            agent.apply_overrides(&self.executor_config);
-        }
+        let mut agent = env.resolve_coding_agent(&self.executor_config)?;
         agent.use_approvals(approvals);
 
         match agent {
@@ -140,14 +131,7 @@ impl Executable for CodingAgentFollowUpRequest {
 
         #[cfg(not(feature = "qa-mode"))]
         {
-            let profile_id = self.executor_config.profile_id();
-            let mut agent = ExecutorConfigs::get_cached()
-                .get_coding_agent(&profile_id)
-                .ok_or(ExecutorError::UnknownExecutorType(profile_id.to_string()))?;
-
-            if self.executor_config.has_overrides() {
-                agent.apply_overrides(&self.executor_config);
-            }
+            let mut agent = env.resolve_coding_agent(&self.executor_config)?;
             agent.use_approvals(approvals.clone());
 
             agent

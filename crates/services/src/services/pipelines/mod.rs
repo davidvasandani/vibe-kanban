@@ -67,6 +67,38 @@ const SEED_MANIFEST_VERSION: u32 = 1;
 /// that must be added incrementally.
 const LEGACY_BUNDLED: &[&str] = &["basic.toml", "wikillm.toml", "speckit.toml"];
 
+const PARALLEL_SUBAGENTS_FILENAME: &str = "parallel-subagents.toml";
+/// Exact first shipped version. Matching bytes authorize the one automatic
+/// refresh; any difference is treated as a user customization.
+const LEGACY_PARALLEL_SUBAGENTS: &str = r#"name = "Parallel Sub-Agents"
+description = "Fan a single prompt out to Claude, Codex, and Grok in parallel, analyze their responses, and iterate up to N rounds."
+
+[[stage]]
+id = "fanout"
+label = "Fan out in parallel"
+default_enabled = true
+heavy = true
+prompt = "Fan this task's prompt out to three sub-agents running in parallel — one using Claude, one using Codex, and one using Grok — giving each the exact same prompt, and collect all three complete responses. Launch them concurrently rather than one after another. If a backend is unavailable, note which one and continue with the sub-agents you can run."
+
+[[stage]]
+id = "analyze"
+label = "Analyze & synthesize"
+default_enabled = true
+prompt = "Analyze the three sub-agent responses side by side: call out where they agree, where they disagree, and the strongest idea from each. Synthesize a single consolidated answer, and list any remaining open questions or contradictions the round did not resolve."
+
+[[stage]]
+id = "iterate"
+label = "Loop N rounds"
+default_enabled = true
+prompt = "Treat the fan-out and analysis you just completed as round 1, then repeat the parallel fan-out and analysis for the remaining rounds up to a total of N rounds (default N = 3; the operator may change N in this task's description). Feed the previous round's synthesis back to the three sub-agents as context each round. Stop early once the responses converge; otherwise stop after the Nth round. Then emit the final consolidated result."
+
+[[stage]]
+id = "code-review"
+label = "Review via Codex"
+default_enabled = false
+prompt = "After implementing, run an independent Codex review of the task's diff (the `codex-review` skill / Codex CLI), iterating until it reports no significant findings. Address confirmed findings and re-verify before marking the task ready."
+"#;
+
 static SEED_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// `load_pipelines` and `load_pipeline_statuses` can run on different request
 /// threads. Serialize their reconciliation transactions so one call never
@@ -524,6 +556,41 @@ fn write_seed_manifest(dir: &Path) -> Result<(), PipelineError> {
     result.map_err(PipelineError::Io)
 }
 
+fn refresh_legacy_parallel_subagents(dir: &Path) -> Result<(), PipelineError> {
+    let path = dir.join(PARALLEL_SUBAGENTS_FILENAME);
+    let existing = match std::fs::read(&path) {
+        Ok(existing) => existing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(PipelineError::Io(e)),
+    };
+    if existing != LEGACY_PARALLEL_SUBAGENTS.as_bytes() {
+        return Ok(());
+    }
+
+    let current = BUNDLED
+        .iter()
+        .find_map(|(name, content)| (*name == PARALLEL_SUBAGENTS_FILENAME).then_some(*content))
+        .expect("parallel sub-agents pipeline must remain bundled");
+    let nonce = SEED_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_path = dir.join(format!(
+        ".parallel-subagents.bundle-refresh-{}-{nonce}",
+        std::process::id()
+    ));
+    let result = (|| -> Result<(), std::io::Error> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        file.write_all(current.as_bytes())?;
+        file.sync_all()?;
+        replace_file(&temp_path, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result.map_err(PipelineError::Io)
+}
+
 fn remove_created(paths: &[PathBuf]) {
     for path in paths.iter().rev() {
         if let Err(e) = std::fs::remove_file(path) {
@@ -559,6 +626,8 @@ pub fn ensure_seeded(dir: &Path) -> Result<(), PipelineError> {
                 .collect()
         })
     };
+
+    refresh_legacy_parallel_subagents(dir)?;
 
     let mut created = Vec::new();
     for (name, content) in BUNDLED {
@@ -855,6 +924,47 @@ mod tests {
     }
 
     #[test]
+    fn refreshes_exact_legacy_parallel_subagents_pipeline() {
+        let d = TmpDir::new();
+        ensure_seeded(d.path()).unwrap();
+        let path = d.path().join(PARALLEL_SUBAGENTS_FILENAME);
+        std::fs::write(&path, LEGACY_PARALLEL_SUBAGENTS).unwrap();
+
+        ensure_seeded(d.path()).unwrap();
+
+        let current = BUNDLED
+            .iter()
+            .find_map(|(name, content)| (*name == PARALLEL_SUBAGENTS_FILENAME).then_some(*content))
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), current);
+    }
+
+    #[test]
+    fn preserves_customized_legacy_parallel_subagents_pipeline() {
+        let d = TmpDir::new();
+        ensure_seeded(d.path()).unwrap();
+        let path = d.path().join(PARALLEL_SUBAGENTS_FILENAME);
+        let customized = format!("{LEGACY_PARALLEL_SUBAGENTS}# local edit\n");
+        std::fs::write(&path, &customized).unwrap();
+
+        ensure_seeded(d.path()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(path).unwrap(), customized);
+    }
+
+    #[test]
+    fn does_not_restore_deleted_parallel_subagents_pipeline() {
+        let d = TmpDir::new();
+        ensure_seeded(d.path()).unwrap();
+        let path = d.path().join(PARALLEL_SUBAGENTS_FILENAME);
+        std::fs::remove_file(&path).unwrap();
+
+        ensure_seeded(d.path()).unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn seed_reconciliation_is_idempotent() {
         let d = TmpDir::new();
         ensure_seeded(d.path()).unwrap();
@@ -1026,14 +1136,38 @@ mod tests {
         assert!(fanout.default_enabled);
         assert!(fanout.heavy);
         let prompt = fanout.prompt_fragment.to_lowercase();
-        assert!(prompt.contains("parallel"));
+        assert!(prompt.contains("concurrently"));
         assert!(prompt.contains("claude"));
         assert!(prompt.contains("codex"));
         assert!(prompt.contains("grok"));
+        assert!(prompt.contains("exact original task prompt"));
+        assert!(prompt.contains("initial task input"));
+        assert!(prompt.contains("read-only sandbox or permission mode"));
+        assert!(prompt.contains("retain the tools"));
+        assert!(prompt.contains("never disable all tools"));
+        assert!(prompt.contains("complete final response"));
+        assert!(prompt.contains("one failure does not block"));
+        assert!(prompt.contains("do not retry providers serially"));
+
+        let analyze = p.stages.iter().find(|s| s.id == "analyze").unwrap();
+        let prompt = analyze.prompt_fragment.to_lowercase();
+        assert!(prompt.contains("provider-labeled"));
+        assert!(prompt.contains("identify missing providers"));
+        assert!(prompt.contains("never invent a provider response"));
+        assert!(prompt.contains("substitute for a failed child"));
 
         // The loop stage caps iterations at N so it cannot run unbounded.
         let iterate = p.stages.iter().find(|s| s.id == "iterate").unwrap();
         assert!(iterate.prompt_fragment.contains('N'));
+        let prompt = iterate.prompt_fragment.to_lowercase();
+        assert!(prompt.contains("completed round"));
+        assert!(prompt.contains("failed launch attempts do not consume"));
+        assert!(prompt.contains("fresh claude, codex, and grok children"));
+        assert!(prompt.contains("launched concurrently"));
+        assert!(prompt.contains("exact original task prompt first"));
+        assert!(prompt.contains("previous round's synthesis"));
+        assert!(prompt.contains("retaining workspace-reading tools"));
+        assert!(prompt.contains("instead of fabricating a round"));
     }
 
     #[test]
@@ -1046,5 +1180,69 @@ mod tests {
             spec.prompt_fragment,
             "Write a technical spec for this task and save it to `SPEC.md` at the repo root before implementing."
         );
+    }
+
+    #[test]
+    fn bundled_wikillm_artifacts_are_task_scoped() {
+        let d = TmpDir::new();
+        let pipelines = load_pipelines(d.path());
+        let wikillm = pipelines.iter().find(|p| p.id == "wikillm").unwrap();
+
+        let cases = [
+            ("spec", "specs/vk/<task-id>/technical-spec.md"),
+            ("recall-knowledge", "specs/vk/<task-id>/prior-knowledge.md"),
+            ("plan", "specs/vk/<task-id>/implementation-plan.md"),
+        ];
+
+        for (stage_id, path) in cases {
+            let stage = wikillm
+                .stages
+                .iter()
+                .find(|stage| stage.id == stage_id)
+                .unwrap();
+            assert!(stage.prompt_fragment.contains(path));
+            assert!(
+                stage
+                    .prompt_fragment
+                    .contains("current task's identifier from the task or task branch")
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_speckit_constitution_avoids_principle_number_collisions() {
+        let d = TmpDir::new();
+        let pipelines = load_pipelines(d.path());
+        let speckit = pipelines.iter().find(|p| p.id == "speckit").unwrap();
+        let constitution = speckit
+            .stages
+            .iter()
+            .find(|stage| stage.id == "speckit-constitution")
+            .unwrap();
+        let prompt = constitution.prompt_fragment.to_lowercase();
+
+        assert!(prompt.contains("assigned while drafting as provisional"));
+        assert!(prompt.contains("immediately before merge"));
+        assert!(prompt.contains("latest tip of its actual base branch"));
+        assert!(prompt.contains("highest existing principle number"));
+        assert!(prompt.contains("choose the next free number"));
+        assert!(prompt.contains("renumber its own addition"));
+        assert!(prompt.contains("never renumber an already-merged principle"));
+
+        for pipeline_id in ["wikillm", "speckit"] {
+            let pipeline = pipelines.iter().find(|p| p.id == pipeline_id).unwrap();
+            let merge = pipeline
+                .stages
+                .iter()
+                .find(|stage| stage.id == "merge")
+                .unwrap();
+            let prompt = merge.prompt_fragment.to_lowercase();
+            assert!(prompt.contains("immediately before merging a constitution change"));
+            assert!(prompt.contains("latest base-branch tip"));
+            assert!(prompt.contains("highest existing principle number"));
+            assert!(prompt.contains("renumber the unmerged principle"));
+            assert!(prompt.contains("update its internal references"));
+            assert!(prompt.contains("never renumber an already-merged principle"));
+        }
     }
 }

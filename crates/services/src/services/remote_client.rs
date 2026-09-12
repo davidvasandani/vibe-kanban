@@ -834,6 +834,13 @@ impl RemoteClient {
         self.post_authed("/v1/issues", Some(request)).await
     }
 
+    pub async fn resolve_low_disk_issue(
+        &self,
+        request: &api_types::ResolveLowDiskIssueRequest,
+    ) -> Result<api_types::ResolveLowDiskIssueResponse, RemoteClientError> {
+        self.post_authed("/v1/issues/low-disk", Some(request)).await
+    }
+
     /// Updates an existing issue.
     pub async fn update_issue(
         &self,

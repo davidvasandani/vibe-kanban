@@ -1,10 +1,13 @@
+use std::future::Future;
+
 use db::models::{
     browser_session::BrowserSession, execution_process::ExecutionProcess, scratch::Scratch,
     workspace::Workspace,
 };
-use futures::StreamExt;
+use futures::{StreamExt, stream::BoxStream};
 use serde_json::json;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use utils::log_msg::LogMsg;
 use uuid::Uuid;
 
@@ -13,6 +16,25 @@ use super::{
     patches::execution_process_patch,
     types::{EventPatch, RecordTypes},
 };
+
+fn lossless_broadcast(
+    receiver: broadcast::Receiver<LogMsg>,
+) -> BoxStream<'static, std::io::Result<LogMsg>> {
+    BroadcastStream::new(receiver)
+        .map(|result| match result {
+            Ok(message) => Ok(message),
+            Err(BroadcastStreamRecvError::Lagged(skipped)) => Err(broadcast_lag_error(skipped)),
+        })
+        .boxed()
+}
+
+async fn subscribe_before_snapshot<T>(
+    msg_store: &utils::msg_store::MsgStore,
+    snapshot: impl Future<Output = T>,
+) -> (T, broadcast::Receiver<LogMsg>) {
+    let receiver = msg_store.get_receiver();
+    (snapshot.await, receiver)
+}
 
 impl EventService {
     /// Stream execution processes for a specific session with initial snapshot (raw LogMsg format for WebSocket)
@@ -24,10 +46,16 @@ impl EventService {
         futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>,
         super::types::EventError,
     > {
-        // Get execution processes for this session
-        let processes =
-            ExecutionProcess::find_by_session_id(&self.db.pool, session_id, show_soft_deleted)
-                .await?;
+        // Subscribe before awaiting the database snapshot. Otherwise an update
+        // committed between the query and `get_receiver()` is absent from both
+        // the snapshot and the live stream, leaving reconnecting clients with
+        // stale process state indefinitely.
+        let (processes, receiver) = subscribe_before_snapshot(
+            &self.msg_store,
+            ExecutionProcess::find_by_session_id(&self.db.pool, session_id, show_soft_deleted),
+        )
+        .await;
+        let processes = processes?;
 
         // Convert processes array to object keyed by process ID
         let processes_map: serde_json::Map<String, serde_json::Value> = processes
@@ -48,97 +76,90 @@ impl EventService {
         let initial_msg = LogMsg::JsonPatch(serde_json::from_value(initial_patch).unwrap());
 
         // Get filtered event stream
-        let filtered_stream =
-            BroadcastStream::new(self.msg_store.get_receiver()).filter_map(move |msg_result| {
-                async move {
-                    match msg_result {
-                        Ok(LogMsg::JsonPatch(patch)) => {
-                            // Filter events based on session_id
-                            if let Some(patch_op) = patch.0.first() {
-                                // Check if this is a modern execution process patch
-                                if patch_op.path().starts_with("/execution_processes/") {
-                                    match patch_op {
-                                        json_patch::PatchOperation::Add(op) => {
-                                            // Parse execution process data directly from value
-                                            if let Ok(process) =
-                                                serde_json::from_value::<ExecutionProcess>(
-                                                    op.value.clone(),
-                                                )
-                                                && process.session_id == session_id
-                                            {
-                                                if !show_soft_deleted && process.dropped {
-                                                    let remove_patch =
-                                                        execution_process_patch::remove(process.id);
-                                                    return Some(Ok(LogMsg::JsonPatch(
-                                                        remove_patch,
-                                                    )));
-                                                }
-                                                return Some(Ok(LogMsg::JsonPatch(patch)));
+        let filtered_stream = lossless_broadcast(receiver).filter_map(move |msg_result| {
+            async move {
+                match msg_result {
+                    Ok(LogMsg::JsonPatch(patch)) => {
+                        // Filter events based on session_id
+                        if let Some(patch_op) = patch.0.first() {
+                            // Check if this is a modern execution process patch
+                            if patch_op.path().starts_with("/execution_processes/") {
+                                match patch_op {
+                                    json_patch::PatchOperation::Add(op) => {
+                                        // Parse execution process data directly from value
+                                        if let Ok(process) =
+                                            serde_json::from_value::<ExecutionProcess>(
+                                                op.value.clone(),
+                                            )
+                                            && process.session_id == session_id
+                                        {
+                                            if !show_soft_deleted && process.dropped {
+                                                let remove_patch =
+                                                    execution_process_patch::remove(process.id);
+                                                return Some(Ok(LogMsg::JsonPatch(remove_patch)));
                                             }
-                                        }
-                                        json_patch::PatchOperation::Replace(op) => {
-                                            // Parse execution process data directly from value
-                                            if let Ok(process) =
-                                                serde_json::from_value::<ExecutionProcess>(
-                                                    op.value.clone(),
-                                                )
-                                                && process.session_id == session_id
-                                            {
-                                                if !show_soft_deleted && process.dropped {
-                                                    let remove_patch =
-                                                        execution_process_patch::remove(process.id);
-                                                    return Some(Ok(LogMsg::JsonPatch(
-                                                        remove_patch,
-                                                    )));
-                                                }
-                                                return Some(Ok(LogMsg::JsonPatch(patch)));
-                                            }
-                                        }
-                                        json_patch::PatchOperation::Remove(_) => {
-                                            // For remove operations, we can't verify session_id
-                                            // so we allow all removals and let the client handle filtering
                                             return Some(Ok(LogMsg::JsonPatch(patch)));
                                         }
-                                        _ => {}
                                     }
-                                }
-                                // Fallback to legacy EventPatch format for backward compatibility
-                                else if let Ok(event_patch_value) = serde_json::to_value(patch_op)
-                                    && let Ok(event_patch) =
-                                        serde_json::from_value::<EventPatch>(event_patch_value)
-                                {
-                                    match &event_patch.value.record {
-                                        RecordTypes::ExecutionProcess(process) => {
-                                            if process.session_id == session_id {
-                                                if !show_soft_deleted && process.dropped {
-                                                    let remove_patch =
-                                                        execution_process_patch::remove(process.id);
-                                                    return Some(Ok(LogMsg::JsonPatch(
-                                                        remove_patch,
-                                                    )));
-                                                }
-                                                return Some(Ok(LogMsg::JsonPatch(patch)));
+                                    json_patch::PatchOperation::Replace(op) => {
+                                        // Parse execution process data directly from value
+                                        if let Ok(process) =
+                                            serde_json::from_value::<ExecutionProcess>(
+                                                op.value.clone(),
+                                            )
+                                            && process.session_id == session_id
+                                        {
+                                            if !show_soft_deleted && process.dropped {
+                                                let remove_patch =
+                                                    execution_process_patch::remove(process.id);
+                                                return Some(Ok(LogMsg::JsonPatch(remove_patch)));
                                             }
+                                            return Some(Ok(LogMsg::JsonPatch(patch)));
                                         }
-                                        RecordTypes::DeletedExecutionProcess {
-                                            session_id: Some(deleted_session_id),
-                                            ..
-                                        } => {
-                                            if *deleted_session_id == session_id {
-                                                return Some(Ok(LogMsg::JsonPatch(patch)));
-                                            }
-                                        }
-                                        _ => {}
                                     }
+                                    json_patch::PatchOperation::Remove(_) => {
+                                        // For remove operations, we can't verify session_id
+                                        // so we allow all removals and let the client handle filtering
+                                        return Some(Ok(LogMsg::JsonPatch(patch)));
+                                    }
+                                    _ => {}
                                 }
                             }
-                            None
+                            // Fallback to legacy EventPatch format for backward compatibility
+                            else if let Ok(event_patch_value) = serde_json::to_value(patch_op)
+                                && let Ok(event_patch) =
+                                    serde_json::from_value::<EventPatch>(event_patch_value)
+                            {
+                                match &event_patch.value.record {
+                                    RecordTypes::ExecutionProcess(process) => {
+                                        if process.session_id == session_id {
+                                            if !show_soft_deleted && process.dropped {
+                                                let remove_patch =
+                                                    execution_process_patch::remove(process.id);
+                                                return Some(Ok(LogMsg::JsonPatch(remove_patch)));
+                                            }
+                                            return Some(Ok(LogMsg::JsonPatch(patch)));
+                                        }
+                                    }
+                                    RecordTypes::DeletedExecutionProcess {
+                                        session_id: Some(deleted_session_id),
+                                        ..
+                                    } => {
+                                        if *deleted_session_id == session_id {
+                                            return Some(Ok(LogMsg::JsonPatch(patch)));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
-                        Ok(other) => Some(Ok(other)), // Pass through non-patch messages
-                        Err(_) => None,               // Filter out broadcast errors
+                        None
                     }
+                    Ok(other) => Some(Ok(other)), // Pass through non-patch messages
+                    Err(error) => Some(Err(error)),
                 }
-            });
+            }
+        });
 
         // Start with initial snapshot, Ready signal, then live updates
         let initial_stream = futures::stream::iter(vec![Ok(initial_msg), Ok(LogMsg::Ready)]);
@@ -156,9 +177,16 @@ impl EventService {
         futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>,
         super::types::EventError,
     > {
+        // Acquire authority before the awaited snapshot query so updates in
+        // that window are buffered for delivery after Ready.
         // Treat errors (e.g., corrupted/malformed data) the same as "scratch not found"
         // This prevents the websocket from closing and retrying indefinitely
-        let scratch = match Scratch::find_by_id(&self.db.pool, scratch_id, scratch_type).await {
+        let (scratch, receiver) = subscribe_before_snapshot(
+            &self.msg_store,
+            Scratch::find_by_id(&self.db.pool, scratch_id, scratch_type),
+        )
+        .await;
+        let scratch = match scratch {
             Ok(scratch) => scratch,
             Err(e) => {
                 tracing::warn!(
@@ -181,46 +209,45 @@ impl EventService {
         let type_str = scratch_type.to_string();
 
         // Filter to only this scratch's events by matching id and payload.type in the patch value
-        let filtered_stream =
-            BroadcastStream::new(self.msg_store.get_receiver()).filter_map(move |msg_result| {
-                let id_str = scratch_id.to_string();
-                let type_str = type_str.clone();
-                async move {
-                    match msg_result {
-                        Ok(LogMsg::JsonPatch(patch)) => {
-                            if let Some(op) = patch.0.first()
-                                && op.path() == "/scratch"
-                            {
-                                // Extract id and payload.type from the patch value
-                                let value = match op {
-                                    json_patch::PatchOperation::Add(a) => Some(&a.value),
-                                    json_patch::PatchOperation::Replace(r) => Some(&r.value),
-                                    json_patch::PatchOperation::Remove(_) => None,
-                                    _ => None,
-                                };
+        let filtered_stream = lossless_broadcast(receiver).filter_map(move |msg_result| {
+            let id_str = scratch_id.to_string();
+            let type_str = type_str.clone();
+            async move {
+                match msg_result {
+                    Ok(LogMsg::JsonPatch(patch)) => {
+                        if let Some(op) = patch.0.first()
+                            && op.path() == "/scratch"
+                        {
+                            // Extract id and payload.type from the patch value
+                            let value = match op {
+                                json_patch::PatchOperation::Add(a) => Some(&a.value),
+                                json_patch::PatchOperation::Replace(r) => Some(&r.value),
+                                json_patch::PatchOperation::Remove(_) => None,
+                                _ => None,
+                            };
 
-                                let matches = value.is_some_and(|v| {
-                                    let id_matches =
-                                        v.get("id").and_then(|v| v.as_str()) == Some(&id_str);
-                                    let type_matches = v
-                                        .get("payload")
-                                        .and_then(|p| p.get("type"))
-                                        .and_then(|t| t.as_str())
-                                        == Some(&type_str);
-                                    id_matches && type_matches
-                                });
+                            let matches = value.is_some_and(|v| {
+                                let id_matches =
+                                    v.get("id").and_then(|v| v.as_str()) == Some(&id_str);
+                                let type_matches = v
+                                    .get("payload")
+                                    .and_then(|p| p.get("type"))
+                                    .and_then(|t| t.as_str())
+                                    == Some(&type_str);
+                                id_matches && type_matches
+                            });
 
-                                if matches {
-                                    return Some(Ok(LogMsg::JsonPatch(patch)));
-                                }
+                            if matches {
+                                return Some(Ok(LogMsg::JsonPatch(patch)));
                             }
-                            None
                         }
-                        Ok(other) => Some(Ok(other)),
-                        Err(_) => None,
+                        None
                     }
+                    Ok(other) => Some(Ok(other)),
+                    Err(error) => Some(Err(error)),
                 }
-            });
+            }
+        });
 
         let initial_stream = futures::stream::iter(vec![Ok(initial_msg), Ok(LogMsg::Ready)]);
         let combined_stream = initial_stream.chain(filtered_stream).boxed();
@@ -235,7 +262,12 @@ impl EventService {
         futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>,
         super::types::EventError,
     > {
-        let workspaces = Workspace::find_all_with_status(&self.db.pool, archived, limit).await?;
+        let (workspaces, receiver) = subscribe_before_snapshot(
+            &self.msg_store,
+            Workspace::find_all_with_status(&self.db.pool, archived, limit),
+        )
+        .await;
+        let workspaces = workspaces?;
         let workspaces_map: serde_json::Map<String, serde_json::Value> = workspaces
             .into_iter()
             .map(|ws| (ws.id.to_string(), serde_json::to_value(ws).unwrap()))
@@ -248,8 +280,8 @@ impl EventService {
         }]);
         let initial_msg = LogMsg::JsonPatch(serde_json::from_value(initial_patch).unwrap());
 
-        let filtered_stream = BroadcastStream::new(self.msg_store.get_receiver()).filter_map(
-            move |msg_result| async move {
+        let filtered_stream =
+            lossless_broadcast(receiver).filter_map(move |msg_result| async move {
                 match msg_result {
                     Ok(LogMsg::JsonPatch(patch)) => {
                         if let Some(op) = patch.0.first()
@@ -309,10 +341,9 @@ impl EventService {
                         None
                     }
                     Ok(other) => Some(Ok(other)),
-                    Err(_) => None,
+                    Err(error) => Some(Err(error)),
                 }
-            },
-        );
+            });
 
         let initial_stream = futures::stream::iter(vec![Ok(initial_msg), Ok(LogMsg::Ready)]);
         Ok(initial_stream.chain(filtered_stream).boxed())
@@ -328,7 +359,12 @@ impl EventService {
         futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>,
         super::types::EventError,
     > {
-        let sessions = BrowserSession::find_by_workspace(&self.db.pool, workspace_id, true).await?;
+        let (sessions, receiver) = subscribe_before_snapshot(
+            &self.msg_store,
+            BrowserSession::find_by_workspace(&self.db.pool, workspace_id, true),
+        )
+        .await;
+        let sessions = sessions?;
         let sessions_map: serde_json::Map<String, serde_json::Value> = sessions
             .into_iter()
             .map(|session| {
@@ -346,8 +382,8 @@ impl EventService {
         }]);
         let initial_msg = LogMsg::JsonPatch(serde_json::from_value(initial_patch).unwrap());
 
-        let filtered_stream = BroadcastStream::new(self.msg_store.get_receiver()).filter_map(
-            move |msg_result| async move {
+        let filtered_stream =
+            lossless_broadcast(receiver).filter_map(move |msg_result| async move {
                 match msg_result {
                     Ok(LogMsg::JsonPatch(patch)) => {
                         if let Some(op) = patch.0.first()
@@ -372,12 +408,93 @@ impl EventService {
                         None
                     }
                     Ok(_) => None,
-                    Err(_) => None,
+                    Err(error) => Some(Err(error)),
                 }
-            },
-        );
+            });
 
         let initial_stream = futures::stream::iter(vec![Ok(initial_msg), Ok(LogMsg::Ready)]);
         Ok(initial_stream.chain(filtered_stream).boxed())
+    }
+}
+
+fn broadcast_lag_error(skipped: u64) -> std::io::Error {
+    std::io::Error::other(format!(
+        "snapshot/live stream lagged by {skipped} messages; resnapshot required"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+    use tokio::sync::{Notify, broadcast};
+    use utils::{log_msg::LogMsg, msg_store::MsgStore};
+
+    use super::{broadcast_lag_error, lossless_broadcast, subscribe_before_snapshot};
+
+    #[test]
+    fn lag_error_requires_an_authoritative_resnapshot() {
+        let error = broadcast_lag_error(7);
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(error.to_string().contains("lagged by 7 messages"));
+        assert!(error.to_string().contains("resnapshot required"));
+    }
+
+    #[tokio::test]
+    async fn handoff_buffers_update_published_while_snapshot_is_paused() {
+        let store = Arc::new(MsgStore::new());
+        let snapshot_started = Arc::new(Notify::new());
+        let finish_snapshot = Arc::new(Notify::new());
+        let task_store = store.clone();
+        let task_started = snapshot_started.clone();
+        let task_finish = finish_snapshot.clone();
+
+        let handoff = tokio::spawn(async move {
+            subscribe_before_snapshot(&task_store, async move {
+                task_started.notify_one();
+                task_finish.notified().await;
+                "running"
+            })
+            .await
+        });
+
+        snapshot_started.notified().await;
+        store.push_stdout("completed");
+        finish_snapshot.notify_one();
+
+        let (snapshot, receiver) = handoff.await.unwrap();
+        let initial =
+            futures::stream::iter([Ok(LogMsg::Stdout(snapshot.into())), Ok(LogMsg::Ready)]);
+        let mut stream = initial.chain(lossless_broadcast(receiver));
+        let mut reduced_status = None;
+        let mut ready = false;
+        while !(ready && reduced_status.as_deref() == Some("completed")) {
+            match stream
+                .next()
+                .await
+                .expect("snapshot, Ready, buffered update")
+            {
+                Ok(LogMsg::Stdout(status)) => reduced_status = Some(status),
+                Ok(LogMsg::Ready) => ready = true,
+                other => panic!("unexpected handoff message: {other:?}"),
+            }
+        }
+
+        assert!(ready);
+        assert_eq!(reduced_status.as_deref(), Some("completed"));
+    }
+
+    #[tokio::test]
+    async fn real_broadcast_lag_terminates_authority_with_error() {
+        let (sender, receiver) = broadcast::channel(2);
+        let mut stream = lossless_broadcast(receiver);
+        for value in 0..3 {
+            sender.send(LogMsg::Stdout(value.to_string())).unwrap();
+        }
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("lagged by 1 messages"));
+        assert!(error.to_string().contains("resnapshot required"));
     }
 }

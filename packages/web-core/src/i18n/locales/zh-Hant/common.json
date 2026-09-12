@@ -108,6 +108,23 @@
     "label": "標籤"
   },
   "workspaces": {
+    "serverAffinity": {
+      "local": "本機",
+      "automatic": "自動配置",
+      "worker": "工作節點",
+      "unassigned": "未指派",
+      "current": "目前伺服器",
+      "runOn": "執行於",
+      "coordinator": "協調器",
+      "unavailable": "無法使用",
+      "localDescription": "此 Vibe Kanban 執行個體在本機執行工作區。",
+      "confirmTitle": "遷移執行中的工作？",
+      "confirmMessage": "Vibe Kanban 將停止目前工作、變更伺服器親和性，並使用受管理的繼續提示重新啟動工作。",
+      "confirmAction": "停止、遷移並重新啟動",
+      "updated": "伺服器親和性已更新",
+      "updateFailed": "無法更新伺服器親和性",
+      "restartFailed": "親和性已變更，但工作無法重新啟動"
+    },
     "title": "工作區",
     "searchPlaceholder": "搜尋...",
     "active": "活躍",
@@ -117,6 +134,7 @@
     "notFoundDescription": "此工作區可能已被刪除，或連結不正確。",
     "selectToStart": "選擇一個工作區開始",
     "draft": "草稿",
+    "creating": "建立中…",
     "viewArchive": "檢視封存",
     "backToActive": "返回活躍",
     "noArchived": "沒有已封存的工作區",
@@ -189,6 +207,7 @@
     "nextGitHubComment": "下一個有評論的檔案"
   },
   "sections": {
+    "serverAffinity": "伺服器親和性",
     "changes": "變更",
     "repositories": "儲存庫",
     "addRepositories": "新增儲存庫",
@@ -515,6 +534,11 @@
       "repoStep": "你想在哪些儲存庫上工作？",
       "chatStep": "你想做什麼工作？"
     },
+    "worker": {
+      "label": "執行於",
+      "automatic": "自動分配",
+      "coordinator": "協調器"
+    },
     "repoPicker": {
       "actions": {
         "recent": "最近",
@@ -597,6 +621,24 @@
     "resetToGenerated": "Reset to generated",
     "updateIssue": "Update Issue",
     "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue."
+  },
+  "workspaceCreation": {
+    "creatingTitle": "正在建立工作區…",
+    "creatingBody": "你可以離開此頁面，建立程序將在背景繼續。",
+    "failedTitle": "工作區建立失敗",
+    "failedFallback": "請建立新的工作區後再試一次。"
+  },
+  "metricsDiskAlerts": {
+    "warning": "磁碟空間不足",
+    "critical": "磁碟空間嚴重不足",
+    "available": "可用",
+    "used": "已用",
+    "resolving": "正在解決問題…",
+    "action": "建立或開啟修復問題",
+    "noProject": "請將此工作區連結至專案以建立問題。",
+    "resolveFailed": "無法解決磁碟空間不足問題：{{error}}",
+    "nodeCount_one": "{{severity}} · {{count}} 個節點",
+    "nodeCount_other": "{{severity}} · {{count}} 個節點"
   },
   "speckit": {
     "title": "SpecKit",

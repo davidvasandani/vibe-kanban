@@ -31,6 +31,8 @@ pub enum McpRefreshErrorCategory {
     Timeout,
     RefreshInProgress,
     ActiveCall,
+    MaterializationFailed,
+    ReloadFailed,
     Unsupported,
     Internal,
 }
@@ -61,6 +63,12 @@ pub struct McpServerRefreshSnapshot {
     pub server_id: String,
     pub status: McpServerRefreshStatus,
     pub tool_count: Option<u32>,
+    /// Sorted tool identifiers from the executor-owned, post-start inventory.
+    #[serde(default)]
+    pub tool_names: Option<Vec<String>>,
+    /// SHA-256 of sorted tool identifiers and their input/output schemas.
+    #[serde(default)]
+    pub tool_schema_fingerprint: Option<String>,
     pub resource_count: Option<u32>,
     pub prompt_count: Option<u32>,
     pub restart_occurred: Option<bool>,
@@ -75,6 +83,10 @@ pub struct McpRefreshResult {
     pub generation: u64,
     pub requested_at: DateTime<Utc>,
     pub last_successful_refresh_at: Option<DateTime<Utc>>,
+    /// Settings-owned server identifiers expected for the selected executor.
+    /// This is definition metadata only; definitions, headers, and env values
+    /// must never cross this status boundary.
+    pub configured_server_ids: Vec<String>,
     pub servers: Vec<McpServerRefreshSnapshot>,
     pub error: Option<McpRefreshError>,
 }
@@ -118,6 +130,16 @@ pub fn safe_executor_error(category: McpRefreshErrorCategory) -> McpRefreshError
         McpRefreshErrorCategory::ActiveCall => (
             "An MCP tool call is active.",
             "Retry after the active tool call finishes.",
+            true,
+        ),
+        McpRefreshErrorCategory::MaterializationFailed => (
+            "Vibe Kanban could not materialize the latest MCP settings.",
+            "Retry. If the problem continues, inspect the worker's secret-safe logs.",
+            true,
+        ),
+        McpRefreshErrorCategory::ReloadFailed => (
+            "Codex could not reload the refreshed MCP configuration.",
+            "Retry after Codex is ready, or continue in a fresh turn.",
             true,
         ),
         McpRefreshErrorCategory::Unsupported => (
@@ -181,6 +203,8 @@ mod tests {
             McpRefreshErrorCategory::Timeout,
             McpRefreshErrorCategory::RefreshInProgress,
             McpRefreshErrorCategory::ActiveCall,
+            McpRefreshErrorCategory::MaterializationFailed,
+            McpRefreshErrorCategory::ReloadFailed,
             McpRefreshErrorCategory::Unsupported,
             McpRefreshErrorCategory::Internal,
         ] {
@@ -189,5 +213,22 @@ mod tests {
             assert!(!encoded.contains("http://"));
             assert!(!encoded.contains("https://"));
         }
+    }
+
+    #[test]
+    fn older_worker_snapshot_defaults_new_inventory_evidence() {
+        let snapshot: McpServerRefreshSnapshot = serde_json::from_value(serde_json::json!({
+            "server_id": "personal_servicenow",
+            "status": "ready",
+            "tool_count": 62,
+            "resource_count": 0,
+            "prompt_count": null,
+            "restart_occurred": null,
+            "error": null
+        }))
+        .expect("snapshot from an older worker must remain compatible");
+
+        assert_eq!(snapshot.tool_names, None);
+        assert_eq!(snapshot.tool_schema_fingerprint, None);
     }
 }

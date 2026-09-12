@@ -75,6 +75,33 @@ session identity, cancellation, failures, and credential redaction must remain
 correct. Extend the shared executor, log-normalization, profile, and MCP
 abstractions before introducing agent-specific parallel machinery.
 
+Normalized-log compaction must preserve protocol lifecycle identity and patch
+ordering. Repeated events may share a visible entry only when semantic equality,
+adjacency, and completion state are proven; failures stay visible, stale event
+updates cannot overwrite newer occurrences, and compact indicators remain
+bounded under arbitrarily long streams.
+
+Controls we impose on a vendor CLI are held to the same standard as data we
+receive from it. A deny rule, permission matcher, or configuration key that
+disables a vendor capability MUST be built from an identifier verified against
+the **pinned artifact that actually executes** — not vendor documentation, not a
+shipped type-definition or schema file, and not recollection. Type declarations
+and schema titles are not wire identifiers. The verification source and the
+version it was read from are recorded next to the rule, because a dependency bump
+can rename the identifier and silently reopen the gap.
+
+A control must fail loud, not inert. Where the vendor silently ignores unknown
+keys or unmatched names, the spelling is pinned by a test, and the control is
+treated as unproven until a live run shows it took effect. Where the enforcement
+point is a parameter rather than a tool name, the rule is placed at the parameter
+— a tool-granular rule that leaves the real path open is a control that looks
+complete and is not. A denial that removes a capability names the supported
+replacement, so the agent redirects instead of stalling.
+
+Where no identifier can be verified, shipping no rule is the correct outcome. The
+absence is recorded as a decision with its evidence, so a later reader does not
+mistake it for an oversight and does not "fix" it with a guess.
+
 ### X. Dialogs hold provisional state; containers hold confirmed state
 Settings dialogs and edit modals own a private snapshot of the data they mutate.
 On open, the dialog is seeded from the current saved state (or blank for "add").
@@ -157,12 +184,22 @@ notification path, and concrete condition that reopens the decision. Dependency
 updates move the source pin, integrity record, tests, and documentation in the
 same reviewed change and fail closed rather than substituting another build.
 
+When a bundled entry points to an operator-hosted shared service instead of
+launching locally, the deployment remains responsible for that same immutable
+source and integrity contract. The catalog contains only the network endpoint
+and non-secret headers; upstream credentials stay at the supervised service and
+must never be copied into an agent's native configuration.
+
 ### XVII. Live capability state is confirmed and atomic
 Configuration on disk is not evidence that a running external agent adopted a
 change. Any feature that reports a live tool, connector, or protocol capability
 as refreshed MUST receive confirmation from the process that owns that live
-capability set. Unsupported reload paths are reported truthfully rather than
-simulated with an independent probe or whole-session restart.
+capability set. Unsupported in-process reload paths are reported truthfully
+rather than simulated with an independent probe. A product operation may instead
+offer an explicitly named agent restart: it must preserve the logical session,
+use the normal continuation path, and report success only after a fresh process
+has started from the new configuration. It must never label a restart as a live
+refresh.
 
 Capability replacement is generation-based: readers observe one complete old or
 new inventory, never a partially rebuilt set. Refresh coordinates with in-flight
@@ -170,6 +207,291 @@ calls, preserves last known-good capability state on partial failure, and
 identifies failures by stable configured identifier. Configuration comparisons,
 logs, diagnostics, and API results never expose environment values, tokens,
 authorization material, authenticated URLs, or secret-bearing command arguments.
+
+If a restart is requested while a turn is running, the product must obtain an
+explicit user confirmation before queueing the handoff. The current turn is not
+interrupted unless the dialog says so. Exactly one lifecycle consumer owns the
+queued continuation.
+
+### XVIII. Distributed execution is affinity-bound and evidence-backed
+Workspace process ownership MUST be explicit, persisted, and stable. A
+coordinator may dispatch work only to the worker assigned to that workspace,
+and the worker must authorize the execution ID and canonical workspace path
+against that assignment. Retries are idempotent and cannot create a second
+process for one execution.
+
+Remote liveness and terminal state require worker evidence. A timeout,
+disconnect, missing handle, or expired lease is not proof that a process
+completed or was killed; expose interruption or indeterminacy and preserve the
+workspace until reconciliation establishes safety. Ordered event streams carry
+monotonic cursors and make replay gaps visible. Shared Git worktree
+administration remains single-owner and serialized even when ordinary commands
+run on several nodes.
+
+### XIX. Observability is a read-only surface
+Metrics, telemetry, and diagnostic sampling exist to be *looked at*. They are
+never evidence.
+
+No observability path may write scheduling, liveness, lease, eligibility, or
+lifecycle state, and no lifecycle decision may read from one. A node that fails
+to report metrics is not offline; a node that reports them is not healthy. The
+existing evidence channel remains the only authority on both questions.
+
+Absence is typed, never fabricated. Unreachable, unsupported, not-implemented,
+and stale are distinct statuses carrying their reason, and each renders as
+itself. A zero that means "no reading" is prohibited — a failed read is not a
+measurement, and a UI that shows `0%` for a dead host is a defect.
+
+Live streams are bounded and self-correcting. Retention is a fixed-size window
+whose memory does not grow with uptime, and no emitted payload may grow with
+elapsed time. A patch stream is an optimisation over a periodic full snapshot,
+never a replacement for one: a dropped message, a replay gap, or a change in the
+member set forces a resnapshot rather than interpolation. Every streamed
+collection is keyed by stable identity — never by array position — so that
+membership changing mid-stream cannot make a `replace` land on the wrong row.
+
+Sampling tasks terminate. A background sampler holds only a weak reference to
+its owner, re-checks each tick that a consumer still exists, exits when none
+does, and never holds a lock across an await.
+
+An explicit operator action may turn displayed evidence into a durable
+remediation issue, but sampling itself remains side-effect free. The action
+MUST preserve the concrete observation and timestamp, use an explicit project
+context, and resolve-or-create transactionally against a stable incident
+identity so retries and concurrent clicks cannot create duplicate open issues.
+Closing the prior issue may permit a later observation to create a new one.
+Alerts derived from metrics are presentation state only: they never become
+scheduler, lease, liveness, or lifecycle authority.
+
+Host introspection is secret-hostile by default. Process environments are never
+read. Anything derived from a process command line is redacted at the point of
+collection — before it is stored, transmitted, or logged — so that an
+unredacted value never exists outside the sampler. Redaction errs toward
+removing too much: an over-redacted command is cosmetic, an under-redacted one
+is a disclosure.
+
+### XX. Cross-node paths are node-identical and structurally verified
+Any absolute path written into shared storage that another node must later
+resolve MUST resolve to the same object on every node, and that property MUST be
+asserted by the code that records it — never left to an operator convention, a
+documentation note, or a naming coincidence.
+
+Three rules follow. **Verify structure, not spelling:** assert that a resolved
+target lies within the shared root, never that its text lacks a known-bad prefix.
+**A same-named local directory is not the target:** existence proves nothing, and
+a resolver that accepts a local path merely because it exists is a defect, not a
+fallback — the shared-mount rule applied to every recorded path. **Both ends of a
+two-sided pointer are repaired and re-probed together;** a zero exit from a repair
+command is not verification, and an object a path claims to reference is proven
+present, never assumed.
+
+Enforcement is level-triggered. A check that runs only where the path is first
+written is an edge trigger and will stall silently; the same assertion runs at
+startup, at placement, and before use, enumerating every violation in one pass
+with an actionable remedy rather than aborting on the first. A one-off migration
+with no recurring check is a comment, not a control.
+
+Where a shared namespace is consolidated, its blast radius is re-derived rather
+than inherited: an operation that was safe while it touched one node's metadata
+is not automatically safe once every node's metadata lives in one place.
+Writes into such a namespace are **additive by default**: an operation that
+deletes or prunes entries there needs an argument for why every other holder of
+the namespace, on every node, is unaffected.
+
+### XXI. One convention per concept, and failures say what failed
+A value that already has a resolution rule in this codebase is resolved by that
+rule everywhere it is consumed. Re-deriving the rule at a new call site — a
+second string format, a narrower lookup, an extra normalisation — is a defect
+even when it passes its own tests, because the two definitions will disagree on
+exactly the inputs the original rule exists to handle. Find the existing
+resolver, call it, or match its outcome exactly and say so in a comment naming
+it.
+
+Consumers must accept the full domain the producer emits. Where a producer is
+user-facing (a picker, an API request body, a config field), the domain includes
+its *default* value, and the default is the case most likely to reach
+production — a consumer that handles every case except the default is broken for
+almost every user.
+
+A failure that a maintainer could act on must reach the operator with the fact
+that identifies it. Collapsing a specific, diagnosable failure into a generic
+message ("an internal error occurred") is a defect in its own right: it converts
+a one-line diagnosis into an investigation, and it does so precisely when the
+system is already failing. Server errors keep their status but carry a message
+naming what failed and which entity it failed for. Widening an error channel is
+scoped to the failure being surfaced — a blanket unwrapping of every internal
+error is not the remedy, and messages remain free of secrets, tokens, and
+environment values.
+
+### XXII. Affinity migration is a single owned lifecycle transition
+An executing process is never transferred between nodes. Changing affinity
+while work is active means terminating the old execution with the established
+stop/cancellation protocol, committing the new placement, and creating at most
+one new continuation execution. The coordinator owns that full transition; a
+browser or worker may request it but must not assemble it from independent
+stop, placement, and follow-up mutations.
+
+The transition is serialized per workspace and revalidates both liveness and
+target eligibility at execution time. A missing worker response is not evidence
+that stop succeeded, and affinity cannot change until terminal evidence meets
+the existing lifecycle contract. Duplicate requests, retries, and lost HTTP
+responses cannot create duplicate continuations.
+
+Outcomes name the last durable boundary reached. If stop fails, placement is
+unchanged. If placement succeeds but continuation creation fails, the workspace
+remains stopped on the new affinity and the operator is told exactly that; the
+system must not roll back into a node that may still own process state or claim
+the migration completed. Product-owned continuation prompts are versioned in
+source and preserve the user's prior session context rather than fabricating a
+new task.
+
+### XXIII. Remote execution receives authoritative configuration snapshots
+Configuration that affects a remotely owned execution is resolved by the
+coordinator and carried through the authenticated dispatch boundary. A worker
+must not reconstruct settings from deployment defaults, query an unauthenticated
+side channel, or silently continue with stale local state when the coordinator
+supplied a snapshot.
+
+Secret-bearing snapshots are minimal, bounded, included in idempotency checks,
+and never logged or returned in diagnostics. Workers validate that a snapshot
+belongs to the dispatched executor, apply it atomically through the existing
+native-config adapter, and preserve unrelated vendor settings. Optional protocol
+fields provide rolling compatibility; presence with invalid content fails closed
+before the child process starts.
+
+### XXIV. MCP definitions have one settings authority
+Vibe Kanban settings own every MCP definition. Deployment configuration may
+install immutable executables, expose network routes, and supply service
+environment, but it must not add, remove, or rewrite native agent MCP tables at
+service startup. Remote workers consume settings-owned definitions through the
+authenticated execution snapshot rather than reconstructing them locally.
+
+### XXV. Executor continuation artifacts move by manifest, never by home copy
+An executor home mixes immutable continuation artifacts with mutable databases,
+credentials, configuration, caches, and logs. Cross-node continuation transfer
+MUST select only artifacts required for the named continuation, bind them to an
+operation manifest, and verify identity, size, digest, regular-file type,
+permissions, ownership, and structural containment before stopping the source
+or changing affinity. Copying the complete executor home is prohibited.
+
+Transfer completion is durable positive evidence, never path existence. Retries
+reuse identical verified content and reject conflicts rather than overwriting.
+Missing, corrupt, oversized, unauthorized, indeterminate, or partial lineage
+leaves source execution and placement unchanged. Readers, writers, and cleaners
+never follow symlinks, accept caller absolute paths, or log contents; all byte,
+count, depth, and time dimensions are bounded. Partials are operation-scoped,
+and verified artifacts have age-based retention that protects every active or
+recoverable reference.
+
+### XXVI. Collapsed controls retain decisive context
+Expandable workspace controls MAY hide detail, but their collapsed affordance
+MUST retain the concise state needed to decide whether to open them. That state
+comes from an existing summary/cache source when one exists; a closed section
+must not stay mounted or issue a private request solely to label its header.
+Header metadata and disclosure actions share a constrained row, so dynamic text
+must have an explicit shrink/truncation boundary and remain distinguishable from
+the control label at the narrowest supported sidebar width.
+
+### XXVII. Legacy identifiers migrate explicitly and atomically
+When a persisted external identifier no longer satisfies the protocol contract,
+reads may diagnose and propose the shared canonical form but must not mutate
+storage. Migration occurs at an explicit write boundary, preserves the original
+human label and complete definition, rejects collisions and cross-profile
+ambiguity before the first write, and either commits every affected native key
+plus metadata or leaves the legacy state recoverable and clearly reported.
+
+### XXVIII. Accepted lifecycle work outlives its request
+Once an API acknowledges lifecycle work that creates or mutates durable product
+state, completion MUST NOT depend on the originating HTTP connection, browser
+route, or component remaining alive. The coordinator persists an authoritative
+operation identity and observable state before acknowledgement, and exactly one
+background consumer claims the work. Retries replay or continue that identity;
+they never create a duplicate execution or repeat a committed phase.
+
+Pending, successful, failed, and indeterminate outcomes are durable and visible
+through ordinary product reads. Process restart reconciles every accepted
+non-terminal operation from positive evidence: it resumes an idempotent phase or
+records a truthful actionable outcome, never infers success from absence and
+never leaves an unbounded pending state. Slow external or filesystem operations
+run outside request cancellation, and no coordination lock is held across them.
+
+### XXIX. Settings-owned MCP materialization is executor-neutral and isolated
+Every MCP-capable remote execution receives the selected profile's complete,
+latest settings-owned MCP map, regardless of executor. The worker materializes
+that map into an execution-scoped native configuration and redirects only that
+execution to it; it must not mutate repository configuration or a worker-global
+vendor configuration. Required vendor authentication and continuation assets are
+preserved without copying secret material into logs or diagnostics.
+
+Executor-specific live reload remains an explicit capability. An executor that
+cannot confirm in-process adoption receives new settings at its next process
+boundary rather than pretending a probe or file write refreshed the running
+session. Credential-bearing snapshots stay within the authenticated dispatch
+channel, remain bounded and idempotency-covered, and are removed with the
+execution-scoped configuration.
+
+### XXX. Execution UI is derived from authoritative, rehydratable state
+An execution is shown as active only while the latest authoritative process
+snapshot says it is non-terminal. WebSocket patches are an optimization, not
+the source of truth: every initial connection and reconnect MUST replace or
+reconcile local execution state from a full backend snapshot before subsequent
+patches are applied. A missed completion event, interrupted request, client
+reconnect, or service restart must therefore converge to the backend's latest
+terminal state without requiring a manual refresh.
+
+Backend shutdown and recovery paths finalize or truthfully classify every
+execution whose process can no longer be proven active. Completed, failed,
+killed, interrupted, and indeterminate terminal outcomes all clear running UI;
+only positively active executions remain cancellable. Regression coverage MUST
+exercise a missed terminal event followed by snapshot rehydration and preserve
+the active-execution Stop behavior.
+
+### XXXI. Historical views are materialized once and shared
+CPU-intensive reconstruction of immutable execution history MUST be keyed by
+the durable source identity and single-flight within a service process.
+Concurrent readers of one cache miss join the same computation; they do not
+independently parse or normalize the same source. A valid completed
+materialization bypasses both coordination and capacity queues.
+
+Only an atomically complete artifact is reusable evidence. Partial output,
+reader cancellation, worker failure, or an in-memory in-flight marker never
+becomes a completed history view, and failure clears coordination so a later
+reader can retry. Input, output, concurrency, and retained coordination state
+are bounded. Expensive synchronous work does not monopolize the async request
+runtime, and structured diagnostics distinguish cache hits, leaders, joined
+waiters, queueing, completion, cancellation, failure, and truncation.
+
+Historical reads do not implicitly migrate workspace affinity. Using another
+node requires an explicit authenticated, affinity-safe reconstruction contract;
+idle-node telemetry alone is never scheduling authority.
+
+### XXXIV. Partial projections degrade deterministically
+When a UI projection joins an authoritative record with asynchronously loaded
+summary or enrichment data, the base record MUST remain immediately usable.
+Ordering and grouping use a persisted base-record fallback until enrichment is
+available; missing or malformed enrichment never outranks known values merely
+because it is absent. Arrival of richer data may refine the projection, but ties
+and incomplete records remain deterministic through stable identity-based
+fallbacks. Regression coverage exercises both the base-only and enriched states.
+
+### XXXV. Entity projections require matching identity
+Aggregate or parent-level summaries MUST NOT be projected onto a child entity
+unless the data carries an identity that matches that child. In multi-entity
+views, a fact established for one repository, workspace, issue, worker, or
+execution remains scoped to that entity; convenience fallbacks may not broadcast
+it to siblings. While identity-scoped enrichment is loading or absent, render
+the fact as unknown rather than borrowing a plausible aggregate. Regression
+coverage includes mixed sibling state and the base-only loading state.
+
+### XXXVI. Dynamic viewports have one scroll authority
+Live, virtualized, or incrementally paged views MUST assign scroll correction to
+one explicit policy at a time: follow the live tail, preserve a reader-selected
+anchor, or execute a named navigation command. Layout measurement and estimated
+size changes are evidence for that policy, not competing scroll owners. A
+render-boundary transition must be monotonic for the lifetime of a live update;
+rows cannot oscillate between layout strategies as derived loading markers
+appear and disappear. Regression coverage exercises continuous updates both at
+the live tail and after the reader scrolls away.
 
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
@@ -192,5 +514,43 @@ authorization material, authenticated URLs, or secret-bearing command arguments.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.14.0 (adds confirmed, atomic live-capability principle XVII;
-0.13.0 added verified bundled third-party delivery principle XVI)
+**Version**: 0.31.0 (adds a single-authority, monotonic-boundary contract for
+dynamic viewport scroll correction; 0.30.0 extended IX so controls imposed on a vendor CLI — deny rules,
+permission matchers, capability-disabling config keys — are built from
+identifiers verified against the pinned executing artifact rather than docs or
+type declarations, record that source and version, pin the spelling by test where
+the vendor ignores unknown keys, sit at the parameter when that is the real
+enforcement point, name the supported replacement when denying, and record a
+verified-absence as an evidenced decision instead of guessing a rule; 0.29.0
+required UI/entity projections to preserve identity and
+render unknown rather than broadcasting aggregate facts across siblings; 0.28.0
+requires immutable historical reconstruction to be
+single-flight by durable identity, atomically materialized, bounded,
+cancellation-safe, observable, and kept off implicit affinity migration; also
+allows explicit metrics-to-remediation issue actions only with preserved
+evidence, explicit project context, transactional open-incident deduplication,
+and no promotion of alert state into scheduling authority; 0.27.0 required
+execution activity UI to derive from authoritative,
+rehydratable process snapshots, reconnects to recover missed terminal events,
+and shutdown/recovery to classify executions that are no longer provably active;
+0.26.0 required executor-neutral, execution-scoped materialization
+of settings-owned MCP snapshots while keeping live reload capability-specific;
+0.25.0 required accepted lifecycle work to have a persisted,
+single-consumer operation identity, request-independent execution, idempotent
+restart reconciliation, and durable user-visible outcomes; 0.24.0 required explicit, collision-safe, atomic legacy identifier
+migration with label and definition preservation; 0.23.0 required collapsed controls to retain summary-backed,
+responsive decision context; 0.22.0 made Vibe Kanban settings the sole
+MCP-definition authority and limited deployment ownership to runtime
+prerequisites; 0.21.0 added coordinator-authoritative, bounded remote execution
+configuration snapshots with atomic worker materialization and secret-safe
+failure behavior; 0.20.0 added coordinator-owned, serialized affinity migration with
+truthful durable-boundary outcomes and at-most-once continuation; 0.19.0 added
+one-convention-per-concept — reuse the existing
+resolution rule rather than re-deriving it, accept the producer's default value,
+and report failures with the fact that identifies them instead of a generic
+internal error; also makes writes into a consolidated shared namespace additive
+by default; 0.18.0 added cross-node path portability — node-identical shared
+paths, structural rather than textual assertions, no same-named-local fallback,
+two-sided pointer repair, level-triggered enforcement, and re-derived blast
+radius for consolidated namespaces; 0.17.0 added observability as a read-only
+surface; 0.16.0 added affinity-bound, evidence-backed distributed execution)

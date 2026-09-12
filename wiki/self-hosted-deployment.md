@@ -25,17 +25,38 @@ Unset (CI, local dev), the build behaves exactly as before. Key properties:
 - **Self-describing** — `release.json.sha` lets a reconciler compare
   "deployed" to "desired" mechanically. It equals the stamp SHA because the
   deploy host builds a worktree pinned to the stamp.
-- **Stage/flip split** — binaries are *staged* before the remote-web static
-  publish and *flipped* after it, so a mid-script failure can't leave the
-  remote frontend live on a build whose binaries never shipped; the drift is
-  always detectable via `release.json`.
+- **Stage/flip split** — binaries are fully staged before the atomic `current`
+  flip, so a mid-script failure leaves the previous complete release live and
+  the drift remains detectable via `release.json`.
 - **Locked flip+prune** — `previous`-repoint, `current`-flip, and prune run
   under `$VK_RELEASES_DIR/.publish-lock` (concurrent builders race
   otherwise), and prune never deletes the resolved targets of
   `current`/`previous`.
-- **Same BUILD_ID pairing** — the binary release `build-<id>` and the
-  remote-web static release `build-<id>` come from one script run, which is
-  what lets a health-gate rollback revert *both* consistently.
+- **No remote-web publish** — live UI traffic is served by local-web through
+  the path-splitting Caddy listener. The remote binary handles only API paths,
+  so `/srv/static` is not part of the release or rollback verdict. Remote-web
+  retains its independent frontend CI build and tests.
+
+## Surfacing deployed identity in the UI
+
+Deployment identity should come from the immutable artifact, not from the
+service process. `local-build.sh` now calculates one UTC timestamp before the
+release build, exports it as `VK_BUILD_TIMESTAMP` for the server build script,
+and writes the identical value to `release.json.built_at`. The server exposes
+that optional timestamp beside its embedded `VK_GIT_SHA` through `/api/info`.
+
+This creates one convention for “time since deployed”:
+
+- it means time since the running immutable release was built/published;
+- restarting the service does not reset it, because a restart is not a deploy;
+- unstamped and older builds return no timestamp, so clients retain revision
+  identity without fabricating an age;
+- the browser derives relative age from the timestamp and may update it locally
+  without polling a second deployment endpoint.
+
+Keep the value optional in API contracts. Release-path access is not guaranteed
+for every packaging mode, and reading `current/release.json` on each request
+would couple the server to one host layout unnecessarily.
 
 ## Why services must not run from the source checkout
 
@@ -104,3 +125,4 @@ migrations) completed, because the listener binds only after init.
 ## Contributed by
 
 - vk/f00d-vibe-kanban-depl
+- vk/7596-deploy-status-mo

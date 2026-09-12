@@ -108,6 +108,23 @@
     "label": "Etiqueta"
   },
   "workspaces": {
+    "serverAffinity": {
+      "local": "Local",
+      "automatic": "Ubicación automática",
+      "worker": "Trabajador",
+      "unassigned": "Sin asignar",
+      "current": "Servidor actual",
+      "runOn": "Ejecutar en",
+      "coordinator": "Coordinador",
+      "unavailable": "No disponible",
+      "localDescription": "Esta instancia de Vibe Kanban ejecuta los espacios de trabajo localmente.",
+      "confirmTitle": "¿Migrar la tarea en ejecución?",
+      "confirmMessage": "Vibe Kanban detendrá la tarea actual, cambiará la afinidad del servidor y la iniciará de nuevo con un mensaje de continuación administrado.",
+      "confirmAction": "Detener, migrar y reiniciar",
+      "updated": "Afinidad del servidor actualizada",
+      "updateFailed": "No se pudo actualizar la afinidad del servidor",
+      "restartFailed": "La afinidad cambió, pero no se pudo reiniciar la tarea"
+    },
     "title": "Espacios de trabajo",
     "searchPlaceholder": "Buscar...",
     "active": "Activo",
@@ -117,6 +134,7 @@
     "notFoundDescription": "Es posible que este espacio de trabajo haya sido eliminado o que el enlace sea incorrecto.",
     "selectToStart": "Selecciona un espacio de trabajo para comenzar",
     "draft": "Borrador",
+    "creating": "Creando…",
     "viewArchive": "Ver archivo",
     "backToActive": "Volver a activos",
     "noArchived": "No hay espacios de trabajo archivados",
@@ -189,6 +207,7 @@
     "nextGitHubComment": "Siguiente archivo con comentarios"
   },
   "sections": {
+    "serverAffinity": "Afinidad del servidor",
     "changes": "Cambios",
     "repositories": "Repositorios",
     "addRepositories": "Agregar repositorios",
@@ -515,6 +534,11 @@
       "repoStep": "¿En qué repositorios te gustaría trabajar?",
       "chatStep": "¿En qué te gustaría trabajar?"
     },
+    "worker": {
+      "label": "Ejecutar en",
+      "automatic": "Colocación automática",
+      "coordinator": "Coordinador"
+    },
     "repoPicker": {
       "actions": {
         "recent": "Recientes",
@@ -597,6 +621,24 @@
     "resetToGenerated": "Reset to generated",
     "updateIssue": "Update Issue",
     "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue."
+  },
+  "workspaceCreation": {
+    "creatingTitle": "Creando espacio de trabajo…",
+    "creatingBody": "Puedes salir de esta página. La creación continuará en segundo plano.",
+    "failedTitle": "No se pudo crear el espacio de trabajo",
+    "failedFallback": "Crea un nuevo espacio de trabajo para intentarlo de nuevo."
+  },
+  "metricsDiskAlerts": {
+    "warning": "Poco espacio en disco",
+    "critical": "Espacio en disco crítico",
+    "available": "disponible",
+    "used": "usado",
+    "resolving": "Resolviendo el problema…",
+    "action": "Crear o abrir una incidencia de remediación",
+    "noProject": "Vincula este espacio de trabajo a un proyecto para crear una incidencia.",
+    "resolveFailed": "No se pudo resolver la incidencia de poco espacio en disco: {{error}}",
+    "nodeCount_one": "{{severity}} · {{count}} nodo",
+    "nodeCount_other": "{{severity}} · {{count}} nodos"
   },
   "speckit": {
     "title": "SpecKit",

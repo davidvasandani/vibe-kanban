@@ -1,0 +1,24 @@
+[package]
+name = "node-metrics"
+version = "0.1.43"
+edition = "2024"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+ts-rs = { workspace = true }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# `statvfs` and `sysconf(_SC_CLK_TCK)` have no std equivalent, and there is no
+# way to read a filesystem's size out of `/proc`. `libc` is already in
+# `Cargo.lock` as a transitive dependency of `tokio`, so this adds a direct edge
+# rather than a new crate; it is Linux-gated because `collect.rs` is.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

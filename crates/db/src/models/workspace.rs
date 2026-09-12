@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use executors::actions::{ExecutorAction, ExecutorActionType};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqlitePool, Type, types::Json};
 use thiserror::Error;
 use ts_rs::TS;
 use uuid::Uuid;
@@ -63,6 +63,19 @@ pub struct Workspace {
     /// Which repo worktree hosts `specs/` + `.specify/` for this workspace's
     /// SpecKit artifacts. Persisted at first provisioning.
     pub speckit_host_repo_id: Option<Uuid>,
+    pub creation_status: WorkspaceCreationStatus,
+    pub creation_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Type, TS)]
+#[sqlx(type_name = "workspace_creation_status", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+#[ts(use_ts_enum)]
+pub enum WorkspaceCreationStatus {
+    Queued,
+    Running,
+    Ready,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -99,6 +112,290 @@ pub struct CreateWorkspace {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Type, TS)]
+#[sqlx(type_name = "workspace_placement_state", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+#[ts(use_ts_enum)]
+pub enum WorkspacePlacementState {
+    Local,
+    Reserved,
+    Provisioning,
+    Ready,
+    Failed,
+    Cleaning,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize, TS)]
+pub struct WorkspacePlacement {
+    pub workspace_id: Uuid,
+    pub worker_node_id: Option<Uuid>,
+    pub placement_state: WorkspacePlacementState,
+    pub placed_at: Option<DateTime<Utc>>,
+    pub placement_reason: Option<String>,
+    pub requested_worker_node_id: Option<Uuid>,
+    #[ts(type = "unknown")]
+    pub placement_constraints: Option<Json<serde_json::Value>>,
+}
+
+impl WorkspacePlacement {
+    pub async fn find_all_by_archived(
+        pool: &SqlitePool,
+        archived: bool,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            SELECT id AS workspace_id, worker_node_id, placement_state,
+                   placed_at, placement_reason, requested_worker_node_id,
+                   placement_constraints
+            FROM workspaces
+            WHERE archived = ?
+            "#,
+        )
+        .bind(archived)
+        .fetch_all(pool)
+        .await
+    }
+
+    pub async fn find(pool: &SqlitePool, workspace_id: Uuid) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            SELECT id AS workspace_id, worker_node_id, placement_state,
+                   placed_at, placement_reason, requested_worker_node_id,
+                   placement_constraints
+            FROM workspaces
+            WHERE id = ?
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    pub async fn reserve(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        worker_node_id: Uuid,
+        requested_worker_node_id: Option<Uuid>,
+        constraints: Option<&serde_json::Value>,
+        reason: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET worker_node_id = ?,
+                placement_state = 'reserved',
+                placed_at = datetime('now', 'subsec'),
+                placement_reason = ?,
+                requested_worker_node_id = ?,
+                placement_constraints = ?,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ? AND placement_state = 'local' AND worker_node_id IS NULL
+            "#,
+        )
+        .bind(worker_node_id)
+        .bind(reason)
+        .bind(requested_worker_node_id)
+        .bind(constraints.map(Json))
+        .bind(workspace_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Reassign an already-provisioned clustered workspace to a selected
+    /// worker. The caller must stop workspace-owned processes first. The
+    /// compare-and-set prevents two affinity operations from silently
+    /// overwriting each other after either one awaited process cancellation.
+    pub async fn reassign(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        expected_worker_node_id: Option<Uuid>,
+        worker_node_id: Uuid,
+        requested_worker_node_id: Option<Uuid>,
+        reason: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET worker_node_id = ?,
+                placement_state = 'ready',
+                placed_at = datetime('now', 'subsec'),
+                placement_reason = ?,
+                requested_worker_node_id = ?,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?
+              AND placement_state != 'local'
+              AND worker_node_id IS ?
+            "#,
+        )
+        .bind(worker_node_id)
+        .bind(reason)
+        .bind(requested_worker_node_id)
+        .bind(workspace_id)
+        .bind(expected_worker_node_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Move an already-provisioned clustered workspace back to coordinator
+    /// ownership. The caller must stop workspace-owned processes first. As
+    /// with worker reassignment, the expected worker makes this a compare-and-
+    /// set so concurrent affinity changes cannot overwrite one another. A
+    /// repeated local-to-local write is allowed so durable migration recovery
+    /// can continue after placement committed but before restart creation.
+    pub async fn reassign_to_coordinator(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        expected_worker_node_id: Option<Uuid>,
+        reason: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET worker_node_id = NULL,
+                placement_state = 'local',
+                placed_at = datetime('now', 'subsec'),
+                placement_reason = ?,
+                requested_worker_node_id = NULL,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?
+              AND worker_node_id IS ?
+            "#,
+        )
+        .bind(reason)
+        .bind(workspace_id)
+        .bind(expected_worker_node_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn transition(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        expected: WorkspacePlacementState,
+        next: WorkspacePlacementState,
+        reason: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let allowed = matches!(
+            (expected, next),
+            (
+                WorkspacePlacementState::Reserved,
+                WorkspacePlacementState::Provisioning
+            ) | (
+                WorkspacePlacementState::Provisioning,
+                WorkspacePlacementState::Ready
+            ) | (
+                WorkspacePlacementState::Provisioning,
+                WorkspacePlacementState::Failed
+            )
+        );
+        if !allowed {
+            return Ok(false);
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET placement_state = ?,
+                placement_reason = COALESCE(?, placement_reason),
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ? AND placement_state = ?
+            "#,
+        )
+        .bind(next)
+        .bind(reason)
+        .bind(workspace_id)
+        .bind(expected)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn begin_cleanup(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET placement_state = 'cleaning',
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?
+              AND placement_state = 'ready'
+              AND worker_node_id IN (
+                SELECT id FROM worker_nodes
+                WHERE status = 'online'
+                  AND mount_status = 'healthy'
+                  AND lease_expires_at > ?
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM sessions s
+                JOIN execution_processes ep ON ep.session_id = s.id
+                JOIN execution_worker_jobs ewj ON ewj.execution_process_id = ep.id
+                WHERE s.workspace_id = workspaces.id
+                  AND ewj.dispatch_state NOT IN ('completed', 'failed', 'killed')
+              )
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(now)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Release the dispatch fence after clustered worktree reclamation has
+    /// durably marked the worktree deleted. The deleted flag is part of the
+    /// compare-and-set so a caller cannot reopen a workspace while cleanup is
+    /// still removing it.
+    pub async fn finish_cleanup(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET placement_state = 'ready',
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?
+              AND placement_state = 'cleaning'
+              AND worktree_deleted = TRUE
+            "#,
+        )
+        .bind(workspace_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Release an unsuccessful cleanup claim without declaring the worktree
+    /// deleted. This returns the workspace to the state from which a later
+    /// cleanup sweep or user access can safely retry.
+    pub async fn cancel_cleanup(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE workspaces
+            SET placement_state = 'ready',
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?
+              AND placement_state = 'cleaning'
+              AND worktree_deleted = FALSE
+            "#,
+        )
+        .bind(workspace_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+}
+
 impl Workspace {
     /// Fetch all workspaces. Newest first.
     pub async fn fetch_all(pool: &SqlitePool) -> Result<Vec<Self>, WorkspaceError> {
@@ -117,7 +414,9 @@ impl Workspace {
                           worktree_deleted AS "worktree_deleted!: bool",
                           current_pipeline_stage,
                           speckit_feature_key,
-                          speckit_host_repo_id AS "speckit_host_repo_id: Uuid"
+                          speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                          creation_status AS "creation_status!: WorkspaceCreationStatus",
+                          creation_error
                    FROM workspaces
                    ORDER BY created_at DESC"#
         )
@@ -222,7 +521,9 @@ impl Workspace {
                        worktree_deleted  AS "worktree_deleted!: bool",
                        current_pipeline_stage,
                        speckit_feature_key,
-                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid"
+                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                       creation_status AS "creation_status!: WorkspaceCreationStatus",
+                       creation_error
                FROM    workspaces
                WHERE   id = $1"#,
             id
@@ -247,7 +548,9 @@ impl Workspace {
                        worktree_deleted  AS "worktree_deleted!: bool",
                        current_pipeline_stage,
                        speckit_feature_key,
-                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid"
+                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                       creation_status AS "creation_status!: WorkspaceCreationStatus",
+                       creation_error
                FROM    workspaces
                WHERE   rowid = $1"#,
             rowid
@@ -293,7 +596,9 @@ impl Workspace {
                 w.worktree_deleted as "worktree_deleted!: bool",
                 w.current_pipeline_stage,
                 w.speckit_feature_key,
-                w.speckit_host_repo_id as "speckit_host_repo_id: Uuid"
+                w.speckit_host_repo_id as "speckit_host_repo_id: Uuid",
+                w.creation_status as "creation_status!: WorkspaceCreationStatus",
+                w.creation_error
             FROM workspaces w
             LEFT JOIN sessions s ON w.id = s.workspace_id
             LEFT JOIN execution_processes ep ON s.id = ep.session_id AND ep.completed_at IS NOT NULL
@@ -341,7 +646,7 @@ impl Workspace {
             Workspace,
             r#"INSERT INTO workspaces (id, task_id, container_ref, branch, setup_completed_at, name)
                VALUES ($1, $2, $3, $4, $5, $6)
-               RETURNING id as "id!: Uuid", task_id as "task_id: Uuid", container_ref, branch, setup_completed_at as "setup_completed_at: DateTime<Utc>", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", archived as "archived!: bool", pinned as "pinned!: bool", name, worktree_deleted as "worktree_deleted!: bool", current_pipeline_stage, speckit_feature_key, speckit_host_repo_id as "speckit_host_repo_id: Uuid""#,
+               RETURNING id as "id!: Uuid", task_id as "task_id: Uuid", container_ref, branch, setup_completed_at as "setup_completed_at: DateTime<Utc>", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", archived as "archived!: bool", pinned as "pinned!: bool", name, worktree_deleted as "worktree_deleted!: bool", current_pipeline_stage, speckit_feature_key, speckit_host_repo_id as "speckit_host_repo_id: Uuid", creation_status as "creation_status!: WorkspaceCreationStatus", creation_error"#,
             id,
             Option::<Uuid>::None,
             Option::<String>::None,
@@ -351,6 +656,86 @@ impl Workspace {
         )
         .fetch_one(pool)
         .await?)
+    }
+
+    pub async fn queue_creation(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query!(
+            r#"UPDATE workspaces
+               SET creation_status = 'queued', creation_error = NULL,
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = ? AND creation_status = 'ready'"#,
+            workspace_id
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn claim_creation(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query!(
+            r#"UPDATE workspaces
+               SET creation_status = 'running', creation_error = NULL,
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = ? AND creation_status = 'queued'"#,
+            workspace_id
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn finish_creation(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query!(
+            r#"UPDATE workspaces
+               SET creation_status = 'ready', creation_error = NULL,
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = ? AND creation_status = 'running'"#,
+            workspace_id
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn fail_creation(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        error: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query!(
+            r#"UPDATE workspaces
+               SET creation_status = 'failed', creation_error = ?,
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = ? AND creation_status IN ('queued', 'running')"#,
+            error,
+            workspace_id
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn fail_unfinished_creations(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query!(
+            r#"UPDATE workspaces
+               SET creation_status = 'failed',
+                   creation_error = 'Workspace creation was interrupted by a server restart. Create a new workspace to try again.',
+                   updated_at = datetime('now', 'subsec')
+               WHERE creation_status IN ('queued', 'running')"#
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(result.rows_affected())
     }
 
     pub async fn update_branch_name(
@@ -532,7 +917,9 @@ impl Workspace {
                        worktree_deleted  AS "worktree_deleted!: bool",
                        current_pipeline_stage,
                        speckit_feature_key,
-                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid"
+                       speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                       creation_status AS "creation_status!: WorkspaceCreationStatus",
+                       creation_error
                FROM    workspaces
                WHERE   task_id = $1 AND worktree_deleted = FALSE
                ORDER BY created_at DESC
@@ -652,6 +1039,8 @@ impl Workspace {
                 w.current_pipeline_stage,
                 w.speckit_feature_key,
                 w.speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                w.creation_status AS "creation_status!: WorkspaceCreationStatus",
+                w.creation_error,
 
                 CASE WHEN EXISTS (
                     SELECT 1
@@ -697,6 +1086,8 @@ impl Workspace {
                     current_pipeline_stage: rec.current_pipeline_stage,
                     speckit_feature_key: rec.speckit_feature_key,
                     speckit_host_repo_id: rec.speckit_host_repo_id,
+                    creation_status: rec.creation_status,
+                    creation_error: rec.creation_error,
                 },
                 is_running: rec.is_running != 0,
                 is_errored: rec.is_errored != 0,
@@ -752,6 +1143,8 @@ impl Workspace {
                 w.current_pipeline_stage,
                 w.speckit_feature_key,
                 w.speckit_host_repo_id AS "speckit_host_repo_id: Uuid",
+                w.creation_status AS "creation_status!: WorkspaceCreationStatus",
+                w.creation_error,
 
                 CASE WHEN EXISTS (
                     SELECT 1
@@ -800,6 +1193,8 @@ impl Workspace {
                 current_pipeline_stage: rec.current_pipeline_stage,
                 speckit_feature_key: rec.speckit_feature_key,
                 speckit_host_repo_id: rec.speckit_host_repo_id,
+                creation_status: rec.creation_status,
+                creation_error: rec.creation_error,
             },
             is_running: rec.is_running != 0,
             is_errored: rec.is_errored != 0,
@@ -819,9 +1214,14 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use uuid::Uuid;
 
-    use super::{CreateWorkspace, Workspace};
+    use super::{
+        CreateWorkspace, Workspace, WorkspaceCreationStatus, WorkspacePlacement,
+        WorkspacePlacementState,
+    };
+    use crate::models::worker_node::{UpsertWorkerNode, WorkerMountStatus, WorkerNode};
 
     async fn test_pool() -> sqlx::SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -831,6 +1231,87 @@ mod tests {
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn creation_lifecycle_has_a_single_claim_and_terminal_state() {
+        let pool = test_pool().await;
+        let workspace = Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "vk/background-create-test".to_string(),
+                name: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(workspace.creation_status, WorkspaceCreationStatus::Ready);
+        assert!(
+            Workspace::queue_creation(&pool, workspace.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            Workspace::claim_creation(&pool, workspace.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !Workspace::claim_creation(&pool, workspace.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            Workspace::finish_creation(&pool, workspace.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !Workspace::fail_creation(&pool, workspace.id, "late failure")
+                .await
+                .unwrap()
+        );
+
+        let workspace = Workspace::find_by_id(&pool, workspace.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(workspace.creation_status, WorkspaceCreationStatus::Ready);
+        assert_eq!(workspace.creation_error, None);
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_fails_unfinished_creation_without_execution() {
+        let pool = test_pool().await;
+        let workspace = Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "vk/interrupted-create-test".to_string(),
+                name: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+        Workspace::queue_creation(&pool, workspace.id)
+            .await
+            .unwrap();
+        Workspace::claim_creation(&pool, workspace.id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            Workspace::fail_unfinished_creations(&pool).await.unwrap(),
+            1
+        );
+        let workspace = Workspace::find_by_id(&pool, workspace.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(workspace.creation_status, WorkspaceCreationStatus::Failed);
+        assert!(workspace.creation_error.unwrap().contains("server restart"));
     }
 
     #[tokio::test]
@@ -883,6 +1364,181 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn placement_is_sticky_and_transitions_forward() {
+        let pool = test_pool().await;
+        let workspace = Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "vk/cluster-placement-test".to_string(),
+                name: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+        let now = Utc::now();
+        let worker_id = Uuid::new_v4();
+        WorkerNode::upsert_heartbeat(
+            &pool,
+            &UpsertWorkerNode {
+                id: worker_id,
+                hostname: "think3".into(),
+                worker_version: "1".into(),
+                vibe_version: "1".into(),
+                capabilities: serde_json::json!({}),
+                resource_snapshot: serde_json::json!({}),
+                labels: serde_json::json!({}),
+                mount_status: WorkerMountStatus::Healthy,
+                mount_message: None,
+                heartbeat_at: now,
+                lease_expires_at: now + chrono::Duration::seconds(30),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            WorkspacePlacement::reserve(
+                &pool,
+                workspace.id,
+                worker_id,
+                None,
+                None,
+                Some("automatic"),
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !WorkspacePlacement::reserve(&pool, workspace.id, Uuid::new_v4(), None, None, None,)
+                .await
+                .unwrap()
+        );
+        assert!(
+            WorkspacePlacement::transition(
+                &pool,
+                workspace.id,
+                WorkspacePlacementState::Reserved,
+                WorkspacePlacementState::Provisioning,
+                None,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            WorkspacePlacement::transition(
+                &pool,
+                workspace.id,
+                WorkspacePlacementState::Provisioning,
+                WorkspacePlacementState::Ready,
+                Some("provisioned"),
+            )
+            .await
+            .unwrap()
+        );
+
+        let placement = WorkspacePlacement::find(&pool, workspace.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(placement.worker_node_id, Some(worker_id));
+        assert_eq!(placement.placement_state, WorkspacePlacementState::Ready);
+        assert_eq!(placement.placement_reason.as_deref(), Some("provisioned"));
+
+        let replacement_id = Uuid::new_v4();
+        WorkerNode::upsert_heartbeat(
+            &pool,
+            &UpsertWorkerNode {
+                id: replacement_id,
+                hostname: "think4".into(),
+                worker_version: "1".into(),
+                vibe_version: "1".into(),
+                capabilities: serde_json::json!({}),
+                resource_snapshot: serde_json::json!({}),
+                labels: serde_json::json!({}),
+                mount_status: WorkerMountStatus::Healthy,
+                mount_message: None,
+                heartbeat_at: now,
+                lease_expires_at: now + chrono::Duration::seconds(30),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            WorkspacePlacement::reassign(
+                &pool,
+                workspace.id,
+                Some(worker_id),
+                replacement_id,
+                Some(replacement_id),
+                "manual worker affinity update",
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !WorkspacePlacement::reassign(
+                &pool,
+                workspace.id,
+                Some(worker_id),
+                worker_id,
+                Some(worker_id),
+                "stale update",
+            )
+            .await
+            .unwrap()
+        );
+        let reassigned = WorkspacePlacement::find(&pool, workspace.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reassigned.worker_node_id, Some(replacement_id));
+        assert_eq!(reassigned.requested_worker_node_id, Some(replacement_id));
+
+        assert!(
+            WorkspacePlacement::reassign_to_coordinator(
+                &pool,
+                workspace.id,
+                Some(replacement_id),
+                "coordinator affinity update",
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !WorkspacePlacement::reassign_to_coordinator(
+                &pool,
+                workspace.id,
+                Some(worker_id),
+                "stale coordinator update",
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            WorkspacePlacement::reassign_to_coordinator(
+                &pool,
+                workspace.id,
+                None,
+                "coordinator affinity recovery",
+            )
+            .await
+            .unwrap()
+        );
+        let local = WorkspacePlacement::find(&pool, workspace.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(local.worker_node_id, None);
+        assert_eq!(local.requested_worker_node_id, None);
+        assert_eq!(local.placement_state, WorkspacePlacementState::Local);
+        assert_eq!(
+            local.placement_reason.as_deref(),
+            Some("coordinator affinity recovery")
         );
     }
 

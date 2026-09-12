@@ -1,0 +1,80 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id as \"id!: Uuid\", workspace_id as \"workspace_id!: Uuid\", host_id, profile, status as \"status!: BrowserSessionDbStatus\", current_url, pgid, created_at as \"created_at!: DateTime<Utc>\", updated_at as \"updated_at!: DateTime<Utc>\", closed_at as \"closed_at: DateTime<Utc>\", expires_at as \"expires_at: DateTime<Utc>\"\n               FROM browser_sessions\n               WHERE workspace_id = $1 AND ($2 OR status NOT IN ('closed', 'failed'))\n               ORDER BY created_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: Uuid",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "workspace_id!: Uuid",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "host_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "profile",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "status!: BrowserSessionDbStatus",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "current_url",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "pgid",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: DateTime<Utc>",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at!: DateTime<Utc>",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "closed_at: DateTime<Utc>",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at: DateTime<Utc>",
+        "ordinal": 10,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "c74e68f243fbe8a74f7ac2ecb419880bd8c656a9598a8e50ee265ae73d237704"
+}

@@ -16,6 +16,19 @@ interface UseExecutionProcessesResult {
   error: string | null;
 }
 
+export function hasRunningAttempt(
+  executionProcesses: Pick<ExecutionProcess, 'run_reason' | 'status'>[]
+): boolean {
+  return executionProcesses.some(
+    (process) =>
+      (process.run_reason === 'codingagent' ||
+        process.run_reason === 'setupscript' ||
+        process.run_reason === 'cleanupscript' ||
+        process.run_reason === 'archivescript') &&
+      process.status === 'running'
+  );
+}
+
 /**
  * Stream execution processes for a session via WebSocket (JSON Patch) and expose as array + map.
  * Server sends initial snapshot: replace /execution_processes with an object keyed by id.
@@ -72,14 +85,7 @@ export const useExecutionProcesses = (
     return processesById;
   }, {});
 
-  const isAttemptRunning = executionProcesses.some(
-    (process) =>
-      (process.run_reason === 'codingagent' ||
-        process.run_reason === 'setupscript' ||
-        process.run_reason === 'cleanupscript' ||
-        process.run_reason === 'archivescript') &&
-      process.status === 'running'
-  );
+  const isAttemptRunning = hasRunningAttempt(executionProcesses);
   const isLoading = !!sessionId && !isInitialized && !error; // until first snapshot
 
   return {

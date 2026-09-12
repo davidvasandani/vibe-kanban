@@ -30,7 +30,13 @@ export type CreateTag = { tag_name: string, content: string, };
 
 export type UpdateTag = { tag_name: string | null, content: string | null, };
 
-export type BrowserSession = { id: string, workspace_id: string, host_id: string, profile: string | null, status: BrowserSessionDbStatus, current_url: string | null, created_at: string, updated_at: string, closed_at: string | null, expires_at: string | null, };
+export type BrowserSession = { id: string, workspace_id: string, host_id: string, profile: string | null, status: BrowserSessionDbStatus, current_url: string | null, 
+/**
+ * OS process group id of the spawned Chromium process group, used to
+ * clean up orphaned process groups after a server crash. Not
+ * meaningful across machines.
+ */
+pgid: bigint | null, created_at: string, updated_at: string, closed_at: string | null, expires_at: string | null, };
 
 export enum BrowserSessionDbStatus { starting = "starting", running = "running", closed = "closed", failed = "failed" }
 
@@ -238,7 +244,7 @@ speckit_feature_key: string | null,
  * Which repo worktree hosts `specs/` + `.specify/` for this workspace's
  * SpecKit artifacts. Persisted at first provisioning.
  */
-speckit_host_repo_id: string | null, };
+speckit_host_repo_id: string | null, creation_status: WorkspaceCreationStatus, creation_error: string | null, };
 
 export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, 
 /**
@@ -258,7 +264,202 @@ speckit_feature_key: string | null,
  * Which repo worktree hosts `specs/` + `.specify/` for this workspace's
  * SpecKit artifacts. Persisted at first provisioning.
  */
-speckit_host_repo_id: string | null, };
+speckit_host_repo_id: string | null, creation_status: WorkspaceCreationStatus, creation_error: string | null, };
+
+export type WorkspacePlacement = { workspace_id: string, worker_node_id: string | null, placement_state: WorkspacePlacementState, placed_at: string | null, placement_reason: string | null, requested_worker_node_id: string | null, placement_constraints: unknown, };
+
+export enum WorkspacePlacementState { local = "local", reserved = "reserved", provisioning = "provisioning", ready = "ready", failed = "failed", cleaning = "cleaning" }
+
+export enum WorkspaceCreationStatus { queued = "queued", running = "running", ready = "ready", failed = "failed" }
+
+export type WorkerNode = { id: string, hostname: string, status: WorkerNodeStatus, worker_version: string, vibe_version: string, capabilities: unknown, resource_snapshot: unknown, labels: unknown, mount_status: WorkerMountStatus, mount_message: string | null, last_heartbeat_at: string | null, lease_expires_at: string | null, created_at: string, updated_at: string, };
+
+export enum WorkerNodeStatus { online = "online", offline = "offline", draining = "draining" }
+
+export enum WorkerMountStatus { healthy = "healthy", missing = "missing", local_fallback = "local_fallback", wrong_filesystem = "wrong_filesystem", probe_not_visible = "probe_not_visible", read_only = "read_only", ownership_mismatch = "ownership_mismatch", io_error = "io_error" }
+
+export type UpdateWorkspaceAffinityRequest = { 
+/**
+ * Explicitly move the workspace back to coordinator-local execution.
+ */
+run_on_coordinator: boolean, requested_worker_node_id: string | null, restart_running: boolean, operation_id: string | null, };
+
+export enum WorkspaceAffinityUpdateOutcome { updated = "updated", restarted = "restarted", restart_failed = "restart_failed", session_transfer_failed = "session_transfer_failed" }
+
+export type WorkspaceAffinityUpdateResponse = { placement: WorkspacePlacement, outcome: WorkspaceAffinityUpdateOutcome, stopped_execution_id: string | null, started_execution: ExecutionProcess | null, message: string | null, };
+
+export enum WorkspaceAffinityKind { local = "local", automatic = "automatic", worker = "worker", unassigned = "unassigned" }
+
+export type WorkspaceAffinitySummary = { kind: WorkspaceAffinityKind, placement_state: WorkspacePlacementState, worker_node_id: string | null, worker_hostname: string | null, requested_worker_node_id: string | null, requested_worker_hostname: string | null, };
+
+export type CpuSample = { model: string | null, core_count: number | null, 
+/**
+ * `1 − Δidle/Δtotal`. `None` until a predecessor exists.
+ */
+total_busy_percent: number | null, 
+/**
+ * One entry per **online** core, each tagged with the kernel's own `cpuN`
+ * index.
+ *
+ * Tagged rather than positional because `/proc/stat` omits offline CPUs:
+ * with cpu1 offline the second entry is cpu2, and a reader labelling by
+ * array position would show cpu2's utilisation as "core 1". Replaced
+ * wholesale, never patched per element, so a core count change cannot
+ * misalign it.
+ */
+per_core_busy: Array<CoreBusy> | null, load_1m: number | null, load_5m: number | null, load_15m: number | null, frequency_mhz: number | null, temperature_celsius: number | null, };
+
+export type CoreBusy = { 
+/**
+ * The `N` of `cpuN`.
+ */
+core: number, busy_percent: number, };
+
+export type MemorySample = { total_bytes: bigint | null, available_bytes: bigint | null, 
+/**
+ * `total − available`, deliberately not `total − free`: `MemFree` excludes
+ * reclaimable page cache and makes a healthy Linux box look full.
+ */
+used_bytes: bigint | null, 
+/**
+ * `Cached + SReclaimable`.
+ */
+cached_bytes: bigint | null, swap_total_bytes: bigint | null, swap_used_bytes: bigint | null, };
+
+export type FilesystemSample = { mount_point: string, device: string, fs_type: string, 
+/**
+ * `None` if `statvfs` failed on an otherwise-listed mount — a stalled NFS
+ * server is the common case, and reporting it as 0 bytes would be a lie
+ * about the one filesystem this panel most exists to watch.
+ */
+total_bytes: bigint | null, used_bytes: bigint | null, available_bytes: bigint | null, };
+
+export type DiskAlertThresholds = { warning_free_percent: number, warning_free_bytes: bigint, critical_free_percent: number, critical_free_bytes: bigint, };
+
+export type NetworkSample = { interface: string, rx_bytes_total: bigint, tx_bytes_total: bigint, 
+/**
+ * `None` on the first sample and whenever the counter has gone backwards
+ * (interface reset), in which case a `degraded` note records it. A zero
+ * here would read as "no traffic", which is a different and false claim.
+ */
+rx_bytes_per_second: bigint | null, tx_bytes_per_second: bigint | null, };
+
+export type ProcessSample = { pid: number, 
+/**
+ * `/proc/[pid]/stat` field 22. Identity only, never displayed.
+ */
+start_ticks: bigint, name: string, user: string | null, 
+/**
+ * Already redacted and truncated to 256 characters. The redactor runs
+ * inside the collector, so an unredacted command line cannot be held by
+ * this type at any point.
+ */
+command: string, 
+/**
+ * `Δ(utime+stime) / (ticks_per_second × Δs) × 100`, capped at
+ * `core_count × 100`. `None` for a process first seen this sample.
+ */
+cpu_percent: number | null, memory_bytes: bigint | null, thread_count: number | null, };
+
+export type HostSample = { 
+/**
+ * Monotonic per sampler and never reused; the cursor consumers advance.
+ */
+sequence: bigint, 
+/**
+ * Read at sample time. This is the only source of a node's hostname —
+ * `ClusterConfig` carries no such field.
+ */
+hostname: string, captured_at: string, 
+/**
+ * Real elapsed time since the previous sample, not the configured
+ * interval, so a delayed tick still produces a correctly scaled rate.
+ * `None` on the first sample.
+ */
+interval_ms: bigint | null, uptime_seconds: bigint | null, cpu: CpuSample, memory: MemorySample, 
+/**
+ * `None` if the mount table was unreadable — distinct from "no
+ * filesystems", which is an empty `Vec`.
+ */
+filesystems: Array<FilesystemSample> | null, 
+/**
+ * `None` if `/proc/net/dev` was unreadable.
+ */
+networks: Array<NetworkSample> | null, 
+/**
+ * Populated on the newest sample only. Retained history entries carry
+ * `None`: the table is roughly 80% of a sample's size and nothing plots it
+ * over time. `Option` rather than an empty `Vec` because an empty list
+ * would be indistinguishable from "no processes were readable".
+ */
+processes: Array<ProcessSample> | null, 
+/**
+ * Human-readable notes about what could not be read. Bounded: collectors
+ * summarise repeated failures into one note rather than one per failure.
+ */
+degraded: Array<string>, };
+
+export type SampleBatch = { 
+/**
+ * Oldest → newest, those with `sequence > after`.
+ */
+samples: Array<HostSample>, 
+/**
+ * A cursor below this has fallen out of the ring; see [`SampleBatch::has_gap`].
+ */
+earliest_retained_sequence: bigint, latest_sequence: bigint, };
+
+export type NodeRole = "coordinator" | "worker";
+
+export type NodeMetricsAvailability = { "status": "available" } | { "status": "stale", since: string, } | { "status": "not_collected" } | { "status": "unsupported", platform: string, } | { "status": "unreachable", reason: string, } | { "status": "not_implemented" };
+
+export type NodeHealth = { 
+/**
+ * `worker_nodes.status`, adjusted **in memory** for a lapsed lease.
+ */
+status: WorkerNodeStatus, 
+/**
+ * `None` for the coordinator, which has no worker row.
+ */
+mount_status: WorkerMountStatus | null, lease_expires_at: string | null, 
+/**
+ * `status == online && mount_status == healthy`, matching the derivation
+ * the workers settings section already renders.
+ */
+schedulable: boolean, };
+
+export type MetricsNode = { node_id: string, 
+/**
+ * From the host's own sample where one exists, falling back to
+ * `worker_nodes.hostname` — the sample is authoritative because it was
+ * read on the machine being described.
+ */
+hostname: string, role: NodeRole, 
+/**
+ * `None` for the coordinator, which has no worker row to judge it by.
+ */
+health: NodeHealth | null, availability: NodeMetricsAvailability, 
+/**
+ * The only sample carrying a process table.
+ */
+latest: HostSample | null, 
+/**
+ * Bounded; `processes` is `None` on every entry.
+ */
+history: Array<HostSample>, last_contact_at: string | null, };
+
+export type ClusterMetricsSnapshot = { 
+/**
+ * **A map, not a `Vec`.** Node-keyed addressing is what lets a worker
+ * register or deregister mid-stream without shifting an index and landing
+ * a `replace` on the wrong row.
+ */
+nodes: { [key in string]?: MetricsNode }, generated_at: string, 
+/**
+ * Served rather than hardcoded on the client, so the sparkline x-axis
+ * stays correct if the cadence ever changes.
+ */
+sample_interval_ms: bigint, disk_alert_thresholds: DiskAlertThresholds, };
 
 export type Session = { id: string, workspace_id: string, name: string | null, executor: string | null, agent_working_dir: string | null, created_at: string, updated_at: string, };
 
@@ -275,9 +476,13 @@ pgid: bigint | null,
  */
 dropped: boolean, started_at: string, completed_at: string | null, created_at: string, updated_at: string, };
 
-export enum ExecutionProcessStatus { running = "running", completed = "completed", failed = "failed", killed = "killed", interrupted = "interrupted" }
+export enum ExecutionProcessStatus { running = "running", completed = "completed", failed = "failed", killed = "killed", interrupted = "interrupted", indeterminate = "indeterminate" }
 
 export type ExecutionProcessRunReason = "setupscript" | "cleanupscript" | "archivescript" | "codingagent" | "devserver" | "backgroundhelper";
+
+export type ExecutionWorkerJob = { execution_process_id: string, worker_node_id: string, worker_job_id: string, request_digest: string, dispatch_state: ExecutionWorkerDispatchState, last_event_sequence: bigint, worker_last_sequence: bigint, lease_expires_at: string | null, output_complete: boolean, terminal_evidence: unknown, dispatched_at: string, accepted_at: string | null, completed_at: string | null, created_at: string, updated_at: string, };
+
+export enum ExecutionWorkerDispatchState { pending = "pending", accepted = "accepted", starting = "starting", running = "running", cancelling = "cancelling", completed = "completed", failed = "failed", killed = "killed", interrupted = "interrupted", indeterminate = "indeterminate", quarantined = "quarantined" }
 
 export type ExecutionProcessRepoState = { id: string, execution_process_id: string, repo_id: string, before_head_commit: string | null, after_head_commit: string | null, merge_commit: string | null, created_at: Date, updated_at: Date, };
 
@@ -387,7 +592,7 @@ export type TagSearchParams = { search: string | null, };
 
 export type TokenResponse = { access_token: string, expires_at: string | null, };
 
-export type UserSystemInfo = { version: string, config: Config, machine_id: string, login_status: LoginStatus, remote_auth_degraded: string | null, environment: Environment, 
+export type UserSystemInfo = { version: string, deployment_timestamp: string | null, config: Config, machine_id: string, login_status: LoginStatus, remote_auth_degraded: string | null, environment: Environment, 
 /**
  * Capabilities supported per executor (e.g., { "CLAUDE_CODE": ["SESSION_FORK"] })
  */
@@ -431,17 +636,17 @@ export type SharedMcpAuthMode = "shared_gateway" | "agent_native" | "explicit_he
 
 export type SharedMcpCompatibility = { executor: BaseCodingAgent, compatible: boolean, reason: string | null, };
 
-export type SharedMcpServer = { name: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, source_kind: SharedMcpSourceKind, native_sources: Array<NativeMcpSource>, compatibility: Array<SharedMcpCompatibility>, auth_mode: SharedMcpAuthMode, gateway_status: string | null, };
+export type SharedMcpServer = { name: string, display_name: string | null, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, source_kind: SharedMcpSourceKind, native_sources: Array<NativeMcpSource>, compatibility: Array<SharedMcpCompatibility>, auth_mode: SharedMcpAuthMode, gateway_status: string | null, runtime_route_configured: boolean, };
 
 export type SharedMcpConflictVariant = { variant_id: string, definition: McpServerDefinition, assignments: Array<SharedMcpAssignment>, native_sources: Array<NativeMcpSource>, };
 
-export type SharedMcpConflict = { name: string, variants: Array<SharedMcpConflictVariant>, message: string, };
+export type SharedMcpConflict = { name: string, display_name: string | null, variants: Array<SharedMcpConflictVariant>, message: string, };
 
 export type SharedMcpProfileError = { executor: BaseCodingAgent, config_path: string | null, error: string, };
 
-export type SharedMcpReadResponse = { profiles: Array<SharedMcpProfile>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, preconfigured: JsonValue, read_errors: Array<SharedMcpProfileError>, };
+export type SharedMcpReadResponse = { profiles: Array<SharedMcpProfile>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, preconfigured: JsonValue, read_errors: Array<SharedMcpProfileError>, metadata_error: string | null, };
 
-export type SharedMcpServerInput = { name: string, definition: McpServerDefinition, assignments: Array<BaseCodingAgent>, native_overrides: { [key in BaseCodingAgent]?: JsonValue }, };
+export type SharedMcpServerInput = { name: string, display_name: string | null, definition: McpServerDefinition, assignments: Array<BaseCodingAgent>, native_overrides: { [key in BaseCodingAgent]?: JsonValue }, };
 
 export type SharedMcpConflictResolution = { name: string, };
 
@@ -453,7 +658,7 @@ export type SharedMcpProfileWriteStatus = "success" | "skipped" | "failed";
 
 export type SharedMcpProfileWriteOutcome = { executor: BaseCodingAgent, config_path: string | null, status: SharedMcpProfileWriteStatus, affected_servers: Array<string>, message: string | null, error: string | null, };
 
-export type SharedMcpWriteResponse = { status: SharedMcpWriteStatus, outcomes: Array<SharedMcpProfileWriteOutcome>, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, };
+export type SharedMcpWriteResponse = { status: SharedMcpWriteStatus, outcomes: Array<SharedMcpProfileWriteOutcome>, metadata_error: string | null, servers: Array<SharedMcpServer>, conflicts: Array<SharedMcpConflict>, };
 
 export type SharedMcpTestTarget = { server_name: string, executor: BaseCodingAgent, };
 
@@ -537,11 +742,29 @@ export type AwsSsoProfile = { name: string, sso_start_url: string, sso_region: s
 
 export type AwsAuthStatus = { "status": "authenticated", identity: string, } | { "status": "unauthenticated" } | { "status": "unknown", message: string, } | { "status": "cli_missing" };
 
+export type AwsSsoAuthScope = { 
+/**
+ * Namespaced stable key (`session:<name>` or `start-url:<url>`).
+ */
+key: string, 
+/**
+ * Named session, or the start URL for a legacy inline profile.
+ */
+label: string, 
+/**
+ * Present for modern profiles backed by `[sso-session <name>]`.
+ */
+session_name: string | null, };
+
 export type AwsSsoProfileStatus = { profile: AwsSsoProfile, auth: AwsAuthStatus, 
 /**
  * False for `[default]` (list/sign-in only): VK never rewrites it.
  */
-editable: boolean, };
+editable: boolean, 
+/**
+ * Shared AWS CLI token-cache identity used to group authentication UI.
+ */
+auth_scope: AwsSsoAuthScope, };
 
 export type AwsSsoSession = { name: string, sso_start_url: string, sso_region: string, };
 
@@ -667,6 +890,26 @@ script: string,
  */
 working_dir: string | null, };
 
+export type StartPollerError = { "type": "empty_command" } | { "type": "invalid_interval" } | { "type": "invalid_working_dir" } | { "type": "too_many_helpers" };
+
+export type StartPollerRequest = { 
+/**
+ * Command to run on each tick.
+ */
+command: string, 
+/**
+ * Seconds between ticks.
+ */
+interval_secs: number, 
+/**
+ * Optional path to run the command in, relative to the workspace root.
+ */
+working_dir: string | null, };
+
+export type PollerSummary = { id: string, status: ExecutionProcessStatus, command: string, interval_secs: number, working_dir: string | null, started_at: string, };
+
+export type ListPollersResponse = { pollers: Array<PollerSummary>, count: number, };
+
 export type AssociateWorkspaceAttachmentsRequest = { attachment_ids: Array<string>, };
 
 export type ImportIssueAttachmentsRequest = { issue_id: string, };
@@ -683,9 +926,17 @@ export type GetPrCommentsError = { "type": "no_pr_attached" } | { "type": "cli_n
 
 export type GetPrCommentsQuery = { repo_id: string, };
 
-export type CreateAndStartWorkspaceRequest = { name: string | null, repos: Array<WorkspaceRepoInput>, linked_issue: LinkedIssueInfo | null, executor_config: ExecutorConfig, prompt: string, attachment_ids: Array<string> | null, };
+export type CreateAndStartWorkspaceRequest = { name: string | null, repos: Array<WorkspaceRepoInput>, linked_issue: LinkedIssueInfo | null, executor_config: ExecutorConfig, prompt: string, attachment_ids: Array<string> | null, 
+/**
+ * Explicitly retain coordinator-local placement in cluster mode.
+ */
+run_on_coordinator: boolean, 
+/**
+ * Optional manual placement override. `None` uses automatic scheduling.
+ */
+requested_worker_node_id: string | null, };
 
-export type CreateAndStartWorkspaceResponse = { workspace: Workspace, execution_process: ExecutionProcess, };
+export type CreateAndStartWorkspaceResponse = { workspace: Workspace, };
 
 export type UnifiedPrComment = { "comment_type": "general", id: string, author: string, author_association: string | null, body: string, created_at: string, url: string | null, } | { "comment_type": "review", id: bigint, author: string, author_association: string | null, body: string, created_at: string, url: string | null, path: string, line: bigint | null, side: string | null, diff_hunk: string | null, };
 
@@ -761,7 +1012,7 @@ pr_number: bigint | null,
 /**
  * PR URL for this workspace (if any PR exists)
  */
-pr_url: string | null, };
+pr_url: string | null, affinity: WorkspaceAffinitySummary, };
 
 export type WorkspaceSummaryResponse = { summaries: Array<WorkspaceSummary>, };
 
@@ -981,7 +1232,7 @@ data: DraftFollowUpData,
 /**
  * Timestamp when the message was queued
  */
-queued_at: string, };
+queued_at: string, restart_agent: boolean, };
 
 export type QueueStatus = { "status": "empty" } | { "status": "queued", message: QueuedMessage, };
 
@@ -993,15 +1244,29 @@ export type McpConfig = { servers: { [key in string]?: JsonValue }, servers_path
 
 export type McpRefreshStatus = "pending_next_turn" | "refreshed" | "partially_refreshed" | "busy" | "unsupported" | "failed";
 
-export type McpRefreshErrorCategory = "executable_unavailable" | "process_launch_failed" | "initialize_failed" | "authentication_failed" | "capability_list_failed" | "invalid_capability_schema" | "timeout" | "refresh_in_progress" | "active_call" | "unsupported" | "internal";
+export type McpRefreshErrorCategory = "executable_unavailable" | "process_launch_failed" | "initialize_failed" | "authentication_failed" | "capability_list_failed" | "invalid_capability_schema" | "timeout" | "refresh_in_progress" | "active_call" | "materialization_failed" | "reload_failed" | "unsupported" | "internal";
 
 export type McpRefreshError = { category: McpRefreshErrorCategory, message: string, remediation: string, retryable: boolean, };
 
 export type McpServerRefreshStatus = "ready" | "failed_retained" | "failed_unavailable" | "removed" | "disabled";
 
-export type McpServerRefreshSnapshot = { server_id: string, status: McpServerRefreshStatus, tool_count: number | null, resource_count: number | null, prompt_count: number | null, restart_occurred: boolean | null, error: McpRefreshError | null, };
+export type McpServerRefreshSnapshot = { server_id: string, status: McpServerRefreshStatus, tool_count: number | null, 
+/**
+ * Sorted tool identifiers from the executor-owned, post-start inventory.
+ */
+tool_names: Array<string> | null, 
+/**
+ * SHA-256 of sorted tool identifiers and their input/output schemas.
+ */
+tool_schema_fingerprint: string | null, resource_count: number | null, prompt_count: number | null, restart_occurred: boolean | null, error: McpRefreshError | null, };
 
-export type McpRefreshResult = { status: McpRefreshStatus, retryable: boolean, generation: bigint, requested_at: string, last_successful_refresh_at: string | null, servers: Array<McpServerRefreshSnapshot>, error: McpRefreshError | null, };
+export type McpRefreshResult = { status: McpRefreshStatus, retryable: boolean, generation: bigint, requested_at: string, last_successful_refresh_at: string | null, 
+/**
+ * Settings-owned server identifiers expected for the selected executor.
+ * This is definition metadata only; definitions, headers, and env values
+ * must never cross this status boundary.
+ */
+configured_server_ids: Array<string>, servers: Array<McpServerRefreshSnapshot>, error: McpRefreshError | null, };
 
 export type ExecutorActionType = { "type": "CodingAgentInitialRequest" } & CodingAgentInitialRequest | { "type": "CodingAgentFollowUpRequest" } & CodingAgentFollowUpRequest | { "type": "ScriptRequest" } & ScriptRequest | { "type": "ReviewRequest" } & ReviewRequest;
 
@@ -1031,6 +1296,17 @@ reasoning_id?: string | null,
  */
 permission_policy?: PermissionPolicy | null, };
 
+export type PollerSpec = { 
+/**
+ * The command run on each tick, as supplied by the agent.
+ */
+command: string, 
+/**
+ * Seconds between ticks. Validated to
+ * `[MIN_POLLER_INTERVAL_SECS, MAX_POLLER_INTERVAL_SECS]`; zero is rejected.
+ */
+interval_secs: number, };
+
 export type ScriptContext = "SetupScript" | "CleanupScript" | "ArchiveScript" | "DevServer" | "ToolInstallScript" | "BackgroundHelper";
 
 export type ScriptRequest = { script: string, language: ScriptRequestLanguage, context: ScriptContext, 
@@ -1038,7 +1314,14 @@ export type ScriptRequest = { script: string, language: ScriptRequestLanguage, c
  * Optional relative path to execute the script in (relative to container_ref).
  * If None, uses the container_ref directory directly.
  */
-working_dir: string | null, };
+working_dir: string | null, 
+/**
+ * Set when this script is a generated poller loop; `None` for every other
+ * script. Absent from rows written before pollers existed, which is why it
+ * is `#[serde(default)]` — `executor_action` is JSON in a TEXT column, so
+ * this stays migration-free.
+ */
+poller: PollerSpec | null, };
 
 export type ScriptRequestLanguage = "Bash";
 
@@ -1100,7 +1383,7 @@ export type Grok = { append_prompt: AppendPrompt, model?: string | null, yolo?: 
 
 export type Amp = { append_prompt: AppendPrompt, dangerously_allow_all?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
-export type Codex = { append_prompt: AppendPrompt, sandbox?: SandboxMode | null, ask_for_approval?: AskForApproval | null, oss?: boolean | null, model?: string | null, model_reasoning_effort?: ReasoningEffort | null, model_reasoning_summary?: ReasoningSummary | null, model_reasoning_summary_format?: ReasoningSummaryFormat | null, profile?: string | null, base_instructions?: string | null, include_apply_patch_tool?: boolean | null, model_provider?: string | null, compact_prompt?: string | null, developer_instructions?: string | null, plan: boolean, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+export type Codex = { append_prompt: AppendPrompt, sandbox?: SandboxMode | null, ask_for_approval?: AskForApproval | null, oss?: boolean | null, model?: string | null, model_reasoning_effort?: ReasoningEffort | null, model_reasoning_summary?: ReasoningSummary | null, model_reasoning_summary_format?: ReasoningSummaryFormat | null, profile?: string | null, base_instructions?: string | null, model_provider?: string | null, compact_prompt?: string | null, developer_instructions?: string | null, plan: boolean, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type SandboxMode = "auto" | "read-only" | "workspace-write" | "danger-full-access";
 

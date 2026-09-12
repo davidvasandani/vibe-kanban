@@ -1,0 +1,61 @@
+Name:	cp
+Umask:	0022
+State:	R (running)
+Tgid:	254348
+Ngid:	0
+Pid:	254348
+PPid:	254334
+TracerPid:	0
+Uid:	994	994	994	994
+Gid:	990	990	990	990
+FDSize:	64
+Groups:	62 990 
+NStgid:	254348
+NSpid:	254348
+NSpgid:	254334
+NSsid:	254334
+Kthread:	0
+VmPeak:	   11172 kB
+VmSize:	   11172 kB
+VmLck:	       0 kB
+VmPin:	       0 kB
+VmHWM:	    3108 kB
+VmRSS:	    3108 kB
+RssAnon:	     200 kB
+RssFile:	    2908 kB
+RssShmem:	       0 kB
+VmData:	    3404 kB
+VmStk:	     140 kB
+VmExe:	    1120 kB
+VmLib:	    2264 kB
+VmPTE:	      60 kB
+VmSwap:	       0 kB
+HugetlbPages:	       0 kB
+CoreDumping:	0
+THP_enabled:	0
+untag_mask:	0xffffffffffffffff
+Threads:	1
+SigQ:	0/63254
+SigPnd:	0000000000000000
+ShdPnd:	0000000000000000
+SigBlk:	0000000000000000
+SigIgn:	0000000000000000
+SigCgt:	0000000000000000
+CapInh:	0000000000000000
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+CapBnd:	000001ffffffffff
+CapAmb:	0000000000000000
+NoNewPrivs:	1
+Seccomp:	0
+Seccomp_filters:	0
+Speculation_Store_Bypass:	thread vulnerable
+SpeculationIndirectBranch:	conditional enabled
+Cpus_allowed:	3f
+Cpus_allowed_list:	0-5
+Mems_allowed:	00000000,00000001
+Mems_allowed_list:	0
+voluntary_ctxt_switches:	3
+nonvoluntary_ctxt_switches:	0
+x86_Thread_features:	
+x86_Thread_features_locked:	

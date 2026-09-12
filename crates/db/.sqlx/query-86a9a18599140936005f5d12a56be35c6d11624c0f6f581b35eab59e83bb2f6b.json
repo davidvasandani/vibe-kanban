@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE browser_sessions SET pgid = $1 WHERE id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "86a9a18599140936005f5d12a56be35c6d11624c0f6f581b35eab59e83bb2f6b"
+}

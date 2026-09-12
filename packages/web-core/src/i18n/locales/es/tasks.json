@@ -261,7 +261,8 @@
     "selectAttempt": "Select an attempt to view execution processes.",
     "started": "Started: {{date}}",
     "copyLogs": "Copiar registros",
-    "logsCopied": "¡Copiado!"
+    "logsCopied": "¡Copiado!",
+    "outputIncomplete": "No se pudo recuperar parte de la salida del trabajador asignado. El registro visible puede estar incompleto."
   },
   "rebase": {
     "common": {

@@ -404,6 +404,10 @@ const SettingsDialogImpl = create<SettingsDialogProps>(
       modal.remove();
     }, [modal]);
 
+    if (!modal.visible) {
+      return null;
+    }
+
     return createPortal(
       <SettingsDirtyProvider>
         <SettingsHostProvider initialHostId={initialHostId}>

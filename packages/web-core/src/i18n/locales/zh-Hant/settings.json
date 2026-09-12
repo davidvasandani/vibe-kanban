@@ -44,7 +44,9 @@
         "slack": "Slack",
         "slackDesc": "Slack 工作區連線",
         "pipelines": "Pipelines",
-        "pipelinesDesc": "Pipeline TOML files and defaults"
+        "pipelinesDesc": "Pipeline TOML files and defaults",
+        "workers": "叢集工作節點",
+        "workersDesc": "工作節點健康狀況、儲存空間與排程"
       }
     },
     "general": {
@@ -415,6 +417,8 @@
         "description": "Configure this MCP server and assign it to agents.",
         "name": "名稱",
         "namePlaceholder": "例如 my_server",
+        "displayName": "顯示名稱",
+        "displayNamePlaceholder": "例如 Atlassian Rovo",
         "transport": "傳輸方式",
         "command": "指令",
         "args": "引數",
@@ -735,6 +739,19 @@
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
     },
+    "workers": {
+      "title": "叢集工作節點",
+      "description": "工作節點健康狀況、共用儲存空間、容量與排程狀態。",
+      "loading": "正在載入工作節點…",
+      "loadError": "無法載入叢集工作節點。",
+      "empty": "尚未有工作節點註冊。",
+      "schedulable": "可排程",
+      "unschedulable": "不可排程",
+      "active": "使用中的執行",
+      "load": "負載",
+      "drain": "排空",
+      "resume": "恢復排程"
+    },
     "attachments": {
       "title": "附件",
       "description": "此部署的附件儲存狀態。",
@@ -796,6 +813,13 @@
       "empty": "尚未設定 SSO 設定檔。新增一個即可在此機器上啟用 AWS 存取。",
       "cliMissing": "此機器上沒有可用的 AWS CLI。請從 CLI 工具區段安裝，以便檢查狀態並登入。",
       "readOnly": "default 設定檔 · 唯讀",
+      "scope": {
+        "session": "SSO 工作階段",
+        "legacy": "舊版 SSO 起始 URL",
+        "profiles": "{{count}} 個設定檔",
+        "profiles_other": "{{count}} 個設定檔"
+      },
+      "manageProfiles": "管理設定檔 ({{count}})",
       "actions": {
         "add": "新增設定檔",
         "refresh": "重新整理狀態",

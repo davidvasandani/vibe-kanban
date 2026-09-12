@@ -34,6 +34,8 @@ export interface WorkspaceContextValue {
   /** Archived workspaces for sidebar display */
   archivedWorkspaces: SidebarWorkspace[];
   isWorkspacesListLoading: boolean;
+  /** False during a recoverable local API/WebSocket handoff. */
+  isServerConnected: boolean;
   isLoading: boolean;
   isCreateMode: boolean;
   selectWorkspace: (id: string) => void;

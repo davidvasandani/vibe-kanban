@@ -134,6 +134,7 @@
     "notFoundDescription": "This workspace may have been deleted or the link may be incorrect.",
     "selectToStart": "Select a workspace to get started",
     "draft": "Draft",
+    "creating": "Creating…",
     "viewArchive": "View Archive",
     "backToActive": "Back to Active",
     "noArchived": "No archived workspaces",
@@ -194,6 +195,23 @@
         "name": "Name"
       },
       "columnError": "This chat failed to render. Open the full view instead."
+    },
+    "serverAffinity": {
+      "local": "Local",
+      "worker": "Worker",
+      "unassigned": "Unassigned",
+      "current": "Current server",
+      "runOn": "Run on",
+      "automatic": "Automatic placement",
+      "coordinator": "Coordinator",
+      "unavailable": "Unavailable",
+      "localDescription": "This Vibe Kanban instance runs workspaces locally.",
+      "confirmTitle": "Migrate the running task?",
+      "confirmMessage": "Vibe Kanban will stop the current task, change its server affinity, and start it again with a managed continuation prompt.",
+      "confirmAction": "Stop, migrate, and restart",
+      "updated": "Server affinity updated",
+      "updateFailed": "Failed to update server affinity",
+      "restartFailed": "Affinity changed, but the task could not be restarted"
     }
   },
   "fileTree": {
@@ -218,7 +236,8 @@
     "other": "Other",
     "devServerPreview": "Dev Server Preview",
     "terminal": "Terminal",
-    "notes": "Notes"
+    "notes": "Notes",
+    "serverAffinity": "Server Affinity"
   },
   "notes": {
     "placeholder": "Add notes about this workspace...",
@@ -532,6 +551,11 @@
       "repoStep": "Which repositories would you like to work on?",
       "chatStep": "What would you like to work on?"
     },
+    "worker": {
+      "label": "Run on",
+      "automatic": "Automatic placement",
+      "coordinator": "Coordinator"
+    },
     "repoPicker": {
       "actions": {
         "recent": "Recent",
@@ -597,6 +621,24 @@
     "resetToGenerated": "Reset to generated",
     "updateIssue": "Update Issue",
     "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue."
+  },
+  "workspaceCreation": {
+    "creatingTitle": "Creating workspace…",
+    "creatingBody": "You can navigate away. Creation will continue in the background.",
+    "failedTitle": "Workspace creation failed",
+    "failedFallback": "Create a new workspace to try again."
+  },
+  "metricsDiskAlerts": {
+    "warning": "Low disk",
+    "critical": "Critical disk",
+    "available": "available",
+    "used": "used",
+    "resolving": "Resolving issue…",
+    "action": "Create or open remediation issue",
+    "noProject": "Link this workspace to a project to create an issue.",
+    "resolveFailed": "Failed to resolve low-disk issue: {{error}}",
+    "nodeCount_one": "{{severity}} · {{count}} node",
+    "nodeCount_other": "{{severity}} · {{count}} nodes"
   },
   "speckit": {
     "title": "SpecKit",

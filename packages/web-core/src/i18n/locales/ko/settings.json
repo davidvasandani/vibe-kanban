@@ -44,7 +44,9 @@
         "slack": "Slack",
         "slackDesc": "Slack 워크스페이스 연결",
         "pipelines": "Pipelines",
-        "pipelinesDesc": "Pipeline TOML files and defaults"
+        "pipelinesDesc": "Pipeline TOML files and defaults",
+        "workers": "클러스터 워커",
+        "workersDesc": "워커 상태, 스토리지 및 스케줄링"
       }
     },
     "general": {
@@ -415,6 +417,8 @@
         "description": "Configure this MCP server and assign it to agents.",
         "name": "이름",
         "namePlaceholder": "예: my_server",
+        "displayName": "표시 이름",
+        "displayNamePlaceholder": "예: Atlassian Rovo",
         "transport": "전송 방식",
         "command": "명령어",
         "args": "인수",
@@ -735,6 +739,19 @@
       "pairMachineHint": "Pair a machine to open machine settings.",
       "selectMachineHint": "Select a machine to open machine settings."
     },
+    "workers": {
+      "title": "클러스터 워커",
+      "description": "워커 상태, 공유 스토리지, 용량 및 스케줄링 상태입니다.",
+      "loading": "워커를 불러오는 중…",
+      "loadError": "클러스터 워커를 불러올 수 없습니다.",
+      "empty": "아직 등록된 워커가 없습니다.",
+      "schedulable": "스케줄 가능",
+      "unschedulable": "스케줄 불가",
+      "active": "활성 실행",
+      "load": "부하",
+      "drain": "드레인",
+      "resume": "스케줄링 재개"
+    },
     "attachments": {
       "title": "첨부 파일",
       "description": "이 배포의 첨부 파일 저장소 상태입니다.",
@@ -796,6 +813,13 @@
       "empty": "아직 구성된 SSO 프로필이 없습니다. 프로필을 추가하면 이 머신에서 AWS를 사용할 수 있습니다.",
       "cliMissing": "이 머신에서는 AWS CLI를 사용할 수 없습니다. CLI 도구 섹션에서 설치하면 상태 확인과 로그인이 가능합니다.",
       "readOnly": "default 프로필 · 읽기 전용",
+      "scope": {
+        "session": "SSO 세션",
+        "legacy": "레거시 SSO 시작 URL",
+        "profiles": "프로필 {{count}}개",
+        "profiles_other": "프로필 {{count}}개"
+      },
+      "manageProfiles": "프로필 관리 ({{count}})",
       "actions": {
         "add": "프로필 추가",
         "refresh": "상태 새로 고침",

@@ -1,244 +1,96 @@
-# Active Workspace MCP Tool Refresh
+# Technical Specification: Claude Fable 5.1 and Claude Code Refresh
 
-## Summary
+**Task:** `vk/1f95-update-claude-mo`
 
-Vibe Kanban must let an active workspace session reconcile its configured MCP
-servers and publish a refreshed capability inventory without replacing the
-workspace, agent session, or conversation. Refresh is an explicit operation
-available from the workspace UI and from the Vibe Kanban API/MCP surface.
+**Service:** Vibe Kanban
 
-The refresh boundary is the live coding-agent session. Vibe Kanban coordinates
-the request, but each supported executor remains responsible for the protocol it
-uses to reload MCP configuration and capabilities. Executors that cannot reload
-in place must return an explicit unsupported result rather than claiming
-success.
+**Date:** 2026-09-11
 
-## Goals
+## Objective
 
-- Add a user-visible **Refresh MCP tools** action to active workspace sessions.
-- Expose refresh through an authenticated/local API and an orchestrator-scoped
-  Vibe Kanban MCP tool.
-- Re-read the active executor's MCP configuration and reconcile additions,
-  removals, enables, disables, configuration changes, and credential changes.
-- Preserve healthy unchanged connections when the executor supports reuse.
-- Restart or reconnect changed servers, initialize them, and enumerate tools,
-  resources, and prompts before publishing a new inventory.
-- Make the new complete inventory visible on the next turn while preserving
-  workspace state and conversation history.
-- Keep the last known-good inventory for a server whose refresh fails.
-- Provide safe, classified, per-server diagnostics and useful refresh metadata.
+Update Vibe Kanban's Claude executor so users can select the newly released
+Fable 5.1 model and executions use the newest supported Claude Code dependency.
+Keep the service deployment compatible with the updated executor and preserve
+the safety controls that Vibe Kanban applies to Claude Code.
 
-## Non-goals
+## Scope
 
-- Defining a new MCP protocol-level refresh extension for arbitrary third-party
-  clients.
-- Silently restarting an entire coding-agent conversation when an executor has
-  no in-session MCP reload mechanism.
-- Returning configuration secrets or raw subprocess/network diagnostics to the
-  browser, agent, or logs.
+- Refresh the pinned `@anthropic-ai/claude-code` package used by the Vibe
+  Kanban Claude executor to the latest published version verified during this
+  task.
+- Add the canonical Fable 5.1 model identifier and display label to the Claude
+  model selector, using vendor/CLI evidence for the exact identifier.
+- Re-verify version-sensitive Claude Code behavior, especially model aliases,
+  supported effort values, protocol compatibility, and the native wire names
+  used by Vibe Kanban's denied background/scheduling tool controls.
+- Update focused tests and documentation/comments that deliberately pin the
+  Claude Code version or model catalog.
+- Inspect `homelab/modules/vibe-kanban-rebuild.nix`, the governing deployment
+  module, and change it only if its Claude Code dependency or compatibility
+  contract must move with the Vibe Kanban source change.
+- Record reusable findings in the Vibe Kanban knowledge base and refresh its
+  index.
 
-## User Experience
+## Out of Scope
 
-An active workspace session exposes a **Refresh MCP tools** action near its
-session controls. While refresh is running, the action shows progress and cannot
-start a duplicate request. The result shows:
+- Changes to services other than Vibe Kanban.
+- Unrelated executor, UI, or infrastructure changes.
+- Replacing Vibe Kanban's process-lifecycle safety policy or enabling Claude
+  Code background jobs inside a turn.
+- Deploying or switching a NixOS host configuration.
 
-- overall outcome: refreshed, partially refreshed, busy, unsupported, or failed;
-- last successful refresh time;
-- configured server identifier;
-- per-server status and discovered tool count;
-- whether the connection was reused, restarted, added, removed, or disabled;
-- safe remediation for any failure.
+## Functional Requirements
 
-The UI must not display success until the executor confirms that the replacement
-inventory has been published. A busy response is retryable and identifies
-whether another refresh or an active MCP call blocked the operation.
+1. The default Claude model catalog MUST expose Fable 5.1 with the exact model
+   argument accepted by the refreshed Claude Code CLI.
+2. Existing Claude model choices and the default model MUST remain available
+   unless authoritative release documentation says they were removed.
+3. Fable 5.1 MUST expose every reasoning-effort choice supported by the Claude
+   executor's current contract.
+4. Fable 5.1 usage MUST be measured against its native 1M-token context window
+   before the end-of-turn usage report is available.
+5. The standard Claude executor command MUST pin the latest verified
+   `@anthropic-ai/claude-code` release rather than use an unbounded tag.
+6. All version-coupled comments and tests MUST agree with that pin.
+7. The update MUST preserve the explicit denial of unsupported wake-up and
+   in-turn background-poller behavior.
+8. Focused automated tests MUST cover the new model entry, reasoning options,
+   context window, exact dependency pin, and version-sensitive safety
+   assumptions.
+9. The governing Nix module MUST continue to provide the runtime prerequisites
+   required by the refreshed executor; no other homelab service may be changed.
 
-## Functional Design
+## Verification
 
-### Refresh request
+- Confirm current model and CLI facts against authoritative Anthropic sources
+  and the published package/native binary.
+- Install repository dependencies with the frozen lockfile before project
+  verification.
+- Run focused Claude executor tests, formatting, and the relevant repository
+  checks.
+- If the Nix module changes, run `nixfmt --check`, `nix-instantiate --parse`,
+  and the narrow Vibe Kanban configuration evaluation available in the
+  homelab repository.
+- Run an independent Codex diff review and resolve all significant findings.
 
-The server accepts a refresh request for one active coding-agent session. It
-validates that the session belongs to the workspace in scope and is running,
-then delegates to the execution backend that owns the live agent process.
+## Acceptance Criteria
 
-The same service operation backs:
+- Fable 5.1 is selectable in Vibe Kanban's Claude model selector and is passed
+  unchanged to Claude Code.
+- Fable 5.1 usage is calculated against a 1M-token context window.
+- Vibe Kanban launches the latest Claude Code version verified on 2026-09-11.
+- Alias/release-note and native-tool-name checks are documented and reflected
+  in tests or code comments where version coupling exists.
+- Relevant automated checks pass.
+- The task's specification, plan, SpecKit artifacts, review evidence, and
+  reusable knowledge are committed; a pull request is opened against the base
+  branch and merged.
 
-1. the workspace-session REST endpoint;
-2. the web action; and
-3. an orchestrator-scoped `refresh_mcp_tools` VK MCP tool.
+## Risks
 
-The MCP tool defaults to its scoped workspace and orchestrator session. Global
-mode requires explicit identifiers.
-
-### Executor capability
-
-The executor interface gains a typed MCP-refresh capability. A refresh adapter
-must:
-
-1. serialize with other refreshes for the session;
-2. wait behind an in-flight MCP call when safely supported, or return a
-   retryable busy result;
-3. re-read the executor-native MCP configuration;
-4. compare secret-safe configuration fingerprints by configured server ID;
-5. reuse unchanged healthy servers;
-6. stop/reconnect changed or removed servers only when safe;
-7. initialize affected servers and list tools, resources, and prompts;
-8. validate returned capability schemas;
-9. construct a complete candidate inventory; and
-10. atomically publish the candidate inventory for subsequent turns.
-
-If an executor's native CLI/API does not expose live reload, its adapter reports
-`unsupported` with remediation. It must not restart the conversation and label
-that as an in-place refresh.
-
-### Reconciliation
-
-Server definitions are normalized before comparison. The comparison includes
-transport kind, command/package and arguments, URL, enabled state, relevant
-headers/environment by keyed digest, and other transport settings. Raw secret
-values never appear in the fingerprint report.
-
-Each configured server is classified as:
-
-- `unchanged_reused`;
-- `added`;
-- `changed_restarted`;
-- `removed`;
-- `disabled`;
-- `refreshed` (reinitialized without process restart);
-- `failed_retained` (refresh failed; last known-good capabilities remain); or
-- `failed_unavailable` (no last known-good capabilities exist).
-
-Removed or explicitly disabled servers are absent from the new inventory after a
-successful atomic publish. Failed changed servers retain their prior inventory,
-if any, until a later successful refresh or explicit disable.
-
-### Atomicity and concurrency
-
-Each live session has one refresh coordinator guarded by a non-reentrant lock and
-generation number. Tool dispatch reads one immutable inventory snapshot. Refresh
-builds a candidate snapshot off to the side and swaps it only after all server
-outcomes have settled. Dispatch therefore sees the entire old or entire new
-generation.
-
-An in-flight call retains the connection/snapshot generation it started with.
-Affected connections are retired only after active calls release them. If an
-executor cannot safely defer retirement, refresh returns `busy_active_call`.
-Concurrent refresh requests return `busy_refresh_in_progress`, including a
-retryable marker.
-
-### Partial failure
-
-A single-server failure does not prevent healthy additions, removals, or updates
-from being published. For the failing server, the candidate snapshot uses its
-last known-good capability set when available. Overall status is
-`partially_refreshed`. If validation or publication of the complete snapshot
-itself fails, no swap occurs and the previous generation remains active.
-
-## API Contract
-
-Suggested REST shape:
-
-`POST /api/workspaces/{workspace_id}/sessions/{session_id}/mcp/refresh`
-
-Response fields:
-
-- `status`;
-- `retryable`;
-- `generation_before` and `generation_after`;
-- `started_at`, `completed_at`, and `last_successful_refresh_at`;
-- `servers[]` with `server_id`, `status`, capability counts, `restarted`, and an
-  optional structured error;
-- a safe summary.
-
-Structured errors contain `code`, `category`, `message`, `remediation`, and
-`retryable`. Categories:
-
-- `executable_unavailable`;
-- `process_launch_failed`;
-- `initialize_failed`;
-- `authentication_failed`;
-- `capability_list_failed`;
-- `invalid_capability_schema`;
-- `timeout`;
-- `busy_refresh_in_progress`;
-- `busy_active_call`;
-- `unsupported`;
-- `internal`.
-
-The endpoint uses the project's normal API envelope and status conventions.
-Busy responses use a conflict/locked-style HTTP status; missing or inactive
-sessions use the existing not-found/conflict conventions.
-
-## Security and Redaction
-
-All errors pass through a dedicated MCP refresh sanitizer before logging or
-serialization. It removes or replaces:
-
-- environment values and tokens;
-- Authorization, Cookie, and OAuth material;
-- credentials embedded in URLs;
-- raw authenticated URLs and query strings;
-- command arguments identified as secret-bearing;
-- subprocess output that cannot be proven safe.
-
-Public diagnostics identify only the configured server ID, error category, safe
-message, and remediation. Configuration fingerprints are keyed digests and are
-never returned to clients.
-
-## Observability
-
-Emit structured, secret-safe events for refresh start, per-server outcome,
-inventory publication, busy rejection, and completion. Metrics should cover
-duration, status, executor, transport, restarts/reuses, tool-count delta, and
-failure category. Persist or retain sufficient session metadata to render the
-last successful refresh and latest per-server status.
-
-## Compatibility
-
-The feature is capability-gated per executor. Existing session launch and MCP
-configuration behavior remain unchanged. API clients can distinguish supported,
-unsupported, busy, partial, and complete outcomes without parsing prose.
-
-## Test Requirements
-
-Automated tests must cover:
-
-- stdio tool addition and removal;
-- streamable-HTTP tool addition and removal;
-- adding, removing, enabling, and disabling a server;
-- unchanged connection reuse and changed connection restart;
-- credential renewal after authentication failure;
-- partial server failure with last known-good retention;
-- timeout and malformed `tools/list`;
-- initialize/handshake and launch failures;
-- refresh during an in-flight call;
-- concurrent refresh attempts;
-- atomic snapshot visibility;
-- removed-tool unavailable behavior;
-- error/log secret redaction;
-- REST and VK MCP authorization/scope;
-- UI status, counts, restart indicator, and no false-success state; and
-- the Slack `v1.3.0-vk.2` regression, proving `attachment_get_data` appears in
-  the same workspace conversation after refresh.
-
-## Acceptance
-
-Starting with tool set A, changing a configured MCP server to expose A+B, and
-refreshing the active session makes B callable on the next turn without creating
-a workspace or losing history. The inverse removes B cleanly. Healthy servers
-remain usable through partial failures, failed servers retain last known-good
-tools unless disabled, and no intermediate inventory or secret material is
-observable.
-
-## Open Technical Questions
-
-- Which current executor CLIs expose a supported live MCP reload command or
-  control channel, and what guarantees does each provide?
-- Where does each executor hold its live tool inventory, and can VK observe the
-  generation that becomes active?
-- Should refresh-status metadata be persisted in the database or retained only
-  with the live execution process?
-- Can all supported executors separately enumerate resources/prompts, or should
-  those counts be optional capability fields?
+- A Claude Code bump can silently change `opus`, `sonnet`, `haiku`, or `fable`
+  alias resolution even when compilation and tests pass.
+- Native tool names can change between Claude Code releases, weakening Vibe
+  Kanban's deny rules if they are not inspected directly.
+- A guessed Fable 5.1 identifier could render a visible but unusable selector
+  choice; authoritative evidence is required before implementation.

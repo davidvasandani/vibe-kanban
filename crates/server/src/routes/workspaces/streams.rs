@@ -1,6 +1,9 @@
 use axum::{
     Extension,
-    extract::{Query, State, ws::Message},
+    extract::{
+        Query, State,
+        ws::{CloseFrame, Message},
+    },
     response::IntoResponse,
 };
 use deployment::Deployment;
@@ -122,7 +125,13 @@ async fn handle_workspaces_ws(
                     }
                     Some(Err(e)) => {
                         tracing::error!("stream error: {}", e);
-                        break;
+                        let _ = socket
+                            .send(Message::Close(Some(CloseFrame {
+                                code: 1011,
+                                reason: "workspace stream requires resnapshot".into(),
+                            })))
+                            .await;
+                        return Err(e.into());
                     }
                     None => break,
                 }

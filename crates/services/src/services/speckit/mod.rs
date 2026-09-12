@@ -481,6 +481,7 @@ const TASKS_TEMPLATE: &str =
 
 /// Where the constitution lives relative to the spec-host repo root.
 pub const CONSTITUTION_REL_PATH: &str = ".specify/memory/constitution.md";
+const FEATURE_OWNER_FILE: &str = ".speckit-owner";
 
 /// Everything [`command_file`] needs to bake fully-literal paths into a
 /// `/speckit.*` command body: paths are written relative to the **agent's
@@ -611,6 +612,71 @@ pub fn command_file(stage: SpecKitStage, ctx: &CommandContext) -> String {
     format!("# {cmd}\n\n{body}\n", cmd = slash_command(stage))
 }
 
+fn declared_spec_owner(spec: &str) -> Option<String> {
+    spec.lines().find_map(|line| {
+        let value = line.strip_prefix("**Task id**:")?.trim();
+        Some(value.trim_matches('`').to_string())
+    })
+}
+
+/// Claim the feature directory before generating commands that instruct an
+/// agent to write into it. A persisted marker is authoritative; for directories
+/// created before markers existed, the spec supplies migration evidence.
+fn ensure_feature_dir_owner(host_root: &Path, ctx: &CommandContext) -> io::Result<()> {
+    let dir = host_root.join(feature_dir(&ctx.feature_key));
+    let owner_path = dir.join(FEATURE_OWNER_FILE);
+    let expected = &ctx.feature_key;
+
+    if let Ok(owner) = std::fs::read_to_string(&owner_path) {
+        if owner.trim() != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "SpecKit directory {} belongs to task {}, not {}",
+                    dir.display(),
+                    owner.trim(),
+                    expected
+                ),
+            ));
+        }
+        return Ok(());
+    }
+
+    let spec_path = dir.join("spec.md");
+    if spec_path.exists() {
+        let spec = std::fs::read_to_string(&spec_path)?;
+        let declared_owner = declared_spec_owner(&spec);
+        let expected_dir = format!("**Feature dir**: `specs/{expected}/`");
+        let matches_legacy_dir = spec.lines().any(|line| line.trim() == expected_dir);
+        if declared_owner
+            .as_deref()
+            .is_some_and(|owner| owner != expected)
+            || (declared_owner.is_none() && !matches_legacy_dir)
+        {
+            let actual = declared_owner.unwrap_or_else(|| "unknown legacy owner".to_string());
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "SpecKit directory {} belongs to task {}, not {}",
+                    dir.display(),
+                    actual,
+                    expected
+                ),
+            ));
+        }
+    } else if dir.exists() && std::fs::read_dir(&dir)?.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "SpecKit directory {} is nonempty but has no ownership marker or legacy spec",
+                dir.display()
+            ),
+        ));
+    }
+
+    write_with_parents(&owner_path, &format!("{expected}\n"))
+}
+
 /// Ensure the `.specify/` scaffold (under the spec-host repo root) and the
 /// `/speckit.*` command files (under the agent's effective cwd) exist.
 ///
@@ -618,6 +684,7 @@ pub fn command_file(stage: SpecKitStage, ctx: &CommandContext) -> String {
 /// - Command files are generated and **overwritten on content mismatch** so
 ///   baked-in paths never go stale.
 pub fn ensure_scaffold(host_root: &Path, agent_cwd: &Path, ctx: &CommandContext) -> io::Result<()> {
+    ensure_feature_dir_owner(host_root, ctx)?;
     for (rel, content) in host_scaffold_files() {
         let path = host_root.join(&rel);
         if path.exists() {
@@ -1024,6 +1091,74 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&cmd_path).unwrap(),
             command_file(SpecKitStage::Specify, &ctx)
+        );
+    }
+
+    #[test]
+    fn scaffold_refuses_foreign_feature_owner_before_writing() {
+        let d = TmpDir::new("scaffold-owner-conflict");
+        let host_root = d.path().join("backend");
+        let cwd = d.path().to_path_buf();
+        let owner = host_root.join("specs/vk/feat-1").join(FEATURE_OWNER_FILE);
+        write_with_parents(&owner, "vk/a-different-task\n").unwrap();
+
+        let error = ensure_scaffold(&host_root, &cwd, &multi_ctx()).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("vk/a-different-task"));
+        assert!(!cwd.join(".claude/commands/speckit.specify.md").exists());
+        assert!(!host_root.join(CONSTITUTION_REL_PATH).exists());
+    }
+
+    #[test]
+    fn scaffold_refuses_unowned_nonempty_legacy_directory() {
+        let d = TmpDir::new("scaffold-unowned-nonempty");
+        let host_root = d.path().join("backend");
+        let cwd = d.path().to_path_buf();
+        write_with_parents(
+            &host_root.join("specs/vk/feat-1/tasks.md"),
+            "# Another task's record\n",
+        )
+        .unwrap();
+
+        let error = ensure_scaffold(&host_root, &cwd, &multi_ctx()).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(error.to_string().contains("nonempty"));
+        assert!(!host_root.join("specs/vk/feat-1/.speckit-owner").exists());
+    }
+
+    #[test]
+    fn scaffold_refreshes_same_feature_owner() {
+        let d = TmpDir::new("scaffold-same-owner");
+        let host_root = d.path().join("backend");
+        let cwd = d.path().to_path_buf();
+        let owner = host_root.join("specs/vk/feat-1").join(FEATURE_OWNER_FILE);
+        write_with_parents(&owner, "vk/feat-1\n").unwrap();
+
+        ensure_scaffold(&host_root, &cwd, &multi_ctx()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(owner).unwrap(), "vk/feat-1\n");
+        assert!(cwd.join(".claude/commands/speckit.specify.md").exists());
+    }
+
+    #[test]
+    fn scaffold_claims_matching_legacy_spec() {
+        let d = TmpDir::new("scaffold-legacy-owner");
+        let host_root = d.path().join("backend");
+        let cwd = d.path().to_path_buf();
+        let spec = host_root.join("specs/vk/feat-1/spec.md");
+        write_with_parents(
+            &spec,
+            "# Feature\n\n**Task id**: `vk/feat-1`\n**Feature dir**: `specs/vk/old/`\n",
+        )
+        .unwrap();
+
+        ensure_scaffold(&host_root, &cwd, &multi_ctx()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(spec.parent().unwrap().join(FEATURE_OWNER_FILE)).unwrap(),
+            "vk/feat-1\n"
         );
     }
 

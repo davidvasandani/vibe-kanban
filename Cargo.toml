@@ -2,15 +2,18 @@
 resolver = "3"
 members = [
     "crates/api-types",
+    "crates/cluster-protocol",
     "crates/relay-client",
     "crates/server",
     "crates/relay-types",
     "crates/trusted-key-auth",
     "crates/mcp",
+    "crates/node-metrics",
     "crates/db",
     "crates/executors",
     "crates/services",
     "crates/worktree-manager",
+    "crates/worker",
     "crates/workspace-manager",
     "crates/relay-control",
     "crates/relay-protocol",
@@ -42,7 +45,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 anyhow = "1.0"
 git2 = { version = "0.20.3", default-features = false }
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "query", "stream", "rustls"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 thiserror = "2.0.12"
 tracing = "0.1.43"

@@ -122,7 +122,8 @@ export function deriveConversationSemanticTimeline(
         failedOrKilled:
           liveExecutionProcess?.status === ExecutionProcessStatus.failed ||
           liveExecutionProcess?.status === ExecutionProcessStatus.killed ||
-          liveExecutionProcess?.status === ExecutionProcessStatus.interrupted,
+          liveExecutionProcess?.status === ExecutionProcessStatus.interrupted ||
+          liveExecutionProcess?.status === ExecutionProcessStatus.indeterminate,
       } satisfies ConversationSemanticProcessItem;
     });
 

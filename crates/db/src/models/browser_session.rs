@@ -23,6 +23,10 @@ pub struct BrowserSession {
     pub profile: Option<String>,
     pub status: BrowserSessionDbStatus,
     pub current_url: Option<String>,
+    /// OS process group id of the spawned Chromium process group, used to
+    /// clean up orphaned process groups after a server crash. Not
+    /// meaningful across machines.
+    pub pgid: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
@@ -48,7 +52,7 @@ pub struct BrowserControlTransition {
     pub created_at: DateTime<Utc>,
 }
 
-const SESSION_COLUMNS: &str = r#"id as "id!: Uuid", workspace_id as "workspace_id!: Uuid", host_id, profile, status as "status!: BrowserSessionDbStatus", current_url, created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", closed_at as "closed_at: DateTime<Utc>", expires_at as "expires_at: DateTime<Utc>""#;
+const SESSION_COLUMNS: &str = r#"id as "id!: Uuid", workspace_id as "workspace_id!: Uuid", host_id, profile, status as "status!: BrowserSessionDbStatus", current_url, pgid, created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", closed_at as "closed_at: DateTime<Utc>", expires_at as "expires_at: DateTime<Utc>""#;
 // SESSION_COLUMNS is documentation for the repeated projections below;
 // sqlx macros need literal strings, so each query repeats it verbatim.
 const _: &str = SESSION_COLUMNS;
@@ -67,7 +71,7 @@ impl BrowserSession {
             BrowserSession,
             r#"INSERT INTO browser_sessions (id, workspace_id, host_id, profile, status, expires_at)
                VALUES ($1, $2, $3, $4, $5, $6)
-               RETURNING id as "id!: Uuid", workspace_id as "workspace_id!: Uuid", host_id, profile, status as "status!: BrowserSessionDbStatus", current_url, created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", closed_at as "closed_at: DateTime<Utc>", expires_at as "expires_at: DateTime<Utc>""#,
+               RETURNING id as "id!: Uuid", workspace_id as "workspace_id!: Uuid", host_id, profile, status as "status!: BrowserSessionDbStatus", current_url, pgid, created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", closed_at as "closed_at: DateTime<Utc>", expires_at as "expires_at: DateTime<Utc>""#,
             id,
             workspace_id,
             host_id,
@@ -82,7 +86,7 @@ impl BrowserSession {
     pub async fn find_by_id(pool: &SqlitePool, id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         sqlx::query_as!(
             BrowserSession,
-            r#"SELECT id as "id!: Uuid", workspace_id as "workspace_id!: Uuid", host_id, profile, status as "status!: BrowserSessionDbStatus", current_url, created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", closed_at as "closed_at: DateTime<Utc>", expires_at as "expires_at: DateTime<Utc>"
+            r#"SELECT id as "id!: Uuid", workspace_id as "workspace_id!: Uuid", host_id, profile, status as "status!: BrowserSessionDbStatus", current_url, pgid, created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", closed_at as "closed_at: DateTime<Utc>", expires_at as "expires_at: DateTime<Utc>"
                FROM browser_sessions WHERE id = $1"#,
             id
         )
@@ -93,7 +97,7 @@ impl BrowserSession {
     pub async fn find_by_rowid(pool: &SqlitePool, rowid: i64) -> Result<Option<Self>, sqlx::Error> {
         sqlx::query_as!(
             BrowserSession,
-            r#"SELECT id as "id!: Uuid", workspace_id as "workspace_id!: Uuid", host_id, profile, status as "status!: BrowserSessionDbStatus", current_url, created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", closed_at as "closed_at: DateTime<Utc>", expires_at as "expires_at: DateTime<Utc>"
+            r#"SELECT id as "id!: Uuid", workspace_id as "workspace_id!: Uuid", host_id, profile, status as "status!: BrowserSessionDbStatus", current_url, pgid, created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", closed_at as "closed_at: DateTime<Utc>", expires_at as "expires_at: DateTime<Utc>"
                FROM browser_sessions WHERE rowid = $1"#,
             rowid
         )
@@ -108,7 +112,7 @@ impl BrowserSession {
     ) -> Result<Vec<Self>, sqlx::Error> {
         sqlx::query_as!(
             BrowserSession,
-            r#"SELECT id as "id!: Uuid", workspace_id as "workspace_id!: Uuid", host_id, profile, status as "status!: BrowserSessionDbStatus", current_url, created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", closed_at as "closed_at: DateTime<Utc>", expires_at as "expires_at: DateTime<Utc>"
+            r#"SELECT id as "id!: Uuid", workspace_id as "workspace_id!: Uuid", host_id, profile, status as "status!: BrowserSessionDbStatus", current_url, pgid, created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", closed_at as "closed_at: DateTime<Utc>", expires_at as "expires_at: DateTime<Utc>"
                FROM browser_sessions
                WHERE workspace_id = $1 AND ($2 OR status NOT IN ('closed', 'failed'))
                ORDER BY created_at DESC"#,
@@ -122,7 +126,7 @@ impl BrowserSession {
     pub async fn find_open(pool: &SqlitePool) -> Result<Vec<Self>, sqlx::Error> {
         sqlx::query_as!(
             BrowserSession,
-            r#"SELECT id as "id!: Uuid", workspace_id as "workspace_id!: Uuid", host_id, profile, status as "status!: BrowserSessionDbStatus", current_url, created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", closed_at as "closed_at: DateTime<Utc>", expires_at as "expires_at: DateTime<Utc>"
+            r#"SELECT id as "id!: Uuid", workspace_id as "workspace_id!: Uuid", host_id, profile, status as "status!: BrowserSessionDbStatus", current_url, pgid, created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", closed_at as "closed_at: DateTime<Utc>", expires_at as "expires_at: DateTime<Utc>"
                FROM browser_sessions
                WHERE status IN ('starting', 'running')"#
         )
@@ -167,6 +171,17 @@ impl BrowserSession {
             id,
             current_url,
             expires_at
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_pgid(pool: &SqlitePool, id: Uuid, pgid: i64) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            r#"UPDATE browser_sessions SET pgid = $1 WHERE id = $2"#,
+            pgid,
+            id
         )
         .execute(pool)
         .await?;
@@ -222,5 +237,81 @@ impl BrowserControlTransition {
         )
         .fetch_all(pool)
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::{BrowserSession, BrowserSessionDbStatus};
+    use crate::models::workspace::{CreateWorkspace, Workspace};
+
+    async fn test_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn seed_workspace(pool: &sqlx::SqlitePool) -> Uuid {
+        let id = Uuid::new_v4();
+        Workspace::create(
+            pool,
+            &CreateWorkspace {
+                branch: "vk/browser-session-pgid-test".to_string(),
+                name: None,
+            },
+            id,
+        )
+        .await
+        .unwrap();
+        id
+    }
+
+    // The startup reaper depends on: a persisted pgid, `find_open` surfacing it
+    // on non-closed rows, and closed rows dropping out of that set.
+    #[tokio::test]
+    async fn pgid_round_trips_and_find_open_tracks_status() {
+        let pool = test_pool().await;
+        let workspace_id = seed_workspace(&pool).await;
+        let id = Uuid::new_v4();
+
+        let row = BrowserSession::create(
+            &pool,
+            id,
+            workspace_id,
+            "host-a",
+            None,
+            BrowserSessionDbStatus::Running,
+            None,
+        )
+        .await
+        .unwrap();
+        // A freshly created session has no pgid until the group is spawned.
+        assert_eq!(row.pgid, None);
+
+        BrowserSession::update_pgid(&pool, id, 4242).await.unwrap();
+        let stored = BrowserSession::find_by_id(&pool, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.pgid, Some(4242));
+
+        // The reaper walks `find_open`; the row is visible with its pgid while
+        // running.
+        let open = BrowserSession::find_open(&pool).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, id);
+        assert_eq!(open[0].pgid, Some(4242));
+
+        // Once closed it drops out of the reaper's candidate set.
+        BrowserSession::update_status(&pool, id, BrowserSessionDbStatus::Closed)
+            .await
+            .unwrap();
+        assert!(BrowserSession::find_open(&pool).await.unwrap().is_empty());
     }
 }

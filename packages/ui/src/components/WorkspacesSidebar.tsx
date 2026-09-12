@@ -27,6 +27,7 @@ export interface WorkspacesSidebarWorkspace {
   linesAdded?: number;
   linesRemoved?: number;
   isRunning?: boolean;
+  isCreating?: boolean;
   isPinned?: boolean;
   hasPendingApproval?: boolean;
   hasRunningDevServer?: boolean;
@@ -37,8 +38,39 @@ export interface WorkspacesSidebarWorkspace {
     | 'completed'
     | 'failed'
     | 'killed'
-    | 'interrupted';
+    | 'interrupted'
+    | 'indeterminate';
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
+  serverAffinity?: {
+    kind: 'local' | 'automatic' | 'worker' | 'unassigned';
+    worker_hostname: string | null;
+    requested_worker_hostname: string | null;
+  };
+}
+
+export function categorizeWorkspaces(workspaces: WorkspacesSidebarWorkspace[]) {
+  // Provisioning belongs beside active runs so it stays visible throughout
+  // creation instead of disappearing into a collapsed Idle section.
+  const needsAttention = (workspace: WorkspacesSidebarWorkspace) =>
+    workspace.hasPendingApproval ||
+    (workspace.hasUnseenActivity && !workspace.isRunning);
+
+  return {
+    raisedHandWorkspaces: workspaces.filter((workspace) =>
+      needsAttention(workspace)
+    ),
+    idleWorkspaces: workspaces.filter(
+      (workspace) =>
+        !workspace.isRunning &&
+        !workspace.isCreating &&
+        !needsAttention(workspace)
+    ),
+    runningWorkspaces: workspaces.filter(
+      (workspace) =>
+        (workspace.isRunning || workspace.isCreating) &&
+        !needsAttention(workspace)
+    ),
+  };
 }
 
 export interface WorkspacesSidebarPersistKeys {
@@ -159,6 +191,7 @@ function WorkspaceList({
           linesRemoved={workspace.linesRemoved}
           isActive={selectedWorkspaceId === workspace.id}
           isRunning={workspace.isRunning}
+          isCreating={workspace.isCreating}
           isPinned={workspace.isPinned}
           hasPendingApproval={workspace.hasPendingApproval}
           hasRunningDevServer={workspace.hasRunningDevServer}
@@ -166,6 +199,7 @@ function WorkspaceList({
           latestProcessCompletedAt={workspace.latestProcessCompletedAt}
           latestProcessStatus={workspace.latestProcessStatus}
           prStatus={workspace.prStatus}
+          serverAffinity={workspace.serverAffinity}
           onOpenWorkspaceActions={onOpenWorkspaceActions}
           onClick={() => onSelectWorkspace(workspace.id)}
         />
@@ -224,22 +258,10 @@ export function WorkspacesSidebar({
   };
 
   // Categorize workspaces for accordion layout
-  const { raisedHandWorkspaces, idleWorkspaces, runningWorkspaces } =
-    useMemo(() => {
-      // Running workspaces should stay in the "Running" section even if unseen.
-      const needsAttention = (ws: WorkspacesSidebarWorkspace) =>
-        ws.hasPendingApproval || (ws.hasUnseenActivity && !ws.isRunning);
-
-      return {
-        raisedHandWorkspaces: workspaces.filter((ws) => needsAttention(ws)),
-        idleWorkspaces: workspaces.filter(
-          (ws) => !ws.isRunning && !needsAttention(ws)
-        ),
-        runningWorkspaces: workspaces.filter(
-          (ws) => ws.isRunning && !needsAttention(ws)
-        ),
-      };
-    }, [workspaces]);
+  const { raisedHandWorkspaces, idleWorkspaces, runningWorkspaces } = useMemo(
+    () => categorizeWorkspaces(workspaces),
+    [workspaces]
+  );
 
   const headerActions: SectionAction[] = [
     ...(onOpenCarousel
@@ -361,6 +383,7 @@ export function WorkspacesSidebar({
                   linesRemoved={workspace.linesRemoved}
                   isActive={selectedWorkspaceId === workspace.id}
                   isRunning={workspace.isRunning}
+                  isCreating={workspace.isCreating}
                   isPinned={workspace.isPinned}
                   hasPendingApproval={workspace.hasPendingApproval}
                   hasRunningDevServer={workspace.hasRunningDevServer}
@@ -478,6 +501,7 @@ export function WorkspacesSidebar({
                 linesRemoved={workspace.linesRemoved}
                 isActive={selectedWorkspaceId === workspace.id}
                 isRunning={workspace.isRunning}
+                isCreating={workspace.isCreating}
                 isPinned={workspace.isPinned}
                 hasPendingApproval={workspace.hasPendingApproval}
                 hasRunningDevServer={workspace.hasRunningDevServer}

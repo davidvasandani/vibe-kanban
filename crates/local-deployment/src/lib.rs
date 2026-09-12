@@ -20,6 +20,10 @@ use services::services::{
     approvals::Approvals,
     auth::AuthContext,
     browser::{BrowserSessionService, BrowserSessionsConfig},
+    cluster::{
+        ClusterConfig, ClusterMetricsService, ExecutionReconciler, WorkerClient, WorkerRegistry,
+        WorkerScheduler,
+    },
     config::{Config, load_config_from_file, save_config_to_file},
     container::ContainerService,
     events::EventService,
@@ -76,6 +80,11 @@ pub struct LocalDeployment {
     remote_info: RemoteInfo,
     preview_proxy: PreviewProxyService,
     browser_sessions: BrowserSessionService,
+    cluster_config: ClusterConfig,
+    worker_registry: WorkerRegistry,
+    worker_scheduler: WorkerScheduler,
+    worker_client: Option<WorkerClient>,
+    cluster_metrics: Arc<ClusterMetricsService>,
     relay_hosts: Option<Arc<RelayHosts>>,
     shutdown: CancellationToken,
     webrtc_host: OnceLock<Arc<WebRtcHost>>,
@@ -150,6 +159,10 @@ impl Deployment for LocalDeployment {
         };
 
         let file = FileService::new(db.clone().pool)?;
+        let cluster_config = ClusterConfig::from_env()
+            .map_err(|error| DeploymentError::Other(anyhow::anyhow!(error)))?;
+        let worker_registry = WorkerRegistry::new(db.pool.clone(), cluster_config.clone());
+        let worker_scheduler = WorkerScheduler::new(&cluster_config);
         {
             let file_service = file.clone();
             tokio::spawn(async move {
@@ -250,6 +263,23 @@ impl Deployment for LocalDeployment {
         let trusted_key_auth = TrustedKeyAuthRuntime::new(trusted_keys_path());
         let relay_signing = RelaySigningService::load_or_generate(&server_signing_key_path())
             .expect("Failed to load or generate server signing key");
+        let worker_client = if cluster_config.enabled {
+            Some(
+                WorkerClient::new(
+                    cluster_config.worker_endpoints.clone(),
+                    relay_signing.signing_key().clone(),
+                )
+                .map_err(|error| DeploymentError::Other(anyhow::anyhow!(error)))?,
+            )
+        } else {
+            None
+        };
+        // Read-only observability. The local sampler runs unconditionally (one
+        // `/proc` read per tick); the worker collector only runs while a drawer
+        // is open, so an idle cluster issues zero `GET /v1/metrics` requests.
+        let cluster_metrics =
+            ClusterMetricsService::new(db.pool.clone(), &cluster_config, worker_client.clone());
+        cluster_metrics.spawn_local_sampler(shutdown.child_token());
         let relay_control = Arc::new(RelayControl::new());
         let client_info = ClientInfo::new();
         let preview_proxy = PreviewProxyService::new();
@@ -274,8 +304,29 @@ impl Deployment for LocalDeployment {
             approvals.clone(),
             queued_message_service.clone(),
             remote_client.clone().ok(),
+            cluster_config.clone(),
+            worker_client.clone(),
         )
         .await;
+
+        if let Some(client) = worker_client.clone() {
+            let reconciler = ExecutionReconciler::new(db.clone(), client, &cluster_config)
+                .map_err(|error| DeploymentError::Other(anyhow::anyhow!(error)))?;
+            let report = reconciler
+                .reconcile()
+                .await
+                .map_err(|error| DeploymentError::Other(anyhow::anyhow!(error)))?;
+            tracing::info!(
+                workers_reached = report.workers_reached,
+                workers_unreachable = report.workers_unreachable.len(),
+                jobs_reconciled = report.jobs_reconciled,
+                jobs_missing = report.jobs_missing,
+                jobs_quarantined = report.jobs_quarantined,
+                conflicts = report.conflicts,
+                "Cluster execution reconciliation completed before cleanup"
+            );
+        }
+        container.start_cleanup_tasks();
 
         let events = EventService::new(db.clone(), events_msg_store, events_entry_count);
 
@@ -342,6 +393,11 @@ impl Deployment for LocalDeployment {
             remote_info,
             preview_proxy,
             browser_sessions,
+            cluster_config,
+            worker_registry,
+            worker_scheduler,
+            worker_client,
+            cluster_metrics,
             relay_hosts,
             shutdown,
             webrtc_host: OnceLock::new(),
@@ -431,6 +487,26 @@ impl Deployment for LocalDeployment {
 
     fn browser_sessions(&self) -> &BrowserSessionService {
         &self.browser_sessions
+    }
+
+    fn cluster_config(&self) -> &ClusterConfig {
+        &self.cluster_config
+    }
+
+    fn worker_registry(&self) -> &WorkerRegistry {
+        &self.worker_registry
+    }
+
+    fn worker_scheduler(&self) -> &WorkerScheduler {
+        &self.worker_scheduler
+    }
+
+    fn worker_client(&self) -> Option<&WorkerClient> {
+        self.worker_client.as_ref()
+    }
+
+    fn cluster_metrics(&self) -> &Arc<ClusterMetricsService> {
+        &self.cluster_metrics
     }
 
     fn relay_hosts(&self) -> Result<&Arc<RelayHosts>, RelayHostsNotConfigured> {

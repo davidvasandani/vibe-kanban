@@ -13,6 +13,7 @@ import {
   type NavbarBreadcrumbItem,
   type MobileTabId,
 } from '@vibe/ui/components/Navbar';
+import { getAvailableWorkspaceMobileTabs } from './workspaceMobileTabs';
 import { useAllOrganizationProjects } from '@/shared/hooks/useAllOrganizationProjects';
 import { useShape } from '@/shared/integrations/electric/hooks';
 import { PROJECT_ISSUES_SHAPE } from 'shared/remote-types';
@@ -124,14 +125,22 @@ export function NavbarContainer({
   mobileMode = false,
   onOrgSelect,
   onOpenDrawer,
+  appVersion,
+  deploymentTimestamp,
 }: {
   mobileMode?: boolean;
   onOrgSelect?: (orgId: string) => void;
   onOpenDrawer?: () => void;
+  appVersion?: string | null;
+  deploymentTimestamp?: string | null;
 }) {
   const { t } = useTranslation('common');
   const { executeAction } = useActions();
-  const { workspace: selectedWorkspace, isCreateMode } = useWorkspaceContext();
+  const {
+    workspaceId,
+    workspace: selectedWorkspace,
+    isCreateMode,
+  } = useWorkspaceContext();
   const { workspaces } = useUserContext();
   const syncErrorContext = useSyncErrorContext();
   const { remoteAuthDegraded } = useUserSystem();
@@ -146,6 +155,14 @@ export function NavbarContainer({
   const isOnProjectSubRoute =
     projectDestination !== null && projectDestination.kind !== 'project';
   const [mobileActiveTab, setMobileActiveTab] = useMobileActiveTab();
+  const mobileTabs = useMemo(
+    () =>
+      getAvailableWorkspaceMobileTabs({
+        hasWorkspaceRoute: Boolean(workspaceId),
+        isCreateMode,
+      }),
+    [isCreateMode, workspaceId]
+  );
 
   // On iPad the mobile navbar only renders in a narrow (Stage Manager / Split
   // View) window, where iPadOS overlays window controls on the top-leading
@@ -379,6 +396,8 @@ export function NavbarContainer({
       syncErrors={syncErrors}
       mobileMode={mobileMode}
       reserveWindowControls={reserveWindowControls}
+      appVersion={appVersion}
+      deploymentTimestamp={deploymentTimestamp}
       mobileUserSlot={userPopoverSlot}
       isOnProjectPage={isOnProjectPage}
       isOnProjectSubRoute={isOnProjectSubRoute}
@@ -389,6 +408,7 @@ export function NavbarContainer({
       onOpenDrawer={onOpenDrawer}
       mobileActiveTab={mobileActiveTab as MobileTabId}
       onMobileTabChange={(tab) => setMobileActiveTab(tab)}
+      mobileTabs={mobileTabs}
       leftSlot={
         !breadcrumbs &&
         !isWaitingForBreadcrumbData &&

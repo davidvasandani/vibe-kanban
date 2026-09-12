@@ -104,7 +104,8 @@
     "loadingDetails": "Chargement des détails du processus...",
     "errorLoadingDetails": "Échec du chargement des détails du processus. Veuillez réessayer.",
     "copyLogs": "Copier les logs",
-    "logsCopied": "Copié !"
+    "logsCopied": "Copié !",
+    "outputIncomplete": "Une partie de la sortie n'a pas pu être récupérée depuis le worker assigné. Le journal affiché peut être incomplet."
   },
   "followUp": {
     "queuedMessage": "Message en file d'attente - s'exécutera lorsque l'exécution actuelle sera terminée"

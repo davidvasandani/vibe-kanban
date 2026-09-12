@@ -4,6 +4,7 @@ version = "0.1.43"
 edition = "2024"
 
 [dependencies]
+cluster-protocol = { path = "../cluster-protocol" }
 api-types = { path = "../api-types" }
 db = { path = "../db" }
 executors = { path="../executors" }
@@ -27,6 +28,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 serde_json = { workspace = true }
 serde = { workspace = true }
 base64 = "0.22"
+sha2 = "0.10"
 ed25519-dalek = "2.2.0"
 anyhow = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }

@@ -31,6 +31,10 @@ import {
 import { cn } from '@/shared/lib/utils';
 import { defineModal } from '@/shared/lib/modals';
 import { toPrettyCase } from '@/shared/lib/string';
+import {
+  isValidMcpServerIdentifier,
+  suggestMcpServerIdentifier,
+} from '@/shared/lib/mcpServerIdentifier';
 import { SettingsSelect } from './SettingsComponents';
 
 export interface McpServerDialogProps {
@@ -39,13 +43,19 @@ export interface McpServerDialogProps {
   profiles: SharedMcpProfile[];
   initial?: {
     name: string;
+    displayName: string | null;
     entry: JsonValue;
     assignments: BaseCodingAgent[];
   };
 }
 
 export type McpServerDialogResult =
-  | { name: string; entry: JsonValue; assignments: BaseCodingAgent[] }
+  | {
+      name: string;
+      displayName: string | null;
+      entry: JsonValue;
+      assignments: BaseCodingAgent[];
+    }
   | undefined;
 
 const TRANSPORT_LABEL: Record<McpTransport, string> = {
@@ -137,6 +147,7 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
     const isCustom = isEdit && initialForm === null;
 
     const [name, setName] = useState(initial?.name ?? '');
+    const [displayName, setDisplayName] = useState(initial?.displayName ?? '');
     const [form, setForm] = useState<McpServerFormValues>(
       initialForm ?? emptyForm(codec.transports[0])
     );
@@ -156,7 +167,17 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
     // the dialog becomes visible (or is reopened for a different server).
     useEffect(() => {
       if (!modal.visible) return;
-      setName(initial?.name ?? '');
+      const initialName = initial?.name ?? '';
+      const repairsUnsafeName =
+        !!initialName && !isValidMcpServerIdentifier(initialName);
+      setName(
+        repairsUnsafeName
+          ? suggestMcpServerIdentifier(initialName)
+          : initialName
+      );
+      setDisplayName(
+        initial?.displayName ?? (repairsUnsafeName ? initialName : '')
+      );
       const resetForm = initialForm ?? emptyForm(codec.transports[0]);
       setForm(resetForm);
       setArgsText((initialForm?.args ?? []).join('\n'));
@@ -203,6 +224,7 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
 
     const validate = (): {
       name: string;
+      displayName: string | null;
       entry: JsonValue;
       assignments: BaseCodingAgent[];
     } | null => {
@@ -215,12 +237,8 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
         setError(t('settings.mcp.validation.nameWhitespace'));
         return null;
       }
-      if (!/^[a-zA-Z0-9_-]+$/.test(trimmedName)) {
-        const suggestion =
-          trimmedName
-            .toLowerCase()
-            .replace(/[^a-z0-9_-]+/g, '_')
-            .replace(/^_+|_+$/g, '') || 'mcp_server';
+      if (!isValidMcpServerIdentifier(trimmedName)) {
+        const suggestion = suggestMcpServerIdentifier(trimmedName);
         setError(t('settings.mcp.validation.nameIdentifier', { suggestion }));
         return null;
       }
@@ -249,6 +267,7 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
           }
           return {
             name: trimmedName,
+            displayName: displayName.trim() || null,
             entry: parsed as JsonValue,
             assignments,
           };
@@ -305,7 +324,12 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
       }
 
       const entry = codec.serialize({ ...form, args }, initial?.entry);
-      return { name: trimmedName, entry, assignments };
+      return {
+        name: trimmedName,
+        displayName: displayName.trim() || null,
+        entry,
+        assignments,
+      };
     };
 
     const handleSave = () => {
@@ -358,6 +382,19 @@ const McpServerDialogImpl = create<McpServerDialogProps>(
                 className="font-mono"
                 autoComplete="off"
                 autoFocus
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="mcp-server-display-name">
+                {t('settings.mcp.dialog.displayName')}
+              </Label>
+              <Input
+                id="mcp-server-display-name"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                placeholder={t('settings.mcp.dialog.displayNamePlaceholder')}
+                autoComplete="off"
               />
             </div>
 

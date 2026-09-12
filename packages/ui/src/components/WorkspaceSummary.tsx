@@ -7,6 +7,7 @@ import {
   CircleIcon,
   GitPullRequestIcon,
   DotsThreeIcon,
+  HardDrivesIcon,
 } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '../lib/cn';
@@ -35,6 +36,8 @@ export interface WorkspaceSummaryProps {
   linesRemoved?: number;
   isActive?: boolean;
   isRunning?: boolean;
+  /** Whether the workspace is reserved/provisioning before its first run. */
+  isCreating?: boolean;
   isPinned?: boolean;
   hasPendingApproval?: boolean;
   hasRunningDevServer?: boolean;
@@ -45,8 +48,14 @@ export interface WorkspaceSummaryProps {
     | 'completed'
     | 'failed'
     | 'killed'
-    | 'interrupted';
+    | 'interrupted'
+    | 'indeterminate';
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
+  serverAffinity?: {
+    kind: 'local' | 'automatic' | 'worker' | 'unassigned';
+    worker_hostname: string | null;
+    requested_worker_hostname: string | null;
+  };
   onClick?: () => void;
   className?: string;
   summary?: boolean;
@@ -63,6 +72,7 @@ export function WorkspaceSummary({
   linesRemoved,
   isActive = false,
   isRunning = false,
+  isCreating = false,
   isPinned = false,
   hasPendingApproval = false,
   hasRunningDevServer = false,
@@ -70,6 +80,7 @@ export function WorkspaceSummary({
   latestProcessCompletedAt,
   latestProcessStatus,
   prStatus,
+  serverAffinity,
   onClick,
   className,
   summary = false,
@@ -81,7 +92,13 @@ export function WorkspaceSummary({
   const isFailed =
     latestProcessStatus === 'failed' ||
     latestProcessStatus === 'killed' ||
-    latestProcessStatus === 'interrupted';
+    latestProcessStatus === 'interrupted' ||
+    latestProcessStatus === 'indeterminate';
+  const affinityLabel = serverAffinity
+    ? (serverAffinity.worker_hostname ??
+      serverAffinity.requested_worker_hostname ??
+      t(`workspaces.serverAffinity.${serverAffinity.kind}`))
+    : null;
 
   const handleOpenCommandBar = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -146,7 +163,18 @@ export function WorkspaceSummary({
             )}
 
             {/* Running dots OR hand icon for pending approval */}
-            {isRunning &&
+            {isCreating ? (
+              <>
+                <RunningDots />
+                <span
+                  role="status"
+                  className="min-w-0 flex-1 truncate text-brand"
+                >
+                  {t('workspaces.creating', { defaultValue: 'Creating…' })}
+                </span>
+              </>
+            ) : (
+              isRunning &&
               (hasPendingApproval ? (
                 <HandIcon
                   className="size-icon-xs text-brand shrink-0"
@@ -154,7 +182,8 @@ export function WorkspaceSummary({
                 />
               ) : (
                 <RunningDots />
-              ))}
+              ))
+            )}
 
             {/* Unseen activity indicator (only when not running and not failed) */}
             {hasUnseenActivity && !isRunning && !isFailed && (
@@ -188,6 +217,7 @@ export function WorkspaceSummary({
 
             {/* Time elapsed OR "Draft" label (when not running) */}
             {!isRunning &&
+              !isCreating &&
               (isDraft ? (
                 <span className="min-w-0 flex-1 truncate">
                   {t('workspaces.draft')}
@@ -201,7 +231,7 @@ export function WorkspaceSummary({
               ))}
 
             {/* Spacer when running (no elapsed time shown) */}
-            {isRunning && <span className="flex-1" />}
+            {isRunning && !isCreating && <span className="flex-1" />}
 
             {/* File count + lines changed on the right */}
             {hasChanges && (
@@ -214,6 +244,16 @@ export function WorkspaceSummary({
                 {linesRemoved !== undefined && (
                   <span className="text-error">-{linesRemoved}</span>
                 )}
+              </span>
+            )}
+
+            {affinityLabel && (
+              <span
+                className="flex max-w-24 shrink-0 items-center gap-half truncate"
+                title={affinityLabel}
+              >
+                <HardDrivesIcon className="size-icon-xs shrink-0" />
+                <span className="truncate">{affinityLabel}</span>
               </span>
             )}
           </div>

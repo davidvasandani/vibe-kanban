@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -8,7 +8,14 @@ use std::{
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
+use cluster_protocol::{
+    CancellationPhase, CancellationRequest, EventAcknowledgement, ExecutionDispatch,
+    ExecutionEventPayload, InteractionRequest, InteractionResponse, McpConfigSnapshot,
+    McpRefreshRequest, PROTOCOL_VERSION, PersistencePolicy, RequestAuthority, TerminalState,
+    WorkerMcpRefreshStatus,
+};
 use command_group::AsyncGroupChild;
 use db::{
     DBService,
@@ -16,14 +23,17 @@ use db::{
         coding_agent_turn::CodingAgentTurn,
         execution_process::{
             ExecutionContext, ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus,
+            ExecutorActionField,
         },
         execution_process_repo_state::ExecutionProcessRepoState,
+        execution_worker_job::{ExecutionWorkerDispatchState, ExecutionWorkerJob},
         project::Project,
         repo::Repo,
         scratch::{DraftFollowUpData, Scratch, ScratchType},
         session::{Session, SessionError},
         task::Task,
-        workspace::Workspace,
+        worker_node::{WorkerMountStatus, WorkerNode, WorkerNodeStatus},
+        workspace::{Workspace, WorkspacePlacement, WorkspacePlacementState},
         workspace_repo::WorkspaceRepo,
     },
 };
@@ -41,10 +51,12 @@ use executors::{
         WarmReuseHandle, WarmReuseSignal,
     },
     logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
+    mcp_config::read_coding_agent_mcp_servers,
     mcp_refresh::{
         McpRefreshErrorCategory, McpRefreshHandle, McpRefreshResult, McpRefreshSignal,
         McpRefreshStatus,
     },
+    profile::{ExecutorConfig, ExecutorConfigs, ExecutorProfile},
 };
 use futures::{FutureExt, StreamExt, TryStreamExt, stream::select};
 use git::GitService;
@@ -52,6 +64,7 @@ use serde_json::json;
 use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
+    cluster::{ClusterConfig, WorkerClient},
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{ContainerError, ContainerRef, ContainerService},
     diff_stream::{self, DiffStreamHandle},
@@ -62,25 +75,440 @@ use services::services::{
     remote_client::{RemoteClient, RemoteClientError},
     remote_sync,
 };
+use sha2::{Digest, Sha256};
 use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_util::io::ReaderStream;
 use utils::{
+    approvals::{ApprovalOutcome, ApprovalRequest},
     log_msg::LogMsg,
     msg_store::MsgStore,
     text::{git_branch_id, short_uuid, truncate_to_char_boundary},
+    worktree_linkage::WorktreeLinkage,
 };
 use uuid::Uuid;
-use workspace_manager::{RepoWorkspaceInput, WorkspaceError, WorkspaceManager};
+use workspace_manager::{
+    AdoptOutcome, RepoWorkspaceInput, SharedRepositoryStore, SharedWorkspacePaths, WorkspaceError,
+    WorkspaceManager,
+};
+use worktree_manager::RepositoryAdminLockManager;
 
 use crate::{command, copy};
 
 const WORKSPACE_TOUCH_DEBOUNCE: Duration = Duration::from_mins(2);
+const FINAL_OUTPUT_RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(45);
+type AsyncChildStore = Arc<RwLock<HashMap<Uuid, Arc<RwLock<AsyncGroupChild>>>>>;
+
+fn history_has_final_assistant_message(history: &[LogMsg]) -> bool {
+    history
+        .iter()
+        .rev()
+        .find_map(normalized_final_assistant_state)
+        .unwrap_or(false)
+}
+
+fn normalized_final_assistant_state(message: &LogMsg) -> Option<bool> {
+    let LogMsg::JsonPatch(patch) = message else {
+        return None;
+    };
+    let (_, entry) = extract_normalized_entry_from_patch(patch)?;
+    match entry.entry_type {
+        NormalizedEntryType::AssistantMessage => Some(!entry.content.trim().is_empty()),
+        // Accounting/progress entries can legitimately trail the final
+        // assistant entry without representing more agent work.
+        NormalizedEntryType::TokenUsageInfo(_)
+        | NormalizedEntryType::Loading
+        | NormalizedEntryType::Thinking => None,
+        // A tool request, interaction, error, or another conversational entry
+        // is positive evidence that earlier assistant output was intermediate.
+        _ => Some(false),
+    }
+}
+
+async fn wait_for_unfinalized_output(
+    msg_stores: Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>,
+    child_store: Option<AsyncChildStore>,
+    exec_id: Uuid,
+    live_child_is_turn_evidence: bool,
+) {
+    let mut observed_final_at = None;
+    loop {
+        let history = msg_stores
+            .read()
+            .await
+            .get(&exec_id)
+            .map(|store| store.get_history())
+            .unwrap_or_default();
+        if history_has_final_assistant_message(&history) {
+            // Preserve the first observation so a capped history that evicts
+            // one entry for every append cannot postpone reconciliation merely
+            // by keeping the same retained length.
+            observed_final_at.get_or_insert_with(tokio::time::Instant::now);
+        } else {
+            observed_final_at = None;
+        }
+        if observed_final_at.is_some_and(|observed| {
+            tokio::time::Instant::now().duration_since(observed)
+                >= FINAL_OUTPUT_RECONCILIATION_TIMEOUT
+        }) {
+            if live_child_is_turn_evidence
+                && let Some(child_store) = &child_store
+                && let Some(child) = child_store.read().await.get(&exec_id).cloned()
+                && matches!(child.write().await.try_wait(), Ok(None))
+            {
+                // A live child is authoritative positive liveness. Re-arm the
+                // observation window; process exit or executor completion owns
+                // terminal classification while that evidence remains true.
+                observed_final_at = Some(tokio::time::Instant::now());
+                continue;
+            }
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn update_completion_with_retry(
+    db: &DBService,
+    exec_id: Uuid,
+    status: ExecutionProcessStatus,
+    exit_code: Option<i64>,
+) -> Result<(), anyhow::Error> {
+    let mut delay = Duration::from_millis(50);
+    for attempt in 1..=3 {
+        match ExecutionProcess::update_completion(&db.pool, exec_id, status.clone(), exit_code)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < 3 => {
+                tracing::warn!(%exec_id, ?status, attempt, %error, "Retrying execution completion write");
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    unreachable!("bounded completion attempts always return")
+}
+
+fn should_ack_worker_batch(cursor: u64, has_terminal: bool) -> bool {
+    cursor > 0 && !has_terminal
+}
+
+fn worker_job_has_positive_liveness(
+    job: &ExecutionWorkerJob,
+    now: DateTime<Utc>,
+    live_lease_is_turn_evidence: bool,
+) -> bool {
+    live_lease_is_turn_evidence
+        && !job.dispatch_state.is_terminal()
+        && job.lease_expires_at.is_some_and(|lease| lease > now)
+}
+
+fn worker_lease_is_turn_evidence(base_executor: Option<BaseCodingAgent>) -> bool {
+    // Keep this aligned with executors whose SpawnedChild carries
+    // `exit_signal: Some(_)`. Their worker process can stay alive independently
+    // of the protocol turn, so a renewed lease is not evidence of turn work.
+    !matches!(
+        base_executor,
+        Some(
+            BaseCodingAgent::Codex
+                | BaseCodingAgent::Opencode
+                | BaseCodingAgent::Gemini
+                | BaseCodingAgent::QwenCode
+                | BaseCodingAgent::Copilot
+                | BaseCodingAgent::Grok
+        )
+    )
+}
+
+#[cfg(test)]
+mod final_output_reconciliation_tests {
+    use std::{collections::HashMap, sync::Arc, time::Duration};
+
+    use command_group::AsyncCommandGroup;
+    use executors::logs::{NormalizedEntry, NormalizedEntryType, utils::patch::ConversationPatch};
+    use tokio::sync::RwLock;
+    use utils::{log_msg::LogMsg, msg_store::MsgStore};
+    use uuid::Uuid;
+
+    use super::{
+        history_has_final_assistant_message, normalized_final_assistant_state,
+        should_ack_worker_batch, wait_for_unfinalized_output, worker_job_has_positive_liveness,
+        worker_lease_is_turn_evidence,
+    };
+
+    fn normalized_message(entry_type: NormalizedEntryType, content: &str) -> LogMsg {
+        LogMsg::JsonPatch(ConversationPatch::add_normalized_entry(
+            0,
+            NormalizedEntry {
+                timestamp: None,
+                entry_type,
+                content: content.into(),
+                metadata: None,
+            },
+        ))
+    }
+
+    #[test]
+    fn final_assistant_output_arms_reconciliation_but_empty_output_does_not() {
+        let final_message =
+            normalized_message(NormalizedEntryType::AssistantMessage, "Final answer");
+        let empty_message = normalized_message(NormalizedEntryType::AssistantMessage, "  ");
+        let tool_after_output = normalized_message(
+            NormalizedEntryType::ToolUse {
+                tool_name: "shell".into(),
+                action_type: executors::logs::ActionType::CommandRun {
+                    command: "sleep 60".into(),
+                    result: None,
+                    category: Default::default(),
+                },
+                status: executors::logs::ToolStatus::Created,
+            },
+            "pending",
+        );
+
+        assert!(history_has_final_assistant_message(std::slice::from_ref(
+            &final_message
+        )));
+        assert!(!history_has_final_assistant_message(&[
+            final_message,
+            tool_after_output.clone(),
+        ]));
+        assert!(!history_has_final_assistant_message(&[empty_message]));
+        assert!(!history_has_final_assistant_message(&[LogMsg::Stdout(
+            "Final answer".into()
+        )]));
+        assert_eq!(
+            normalized_final_assistant_state(&tool_after_output),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn terminal_worker_batch_is_not_acknowledged_before_persistence() {
+        assert!(should_ack_worker_batch(4, false));
+        assert!(!should_ack_worker_batch(4, true));
+        assert!(!should_ack_worker_batch(0, false));
+    }
+
+    #[test]
+    fn worker_job_liveness_requires_active_state_and_current_lease() {
+        let now = chrono::Utc::now();
+        let mut job = db::models::execution_worker_job::ExecutionWorkerJob {
+            execution_process_id: Uuid::new_v4(),
+            worker_node_id: Uuid::new_v4(),
+            worker_job_id: Uuid::new_v4(),
+            request_digest: "digest".into(),
+            dispatch_state: db::models::execution_worker_job::ExecutionWorkerDispatchState::Running,
+            last_event_sequence: 0,
+            worker_last_sequence: 0,
+            lease_expires_at: Some(now + chrono::Duration::seconds(30)),
+            output_complete: false,
+            terminal_evidence: None,
+            dispatched_at: now,
+            accepted_at: Some(now),
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        assert!(worker_job_has_positive_liveness(&job, now, true));
+        assert!(
+            !worker_job_has_positive_liveness(&job, now, false),
+            "a signal-driven worker lease is process liveness, not turn liveness"
+        );
+
+        job.lease_expires_at = Some(now - chrono::Duration::seconds(1));
+        assert!(!worker_job_has_positive_liveness(&job, now, true));
+        job.lease_expires_at = Some(now + chrono::Duration::seconds(30));
+        job.dispatch_state =
+            db::models::execution_worker_job::ExecutionWorkerDispatchState::Completed;
+        assert!(!worker_job_has_positive_liveness(&job, now, true));
+    }
+
+    #[test]
+    fn signal_driven_worker_lease_is_not_turn_liveness() {
+        use executors::executors::BaseCodingAgent;
+
+        for executor in [
+            BaseCodingAgent::Codex,
+            BaseCodingAgent::Opencode,
+            BaseCodingAgent::Gemini,
+            BaseCodingAgent::QwenCode,
+            BaseCodingAgent::Copilot,
+            BaseCodingAgent::Grok,
+        ] {
+            assert!(!worker_lease_is_turn_evidence(Some(executor)));
+        }
+        for executor in [
+            BaseCodingAgent::ClaudeCode,
+            BaseCodingAgent::Amp,
+            BaseCodingAgent::CursorAgent,
+            BaseCodingAgent::Droid,
+        ] {
+            assert!(worker_lease_is_turn_evidence(Some(executor)));
+        }
+        assert!(worker_lease_is_turn_evidence(None));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_output_without_terminal_evidence_triggers_bounded_reconciliation() {
+        let execution_id = Uuid::new_v4();
+        let store = Arc::new(MsgStore::new());
+        store.push(normalized_message(
+            NormalizedEntryType::AssistantMessage,
+            "Final answer",
+        ));
+        let stores = Arc::new(RwLock::new(HashMap::from([(execution_id, store)])));
+
+        let reconciliation = tokio::spawn(wait_for_unfinalized_output(
+            stores,
+            None,
+            execution_id,
+            true,
+        ));
+        tokio::time::advance(Duration::from_secs(44)).await;
+        assert!(!reconciliation.is_finished());
+        tokio::time::advance(Duration::from_secs(2)).await;
+        reconciliation.await.expect("reconciliation task completes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn positive_local_process_liveness_defers_reconciliation() {
+        let execution_id = Uuid::new_v4();
+        let store = Arc::new(MsgStore::new());
+        store.push(normalized_message(
+            NormalizedEntryType::AssistantMessage,
+            "Final answer",
+        ));
+        let stores = Arc::new(RwLock::new(HashMap::from([(execution_id, store)])));
+        let child = Arc::new(RwLock::new(
+            tokio::process::Command::new("sleep")
+                .arg("300")
+                .group_spawn()
+                .expect("spawn live child"),
+        ));
+        let children = Arc::new(RwLock::new(HashMap::from([(execution_id, child.clone())])));
+
+        let reconciliation = tokio::spawn(wait_for_unfinalized_output(
+            stores,
+            Some(children),
+            execution_id,
+            true,
+        ));
+        tokio::time::advance(Duration::from_secs(46)).await;
+        assert!(!reconciliation.is_finished());
+
+        child.write().await.kill().await.expect("kill child");
+        tokio::time::advance(Duration::from_secs(46)).await;
+        reconciliation
+            .await
+            .expect("dead child permits reconciliation");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn signal_driven_turn_does_not_treat_live_child_as_turn_liveness() {
+        let execution_id = Uuid::new_v4();
+        let store = Arc::new(MsgStore::new());
+        store.push(normalized_message(
+            NormalizedEntryType::AssistantMessage,
+            "Final answer",
+        ));
+        let stores = Arc::new(RwLock::new(HashMap::from([(execution_id, store)])));
+        let child = Arc::new(RwLock::new(
+            tokio::process::Command::new("sleep")
+                .arg("300")
+                .group_spawn()
+                .expect("spawn live app-server child"),
+        ));
+        let children = Arc::new(RwLock::new(HashMap::from([(execution_id, child.clone())])));
+
+        let reconciliation = tokio::spawn(wait_for_unfinalized_output(
+            stores,
+            Some(children),
+            execution_id,
+            false,
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(46)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            reconciliation.is_finished(),
+            "an app-server child can outlive its turn and must not defer forever"
+        );
+
+        child.write().await.kill().await.expect("kill child");
+        reconciliation.await.expect("reconciliation task completes");
+    }
+}
 
 /// Env gate for warm coding-agent process reuse (Phase 2). Default off: until
 /// this is set truthy, no app-server is kept warm and the runtime behaves
 /// exactly as before (Constitution IV — do not enable a runtime path we cannot
 /// observe E2E here). See `specs/vk/826e-coding-agent-war/`.
 const KEEP_WARM_ENV: &str = "VK_KEEP_WARM_AGENTS";
+
+fn validated_mcp_snapshot(
+    executor: BaseCodingAgent,
+    mut servers: BTreeMap<String, serde_json::Value>,
+) -> anyhow::Result<McpConfigSnapshot> {
+    executors::mcp_config::route_mcp_servers_for_runtime(&mut servers);
+    let snapshot = McpConfigSnapshot {
+        executor: executor.to_string(),
+        servers,
+    };
+    snapshot.validate_size().map_err(anyhow::Error::from)?;
+    Ok(snapshot)
+}
+
+fn push_worker_bytes(store: &MsgStore, encoded: &str, stderr: bool) {
+    let message = match BASE64_STANDARD.decode(encoded) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => {
+            store.push(LogMsg::Stderr(format!(
+                "Worker returned invalid base64 output: {error}"
+            )));
+            return;
+        }
+    };
+    if stderr {
+        store.push(LogMsg::Stderr(message));
+    } else {
+        store.push_stdout(message);
+    }
+}
+
+async fn mark_remote_execution_indeterminate(
+    db: &DBService,
+    execution_id: Uuid,
+) -> Result<(), ContainerError> {
+    ExecutionWorkerJob::update_state(
+        &db.pool,
+        execution_id,
+        ExecutionWorkerDispatchState::Indeterminate,
+        None,
+        Some(Utc::now()),
+    )
+    .await?;
+    ExecutionProcess::update_completion(
+        &db.pool,
+        execution_id,
+        ExecutionProcessStatus::Indeterminate,
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+fn worker_cleanup_evidence_safe(
+    worker: &WorkerNode,
+    has_unsafe_jobs: bool,
+    now: DateTime<Utc>,
+) -> bool {
+    worker.status == WorkerNodeStatus::Online
+        && worker.mount_status == WorkerMountStatus::Healthy
+        && worker.lease_expires_at.is_some_and(|lease| lease > now)
+        && !has_unsafe_jobs
+}
 
 /// A warm app-server with no active turn for longer than this is proactively
 /// reaped so an abandoned-but-not-closed attempt cannot pin a process forever
@@ -310,11 +738,38 @@ async fn reap_all_warm_entries(registry: &WarmRegistry) {
     }
 }
 
+/// The profile definition to dispatch alongside `config`: exactly the one
+/// variant the request names, resolved against this coordinator's profiles.
+///
+/// One variant rather than the executor's whole profile, because that is all the
+/// worker needs to run this job, and a dispatch is not a reason to copy the
+/// operator's other configurations onto another host.
+///
+/// Overrides carried on the request are deliberately *not* applied here: the
+/// worker applies them itself, from the action it already receives, so applying
+/// them on both sides would double them.
+///
+/// `None` when the profile does not resolve here either. That is not this
+/// function's failure to report — the coordinator refuses such a request through
+/// its own resolution path, and inventing an error here would duplicate it.
+fn dispatched_executor_profile(config: &ExecutorConfig) -> Option<ExecutorProfile> {
+    let profile_id = config.profile_id();
+    let variant = profile_id
+        .variant
+        .clone()
+        .unwrap_or_else(|| "DEFAULT".into());
+    let agent = ExecutorConfigs::get_cached().get_coding_agent(&profile_id)?;
+    Some(ExecutorProfile {
+        recently_used_models: None,
+        configurations: HashMap::from([(variant, agent)]),
+    })
+}
+
 #[derive(Clone)]
 pub struct LocalContainerService {
     db: DBService,
     workspace_manager: WorkspaceManager,
-    child_store: Arc<RwLock<HashMap<Uuid, Arc<RwLock<AsyncGroupChild>>>>>,
+    child_store: AsyncChildStore,
     cancellation_tokens: Arc<RwLock<HashMap<Uuid, CancellationToken>>>,
     msg_stores: Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>,
     /// Tracks background tasks that stream logs to the database.
@@ -344,9 +799,84 @@ pub struct LocalContainerService {
     queued_message_service: QueuedMessageService,
     notification_service: NotificationService,
     remote_client: Option<RemoteClient>,
+    cluster_config: ClusterConfig,
+    repository_admin_locks: RepositoryAdminLockManager,
+    worker_client: Option<WorkerClient>,
 }
 
 impl LocalContainerService {
+    fn route_worker_interaction(
+        &self,
+        execution_id: Uuid,
+        worker_node_id: Uuid,
+        interaction: InteractionRequest,
+    ) {
+        let Some(client) = self.worker_client.clone() else {
+            tracing::error!(%execution_id, "Cannot route worker interaction without a worker client");
+            return;
+        };
+        let Some(coordinator_id) = self.cluster_config.coordinator_id else {
+            tracing::error!(%execution_id, "Cannot route worker interaction without coordinator identity");
+            return;
+        };
+        let approvals = self.approvals.clone();
+        tokio::spawn(async move {
+            let mut request = ApprovalRequest::new(interaction.prompt, execution_id);
+            request.id = interaction.interaction_id.to_string();
+            if let Some(expires_at) = interaction.expires_at {
+                request.timeout_at = expires_at;
+            }
+            let is_question = interaction.kind == "question";
+            let Ok((_, waiter)) = approvals.create_with_waiter(request, is_question).await else {
+                tracing::error!(%execution_id, interaction_id = %interaction.interaction_id, "Failed to register worker interaction");
+                return;
+            };
+            let mut outcome = waiter.await;
+            let deadline = interaction.expires_at;
+            loop {
+                if matches!(
+                    interaction.disconnect_policy,
+                    cluster_protocol::DisconnectPolicy::FailClosed
+                ) && deadline.is_some_and(|deadline| Utc::now() >= deadline)
+                {
+                    outcome = ApprovalOutcome::Denied {
+                        reason: Some(
+                            "coordinator could not deliver approval before timeout".into(),
+                        ),
+                    };
+                }
+                let response = InteractionResponse {
+                    authority: RequestAuthority {
+                        protocol_version: PROTOCOL_VERSION,
+                        coordinator_id,
+                        worker_node_id,
+                        correlation_id: execution_id,
+                        issued_at: Utc::now(),
+                        nonce: Uuid::new_v4().to_string(),
+                    },
+                    execution_id,
+                    interaction_id: interaction.interaction_id,
+                    response: serde_json::to_string(&outcome)
+                        .expect("approval outcome must serialize"),
+                };
+                match client.respond_interaction(worker_node_id, &response).await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        tracing::warn!(%execution_id, interaction_id = %interaction.interaction_id, "Worker interaction response failed; retrying: {error}");
+                        if matches!(
+                            interaction.disconnect_policy,
+                            cluster_protocol::DisconnectPolicy::Timeout
+                        ) && deadline.is_some_and(|deadline| Utc::now() >= deadline)
+                        {
+                            outcome = ApprovalOutcome::TimedOut;
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        });
+    }
+
     fn register_mcp_refresh_control(
         &self,
         session_id: Uuid,
@@ -416,6 +946,8 @@ impl LocalContainerService {
         approvals: Approvals,
         queued_message_service: QueuedMessageService,
         remote_client: Option<RemoteClient>,
+        cluster_config: ClusterConfig,
+        worker_client: Option<WorkerClient>,
     ) -> Self {
         let child_store = Arc::new(RwLock::new(HashMap::new()));
         let cancellation_tokens = Arc::new(RwLock::new(HashMap::new()));
@@ -427,8 +959,11 @@ impl LocalContainerService {
         let mcp_refresh_controls = Arc::new(RwLock::new(HashMap::new()));
         let workspace_touch_times = Arc::new(RwLock::new(HashMap::new()));
         let notification_service = NotificationService::new(config.clone());
+        let repository_admin_locks =
+            RepositoryAdminLockManager::new(db.pool.clone(), Duration::from_mins(5))
+                .expect("static repository lock lease must be valid");
 
-        let container = LocalContainerService {
+        LocalContainerService {
             db,
             workspace_manager,
             child_store,
@@ -450,11 +985,14 @@ impl LocalContainerService {
             queued_message_service,
             notification_service,
             remote_client,
-        };
+            cluster_config,
+            repository_admin_locks,
+            worker_client,
+        }
+    }
 
-        container.spawn_workspace_cleanup();
-
-        container
+    pub fn start_cleanup_tasks(&self) {
+        self.spawn_workspace_cleanup();
     }
 
     fn map_workspace_manager_error(err: WorkspaceError) -> ContainerError {
@@ -479,6 +1017,22 @@ impl LocalContainerService {
                 repo_name
             )),
             WorkspaceError::PartialCreation(msg) => ContainerError::Other(anyhow!(msg)),
+            WorkspaceError::WorktreeNotPortable { repo_name, detail } => {
+                ContainerError::Other(anyhow!(
+                    "Repository '{}' has a worktree other nodes cannot use: {}",
+                    repo_name,
+                    detail
+                ))
+            }
+            // Kept out of `Other` on purpose: `Other` is rendered to the user as
+            // a generic internal error, and this is the one provisioning failure
+            // whose text is the diagnosis.
+            err @ WorkspaceError::SharedStore { .. } => {
+                ContainerError::SharedStore(err.to_string())
+            }
+            WorkspaceError::InvalidSharedRoot(path) => {
+                ContainerError::Other(anyhow!("Invalid shared workspace root: {}", path.display()))
+            }
         }
     }
 
@@ -501,6 +1055,12 @@ impl LocalContainerService {
             .map(|wr| (wr.repo_id, wr.target_branch.clone()))
             .collect();
 
+        // Resolve, once and here, which Git directory administers this
+        // workspace's worktrees. Every caller — create, ensure, cleanup, diff —
+        // goes through this function, so the decision is made in one place
+        // rather than re-derived (and eventually disagreed about) per call site.
+        let store = self.shared_repository_store_for(workspace_id).await?;
+
         let workspace_inputs: Vec<RepoWorkspaceInput> = repositories
             .iter()
             .map(|repo| {
@@ -511,11 +1071,108 @@ impl LocalContainerService {
                         workspace_id
                     ))
                 })?;
-                Ok(RepoWorkspaceInput::new(repo.clone(), target_branch))
+                Ok(match &store {
+                    Some(store) => RepoWorkspaceInput::shared(
+                        repo.clone(),
+                        target_branch,
+                        store.path_for(repo.id),
+                    ),
+                    None => RepoWorkspaceInput::new(repo.clone(), target_branch),
+                })
             })
             .collect::<Result<_, ContainerError>>()?;
 
         Ok((repositories, workspace_inputs))
+    }
+
+    /// Best-effort repair of one cluster worktree that predates the shared
+    /// store.
+    ///
+    /// Deliberately never fails the caller. Every outcome is either a no-op
+    /// (the common case, once healed), a repair, or a refusal that leaves the
+    /// worktree exactly as it was — and a workspace that cannot be healed is
+    /// still better served by the ordinary `ensure` path reporting its own
+    /// error than by this one masking it.
+    async fn heal_cluster_worktree(
+        &self,
+        store: &SharedRepositoryStore,
+        workspace_dir: &Path,
+        input: &RepoWorkspaceInput,
+        branch: &str,
+    ) {
+        let worktree_path = workspace_dir.join(&input.repo.name);
+        // The store must hold the workspace's branch before anything is
+        // re-pointed at it, or adoption would refuse — correctly, but for a
+        // reason we can fix here by fetching from the checkout that still has
+        // it.
+        if let Err(e) = store.ensure(&input.repo, branch).await {
+            tracing::warn!(
+                repo = %input.repo.name,
+                "could not prepare the shared store while healing {}: {e}",
+                worktree_path.display()
+            );
+            return;
+        }
+        match store.adopt(&input.repo, &worktree_path, branch).await {
+            Ok(AdoptOutcome::AlreadyPortable) => {}
+            Ok(AdoptOutcome::Adopted { common_dir }) => tracing::info!(
+                repo = %input.repo.name,
+                "re-linked {} to {}",
+                worktree_path.display(),
+                common_dir.display()
+            ),
+            Ok(AdoptOutcome::Skipped { reason }) => tracing::info!(
+                repo = %input.repo.name,
+                "left {} alone: {reason}",
+                worktree_path.display()
+            ),
+            Err(e) => tracing::warn!(
+                repo = %input.repo.name,
+                "could not re-link {}: {e}",
+                worktree_path.display()
+            ),
+        }
+    }
+
+    /// The shared repository store this workspace's worktrees belong to, or
+    /// `None` when they belong to the operator's registered checkout.
+    ///
+    /// `None` for every workspace when clustering is disabled, and for a
+    /// `Local` placement when it is enabled — `Local` is a valid terminal state
+    /// meaning "runs on the coordinator", which is what every workspace created
+    /// before clustering has. Every other placement state, `Cleaning` included,
+    /// belongs to the store: a clustered workspace's registrations live there,
+    /// so cleaning it up against the registered checkout would delete the
+    /// directory while unregistering nothing.
+    async fn shared_repository_store_for(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Option<SharedRepositoryStore>, ContainerError> {
+        if !self.cluster_config.enabled {
+            return Ok(None);
+        }
+        let Some(placement) = WorkspacePlacement::find(&self.db.pool, workspace_id).await? else {
+            return Ok(None);
+        };
+        // Exhaustive on purpose: a new placement state must be a compile error
+        // here, not a silent fallthrough to the registered checkout.
+        let uses_shared_store = match placement.placement_state {
+            WorkspacePlacementState::Local => false,
+            WorkspacePlacementState::Reserved
+            | WorkspacePlacementState::Provisioning
+            | WorkspacePlacementState::Ready
+            | WorkspacePlacementState::Failed
+            | WorkspacePlacementState::Cleaning => true,
+        };
+        if !uses_shared_store {
+            return Ok(None);
+        }
+        let store = SharedRepositoryStore::new(
+            &self.cluster_config.shared_root,
+            self.repository_admin_locks.clone(),
+        )
+        .map_err(Self::map_workspace_manager_error)?;
+        Ok(Some(store))
     }
 
     async fn get_child_from_store(&self, id: &Uuid) -> Option<Arc<RwLock<AsyncGroupChild>>> {
@@ -631,6 +1288,20 @@ impl LocalContainerService {
         }
     }
 
+    /// Remove a just-finished execution's in-memory store and push its
+    /// `Finished` sentinel — the shared tail every completion path in this
+    /// file runs. Caches the store's settled entries to disk first (VAS-440):
+    /// every call site here means the execution just left `Running`, so this
+    /// is the one place guaranteed to hold the complete history without
+    /// requiring a reader to ask for it before the store is gone.
+    async fn finish_msg_store(&self, id: &Uuid) {
+        let Some(store) = self.msg_stores.write().await.remove(id) else {
+            return;
+        };
+        self.cache_finished_execution(id, &store).await;
+        store.push_finished();
+    }
+
     /// Leave a detached process running across a server shutdown so the next
     /// boot can adopt it. Forgets the child handle (defusing kill_on_drop)
     /// and stops its monitor tasks without touching the DB row, which stays
@@ -686,9 +1357,7 @@ impl LocalContainerService {
 
             container.take_adopted_pgid(&exec_id).await;
             container.finish_raw_log_tailer(&exec_id).await;
-            if let Some(msg) = container.msg_stores.write().await.remove(&exec_id) {
-                msg.push_finished();
-            }
+            container.finish_msg_store(&exec_id).await;
         })
     }
 
@@ -719,9 +1388,7 @@ impl LocalContainerService {
             handle.abort();
         }
         self.finish_raw_log_tailer(&execution_process.id).await;
-        if let Some(msg) = self.msg_stores.write().await.remove(&execution_process.id) {
-            msg.push_finished();
-        }
+        self.finish_msg_store(&execution_process.id).await;
 
         self.update_after_head_commits(execution_process.id).await;
 
@@ -743,33 +1410,97 @@ impl LocalContainerService {
         };
         let workspace_dir = PathBuf::from(container_ref);
 
-        let repositories = WorkspaceRepo::find_repos_for_workspace(&self.db.pool, workspace.id)
-            .await
-            .unwrap_or_default();
+        // Resolve through the same seam creation used, so a clustered
+        // workspace's registrations are removed from the store that holds them.
+        let workspace_inputs = match self.workspace_repo_inputs(workspace.id).await {
+            Ok((_, inputs)) => inputs,
+            Err(e) => {
+                tracing::warn!(
+                    "Could not resolve repositories for workspace {}: {}",
+                    workspace.id,
+                    e
+                );
+                Vec::new()
+            }
+        };
 
-        if repositories.is_empty() {
+        let cleanup_succeeded = if workspace_inputs.is_empty() {
             tracing::warn!(
                 "No repositories found for workspace {}, cleaning up workspace directory only",
                 workspace.id
             );
-            if workspace_dir.exists()
-                && let Err(e) = tokio::fs::remove_dir_all(&workspace_dir).await
-            {
-                tracing::warn!("Failed to remove workspace directory: {}", e);
+            if workspace_dir.exists() {
+                match tokio::fs::remove_dir_all(&workspace_dir).await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        tracing::warn!("Failed to remove workspace directory: {}", error);
+                        false
+                    }
+                }
+            } else {
+                true
             }
         } else {
-            WorkspaceManager::cleanup_workspace(&workspace_dir, &repositories)
-                .await
-                .unwrap_or_else(|e| {
+            match WorkspaceManager::cleanup_workspace(&workspace_dir, &workspace_inputs).await {
+                Ok(()) => true,
+                Err(error) => {
                     tracing::warn!(
                         "Failed to clean up workspace for workspace {}: {}",
                         workspace.id,
-                        e
+                        error
                     );
-                });
+                    false
+                }
+            }
+        };
+
+        if !cleanup_succeeded {
+            if self.cluster_config.enabled
+                && let Err(error) =
+                    WorkspacePlacement::cancel_cleanup(&self.db.pool, workspace.id).await
+            {
+                tracing::warn!(
+                    workspace_id = %workspace.id,
+                    %error,
+                    "Failed to release unsuccessful clustered workspace cleanup claim"
+                );
+            }
+            return;
         }
 
-        let _ = Workspace::mark_worktree_deleted(&self.db.pool, workspace.id).await;
+        if let Err(error) = Workspace::mark_worktree_deleted(&self.db.pool, workspace.id).await {
+            tracing::warn!(
+                workspace_id = %workspace.id,
+                %error,
+                "Failed to mark cleaned workspace worktree deleted"
+            );
+            if self.cluster_config.enabled
+                && let Err(cancel_error) =
+                    WorkspacePlacement::cancel_cleanup(&self.db.pool, workspace.id).await
+            {
+                tracing::warn!(
+                    workspace_id = %workspace.id,
+                    error = %cancel_error,
+                    "Failed to release cleanup claim after deletion-state persistence failed"
+                );
+            }
+            return;
+        }
+
+        if self.cluster_config.enabled {
+            match WorkspacePlacement::finish_cleanup(&self.db.pool, workspace.id).await {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    workspace_id = %workspace.id,
+                    "Cleaned clustered workspace did not hold the cleanup fence"
+                ),
+                Err(error) => tracing::warn!(
+                    workspace_id = %workspace.id,
+                    %error,
+                    "Failed to release clustered workspace cleanup fence"
+                ),
+            }
+        }
     }
 
     async fn cleanup_expired_workspaces(&self) -> Result<(), DeploymentError> {
@@ -790,6 +1521,13 @@ impl LocalContainerService {
             expired_workspaces.len()
         );
         for workspace in &expired_workspaces {
+            if !self.cluster_workspace_cleanup_safe(workspace).await? {
+                tracing::info!(
+                    workspace_id = %workspace.id,
+                    "Retaining expired clustered workspace because worker ownership is active or uncertain"
+                );
+                continue;
+            }
             // Never auto-delete a workspace whose worktree still holds pending
             // work. Archival accelerates expiry to 1h (vs 72h), so an archived
             // workspace with uncommitted or untracked changes could otherwise be
@@ -814,9 +1552,50 @@ impl LocalContainerService {
                     continue;
                 }
             }
+            if self.cluster_config.enabled {
+                let placement = WorkspacePlacement::find(&self.db.pool, workspace.id).await?;
+                if placement
+                    .as_ref()
+                    .and_then(|value| value.worker_node_id)
+                    .is_some()
+                    && !WorkspacePlacement::begin_cleanup(&self.db.pool, workspace.id, Utc::now())
+                        .await?
+                {
+                    tracing::info!(
+                        workspace_id = %workspace.id,
+                        "Retaining clustered workspace because cleanup ownership changed before reclamation"
+                    );
+                    continue;
+                }
+            }
             self.cleanup_workspace(workspace).await;
         }
         Ok(())
+    }
+
+    async fn cluster_workspace_cleanup_safe(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<bool, DeploymentError> {
+        if !self.cluster_config.enabled {
+            return Ok(true);
+        }
+        let Some(placement) = WorkspacePlacement::find(&self.db.pool, workspace.id).await? else {
+            return Ok(false);
+        };
+        let Some(worker_node_id) = placement.worker_node_id else {
+            return Ok(placement.placement_state == WorkspacePlacementState::Local);
+        };
+        let Some(worker) = WorkerNode::find_by_id(&self.db.pool, worker_node_id).await? else {
+            return Ok(false);
+        };
+        let has_unsafe_jobs =
+            ExecutionWorkerJob::has_unsafe_for_workspace(&self.db.pool, workspace.id).await?;
+        Ok(worker_cleanup_evidence_safe(
+            &worker,
+            has_unsafe_jobs,
+            Utc::now(),
+        ))
     }
 
     fn spawn_workspace_cleanup(&self) {
@@ -824,7 +1603,7 @@ impl LocalContainerService {
         tokio::spawn(async move {
             container
                 .workspace_manager
-                .cleanup_orphan_workspaces()
+                .cleanup_orphan_workspaces(!container.cluster_config.enabled)
                 .await;
 
             let mut cleanup_interval =
@@ -1033,11 +1812,24 @@ impl LocalContainerService {
         let mut process_exit_rx = self.spawn_os_exit_watcher(exec_id);
 
         tokio::spawn(async move {
+            // For natural-exit executors the child lifetime is the turn
+            // lifetime. App-server executors report turn completion through a
+            // separate signal, so their still-live child does not prove the
+            // protocol turn remains active.
+            let live_child_is_turn_evidence = exit_signal.is_none();
             let mut exit_signal_future = exit_signal
                 .map(|rx| rx.boxed()) // wait for result
                 .unwrap_or_else(|| std::future::pending().boxed()); // no signal, stall forever
 
             let status_result: std::io::Result<std::process::ExitStatus>;
+            let mut reconciliation_timed_out = false;
+            let final_output_timeout = wait_for_unfinalized_output(
+                msg_stores.clone(),
+                Some(child_store.clone()),
+                exec_id,
+                live_child_is_turn_evidence,
+            );
+            tokio::pin!(final_output_timeout);
             // True when a persistent app-server finished a turn cleanly and is
             // being left alive for reuse; also guards the tail cleanup below so
             // the warm child is not killed or dropped after finalization.
@@ -1074,12 +1866,31 @@ impl LocalContainerService {
                     status_result = match exit_result {
                         Ok(ExecutorExitResult::Success) => Ok(success_exit_status()),
                         Ok(ExecutorExitResult::Failure) => Ok(failure_exit_status()),
-                        Err(_) => Ok(success_exit_status()), // Channel closed, assume success
+                        Err(error) => Err(std::io::Error::other(format!(
+                            "executor completion channel closed without terminal evidence: {error}"
+                        ))),
                     };
                 }
                 // Process exit
                 exit_status_result = &mut process_exit_rx => {
                     status_result = exit_status_result.unwrap_or_else(|e| Err(std::io::Error::other(e)));
+                }
+                _ = &mut final_output_timeout => {
+                    reconciliation_timed_out = true;
+                    tracing::warn!(
+                        %exec_id,
+                        timeout_seconds = FINAL_OUTPUT_RECONCILIATION_TIMEOUT.as_secs(),
+                        "Final assistant output was not followed by terminal evidence; reconciling execution"
+                    );
+                    if let Some(child_lock) = child_store.read().await.get(&exec_id).cloned() {
+                        let mut child = child_lock.write().await;
+                        if let Err(error) = command::kill_process_group(&mut child).await {
+                            tracing::error!(%exec_id, %error, "Failed to reap execution after final-output reconciliation timeout");
+                        }
+                    }
+                    status_result = Err(std::io::Error::other(
+                        "final output reconciliation timed out without terminal evidence"
+                    ));
                 }
             }
 
@@ -1118,14 +1929,15 @@ impl LocalContainerService {
                     };
                     (Some(code), status)
                 }
+                Err(_) if reconciliation_timed_out => (None, ExecutionProcessStatus::Indeterminate),
                 Err(_) => (None, ExecutionProcessStatus::Failed),
             };
 
             if !ExecutionProcess::was_stopped(&db.pool, exec_id).await
                 && let Err(e) =
-                    ExecutionProcess::update_completion(&db.pool, exec_id, status, exit_code).await
+                    update_completion_with_retry(&db, exec_id, status.clone(), exit_code).await
             {
-                tracing::error!("Failed to update execution process completion: {}", e);
+                tracing::error!(%exec_id, ?status, "Failed to update execution process completion after bounded retries: {e}");
             }
 
             if let Ok(ctx) = ExecutionProcess::load_context(&db.pool, exec_id).await {
@@ -1194,6 +2006,10 @@ impl LocalContainerService {
                             container.queued_message_service.has_queued(ctx.session.id),
                         ) {
                             SkippedCleanupAction::StartQueuedFollowUp => {
+                                container
+                                    .queued_message_service
+                                    .wait_for_restart_resolution(ctx.session.id)
+                                    .await;
                                 match container.queued_message_service.take_queued(ctx.session.id) {
                                     Some(queued_msg) => {
                                         container
@@ -1225,20 +2041,25 @@ impl LocalContainerService {
                         .ok()
                         .and_then(|action| action.next_action())
                         .is_some();
+                    container
+                        .queued_message_service
+                        .wait_for_restart_resolution(ctx.session.id)
+                        .await;
                     let mut started_queued_follow_up = false;
 
                     // Only execute queued messages if the execution succeeded
                     // If it failed, was killed or interrupted, just clear the queue and finalize
-                    let should_execute_queued = !matches!(
-                        ctx.execution_process.status,
-                        ExecutionProcessStatus::Failed
-                            | ExecutionProcessStatus::Killed
-                            | ExecutionProcessStatus::Interrupted
-                    );
-
                     if let Some(queued_msg) =
                         container.queued_message_service.take_queued(ctx.session.id)
                     {
+                        let should_execute_queued = (queued_msg.restart_agent
+                            && ctx.execution_process.status == ExecutionProcessStatus::Failed)
+                            || !matches!(
+                                ctx.execution_process.status,
+                                ExecutionProcessStatus::Failed
+                                    | ExecutionProcessStatus::Killed
+                                    | ExecutionProcessStatus::Interrupted
+                            );
                         if should_execute_queued {
                             tracing::info!(
                                 "Found queued message for session {}, starting follow-up execution",
@@ -1262,7 +2083,7 @@ impl LocalContainerService {
                             );
                             container.finalize_task(&ctx).await;
                         }
-                    } else {
+                    } else if !started_queued_follow_up {
                         container.finalize_task(&ctx).await;
                     }
 
@@ -1310,23 +2131,12 @@ impl LocalContainerService {
                             ctx.session.id
                         );
 
-                        if let Err(e) =
-                            Scratch::delete(&db.pool, ctx.session.id, &ScratchType::DraftFollowUp)
-                                .await
-                        {
-                            tracing::warn!(
-                                "Failed to delete scratch after consuming queued message: {}",
-                                e
-                            );
-                        }
-
-                        if let Err(e) = container
-                            .start_queued_follow_up(&ctx, &queued_msg.data)
+                        if !container
+                            .start_queued_follow_up_message(&ctx, &queued_msg)
                             .await
                         {
                             tracing::error!(
-                                "Failed to start queued follow-up from setup script completion: {}",
-                                e
+                                "Failed to start queued follow-up from setup script completion"
                             );
                         }
                     }
@@ -1390,9 +2200,7 @@ impl LocalContainerService {
             // for DB persistence to complete before cleaning up the MsgStore
             container.finish_raw_log_tailer(&exec_id).await;
             let db_stream_handle = container.take_db_stream_handle(&exec_id).await;
-            if let Some(msg_arc) = msg_stores.write().await.remove(&exec_id) {
-                msg_arc.push_finished();
-            }
+            container.finish_msg_store(&exec_id).await;
             if let Some(handle) = db_stream_handle {
                 let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
             }
@@ -1559,6 +2367,426 @@ impl LocalContainerService {
 
         let mut map = self.msg_stores().write().await;
         map.insert(id, store);
+    }
+
+    async fn track_worker_msgs_in_store(
+        &self,
+        execution_process: &ExecutionProcess,
+        worker_node_id: Uuid,
+    ) -> Result<(), ContainerError> {
+        let client = self.worker_client.clone().ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster worker client is not configured"))
+        })?;
+        let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
+        })?;
+        let execution_id = execution_process.id;
+        let base_executor = match &execution_process.executor_action.0 {
+            ExecutorActionField::ExecutorAction(action) => action.base_executor(),
+            ExecutorActionField::Other(_) => None,
+        };
+        let live_worker_lease_is_turn_evidence = worker_lease_is_turn_evidence(base_executor);
+        let store = Arc::new(MsgStore::new());
+        self.msg_stores
+            .write()
+            .await
+            .insert(execution_id, store.clone());
+        let db = self.db.clone();
+        let container = self.clone();
+        let handle = tokio::spawn(async move {
+            let mut cursor = 0_u64;
+            let mut retry_delay = Duration::from_millis(100);
+            let mut final_output_deadline: Option<tokio::time::Instant> = None;
+            'poll: loop {
+                let batch = match client.events(worker_node_id, execution_id, cursor).await {
+                    Ok(batch) => {
+                        retry_delay = Duration::from_millis(100);
+                        batch
+                    }
+                    Err(services::services::cluster::WorkerClientError::ReplayGap { .. }) => {
+                        let _ = ExecutionWorkerJob::mark_output_incomplete(&db.pool, execution_id)
+                            .await;
+                        let _ = ExecutionWorkerJob::update_state(
+                            &db.pool,
+                            execution_id,
+                            ExecutionWorkerDispatchState::Indeterminate,
+                            None,
+                            Some(Utc::now()),
+                        )
+                        .await;
+                        if let Err(error) = update_completion_with_retry(
+                            &db,
+                            execution_id,
+                            ExecutionProcessStatus::Indeterminate,
+                            None,
+                        )
+                        .await
+                        {
+                            tracing::error!(%execution_id, %error, "Failed to persist replay-gap reconciliation");
+                            tokio::time::sleep(retry_delay).await;
+                            continue;
+                        }
+                        store.push(LogMsg::Stderr(
+                            "Worker output replay gap; execution state is indeterminate".into(),
+                        ));
+                        // Remove (and cache) before finishing so a client that
+                        // subscribes after this point re-derives from disk
+                        // instead of attaching to a store whose live broadcast
+                        // will never carry another message (see the terminal
+                        // arm below for the full explanation).
+                        container.finish_msg_store(&execution_id).await;
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            execution_id = %execution_id,
+                            worker_node_id = %worker_node_id,
+                            "Worker event poll failed; retrying: {error}"
+                        );
+                        if final_output_deadline
+                            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                        {
+                            tracing::warn!(
+                                %execution_id,
+                                %worker_node_id,
+                                "Worker became unreachable after final output; marking execution indeterminate"
+                            );
+                            if let Err(update_error) =
+                                mark_remote_execution_indeterminate(&db, execution_id).await
+                            {
+                                tracing::error!(%execution_id, %update_error, "Failed to reconcile unreachable worker execution");
+                                tokio::time::sleep(retry_delay).await;
+                                continue 'poll;
+                            }
+                            container.finalize_remote_execution(execution_id).await;
+                            container.finish_msg_store(&execution_id).await;
+                            break;
+                        }
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
+                        continue;
+                    }
+                };
+
+                let mut terminal = None;
+                let had_events = !batch.events.is_empty();
+                for event in batch.events {
+                    cursor = event.sequence;
+                    match event.payload {
+                        ExecutionEventPayload::Stdout { data_base64 } => {
+                            push_worker_bytes(&store, &data_base64, false);
+                        }
+                        ExecutionEventPayload::Stderr { data_base64 } => {
+                            push_worker_bytes(&store, &data_base64, true);
+                        }
+                        ExecutionEventPayload::Structured { json } => {
+                            if let Ok(message) = serde_json::from_str::<LogMsg>(&json) {
+                                if let Some(is_final) = normalized_final_assistant_state(&message) {
+                                    final_output_deadline = is_final.then(|| {
+                                        tokio::time::Instant::now()
+                                            + FINAL_OUTPUT_RECONCILIATION_TIMEOUT
+                                    });
+                                }
+                                store.push(message);
+                            } else {
+                                store.push_stdout(format!("{json}\n"));
+                            }
+                        }
+                        ExecutionEventPayload::Completed(evidence) => {
+                            terminal = Some((
+                                ExecutionWorkerDispatchState::Completed,
+                                ExecutionProcessStatus::Completed,
+                                evidence,
+                            ));
+                        }
+                        ExecutionEventPayload::Failed(evidence) => {
+                            terminal = Some((
+                                ExecutionWorkerDispatchState::Failed,
+                                ExecutionProcessStatus::Failed,
+                                evidence,
+                            ));
+                        }
+                        ExecutionEventPayload::Killed(evidence) => {
+                            terminal = Some((
+                                ExecutionWorkerDispatchState::Killed,
+                                ExecutionProcessStatus::Killed,
+                                evidence,
+                            ));
+                        }
+                        ExecutionEventPayload::Interrupted(evidence) => {
+                            terminal = Some((
+                                ExecutionWorkerDispatchState::Interrupted,
+                                ExecutionProcessStatus::Interrupted,
+                                evidence,
+                            ));
+                        }
+                        ExecutionEventPayload::Indeterminate { reason } => {
+                            store.push(LogMsg::Stderr(format!(
+                                "Worker reported an indeterminate execution: {reason}"
+                            )));
+                            let _ = ExecutionWorkerJob::update_state(
+                                &db.pool,
+                                execution_id,
+                                ExecutionWorkerDispatchState::Indeterminate,
+                                None,
+                                Some(Utc::now()),
+                            )
+                            .await;
+                            loop {
+                                match update_completion_with_retry(
+                                    &db,
+                                    execution_id,
+                                    ExecutionProcessStatus::Indeterminate,
+                                    None,
+                                )
+                                .await
+                                {
+                                    Ok(()) => break,
+                                    Err(error) => {
+                                        tracing::error!(%execution_id, %error, "Worker-reported indeterminate evidence remains pending");
+                                        tokio::time::sleep(retry_delay).await;
+                                        retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
+                                    }
+                                }
+                            }
+                            container.finish_msg_store(&execution_id).await;
+                            return;
+                        }
+                        ExecutionEventPayload::InteractionRequested(interaction) => {
+                            final_output_deadline = None;
+                            container.route_worker_interaction(
+                                execution_id,
+                                worker_node_id,
+                                interaction,
+                            );
+                        }
+                        ExecutionEventPayload::Accepted => {}
+                        ExecutionEventPayload::Starting => {
+                            final_output_deadline = None;
+                        }
+                        ExecutionEventPayload::InteractionAcknowledged { .. }
+                        | ExecutionEventPayload::Preview(_) => {}
+                    }
+                }
+
+                if had_events && final_output_deadline.is_some() {
+                    final_output_deadline =
+                        Some(tokio::time::Instant::now() + FINAL_OUTPUT_RECONCILIATION_TIMEOUT);
+                }
+
+                // Terminal events are deliberately not acknowledged until the
+                // process-row transition below succeeds; the worker retains
+                // replay authority if this coordinator dies while persisting.
+                if should_ack_worker_batch(cursor, terminal.is_some()) {
+                    let _ = ExecutionWorkerJob::acknowledge_sequence(
+                        &db.pool,
+                        execution_id,
+                        cursor as i64,
+                        batch.latest_available as i64,
+                    )
+                    .await;
+                    let acknowledgement = EventAcknowledgement {
+                        authority: RequestAuthority {
+                            protocol_version: PROTOCOL_VERSION,
+                            coordinator_id,
+                            worker_node_id,
+                            correlation_id: execution_id,
+                            issued_at: Utc::now(),
+                            nonce: Uuid::new_v4().to_string(),
+                        },
+                        execution_id,
+                        highest_contiguous_sequence: cursor,
+                    };
+                    if let Err(error) = client.acknowledge(worker_node_id, &acknowledgement).await {
+                        tracing::warn!(%execution_id, "Worker event acknowledgement failed: {error}");
+                    }
+                }
+
+                if let Some((worker_state, process_state, evidence)) = terminal {
+                    let evidence_json = serde_json::to_value(&evidence).ok();
+                    let _ = ExecutionWorkerJob::update_state(
+                        &db.pool,
+                        execution_id,
+                        worker_state,
+                        evidence_json.as_ref(),
+                        Some(evidence.observed_at),
+                    )
+                    .await;
+                    let exit_code = evidence.exit_code.map(i64::from);
+                    if !ExecutionProcess::was_stopped(&db.pool, execution_id).await {
+                        // Do not acknowledge or discard terminal evidence until
+                        // the authoritative process row contains it. Each retry
+                        // burst is bounded; persistent database failure keeps
+                        // this captured evidence resident instead of polling
+                        // past and permanently losing it.
+                        loop {
+                            match update_completion_with_retry(
+                                &db,
+                                execution_id,
+                                process_state.clone(),
+                                exit_code,
+                            )
+                            .await
+                            {
+                                Ok(()) => break,
+                                Err(error) => {
+                                    tracing::error!(%execution_id, ?process_state, %error, "Terminal evidence remains pending; retrying before acknowledgement");
+                                    tokio::time::sleep(retry_delay).await;
+                                    retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
+                                }
+                            }
+                        }
+                    }
+                    // Persistence now owns the terminal truth, so release the
+                    // worker's replay buffer through both acknowledgement
+                    // channels before finalizing this tracker.
+                    let _ = ExecutionWorkerJob::acknowledge_sequence(
+                        &db.pool,
+                        execution_id,
+                        cursor as i64,
+                        batch.latest_available as i64,
+                    )
+                    .await;
+                    let acknowledgement = EventAcknowledgement {
+                        authority: RequestAuthority {
+                            protocol_version: PROTOCOL_VERSION,
+                            coordinator_id,
+                            worker_node_id,
+                            correlation_id: execution_id,
+                            issued_at: Utc::now(),
+                            nonce: Uuid::new_v4().to_string(),
+                        },
+                        execution_id,
+                        highest_contiguous_sequence: cursor,
+                    };
+                    if let Err(error) = client.acknowledge(worker_node_id, &acknowledgement).await {
+                        tracing::warn!(%execution_id, "Terminal worker acknowledgement failed after persistence: {error}");
+                    }
+                    container.finalize_remote_execution(execution_id).await;
+                    // Remove (and cache) from the map before pushing Finished.
+                    // Historic replay (`stream_normalized_logs`) reads a
+                    // resident store via `history_plus_stream()`, which chains
+                    // the buffered history onto a *live* broadcast
+                    // subscription. A late subscriber's history replay
+                    // includes this store's past `Finished` entry, but the
+                    // filter used by that replay path drops non-JsonPatch
+                    // entries — so the sentinel is discarded and the replay
+                    // falls through to the live half, which never yields
+                    // again for a store nothing will ever push to. Removing
+                    // the store here ensures any later subscriber instead
+                    // falls back to the on-disk/materialized log path, which
+                    // terminates correctly.
+                    container.finish_msg_store(&execution_id).await;
+                    break;
+                }
+
+                if final_output_deadline
+                    .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                {
+                    match ExecutionWorkerJob::find_by_execution_id(&db.pool, execution_id).await {
+                        Ok(Some(job))
+                            if worker_job_has_positive_liveness(
+                                &job,
+                                Utc::now(),
+                                live_worker_lease_is_turn_evidence,
+                            ) =>
+                        {
+                            // A current job lease is authoritative positive
+                            // liveness. Do not turn quiet final text into a
+                            // cancellation while the worker still owns work.
+                            final_output_deadline = Some(
+                                tokio::time::Instant::now() + FINAL_OUTPUT_RECONCILIATION_TIMEOUT,
+                            );
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%execution_id, %error, "Unable to verify worker liveness; deferring destructive reconciliation");
+                            final_output_deadline = Some(
+                                tokio::time::Instant::now() + FINAL_OUTPUT_RECONCILIATION_TIMEOUT,
+                            );
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    tracing::warn!(
+                        %execution_id,
+                        %worker_node_id,
+                        "Worker final assistant output was not followed by terminal evidence; marking execution indeterminate"
+                    );
+                    let cancellation = CancellationRequest {
+                        authority: RequestAuthority {
+                            protocol_version: PROTOCOL_VERSION,
+                            coordinator_id,
+                            worker_node_id,
+                            correlation_id: execution_id,
+                            issued_at: Utc::now(),
+                            nonce: Uuid::new_v4().to_string(),
+                        },
+                        execution_id,
+                        graceful_timeout_seconds: 5,
+                        terminate_timeout_seconds: 5,
+                    };
+                    if let Err(error) = client.cancel(worker_node_id, &cancellation).await {
+                        tracing::warn!(%execution_id, %worker_node_id, %error, "Failed to cancel worker after final-output reconciliation timeout");
+                    }
+                    if let Err(error) = ExecutionWorkerJob::update_state(
+                        &db.pool,
+                        execution_id,
+                        ExecutionWorkerDispatchState::Indeterminate,
+                        None,
+                        Some(Utc::now()),
+                    )
+                    .await
+                    {
+                        tracing::error!(%execution_id, %error, "Failed to persist indeterminate worker reconciliation state");
+                    }
+                    if let Err(error) = update_completion_with_retry(
+                        &db,
+                        execution_id,
+                        ExecutionProcessStatus::Indeterminate,
+                        None,
+                    )
+                    .await
+                    {
+                        tracing::error!(%execution_id, %error, "Failed to persist final-output reconciliation after bounded retries");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    store.push(LogMsg::Stderr(
+                        "Final response arrived without worker terminal evidence; execution state is indeterminate"
+                            .into(),
+                    ));
+                    container.finalize_remote_execution(execution_id).await;
+                    container.finish_msg_store(&execution_id).await;
+                    break;
+                }
+
+                if batch.latest_available <= cursor {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        });
+        self.add_exit_monitor_handle(execution_id, handle).await;
+        Ok(())
+    }
+
+    async fn finalize_remote_execution(&self, execution_id: Uuid) {
+        let Ok(ctx) = ExecutionProcess::load_context(&self.db.pool, execution_id).await else {
+            tracing::warn!(%execution_id, "Could not load remote execution context for finalization");
+            return;
+        };
+        if ctx.execution_process.status == ExecutionProcessStatus::Completed {
+            if let Err(error) = self.try_commit_changes(&ctx).await {
+                tracing::error!(%execution_id, "Remote execution commit failed: {error}");
+            }
+            if let Err(error) = self.try_start_next_action(&ctx).await {
+                tracing::error!(%execution_id, "Remote execution next action failed: {error}");
+            }
+        }
+        if self.should_finalize(&ctx) {
+            self.finalize_task(&ctx).await;
+        }
+        self.update_after_head_commits(execution_id).await;
     }
 
     /// Create a live diff log stream for ongoing attempts for WebSocket
@@ -1729,6 +2957,9 @@ impl LocalContainerService {
         ctx: &ExecutionContext,
         queued_msg: &services::services::queued_message::QueuedMessage,
     ) -> bool {
+        if queued_msg.restart_agent {
+            self.reap_warm_server(&ctx.session.id).await;
+        }
         if let Err(e) =
             Scratch::delete(&self.db.pool, ctx.session.id, &ScratchType::DraftFollowUp).await
         {
@@ -1947,12 +3178,54 @@ const ORG_ENV_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// case-sensitive to match process env semantics on Unix.
 const RESERVED_ENV_PREFIXES: &[&str] = &["VK_"];
 const RESERVED_ENV_NAMES: &[&str] = &[
+    "GOBIN",
+    "GOCACHE",
+    "GOENV",
+    "GOMODCACHE",
+    "GOPATH",
+    "GOTOOLCHAIN",
     "PATH",
     "HOME",
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
     "OPENCODE_SERVER_PASSWORD",
 ];
+
+fn workspace_go_environment(
+    workspace_root: &Path,
+    inherited_path: Option<&std::ffi::OsStr>,
+) -> HashMap<String, String> {
+    let root = workspace_root.join(".vibe-kanban/go");
+    let gobin = root.join("bin");
+    let mut environment = HashMap::from([
+        ("GOBIN".into(), gobin.to_string_lossy().into_owned()),
+        (
+            "GOCACHE".into(),
+            root.join("build").to_string_lossy().into_owned(),
+        ),
+        (
+            "GOENV".into(),
+            root.join("env").to_string_lossy().into_owned(),
+        ),
+        (
+            "GOMODCACHE".into(),
+            root.join("mod").to_string_lossy().into_owned(),
+        ),
+        (
+            "GOPATH".into(),
+            root.join("path").to_string_lossy().into_owned(),
+        ),
+        ("GOTOOLCHAIN".into(), "auto".into()),
+    ]);
+    if let Some(inherited_path) = inherited_path {
+        let path = std::env::join_paths(
+            std::iter::once(gobin).chain(std::env::split_paths(inherited_path)),
+        )
+        .unwrap_or_else(|_| inherited_path.to_os_string());
+        environment.insert("PATH".into(), path.to_string_lossy().into_owned());
+    }
+    environment
+}
 
 fn is_reserved_env_name(name: &str) -> bool {
     RESERVED_ENV_PREFIXES
@@ -2030,12 +3303,150 @@ impl ContainerService for LocalContainerService {
         let supported = profile
             .as_ref()
             .is_some_and(|profile| profile.executor == BaseCodingAgent::Codex);
+        let configured_servers = if let Some(profile_id) = profile.as_ref()
+            && let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id)
+        {
+            read_coding_agent_mcp_servers(&agent).await.ok()
+        } else {
+            None
+        };
+        let configured_server_ids = configured_servers
+            .as_ref()
+            .map(|servers| servers.keys().cloned().collect())
+            .unwrap_or_default();
         let result = self
             .mcp_refresh_coordinator
-            .request(session_id, supported)
+            .request(session_id, supported, configured_server_ids)
             .await;
         if result.status != McpRefreshStatus::PendingNextTurn {
             return Ok(result);
+        }
+
+        // A clustered execution owns both its scoped config and live Codex
+        // control on the assigned worker. Resolve settings again here; the
+        // dispatch-time snapshot is intentionally not reused.
+        let latest_execution =
+            ExecutionProcess::find_by_session_id(&self.db.pool, session_id, false)
+                .await?
+                .into_iter()
+                .rev()
+                .find(|process| process.run_reason == ExecutionProcessRunReason::CodingAgent);
+        if let Some(execution) = latest_execution
+            && let Some(worker_job) =
+                ExecutionWorkerJob::find_by_execution_id(&self.db.pool, execution.id).await?
+        {
+            let Some(profile_id) = profile.as_ref() else {
+                return Ok(self
+                    .mcp_refresh_coordinator
+                    .fail(session_id, McpRefreshErrorCategory::Unsupported)
+                    .await
+                    .unwrap_or(result));
+            };
+            let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id) else {
+                return Ok(self
+                    .mcp_refresh_coordinator
+                    .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                    .await
+                    .unwrap_or(result));
+            };
+            // Re-read after worker resolution. The earlier read is status-only;
+            // settings may have changed while affinity was being resolved.
+            let servers = match read_coding_agent_mcp_servers(&agent).await {
+                Ok(servers) => servers.into_iter().collect(),
+                Err(_) => {
+                    return Ok(self
+                        .mcp_refresh_coordinator
+                        .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                        .await
+                        .unwrap_or(result));
+                }
+            };
+            let snapshot = match validated_mcp_snapshot(BaseCodingAgent::Codex, servers) {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    return Ok(self
+                        .mcp_refresh_coordinator
+                        .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                        .await
+                        .unwrap_or(result));
+                }
+            };
+            if snapshot.validate_size().is_err() {
+                return Ok(self
+                    .mcp_refresh_coordinator
+                    .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                    .await
+                    .unwrap_or(result));
+            }
+            let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
+                ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
+            })?;
+            let request = McpRefreshRequest {
+                authority: RequestAuthority {
+                    protocol_version: PROTOCOL_VERSION,
+                    coordinator_id,
+                    worker_node_id: worker_job.worker_node_id,
+                    correlation_id: execution.id,
+                    issued_at: Utc::now(),
+                    nonce: Uuid::new_v4().to_string(),
+                },
+                execution_id: execution.id,
+                snapshot,
+            };
+            let worker_result = match self.worker_client.as_ref() {
+                Some(client) => {
+                    client
+                        .refresh_mcp(worker_job.worker_node_id, &request)
+                        .await
+                }
+                None => {
+                    return Ok(self
+                        .mcp_refresh_coordinator
+                        .unsupported(session_id)
+                        .await
+                        .unwrap_or(result));
+                }
+            };
+            let failure = match worker_result {
+                Ok(worker_result) => match worker_result.status {
+                    WorkerMcpRefreshStatus::Queued => {
+                        return Ok(result);
+                    }
+                    WorkerMcpRefreshStatus::Busy => {
+                        return Ok(self
+                            .mcp_refresh_coordinator
+                            .busy(session_id)
+                            .await
+                            .unwrap_or(result));
+                    }
+                    WorkerMcpRefreshStatus::Unsupported => {
+                        return Ok(self
+                            .mcp_refresh_coordinator
+                            .unsupported(session_id)
+                            .await
+                            .unwrap_or(result));
+                    }
+                    WorkerMcpRefreshStatus::MaterializationFailed => {
+                        McpRefreshErrorCategory::MaterializationFailed
+                    }
+                    WorkerMcpRefreshStatus::ReloadFailed => McpRefreshErrorCategory::ReloadFailed,
+                },
+                Err(services::services::cluster::client::WorkerClientError::NotImplemented {
+                    ..
+                }) => {
+                    return Ok(self
+                        .mcp_refresh_coordinator
+                        .unsupported(session_id)
+                        .await
+                        .unwrap_or(result));
+                }
+                Err(_) => McpRefreshErrorCategory::ReloadFailed,
+            };
+            return Ok(self
+                .mcp_refresh_coordinator
+                .fail(session_id, failure)
+                .await
+                .unwrap_or(result));
         }
 
         let control = self
@@ -2131,6 +3542,10 @@ impl ContainerService for LocalContainerService {
     }
 
     async fn create(&self, workspace: &Workspace) -> Result<ContainerRef, ContainerError> {
+        if self.cluster_config.enabled {
+            return create_cluster_workspace(self, workspace).await;
+        }
+
         let label = workspace.name.as_deref().unwrap_or("workspace");
         let workspace_dir_name =
             LocalContainerService::dir_name_from_workspace(&workspace.id, label);
@@ -2177,6 +3592,15 @@ impl ContainerService for LocalContainerService {
         workspace: &Workspace,
     ) -> Result<ContainerRef, ContainerError> {
         self.touch(workspace).await?;
+
+        // A process crash after deletion was recorded but before the cleanup
+        // fence was released leaves a recoverable `cleaning` row. Repair only
+        // that proven-complete state; an in-progress cleanup still has
+        // `worktree_deleted = false` and remains fenced.
+        if self.cluster_config.enabled && workspace.worktree_deleted {
+            WorkspacePlacement::finish_cleanup(&self.db.pool, workspace.id).await?;
+        }
+
         let (repositories, workspace_inputs) = self.workspace_repo_inputs(workspace.id).await?;
 
         let workspace_dir = if let Some(container_ref) = &workspace.container_ref {
@@ -2188,13 +3612,69 @@ impl ContainerService for LocalContainerService {
             WorkspaceManager::get_workspace_base_dir().join(&workspace_dir_name)
         };
 
-        WorkspaceManager::ensure_workspace_exists(
-            &workspace_dir,
-            &workspace_inputs,
-            &workspace.branch,
-        )
-        .await
-        .map_err(Self::map_workspace_manager_error)?;
+        // Enabling clustering must not change how coordinator-local workspaces
+        // behave. `Local` is a terminal, valid placement — it is what every
+        // workspace created before clustering has, and what "Automatic
+        // placement" yields when no worker is chosen — so it takes the same
+        // unfenced local path it took before. Only a workspace actually placed
+        // on a worker lives on shared storage and needs the fenced path.
+        let cluster_placement = if self.cluster_config.enabled {
+            let placement = WorkspacePlacement::find(&self.db.pool, workspace.id)
+                .await?
+                .ok_or_else(|| ContainerError::Other(anyhow!("Workspace placement is missing")))?;
+            Some(placement.placement_state)
+        } else {
+            None
+        };
+
+        match cluster_placement {
+            Some(state) if state != WorkspacePlacementState::Local => {
+                if state != WorkspacePlacementState::Ready {
+                    return Err(ContainerError::Other(anyhow!(
+                        "Cluster workspace is not ready (state: {:?})",
+                        state
+                    )));
+                }
+                // Heal before ensuring. A workspace created before this change
+                // has worktrees pointing at the coordinator's own checkout, and
+                // `ensure_workspace_exists_fenced` now administers them in the
+                // shared store — where that branch does not yet exist. Left
+                // alone it would take the "branch missing" arm, fail to repair
+                // linkage it cannot see, and fall through to destructive
+                // recreation, deleting exactly the work this change exists to
+                // rescue. Adoption re-links the worktree first, so `ensure`
+                // then finds a healthy worktree on the expected branch and does
+                // nothing.
+                if let Some(store) = self.shared_repository_store_for(workspace.id).await? {
+                    for input in &workspace_inputs {
+                        self.heal_cluster_worktree(
+                            &store,
+                            &workspace_dir,
+                            input,
+                            &workspace.branch,
+                        )
+                        .await;
+                    }
+                }
+                WorkspaceManager::ensure_workspace_exists_fenced(
+                    &workspace_dir,
+                    &workspace_inputs,
+                    &workspace.branch,
+                    &self.repository_admin_locks,
+                )
+                .await
+                .map_err(Self::map_workspace_manager_error)?;
+            }
+            _ => {
+                WorkspaceManager::ensure_workspace_exists(
+                    &workspace_dir,
+                    &workspace_inputs,
+                    &workspace.branch,
+                )
+                .await
+                .map_err(Self::map_workspace_manager_error)?;
+            }
+        }
 
         if workspace.container_ref.is_none() {
             Workspace::update_container_ref(
@@ -2243,6 +3723,263 @@ impl ContainerService for LocalContainerService {
         }
 
         Ok(true)
+    }
+
+    async fn dispatch_execution(
+        &self,
+        workspace: &Workspace,
+        execution_process: &ExecutionProcess,
+        executor_action: &ExecutorAction,
+    ) -> Result<(), ContainerError> {
+        if !self.cluster_config.enabled {
+            return self
+                .start_execution_inner(workspace, execution_process, executor_action)
+                .await;
+        }
+
+        let placement = WorkspacePlacement::find(&self.db.pool, workspace.id)
+            .await?
+            .ok_or_else(|| ContainerError::Other(anyhow!("Workspace placement is missing")))?;
+        // A coordinator-local workspace executes locally whether or not this
+        // node is a cluster coordinator. Without this, turning clustering on
+        // made every pre-existing workspace unrunnable.
+        if placement.placement_state == WorkspacePlacementState::Local {
+            return self
+                .start_execution_inner(workspace, execution_process, executor_action)
+                .await;
+        }
+        if placement.placement_state != WorkspacePlacementState::Ready {
+            return Err(ContainerError::Other(anyhow!(
+                "Cluster workspace is not ready for execution (state: {:?})",
+                placement.placement_state
+            )));
+        }
+        let worker_node_id = placement.worker_node_id.ok_or_else(|| {
+            ContainerError::Other(anyhow!("Ready cluster workspace has no assigned worker"))
+        })?;
+        let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
+        })?;
+        let client = self.worker_client.as_ref().ok_or_else(|| {
+            ContainerError::Other(anyhow!("Cluster worker client is not configured"))
+        })?;
+        let workspace_path = workspace.container_ref.clone().ok_or_else(|| {
+            ContainerError::Other(anyhow!("Container ref not found for workspace"))
+        })?;
+
+        let mut environment = BTreeMap::new();
+        environment.extend(self.resolve_org_env_vars(workspace).await);
+        // Send only workspace-relative Go state. The worker must construct PATH
+        // from its own supervised environment; coordinator Nix store paths are
+        // not necessarily valid on a heterogeneous worker.
+        environment.extend(workspace_go_environment(Path::new(&workspace_path), None));
+        environment.insert("VK_WORKSPACE_ID".into(), workspace.id.to_string());
+        environment.insert("VK_WORKSPACE_BRANCH".into(), workspace.branch.clone());
+
+        let executor_config = match executor_action.typ() {
+            ExecutorActionType::CodingAgentInitialRequest(request) => {
+                Some(&request.executor_config)
+            }
+            ExecutorActionType::CodingAgentFollowUpRequest(request) => {
+                Some(&request.executor_config)
+            }
+            ExecutorActionType::ReviewRequest(request) => Some(&request.executor_config),
+            ExecutorActionType::ScriptRequest(_) => None,
+        };
+        let executor_profile = executor_config
+            .map(|config| config.profile_id().to_string())
+            .unwrap_or_else(|| "script".into());
+        // Send the definition, not just the name. A variant is user-defined data
+        // that lives only here; a worker holds the embedded defaults, which
+        // define DEFAULT and nothing else.
+        let executor_profile_config = executor_config
+            .and_then(dispatched_executor_profile)
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(anyhow::Error::from)?;
+        let mcp_config_snapshot = if let Some(config) = executor_config {
+            let profile_id = config.profile_id();
+            let agent = ExecutorConfigs::get_cached()
+                .get_coding_agent(&profile_id)
+                .ok_or_else(|| anyhow!("executor profile {profile_id} is unavailable"))?;
+            if agent.supports_mcp() {
+                let snapshot = validated_mcp_snapshot(
+                    config.executor,
+                    read_coding_agent_mcp_servers(&agent)
+                        .await
+                        .map_err(anyhow::Error::from)?
+                        .into_iter()
+                        .collect(),
+                )?;
+                Some(snapshot)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let action = serde_json::to_value(executor_action).map_err(anyhow::Error::from)?;
+        let run_reason = serde_json::to_value(&execution_process.run_reason)
+            .map_err(anyhow::Error::from)?
+            .as_str()
+            .unwrap_or("unknown")
+            .to_owned();
+        let persistence = if execution_process.run_reason.is_persistent() {
+            PersistencePolicy::Persistent
+        } else {
+            PersistencePolicy::Ordinary
+        };
+        let digest_material = serde_json::to_vec(&json!({
+            "execution_id": execution_process.id,
+            "workspace_id": workspace.id,
+            "session_id": execution_process.session_id,
+            "worker_node_id": worker_node_id,
+            "workspace_path": workspace_path,
+            "executor_profile": executor_profile,
+            // Part of the request's identity: the worker treats a dispatch with
+            // a different digest as a different request. A profile edited
+            // between two dispatches of the same execution must not be deduped
+            // into the first one's definition.
+            "executor_profile_config": executor_profile_config,
+            "mcp_config_snapshot": mcp_config_snapshot,
+            "action": action,
+            "environment": environment,
+            "run_reason": run_reason,
+            "persistence": persistence,
+        }))
+        .map_err(anyhow::Error::from)?;
+        let request_digest = format!("sha256:{:x}", Sha256::digest(digest_material));
+        let authority = RequestAuthority {
+            protocol_version: PROTOCOL_VERSION,
+            coordinator_id,
+            worker_node_id,
+            correlation_id: execution_process.id,
+            issued_at: Utc::now(),
+            nonce: Uuid::new_v4().to_string(),
+        };
+        let dispatch = ExecutionDispatch {
+            authority,
+            execution_id: execution_process.id,
+            workspace_id: workspace.id,
+            session_id: execution_process.session_id,
+            workspace_path: workspace_path.clone(),
+            working_directory: workspace_path,
+            executor_profile,
+            executor_profile_config,
+            mcp_config_snapshot,
+            action,
+            environment,
+            run_reason,
+            timeout_seconds: None,
+            persistence,
+            request_digest: request_digest.clone(),
+        };
+
+        ExecutionWorkerJob::create_pending(
+            &self.db.pool,
+            execution_process.id,
+            worker_node_id,
+            &request_digest,
+        )
+        .await?;
+        let accepted = match client.dispatch(worker_node_id, &dispatch).await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                let evidence = serde_json::json!({
+                    "reason": "worker dispatch failed",
+                    "error": error.to_string(),
+                });
+                ExecutionWorkerJob::update_state(
+                    &self.db.pool,
+                    execution_process.id,
+                    ExecutionWorkerDispatchState::Failed,
+                    Some(&evidence),
+                    Some(Utc::now()),
+                )
+                .await?;
+                return Err(ContainerError::Other(anyhow!(error)));
+            }
+        };
+        if accepted.execution_id != execution_process.id
+            || accepted.request_digest != request_digest
+        {
+            let evidence = serde_json::json!({
+                "reason": "worker returned mismatched dispatch acceptance",
+            });
+            ExecutionWorkerJob::update_state(
+                &self.db.pool,
+                execution_process.id,
+                ExecutionWorkerDispatchState::Failed,
+                Some(&evidence),
+                Some(Utc::now()),
+            )
+            .await?;
+            return Err(ContainerError::Other(anyhow!(
+                "Worker returned mismatched dispatch acceptance"
+            )));
+        }
+        if !ExecutionWorkerJob::record_acceptance(
+            &self.db.pool,
+            execution_process.id,
+            accepted.worker_job_id,
+            accepted.last_sequence as i64,
+        )
+        .await?
+        {
+            return Err(ContainerError::Other(anyhow!(
+                "Execution worker job was not pending during acceptance"
+            )));
+        }
+        if dispatch.mcp_config_snapshot.is_some()
+            && self
+                .mcp_refresh_coordinator
+                .status(execution_process.session_id)
+                .await
+                .is_some_and(|state| {
+                    state.status == McpRefreshStatus::PendingNextTurn
+                        && state.requested_at <= execution_process.started_at
+                })
+        {
+            let client = client.clone();
+            let coordinator = self.mcp_refresh_coordinator.clone();
+            let session_id = execution_process.session_id;
+            let execution_id = execution_process.id;
+            let snapshot = dispatch.mcp_config_snapshot.clone().expect("checked above");
+            tokio::spawn(async move {
+                for _ in 0..30 {
+                    let request = McpRefreshRequest {
+                        authority: RequestAuthority {
+                            protocol_version: PROTOCOL_VERSION,
+                            coordinator_id,
+                            worker_node_id,
+                            correlation_id: execution_id,
+                            issued_at: Utc::now(),
+                            nonce: Uuid::new_v4().to_string(),
+                        },
+                        execution_id,
+                        snapshot: snapshot.clone(),
+                    };
+                    if let Ok(status) = client.mcp_status(worker_node_id, &request).await
+                        && status.status == WorkerMcpRefreshStatus::Queued
+                    {
+                        let servers = status
+                            .servers
+                            .into_iter()
+                            .filter_map(|server| serde_json::from_value(server).ok())
+                            .collect();
+                        coordinator.confirm(session_id, servers).await;
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                coordinator
+                    .fail(session_id, McpRefreshErrorCategory::Timeout)
+                    .await;
+            });
+        }
+        self.track_worker_msgs_in_store(execution_process, worker_node_id)
+            .await?;
+        Ok(())
     }
 
     async fn start_execution_inner(
@@ -2306,6 +4043,11 @@ impl ContainerService for LocalContainerService {
         if !org_env_vars.is_empty() {
             env.merge(&org_env_vars);
         }
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        env.merge(&workspace_go_environment(
+            &current_dir,
+            Some(&inherited_path),
+        ));
 
         // Always inject workspace/session context (wins over any org var above).
         env.insert("VK_WORKSPACE_ID", workspace.id.to_string());
@@ -2316,13 +4058,11 @@ impl ContainerService for LocalContainerService {
         // same tool always wins over an app-installed one. PATH is a reserved
         // env name (org vars can't set it), but base the merge on any PATH
         // already in the env so this stays correct if that ever changes.
-        let cli_tools_bin = services::services::cli_tools::cli_tools_bin_dir();
-        if cli_tools_bin.is_dir() {
-            let inherited = env
-                .get("PATH")
-                .map(std::ffi::OsString::from)
-                .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
-            let merged = utils::shell::merge_paths(&inherited, cli_tools_bin.as_os_str());
+        let inherited = env
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+        if let Some(merged) = utils::shell::append_cli_tools_to_path(&inherited) {
             env.insert("PATH", merged.to_string_lossy().into_owned());
         }
 
@@ -2532,6 +4272,91 @@ impl ContainerService for LocalContainerService {
         // by session key. Idempotent no-op when there is none.
         self.reap_warm_server(&execution_process.session_id).await;
 
+        if let Some(worker_job) =
+            ExecutionWorkerJob::find_by_execution_id(&self.db.pool, execution_process.id).await?
+        {
+            let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
+                ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
+            })?;
+            let client = self.worker_client.as_ref().ok_or_else(|| {
+                ContainerError::Other(anyhow!("Cluster worker client is not configured"))
+            })?;
+            let request = CancellationRequest {
+                authority: RequestAuthority {
+                    protocol_version: PROTOCOL_VERSION,
+                    coordinator_id,
+                    worker_node_id: worker_job.worker_node_id,
+                    correlation_id: execution_process.id,
+                    issued_at: Utc::now(),
+                    nonce: Uuid::new_v4().to_string(),
+                },
+                execution_id: execution_process.id,
+                graceful_timeout_seconds: 5,
+                terminate_timeout_seconds: 5,
+            };
+            match client.cancel(worker_job.worker_node_id, &request).await {
+                Ok(response)
+                    if matches!(
+                        response.phase,
+                        CancellationPhase::Confirmed | CancellationPhase::AlreadyTerminal
+                    ) && response.terminal.is_some() =>
+                {
+                    let evidence = response.terminal.expect("guarded above");
+                    let (worker_state, process_state) = match evidence.state {
+                        TerminalState::Completed => (
+                            ExecutionWorkerDispatchState::Completed,
+                            ExecutionProcessStatus::Completed,
+                        ),
+                        TerminalState::Failed => (
+                            ExecutionWorkerDispatchState::Failed,
+                            ExecutionProcessStatus::Failed,
+                        ),
+                        TerminalState::Killed => (
+                            ExecutionWorkerDispatchState::Killed,
+                            ExecutionProcessStatus::Killed,
+                        ),
+                        TerminalState::Interrupted => (
+                            ExecutionWorkerDispatchState::Interrupted,
+                            ExecutionProcessStatus::Interrupted,
+                        ),
+                    };
+                    let evidence_json = serde_json::to_value(&evidence).ok();
+                    ExecutionWorkerJob::update_state(
+                        &self.db.pool,
+                        execution_process.id,
+                        worker_state,
+                        evidence_json.as_ref(),
+                        Some(evidence.observed_at),
+                    )
+                    .await?;
+                    ExecutionProcess::update_completion(
+                        &self.db.pool,
+                        execution_process.id,
+                        process_state,
+                        evidence.exit_code.map(i64::from),
+                    )
+                    .await?;
+                }
+                Ok(response) => {
+                    tracing::warn!(
+                        execution_id = %execution_process.id,
+                        phase = ?response.phase,
+                        "Worker did not confirm a terminal state after cancellation"
+                    );
+                    mark_remote_execution_indeterminate(&self.db, execution_process.id).await?;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        execution_id = %execution_process.id,
+                        "Remote cancellation could not be confirmed: {error}"
+                    );
+                    mark_remote_execution_indeterminate(&self.db, execution_process.id).await?;
+                }
+            }
+            self.finish_msg_store(&execution_process.id).await;
+            return Ok(());
+        }
+
         let Some(child) = self.get_child_from_store(&execution_process.id).await else {
             // No in-memory handle: the process may have been adopted from a
             // previous server instance and is managed by pgid only.
@@ -2596,9 +4421,7 @@ impl ContainerService for LocalContainerService {
         // Mark the process finished in the MsgStore and wait for DB persistence
         self.finish_raw_log_tailer(&execution_process.id).await;
         let db_stream_handle = self.take_db_stream_handle(&execution_process.id).await;
-        if let Some(msg) = self.msg_stores.write().await.remove(&execution_process.id) {
-            msg.push_finished();
-        }
+        self.finish_msg_store(&execution_process.id).await;
         if let Some(handle) = db_stream_handle {
             let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
@@ -2907,6 +4730,146 @@ impl ContainerService for LocalContainerService {
         Ok(())
     }
 }
+
+/// Fail unless every worktree in `workspace_dir` is backed by a repository that
+/// resolves inside `shared_root`.
+///
+/// Enumerates all of them and reports every violation, rather than stopping at
+/// the first: an operator fixing a multi-repository workspace needs the whole
+/// list, not one entry at a time. `Indeterminate` counts as a violation here
+/// because this runs before a workspace is advertised as ready, and "could not
+/// tell" is not a basis for telling a user their workspace works.
+fn assert_worktrees_are_portable(
+    shared_root: &Path,
+    workspace_dir: &Path,
+    inputs: &[RepoWorkspaceInput],
+) -> Result<(), ContainerError> {
+    let mut violations = Vec::new();
+    for input in inputs {
+        let worktree_path = workspace_dir.join(&input.repo.name);
+        let status = WorktreeLinkage::probe(&worktree_path, shared_root);
+        if !status.is_portable() {
+            violations.push(format!("{}: {}", input.repo.name, status.describe()));
+        }
+    }
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(ContainerError::Other(anyhow!(
+        "worktrees are not usable from other nodes: {}",
+        violations.join("; ")
+    )))
+}
+
+async fn create_cluster_workspace(
+    service: &LocalContainerService,
+    workspace: &Workspace,
+) -> Result<ContainerRef, ContainerError> {
+    let placement = WorkspacePlacement::find(&service.db.pool, workspace.id)
+        .await?
+        .ok_or_else(|| ContainerError::Other(anyhow!("Workspace placement is missing")))?;
+    if placement.placement_state != WorkspacePlacementState::Reserved
+        || placement.worker_node_id.is_none()
+    {
+        return Err(ContainerError::Other(anyhow!(
+            "Workspace must have a reserved worker before provisioning"
+        )));
+    }
+    if !WorkspacePlacement::transition(
+        &service.db.pool,
+        workspace.id,
+        WorkspacePlacementState::Reserved,
+        WorkspacePlacementState::Provisioning,
+        None,
+    )
+    .await?
+    {
+        return Err(ContainerError::Other(anyhow!(
+            "Workspace placement changed before provisioning"
+        )));
+    }
+
+    let result = async {
+        let paths = SharedWorkspacePaths::new(&service.cluster_config.shared_root)
+            .map_err(LocalContainerService::map_workspace_manager_error)?;
+        paths.create_base_dirs().await?;
+        let workspace_dir = paths.workspace_dir(workspace.id);
+        let (repositories, workspace_inputs) = service.workspace_repo_inputs(workspace.id).await?;
+
+        // Materialise the shared store for every repository *before* any
+        // worktree is created from it. Without this the worktree would be
+        // created from the coordinator's own checkout and record a path no
+        // worker can resolve — the defect this exists to close.
+        let store = service
+            .shared_repository_store_for(workspace.id)
+            .await?
+            .ok_or_else(|| {
+                ContainerError::Other(anyhow!(
+                    "Cluster provisioning requires a shared repository store"
+                ))
+            })?;
+        for input in &workspace_inputs {
+            store
+                .ensure(&input.repo, &input.target_branch)
+                .await
+                .map_err(LocalContainerService::map_workspace_manager_error)?;
+        }
+
+        let created_workspace = WorkspaceManager::create_workspace_fenced(
+            &workspace_dir,
+            &workspace_inputs,
+            &workspace.branch,
+            &service.repository_admin_locks,
+        )
+        .await
+        .map_err(LocalContainerService::map_workspace_manager_error)?;
+
+        // Assert portability before this workspace can be advertised as ready.
+        // A workspace whose worktrees a worker cannot use must fail loudly here,
+        // not silently several minutes into an agent's first turn.
+        assert_worktrees_are_portable(
+            paths.root(),
+            &created_workspace.workspace_dir,
+            &workspace_inputs,
+        )?;
+
+        service
+            .copy_files_and_images(&created_workspace.workspace_dir, workspace)
+            .await?;
+        LocalContainerService::create_workspace_config_files(
+            &created_workspace.workspace_dir,
+            &repositories,
+        )
+        .await?;
+        let container_ref = created_workspace
+            .workspace_dir
+            .to_string_lossy()
+            .to_string();
+        Workspace::update_container_ref(&service.db.pool, workspace.id, &container_ref).await?;
+        Ok::<_, ContainerError>(container_ref)
+    }
+    .await;
+
+    let (next, reason) = match &result {
+        Ok(_) => (WorkspacePlacementState::Ready, None),
+        Err(error) => (WorkspacePlacementState::Failed, Some(error.to_string())),
+    };
+    let transitioned = WorkspacePlacement::transition(
+        &service.db.pool,
+        workspace.id,
+        WorkspacePlacementState::Provisioning,
+        next,
+        reason.as_deref(),
+    )
+    .await?;
+    if !transitioned && result.is_ok() {
+        return Err(ContainerError::Other(anyhow!(
+            "Workspace provisioning completed but ready state could not be persisted"
+        )));
+    }
+    result
+}
+
 fn success_exit_status() -> std::process::ExitStatus {
     #[cfg(unix)]
     {
@@ -2917,6 +4880,33 @@ fn success_exit_status() -> std::process::ExitStatus {
     {
         use std::os::windows::process::ExitStatusExt;
         ExitStatusExt::from_raw(0)
+    }
+}
+
+#[cfg(test)]
+mod mcp_snapshot_tests {
+    use std::collections::BTreeMap;
+
+    use executors::executors::BaseCodingAgent;
+    use serde_json::json;
+
+    use super::validated_mcp_snapshot;
+
+    #[test]
+    fn snapshot_builder_preserves_non_codex_executor_identity_and_definition() {
+        for executor in [BaseCodingAgent::ClaudeCode, BaseCodingAgent::Gemini] {
+            let snapshot = validated_mcp_snapshot(
+                executor,
+                BTreeMap::from([(
+                    "settings-owned".into(),
+                    json!({"type": "http", "url": "https://example.invalid/mcp"}),
+                )]),
+            )
+            .unwrap();
+
+            assert_eq!(snapshot.executor, executor.to_string());
+            assert!(snapshot.servers.contains_key("settings-owned"));
+        }
     }
 }
 
@@ -2942,6 +4932,93 @@ mod queued_follow_up_tests {
 }
 
 #[cfg(test)]
+mod worker_event_tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+    use utils::{log_msg::LogMsg, msg_store::MsgStore};
+
+    use super::push_worker_bytes;
+
+    #[test]
+    fn worker_output_is_forwarded_to_msg_store_in_received_order() {
+        let store = MsgStore::new();
+        push_worker_bytes(&store, &BASE64_STANDARD.encode("first"), false);
+        push_worker_bytes(&store, &BASE64_STANDARD.encode("second"), true);
+        push_worker_bytes(&store, &BASE64_STANDARD.encode("third"), false);
+
+        assert!(matches!(store.get_history().as_slice(), [
+            LogMsg::Stdout(first),
+            LogMsg::Stderr(second),
+            LogMsg::Stdout(third),
+        ] if first == "first" && second == "second" && third == "third"));
+    }
+
+    #[test]
+    fn invalid_worker_output_is_explicitly_reported() {
+        let store = MsgStore::new();
+        push_worker_bytes(&store, "not-base64", false);
+        assert!(matches!(
+            store.get_history().as_slice(),
+            [LogMsg::Stderr(message)] if message.contains("invalid base64")
+        ));
+    }
+}
+
+#[cfg(test)]
+mod cluster_cleanup_tests {
+    use chrono::{Duration, Utc};
+    use db::models::worker_node::{WorkerMountStatus, WorkerNode, WorkerNodeStatus};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::worker_cleanup_evidence_safe;
+
+    fn worker(status: WorkerNodeStatus, lease_offset_seconds: i64) -> WorkerNode {
+        let now = Utc::now();
+        WorkerNode {
+            id: Uuid::new_v4(),
+            hostname: "think3".into(),
+            status,
+            worker_version: "1".into(),
+            vibe_version: "1".into(),
+            capabilities: json!({}).into(),
+            resource_snapshot: json!({}).into(),
+            labels: json!({}).into(),
+            mount_status: WorkerMountStatus::Healthy,
+            mount_message: None,
+            last_heartbeat_at: Some(now),
+            lease_expires_at: Some(now + Duration::seconds(lease_offset_seconds)),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn cleanup_requires_current_worker_evidence_and_no_unsafe_jobs() {
+        let now = Utc::now();
+        assert!(worker_cleanup_evidence_safe(
+            &worker(WorkerNodeStatus::Online, 30),
+            false,
+            now
+        ));
+        assert!(!worker_cleanup_evidence_safe(
+            &worker(WorkerNodeStatus::Offline, 30),
+            false,
+            now
+        ));
+        assert!(!worker_cleanup_evidence_safe(
+            &worker(WorkerNodeStatus::Online, -1),
+            false,
+            now
+        ));
+        assert!(!worker_cleanup_evidence_safe(
+            &worker(WorkerNodeStatus::Online, 30),
+            true,
+            now
+        ));
+    }
+}
+
+#[cfg(test)]
 mod warm_tests {
     use std::{sync::Arc, time::Duration};
 
@@ -2953,7 +5030,7 @@ mod warm_tests {
         WARM_IDLE_TIMEOUT, WarmAppServer, WarmRegistry, WarmReuseHandle, is_reserved_env_name,
         parse_keep_warm, reap_all_warm_entries, reap_warm_entry, reap_warm_entry_if_unchanged,
         register_warm_entry, should_keep_warm, sweep_idle_warm_entries, take_live_warm_entry,
-        warm_entry_is_idle,
+        warm_entry_is_idle, workspace_go_environment,
     };
 
     #[test]
@@ -2961,6 +5038,12 @@ mod warm_tests {
         for name in [
             "VK_WORKSPACE_ID",
             "VK_WORKSPACE_BRANCH",
+            "GOBIN",
+            "GOCACHE",
+            "GOENV",
+            "GOMODCACHE",
+            "GOPATH",
+            "GOTOOLCHAIN",
             "PATH",
             "HOME",
             "LD_PRELOAD",
@@ -2971,6 +5054,34 @@ mod warm_tests {
         }
         assert!(!is_reserved_env_name("GITHUB_TOKEN"));
         assert!(!is_reserved_env_name("AZURE_CLIENT_ID"));
+    }
+
+    #[test]
+    fn go_environment_is_stable_and_workspace_scoped() {
+        let inherited = std::ffi::OsStr::new("/host/bin:/usr/bin");
+        let first =
+            workspace_go_environment(std::path::Path::new("/workspaces/first"), Some(inherited));
+        let first_again =
+            workspace_go_environment(std::path::Path::new("/workspaces/first"), Some(inherited));
+        let second =
+            workspace_go_environment(std::path::Path::new("/workspaces/second"), Some(inherited));
+
+        assert_eq!(first, first_again);
+        assert_eq!(first["GOTOOLCHAIN"], "auto");
+        for name in ["GOBIN", "GOCACHE", "GOENV", "GOMODCACHE", "GOPATH"] {
+            assert!(first[name].starts_with("/workspaces/first/.vibe-kanban/go/"));
+            assert!(second[name].starts_with("/workspaces/second/.vibe-kanban/go/"));
+            assert_ne!(first[name], second[name]);
+        }
+        assert_eq!(
+            std::env::split_paths(std::ffi::OsStr::new(&first["PATH"]))
+                .next()
+                .unwrap(),
+            std::path::PathBuf::from(&first["GOBIN"])
+        );
+
+        let dispatched = workspace_go_environment(std::path::Path::new("/workspaces/first"), None);
+        assert!(!dispatched.contains_key("PATH"));
     }
 
     // The exit-monitor keeps a persistent app-server warm only on a clean turn
