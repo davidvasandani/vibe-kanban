@@ -185,3 +185,7 @@ contributed to it.
   desktop-only fixed chrome in a drawer component also reused on mobile; plus
   discoverable mobile access, stable persisted tab identifiers, truthful button
   semantics, and route-owned availability during async workspace loading.
+- [workspace-creation-reliability.md](workspace-creation-reliability.md) —
+  Repository-ID admin queue identity, bounded pre-operation lease contention
+  waits, cancellation and fencing limits, original-code regression proof, and
+  distinguishing rejected placement transitions from SQL failures.

@@ -1,36 +1,11 @@
-# Implementation Plan: Claude Fable 5.1 and Claude Code Refresh
+# Implementation plan: workspace creation failure
 
-**Task:** `vk/1f95-update-claude-mo`
+1. Complete SpecKit constitution, specification, clarification, plan, task breakdown, and cross-artifact analysis using the repository commands.
+2. Collect coordinator failure logs and trace the failed creation phases in crates/server/src/routes/workspaces/create.rs through container and Git services. Establish a reproducible cause before changing behavior.
+3. Implement the smallest evidenced correction in the owning Vibe Kanban component; add focused failure/success regression tests. Preserve operation identity, shared-store safety, and permanent failure visibility.
+4. Install dependencies with pnpm install --frozen-lockfile, run focused tests and relevant checks, and run pnpm run format. Record evidence and limitations.
+5. Run independent Codex diff review; resolve significant findings and reverify.
+6. Update the relevant project knowledge page and index with task vk/40fb-workspace-creati; commit the knowledge and implementation.
+7. Open a PR against the repository base branch, verify required checks, and merge the PR.
 
-1. Inspect the current Claude executor catalog, package pin, version-coupled
-   tests/comments, governing Nix module, and clean/dirty state of both scoped
-   repositories.
-2. Verify the Fable 5.1 model identifier, supported effort controls, current
-   Claude Code release, release notes, and alias mappings using authoritative
-   Anthropic/npm/native-package evidence.
-3. Run the SpecKit constitution, specification, clarification, planning, task,
-   and analysis stages, saving their task-scoped artifacts under
-   `specs/vk/1f95-update-claude-mo/`.
-4. Update the Claude executor's fallback model catalog and focused tests for
-   Fable 5.1, preserving all still-supported existing choices and the default.
-5. Update the pinned `@anthropic-ai/claude-code` version and every deliberate
-   version twin in comments/tests.
-6. Inspect the refreshed native Claude Code binary for the exact scheduling and
-   background tool names and aliases. Adjust Vibe Kanban's safety constants
-   only if verified runtime facts changed, while retaining the parameter-level
-   background-Bash guard.
-7. Update `homelab/modules/vibe-kanban-rebuild.nix` only if the refreshed Vibe
-   Kanban executor requires a deployment/runtime change; otherwise record that
-   the module was inspected and remains compatible.
-8. Install dependencies with `pnpm install --frozen-lockfile`, format, and run
-   focused Claude executor tests plus generated-type and relevant broader
-   checks. If homelab changes, run its narrow Nix parse/format/evaluation gates.
-9. Run an independent Codex CLI review of the complete task diff. Resolve each
-   confirmed significant finding and repeat review/verification until clean.
-10. Update the Vibe Kanban project knowledge base with reusable model/CLI bump
-    guidance, tag it `vk/1f95-update-claude-mo`, refresh the index, and commit
-    the knowledge-base change.
-11. Reconcile and complete all pipeline artifacts and task checkboxes, confirm
-    scope and repository status, commit the implementation, push the branch,
-    open a pull request against the latest base branch, wait for required
-    checks, and merge it.
+Specific implementation files will be refined in the SpecKit plan from the diagnostic evidence. Hosting changes are limited to Vibe Kanban's governing module if demonstrated necessary.

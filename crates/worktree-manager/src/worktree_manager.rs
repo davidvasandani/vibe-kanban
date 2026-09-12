@@ -23,7 +23,9 @@ use uuid::Uuid;
 static REPOSITORY_OPERATION_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-static REPOSITORY_ADMIN_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+// Match the durable lease identity, including local checkouts and shared stores
+// that have different common directories but represent the same repository.
+static REPOSITORY_ADMIN_LOCKS: LazyLock<Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Coordinator-side repository lock combining process-local exclusion with a
@@ -95,6 +97,194 @@ mod repository_admin_lock_tests {
         assert_ne!(second.operation_id(), Uuid::nil());
         second.release().await.unwrap();
     }
+    #[tokio::test]
+    async fn different_paths_for_one_repository_share_the_local_queue() {
+        let manager = manager().await;
+        let repo_id = Uuid::new_v4();
+        let checkout = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let first = manager.acquire(repo_id, checkout.path()).await.unwrap();
+        let waiter = manager.acquire(repo_id, store.path());
+        tokio::pin!(waiter);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut waiter)
+                .await
+                .is_err()
+        );
+        first.release().await.unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.generation(), 2);
+        second.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn durable_contention_waits_for_fenced_release() {
+        let manager = manager().await;
+        let repo_id = Uuid::new_v4();
+        let path = tempfile::tempdir().unwrap();
+        let owner = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let first = db::models::repository_admin_lock::RepositoryAdminLock::acquire(
+            &manager.pool,
+            repo_id,
+            owner,
+            now,
+            now + chrono::TimeDelta::seconds(30),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let waiter = manager.acquire(repo_id, path.path());
+        tokio::pin!(waiter);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut waiter)
+                .await
+                .is_err()
+        );
+        assert!(
+            db::models::repository_admin_lock::RepositoryAdminLock::release(
+                &manager.pool,
+                repo_id,
+                first.generation,
+                owner,
+            )
+            .await
+            .unwrap()
+        );
+        let second = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.generation(), 2);
+        assert!(
+            !db::models::repository_admin_lock::RepositoryAdminLock::release(
+                &manager.pool,
+                repo_id,
+                first.generation,
+                owner,
+            )
+            .await
+            .unwrap()
+        );
+        second.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn durable_contention_is_bounded_and_does_not_steal_a_live_lease() {
+        let mut manager = manager().await;
+        manager.lease_duration = Duration::from_millis(40);
+        let repo_id = Uuid::new_v4();
+        let path = tempfile::tempdir().unwrap();
+        let owner = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let first = db::models::repository_admin_lock::RepositoryAdminLock::acquire(
+            &manager.pool,
+            repo_id,
+            owner,
+            now,
+            now + chrono::TimeDelta::seconds(30),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.acquire(repo_id, path.path()),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(WorktreeError::RepositoryLockBusy(id)) if id == repo_id));
+        assert!(
+            db::models::repository_admin_lock::RepositoryAdminLock::release(
+                &manager.pool,
+                repo_id,
+                first.generation,
+                owner,
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoned_lease_expires_without_replaying_an_operation() {
+        let mut manager = manager().await;
+        manager.lease_duration = Duration::from_millis(100);
+        let repo_id = Uuid::new_v4();
+        let path = tempfile::tempdir().unwrap();
+        let first = manager.acquire(repo_id, path.path()).await.unwrap();
+        drop(first); // Simulate cancellation after acquisition.
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.acquire(repo_id, path.path()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(second.generation(), 2);
+        second.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unrelated_repositories_do_not_wait_for_each_other() {
+        let manager = manager().await;
+        let path = tempfile::tempdir().unwrap();
+        let first = manager.acquire(Uuid::new_v4(), path.path()).await.unwrap();
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.acquire(Uuid::new_v4(), path.path()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        second.release().await.unwrap();
+        first.release().await.unwrap();
+    }
+    #[tokio::test]
+    async fn database_errors_are_not_retried_as_contention() {
+        let manager = manager().await;
+        sqlx::query("DROP TABLE repository_admin_locks")
+            .execute(&manager.pool)
+            .await
+            .unwrap();
+        let path = tempfile::tempdir().unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.acquire(Uuid::new_v4(), path.path()),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(WorktreeError::Database(_))));
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_does_not_leave_the_local_queue_locked() {
+        let manager = manager().await;
+        let repo_id = Uuid::new_v4();
+        let path = tempfile::tempdir().unwrap();
+        let first = manager.acquire(repo_id, path.path()).await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                manager.acquire(repo_id, path.path()),
+            )
+            .await
+            .is_err()
+        );
+        first.release().await.unwrap();
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.acquire(repo_id, path.path()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(second.generation(), 2);
+        second.release().await.unwrap();
+    }
 }
 
 pub struct RepositoryAdminGuard {
@@ -119,29 +309,53 @@ impl RepositoryAdminLockManager {
         repository_id: Uuid,
         repository_path: &Path,
     ) -> Result<RepositoryAdminGuard, WorktreeError> {
-        let key = canonical_lock_key(repository_path)?;
+        if !repository_path.is_absolute() {
+            return Err(WorktreeError::InvalidPath(
+                repository_path.display().to_string(),
+            ));
+        }
         let mutex = {
             let mut locks = REPOSITORY_ADMIN_LOCKS.lock().unwrap();
             locks
-                .entry(key)
+                .entry(repository_id)
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
         let local_guard = mutex.lock_owned().await;
-        let now = Utc::now();
-        let lease_expires_at = now
-            + TimeDelta::from_std(self.lease_duration)
-                .map_err(|_| WorktreeError::InvalidLeaseDuration)?;
+        let lease_duration = TimeDelta::from_std(self.lease_duration)
+            .map_err(|_| WorktreeError::InvalidLeaseDuration)?;
         let operation_id = Uuid::new_v4();
-        let record = RepositoryAdminLock::acquire(
-            &self.pool,
-            repository_id,
-            operation_id,
-            now,
-            lease_expires_at,
-        )
-        .await?
-        .ok_or(WorktreeError::RepositoryLockBusy(repository_id))?;
+        // A cancelled caller or a previous coordinator can leave an unexpired
+        // lease. Wait for its fenced release/expiry instead of failing creation
+        // immediately. Only acquisition is retried: no Git or startup work has
+        // begun, and the database predicate remains the ownership authority.
+        let deadline = tokio::time::Instant::now() + self.lease_duration;
+        let mut reported_contention = false;
+        let record = loop {
+            let now = Utc::now();
+            if let Some(record) = RepositoryAdminLock::acquire(
+                &self.pool,
+                repository_id,
+                operation_id,
+                now,
+                now + lease_duration,
+            )
+            .await?
+            {
+                break record;
+            }
+            if !reported_contention {
+                info!(%repository_id, "Waiting for repository administration lease");
+                reported_contention = true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(WorktreeError::RepositoryLockBusy(repository_id));
+            }
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(100)),
+            )
+            .await;
+        };
 
         Ok(RepositoryAdminGuard {
             pool: self.pool.clone(),
