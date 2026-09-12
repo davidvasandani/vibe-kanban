@@ -1,4 +1,4 @@
-import type { BaseCodingAgent } from 'shared/types';
+import type { BaseCodingAgent, McpRefreshResult } from 'shared/types';
 import type {
   CreateIssueRequest,
   Issue,
@@ -20,6 +20,42 @@ export type McpDebugAvailability =
   | { available: false; reason: 'no-project' | 'no-status' };
 
 const activeMcpDebugCreations = new Set<string>();
+
+export function buildMcpRuntimeDiagnostic({
+  result,
+  executor,
+  workspaceId,
+  sessionId,
+}: {
+  result: McpRefreshResult;
+  executor: BaseCodingAgent;
+  workspaceId: string;
+  sessionId: string;
+}): string {
+  const lines = [
+    'Active-session MCP registry diagnostic',
+    `Executor: ${toPrettyCase(executor)}`,
+    `Workspace ID: ${workspaceId}`,
+    `Session ID: ${sessionId}`,
+    `Discovery generation: ${result.generation}`,
+    `Requested at: ${result.requested_at}`,
+    `Overall status: ${result.status}`,
+    '',
+    'Servers:',
+  ];
+  for (const server of result.servers) {
+    lines.push(
+      `- ${server.server_id}: ${server.status}; tools=${server.tool_count ?? 'unknown'}; attempts=${server.discovery_attempts}`
+    );
+    for (const observation of server.observed_errors) {
+      lines.push(`  - ${observation.observed_at}: ${observation.code}`);
+    }
+    if (server.error) {
+      lines.push(`  - ${server.error.category}: ${server.error.message}`);
+    }
+  }
+  return lines.join('\n');
+}
 
 export function mcpDiagnosticText(
   error: string | null | undefined,

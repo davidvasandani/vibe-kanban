@@ -16,7 +16,10 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use tokio::{
+    process::Command,
+    sync::{Notify, RwLock},
+};
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 use workspace_utils::{
@@ -54,12 +57,91 @@ use crate::{
             shell_command_parsing::CommandCategory,
         },
     },
+    mcp_refresh::{
+        McpRefreshControl, McpRefreshErrorCategory, McpRefreshHandle, McpServerRefreshSnapshot,
+        McpServerRefreshStatus,
+    },
     model_selector::PermissionPolicy,
     profile::ExecutorConfig,
     stdout_dup::create_stdout_pipe_writer,
 };
 
 const SUPPRESSED_STDERR_PATTERNS: &[&str] = &["[WARN] Fast mode requires the native binary"];
+
+#[derive(Default)]
+pub(crate) struct ClaudeMcpInventory {
+    servers: RwLock<Option<Vec<McpServerRefreshSnapshot>>>,
+    ready: Notify,
+}
+
+impl ClaudeMcpInventory {
+    pub(crate) async fn observe_tools(&self, tools: &[serde_json::Value]) {
+        let mut by_server: HashMap<String, Vec<String>> = HashMap::new();
+        for tool in tools {
+            let name = tool
+                .as_str()
+                .or_else(|| tool.get("name").and_then(serde_json::Value::as_str));
+            let Some(name) = name.and_then(|name| name.strip_prefix("mcp__")) else {
+                continue;
+            };
+            let Some((server_id, _)) = name.split_once("__") else {
+                continue;
+            };
+            by_server
+                .entry(server_id.to_string())
+                .or_default()
+                .push(format!("mcp__{name}"));
+        }
+        let mut servers: Vec<_> = by_server
+            .into_iter()
+            .map(|(server_id, mut tool_names)| {
+                tool_names.sort();
+                tool_names.dedup();
+                McpServerRefreshSnapshot {
+                    server_id,
+                    status: McpServerRefreshStatus::Ready,
+                    tool_count: Some(tool_names.len() as u32),
+                    tool_names: Some(tool_names),
+                    // Claude's init event provides names, not schemas.
+                    tool_schema_fingerprint: None,
+                    resource_count: None,
+                    prompt_count: None,
+                    restart_occurred: Some(true),
+                    discovery_attempts: 1,
+                    observed_errors: Vec::new(),
+                    first_observed_at: Some(chrono::Utc::now()),
+                    last_observed_at: Some(chrono::Utc::now()),
+                    terminal_at: Some(chrono::Utc::now()),
+                    error: None,
+                }
+            })
+            .collect();
+        servers.sort_by(|a, b| a.server_id.cmp(&b.server_id));
+        *self.servers.write().await = Some(servers);
+        self.ready.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl McpRefreshControl for ClaudeMcpInventory {
+    async fn queue_refresh(&self) -> Result<(), McpRefreshErrorCategory> {
+        Err(McpRefreshErrorCategory::Unsupported)
+    }
+
+    async fn list_servers(&self) -> Result<Vec<McpServerRefreshSnapshot>, McpRefreshErrorCategory> {
+        let wait = async {
+            loop {
+                if let Some(servers) = self.servers.read().await.clone() {
+                    return servers;
+                }
+                self.ready.notified().await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), wait)
+            .await
+            .map_err(|_| McpRefreshErrorCategory::Timeout)
+    }
+}
 
 fn base_command(claude_code_router: bool) -> &'static str {
     if claude_code_router {
@@ -818,6 +900,9 @@ impl ClaudeCode {
         let repo_context = env.repo_context.clone();
         let commit_reminder_prompt = env.commit_reminder_prompt.clone();
         let cancel_for_task = cancel.clone();
+        let mcp_inventory = Arc::new(ClaudeMcpInventory::default());
+        let (mcp_refresh_tx, mcp_refresh_rx) = tokio::sync::oneshot::channel();
+        let _ = mcp_refresh_tx.send(McpRefreshHandle(mcp_inventory.clone()));
         tokio::spawn(async move {
             let log_writer = LogWriter::new(new_stdout);
             let client = ClaudeAgentClient::new(
@@ -826,6 +911,7 @@ impl ClaudeCode {
                 repo_context,
                 commit_reminder_prompt,
                 cancel_for_task.clone(),
+                mcp_inventory,
             );
             let protocol_peer =
                 ProtocolPeer::spawn(child_stdin, child_stdout, client.clone(), cancel_for_task);
@@ -858,7 +944,7 @@ impl ClaudeCode {
             cancel: Some(cancel),
             keep_warm: false,
             warm_reuse: None,
-            mcp_refresh: None,
+            mcp_refresh: Some(mcp_refresh_rx),
         })
     }
 }
@@ -3497,6 +3583,26 @@ mod tests {
             entries[0].content,
             "System initialized with model: claude-sonnet-4-20250514"
         );
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_groups_registered_mcp_tools_by_server() {
+        let inventory = ClaudeMcpInventory::default();
+        inventory
+            .observe_tools(&[
+                serde_json::json!("Read"),
+                serde_json::json!("mcp__slack__conversations_replies"),
+                serde_json::json!({ "name": "mcp__slack__conversations_history" }),
+                serde_json::json!("mcp__brink__sales_split"),
+            ])
+            .await;
+
+        let servers = inventory.list_servers().await.unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].server_id, "brink");
+        assert_eq!(servers[0].tool_count, Some(1));
+        assert_eq!(servers[1].server_id, "slack");
+        assert_eq!(servers[1].tool_count, Some(2));
     }
 
     #[test]

@@ -3272,6 +3272,11 @@ impl ContainerService for LocalContainerService {
         self.mcp_refresh_coordinator.remove(session_id).await;
     }
 
+    async fn reap_warm_process_for_mcp_restart(&self, session_id: Uuid) {
+        self.reap_warm_server(&session_id).await;
+        self.mcp_refresh_controls.write().await.remove(&session_id);
+    }
+
     fn db(&self) -> &DBService {
         &self.db
     }
@@ -3470,6 +3475,38 @@ impl ContainerService for LocalContainerService {
         // `register_mcp_refresh_control`, which reads the complete status and
         // atomically confirms this pending generation.
         Ok(result)
+    }
+
+    async fn prepare_mcp_restart(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<McpRefreshResult, ContainerError> {
+        let session = Session::find_by_id(&self.db.pool, session_id)
+            .await?
+            .ok_or(SessionError::NotFound)?;
+        if session.workspace_id != workspace_id {
+            return Err(ContainerError::Other(anyhow!(
+                "Session does not belong to workspace"
+            )));
+        }
+        let profile =
+            ExecutionProcess::latest_executor_profile_for_session(&self.db.pool, session_id)
+                .await?;
+        let configured_server_ids = if let Some(profile_id) = profile.as_ref()
+            && let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id)
+        {
+            read_coding_agent_mcp_servers(&agent)
+                .await
+                .map(|servers| servers.keys().cloned().collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        Ok(self
+            .mcp_refresh_coordinator
+            .request_restart(session_id, configured_server_ids)
+            .await)
     }
 
     async fn mcp_refresh_status(

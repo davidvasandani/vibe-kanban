@@ -35,6 +35,7 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/placement", get(core::get_workspace_placement))
         .route("/affinity", patch(affinity::update_workspace_affinity))
         .route("/seen", axum::routing::put(core::mark_seen))
+        .route("/mcp/restart", post(mcp_refresh::restart_workspace))
         .nest("/git", git::router())
         .nest("/execution", execution::router())
         .nest("/integration", integration::router())

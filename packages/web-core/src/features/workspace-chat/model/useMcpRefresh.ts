@@ -36,7 +36,7 @@ function notifyResult(result: McpRefreshResult) {
 
 export function mcpRefreshTooltip(result: McpRefreshResult | null) {
   if (!result) {
-    return 'Reload MCP configuration and verify the active Codex tool registry';
+    return 'Reload MCP configuration and verify the active executor tool registry';
   }
   const slack = mcpCapabilityDiagnostic(result, 'slack');
   const entra = mcpCapabilityDiagnostic(result, 'entra');

@@ -183,6 +183,12 @@ impl QueuedMessageService {
             .is_some_and(|message| message.restart_reservation.is_some())
     }
 
+    pub fn has_mcp_restart(&self, session_id: Uuid) -> bool {
+        self.queue
+            .get(&session_id)
+            .is_some_and(|message| message.restart_agent || message.restart_reservation.is_some())
+    }
+
     pub async fn wait_for_restart_resolution(&self, session_id: Uuid) {
         loop {
             let notified = self.restart_resolution.notified();

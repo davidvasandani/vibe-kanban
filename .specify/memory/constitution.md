@@ -208,6 +208,14 @@ identifies failures by stable configured identifier. Configuration comparisons,
 logs, diagnostics, and API results never expose environment values, tokens,
 authorization material, authenticated URLs, or secret-bearing command arguments.
 
+Discovery is bounded per server and generation. Repeated transient connection
+events do not extend the deadline indefinitely; every configured server reaches
+either a usable state or a named terminal failure. Transport connectivity and
+the live executor registry are separate facts: user-facing status treats the
+registry as authoritative, reports registered tool counts including zero, and
+never presents a settings probe or transport handshake as proof that tools are
+callable in the active session.
+
 If a restart is requested while a turn is running, the product must obtain an
 explicit user confirmation before queueing the handoff. The current turn is not
 interrupted unless the dialog says so. Exactly one lifecycle consumer owns the

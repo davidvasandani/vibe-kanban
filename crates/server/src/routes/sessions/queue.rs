@@ -1,10 +1,24 @@
+use std::{
+    collections::HashSet,
+    sync::{LazyLock, Mutex},
+    time::Duration,
+};
+
 use axum::{
     Extension, Json, Router, extract::State, middleware::from_fn_with_state,
     response::Json as ResponseJson, routing::get,
 };
-use db::models::{scratch::DraftFollowUpData, session::Session};
+use db::models::{
+    execution_process::{ExecutionProcess, ExecutionProcessRunReason},
+    scratch::DraftFollowUpData,
+    session::Session,
+};
 use deployment::Deployment;
-use executors::profile::ExecutorConfig;
+use executors::{
+    actions::ExecutorActionType,
+    mcp_recovery::{McpRecoveryResult, McpRecoveryScope, McpRecoveryStatus, McpRestartDisposition},
+    profile::ExecutorConfig,
+};
 use serde::{Deserialize, Serialize};
 use services::services::{
     container::ContainerService,
@@ -31,10 +45,35 @@ struct QueueMcpRestartRequest {
 
 #[derive(Debug, Serialize, TS)]
 #[serde(tag = "status", rename_all = "snake_case")]
-enum QueueMcpRestartResult {
+pub enum QueueMcpRestartResult {
     ConfirmationRequired,
     Queued,
     Started,
+}
+
+static ACTIVE_MCP_SESSION_RESTARTS: LazyLock<Mutex<HashSet<uuid::Uuid>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+struct ActiveSessionRestartGuard {
+    session_id: uuid::Uuid,
+    active: bool,
+}
+
+impl ActiveSessionRestartGuard {
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for ActiveSessionRestartGuard {
+    fn drop(&mut self) {
+        if self.active {
+            ACTIVE_MCP_SESSION_RESTARTS
+                .lock()
+                .expect("MCP session restart lock poisoned")
+                .remove(&self.session_id);
+        }
+    }
 }
 
 struct RestartReservationGuard {
@@ -59,11 +98,11 @@ impl Drop for RestartReservationGuard {
     }
 }
 
-async fn queue_mcp_restart(
-    Extension(session): Extension<Session>,
-    State(deployment): State<DeploymentImpl>,
-    Json(payload): Json<QueueMcpRestartRequest>,
-) -> Result<ResponseJson<ApiResponse<QueueMcpRestartResult>>, ApiError> {
+async fn queue_mcp_restart_impl(
+    session: &Session,
+    deployment: &DeploymentImpl,
+    payload: QueueMcpRestartRequest,
+) -> Result<QueueMcpRestartResult, ApiError> {
     let was_running =
         db::models::execution_process::ExecutionProcess::has_running_coding_agent_for_session(
             &deployment.db().pool,
@@ -71,9 +110,7 @@ async fn queue_mcp_restart(
         )
         .await?;
     if was_running && !payload.confirmed_running_restart {
-        return Ok(ResponseJson(ApiResponse::success(
-            QueueMcpRestartResult::ConfirmationRequired,
-        )));
+        return Ok(QueueMcpRestartResult::ConfirmationRequired);
     }
 
     let data = DraftFollowUpData {
@@ -114,9 +151,7 @@ async fn queue_mcp_restart(
                 .queued_message_service()
                 .cancel_mcp_restart(session.id, reservation);
             reservation_guard.disarm();
-            return Ok(ResponseJson(ApiResponse::success(
-                QueueMcpRestartResult::ConfirmationRequired,
-            )));
+            return Ok(QueueMcpRestartResult::ConfirmationRequired);
         }
         let queued_at = deployment
             .queued_message_service()
@@ -129,9 +164,7 @@ async fn queue_mcp_restart(
             )
             .await;
         if matches!(still_running_result, Ok(true)) {
-            return Ok(ResponseJson(ApiResponse::success(
-                QueueMcpRestartResult::Queued,
-            )));
+            return Ok(QueueMcpRestartResult::Queued);
         }
         if let Err(error) = still_running_result {
             tracing::warn!(
@@ -156,7 +189,7 @@ async fn queue_mcp_restart(
     let result = if let Some(queued) = queued {
         deployment
             .container()
-            .reap_warm_processes_for_session(session.id)
+            .reap_warm_process_for_mcp_restart(session.id)
             .await;
         let _ = super::follow_up(
             Extension(session.clone()),
@@ -175,6 +208,162 @@ async fn queue_mcp_restart(
         // Finalization claimed this exact message and owns starting it.
         QueueMcpRestartResult::Queued
     };
+    Ok(result)
+}
+
+async fn queue_mcp_restart(
+    Extension(session): Extension<Session>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<QueueMcpRestartRequest>,
+) -> Result<ResponseJson<ApiResponse<QueueMcpRestartResult>>, ApiError> {
+    let result = queue_mcp_restart_impl(&session, &deployment, payload).await?;
+    Ok(ResponseJson(ApiResponse::success(result)))
+}
+
+fn executor_config(process: &ExecutionProcess) -> Result<ExecutorConfig, ApiError> {
+    let action = process.executor_action().map_err(|error| {
+        ApiError::Conflict(format!(
+            "Could not read executor configuration for {}: {error}",
+            process.id
+        ))
+    })?;
+    match action.typ() {
+        ExecutorActionType::CodingAgentInitialRequest(request) => {
+            Ok(request.executor_config.clone())
+        }
+        ExecutorActionType::CodingAgentFollowUpRequest(request) => {
+            Ok(request.executor_config.clone())
+        }
+        _ => Err(ApiError::Conflict(format!(
+            "Execution {} is not a resumable coding-agent task",
+            process.id
+        ))),
+    }
+}
+
+pub async fn restart_mcp_session(
+    session: &Session,
+    deployment: &DeploymentImpl,
+) -> Result<McpRecoveryResult, ApiError> {
+    let already_active = {
+        let mut active = ACTIVE_MCP_SESSION_RESTARTS
+            .lock()
+            .expect("MCP session restart lock poisoned");
+        !active.insert(session.id)
+    };
+    if already_active
+        && let Some(current) = deployment
+            .container()
+            .mcp_refresh_status(session.workspace_id, session.id)
+            .await?
+    {
+        return Ok(McpRecoveryResult {
+            generation: current.generation,
+            scope: McpRecoveryScope::Session,
+            workspace_id: session.workspace_id,
+            session_id: Some(session.id),
+            status: McpRecoveryStatus::InProgress,
+            disposition: McpRestartDisposition::AlreadyInProgress,
+            requested_at: current.requested_at,
+            completed_at: None,
+            executor: session
+                .executor
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            servers: current.servers,
+            error: current.error,
+        });
+    }
+    if already_active {
+        return Err(ApiError::Conflict(
+            "An MCP session restart is already in progress".to_string(),
+        ));
+    }
+    let mut active_guard = ActiveSessionRestartGuard {
+        session_id: session.id,
+        active: true,
+    };
+    let latest = ExecutionProcess::find_by_session_id(&deployment.db().pool, session.id, false)
+        .await?
+        .into_iter()
+        .rev()
+        .find(|process| process.run_reason == ExecutionProcessRunReason::CodingAgent)
+        .ok_or_else(|| {
+            ApiError::Conflict("Session has no coding-agent execution to restart".into())
+        })?;
+    let config = executor_config(&latest)?;
+    let executor = config.executor.to_string();
+    let tracking = deployment
+        .container()
+        .prepare_mcp_restart(session.workspace_id, session.id)
+        .await?;
+    let result = queue_mcp_restart_impl(
+        session,
+        deployment,
+        QueueMcpRestartRequest {
+            message: "Continue the existing task after restarting the agent process. Re-check MCP availability before relying on MCP tools.".to_string(),
+            executor_config: config,
+            // Calling the restart endpoint is itself the explicit confirmation.
+            confirmed_running_restart: true,
+        },
+    )
+    .await?;
+    let disposition = match result {
+        QueueMcpRestartResult::Queued => McpRestartDisposition::Queued,
+        QueueMcpRestartResult::Started => McpRestartDisposition::Started,
+        QueueMcpRestartResult::ConfirmationRequired => {
+            unreachable!("restart endpoint supplies explicit running-turn confirmation")
+        }
+    };
+    let servers = tracking.servers;
+    let cleanup_deployment = deployment.clone();
+    let cleanup_session = session.clone();
+    tokio::spawn(async move {
+        for _ in 0..35 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let terminal = cleanup_deployment
+                .container()
+                .mcp_refresh_status(cleanup_session.workspace_id, cleanup_session.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|state| {
+                    !matches!(
+                        state.status,
+                        executors::mcp_refresh::McpRefreshStatus::PendingNextTurn
+                            | executors::mcp_refresh::McpRefreshStatus::Busy
+                    )
+                });
+            if terminal {
+                break;
+            }
+        }
+        ACTIVE_MCP_SESSION_RESTARTS
+            .lock()
+            .expect("MCP session restart lock poisoned")
+            .remove(&cleanup_session.id);
+    });
+    active_guard.disarm();
+    Ok(McpRecoveryResult {
+        generation: tracking.generation,
+        scope: McpRecoveryScope::Session,
+        workspace_id: session.workspace_id,
+        session_id: Some(session.id),
+        status: McpRecoveryStatus::Accepted,
+        disposition,
+        requested_at: tracking.requested_at,
+        completed_at: None,
+        executor,
+        servers,
+        error: None,
+    })
+}
+
+async fn restart_mcp_session_route(
+    Extension(session): Extension<Session>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<McpRecoveryResult>>, ApiError> {
+    let result = restart_mcp_session(&session, &deployment).await?;
     Ok(ResponseJson(ApiResponse::success(result)))
 }
 
@@ -249,6 +438,7 @@ pub(super) fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
                 .delete(cancel_queued_message),
         )
         .route("/mcp-restart", axum::routing::post(queue_mcp_restart))
+        .route("/restart", axum::routing::post(restart_mcp_session_route))
         .layer(from_fn_with_state(
             deployment.clone(),
             load_session_middleware,

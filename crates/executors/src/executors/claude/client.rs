@@ -10,7 +10,7 @@ use crate::{
     executors::{
         ExecutorError,
         claude::{
-            ClaudeJson,
+            ClaudeJson, ClaudeMcpInventory,
             types::{
                 PermissionResult, PermissionUpdate, PermissionUpdateDestination,
                 PermissionUpdateType,
@@ -101,16 +101,18 @@ pub struct ClaudeAgentClient {
     repo_context: RepoContext,
     commit_reminder_prompt: String,
     cancel: CancellationToken,
+    mcp_inventory: Arc<ClaudeMcpInventory>,
 }
 
 impl ClaudeAgentClient {
     /// Create a new client with optional approval service
-    pub fn new(
+    pub(crate) fn new(
         log_writer: LogWriter,
         approvals: Option<Arc<dyn ExecutorApprovalService>>,
         repo_context: RepoContext,
         commit_reminder_prompt: String,
         cancel: CancellationToken,
+        mcp_inventory: Arc<ClaudeMcpInventory>,
     ) -> Arc<Self> {
         let auto_approve = approvals.is_none();
         Arc::new(Self {
@@ -120,6 +122,7 @@ impl ClaudeAgentClient {
             repo_context,
             commit_reminder_prompt,
             cancel,
+            mcp_inventory,
         })
     }
 
@@ -478,6 +481,15 @@ impl ClaudeAgentClient {
     }
 
     pub async fn log_message(&self, line: &str) -> Result<(), ExecutorError> {
+        if let Ok(ClaudeJson::System {
+            subtype: Some(subtype),
+            tools: Some(tools),
+            ..
+        }) = serde_json::from_str::<ClaudeJson>(line)
+            && subtype == "init"
+        {
+            self.mcp_inventory.observe_tools(&tools).await;
+        }
         self.log_writer.log_raw(line).await
     }
 }
@@ -499,6 +511,7 @@ mod tests {
             RepoContext::default(),
             String::new(),
             CancellationToken::new(),
+            Arc::new(ClaudeMcpInventory::default()),
         )
     }
 
@@ -511,6 +524,7 @@ mod tests {
             RepoContext::default(),
             String::new(),
             CancellationToken::new(),
+            Arc::new(ClaudeMcpInventory::default()),
         )
     }
 

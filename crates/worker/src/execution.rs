@@ -2181,6 +2181,11 @@ mod tests {
                 resource_count: Some(0),
                 prompt_count: Some(0),
                 restart_occurred: Some(true),
+                discovery_attempts: 1,
+                observed_errors: Vec::new(),
+                first_observed_at: None,
+                last_observed_at: None,
+                terminal_at: None,
                 error: None,
             }])
         }

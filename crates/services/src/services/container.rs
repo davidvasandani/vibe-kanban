@@ -364,6 +364,19 @@ pub trait ContainerService {
         session_id: Uuid,
     ) -> Result<McpRefreshResult, ContainerError>;
 
+    /// Start a fresh-process MCP inventory generation without asking the
+    /// current executor to reload in place. The replacement execution confirms
+    /// this generation from its own startup registry.
+    async fn prepare_mcp_restart(
+        &self,
+        _workspace_id: Uuid,
+        _session_id: Uuid,
+    ) -> Result<McpRefreshResult, ContainerError> {
+        Err(ContainerError::Other(anyhow!(
+            "Fresh-process MCP inventory tracking is unsupported"
+        )))
+    }
+
     async fn mcp_refresh_status(
         &self,
         workspace_id: Uuid,
@@ -1298,6 +1311,12 @@ pub trait ContainerService {
     /// `Running`-only stop loop would otherwise leak it. See
     /// `specs/vk/826e-coding-agent-war/`.
     async fn reap_warm_processes_for_session(&self, _session_id: Uuid) {}
+
+    /// Reap a warm executor before a deliberate MCP restart while preserving
+    /// the pending recovery generation that the replacement process confirms.
+    async fn reap_warm_process_for_mcp_restart(&self, session_id: Uuid) {
+        self.reap_warm_processes_for_session(session_id).await;
+    }
 
     async fn ensure_container_exists(
         &self,

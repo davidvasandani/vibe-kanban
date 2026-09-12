@@ -408,6 +408,32 @@ Other executors report **Unsupported** for this internal operation when they do
 not expose a live, confirmable MCP reload. Vibe Kanban does not substitute the
 independent connection test for live adoption; use the agent restart instead.
 
+Claude Code is explicitly unsupported for in-place refresh. A fresh Claude Code
+process publishes its registered tool names during startup, so Vibe Kanban can
+still confirm the post-restart registry and identify a configured server that
+registered no tools.
+
+Agents connected to the Vibe Kanban MCP server can call `restart_session`.
+Inside a scoped session, the session and workspace identifiers are optional. The
+backend accepts the restart before the current process exits, preserves the
+conversation, and starts a continuation from a fresh executor process.
+
+Use `restart_workspace` when the whole workspace runtime is wedged. It preserves
+the worktree and Git state, restarts workspace-owned processes, replays durable
+dev server and background helper definitions, and resumes the selected session.
+In scoped use, it defaults to the current workspace and session.
+
+Restart results list every configured server. A server can be **Ready**,
+**Connected with 0 tools**, or terminally unavailable. Discovery has a 30-second
+bound; reconnection attempts do not leave the status at **Connecting**
+indefinitely.
+
+When the active registry is unavailable or disagrees with a successful settings
+test, use **Open VK issue for MCP failure**. Vibe Kanban pre-fills the issue with
+the executor, workspace and session identifiers, server outcomes, tool counts,
+safe error timestamps, and discovery attempt counts. It creates the issue only
+after you select the action.
+
 Codex publishes a complete MCP runtime at the next-turn boundary. This makes
 publication atomic and does not interrupt the current turn. The pinned status
 protocol does not report whether an individual server was restarted or reused,

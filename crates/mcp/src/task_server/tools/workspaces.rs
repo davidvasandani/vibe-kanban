@@ -88,6 +88,18 @@ struct McpDeleteWorkspaceRequest {
     delete_branches: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct McpRestartWorkspaceRequest {
+    #[schemars(
+        description = "Workspace ID to restart. Optional if running inside that workspace context."
+    )]
+    workspace_id: Option<Uuid>,
+    #[schemars(
+        description = "Session to resume after restart. Defaults to the orchestrator session in scoped mode."
+    )]
+    session_id: Option<Uuid>,
+}
+
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct McpDeleteWorkspaceResponse {
     success: bool,
@@ -98,6 +110,48 @@ struct McpDeleteWorkspaceResponse {
 
 #[tool_router(router = workspaces_tools_router, vis = "pub")]
 impl McpServer {
+    #[tool(
+        description = "Restart the current workspace process group while preserving its worktree, Git state, sessions, and conversations. Defaults to the current scoped workspace and safely resumes the calling session afterward."
+    )]
+    async fn restart_workspace(
+        &self,
+        Parameters(McpRestartWorkspaceRequest {
+            workspace_id,
+            session_id,
+        }): Parameters<McpRestartWorkspaceRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let workspace_id = match self.resolve_workspace_id(workspace_id) {
+            Ok(id) => id,
+            Err(error_result) => return Ok(Self::tool_error(error_result)),
+        };
+        if let Err(error_result) = self.scope_allows_workspace(workspace_id) {
+            return Ok(Self::tool_error(error_result));
+        }
+        let session_id = session_id.or_else(|| self.orchestrator_session_id());
+        if self
+            .orchestrator_session_id()
+            .is_some_and(|scoped_session_id| {
+                session_id.is_some_and(|session_id| session_id != scoped_session_id)
+            })
+        {
+            return Self::err("Session is outside the configured MCP scope", None);
+        }
+
+        let url = self.url(&format!("/api/workspaces/{workspace_id}/mcp/restart"));
+        let result: executors::mcp_recovery::McpRecoveryResult = match self
+            .send_json(
+                self.client
+                    .post(&url)
+                    .json(&serde_json::json!({ "resume_session_id": session_id })),
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(error_result) => return Ok(Self::tool_error(error_result)),
+        };
+        Self::success(&result)
+    }
+
     #[tool(description = "List local workspaces with optional filters and pagination.")]
     async fn list_workspaces(
         &self,

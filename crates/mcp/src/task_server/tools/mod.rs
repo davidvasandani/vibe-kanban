@@ -636,6 +636,8 @@ mod tests {
             "list_recent_messages".to_string(),
             "list_sessions".to_string(),
             "refresh_mcp_tools".to_string(),
+            "restart_session".to_string(),
+            "restart_workspace".to_string(),
             "run_session_prompt".to_string(),
             "spawn_background_helper".to_string(),
             "spawn_poller".to_string(),

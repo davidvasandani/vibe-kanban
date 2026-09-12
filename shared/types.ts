@@ -1260,7 +1260,9 @@ export type McpRefreshErrorCategory = "executable_unavailable" | "process_launch
 
 export type McpRefreshError = { category: McpRefreshErrorCategory, message: string, remediation: string, retryable: boolean, };
 
-export type McpServerRefreshStatus = "ready" | "failed_retained" | "failed_unavailable" | "removed" | "disabled";
+export type McpDiscoveryObservation = { code: McpRefreshErrorCategory, observed_at: string, };
+
+export type McpServerRefreshStatus = "connecting" | "ready" | "connected_no_tools" | "failed_retained" | "failed_unavailable" | "not_registered" | "removed" | "disabled";
 
 export type McpServerRefreshSnapshot = { server_id: string, status: McpServerRefreshStatus, tool_count: number | null, 
 /**
@@ -1270,7 +1272,7 @@ tool_names: Array<string> | null,
 /**
  * SHA-256 of sorted tool identifiers and their input/output schemas.
  */
-tool_schema_fingerprint: string | null, resource_count: number | null, prompt_count: number | null, restart_occurred: boolean | null, error: McpRefreshError | null, };
+tool_schema_fingerprint: string | null, resource_count: number | null, prompt_count: number | null, restart_occurred: boolean | null, discovery_attempts: number, observed_errors: Array<McpDiscoveryObservation>, first_observed_at: string | null, last_observed_at: string | null, terminal_at: string | null, error: McpRefreshError | null, };
 
 export type McpRefreshResult = { status: McpRefreshStatus, retryable: boolean, generation: bigint, requested_at: string, last_successful_refresh_at: string | null, 
 /**
@@ -1279,6 +1281,19 @@ export type McpRefreshResult = { status: McpRefreshStatus, retryable: boolean, g
  * must never cross this status boundary.
  */
 configured_server_ids: Array<string>, servers: Array<McpServerRefreshSnapshot>, error: McpRefreshError | null, };
+
+export type McpRecoveryScope = "session" | "workspace";
+
+export type McpRecoveryStatus = "accepted" | "in_progress" | "completed" | "partially_completed" | "failed";
+
+export type McpRestartDisposition = "queued" | "started" | "already_in_progress";
+
+export type McpRecoveryResult = { generation: bigint, scope: McpRecoveryScope, workspace_id: string, session_id: string | null, status: McpRecoveryStatus, disposition: McpRestartDisposition, requested_at: string, completed_at: string | null, executor: string, 
+/**
+ * Executor-owned registry snapshot. An empty vector means the replacement
+ * process has not published a registry yet, never that discovery succeeded.
+ */
+servers: Array<McpServerRefreshSnapshot>, error: McpRefreshError | null, };
 
 export type ExecutorActionType = { "type": "CodingAgentInitialRequest" } & CodingAgentInitialRequest | { "type": "CodingAgentFollowUpRequest" } & CodingAgentFollowUpRequest | { "type": "ScriptRequest" } & ScriptRequest | { "type": "ReviewRequest" } & ReviewRequest;
 

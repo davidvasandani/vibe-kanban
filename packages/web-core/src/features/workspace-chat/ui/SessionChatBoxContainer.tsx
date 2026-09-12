@@ -68,11 +68,20 @@ import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { queueApi, sessionsApi } from '@/shared/lib/api';
 import { RenameSessionDialog } from '@vibe/ui/components/RenameSessionDialog';
 import type { TurnNavigationItem } from '@vibe/ui/components/TurnNavigationPopup';
-import { ArrowsClockwiseIcon } from '@phosphor-icons/react';
+import { ArrowsClockwiseIcon, BugIcon } from '@phosphor-icons/react';
 import { ConfirmDialog } from '@/shared/dialogs/shared/ConfirmDialog';
 import { toast } from 'sonner';
 import { restartAgentForMcpChanges } from '../model/restartAgentForMcpChanges';
 import { useMcpRefresh } from '../model/useMcpRefresh';
+import { useProjectContextOptional } from '@/shared/hooks/useProjectContext';
+import {
+  acquireMcpDebugCreation,
+  buildMcpDebugIssueRequest,
+  buildMcpRuntimeDiagnostic,
+  mcpDebugAvailability,
+  mcpDebugCreationKey,
+  releaseMcpDebugCreation,
+} from '@/shared/lib/mcpDebugIssue';
 
 /**
  * Follow-up prompt sent when resuming a run interrupted by a server restart.
@@ -209,6 +218,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     [queryClient, hostId, workspaceId]
   );
   const appNavigation = useAppNavigation();
+  const projectContext = useProjectContextOptional();
 
   const { executeAction } = useActions();
   const actionCtx = useActionVisibilityContext();
@@ -914,6 +924,21 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     const canUseCodexRefresh =
       effectiveExecutor === BaseCodingAgent.CODEX &&
       mcpRefresh.result?.status !== 'unsupported';
+    const unusableServers =
+      mcpRefresh.result?.servers.filter(
+        (server) =>
+          server.status === 'failed_retained' ||
+          server.status === 'failed_unavailable' ||
+          server.status === 'not_registered' ||
+          server.status === 'connected_no_tools' ||
+          (server.status === 'ready' && server.tool_count === 0)
+      ) ?? [];
+    const offerMcpIssue =
+      unusableServers.length > 0 &&
+      !!projectContext &&
+      !!effectiveExecutor &&
+      !!workspaceId &&
+      !!sessionId;
     return [
       ...(workspaceId && sessionId
         ? [
@@ -937,6 +962,72 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
               onClick: canUseCodexRefresh
                 ? mcpRefresh.refresh
                 : handleRestartForMcpChanges,
+            },
+          ]
+        : []),
+      ...(offerMcpIssue
+        ? [
+            {
+              id: 'open-mcp-diagnostic-issue',
+              icon: BugIcon,
+              label: 'Open VK issue for MCP failure',
+              tooltip:
+                'Create a prefilled issue with the active executor registry diagnostic',
+              disabled: false,
+              onClick: () => {
+                if (
+                  !projectContext ||
+                  !effectiveExecutor ||
+                  !workspaceId ||
+                  !sessionId ||
+                  !mcpRefresh.result
+                )
+                  return;
+                const availability = mcpDebugAvailability(
+                  true,
+                  projectContext.statuses
+                );
+                if (!availability.available) {
+                  toast.error(
+                    'This project has no status column for the issue.'
+                  );
+                  return;
+                }
+                const serverName = unusableServers
+                  .map((server) => server.server_id)
+                  .join(', ');
+                const key = mcpDebugCreationKey(
+                  projectContext.projectId,
+                  `runtime:${workspaceId}:${sessionId}:${mcpRefresh.result.generation}`
+                );
+                if (!acquireMcpDebugCreation(key)) return;
+                const diagnostic = buildMcpRuntimeDiagnostic({
+                  result: mcpRefresh.result,
+                  executor: effectiveExecutor,
+                  workspaceId,
+                  sessionId,
+                });
+                const { persisted } = projectContext.insertIssue(
+                  buildMcpDebugIssueRequest({
+                    projectId: projectContext.projectId,
+                    status: availability.status,
+                    issues: projectContext.issues,
+                    serverName,
+                    executor: effectiveExecutor,
+                    diagnostic,
+                  })
+                );
+                void persisted
+                  .then(() => toast.success('MCP diagnostic issue created.'))
+                  .catch((error) =>
+                    toast.error(
+                      error instanceof Error
+                        ? error.message
+                        : 'Failed to create MCP diagnostic issue.'
+                    )
+                  )
+                  .finally(() => releaseMcpDebugCreation(key));
+              },
             },
           ]
         : []),
@@ -970,8 +1061,9 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     isRestartingForMcp,
     isSending,
     mcpRefresh,
-    sessionHasRunningAgent,
+    projectContext,
     sessionId,
+    sessionHasRunningAgent,
     workspaceId,
   ]);
 
