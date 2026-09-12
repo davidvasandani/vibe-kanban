@@ -1,89 +1,21 @@
-# Research: Close Stale Execution Follow-up Gaps
+# Investigation evidence
 
-## Existing failure shapes
+- 2026-09-12 01:27:36 and 01:29:23 UTC, think2 vibe-kanban-dev: f665b4c8-5872-4602-8063-815b31a079b5 and 72b2435a-1bd8-4b9e-a5b6-a150fdfea94b failed because repository cdce12c2-a050-49b1-86c3-3b28ace8ada8 administration lock was held by another owner.
+- 2026-09-11 16:12:18 and 18:07:13 UTC: a642b27f-c094-4041-b9e0-706fd655108a and d2917abb-64a6-4d7b-8f96-cd7689a1bd6b failed at final provisioning state persistence.
+- Older CURSOR_AGENT failures reflect scheduler capability rejection, distinct from intermittent provisioning.
+- Repository commands point to specs/vk/c89d-address-fable-fo; use their exact requested paths while identifying the current task in the artifacts.
+- No external API/library design changes or new dependencies planned.
 
-`ExecutionProcessesProvider.tsx` omits `setupscript` in its inline visible
-predicate even though `useExecutionProcesses.ts` includes it. The provider value
-is what `useWorkspaceExecution` consumes, so the pure helper test is not a test
-of runtime composer truth.
+## Confirmed correction
 
-The execution-process stream now subscribes before its snapshot, but sibling
-snapshot streams still query first and ignore `BroadcastStreamRecvError`.
-`MsgStore::history_plus_stream` reads history before subscribing and logs then
-drops lag. Both patterns can create permanently incomplete state.
+The admin mutex is keyed by canonical filesystem path while repository_admin_locks is keyed by repo UUID. A coordinator-local checkout and its shared bare store have different canonical common directories but the same registered repo ID. The original manager returns RepositoryLockBusy immediately when the SQLite lease belongs to another operation; an abandoned guard also retains its lease until expiry. Tests exercise both conditions without Git side effects.
 
-`useJsonPatchWsStream` allocates `dataRef.current = initialData()` before any
-connection. Its failure check tests `!dataRef.current`, so it cannot fire. The
-socket-open handler resets retries even if the connection never reaches Ready,
-allowing repeated lag/resnapshot cycles at the shortest delay.
+Use the registered repository ID for the admin queue, matching the durable authority. For residual durable contention, poll only atomic acquisition at 100 ms intervals for at most the configured lease duration (plus any in-flight database call). Recompute wall-clock lease times on each attempt; use monotonic time for the wait budget. Preserve generation and operation-id predicates, retain tombstones, and never force release or retry Git/agent startup. Other repository IDs retain independent queues. No Drop-based release was added: blocking Git may outlive a cancelled future.
 
-Codex emits `turn/completed` through its app-server client, and the local
-container races executor exit signal against child exit before calling
-`ExecutionProcess::update_completion`. Several worker event branches discard
-completion-write errors. A final normalized message is separately extractable
-from the message store, but presently does not arm recovery when terminal
-signaling disappears.
+## Placement investigation limitation
 
-## Decisions
+Read-only inspection of the active database (db.v2.sqlite, confirmed through coordinator file descriptors) on 2026-09-12 found none of the four failed workspace rows: they have been removed. No trigger mutates placement state. In current source, the reported final-state error follows a compare-and-set that affects zero rows, not a SQL error. Deletion or a concurrent placement mutation can produce it; the retained evidence does not establish which happened to those removed workspaces. Do not weaken that ownership check or replay successful provisioning. No placement code change is justified by the available evidence.
 
-### Subscribe first and fail authority on lag
+## Hosting
 
-Receiver acquisition before an awaited snapshot is the minimum lossless
-handoff. Query-twice and client polling were rejected because each adds work
-without making a missing patch explicit. Lag is an authority error, not a
-diagnostic-only warning.
-
-### Owner-specific liveness, shared reconciliation decision
-
-Local OS/process-monitor evidence and remote worker job/lease/event evidence
-cannot be collapsed into one probe without weakening the distributed authority
-model. They can implement one decision contract: positive liveness permits
-continued running; terminal evidence classifies exactly; absent evidence after
-the bound becomes indeterminate after preservation.
-
-### Forty-five seconds
-
-The worker lease is normally 30 seconds. A 45-second testable bound covers one
-lease plus event polling/scheduling margin. It is short enough to prevent the
-confirmed indefinite spinner and does not turn final text into immediate exit.
-
-### Indeterminate is the unknown-evidence terminal
-
-The schema and UI already support `indeterminate`. It states exactly that the
-coordinator cannot prove outcome. `completed` would overclaim; `failed` or
-`interrupted` require evidence absent in this case.
-
-### Ready resets health; open does not
-
-A TCP/WebSocket handshake is transport availability, not stream authority.
-Only the server's Ready boundary proves the connection supplied a complete
-snapshot and should reset consecutive unhealthy retry pressure.
-
-### Relay metadata is consumer-facing
-
-The relay shim decodes a signed server close payload and currently calls the raw
-browser socket's `close(code, reason)`. Reserved code 1011 cannot be originated
-by browser script. The decoded envelope remains authoritative; close the raw
-transport legally and synthesize one shim-facing CloseEvent with the decoded
-metadata.
-
-### No new dependencies
-
-Tokio synchronization/time, existing broadcast wrappers, Vitest fake timers,
-and current relay event helpers cover the needed behavior.
-
-## Sibling stream audit disposition
-
-- Execution processes, scratch, workspaces, and browser sessions all combine a
-  DB snapshot with the shared event broadcast. They now call the same
-  subscribe-before-snapshot helper and the same lag-to-error live adapter.
-- `MsgStore::history_plus_stream` is history plus live state, not a DB snapshot,
-  but has the same lossless boundary. `push` publishes while holding the history
-  write lock; a subscriber takes the receiver while holding the read lock, so a
-  message appears exactly once across history/live. Lag returns an I/O error.
-- Raw and normalized live log WebSockets preserve that error through their
-  filters. Stdout/stderr chunk streams now preserve it as well.
-- The temporary historical-normalization store is exempt from resnapshot: it is
-  a private, single-producer replay with the normal 100,000-message broadcast
-  capacity and a Ready sentinel, not a concurrently changing authoritative DB
-  snapshot. Its consumer owns and aborts the producer tasks if dropped.
+Coordinator is think2, workers include think3/think5. The relevant repo is Vibe Kanban (cdce12c2-a050-49b1-86c3-3b28ace8ada8), registered at /srv/src/vibe-kanban. No hosting changes required.
