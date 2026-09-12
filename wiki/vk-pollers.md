@@ -239,7 +239,40 @@ A vk poller runs a **command**, not a turn; it never resumes the agent. Persisti
 `QueuedMessageService` is VAS-283 "option B", deliberately deferred alongside
 VAS-132. Don't reopen it incidentally — see [[agent-process-lifecycle]].
 
+## Workspace sidebar grouping uses bulk workspace state
+
+The Polling group takes its signal from
+`WorkspaceSummary.has_running_poller`, mapped to `hasRunningPoller` by
+`useWorkspaces`. The summary query joins executions through **all sessions**
+of each workspace; inspecting only the latest session loses older live loops.
+It reuses the existing 15-second summary refresh rather than adding one
+execution subscription per sidebar row.
+
+A poller is a running `backgroundhelper` whose root action is
+`ScriptRequest` with object-valued `typ.poller` metadata. A sleeping interval
+still belongs to a running loop. A plain helper, dev server, or terminal
+execution does not count. Guard SQLite JSON extraction with `json_valid` so a
+malformed legacy row cannot fail the entire summary.
+
+**Dropped history is not stopped execution.** The existing `list_pollers`
+API includes live processes even when their chat history is hidden. The
+bulk query follows that same rule; do not add `dropped = FALSE` merely
+because latest-agent-turn queries use it.
+
+For polling workspaces, sidebar precedence is pending approval → active agent
+run/provisioning → Polling. Thus unread completion output alone does not
+require attention while monitoring continues. Preserve the old predicate for
+non-polling workspaces, and never change read receipts to implement grouping.
+Carousel ordering remains independent.
+
+The Polling section owns a separate collapse key and uses the shared header
+and workspace list. Regression tests belong in the existing remote-web DOM
+harness, which renders the same shared sidebar as local-web; backend tests
+exercise the bulk query against migrated SQLite and serialized executor actions.
+
 ## Contributed by
 
 - vk/869c-vk-background-po
 - vk/5cd1-debug-this-vk-ba
+
+- vk/dc76-add-polling-to-w
