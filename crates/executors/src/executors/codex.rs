@@ -1336,11 +1336,7 @@ impl Codex {
             client.register_session(&response.thread.id).await?;
             let new_collaboration_mode = client.initial_collaboration_mode()?;
             client
-                .turn_start_with_mode(
-                    response.thread.id,
-                    turn_input,
-                    Some(new_collaboration_mode),
-                )
+                .turn_start_with_mode(response.thread.id, turn_input, Some(new_collaboration_mode))
                 .await?;
 
             return Ok(());
