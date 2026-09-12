@@ -20,9 +20,10 @@ use codex_app_server_protocol::{
     McpServerRefreshResponse, McpServerStatus, McpServerStatusDetail, RequestId, ReviewStartParams,
     ReviewStartResponse, ReviewTarget, ServerRequest, ThreadCompactStartParams,
     ThreadCompactStartResponse, ThreadForkParams, ThreadForkResponse, ThreadItem, ThreadReadParams,
-    ThreadReadResponse, ThreadStartParams, ThreadStartResponse, ToolRequestUserInputAnswer,
-    ToolRequestUserInputQuestion, ToolRequestUserInputResponse, TurnCompletedNotification,
-    TurnStartParams, TurnStartResponse, TurnStatus, UserInput,
+    ThreadReadResponse, ThreadResumeParams, ThreadResumeResponse, ThreadStartParams,
+    ThreadStartResponse, ToolRequestUserInputAnswer, ToolRequestUserInputQuestion,
+    ToolRequestUserInputResponse, TurnCompletedNotification, TurnStartParams, TurnStartResponse,
+    TurnStatus, UserInput,
 };
 use codex_protocol::config_types::{CollaborationMode, ModeKind, Settings};
 use futures::TryFutureExt;
@@ -155,6 +156,17 @@ impl AppServerClient {
             params,
         };
         self.send_request(request, "thread/fork").await
+    }
+
+    pub async fn thread_resume(
+        &self,
+        params: ThreadResumeParams,
+    ) -> Result<ThreadResumeResponse, ExecutorError> {
+        let request = ClientRequest::ThreadResume {
+            request_id: self.next_request_id(),
+            params,
+        };
+        self.send_request(request, "thread/resume").await
     }
 
     pub async fn turn_start_with_mode(
@@ -1111,6 +1123,7 @@ fn request_id(request: &ClientRequest) -> RequestId {
         ClientRequest::Initialize { request_id, .. }
         | ClientRequest::ThreadStart { request_id, .. }
         | ClientRequest::ThreadFork { request_id, .. }
+        | ClientRequest::ThreadResume { request_id, .. }
         | ClientRequest::TurnStart { request_id, .. }
         | ClientRequest::GetAccount { request_id, .. }
         | ClientRequest::ReviewStart { request_id, .. }

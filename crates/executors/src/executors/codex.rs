@@ -444,6 +444,77 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn resume_params_from_preserves_thread_start_params() {
+        use std::collections::HashMap;
+
+        use codex_app_server_protocol::{
+            AskForApproval as V2AskForApproval, SandboxMode as V2SandboxMode, ThreadStartParams,
+        };
+
+        use super::resume_params_from;
+
+        let params = ThreadStartParams {
+            model: Some("gpt-5.6-sol".to_string()),
+            model_provider: Some("chatgpt".to_string()),
+            cwd: Some("/workspace".to_string()),
+            approval_policy: Some(V2AskForApproval::Never),
+            sandbox: Some(V2SandboxMode::WorkspaceWrite),
+            config: Some(HashMap::from([(
+                "test_key".to_string(),
+                serde_json::json!("test_value"),
+            )])),
+            base_instructions: Some("base instructions".to_string()),
+            developer_instructions: Some("developer instructions".to_string()),
+            service_tier: Some(Some("fast".to_string())),
+            ..Default::default()
+        };
+
+        let thread_id = "01a09307-156d-79f2-8973-ffb067b84274".to_string();
+        let resume = resume_params_from(thread_id.clone(), params.clone(), None);
+
+        assert_eq!(resume.thread_id, thread_id);
+        assert_eq!(resume.model, params.model);
+        assert_eq!(resume.model_provider, params.model_provider);
+        assert_eq!(resume.cwd, params.cwd);
+        assert_eq!(resume.approval_policy, params.approval_policy);
+        assert_eq!(resume.sandbox, params.sandbox);
+        assert_eq!(resume.config, params.config);
+        assert_eq!(resume.base_instructions, params.base_instructions);
+        assert_eq!(resume.developer_instructions, params.developer_instructions);
+        assert_eq!(resume.service_tier, params.service_tier);
+        assert_eq!(resume.history, None);
+    }
+
+    #[test]
+    fn resume_params_from_includes_history_when_provided() {
+        use codex_app_server_protocol::ThreadStartParams;
+        use codex_protocol::models::{ContentItem, ResponseItem};
+
+        use super::resume_params_from;
+
+        let params = ThreadStartParams {
+            model: Some("gpt-5.6-sol".to_string()),
+            ..Default::default()
+        };
+
+        let history = vec![ResponseItem::Message {
+            id: Some("msg_001".to_string()),
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Hello, Codex!".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }];
+
+        let thread_id = "01a09307-156d-79f2-8973-ffb067b84274".to_string();
+        let resume = resume_params_from(thread_id.clone(), params, Some(history.clone()));
+
+        assert_eq!(resume.thread_id, thread_id);
+        assert_eq!(resume.history, Some(history));
+    }
 }
 
 pub(crate) fn resolve_model(model: Option<&str>) -> (Option<&str>, bool) {
@@ -509,6 +580,27 @@ pub(crate) fn fork_params_from(thread_id: String, params: ThreadStartParams) -> 
         base_instructions: params.base_instructions,
         developer_instructions: params.developer_instructions,
         service_tier: params.service_tier,
+        ..Default::default()
+    }
+}
+
+pub(crate) fn resume_params_from(
+    thread_id: String,
+    params: ThreadStartParams,
+    history: Option<Vec<codex_protocol::models::ResponseItem>>,
+) -> ThreadResumeParams {
+    ThreadResumeParams {
+        thread_id,
+        model: params.model,
+        model_provider: params.model_provider,
+        cwd: params.cwd,
+        approval_policy: params.approval_policy,
+        sandbox: params.sandbox,
+        config: params.config,
+        base_instructions: params.base_instructions,
+        developer_instructions: params.developer_instructions,
+        service_tier: params.service_tier,
+        history,
         ..Default::default()
     }
 }
@@ -581,6 +673,7 @@ fn is_missing_conversation_error(error: &ExecutorError, requested_thread_id: &st
 /// Returns `true` if the error is a `turn/start` "thread not found" error for
 /// the given thread ID. This happens when a thread's rollout exists on disk
 /// but the Codex app-server doesn't have the thread loaded in memory.
+#[cfg(test)]
 fn is_turn_thread_not_found(error: &ExecutorError, thread_id: &str) -> bool {
     if uuid::Uuid::parse_str(thread_id).is_err() {
         return false;
@@ -615,10 +708,41 @@ fn rollout_exists_locally(thread_id: &str) -> bool {
     store.thread_rollout_exists(uuid)
 }
 
+/// Read the model-visible history from a local rollout file for the given thread ID.
+/// Returns None if the thread ID is invalid, CODEX_HOME is unavailable, or reading fails.
+/// The history can be passed to thread/resume's history parameter to bypass Codex's
+/// internal disk read, which fails for paginated threads without a history_base.
+fn read_rollout_history_for_thread(
+    thread_id: &str,
+) -> Option<Vec<codex_protocol::models::ResponseItem>> {
+    let uuid = uuid::Uuid::parse_str(thread_id).ok()?;
+    let codex_home = codex_home()?;
+    let store = rollout_transfer::CodexRolloutStore::new(&codex_home).ok()?;
+    match store.read_rollout_history(uuid) {
+        Ok(history) => {
+            if history.is_empty() {
+                tracing::debug!(
+                    thread_id = %thread_id,
+                    "rollout contains no ResponseItem entries"
+                );
+            }
+            Some(history)
+        }
+        Err(err) => {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %err,
+                "failed to read rollout history for thread"
+            );
+            None
+        }
+    }
+}
+
 use async_trait::async_trait;
 use codex_app_server_protocol::{
     AskForApproval as V2AskForApproval, ReviewTarget, SandboxMode as V2SandboxMode,
-    ThreadForkParams, ThreadStartParams, UserInput,
+    ThreadForkParams, ThreadResumeParams, ThreadStartParams, UserInput,
 };
 use derivative::Derivative;
 use schemars::JsonSchema;
@@ -1232,10 +1356,6 @@ impl Codex {
             ));
         }
 
-        // Tracks whether we're attempting to resume a local leaf. If turn/start
-        // fails with "thread not found", we fall back to a replacement thread.
-        let mut resuming_local_leaf: Option<String> = None;
-
         let (thread_id, resolved_model) = match resume_session {
             None => {
                 let response = client.thread_start(thread_start_params.clone()).await?;
@@ -1260,21 +1380,57 @@ impl Codex {
                             {
                                 // The leaf rollout exists but has lineage problems
                                 // (e.g. paginated history without history_base).
-                                // Resume the existing thread directly instead of
-                                // forking or replacing. The conversation text is
-                                // already in the leaf.
-                                //
-                                // Note: turn/start may still fail with "thread not
-                                // found" if the Codex app-server doesn't have the
-                                // thread loaded in memory. We track that we're
-                                // resuming so we can fall back to replacement.
+                                // Read the history directly from the JSONL rollout
+                                // and pass it to thread/resume, bypassing Codex's
+                                // internal disk read that fails for paginated threads.
                                 tracing::info!(
                                     thread_id = %session_id,
-                                    "Codex thread has unusable lineage but leaf exists; attempting to resume"
+                                    "Codex thread has unusable lineage but leaf exists; reading history from rollout"
                                 );
-                                let model = thread_start_params.model.clone().unwrap_or_default();
-                                resuming_local_leaf = Some(session_id.clone());
-                                (session_id, model)
+
+                                // Try to read history from the rollout file
+                                let history = read_rollout_history_for_thread(&session_id);
+                                let history_item_count = history.as_ref().map(|h| h.len());
+
+                                tracing::info!(
+                                    thread_id = %session_id,
+                                    history_items = ?history_item_count,
+                                    "Attempting thread/resume with history from local rollout"
+                                );
+
+                                match client
+                                    .thread_resume(resume_params_from(
+                                        session_id.clone(),
+                                        thread_start_params.clone(),
+                                        history,
+                                    ))
+                                    .await
+                                {
+                                    Ok(response) => {
+                                        tracing::info!(
+                                            thread_id = %response.thread.id,
+                                            "Successfully resumed thread from local rollout history"
+                                        );
+                                        (response.thread.id, response.model)
+                                    }
+                                    Err(resume_error) => {
+                                        // Resume also failed (e.g., same lineage error
+                                        // or other issue). Fall back to replacement thread.
+                                        tracing::warn!(
+                                            thread_id = %session_id,
+                                            resume_error = %resume_error,
+                                            "thread/resume failed for thread with unusable lineage; falling back to replacement thread"
+                                        );
+                                        let response =
+                                            client.thread_start(thread_start_params).await?;
+                                        tracing::warn!(
+                                            missing_thread_id = %session_id,
+                                            replacement_thread_id = %response.thread.id,
+                                            "Started replacement thread after thread/resume failure"
+                                        );
+                                        (response.thread.id, response.model)
+                                    }
+                                }
                             }
                             Some(ForkRejection::ConversationMissing)
                             | Some(ForkRejection::LineageUnusable) => {
@@ -1306,43 +1462,13 @@ impl Codex {
             text_elements: vec![],
         }];
 
-        let turn_result = client
+        client
             .turn_start_with_mode(
                 thread_id.clone(),
                 turn_input.clone(),
                 Some(collaboration_mode.clone()),
             )
-            .await;
-
-        // If turn/start failed with "thread not found" and we were attempting to
-        // resume a local leaf, fall back to creating a replacement thread.
-        if let Err(ref error) = turn_result
-            && let Some(ref original_session_id) = resuming_local_leaf
-            && is_turn_thread_not_found(error, &thread_id)
-        {
-            tracing::warn!(
-                original_thread_id = %original_session_id,
-                "turn/start failed with 'thread not found' for local leaf; falling back to replacement thread"
-            );
-
-            let response = client.thread_start(thread_start_params).await?;
-            tracing::warn!(
-                missing_thread_id = %original_session_id,
-                replacement_thread_id = %response.thread.id,
-                "Started replacement thread after turn/start 'thread not found'"
-            );
-
-            client.set_resolved_model(response.model);
-            client.register_session(&response.thread.id).await?;
-            let new_collaboration_mode = client.initial_collaboration_mode()?;
-            client
-                .turn_start_with_mode(response.thread.id, turn_input, Some(new_collaboration_mode))
-                .await?;
-
-            return Ok(());
-        }
-
-        turn_result?;
+            .await?;
 
         Ok(())
     }
