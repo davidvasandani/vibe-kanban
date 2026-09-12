@@ -109,12 +109,9 @@ impl SharedRepositoryStore {
             Some(self.clone_into_staging(repo).await?)
         };
 
-        // Lock on the store itself, not on `repositories/`. Worktree creation
-        // and cleanup fence on the store path, and `canonical_lock_key` derives
-        // the in-process mutex from the path — so locking a different path here
-        // would leave those callers unserialized against this one in-process
-        // while still contending for the same per-repository database lease,
-        // turning a concurrent provisioning into a spurious "lock busy" failure.
+        // Use the same registered repository identity as worktree creation and
+        // cleanup. The lock manager queues by that ID even when a caller uses
+        // the coordinator checkout instead of this shared store path.
         let guard = self.locks.acquire(repo.id, &store).await;
         let guard = match guard {
             Ok(guard) => guard,

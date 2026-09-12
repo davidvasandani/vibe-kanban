@@ -554,3 +554,10 @@ paths, structural rather than textual assertions, no same-named-local fallback,
 two-sided pointer repair, level-triggered enforcement, and re-derived blast
 radius for consolidated namespaces; 0.17.0 added observability as a read-only
 surface; 0.16.0 added affinity-bound, evidence-backed distributed execution)
+
+## Task applicability review — 2026-09-12
+
+`vk/40fb-workspace-creati`: reaffirm II (regression evidence), XV/XVIII/XX
+(preserve work and coordinator-owned shared Git administration), XXI (safe,
+identifying failures), and XXVIII (request-independent creation with no replay of
+partially committed startup). No new principle or version change is required.
