@@ -465,6 +465,39 @@ impl CodexRolloutStore {
         Ok(())
     }
 
+    /// Check whether a rollout file exists locally for the given thread ID.
+    /// This is a lightweight check that scans the sessions directory without
+    /// reading file contents or validating metadata.
+    pub fn thread_rollout_exists(&self, thread_id: Uuid) -> bool {
+        let mut stack = vec![self.sessions_root.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(ty) = entry.file_type() else {
+                    continue;
+                };
+                if ty.is_symlink() {
+                    continue;
+                }
+                if ty.is_dir() {
+                    stack.push(entry.path());
+                    continue;
+                }
+                if !ty.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if rollout_id_from_name(&name) == Some(thread_id) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn index_rollouts(&self) -> Result<HashMap<Uuid, PathBuf>, RolloutTransferError> {
         let mut index = HashMap::new();
         let mut stack = vec![self.sessions_root.clone()];
@@ -981,5 +1014,23 @@ mod tests {
             ),
             Err(RolloutTransferError::FileTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn thread_rollout_exists_finds_existing_and_rejects_missing() {
+        let source = TempDir::new().unwrap();
+        let existing = Uuid::new_v4();
+        let missing = Uuid::new_v4();
+        rollout(source.path(), existing, None, "{}");
+        let store = CodexRolloutStore::new(source.path()).unwrap();
+
+        assert!(
+            store.thread_rollout_exists(existing),
+            "should find existing rollout"
+        );
+        assert!(
+            !store.thread_rollout_exists(missing),
+            "should not find missing rollout"
+        );
     }
 }

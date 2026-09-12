@@ -31,8 +31,8 @@ mod tests {
     use futures::StreamExt;
 
     use super::{
-        Codex, POLLER_DEVELOPER_INSTRUCTIONS, compose_developer_instructions,
-        is_missing_conversation_error,
+        Codex, ForkRejection, POLLER_DEVELOPER_INSTRUCTIONS, classify_fork_rejection,
+        compose_developer_instructions, is_missing_conversation_error,
     };
     use crate::executors::{ExecutorError, StandardCodingAgentExecutor};
 
@@ -253,10 +253,11 @@ mod tests {
     #[test]
     fn identifies_only_known_missing_conversation_errors_for_requested_thread() {
         let session_id = "27254d1c-bde6-48aa-a980-3e136b9d35bf";
+        // Only leaf-absent errors classify as "missing conversation".
+        // Lineage errors are classified separately as LineageUnusable.
         for message in [
             format!("no rollout found for thread id {session_id}"),
             format!("No conversation found with session ID: {session_id}"),
-            format!("invalid paginated history lineage for {session_id}: missing source rollout"),
         ] {
             let error = rpc_error(-32600, &message, None);
             assert!(is_missing_conversation_error(&error, session_id));
@@ -278,6 +279,14 @@ mod tests {
                 -32600,
                 &format!("no rollout found for thread id {session_id}"),
                 Some(serde_json::json!({"reason": "permission_denied"})),
+            ),
+            // Lineage errors are LineageUnusable, not ConversationMissing
+            rpc_error(
+                -32600,
+                &format!(
+                    "invalid paginated history lineage for {session_id}: missing source rollout"
+                ),
+                None,
             ),
             // Paginated lineage error with wrong UUID must not match
             rpc_error(
@@ -304,6 +313,59 @@ mod tests {
             None,
         );
         assert!(!is_missing_conversation_error(&error, "not-a-uuid"));
+    }
+
+    #[test]
+    fn classifies_lineage_errors_as_lineage_unusable() {
+        let session_id = "01a09307-156d-79f2-8973-ffb067b84274";
+        let error = rpc_error(
+            -32600,
+            &format!("invalid paginated history lineage for {session_id}: missing source rollout"),
+            None,
+        );
+        assert_eq!(
+            classify_fork_rejection(&error, session_id),
+            Some(ForkRejection::LineageUnusable)
+        );
+        // Lineage errors should NOT classify as missing conversation
+        assert!(!is_missing_conversation_error(&error, session_id));
+    }
+
+    #[test]
+    fn lineage_error_requires_matching_thread_id() {
+        let session_id = "01a09307-156d-79f2-8973-ffb067b84274";
+        let other_id = "99999999-9999-9999-9999-999999999999";
+        let error = rpc_error(
+            -32600,
+            &format!("invalid paginated history lineage for {other_id}: missing source rollout"),
+            None,
+        );
+        // Should not match when the UUID in the message differs
+        assert_eq!(classify_fork_rejection(&error, session_id), None);
+    }
+
+    #[test]
+    fn lineage_error_requires_exact_suffix() {
+        let session_id = "01a09307-156d-79f2-8973-ffb067b84274";
+        // Wrong suffix
+        let error = rpc_error(
+            -32600,
+            &format!("invalid paginated history lineage for {session_id}: other reason"),
+            None,
+        );
+        assert_eq!(classify_fork_rejection(&error, session_id), None);
+    }
+
+    #[test]
+    fn lineage_error_requires_invalid_request_code() {
+        let session_id = "01a09307-156d-79f2-8973-ffb067b84274";
+        // Wrong error code
+        let error = rpc_error(
+            -32603,
+            &format!("invalid paginated history lineage for {session_id}: missing source rollout"),
+            None,
+        );
+        assert_eq!(classify_fork_rejection(&error, session_id), None);
     }
 
     fn rpc_error(code: i64, message: &str, data: Option<serde_json::Value>) -> ExecutorError {
@@ -385,9 +447,23 @@ pub(crate) fn fork_params_from(thread_id: String, params: ThreadStartParams) -> 
 
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
 
-fn is_missing_conversation_error(error: &ExecutorError, requested_thread_id: &str) -> bool {
+/// Describes why a thread/fork request was rejected.
+#[derive(Debug, Clone, PartialEq)]
+enum ForkRejection {
+    /// The requested thread's rollout file is entirely absent.
+    ConversationMissing,
+    /// The rollout exists but has lineage/ancestry problems that Codex cannot
+    /// resolve (e.g. `history_mode=paginated` with no `history_base`). The
+    /// conversation text is present in the leaf.
+    LineageUnusable,
+}
+
+fn classify_fork_rejection(
+    error: &ExecutorError,
+    requested_thread_id: &str,
+) -> Option<ForkRejection> {
     if uuid::Uuid::parse_str(requested_thread_id).is_err() {
-        return false;
+        return None;
     }
 
     let ExecutorError::JsonRpc {
@@ -397,22 +473,55 @@ fn is_missing_conversation_error(error: &ExecutorError, requested_thread_id: &st
         data,
     } = error
     else {
-        return false;
+        return None;
     };
 
     if label != "thread/fork"
         || *code != INVALID_REQUEST_ERROR_CODE
         || data.as_ref().is_some_and(|value| !value.is_null())
     {
-        return false;
+        return None;
     }
 
-    message == &format!("no rollout found for thread id {requested_thread_id}")
+    // Leaf-absent errors: the rollout file itself is missing.
+    if message == &format!("no rollout found for thread id {requested_thread_id}")
         || message == &format!("No conversation found with session ID: {requested_thread_id}")
-        || message
-            == &format!(
-                "invalid paginated history lineage for {requested_thread_id}: missing source rollout"
-            )
+    {
+        return Some(ForkRejection::ConversationMissing);
+    }
+
+    // Lineage errors: the leaf exists but Codex cannot resolve its ancestry.
+    // Codex 0.154+ rejects paginated-history rollouts that lack a `history_base`
+    // field with "invalid paginated history lineage for {uuid}: missing source rollout".
+    if message.starts_with("invalid paginated history lineage for ")
+        && message.contains(requested_thread_id)
+        && message.ends_with(": missing source rollout")
+    {
+        return Some(ForkRejection::LineageUnusable);
+    }
+
+    None
+}
+
+/// Returns true if the error indicates the conversation is completely missing.
+/// Used by tests and as a compatibility wrapper.
+#[allow(dead_code)]
+fn is_missing_conversation_error(error: &ExecutorError, requested_thread_id: &str) -> bool {
+    classify_fork_rejection(error, requested_thread_id) == Some(ForkRejection::ConversationMissing)
+}
+
+/// Check whether a rollout file exists locally for the given thread ID.
+fn rollout_exists_locally(thread_id: &str) -> bool {
+    let Ok(uuid) = uuid::Uuid::parse_str(thread_id) else {
+        return false;
+    };
+    let Some(codex_home) = codex_home() else {
+        return false;
+    };
+    let Ok(store) = rollout_transfer::CodexRolloutStore::new(&codex_home) else {
+        return false;
+    };
+    store.thread_rollout_exists(uuid)
 }
 
 use async_trait::async_trait;
@@ -1049,16 +1158,43 @@ impl Codex {
                         tracing::debug!("forked thread, new thread_id={}", response.thread.id);
                         (response.thread.id, response.model)
                     }
-                    Err(error) if is_missing_conversation_error(&error, &session_id) => {
-                        let response = client.thread_start(thread_start_params).await?;
-                        tracing::warn!(
-                            missing_thread_id = %session_id,
-                            replacement_thread_id = %response.thread.id,
-                            "Codex conversation was missing; started a replacement in the same workspace"
-                        );
-                        (response.thread.id, response.model)
+                    Err(error) => {
+                        match classify_fork_rejection(&error, &session_id) {
+                            Some(ForkRejection::LineageUnusable)
+                                if rollout_exists_locally(&session_id) =>
+                            {
+                                // The leaf rollout exists but has lineage problems
+                                // (e.g. paginated history without history_base).
+                                // Resume the existing thread directly instead of
+                                // forking or replacing. The conversation text is
+                                // already in the leaf.
+                                tracing::info!(
+                                    thread_id = %session_id,
+                                    "Codex thread has unusable lineage but leaf exists; resuming existing thread"
+                                );
+                                // Use the model from thread_start_params for this
+                                // turn. The thread itself may have used a different
+                                // model previously, but we're specifying what to use
+                                // now.
+                                let model = thread_start_params.model.clone().unwrap_or_default();
+                                (session_id, model)
+                            }
+                            Some(ForkRejection::ConversationMissing)
+                            | Some(ForkRejection::LineageUnusable) => {
+                                // Either the rollout is genuinely missing, or lineage
+                                // is unusable and the leaf is also absent. Start a
+                                // replacement thread.
+                                let response = client.thread_start(thread_start_params).await?;
+                                tracing::warn!(
+                                    missing_thread_id = %session_id,
+                                    replacement_thread_id = %response.thread.id,
+                                    "Codex conversation was missing; started a replacement in the same workspace"
+                                );
+                                (response.thread.id, response.model)
+                            }
+                            None => return Err(error),
+                        }
                     }
-                    Err(error) => return Err(error),
                 }
             }
         };

@@ -92,18 +92,33 @@ not silently become fresh conversations.
 ### Known missing-conversation error formats
 
 The following `thread/fork` error messages (JSON-RPC code `-32600`, null data)
-indicate a recoverable missing conversation:
+indicate a genuinely missing conversation where replacement is required:
 
 1. `no rollout found for thread id <uuid>` — the leaf rollout file is absent.
 2. `No conversation found with session ID: <uuid>` — legacy session lookup
    failed.
-3. `invalid paginated history lineage for <uuid>: missing source rollout` —
-   Codex 0.154+ paginated history cannot resolve an ancestor rollout referenced
-   by the thread's `history_base`. This occurs when a thread was created or
-   continued on one host but a follow-up attempts to fork it on a different
-   host (or from a different `CODEX_HOME`) where the ancestor rollout was never
-   transferred.
 
-All three require the `<uuid>` in the message to match the exact thread ID
-requested by Vibe Kanban. A mismatch, wrong JSON-RPC code, or non-null error
-data means the error is not eligible for recovery.
+All require the `<uuid>` in the message to match the exact thread ID requested
+by Vibe Kanban. A mismatch, wrong JSON-RPC code, or non-null error data means
+the error is not eligible for recovery.
+
+## Resume threads with unusable lineage when the leaf exists
+
+Codex 0.154+ introduced paginated history mode and stricter lineage validation.
+A `thread/fork` request may fail with `invalid paginated history lineage for
+{uuid}: missing source rollout` even when the leaf rollout file is present. This
+occurs when the session metadata has `history_mode=paginated` but no
+`history_base` field, and the expected ancestry rollout was never written.
+
+When a fork fails due to lineage issues:
+
+1. Check whether the leaf rollout file exists locally for the requested thread.
+2. If the leaf exists, resume the thread directly by starting a new turn with
+   `turn/start` using the original thread ID. The conversation text is already
+   in the leaf, so history is preserved.
+3. If the leaf is absent (or resume fails for other reasons), fall back to the
+   existing replacement-thread behavior.
+
+This preserves conversation context when the underlying problem is an ancestry
+artifact that never existed rather than actual data loss. The replacement-thread
+fallback remains for genuinely missing rollouts.
