@@ -56,6 +56,8 @@ pub struct WorkspaceSummary {
     pub latest_process_status: Option<ExecutionProcessStatus>,
     /// Is a dev server currently running?
     pub has_running_dev_server: bool,
+    /// Is a periodic poller loop currently running (including between ticks)?
+    pub has_running_poller: bool,
     /// Does this workspace have unseen coding agent turns?
     pub has_unseen_turns: bool,
     /// PR status for this workspace (if any PR exists)
@@ -167,6 +169,9 @@ pub async fn get_workspace_summaries(
     let dev_server_workspaces =
         ExecutionProcess::find_workspaces_with_running_dev_servers(pool, archived).await?;
 
+    let poller_workspaces =
+        ExecutionProcess::find_workspaces_with_running_pollers(pool, archived).await?;
+
     // 4. Check pending approvals for running processes
     let running_ep_ids: Vec<_> = latest_processes
         .values()
@@ -257,6 +262,7 @@ pub async fn get_workspace_summaries(
                 latest_process_completed_at: latest.and_then(|p| p.completed_at),
                 latest_process_status: latest.map(|p| p.status.clone()),
                 has_running_dev_server: dev_server_workspaces.contains(&id),
+                has_running_poller: poller_workspaces.contains(&id),
                 has_unseen_turns: unseen_workspaces.contains(&id),
                 pr_status: pr_statuses.get(&id).map(|pr| pr.pr_status.clone()),
                 pr_number: pr_statuses.get(&id).map(|pr| pr.pr_number),

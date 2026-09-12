@@ -30,6 +30,7 @@ export interface SidebarWorkspace {
   isArchived?: boolean;
   hasPendingApproval?: boolean;
   hasRunningDevServer?: boolean;
+  hasRunningPoller?: boolean;
   hasUnseenActivity?: boolean;
   latestProcessCompletedAt?: string;
   latestProcessStatus?:
@@ -87,6 +88,7 @@ function toSidebarWorkspace(
     // Additional data from summary
     hasPendingApproval: summary?.has_pending_approval,
     hasRunningDevServer: summary?.has_running_dev_server,
+    hasRunningPoller: summary?.has_running_poller,
     hasUnseenActivity: summary?.has_unseen_turns,
     latestProcessCompletedAt: summary?.latest_process_completed_at ?? undefined,
     latestProcessStatus: summary?.latest_process_status ?? undefined,

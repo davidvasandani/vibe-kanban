@@ -998,6 +998,10 @@ latest_process_status: ExecutionProcessStatus | null,
  */
 has_running_dev_server: boolean, 
 /**
+ * Is a periodic poller loop currently running (including between ticks)?
+ */
+has_running_poller: boolean, 
+/**
  * Does this workspace have unseen coding agent turns?
  */
 has_unseen_turns: boolean, 
