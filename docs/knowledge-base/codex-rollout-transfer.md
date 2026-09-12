@@ -113,18 +113,22 @@ occurs when the session metadata has `history_mode=paginated` but no
 When a fork fails due to lineage issues:
 
 1. Check whether the leaf rollout file exists locally for the requested thread.
-2. If the leaf exists, call `thread/resume` with the original thread ID to load
-   the thread from the on-disk rollout into the app-server's memory. The
-   `thread/resume` method is designed to load an existing thread by thread_id
-   without requiring full ancestry resolution like `thread/fork` does.
-3. If `thread/resume` succeeds, the resumed thread is used for the turn. The
-   conversation text from the leaf is preserved.
-4. If `thread/resume` also fails (e.g., the same lineage error or other issue),
-   or if the leaf is absent, fall back to the replacement-thread behavior.
+2. If the leaf exists, read the JSONL rollout file directly and extract the
+   `ResponseItem` entries (the model-visible conversation history).
+3. Call `thread/resume` with the `history` parameter populated from the
+   extracted items. This bypasses Codex's internal disk read, which fails for
+   paginated threads due to `reject_paginated_history_mode()`.
+4. If `thread/resume` succeeds, the resumed thread is used for the turn. The
+   conversation text from the leaf is preserved in the new thread.
+5. If `thread/resume` also fails (e.g., incompatible history format), or if
+   the leaf is absent, fall back to the replacement-thread behavior.
 
-This two-stage approach (`thread/fork` → `thread/resume` → replacement) gives
-the best chance of preserving conversation context. The replacement-thread
-fallback remains as the last resort for genuinely irrecoverable rollouts.
+This approach (`thread/fork` → `thread/resume` with extracted history →
+replacement) gives the best chance of preserving conversation context. The
+`history` parameter is experimental (`thread/resume.history`) but is designed
+for exactly this use case: providing history directly instead of loading from
+disk. The replacement-thread fallback remains as the last resort for genuinely
+irrecoverable rollouts.
 
 ### Protocol methods tried for lineage-unusable leaves
 
@@ -133,10 +137,29 @@ The following methods were evaluated for loading paginated leaves with no
 
 1. **`thread/fork`**: Fails with "invalid paginated history lineage" because it
    requires full ancestry resolution for paginated history mode.
-2. **`thread/resume`**: Loads the thread from disk by thread_id. This is the
-   preferred recovery path when the leaf exists locally.
-3. **`turn/start` directly**: Does not work; the app-server must have the thread
+2. **`thread/resume` (without history)**: Also fails because Codex's internal
+   disk read calls `reject_paginated_history_mode()`, which blocks reads for
+   paginated threads when `include_history=true`.
+3. **`thread/resume` (with history)**: Works by bypassing the disk read
+   entirely. The `history` parameter (experimental `thread/resume.history`)
+   allows providing history directly, and the app-server wraps it in
+   `InitialHistory::Forked` without touching the problematic rollout file.
+4. **`turn/start` directly**: Does not work; the app-server must have the thread
    loaded in memory first. Calling `turn/start` on an unloaded thread returns
    "thread not found".
-4. **Replacement thread via `thread/start`**: Loses Codex-private history but
+5. **Replacement thread via `thread/start`**: Loses Codex-private history but
    keeps the Vibe workspace usable. Used as last resort.
+
+### Reading history from rollout files
+
+Rollout JSONL files contain `RolloutItem` entries, serialized with
+`#[serde(tag = "type", content = "payload")]`:
+
+- `{"type": "response_item", "payload": {...}}` - Model-visible history items
+- `{"type": "session_meta", "payload": {...}}` - Thread metadata
+- `{"type": "event_msg", "payload": {...}}` - Turn lifecycle events
+- `{"type": "compacted", "payload": {...}}` - Compaction records
+
+Only `response_item` entries are extracted and passed to `thread/resume`. This
+matches the contract of `ThreadResumeParams.history`, which expects
+`Vec<ResponseItem>` representing the model-visible conversation.

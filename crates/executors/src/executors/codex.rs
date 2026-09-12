@@ -377,7 +377,7 @@ mod tests {
         }
     }
 
-fn turn_start_error(
+    fn turn_start_error(
         code: i64,
         message: &str,
         data: Option<serde_json::Value>,
@@ -472,7 +472,7 @@ fn turn_start_error(
         };
 
         let thread_id = "01a09307-156d-79f2-8973-ffb067b84274".to_string();
-        let resume = resume_params_from(thread_id.clone(), params.clone());
+        let resume = resume_params_from(thread_id.clone(), params.clone(), None);
 
         assert_eq!(resume.thread_id, thread_id);
         assert_eq!(resume.model, params.model);
@@ -484,6 +484,36 @@ fn turn_start_error(
         assert_eq!(resume.base_instructions, params.base_instructions);
         assert_eq!(resume.developer_instructions, params.developer_instructions);
         assert_eq!(resume.service_tier, params.service_tier);
+        assert_eq!(resume.history, None);
+    }
+
+    #[test]
+    fn resume_params_from_includes_history_when_provided() {
+        use codex_app_server_protocol::ThreadStartParams;
+        use codex_protocol::models::{ContentItem, ResponseItem};
+
+        use super::resume_params_from;
+
+        let params = ThreadStartParams {
+            model: Some("gpt-5.6-sol".to_string()),
+            ..Default::default()
+        };
+
+        let history = vec![ResponseItem::Message {
+            id: Some("msg_001".to_string()),
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Hello, Codex!".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }];
+
+        let thread_id = "01a09307-156d-79f2-8973-ffb067b84274".to_string();
+        let resume = resume_params_from(thread_id.clone(), params, Some(history.clone()));
+
+        assert_eq!(resume.thread_id, thread_id);
+        assert_eq!(resume.history, Some(history));
     }
 }
 
@@ -557,6 +587,7 @@ pub(crate) fn fork_params_from(thread_id: String, params: ThreadStartParams) -> 
 pub(crate) fn resume_params_from(
     thread_id: String,
     params: ThreadStartParams,
+    history: Option<Vec<codex_protocol::models::ResponseItem>>,
 ) -> ThreadResumeParams {
     ThreadResumeParams {
         thread_id,
@@ -569,6 +600,7 @@ pub(crate) fn resume_params_from(
         base_instructions: params.base_instructions,
         developer_instructions: params.developer_instructions,
         service_tier: params.service_tier,
+        history,
         ..Default::default()
     }
 }
@@ -641,6 +673,7 @@ fn is_missing_conversation_error(error: &ExecutorError, requested_thread_id: &st
 /// Returns `true` if the error is a `turn/start` "thread not found" error for
 /// the given thread ID. This happens when a thread's rollout exists on disk
 /// but the Codex app-server doesn't have the thread loaded in memory.
+#[cfg(test)]
 fn is_turn_thread_not_found(error: &ExecutorError, thread_id: &str) -> bool {
     if uuid::Uuid::parse_str(thread_id).is_err() {
         return false;
@@ -673,6 +706,37 @@ fn rollout_exists_locally(thread_id: &str) -> bool {
         return false;
     };
     store.thread_rollout_exists(uuid)
+}
+
+/// Read the model-visible history from a local rollout file for the given thread ID.
+/// Returns None if the thread ID is invalid, CODEX_HOME is unavailable, or reading fails.
+/// The history can be passed to thread/resume's history parameter to bypass Codex's
+/// internal disk read, which fails for paginated threads without a history_base.
+fn read_rollout_history_for_thread(
+    thread_id: &str,
+) -> Option<Vec<codex_protocol::models::ResponseItem>> {
+    let uuid = uuid::Uuid::parse_str(thread_id).ok()?;
+    let codex_home = codex_home()?;
+    let store = rollout_transfer::CodexRolloutStore::new(&codex_home).ok()?;
+    match store.read_rollout_history(uuid) {
+        Ok(history) => {
+            if history.is_empty() {
+                tracing::debug!(
+                    thread_id = %thread_id,
+                    "rollout contains no ResponseItem entries"
+                );
+            }
+            Some(history)
+        }
+        Err(err) => {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %err,
+                "failed to read rollout history for thread"
+            );
+            None
+        }
+    }
 }
 
 use async_trait::async_trait;
@@ -1316,24 +1380,36 @@ impl Codex {
                             {
                                 // The leaf rollout exists but has lineage problems
                                 // (e.g. paginated history without history_base).
-                                // Try to load the thread from disk using thread/resume.
-                                // This loads the rollout into the app-server's memory
-                                // without requiring ancestor resolution.
+                                // Read the history directly from the JSONL rollout
+                                // and pass it to thread/resume, bypassing Codex's
+                                // internal disk read that fails for paginated threads.
                                 tracing::info!(
                                     thread_id = %session_id,
-                                    "Codex thread has unusable lineage but leaf exists; attempting thread/resume"
+                                    "Codex thread has unusable lineage but leaf exists; reading history from rollout"
                                 );
+
+                                // Try to read history from the rollout file
+                                let history = read_rollout_history_for_thread(&session_id);
+                                let history_item_count = history.as_ref().map(|h| h.len());
+
+                                tracing::info!(
+                                    thread_id = %session_id,
+                                    history_items = ?history_item_count,
+                                    "Attempting thread/resume with history from local rollout"
+                                );
+
                                 match client
                                     .thread_resume(resume_params_from(
                                         session_id.clone(),
                                         thread_start_params.clone(),
+                                        history,
                                     ))
                                     .await
                                 {
                                     Ok(response) => {
                                         tracing::info!(
                                             thread_id = %response.thread.id,
-                                            "Successfully resumed thread from local rollout"
+                                            "Successfully resumed thread from local rollout history"
                                         );
                                         (response.thread.id, response.model)
                                     }
