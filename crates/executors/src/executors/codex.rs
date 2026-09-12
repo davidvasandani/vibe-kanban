@@ -32,7 +32,7 @@ mod tests {
 
     use super::{
         Codex, ForkRejection, POLLER_DEVELOPER_INSTRUCTIONS, classify_fork_rejection,
-        compose_developer_instructions, is_missing_conversation_error,
+        compose_developer_instructions, is_missing_conversation_error, is_turn_thread_not_found,
     };
     use crate::executors::{ExecutorError, StandardCodingAgentExecutor};
 
@@ -376,6 +376,74 @@ mod tests {
             data: data.map(Box::new),
         }
     }
+
+    fn turn_start_error(
+        code: i64,
+        message: &str,
+        data: Option<serde_json::Value>,
+    ) -> ExecutorError {
+        ExecutorError::JsonRpc {
+            label: "turn/start".to_string(),
+            code,
+            message: message.to_string(),
+            data: data.map(Box::new),
+        }
+    }
+
+    #[test]
+    fn detects_turn_start_thread_not_found() {
+        let thread_id = "01a0942f-1f36-7621-ba7d-9b546ceea3d5";
+        let error = turn_start_error(-32600, &format!("thread not found: {thread_id}"), None);
+        assert!(is_turn_thread_not_found(&error, thread_id));
+    }
+
+    #[test]
+    fn turn_thread_not_found_requires_matching_thread_id() {
+        let thread_id = "01a0942f-1f36-7621-ba7d-9b546ceea3d5";
+        let other_id = "99999999-9999-9999-9999-999999999999";
+        let error = turn_start_error(-32600, &format!("thread not found: {other_id}"), None);
+        assert!(!is_turn_thread_not_found(&error, thread_id));
+    }
+
+    #[test]
+    fn turn_thread_not_found_requires_turn_start_label() {
+        let thread_id = "01a0942f-1f36-7621-ba7d-9b546ceea3d5";
+        // Using thread/fork label instead of turn/start
+        let error = rpc_error(-32600, &format!("thread not found: {thread_id}"), None);
+        assert!(!is_turn_thread_not_found(&error, thread_id));
+    }
+
+    #[test]
+    fn turn_thread_not_found_requires_invalid_request_code() {
+        let thread_id = "01a0942f-1f36-7621-ba7d-9b546ceea3d5";
+        // Wrong error code (-32603 instead of -32600)
+        let error = turn_start_error(-32603, &format!("thread not found: {thread_id}"), None);
+        assert!(!is_turn_thread_not_found(&error, thread_id));
+    }
+
+    #[test]
+    fn turn_thread_not_found_rejects_invalid_uuid() {
+        let error = turn_start_error(-32600, "thread not found: not-a-uuid", None);
+        assert!(!is_turn_thread_not_found(&error, "not-a-uuid"));
+    }
+
+    #[test]
+    fn turn_thread_not_found_requires_exact_message_format() {
+        let thread_id = "01a0942f-1f36-7621-ba7d-9b546ceea3d5";
+        // Different message format
+        for message in [
+            "Thread not found",
+            &format!("Thread not found: {thread_id}"),
+            &format!("thread not found {thread_id}"),
+            &format!("thread not found: {thread_id} extra"),
+        ] {
+            let error = turn_start_error(-32600, message, None);
+            assert!(
+                !is_turn_thread_not_found(&error, thread_id),
+                "should not match message: {message}"
+            );
+        }
+    }
 }
 
 pub(crate) fn resolve_model(model: Option<&str>) -> (Option<&str>, bool) {
@@ -508,6 +576,29 @@ fn classify_fork_rejection(
 #[allow(dead_code)]
 fn is_missing_conversation_error(error: &ExecutorError, requested_thread_id: &str) -> bool {
     classify_fork_rejection(error, requested_thread_id) == Some(ForkRejection::ConversationMissing)
+}
+
+/// Returns `true` if the error is a `turn/start` "thread not found" error for
+/// the given thread ID. This happens when a thread's rollout exists on disk
+/// but the Codex app-server doesn't have the thread loaded in memory.
+fn is_turn_thread_not_found(error: &ExecutorError, thread_id: &str) -> bool {
+    if uuid::Uuid::parse_str(thread_id).is_err() {
+        return false;
+    }
+
+    let ExecutorError::JsonRpc {
+        label,
+        code,
+        message,
+        ..
+    } = error
+    else {
+        return false;
+    };
+
+    label == "turn/start"
+        && *code == INVALID_REQUEST_ERROR_CODE
+        && message == &format!("thread not found: {thread_id}")
 }
 
 /// Check whether a rollout file exists locally for the given thread ID.
@@ -1141,9 +1232,13 @@ impl Codex {
             ));
         }
 
+        // Tracks whether we're attempting to resume a local leaf. If turn/start
+        // fails with "thread not found", we fall back to a replacement thread.
+        let mut resuming_local_leaf: Option<String> = None;
+
         let (thread_id, resolved_model) = match resume_session {
             None => {
-                let response = client.thread_start(thread_start_params).await?;
+                let response = client.thread_start(thread_start_params.clone()).await?;
                 (response.thread.id, response.model)
             }
             Some(session_id) => {
@@ -1168,15 +1263,17 @@ impl Codex {
                                 // Resume the existing thread directly instead of
                                 // forking or replacing. The conversation text is
                                 // already in the leaf.
+                                //
+                                // Note: turn/start may still fail with "thread not
+                                // found" if the Codex app-server doesn't have the
+                                // thread loaded in memory. We track that we're
+                                // resuming so we can fall back to replacement.
                                 tracing::info!(
                                     thread_id = %session_id,
-                                    "Codex thread has unusable lineage but leaf exists; resuming existing thread"
+                                    "Codex thread has unusable lineage but leaf exists; attempting to resume"
                                 );
-                                // Use the model from thread_start_params for this
-                                // turn. The thread itself may have used a different
-                                // model previously, but we're specifying what to use
-                                // now.
                                 let model = thread_start_params.model.clone().unwrap_or_default();
+                                resuming_local_leaf = Some(session_id.clone());
                                 (session_id, model)
                             }
                             Some(ForkRejection::ConversationMissing)
@@ -1184,7 +1281,8 @@ impl Codex {
                                 // Either the rollout is genuinely missing, or lineage
                                 // is unusable and the leaf is also absent. Start a
                                 // replacement thread.
-                                let response = client.thread_start(thread_start_params).await?;
+                                let response =
+                                    client.thread_start(thread_start_params.clone()).await?;
                                 tracing::warn!(
                                     missing_thread_id = %session_id,
                                     replacement_thread_id = %response.thread.id,
@@ -1199,19 +1297,56 @@ impl Codex {
             }
         };
 
-        client.set_resolved_model(resolved_model);
+        client.set_resolved_model(resolved_model.clone());
         client.register_session(&thread_id).await?;
         let collaboration_mode = client.initial_collaboration_mode()?;
-        client
+
+        let turn_input = vec![UserInput::Text {
+            text: combined_prompt,
+            text_elements: vec![],
+        }];
+
+        let turn_result = client
             .turn_start_with_mode(
-                thread_id,
-                vec![UserInput::Text {
-                    text: combined_prompt,
-                    text_elements: vec![],
-                }],
-                Some(collaboration_mode),
+                thread_id.clone(),
+                turn_input.clone(),
+                Some(collaboration_mode.clone()),
             )
-            .await?;
+            .await;
+
+        // If turn/start failed with "thread not found" and we were attempting to
+        // resume a local leaf, fall back to creating a replacement thread.
+        if let Err(ref error) = turn_result
+            && let Some(ref original_session_id) = resuming_local_leaf
+            && is_turn_thread_not_found(error, &thread_id)
+        {
+            tracing::warn!(
+                original_thread_id = %original_session_id,
+                "turn/start failed with 'thread not found' for local leaf; falling back to replacement thread"
+            );
+
+            let response = client.thread_start(thread_start_params).await?;
+            tracing::warn!(
+                missing_thread_id = %original_session_id,
+                replacement_thread_id = %response.thread.id,
+                "Started replacement thread after turn/start 'thread not found'"
+            );
+
+            client.set_resolved_model(response.model);
+            client.register_session(&response.thread.id).await?;
+            let new_collaboration_mode = client.initial_collaboration_mode()?;
+            client
+                .turn_start_with_mode(
+                    response.thread.id,
+                    turn_input,
+                    Some(new_collaboration_mode),
+                )
+                .await?;
+
+            return Ok(());
+        }
+
+        turn_result?;
 
         Ok(())
     }
