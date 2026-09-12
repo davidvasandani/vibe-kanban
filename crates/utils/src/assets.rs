@@ -36,7 +36,36 @@ pub fn config_path() -> std::path::PathBuf {
 /// Its `bin/` subdirectory is the only path exposed on workspace processes'
 /// PATH.
 pub fn cli_tools_dir() -> std::path::PathBuf {
+    if let Some(path) = cli_tools_dir_override(std::env::var_os("VIBE_KANBAN_CLI_TOOLS_DIR")) {
+        return path;
+    }
     asset_dir().join("cli-tools")
+}
+
+fn cli_tools_dir_override(value: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    value
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cli_tools_dir_override;
+
+    #[test]
+    fn cli_tools_override_requires_a_nonempty_absolute_path() {
+        assert_eq!(
+            cli_tools_dir_override(Some("/srv/shared/cli-tools".into())),
+            Some("/srv/shared/cli-tools".into())
+        );
+        assert_eq!(
+            cli_tools_dir_override(Some("relative/cli-tools".into())),
+            None
+        );
+        assert_eq!(cli_tools_dir_override(Some("".into())), None);
+        assert_eq!(cli_tools_dir_override(None), None);
+    }
 }
 
 pub fn profiles_path() -> std::path::PathBuf {
