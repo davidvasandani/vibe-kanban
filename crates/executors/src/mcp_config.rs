@@ -157,6 +157,79 @@ pub async fn write_coding_agent_mcp_servers_to_path(
     write_agent_config(target_path, &mcp_config, &config).await
 }
 
+/// Finite diagnostics: never expose native configuration or parser excerpts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CodexConfigError {
+    #[error("source read failed; check config access")]
+    Read,
+    #[error("TOML parse failed; correct source syntax")]
+    Parse,
+    #[error("trust update failed; check project tables and UTF-8 path")]
+    Trust,
+    #[error("serialization failed; check configuration value shapes")]
+    Serialize,
+    #[error("scoped write failed; check worker state access")]
+    Write,
+}
+
+/// Initial source absence is valid; refresh must read the already scoped file.
+pub enum CodexConfigMode<'a> {
+    Initial { authorized_directory: &'a Path },
+    Refresh,
+}
+
+pub async fn write_scoped_codex_config(
+    source: &Path,
+    target: &Path,
+    mode: CodexConfigMode<'_>,
+    servers: Option<&HashMap<String, Value>>,
+) -> Result<(), CodexConfigError> {
+    let content = match fs::read_to_string(source).await {
+        Ok(content) => content,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && matches!(mode, CodexConfigMode::Initial { .. }) =>
+        {
+            String::new()
+        }
+        Err(_) => return Err(CodexConfigError::Read),
+    };
+    let mut document: toml::Table = content.parse().map_err(|_| CodexConfigError::Parse)?;
+    if content.trim().is_empty() && matches!(mode, CodexConfigMode::Initial { .. }) {
+        document.insert("mcp_servers".into(), toml::Value::Table(Default::default()));
+    }
+    if let Some(servers) = servers {
+        let value = toml::Value::try_from(servers).map_err(|_| CodexConfigError::Serialize)?;
+        document.insert("mcp_servers".into(), value);
+    }
+    if let CodexConfigMode::Initial {
+        authorized_directory,
+    } = mode
+    {
+        let key = authorized_directory
+            .to_str()
+            .ok_or(CodexConfigError::Trust)?;
+        if !authorized_directory.is_absolute() {
+            return Err(CodexConfigError::Trust);
+        }
+        let projects = document
+            .entry("projects")
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+            .ok_or(CodexConfigError::Trust)?;
+        let project = projects
+            .entry(key)
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+            .ok_or(CodexConfigError::Trust)?;
+        project.insert("trust_level".into(), toml::Value::String("trusted".into()));
+    }
+    let output = toml::to_string(&document).map_err(|_| CodexConfigError::Serialize)?;
+    atomic_write_agent_config(target, output.as_bytes())
+        .await
+        .map_err(|_| CodexConfigError::Write)
+}
+
 fn is_jsonc_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -1421,5 +1494,180 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(fs::read_to_string(&path).await.unwrap(), "replacement");
         let _ = fs::remove_dir_all(&dir).await;
+    }
+}
+
+#[cfg(test)]
+mod scoped_codex_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_preservation_isolation_and_refresh() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.toml");
+        let target = root.path().join("scoped/config.toml");
+        let project = Path::new("/workspace/a \"quote\" \\ unicode-é");
+        let content = "model = 'keep'\ntime = 1979-05-27T07:32:00Z\nfloat = inf\n[projects.other]\ntrust_level = 'untrusted'\n[mcp_servers.original]\ncommand = 'original'\n";
+        fs::write(&source, content).await.unwrap();
+        for source_path in [&source, &target] {
+            write_scoped_codex_config(
+                source_path,
+                &target,
+                CodexConfigMode::Initial {
+                    authorized_directory: project,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let before: toml::Table = fs::read_to_string(&target).await.unwrap().parse().unwrap();
+        assert_eq!(
+            before["projects"][project.to_str().unwrap()]["trust_level"].as_str(),
+            Some("trusted")
+        );
+        assert_eq!(before["projects"].as_table().unwrap().len(), 2);
+        assert!(before["time"].is_datetime());
+        assert!(before["float"].as_float().unwrap().is_infinite());
+        assert!(before["mcp_servers"].get("original").is_some());
+        fs::write(&source, "changed = true").await.unwrap();
+        write_scoped_codex_config(
+            &target,
+            &target,
+            CodexConfigMode::Refresh,
+            Some(&HashMap::new()),
+        )
+        .await
+        .unwrap();
+        let mut after: toml::Table = fs::read_to_string(&target).await.unwrap().parse().unwrap();
+        assert!(after["mcp_servers"].as_table().unwrap().is_empty());
+        after.insert("mcp_servers".into(), before["mcp_servers"].clone());
+        assert_eq!(after, before);
+        assert_eq!(fs::read_to_string(source).await.unwrap(), "changed = true");
+    }
+
+    #[tokio::test]
+    async fn defaults_shapes_and_safe_failures() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("missing/config.toml");
+        let target = root.path().join("target.toml");
+        let project = Path::new("/workspace/repo");
+        write_scoped_codex_config(
+            &source,
+            &target,
+            CodexConfigMode::Initial {
+                authorized_directory: project,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            write_scoped_codex_config(&source, &target, CodexConfigMode::Refresh, None).await,
+            Err(CodexConfigError::Read)
+        );
+        fs::create_dir_all(source.parent().unwrap()).await.unwrap();
+        for (content, expected) in [
+            ("secret = 'SENTINEL", CodexConfigError::Parse),
+            ("projects = 'SENTINEL'", CodexConfigError::Trust),
+            (
+                "[projects]\n'/workspace/repo' = 'SENTINEL'",
+                CodexConfigError::Trust,
+            ),
+        ] {
+            fs::write(&source, content).await.unwrap();
+            let error = write_scoped_codex_config(
+                &source,
+                &target,
+                CodexConfigMode::Initial {
+                    authorized_directory: project,
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error, expected);
+            assert!(!error.to_string().contains("SENTINEL"));
+        }
+        for trust in ["trusted", "untrusted"] {
+            fs::write(
+                &source,
+                format!("[projects.'/workspace/repo']\ntrust_level = '{trust}'\nextra = 42"),
+            )
+            .await
+            .unwrap();
+            write_scoped_codex_config(
+                &source,
+                &target,
+                CodexConfigMode::Initial {
+                    authorized_directory: project,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            let doc: toml::Table = fs::read_to_string(&target).await.unwrap().parse().unwrap();
+            assert_eq!(
+                doc["projects"]["/workspace/repo"]["extra"].as_integer(),
+                Some(42)
+            );
+            assert_eq!(
+                doc["projects"]["/workspace/repo"]["trust_level"].as_str(),
+                Some("trusted")
+            );
+        }
+        fs::write(&source, "").await.unwrap();
+        let invalid = HashMap::from([("secret".into(), Value::Null)]);
+        assert_eq!(
+            write_scoped_codex_config(
+                &source,
+                &target,
+                CodexConfigMode::Initial {
+                    authorized_directory: project
+                },
+                Some(&invalid)
+            )
+            .await,
+            Err(CodexConfigError::Serialize)
+        );
+        let old = fs::read(&target).await.unwrap();
+        fs::create_dir(staged_path(&target)).await.unwrap();
+        assert_eq!(
+            write_scoped_codex_config(
+                &source,
+                &target,
+                CodexConfigMode::Initial {
+                    authorized_directory: project
+                },
+                None
+            )
+            .await,
+            Err(CodexConfigError::Write)
+        );
+        assert_eq!(fs::read(&target).await.unwrap(), old);
+        assert_eq!(
+            write_scoped_codex_config(root.path(), &target, CodexConfigMode::Refresh, None).await,
+            Err(CodexConfigError::Read)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_non_utf8_trust() {
+        use std::os::unix::ffi::OsStringExt;
+        let root = tempfile::tempdir().unwrap();
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b"/workspace/\xff".to_vec()));
+        assert_eq!(
+            write_scoped_codex_config(
+                &root.path().join("missing"),
+                &root.path().join("target"),
+                CodexConfigMode::Initial {
+                    authorized_directory: &path
+                },
+                None
+            )
+            .await,
+            Err(CodexConfigError::Trust)
+        );
     }
 }
