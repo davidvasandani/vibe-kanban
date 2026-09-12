@@ -1957,12 +1957,12 @@ export const scratchApi = {
     scratchType: ScratchType,
     id: string,
     data: UpdateScratch
-  ): Promise<void> => {
+  ): Promise<Scratch> => {
     const response = await makeRequest(`/api/scratch/${scratchType}/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     });
-    return handleApiResponse<void>(response);
+    return handleApiResponse<Scratch>(response);
   },
 
   delete: async (scratchType: ScratchType, id: string): Promise<void> => {

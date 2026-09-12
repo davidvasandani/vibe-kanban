@@ -1,18 +1,93 @@
-# Technical plan: workspace creation reliability
+# Implementation Plan: Preserve Preview App Navigation URLs
 
-Spec: ./spec.md
+**Spec**: `./spec.md`
+**Status**: Ready for tasks
 
-## Technical context and approach
-Rust/Tokio coordinator, SQLite lifecycle state, shared Git stores. Production failures collected read-only from think2 vibe-kanban-dev journal on 2026-09-12.
+## Technical Context
 
-1. Reproduce repository lock behavior in crates/worktree-manager/src/worktree_manager.rs: compare process-local path key with SQLite repo-id identity and inspect dropped/acquired lease behavior. Fix demonstrated contention at the ownership boundary, not by retrying workspace startup.
-2. Inspect placement transitions in crates/db/src/models/workspace.rs and create_cluster_workspace in crates/local-deployment/src/container.rs. Correlate stored states with failed transition logs; correct demonstrated transition/result handling without weakening compare-and-set.
-3. Preserve safe user failure text in crates/server/src/routes/workspaces/create.rs; if needed identify bounded failure categories with workspace identity rather than copying arbitrary errors.
-4. Add regression tests alongside affected Rust code. No dependencies or wire schema changes anticipated.
-5. Run frozen dependency installation, focused tests, relevant checks, required formatting, independent Codex review, knowledge update, and PR merge.
+The shared React/TypeScript preview surface lives in
+`packages/web-core/src/pages/workspaces/PreviewBrowserContainer.tsx` and is used
+by both local and remote frontends. The preview proxy injects
+`crates/preview-proxy/src/devtools_script.js`, which reports complete
+`location.href` navigation events. Per-workspace preview settings are stored as a
+typed scratch payload defined by `PreviewSettingsData` in
+`crates/db/src/models/scratch.rs` and accessed through
+`packages/web-core/src/shared/hooks/usePreviewSettings.ts`. Rust-to-TypeScript
+contracts are generated into `shared/types.ts`; that file must not be hand-edited.
 
-## Constitution check
-II, III, VI: evidence-led minimal corrections with actual regression tests. XV/XVIII/XX: no destructive recovery, no unfenced concurrency, no affinity reassignment or broad Git prune. XXI: diagnostics remain safe and identifying. XXVIII: preserve durable lifecycle identity and no startup replay. No deviations.
+The change must preserve existing URL override semantics, debounce durable
+writes, keep scratch updates merge-safe, and include URL fragments when building
+the proxy iframe URL.
 
-## Risks
-Request cancellation may abandon a guard while blocking Git continues: merely releasing in Drop is unsafe. Lock lease expiry is not evidence that Git stopped. A failed transition may already have committed: verify actual persisted evidence rather than blindly repeating filesystem work. Scope will be narrowed/refined from tests before edits.
+## Architecture & Approach
+
+1. Extend `PreviewSettingsData` with an optional `current_route` field. It stores
+   only the latest route components (`pathname + search + hash`) reported for an
+   auto-detected preview, leaving `url` as the existing full manual override.
+   Optional/default deserialization preserves compatibility with existing scratch
+   documents.
+2. Regenerate `shared/types.ts` using `pnpm run generate-types`, so both frontend
+   modes receive the same contract.
+3. Extend `usePreviewSettings` to expose `currentRoute` and a durable
+   `setCurrentRoute` operation. Every settings write carries forward all existing
+   fields, including the new route, so screen-size and URL updates cannot erase
+   it. Clearing a manual override must clear only the override field while
+   retaining display settings and the separately tracked auto-detected route;
+   deleting the whole scratch object is no longer safe once it has independent
+   state.
+4. Extract small pure URL helpers from `PreviewBrowserContainer.tsx` where that
+   improves focused testing. Derive an auto-detected effective URL by applying a
+   valid retained route to the freshly detected application origin. A manual
+   override remains authoritative and is never rebased.
+5. After `usePreviewNavigation` accepts a navigation event, canonicalize the
+   displayed development URL, remove preview-only metadata, and persist only its
+   route when the preview is auto-detected. An equality guard avoids write loops
+   and redundant scratch traffic; route writes are immediate so leaving the
+   preview cannot cancel the latest selection.
+6. Include the URL fragment when constructing the proxy iframe source. Fragments
+   never reach the proxy server, but they must be present in the browser-side
+   iframe URL for hash-routed applications such as Mad Minutes.
+7. Add Vitest regression coverage for route extraction/rebasing and proxy URL
+   construction, including pathname, query, fragment, transport metadata, manual
+   overrides, and changed ports. Add Rust serde compatibility coverage if the
+   model currently has a suitable local test module.
+
+## Data Model
+
+See `./data-model.md`.
+
+## Contracts
+
+See `./contracts/preview-settings.md` for the internal shared hook contract. No
+new HTTP endpoint is required; the existing scratch API transports the expanded
+payload.
+
+## Research Notes
+
+See `./research.md`. No new dependency is required.
+
+## Constitution Check
+
+- Principle II: focused tests verify the user-visible persistence contract.
+- Principles III and VI: the design extends the existing scratch and bridge
+  machinery with one optional field and pure URL helpers.
+- Principle IV: behavior remains in `web-core`, so local and remote frontends
+  share it.
+- Principle XXI: existing proxy-to-development normalization remains canonical;
+  route persistence calls it rather than defining a competing origin format.
+- Generated types are regenerated through the mandated script.
+
+No constitution deviation or unresolved question remains.
+
+## Risks & Dependencies
+
+- Scratch update callbacks can capture stale values. Tests and merge-complete
+  writes must ensure one debounced update does not erase another field.
+- Direct non-loopback previews lack the injected bridge, so their current route
+  cannot be learned automatically; existing explicit override behavior remains
+  their supported persistence path.
+- A route from an unrelated app could be applied after the dev server changes.
+  Scoping by workspace and applying it only to auto-detected previews is the
+  intended compatibility boundary from clarification.
+- Verification depends on installing the locked pnpm dependency graph in this
+  fresh worktree.

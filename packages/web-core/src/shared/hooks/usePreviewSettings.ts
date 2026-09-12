@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import { useScratch } from '@/shared/hooks/useScratch';
 import { useDebouncedCallback } from '@/shared/hooks/useDebouncedCallback';
 import {
@@ -20,6 +20,10 @@ interface UsePreviewSettingsResult {
   hasOverride: boolean;
   setOverrideUrl: (url: string) => void;
   clearOverride: () => Promise<void>;
+
+  // Latest route within an auto-detected application
+  currentRoute: string | null;
+  setCurrentRoute: (route: string) => void;
 
   // Screen size
   screenSize: ScreenSize;
@@ -47,7 +51,6 @@ export function usePreviewSettings(
   const {
     scratch,
     updateScratch,
-    deleteScratch,
     isLoading: isScratchLoading,
   } = useScratch(ScratchType.PREVIEW_SETTINGS, workspaceId ?? '', {
     enabled,
@@ -60,6 +63,7 @@ export function usePreviewSettings(
 
   const overrideUrl = scratchData?.url ?? null;
   const hasOverride = overrideUrl !== null && overrideUrl.trim() !== '';
+  const currentRoute = scratchData?.current_route ?? null;
 
   const screenSize: ScreenSize =
     (scratchData?.screen_size as ScreenSize) ?? 'desktop';
@@ -73,46 +77,89 @@ export function usePreviewSettings(
     [scratchData?.responsive_width, scratchData?.responsive_height]
   );
 
+  const scratchVersion = scratch?.updated_at ?? null;
+  const completeSettings: PreviewSettingsData = {
+    url: overrideUrl ?? '',
+    current_route: currentRoute,
+    screen_size: screenSize,
+    responsive_width: responsiveDimensions.width,
+    responsive_height: responsiveDimensions.height,
+  };
+  const writeStateRef = useRef<{
+    workspaceId: string | undefined;
+    scratchVersion: string | null;
+    settings: PreviewSettingsData;
+    pending: number;
+    chain: Promise<void>;
+    ownScratchVersions: Set<string>;
+  }>({
+    workspaceId,
+    scratchVersion,
+    settings: completeSettings,
+    pending: 0,
+    chain: Promise.resolve(),
+    ownScratchVersions: new Set(),
+  });
+  if (writeStateRef.current.workspaceId !== workspaceId) {
+    writeStateRef.current = {
+      workspaceId,
+      scratchVersion,
+      settings: completeSettings,
+      pending: 0,
+      chain: Promise.resolve(),
+      ownScratchVersions: new Set(),
+    };
+  } else if (
+    scratchVersion &&
+    writeStateRef.current.ownScratchVersions.delete(scratchVersion)
+  ) {
+    writeStateRef.current.scratchVersion = scratchVersion;
+  } else if (
+    writeStateRef.current.pending === 0 &&
+    writeStateRef.current.scratchVersion !== scratchVersion
+  ) {
+    writeStateRef.current.scratchVersion = scratchVersion;
+    writeStateRef.current.settings = completeSettings;
+  }
+
   // Helper to save settings
   const saveSettings = useCallback(
     async (updates: Partial<PreviewSettingsData>) => {
       if (!workspaceId) return;
 
-      try {
-        await updateScratch({
-          payload: {
-            type: 'PREVIEW_SETTINGS',
-            data: {
-              url: updates.url ?? overrideUrl ?? '',
-              screen_size: updates.screen_size ?? screenSize,
-              responsive_width:
-                updates.responsive_width ?? responsiveDimensions.width,
-              responsive_height:
-                updates.responsive_height ?? responsiveDimensions.height,
+      const writeState = writeStateRef.current;
+      if (writeState.workspaceId !== workspaceId) return;
+
+      writeState.settings = { ...writeState.settings, ...updates };
+      const settings = { ...writeState.settings };
+      writeState.pending += 1;
+      writeState.chain = writeState.chain
+        .then(async () => {
+          const updatedScratch = await updateScratch({
+            payload: {
+              type: 'PREVIEW_SETTINGS',
+              data: settings,
             },
-          },
+          });
+          writeState.ownScratchVersions.add(updatedScratch.updated_at);
+        })
+        .catch((e) => {
+          console.error('[usePreviewSettings] Failed to save:', e);
+        })
+        .finally(() => {
+          writeState.pending -= 1;
         });
-      } catch (e) {
-        console.error('[usePreviewSettings] Failed to save:', e);
-      }
+
+      await writeState.chain;
     },
-    [
-      workspaceId,
-      updateScratch,
-      overrideUrl,
-      screenSize,
-      responsiveDimensions.width,
-      responsiveDimensions.height,
-    ]
+    [workspaceId, updateScratch]
   );
 
   // Debounced save for URL changes (frequent typing)
-  const { debounced: debouncedSaveUrl } = useDebouncedCallback(
-    async (url: string) => {
+  const { debounced: debouncedSaveUrl, cancel: cancelSaveUrl } =
+    useDebouncedCallback(async (url: string) => {
       await saveSettings({ url });
-    },
-    300
-  );
+    }, 300);
 
   // Debounced save for responsive dimensions (frequent dragging)
   const { debounced: debouncedSaveDimensions } = useDebouncedCallback(
@@ -132,6 +179,13 @@ export function usePreviewSettings(
     [debouncedSaveUrl]
   );
 
+  const setCurrentRoute = useCallback(
+    (route: string) => {
+      void saveSettings({ current_route: route });
+    },
+    [saveSettings]
+  );
+
   const setScreenSize = useCallback(
     (size: ScreenSize) => {
       saveSettings({ screen_size: size });
@@ -147,19 +201,17 @@ export function usePreviewSettings(
   );
 
   const clearOverride = useCallback(async () => {
-    try {
-      await deleteScratch();
-    } catch (e) {
-      // Ignore 404 errors when scratch doesn't exist
-      console.error('[usePreviewSettings] Failed to clear:', e);
-    }
-  }, [deleteScratch]);
+    cancelSaveUrl();
+    await saveSettings({ url: '' });
+  }, [cancelSaveUrl, saveSettings]);
 
   return {
     overrideUrl,
     hasOverride,
     setOverrideUrl,
     clearOverride,
+    currentRoute,
+    setCurrentRoute,
     screenSize,
     responsiveDimensions,
     setScreenSize,

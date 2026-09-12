@@ -14,7 +14,7 @@ export interface UseScratchResult {
   isLoading: boolean;
   isConnected: boolean;
   error: string | null;
-  updateScratch: (update: UpdateScratch) => Promise<void>;
+  updateScratch: (update: UpdateScratch) => Promise<Scratch>;
   deleteScratch: () => Promise<void>;
 }
 
@@ -62,7 +62,7 @@ export const useScratch = (
 
   const updateScratch = useCallback(
     async (update: UpdateScratch) => {
-      await scratchApi.update(scratchType, id, update);
+      return scratchApi.update(scratchType, id, update);
     },
     [scratchType, id]
   );
