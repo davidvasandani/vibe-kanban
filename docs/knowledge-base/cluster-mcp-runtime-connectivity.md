@@ -1,6 +1,7 @@
 # Cluster MCP runtime connectivity
 
-Contributing tasks: `VAS-356`, `VAS-375`, `268b-debug-vk-error`
+Contributing tasks: `VAS-356`, `VAS-375`, `268b-debug-vk-error`,
+`vk/f558-update-vk-to-aut`
 
 An MCP configuration can be valid, persisted, and successfully tested by the
 coordinator while remaining unusable by an executor on a worker. Treat these as
@@ -46,6 +47,30 @@ the source of linked authentication/runtime assets rather than a write target.
 Because a crash bypasses teardown and recovery interrupts rather than resumes
 old jobs, worker startup clears and recreates the dedicated `mcp-config` root
 with owner-only permissions before accepting executions.
+
+For Codex, the worker also writes one exact project trust entry into the scoped
+`config.toml` before launch. The key is the canonical action directory after any
+initial, follow-up, or review offset has been authorised; do not trust a broader
+workspace or inferred Git root. Keep the original workspace directory separately
+for repository discovery and commit reminders.
+
+Use native TOML values while adding trust. Preserve unrelated settings, other
+project entries, and fields beside the selected project's `trust_level`. An
+absent MCP snapshot preserves source MCP definitions, while a supplied empty
+snapshot clears them. Refresh must read the existing scoped file and replace
+only MCP settings so it cannot erase trust or recreate state after terminal
+cleanup.
+
+The scoped home remains disposable, but conversation data does not. Create the
+persistent source `sessions` directory before building the overlay, then link it
+into the scoped home. This ensures a first execution on a fresh worker does not
+lose its rollout when the execution-owned directory is removed.
+
+<Note>
+Writing and parsing the scoped trust entry proves materialisation. Only a launch
+with the deployed Codex executable proves that Codex adopted project-local
+configuration, hooks, and execution policies.
+</Note>
 
 Treat repository skill errors separately from scoped-home routing. A skill must
 start and end YAML frontmatter with `---`; commit `efe4dd7e` fixed the historical
