@@ -1,6 +1,6 @@
 # App-managed PowerShell module CLI tools
 
-Tags: `4942-add-graph-powers`
+Tags: `4942-add-graph-powers`, `cd28-test-powershell`
 
 ## When a catalog tool is a module, not a binary
 
@@ -73,3 +73,26 @@ both managed-login invariants from
 host, and tenant/scopes are runtime policy VK must never choose. Production
 and development service users must not share a HOME (and therefore a token
 cache).
+
+## Live device-code validation
+
+A live `User.Read` device-code test on think2 confirmed that the installed
+wrapper loads `Connect-MgGraph` from the pinned `2.38.1` SDK and reaches the
+Microsoft device-login flow. It also exposed two operational boundaries:
+
+- A task shell that was already running without `cli-tools/bin` on `PATH` did
+  not begin resolving a subsequently installed managed tool. Test the bare
+  command first; adding the managed bin directory manually proves the payload,
+  but does not prove normal agent `PATH` injection. A newly spawned agent is
+  the correct end-to-end check.
+- Sweetgreen Entra rejected the otherwise successful primary sign-in with
+  Conditional Access error `53003`: the Linux browser reported an unregistered
+  device. The wrapper cannot fix tenant policy. Preserve the request ID,
+  correlation ID, timestamp, app ID, platform, and device state for the Entra
+  administrator, while keeping credentials, device codes, and tokens out of
+  task documentation.
+
+When Conditional Access denies the browser flow, the waiting
+`Connect-MgGraph` process may surface only a later authentication timeout. The
+browser's Entra diagnostic details are therefore the actionable root cause;
+the PowerShell timeout is secondary.
