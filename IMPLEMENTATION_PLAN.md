@@ -1,65 +1,57 @@
-# Implementation plan: Codex Slack MCP and Azure/Entra capabilities
+# Implementation plan: reliable Claude background-Bash denial
 
-**Task:** `vk/84ef-restore-slack-mc`
+**Task:** `VAS-540` / `vk/5cd1-debug-this-vk-ba`
 
-1. Establish the current capability boundaries.
-   - Trace shared MCP persistence, Codex native materialization, fresh-session
-     launch, clustered dispatch, and the existing MCP reload/restart action.
-   - Trace app-managed CLI installation and PATH construction for local agents,
-     remote workers, setup/dev processes, and workspace PTYs.
-   - Inspect the Vibe Kanban Nix module for Slack URL convergence and any
-     existing Azure package/auth state.
+1. Refresh the task branch from the current base.
+   - Inspect upstream changes since the workspace branch was created.
+   - Merge the current `origin/main` before implementation so testing targets
+     the deployed Claude executor and pin.
+   - Preserve the task artifacts created by this pipeline.
 
-2. Define truthful capability diagnostics.
-   - Add a backend read model that compares configured Slack assignment,
-     executor-native persistence, active-session MCP status/tool inventory, `az`
-     executable discovery, and Azure account probe state without returning
-     credentials or raw subprocess output.
-   - Represent unavailable, stale/restart-required, unauthenticated, connected,
-     and failed states distinctly with allowlisted remediation.
-   - Surface the result beside the existing MCP refresh/restart workflow.
+2. Establish the exact failing lifecycle.
+   - Trace ownership of Claude child stdin/stdout, the detached protocol reader,
+     terminal-result grace, cancellation, EOF, and child wait/finalization.
+   - Inspect the pinned Claude Code artifact's structured-input request broker
+     and hook ordering around `DENY_BACKGROUND_BASH_CALLBACK_ID`.
+   - Reproduce the failure with a deterministic duplex-stream test or the
+     smallest realistic harness that captures control request, response, result,
+     and stream-close ordering.
 
-3. Restore Slack for new and active Codex sessions.
-   - Ensure settings-owned Slack HTTP MCP definitions reach the exact Codex home
-     used by fresh local and remote executions.
-   - Reuse the supported Codex reload/next-turn confirmation where available and
-     the existing safe agent-restart fallback otherwise.
-   - Make reconnect completion invalidate/refetch the relevant state so the
-     refresh action is discoverable without recreating the task.
+3. Correct protocol ownership.
+   - Model outstanding control requests explicitly if they can outlive the
+     reader iteration or terminal-result signal.
+   - Do not close/drop the input stream until terminal handling has allowed all
+     accepted required responses to flush, while retaining a bounded fallback
+     for a genuinely wedged CLI.
+   - Propagate or record response write failures instead of logging and
+     converting them into apparent success.
+   - Keep cancellation responsive and retain zero-turn-result protection.
 
-4. Restore Azure CLI and read-only Entra authentication.
-   - Put the pinned/host-managed Azure CLI on the supervised coordinator and
-     worker agent PATH, retaining the app-managed CLI fallback where applicable.
-   - Reuse the existing durable Azure CLI authentication model and expose only
-     non-secret account status to agents/diagnostics. If deployment provisioning
-     is required, load it through systemd credentials or an equivalent protected
-     runtime store and grant only read-only Graph device permissions.
-   - Ensure the same context is available at each actual workspace execution
-     boundary, including execution-scoped homes where vendor state must be
-     linked rather than copied.
+4. Preserve hook semantics.
+   - Keep explicit `run_in_background: true` denied in auto, supervised, and
+     plan modes.
+   - Keep foreground/malformed Bash routed through existing permission policy.
+   - Retain the actionable `spawn_poller` denial message and all tool-name
+     guardrails.
 
 5. Add regression coverage.
-   - Backend tests: configured/connected Slack with absent native/live agent
-     state, stale state requiring refresh, successful tool registration, missing
-     `az`, unauthenticated Azure, and authenticated secret-free probe output.
-   - Executor/cluster tests: fresh Codex config materialization and refresh
-     rematerialization on the owning worker.
-   - Nix tests: Azure CLI appears in coordinator and worker service PATH and
-     runtime auth wiring contains references/paths but no credential contents.
-   - Frontend tests: mismatch diagnostic and supported refresh action rendering.
+   - Add protocol transport tests for background denial at the terminal
+     boundary and any identified race ordering.
+   - Cover clean terminal shutdown, cancellation, and response write failure if
+     touched by the fix.
+   - Retain/extend unit tests for hook routing and denial payload shape.
 
-6. Document and verify.
-   - Document required Slack app/connection permissions, Codex assignment,
-     Azure login/auth ownership and minimum Graph permissions, restart/refresh
-     steps, and layered troubleshooting.
-   - Run focused Rust/TypeScript/Nix tests, formatting, generated-type checks,
-     and broader checks proportionate to touched code.
-   - Validate read-only exact-hostname searches for the four supplied candidates
-     across Slack and Entra, then correlate with LogMeIn when the live connected
-     capabilities are available.
+6. Verify and document.
+   - Run focused `executors` tests first, then formatting and proportionate
+     workspace checks after installing dependencies if frontend tooling is
+     involved.
+   - Record the root cause and reusable lifecycle invariant in the existing
+     project knowledge page and refresh its index.
+   - Run independent Codex diff review, address confirmed findings, and rerun
+     affected checks until no significant findings remain.
 
-7. Review and ship.
-   - Run an independent Codex diff review, fix confirmed findings, rerun relevant
-     checks until no significant findings remain, update the project knowledge
-     base and index, commit both repositories as needed, then open and merge the
-     pull request(s) against their base branches.
+7. Ship.
+   - Commit task source/artifacts and the knowledge-base update.
+   - Push the task branch, open a pull request against the base branch, wait for
+     required checks, address failures, and merge only when the review and CI
+     gates are clear.

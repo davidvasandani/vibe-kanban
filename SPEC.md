@@ -1,89 +1,100 @@
-# Technical specification: Codex Slack MCP and Azure/Entra capabilities
+# Technical specification: reliable Claude background-Bash denial
 
-**Task:** `vk/84ef-restore-slack-mc`
+**Task:** `VAS-540` / `vk/5cd1-debug-this-vk-ba`
+
+## Problem
+
+Vibe Kanban registers the SDK callback
+`DENY_BACKGROUND_BASH_CALLBACK_ID` as a Claude Code `PreToolUse` hook. When
+Claude requests `Bash` with `run_in_background: true`, some executions print a
+large minified CLI excerpt followed by:
+
+```text
+Error in hook callback DENY_BACKGROUND_BASH_CALLBACK_ID: ...
+error: Stream closed
+```
+
+The denial itself is intentional: processes backgrounded inside an agent turn
+are reaped with that turn, while a Vibe Kanban poller is the supported durable
+replacement. The defect is the failed control-protocol round trip. A callback
+request accepted from Claude must receive its response before Vibe Kanban can
+consider the protocol input stream disposable.
 
 ## Objective
 
-Make the Slack connector and the Azure CLI-backed Microsoft Entra read path that
-an operator enables for Codex actually available inside Vibe Kanban Codex
-workspaces. Availability must be consistent for fresh sessions and must be
-refreshable for a workspace whose agent process started before a connector was
-enabled.
+Make the background-Bash denial reliable at execution boundaries so Claude
+receives the actionable `spawn_poller` guidance without emitting a control
+stream error, losing the current request, or weakening the prohibition on
+in-turn background work.
 
 ## Scope
 
-Changes are limited to the Vibe Kanban application and its deployment/runtime
-configuration in `homelab/modules/vibe-kanban-rebuild.nix`. The work may update
-Codex executor configuration, workspace process lifecycle and diagnostics,
-deployment packages and runtime authentication wiring, focused tests, and Vibe
-Kanban documentation. It must not change Slack, Entra, LogMeIn, Automox, or any
-other hosted service, and validation operations must remain read-only.
+- Claude executor structured-input/control-protocol lifecycle.
+- The `DENY_BACKGROUND_BASH_CALLBACK_ID` hook and closely related trailing
+  hook behavior needed to correct the shared lifecycle bug.
+- Focused executor tests and durable Vibe Kanban documentation.
+- Vibe Kanban source only. No other service or deployment changes are needed
+  unless investigation proves that `modules/vibe-kanban-rebuild.nix` owns the
+  faulty lifecycle; such a finding must be documented before editing it.
 
 ## Required behavior
 
-1. A Slack MCP definition connected and assigned to Codex is included in the
-   native Codex MCP configuration read by every newly started workspace agent.
-   It exposes a read-only Slack message-search tool capable of exact-hostname
-   searches.
-2. The workspace execution environment includes an `az` executable on `PATH`.
-3. The workspace receives a non-secret-bearing Azure authentication context
-   suitable for `az account show` and read-only Microsoft Graph device queries.
-   Credentials remain in the existing runtime secret boundary and are never
-   copied into repositories, prompts, logs, or diagnostics.
-4. A supported refresh action restarts the agent process for an existing task,
-   preserves task/chat continuity, and reloads the current native MCP
-   configuration. Enabling or reconnecting Slack therefore does not require
-   recreating the task or workspace.
-5. The UI reports a useful mismatch diagnostic when its configured/connected
-   Slack state does not agree with the MCP definition or runtime capability
-   visible to the selected Codex executor. Azure diagnostics distinguish a
-   missing executable, missing runtime auth context, and failed account/Graph
-   access without disclosing sensitive values.
+1. Every parsed Claude control request is either answered successfully while
+   the protocol input stream is open or fails through an explicit executor
+   error path; it is never abandoned merely because a result, cancellation,
+   timeout, or stdout EOF races with it.
+2. A `DENY_BACKGROUND_BASH_CALLBACK_ID` request whose input explicitly has
+   `tool_input.run_in_background: true` receives a `PreToolUse` deny response
+   containing the existing actionable `spawn_poller` guidance.
+3. Foreground Bash remains permitted or approval-routed according to the
+   selected permission mode.
+4. Terminal-result and cancellation handling still let Claude exit promptly;
+   the fix must not keep executions alive indefinitely.
+5. The existing protection against late Stop-hook `Stream closed` failures and
+   spurious zero-turn resume results remains intact.
+6. Protocol write failures are observable in Vibe Kanban logs and propagate
+   where ownership permits; successful turn completion must not mask a failed
+   required hook response.
 
-## Security and operational constraints
+## Verification requirements
 
-- Slack and Entra validation is read-only; no messages, users, groups, devices,
-  memberships, or inventory records are created, modified, or deleted.
-- Slack tokens and Azure client credentials are loaded through protected
-  runtime credential files or equivalent opaque references, never emitted as
-  environment values visible in diagnostics.
-- Microsoft Graph permissions are the minimum application/delegated read scopes
-  required for exact device lookup.
-- Refresh affects the active agent process only after the current turn exits
-  safely; it must not discard Vibe Kanban task history.
-- Existing custom MCP definitions must not be silently overwritten.
+- Add a deterministic protocol-level regression test that reproduces the
+  relevant ordering using mocked child stdin/stdout or an equivalent duplex
+  transport; a value-only unit test of the denial JSON is insufficient.
+- Cover at least the background denial response and the terminal-boundary
+  ordering that previously closed the stream.
+- Retain the current unit coverage for callback routing in auto, supervised,
+  and plan modes.
+- Run focused executor tests, formatting, and repository checks proportionate
+  to the files touched.
+- Verify the adopted lifecycle against the pinned Claude Code artifact and
+  relevant upstream SDK/CLI primary-source behavior.
 
-## Acceptance criteria
+## Success criteria
 
-- In a fresh Codex workspace, the connected Slack MCP exposes a read-only
-  message-search tool and an exact search for each validation hostname can run.
-- In that workspace, `command -v az` returns an executable path and
-  `az account show` succeeds without secrets in output or logs.
-- A read-only Graph/Entra device lookup by exact hostname succeeds.
-- Reconnecting or enabling Slack after workspace creation becomes visible after
-  the supported agent refresh action, without recreating the task.
-- A regression test covers a user-visible enabled/connected state whose agent
-  tool registry or runtime capability is absent and verifies the diagnostic.
-- Documentation states the required Slack connection and permissions, Azure
-  authentication mechanism and Graph read permissions, refresh procedure, and
-  troubleshooting checks.
-- The four hostnames `USSG01RG0300221`, `USSG01RG0200047`,
-  `USSG01RG0100047`, and `USSG01PM0100047` can be searched read-only across
-  Slack and Entra and correlated with the already available LogMeIn MCP.
-
-## Open questions for clarification
-
-- Which existing deployment-owned Azure identity and secret source is intended
-  for the read-only Entra device lookup?
-- Whether the mismatch diagnostic should be computed from configuration and
-  executor-native state only, or additionally perform bounded live probes.
-- Whether Azure CLI access is required on coordinator and all worker roles, or
-  only hosts that execute Codex workspaces.
+- The reported VAS-540 sequence no longer emits `Error in hook callback
+  DENY_BACKGROUND_BASH_CALLBACK_ID` or `Stream closed`.
+- Claude sees a normal tool denial explaining that durable work belongs in
+  `spawn_poller`.
+- No background Bash process is admitted, and foreground Bash behavior does
+  not regress.
+- New regression coverage fails against the faulty lifecycle and passes with
+  the correction.
 
 ## Non-goals
 
-- Automox cleanup or any mutation of inventory candidates.
-- Changes to LogMeIn MCP behavior.
-- General-purpose Azure administration or broad Microsoft Graph permissions.
-- Hot-injecting new tools into a currently running Codex process without a safe
-  process restart.
+- Allowing Claude's native background Bash or polling tools.
+- Changing VK poller scheduling, persistence, or UI behavior.
+- Updating Claude Code merely to avoid fixing an application-owned protocol
+  race.
+- Modifying any hosted service other than Vibe Kanban.
+
+## Initial investigation hypotheses
+
+The error string originates in Claude Code's structured-input request broker
+when its inbound permission/control stream closes before a pending callback is
+resolved. Existing Vibe Kanban code already has a fixed 500 ms post-result
+grace for late Stop hooks, but the new background-Bash hook exercises the same
+contract at a different ordering boundary. Planning must determine whether the
+root cause is a fixed-duration grace window, detached reader-task ownership,
+stdout EOF handling, or a pinned-CLI regression before selecting the fix.

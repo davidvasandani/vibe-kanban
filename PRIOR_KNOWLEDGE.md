@@ -1,75 +1,94 @@
-# Prior Knowledge: Three rollout loose ends
+# Prior knowledge: Claude background-hook stream lifecycle
 
-Task: `vk/94c0-three-loose-ends`
+**Task:** `VAS-540` / `vk/5cd1-debug-this-vk-ba`
 
-Searched `docs/knowledge-base/`, its `INDEX.md`, and the legacy `wiki/` pages
-for i18n consistency, API envelope errors, MCP caller behavior, Codex config,
-strict validation, and verification boundaries.
+The project knowledge base was searched for Claude hooks, background Bash,
+pollers, control requests, stream closure, and executor process lifecycle.
 
 ## Directly relevant knowledge
 
 ### `wiki/vk-pollers.md`
 
-This is the primary design record for items 2 and 3.
+- The `Bash(run_in_background: true)` PreToolUse hook is the load-bearing
+  Claude guard. Denying background-related tool names alone is insufficient
+  because Claude can read a background task's output through ordinary `Read`.
+- The predicate must remain conservative: only explicit boolean `true` is
+  denied. Missing, malformed, and false values fall through so foreground Bash
+  cannot be broken.
+- The denial must run before auto-approval and must name `spawn_poller`, giving
+  the agent a usable durable replacement.
+- Claude wire identifiers were verified against the pinned native artifact,
+  not the npm stub's schema-title declarations.
 
-- A typed rejection is not the MCP contract. `ApiResponse::error_with_data`
-  omits `message`, while the MCP client surfaces only that field, so tests must
-  assert the message on the response envelope.
-- Agent-facing denials must state both the problem and corrective action; an
-  `Unknown error` prevents self-correction.
-- Codex `features.unified_exec=false` is a verified exact config identifier.
-  Codex's deserializer accepts unknown fields unless strict config is requested,
-  so a plausible-looking misspelling can be completely inert.
-- Authoritative Codex identifiers must be checked against the source/artifact
-  corresponding to the pinned executable, not inferred from stale types or UI.
+### `wiki/agent-process-lifecycle.md`
 
-### `docs/knowledge-base/worktree-formatting-prerequisites.md`
+- Claude is a natural-exit executor: one turn maps to one child-process
+  lifetime, and VK expects it to exit rather than receiving an independent
+  protocol turn-completion signal.
+- The same page records the two process-group kill points at execution
+  finalization. This confirms why native in-turn background work remains
+  unsupported and why weakening the denial is not an acceptable workaround.
+- Lifecycle shortcuts must preserve all handoffs owned by the normal path. For
+  this bug, a parsed control request and its response are such a handoff: stream
+  teardown must not bypass it.
+- Output draining needs a bound because inherited descriptors can prevent EOF,
+  but a liveness bound must be attached to terminal evidence rather than
+  silently discarding protocol obligations.
 
-- A fresh worktree must run `pnpm install --frozen-lockfile` before repository
-  formatting or frontend verification.
-- Run the dependency preflight before mutating formatting stages and verify the
-  package-local frontend tools rather than assuming a root shim.
+### `docs/knowledge-base/authoritative-snapshot-stream-handoffs.md`
 
-### `docs/knowledge-base/prompt-driven-agent-pipelines.md`
+- A stream consumer must establish authoritative state before relying on the
+  incremental tail, and ownership transfer must avoid gaps. Applied here, the
+  protocol reader must retain ownership until requests accepted from the stream
+  have been answered; a timer is not proof that the handoff completed.
+- Restart/recovery behavior should be level-triggered from current authority,
+  not inferred from a transient event. This supports testing explicit protocol
+  states rather than adding another timing-only sleep.
 
-- Pipeline prompts are executable contracts and their required artifacts and
-  order must be followed literally.
-- The durable convention is task-scoped artifacts under
-  `specs/vk/<task-id>/`, though this task's injected pipeline explicitly names
-  root `SPEC.md`, `PRIOR_KNOWLEDGE.md`, and `IMPLEMENTATION_PLAN.md`; the explicit
-  task instruction is authoritative for these three files.
-- Constitution numbering must be rechecked against the latest base immediately
-  before merge if the constitution itself changes.
+### `docs/knowledge-base/claude-log-normalization.md`
 
-### `docs/knowledge-base/codex-rollout-transfer.md` and
-`docs/knowledge-base/active-mcp-refresh.md`
+- Claude emits several structured message shapes on stdout, and parser changes
+  must avoid turning transport/control messages into user-visible conversation
+  content.
+- Tool/progress metadata is not terminal evidence by itself. Regression tests
+  should exercise the structured protocol boundary without depending on the
+  chat log renderer.
 
-- Codex runs through the stdio app-server protocol and receives execution-scoped
-  configuration. The actual app-server launch and thread-start boundaries are
-  therefore the correct places to verify fail-loud CLI flags and emitted config
-  keys.
-- Avoid widening a focused executor-config correction into changes to Codex home,
-  credentials, rollout persistence, or MCP configuration ownership.
+## Existing source history
 
-## Adjacent findings
+- PR #56 (`e072e906`) previously fixed a related Stop-hook failure by keeping
+  stdin open for a fixed 500 ms after a terminal result and by ignoring a known
+  spurious zero-turn resume result. VAS-540 shows that the general control
+  stream invariant is not fully captured by that Stop-specific grace period.
+- PR #252 (`79941275`) introduced
+  `DENY_BACKGROUND_BASH_CALLBACK_ID`. Its current unit tests validate callback
+  routing and JSON values, but they do not test the bidirectional transport
+  lifetime.
 
-- No durable `docs/knowledge-base` topic currently records the i18n key-set
-  comparison/sort-order invariant or the API envelope lesson. Those are
-  candidates for stage 12 if confirmed by implementation.
-- `wiki/kanban-issue-panel-sections.md` notes that i18n tests without a provider
-  may return raw keys. This task instead tests locale JSON/key consistency and
-  should not mistake component fallback behavior for translation coverage.
-- `wiki/project-context-map.md` records the broader fail-loud principle: reject
-  unknown keys at the boundary rather than accepting and discarding meaning.
+## Upstream primary-source evidence
 
-## Consequences for implementation
+Firecrawl Developer search found Anthropic SDK reports with the same invariant:
 
-1. Fix and test the i18n comparison algorithm itself, not merely the currently
-   missing translations.
-2. Extract one helper-error message mapping parallel to the poller mapping and
-   assert every variant reaches `ApiResponse.message`.
-3. Trace `include_apply_patch_tool` history before removal, verify the pinned
-   Codex CLI's strict-config support, and pin the exact adopted launch contract
-   in tests.
-4. Keep all work inside the Vibe Kanban repository and use focused verification
-   before the full frontend/backend gates.
+- `anthropics/claude-agent-sdk-python#730` attributes
+  `Tool permission stream closed before response received` to the input side
+  of the bidirectional protocol closing while hooks are still active.
+- `anthropics/claude-agent-sdk-typescript#369` reports that closing shared
+  stdin on an early result breaks later `canUseTool` and hook round trips.
+- `anthropics/anthropic-sdk-typescript#840` records SessionEnd hooks firing
+  after the SDK has already closed streams.
+
+These reports corroborate the error classification, but the implementation
+must still reproduce the ordering in VK's own Rust protocol adapter and verify
+the pinned CLI artifact before adopting a specific workaround.
+
+## Consequences for specification and planning
+
+1. Preserve the background denial; fix transport ownership instead.
+2. Prefer an explicit “terminal result plus no outstanding protocol work”
+   condition over increasing the 500 ms constant.
+3. Treat EOF, cancellation, terminal results, and in-flight callback responses
+   as distinct lifecycle signals in tests.
+4. Keep changes inside the Vibe Kanban repository unless direct evidence points
+   to its governing Nix module.
+5. Add protocol-level regression coverage; value-only hook tests cannot prove
+   that Claude received the response.
