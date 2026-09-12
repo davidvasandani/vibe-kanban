@@ -113,12 +113,26 @@ occurs when the session metadata has `history_mode=paginated` but no
 When a fork fails due to lineage issues:
 
 1. Check whether the leaf rollout file exists locally for the requested thread.
-2. If the leaf exists, resume the thread directly by starting a new turn with
-   `turn/start` using the original thread ID. The conversation text is already
-   in the leaf, so history is preserved.
-3. If the leaf is absent (or resume fails for other reasons), fall back to the
-   existing replacement-thread behavior.
+2. If the leaf exists, attempt to resume the thread directly by starting a new
+   turn with `turn/start` using the original thread ID.
+3. If `turn/start` fails with "thread not found" (the Codex app-server doesn't
+   have the thread loaded in memory even though the file exists on disk), fall
+   back to starting a replacement thread.
+4. If the leaf is absent, fall back to the existing replacement-thread behavior.
 
 This preserves conversation context when the underlying problem is an ancestry
 artifact that never existed rather than actual data loss. The replacement-thread
-fallback remains for genuinely missing rollouts.
+fallback remains for genuinely missing rollouts and for cases where the Codex
+app-server cannot load the thread from its local rollout file.
+
+### Known turn/start error formats
+
+The following `turn/start` error messages (JSON-RPC code `-32600`) indicate the
+Codex app-server doesn't have the thread loaded and recovery should fall back to
+a replacement thread:
+
+1. `thread not found: <uuid>` — the thread is not loaded in the app-server
+   memory, even though the rollout file may exist on disk.
+
+The `<uuid>` in the message must match the exact thread ID that was requested.
+A mismatch or wrong JSON-RPC code means the error is not eligible for recovery.
