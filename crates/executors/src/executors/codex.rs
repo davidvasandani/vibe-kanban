@@ -256,6 +256,7 @@ mod tests {
         for message in [
             format!("no rollout found for thread id {session_id}"),
             format!("No conversation found with session ID: {session_id}"),
+            format!("invalid paginated history lineage for {session_id}: missing source rollout"),
         ] {
             let error = rpc_error(-32600, &message, None);
             assert!(is_missing_conversation_error(&error, session_id));
@@ -277,6 +278,18 @@ mod tests {
                 -32600,
                 &format!("no rollout found for thread id {session_id}"),
                 Some(serde_json::json!({"reason": "permission_denied"})),
+            ),
+            // Paginated lineage error with wrong UUID must not match
+            rpc_error(
+                -32600,
+                "invalid paginated history lineage for 11111111-1111-4111-8111-111111111111: missing source rollout",
+                None,
+            ),
+            // Different suffix on paginated lineage error must not match
+            rpc_error(
+                -32600,
+                &format!("invalid paginated history lineage for {session_id}: corrupt rollout"),
+                None,
             ),
         ] {
             assert!(!is_missing_conversation_error(&error, session_id));
@@ -396,6 +409,10 @@ fn is_missing_conversation_error(error: &ExecutorError, requested_thread_id: &st
 
     message == &format!("no rollout found for thread id {requested_thread_id}")
         || message == &format!("No conversation found with session ID: {requested_thread_id}")
+        || message
+            == &format!(
+                "invalid paginated history lineage for {requested_thread_id}: missing source rollout"
+            )
 }
 
 use async_trait::async_trait;
