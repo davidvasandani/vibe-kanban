@@ -265,6 +265,7 @@ export const PERSIST_KEYS = {
   workspacesSidebarRaisedHand: 'workspaces-sidebar-raised-hand',
   workspacesSidebarNotRunning: 'workspaces-sidebar-not-running',
   workspacesSidebarRunning: 'workspaces-sidebar-running',
+  workspacesSidebarPolling: 'workspaces-sidebar-polling',
   // Right panel sections
   gitAdvancedSettings: 'git-advanced-settings',
   gitPanelRepositories: 'git-panel-repositories',
@@ -312,6 +313,7 @@ export type PersistKey =
   | typeof PERSIST_KEYS.workspacesSidebarRaisedHand
   | typeof PERSIST_KEYS.workspacesSidebarNotRunning
   | typeof PERSIST_KEYS.workspacesSidebarRunning
+  | typeof PERSIST_KEYS.workspacesSidebarPolling
   | typeof PERSIST_KEYS.gitAdvancedSettings
   | typeof PERSIST_KEYS.gitPanelRepositories
   | typeof PERSIST_KEYS.gitPanelProject

@@ -140,6 +140,7 @@
     "noArchived": "보관된 워크스페이스 없음",
     "noWorkspaces": "워크스페이스 없음",
     "newWorkspace": "새 워크스페이스",
+    "polling": "폴링 중",
     "needsAttention": "주의 필요",
     "idle": "대기 중",
     "running": "실행 중",

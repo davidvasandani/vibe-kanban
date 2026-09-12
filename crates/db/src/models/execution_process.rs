@@ -760,6 +760,35 @@ impl ExecutionProcess {
         Ok(result)
     }
 
+    /// Poller loops stay running between ticks, independently of agent turns.
+    /// Read all sessions in one query rather than inspecting only the latest run.
+    /// Dropping chat history does not stop a persistent loop (same as list_pollers).
+    pub async fn find_workspaces_with_running_pollers(
+        pool: &SqlitePool,
+        archived: bool,
+    ) -> Result<HashSet<Uuid>, sqlx::Error> {
+        let rows: Vec<Uuid> = sqlx::query_scalar(
+            r#"
+            SELECT DISTINCT s.workspace_id
+            FROM execution_processes ep
+            JOIN sessions s ON ep.session_id = s.id
+            JOIN workspaces w ON s.workspace_id = w.id
+            WHERE w.archived = $1
+              AND ep.status = 'running'
+              AND ep.run_reason = 'backgroundhelper'
+              AND CASE WHEN json_valid(ep.executor_action) THEN
+                json_extract(ep.executor_action, '$.typ.type') = 'ScriptRequest'
+                AND json_type(ep.executor_action, '$.typ.poller') = 'object'
+              ELSE FALSE END
+            "#,
+        )
+        .bind(archived)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows.into_iter().collect())
+    }
+
     /// Find all workspaces with running dev servers, filtered by archived status.
     /// Returns a set of workspace IDs that have at least one running dev server.
     pub async fn find_workspaces_with_running_dev_servers(
@@ -788,6 +817,155 @@ impl ExecutionProcess {
 #[cfg(test)]
 mod tests {
     use super::ExecutionProcessRunReason;
+
+    #[tokio::test]
+    async fn running_pollers_are_workspace_wide_and_exclude_history_and_plain_helpers() {
+        use executors::actions::{
+            ExecutorAction, ExecutorActionType,
+            script::{PollerSpec, ScriptContext, ScriptRequest, ScriptRequestLanguage},
+        };
+        use uuid::Uuid;
+
+        use super::{CreateExecutionProcess, ExecutionProcess};
+        use crate::models::{
+            session::{CreateSession, Session},
+            workspace::{CreateWorkspace, Workspace},
+        };
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let workspace_id = Uuid::new_v4();
+        Workspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "polling-test".into(),
+                name: None,
+            },
+            workspace_id,
+        )
+        .await
+        .unwrap();
+        let mut sessions = Vec::new();
+        for _ in 0..2 {
+            let id = Uuid::new_v4();
+            Session::create(
+                &pool,
+                &CreateSession {
+                    executor: None,
+                    name: None,
+                },
+                id,
+                workspace_id,
+            )
+            .await
+            .unwrap();
+            sessions.push(id);
+        }
+        let action = ExecutorAction::new(
+            ExecutorActionType::ScriptRequest(ScriptRequest {
+                script: "echo tick; sleep 60".into(),
+                language: ScriptRequestLanguage::Bash,
+                context: ScriptContext::BackgroundHelper,
+                working_dir: None,
+                poller: Some(PollerSpec {
+                    command: "echo tick".into(),
+                    interval_secs: 60,
+                }),
+            }),
+            None,
+        );
+        let mut processes = Vec::new();
+        for session_id in &sessions {
+            let id = Uuid::new_v4();
+            ExecutionProcess::create(
+                &pool,
+                &CreateExecutionProcess {
+                    session_id: *session_id,
+                    executor_action: action.clone(),
+                    run_reason: ExecutionProcessRunReason::BackgroundHelper,
+                },
+                id,
+                &[],
+            )
+            .await
+            .unwrap();
+            processes.push(id);
+        }
+        let query =
+            |archived| ExecutionProcess::find_workspaces_with_running_pollers(&pool, archived);
+        assert_eq!(query(false).await.unwrap(), [workspace_id].into());
+        assert!(query(true).await.unwrap().is_empty());
+
+        // Ending the newest session's poller must not hide an older live loop.
+        sqlx::query("UPDATE execution_processes SET status = 'completed' WHERE id = ?")
+            .bind(processes[1])
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(query(false).await.unwrap(), [workspace_id].into());
+        for status in [
+            "completed",
+            "failed",
+            "killed",
+            "interrupted",
+            "indeterminate",
+        ] {
+            sqlx::query("UPDATE execution_processes SET status = ? WHERE id = ?")
+                .bind(status)
+                .bind(processes[0])
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(query(false).await.unwrap().is_empty(), "{status}");
+        }
+        sqlx::query(
+            "UPDATE execution_processes SET status = 'running', dropped = TRUE WHERE id = ?",
+        )
+        .bind(processes[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+        // A hidden history entry can still own a live process.
+        assert_eq!(query(false).await.unwrap(), [workspace_id].into());
+        sqlx::query(
+            "UPDATE execution_processes SET dropped = FALSE, run_reason = 'devserver' WHERE id = ?",
+        )
+        .bind(processes[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(query(false).await.unwrap().is_empty());
+
+        // Legacy helpers, explicit null metadata and malformed actions are not pollers.
+        let mut plain = serde_json::to_value(&action).unwrap();
+        plain["typ"].as_object_mut().unwrap().remove("poller");
+        for json in [
+            plain.to_string(),
+            r#"{"typ":{"type":"ScriptRequest","poller":null}}"#.into(),
+            "invalid json".into(),
+        ] {
+            sqlx::query("UPDATE execution_processes SET run_reason = 'backgroundhelper', executor_action = ? WHERE id = ?")
+                .bind(json).bind(processes[0]).execute(&pool).await.unwrap();
+            assert!(query(false).await.unwrap().is_empty());
+        }
+        sqlx::query("UPDATE execution_processes SET executor_action = ? WHERE id = ?")
+            .bind(serde_json::to_string(&action).unwrap())
+            .bind(processes[0])
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE workspaces SET archived = TRUE WHERE id = ?")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(query(false).await.unwrap().is_empty());
+        assert_eq!(query(true).await.unwrap(), [workspace_id].into());
+    }
 
     #[test]
     fn only_dev_servers_and_background_helpers_are_persistent() {

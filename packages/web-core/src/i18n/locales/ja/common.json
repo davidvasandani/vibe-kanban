@@ -140,6 +140,7 @@
     "noArchived": "アーカイブされたワークスペースはありません",
     "noWorkspaces": "ワークスペースがありません",
     "newWorkspace": "新しいワークスペース",
+    "polling": "ポーリング中",
     "needsAttention": "対応が必要",
     "idle": "待機中",
     "running": "実行中",

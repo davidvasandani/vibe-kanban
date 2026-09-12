@@ -72,7 +72,8 @@ contributed to it.
   no-op, Claude's resettable post-result hook quiescence window and fail-loud
   response delivery, the `exit N`-in-a-subshell trap that would silently
   swallow tick failures, and the drawer summary that rides a stream the layout
-  already had.
+  already had; workspace-wide Polling classification through the existing bulk
+  summary, approval/run precedence, and why dropped history still counts as live.
 - [codex-credential-refresh.md](codex-credential-refresh.md) — Why concurrent
   `codex app-server` processes sharing one ChatGPT `auth.json` hit "refresh token
   already used" (rotating single-use refresh tokens + Codex's guarded reload but

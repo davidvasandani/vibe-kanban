@@ -31,6 +31,7 @@ export interface WorkspacesSidebarWorkspace {
   isPinned?: boolean;
   hasPendingApproval?: boolean;
   hasRunningDevServer?: boolean;
+  hasRunningPoller?: boolean;
   hasUnseenActivity?: boolean;
   latestProcessCompletedAt?: string;
   latestProcessStatus?:
@@ -51,18 +52,29 @@ export interface WorkspacesSidebarWorkspace {
 export function categorizeWorkspaces(workspaces: WorkspacesSidebarWorkspace[]) {
   // Provisioning belongs beside active runs so it stays visible throughout
   // creation instead of disappearing into a collapsed Idle section.
+  // Unread output from a stopped turn is expected while monitoring continues;
+  // actual approval requests still need human attention.
   const needsAttention = (workspace: WorkspacesSidebarWorkspace) =>
     workspace.hasPendingApproval ||
-    (workspace.hasUnseenActivity && !workspace.isRunning);
+    (workspace.hasUnseenActivity &&
+      !workspace.isRunning &&
+      !workspace.hasRunningPoller);
+  const isPolling = (workspace: WorkspacesSidebarWorkspace) =>
+    workspace.hasRunningPoller &&
+    !workspace.hasPendingApproval &&
+    !workspace.isRunning &&
+    !workspace.isCreating;
 
   return {
     raisedHandWorkspaces: workspaces.filter((workspace) =>
       needsAttention(workspace)
     ),
+    pollingWorkspaces: workspaces.filter(isPolling),
     idleWorkspaces: workspaces.filter(
       (workspace) =>
         !workspace.isRunning &&
         !workspace.isCreating &&
+        !isPolling(workspace) &&
         !needsAttention(workspace)
     ),
     runningWorkspaces: workspaces.filter(
@@ -77,12 +89,14 @@ export interface WorkspacesSidebarPersistKeys {
   raisedHand: string;
   notRunning: string;
   running: string;
+  polling: string;
 }
 
 const DEFAULT_PERSIST_KEYS: WorkspacesSidebarPersistKeys = {
   raisedHand: 'workspaces-sidebar-raised-hand',
   notRunning: 'workspaces-sidebar-not-running',
   running: 'workspaces-sidebar-running',
+  polling: 'workspaces-sidebar-polling',
 };
 
 export interface WorkspacesSidebarProps {
@@ -258,10 +272,12 @@ export function WorkspacesSidebar({
   };
 
   // Categorize workspaces for accordion layout
-  const { raisedHandWorkspaces, idleWorkspaces, runningWorkspaces } = useMemo(
-    () => categorizeWorkspaces(workspaces),
-    [workspaces]
-  );
+  const {
+    raisedHandWorkspaces,
+    idleWorkspaces,
+    runningWorkspaces,
+    pollingWorkspaces,
+  } = useMemo(() => categorizeWorkspaces(workspaces), [workspaces]);
 
   const headerActions: SectionAction[] = [
     ...(onOpenCarousel
@@ -444,6 +460,28 @@ export function WorkspacesSidebar({
                 ) : (
                   <WorkspaceList
                     workspaces={runningWorkspaces}
+                    selectedWorkspaceId={selectedWorkspaceId}
+                    onSelectWorkspace={onSelectWorkspace}
+                    onOpenWorkspaceActions={handleOpenWorkspaceActions}
+                  />
+                )}
+              </div>
+            </CollapsibleSectionHeader>
+
+            {/* Polling section */}
+            <CollapsibleSectionHeader
+              title={t('common:workspaces.polling')}
+              persistKey={persistKeys.polling}
+              defaultExpanded={true}
+            >
+              <div className="flex flex-col gap-base py-half">
+                {pollingWorkspaces.length === 0 ? (
+                  <span className="text-sm text-low opacity-60 pl-base">
+                    {t('common:workspaces.noWorkspaces')}
+                  </span>
+                ) : (
+                  <WorkspaceList
+                    workspaces={pollingWorkspaces}
                     selectedWorkspaceId={selectedWorkspaceId}
                     onSelectWorkspace={onSelectWorkspace}
                     onOpenWorkspaceActions={handleOpenWorkspaceActions}
