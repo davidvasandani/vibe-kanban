@@ -1268,6 +1268,7 @@ impl ClaudeLogProcessor {
             ClaudeJson::ControlResponse { .. } => None,
             ClaudeJson::ControlCancelRequest { .. } => None,
             ClaudeJson::RateLimitEvent { session_id, .. } => session_id.clone(),
+            ClaudeJson::ToolProgress { session_id, .. } => session_id.clone(),
             ClaudeJson::Unknown { .. } => None,
         }
     }
@@ -2358,7 +2359,8 @@ impl ClaudeLogProcessor {
             ClaudeJson::ControlRequest { .. }
             | ClaudeJson::ControlResponse { .. }
             | ClaudeJson::ControlCancelRequest { .. }
-            | ClaudeJson::RateLimitEvent { .. } => {}
+            | ClaudeJson::RateLimitEvent { .. }
+            | ClaudeJson::ToolProgress { .. } => {}
         }
         patches
     }
@@ -2790,6 +2792,29 @@ pub enum ClaudeJson {
         session_id: Option<String>,
         #[serde(default)]
         rate_limit_info: Option<serde_json::Value>,
+    },
+    /// Heartbeat emitted periodically while a long-running tool is in flight.
+    /// Purely informational — carries no result data; the tool's real
+    /// `tool_result` still arrives separately. Silently ignored.
+    ToolProgress {
+        #[serde(default)]
+        tool_use_id: Option<String>,
+        #[serde(default)]
+        tool_name: Option<String>,
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
+        #[serde(default)]
+        elapsed_time_seconds: Option<f64>,
+        #[serde(default)]
+        heartbeat: Option<bool>,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        uuid: Option<String>,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        subagent_type: Option<String>,
     },
     // Catch-all for unknown message types
     #[serde(untagged)]
@@ -4339,5 +4364,100 @@ mod tests {
             options.model_selector.default_model.as_deref(),
             Some("opus")
         );
+    }
+
+    #[test]
+    fn test_tool_progress_message_parses() {
+        let tool_progress_json = r#"{"type":"tool_progress","tool_use_id":"toolu_011cbTyUrSBE4D28tMCVqRSt-heartbeat-0","tool_name":"Bash","parent_tool_use_id":"toolu_011cbTyUrSBE4D28tMCVqRSt","elapsed_time_seconds":30,"heartbeat":true,"session_id":"8e8245e8-952c-4b70-9c6f-4c1cb4d4a687","uuid":"a9786562-4e78-418e-b48a-b14e57a1076d"}"#;
+        let parsed: ClaudeJson = serde_json::from_str(tool_progress_json).unwrap();
+        assert!(matches!(parsed, ClaudeJson::ToolProgress { .. }));
+
+        if let ClaudeJson::ToolProgress {
+            tool_use_id,
+            tool_name,
+            parent_tool_use_id,
+            elapsed_time_seconds,
+            heartbeat,
+            session_id,
+            ..
+        } = parsed
+        {
+            assert_eq!(
+                tool_use_id.as_deref(),
+                Some("toolu_011cbTyUrSBE4D28tMCVqRSt-heartbeat-0")
+            );
+            assert_eq!(tool_name.as_deref(), Some("Bash"));
+            assert_eq!(
+                parent_tool_use_id.as_deref(),
+                Some("toolu_011cbTyUrSBE4D28tMCVqRSt")
+            );
+            assert_eq!(elapsed_time_seconds, Some(30.0));
+            assert_eq!(heartbeat, Some(true));
+            assert_eq!(
+                session_id.as_deref(),
+                Some("8e8245e8-952c-4b70-9c6f-4c1cb4d4a687")
+            );
+        }
+    }
+
+    #[test]
+    fn test_tool_progress_message_silently_ignored() {
+        let tool_progress_json = r#"{"type":"tool_progress","tool_use_id":"toolu_abc123","tool_name":"Bash","elapsed_time_seconds":60,"heartbeat":true,"session_id":"test-session"}"#;
+        let parsed: ClaudeJson = serde_json::from_str(tool_progress_json).unwrap();
+
+        let mut processor = ClaudeLogProcessor::new();
+        let patches = normalize_helper(&mut processor, &parsed, "/tmp");
+
+        assert!(
+            patches.is_empty(),
+            "tool_progress messages should be silently ignored and produce no patches"
+        );
+    }
+
+    #[test]
+    fn test_tool_progress_session_id_extraction() {
+        let tool_progress: ClaudeJson = serde_json::from_str(
+            r#"{"type":"tool_progress","tool_use_id":"toolu_xyz","tool_name":"Read","session_id":"my-session-123"}"#,
+        )
+        .unwrap();
+
+        let session_id = ClaudeLogProcessor::extract_session_id(&tool_progress);
+        assert_eq!(session_id.as_deref(), Some("my-session-123"));
+    }
+
+    #[test]
+    fn test_tool_progress_minimal_fields() {
+        let tool_progress_json = r#"{"type":"tool_progress"}"#;
+        let parsed: ClaudeJson = serde_json::from_str(tool_progress_json).unwrap();
+        assert!(
+            matches!(parsed, ClaudeJson::ToolProgress { .. }),
+            "tool_progress with minimal fields should still parse"
+        );
+
+        let mut processor = ClaudeLogProcessor::new();
+        let patches = normalize_helper(&mut processor, &parsed, "/tmp");
+        assert!(patches.is_empty());
+    }
+
+    #[test]
+    fn test_tool_progress_with_subagent_type() {
+        let tool_progress_json = r#"{"type":"tool_progress","tool_use_id":"toolu_task123","tool_name":"Task","elapsed_time_seconds":90,"task_id":"task-abc","subagent_type":"explore","session_id":"sess-456"}"#;
+        let parsed: ClaudeJson = serde_json::from_str(tool_progress_json).unwrap();
+
+        if let ClaudeJson::ToolProgress {
+            tool_name,
+            task_id,
+            subagent_type,
+            elapsed_time_seconds,
+            ..
+        } = parsed
+        {
+            assert_eq!(tool_name.as_deref(), Some("Task"));
+            assert_eq!(task_id.as_deref(), Some("task-abc"));
+            assert_eq!(subagent_type.as_deref(), Some("explore"));
+            assert_eq!(elapsed_time_seconds, Some(90.0));
+        } else {
+            panic!("Expected ToolProgress variant");
+        }
     }
 }
