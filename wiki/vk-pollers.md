@@ -204,6 +204,34 @@ Two transferable lessons:
 Note `spawn_background_helper` still has the message-less shape through the same
 constructor — pre-existing, and left for its own change rather than folded in.
 
+## Post-result hook grace is a quiescence window
+
+Claude's structured-input stdin is both the prompt stream and the return path
+for PreToolUse callbacks. VK must eventually close it so the natural-exit CLI
+can terminate, but a `result` line is not proof that all SDK-managed/background
+activity and hook traffic has drained.
+
+The original late-Stop-hook fix kept stdin open until an absolute deadline 500
+ms after the first result. VAS-540 exposed the remaining race: Claude could emit
+another structured line inside that window and then request
+`DENY_BACKGROUND_BASH_CALLBACK_ID` less than 500 ms later, while the original
+timer still expired between them. The CLI then reported `Stream closed` before
+VK ever received the callback.
+
+Treat `POST_RESULT_GRACE` as **time since the latest non-empty output**, not
+time since the result. Once a result arms shutdown, every later line resets the
+deadline. Control requests remain handled inline and their response is flushed
+before the timer is checked again. This preserves bounded natural exit while
+making visible activity authoritative over an old timer.
+
+Two reusable testing rules:
+
+- Value tests for a hook's deny JSON cannot prove transport delivery. Use a
+  duplex protocol test that crosses the old deadline and reads the matching
+  `control_response`.
+- A mandatory response-write failure is a protocol-loop failure, not a warning
+  that can be swallowed while the execution appears successful.
+
 ## Not this: a wake-up scheduler
 
 A vk poller runs a **command**, not a turn; it never resumes the agent. Persisting
@@ -214,3 +242,4 @@ VAS-132. Don't reopen it incidentally — see [[agent-process-lifecycle]].
 ## Contributed by
 
 - vk/869c-vk-background-po
+- vk/5cd1-debug-this-vk-ba

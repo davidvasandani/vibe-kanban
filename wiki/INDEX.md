@@ -69,8 +69,10 @@ contributed to it.
   output file), the verify-the-executing-artifact rule (the Claude npm package is
   a stub whose `sdk-tools.d.ts` lists schema titles rather than wire tool names;
   Codex config keys fail open and so are pinned by test), Grok's evidenced
-  no-op, the `exit N`-in-a-subshell trap that would silently swallow tick
-  failures, and the drawer summary that rides a stream the layout already had.
+  no-op, Claude's resettable post-result hook quiescence window and fail-loud
+  response delivery, the `exit N`-in-a-subshell trap that would silently
+  swallow tick failures, and the drawer summary that rides a stream the layout
+  already had.
 - [codex-credential-refresh.md](codex-credential-refresh.md) — Why concurrent
   `codex app-server` processes sharing one ChatGPT `auth.json` hit "refresh token
   already used" (rotating single-use refresh tokens + Codex's guarded reload but

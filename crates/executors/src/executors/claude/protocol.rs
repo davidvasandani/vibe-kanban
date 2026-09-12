@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     process::{ChildStdin, ChildStdout},
     sync::Mutex,
     time::{Instant, sleep_until},
@@ -33,7 +33,7 @@ const SPURIOUS_RESULT_FALLBACK: Duration = Duration::from_secs(30);
 /// Handles bidirectional control protocol communication
 #[derive(Clone)]
 pub struct ProtocolPeer {
-    stdin: Arc<Mutex<ChildStdin>>,
+    stdin: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
 }
 
 impl ProtocolPeer {
@@ -43,9 +43,7 @@ impl ProtocolPeer {
         client: Arc<ClaudeAgentClient>,
         cancel: CancellationToken,
     ) -> Self {
-        let peer = Self {
-            stdin: Arc::new(Mutex::new(stdin)),
-        };
+        let peer = Self::with_writer(stdin);
 
         let reader_peer = peer.clone();
         tokio::spawn(async move {
@@ -57,12 +55,21 @@ impl ProtocolPeer {
         peer
     }
 
-    async fn read_loop(
+    fn with_writer(stdin: impl AsyncWrite + Send + Unpin + 'static) -> Self {
+        Self {
+            stdin: Arc::new(Mutex::new(Box::new(stdin))),
+        }
+    }
+
+    async fn read_loop<R>(
         &self,
-        stdout: ChildStdout,
+        stdout: R,
         client: Arc<ClaudeAgentClient>,
         cancel: CancellationToken,
-    ) -> Result<(), ExecutorError> {
+    ) -> Result<(), ExecutorError>
+    where
+        R: AsyncRead + Unpin,
+    {
         let mut reader = BufReader::new(stdout);
         let mut buffer = String::new();
         let mut interrupt_sent = false;
@@ -111,6 +118,15 @@ impl ProtocolPeer {
                                 continue;
                             }
 
+                            // A result starts a *quiescence* window, not an
+                            // absolute teardown timer. Claude may still emit
+                            // control traffic while background SDK work drains;
+                            // every line proves the stream is active and buys a
+                            // complete quiet interval for the next callback.
+                            if grace_deadline.is_some() {
+                                grace_deadline = Some(Instant::now() + POST_RESULT_GRACE);
+                            }
+
                             // Parse before logging so the spurious result
                             // below can be kept out of the user-facing log
                             // (it would otherwise render as an empty
@@ -152,7 +168,7 @@ impl ProtocolPeer {
                                     // Tool activity means the real turn is running.
                                     spurious_fallback = None;
                                     self.handle_control_request(&client, request_id, request)
-                                        .await;
+                                        .await?;
                                 }
                                 Ok(CLIMessage::Result(_)) => {
                                     spurious_fallback = None;
@@ -195,7 +211,7 @@ impl ProtocolPeer {
         client: &Arc<ClaudeAgentClient>,
         request_id: String,
         request: ControlRequestType,
-    ) {
+    ) -> Result<(), ExecutorError> {
         match request {
             ControlRequestType::CanUseTool {
                 tool_name,
@@ -209,20 +225,14 @@ impl ProtocolPeer {
                     .await
                 {
                     Ok(result) => {
-                        if let Err(e) = self
-                            .send_hook_response(request_id, serde_json::to_value(result).unwrap())
-                            .await
-                        {
-                            tracing::error!("Failed to send permission result: {e}");
-                        }
+                        self.send_hook_response(request_id, serde_json::to_value(result).unwrap())
+                            .await?;
                     }
                     Err(ExecutorError::ExecutorApprovalError(ExecutorApprovalError::Cancelled)) => {
                     }
                     Err(e) => {
                         tracing::error!("Error in on_can_use_tool: {e}");
-                        if let Err(e2) = self.send_error(request_id, e.to_string()).await {
-                            tracing::error!("Failed to send error response: {e2}");
-                        }
+                        self.send_error(request_id, e.to_string()).await?;
                     }
                 }
             }
@@ -236,19 +246,16 @@ impl ProtocolPeer {
                     .await
                 {
                     Ok(hook_output) => {
-                        if let Err(e) = self.send_hook_response(request_id, hook_output).await {
-                            tracing::error!("Failed to send hook callback result: {e}");
-                        }
+                        self.send_hook_response(request_id, hook_output).await?;
                     }
                     Err(e) => {
                         tracing::error!("Error in on_hook_callback: {e}");
-                        if let Err(e2) = self.send_error(request_id, e.to_string()).await {
-                            tracing::error!("Failed to send error response: {e2}");
-                        }
+                        self.send_error(request_id, e.to_string()).await?;
                     }
                 }
             }
         }
+        Ok(())
     }
 
     pub async fn send_hook_response(
@@ -302,5 +309,133 @@ impl ProtocolPeer {
             SDKControlRequestType::SetPermissionMode { mode },
         ))
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex},
+        time::{Duration, sleep, timeout},
+    };
+
+    use super::*;
+    use crate::{env::RepoContext, executors::codex::client::LogWriter};
+
+    fn test_client() -> Arc<ClaudeAgentClient> {
+        ClaudeAgentClient::new(
+            LogWriter::new(tokio::io::sink()),
+            None,
+            RepoContext::default(),
+            String::new(),
+            CancellationToken::new(),
+        )
+    }
+
+    const BACKGROUND_BASH_HOOK_REQUEST: &[u8] =
+        br#"{"type":"control_request","request_id":"deny-1","request":{"subtype":"hook_callback","callback_id":"DENY_BACKGROUND_BASH_CALLBACK_ID","input":{"tool_input":{"run_in_background":true}}}}"#;
+
+    #[tokio::test]
+    async fn post_result_activity_keeps_background_bash_hook_stream_open() {
+        let (mut cli_stdout, vk_stdout) = duplex(16 * 1024);
+        let (vk_stdin, cli_stdin) = duplex(16 * 1024);
+        let peer = ProtocolPeer::with_writer(vk_stdin);
+        let cancel = CancellationToken::new();
+        let reader =
+            tokio::spawn(async move { peer.read_loop(vk_stdout, test_client(), cancel).await });
+
+        cli_stdout
+            .write_all(b"{\"type\":\"result\",\"num_turns\":1,\"is_error\":false}\n")
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(350)).await;
+        cli_stdout
+            .write_all(b"{\"type\":\"assistant\",\"message\":{}}\n")
+            .await
+            .unwrap();
+
+        // The hook arrives after the original absolute 500 ms post-result
+        // deadline, but less than one quiet interval after the latest output.
+        sleep(Duration::from_millis(250)).await;
+        cli_stdout
+            .write_all(BACKGROUND_BASH_HOOK_REQUEST)
+            .await
+            .expect("protocol input remains open after post-result activity");
+        cli_stdout.write_all(b"\n").await.unwrap();
+
+        let mut response = String::new();
+        timeout(
+            Duration::from_millis(250),
+            BufReader::new(cli_stdin).read_line(&mut response),
+        )
+        .await
+        .expect("hook response should be prompt")
+        .expect("hook response should be readable");
+        let response: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(response["type"], "control_response");
+        assert_eq!(response["response"]["request_id"], "deny-1");
+        assert_eq!(
+            response["response"]["response"]["hookSpecificOutput"]["permissionDecision"],
+            "deny"
+        );
+        assert!(
+            response["response"]["response"]["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("spawn_poller")
+        );
+
+        drop(cli_stdout);
+        reader.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn post_result_quiescence_still_ends_the_protocol_loop() {
+        let (mut cli_stdout, vk_stdout) = duplex(1024);
+        let (vk_stdin, _cli_stdin) = duplex(1024);
+        let peer = ProtocolPeer::with_writer(vk_stdin);
+        let reader = tokio::spawn(async move {
+            peer.read_loop(vk_stdout, test_client(), CancellationToken::new())
+                .await
+        });
+
+        cli_stdout
+            .write_all(b"{\"type\":\"result\",\"num_turns\":1,\"is_error\":false}\n")
+            .await
+            .unwrap();
+
+        timeout(Duration::from_millis(1_500), reader)
+            .await
+            .expect("a quiet completed turn must not keep stdin open indefinitely")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn hook_response_write_failure_fails_the_protocol_loop() {
+        let (mut cli_stdout, vk_stdout) = duplex(4096);
+        let (vk_stdin, cli_stdin) = duplex(4096);
+        drop(cli_stdin);
+        let peer = ProtocolPeer::with_writer(vk_stdin);
+        let reader = tokio::spawn(async move {
+            peer.read_loop(vk_stdout, test_client(), CancellationToken::new())
+                .await
+        });
+
+        cli_stdout
+            .write_all(BACKGROUND_BASH_HOOK_REQUEST)
+            .await
+            .unwrap();
+        cli_stdout.write_all(b"\n").await.unwrap();
+
+        let error = timeout(Duration::from_millis(250), reader)
+            .await
+            .expect("failed response write should end the protocol loop")
+            .unwrap()
+            .expect_err("closed response stream must be a protocol error");
+        assert!(
+            error.to_string().contains("broken pipe") || error.to_string().contains("closed"),
+            "unexpected protocol error: {error:?}"
+        );
     }
 }
