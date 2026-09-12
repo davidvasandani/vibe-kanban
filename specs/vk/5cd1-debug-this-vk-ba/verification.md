@@ -45,3 +45,7 @@ cargo test -p executors
 282 passed; 0 failed; 1 ignored
 doc tests: 0 passed; 0 failed; 1 ignored
 ```
+
+## Delivery
+
+- Pull request: https://github.com/davidvasandani/vibe-kanban/pull/280

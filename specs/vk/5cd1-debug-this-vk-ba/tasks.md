@@ -48,7 +48,7 @@
 
 ## Phase 5: Delivery
 
-- [ ] T011 Commit and push the Vibe Kanban changes, open a pull request against
+- [x] T011 Commit and push the Vibe Kanban changes, open a pull request against
       the base branch, and verify required CI (depends on T010).
 - [ ] T012 Merge the pull request after CI/review is clear and record the merged
       PR and commit in verification notes (depends on T011).
