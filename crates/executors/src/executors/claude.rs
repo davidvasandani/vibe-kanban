@@ -65,7 +65,7 @@ fn base_command(claude_code_router: bool) -> &'static str {
     if claude_code_router {
         "npx -y @musistudio/claude-code-router@1.0.66 code"
     } else {
-        "npx -y @anthropic-ai/claude-code@2.1.200"
+        "npx -y @anthropic-ai/claude-code@2.1.268"
     }
 }
 
@@ -143,13 +143,13 @@ const SCHEDULE_WAKEUP_MATCHER: &str = "^ScheduleWakeup$";
 /// # Verification source (Constitution IX)
 ///
 /// These are **wire tool names**, read out of the native binary shipped in
-/// `@anthropic-ai/claude-code-linux-x64@2.1.200` — the platform package behind
-/// the `@anthropic-ai/claude-code@2.1.200` pin in [`base_command`]. The npm
-/// package itself is a ~20KB stub; its `sdk-tools.d.ts` lists JSON-Schema
-/// *titles* (`FileReadInput`, `FileEditInput`, …), **not** wire tool names
-/// (`Read`, `Edit`, …). A deny list derived from that file would name tools
-/// that do not exist and would silently match nothing. The alias→canonical
-/// table was read from the binary's own alias map. See
+/// `@anthropic-ai/claude-code-linux-x64@2.1.268` — the platform package behind
+/// the `@anthropic-ai/claude-code@2.1.268` pin in [`base_command`]. The wrapper's
+/// `sdk-tools.d.ts` lists JSON-Schema *titles* (`FileReadInput`,
+/// `FileEditInput`, …), **not** wire tool names (`Read`, `Edit`, …). A deny list
+/// derived from that file would name tools that do not exist and would silently
+/// match nothing. The alias→canonical table was read from the binary's own
+/// alias map. See
 /// `specs/vk/869c-vk-background-po/research.md`.
 ///
 /// Because `@anthropic-ai/claude-code` is a `needs-review` Renovate carve-out,
@@ -426,6 +426,7 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
                 ("opus[1m]", "Opus (1M context)"),
                 ("claude-opus-5", "Opus 5"),
                 ("claude-sonnet-5", "Sonnet 5"),
+                ("claude-fable-5-1", "Fable 5.1"),
                 ("sonnet", "Sonnet"),
                 ("fable", "Fable"),
                 ("haiku", "Haiku"),
@@ -879,12 +880,17 @@ const CLAUDE_1M_CONTEXT_WINDOW: u32 = 1_000_000;
 
 /// Infer a model's max context window from its name or alias.
 ///
-/// Different models have different max contexts. Opus 5 has a 1M-token context
-/// by default; older models requesting the 1M-token context beta carry a `[1m]`
+/// Different models have different max contexts. The current Opus, Sonnet, and
+/// Fable aliases and their explicit catalog models have a 1M-token context by
+/// default; older models requesting the 1M-token context beta carry a `[1m]`
 /// suffix (e.g. `opus[1m]`). We rely on the configured/reported model string
 /// because the end-of-turn usage report is only available once a turn finishes.
 fn context_window_for_model(model: &str) -> u32 {
-    if model == "claude-opus-5" || model.contains("[1m]") {
+    if matches!(
+        model,
+        "opus" | "sonnet" | "fable" | "claude-opus-5" | "claude-sonnet-5" | "claude-fable-5-1"
+    ) || model.contains("[1m]")
+    {
         CLAUDE_1M_CONTEXT_WINDOW
     } else {
         DEFAULT_CLAUDE_CONTEXT_WINDOW
@@ -1262,6 +1268,7 @@ impl ClaudeLogProcessor {
             ClaudeJson::ControlResponse { .. } => None,
             ClaudeJson::ControlCancelRequest { .. } => None,
             ClaudeJson::RateLimitEvent { session_id, .. } => session_id.clone(),
+            ClaudeJson::ToolProgress { session_id, .. } => session_id.clone(),
             ClaudeJson::Unknown { .. } => None,
         }
     }
@@ -2352,7 +2359,8 @@ impl ClaudeLogProcessor {
             ClaudeJson::ControlRequest { .. }
             | ClaudeJson::ControlResponse { .. }
             | ClaudeJson::ControlCancelRequest { .. }
-            | ClaudeJson::RateLimitEvent { .. } => {}
+            | ClaudeJson::RateLimitEvent { .. }
+            | ClaudeJson::ToolProgress { .. } => {}
         }
         patches
     }
@@ -2784,6 +2792,29 @@ pub enum ClaudeJson {
         session_id: Option<String>,
         #[serde(default)]
         rate_limit_info: Option<serde_json::Value>,
+    },
+    /// Heartbeat emitted periodically while a long-running tool is in flight.
+    /// Purely informational — carries no result data; the tool's real
+    /// `tool_result` still arrives separately. Silently ignored.
+    ToolProgress {
+        #[serde(default)]
+        tool_use_id: Option<String>,
+        #[serde(default)]
+        tool_name: Option<String>,
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
+        #[serde(default)]
+        elapsed_time_seconds: Option<f64>,
+        #[serde(default)]
+        heartbeat: Option<bool>,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        uuid: Option<String>,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        subagent_type: Option<String>,
     },
     // Catch-all for unknown message types
     #[serde(untagged)]
@@ -3408,7 +3439,7 @@ mod tests {
     }
 
     /// The names are wire tool names read from the
-    /// `@anthropic-ai/claude-code-linux-x64@2.1.200` native binary, not from
+    /// `@anthropic-ai/claude-code-linux-x64@2.1.268` native binary, not from
     /// the npm stub's `sdk-tools.d.ts` (which lists JSON-Schema titles). A
     /// misspelling would silently match nothing, so the exact spellings are
     /// pinned here.
@@ -3435,8 +3466,8 @@ mod tests {
         // The pin above is only meaningful while the CLI pin it was read from
         // is in force.
         assert!(
-            base_command(false).contains("@anthropic-ai/claude-code@2.1.200"),
-            "tool names were verified against 2.1.200; re-verify against the binary if this pin moves"
+            base_command(false).contains("@anthropic-ai/claude-code@2.1.268"),
+            "tool names were verified against 2.1.268; re-verify against the binary if this pin moves"
         );
     }
 
@@ -4213,20 +4244,23 @@ mod tests {
 
     #[test]
     fn test_context_window_for_model() {
-        assert_eq!(
-            context_window_for_model("opus"),
-            DEFAULT_CLAUDE_CONTEXT_WINDOW
-        );
-        assert_eq!(
-            context_window_for_model("sonnet"),
-            DEFAULT_CLAUDE_CONTEXT_WINDOW
-        );
+        assert_eq!(context_window_for_model("opus"), CLAUDE_1M_CONTEXT_WINDOW);
+        assert_eq!(context_window_for_model("sonnet"), CLAUDE_1M_CONTEXT_WINDOW);
+        assert_eq!(context_window_for_model("fable"), CLAUDE_1M_CONTEXT_WINDOW);
         assert_eq!(
             context_window_for_model("claude-opus-4-8"),
             DEFAULT_CLAUDE_CONTEXT_WINDOW
         );
         assert_eq!(
             context_window_for_model("claude-opus-5"),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-fable-5-1"),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            context_window_for_model("claude-sonnet-5"),
             CLAUDE_1M_CONTEXT_WINDOW
         );
         assert_eq!(
@@ -4305,5 +4339,125 @@ mod tests {
             !opus5.reasoning_options.is_empty(),
             "claude-opus-5 must have reasoning options (supports_effort coverage)"
         );
+    }
+
+    #[test]
+    fn test_claude_fable_5_1_in_discovered_options() {
+        let options = super::default_discovered_options();
+        let fable = options
+            .model_selector
+            .models
+            .iter()
+            .find(|model| model.id == "claude-fable-5-1")
+            .expect("claude-fable-5-1 must be in model catalog");
+
+        assert_eq!(fable.name, "Fable 5.1");
+        assert_eq!(
+            fable
+                .reasoning_options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            options.model_selector.default_model.as_deref(),
+            Some("opus")
+        );
+    }
+
+    #[test]
+    fn test_tool_progress_message_parses() {
+        let tool_progress_json = r#"{"type":"tool_progress","tool_use_id":"toolu_011cbTyUrSBE4D28tMCVqRSt-heartbeat-0","tool_name":"Bash","parent_tool_use_id":"toolu_011cbTyUrSBE4D28tMCVqRSt","elapsed_time_seconds":30,"heartbeat":true,"session_id":"8e8245e8-952c-4b70-9c6f-4c1cb4d4a687","uuid":"a9786562-4e78-418e-b48a-b14e57a1076d"}"#;
+        let parsed: ClaudeJson = serde_json::from_str(tool_progress_json).unwrap();
+        assert!(matches!(parsed, ClaudeJson::ToolProgress { .. }));
+
+        if let ClaudeJson::ToolProgress {
+            tool_use_id,
+            tool_name,
+            parent_tool_use_id,
+            elapsed_time_seconds,
+            heartbeat,
+            session_id,
+            ..
+        } = parsed
+        {
+            assert_eq!(
+                tool_use_id.as_deref(),
+                Some("toolu_011cbTyUrSBE4D28tMCVqRSt-heartbeat-0")
+            );
+            assert_eq!(tool_name.as_deref(), Some("Bash"));
+            assert_eq!(
+                parent_tool_use_id.as_deref(),
+                Some("toolu_011cbTyUrSBE4D28tMCVqRSt")
+            );
+            assert_eq!(elapsed_time_seconds, Some(30.0));
+            assert_eq!(heartbeat, Some(true));
+            assert_eq!(
+                session_id.as_deref(),
+                Some("8e8245e8-952c-4b70-9c6f-4c1cb4d4a687")
+            );
+        }
+    }
+
+    #[test]
+    fn test_tool_progress_message_silently_ignored() {
+        let tool_progress_json = r#"{"type":"tool_progress","tool_use_id":"toolu_abc123","tool_name":"Bash","elapsed_time_seconds":60,"heartbeat":true,"session_id":"test-session"}"#;
+        let parsed: ClaudeJson = serde_json::from_str(tool_progress_json).unwrap();
+
+        let mut processor = ClaudeLogProcessor::new();
+        let patches = normalize_helper(&mut processor, &parsed, "/tmp");
+
+        assert!(
+            patches.is_empty(),
+            "tool_progress messages should be silently ignored and produce no patches"
+        );
+    }
+
+    #[test]
+    fn test_tool_progress_session_id_extraction() {
+        let tool_progress: ClaudeJson = serde_json::from_str(
+            r#"{"type":"tool_progress","tool_use_id":"toolu_xyz","tool_name":"Read","session_id":"my-session-123"}"#,
+        )
+        .unwrap();
+
+        let session_id = ClaudeLogProcessor::extract_session_id(&tool_progress);
+        assert_eq!(session_id.as_deref(), Some("my-session-123"));
+    }
+
+    #[test]
+    fn test_tool_progress_minimal_fields() {
+        let tool_progress_json = r#"{"type":"tool_progress"}"#;
+        let parsed: ClaudeJson = serde_json::from_str(tool_progress_json).unwrap();
+        assert!(
+            matches!(parsed, ClaudeJson::ToolProgress { .. }),
+            "tool_progress with minimal fields should still parse"
+        );
+
+        let mut processor = ClaudeLogProcessor::new();
+        let patches = normalize_helper(&mut processor, &parsed, "/tmp");
+        assert!(patches.is_empty());
+    }
+
+    #[test]
+    fn test_tool_progress_with_subagent_type() {
+        let tool_progress_json = r#"{"type":"tool_progress","tool_use_id":"toolu_task123","tool_name":"Task","elapsed_time_seconds":90,"task_id":"task-abc","subagent_type":"explore","session_id":"sess-456"}"#;
+        let parsed: ClaudeJson = serde_json::from_str(tool_progress_json).unwrap();
+
+        if let ClaudeJson::ToolProgress {
+            tool_name,
+            task_id,
+            subagent_type,
+            elapsed_time_seconds,
+            ..
+        } = parsed
+        {
+            assert_eq!(tool_name.as_deref(), Some("Task"));
+            assert_eq!(task_id.as_deref(), Some("task-abc"));
+            assert_eq!(subagent_type.as_deref(), Some("explore"));
+            assert_eq!(elapsed_time_seconds, Some(90.0));
+        } else {
+            panic!("Expected ToolProgress variant");
+        }
     }
 }

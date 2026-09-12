@@ -12,6 +12,7 @@ use cluster_protocol::{
     CodexRolloutArtifact, CodexRolloutManifest, CodexRolloutManifestEntry, CodexRolloutStageResult,
     CodexRolloutVerification,
 };
+use codex_protocol::{models::ResponseItem, protocol::RolloutItem};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -465,6 +466,58 @@ impl CodexRolloutStore {
         Ok(())
     }
 
+    /// Check whether a rollout file exists locally for the given thread ID.
+    /// This is a lightweight check that scans the sessions directory without
+    /// reading file contents or validating metadata.
+    pub fn thread_rollout_exists(&self, thread_id: Uuid) -> bool {
+        self.find_rollout_path(thread_id).is_some()
+    }
+
+    /// Find the rollout file path for a given thread ID, if it exists.
+    pub fn find_rollout_path(&self, thread_id: Uuid) -> Option<PathBuf> {
+        let mut stack = vec![self.sessions_root.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(ty) = entry.file_type() else {
+                    continue;
+                };
+                if ty.is_symlink() {
+                    continue;
+                }
+                if ty.is_dir() {
+                    stack.push(entry.path());
+                    continue;
+                }
+                if !ty.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if rollout_id_from_name(&name) == Some(thread_id) {
+                    return Some(entry.path());
+                }
+            }
+        }
+        None
+    }
+
+    /// Read the rollout JSONL file and extract ResponseItem entries.
+    /// These can be passed to thread/resume's history parameter to bypass
+    /// Codex's internal disk read, which fails for paginated threads
+    /// without a history_base.
+    pub fn read_rollout_history(
+        &self,
+        thread_id: Uuid,
+    ) -> Result<Vec<ResponseItem>, RolloutTransferError> {
+        let path = self
+            .find_rollout_path(thread_id)
+            .ok_or(RolloutTransferError::Missing(thread_id))?;
+        read_response_items_from_rollout(&path)
+    }
+
     fn index_rollouts(&self) -> Result<HashMap<Uuid, PathBuf>, RolloutTransferError> {
         let mut index = HashMap::new();
         let mut stack = vec![self.sessions_root.clone()];
@@ -526,6 +579,47 @@ impl CodexRolloutStore {
         validate_relative(relative)?;
         Ok(self.sessions_root.join(relative))
     }
+}
+
+/// Read a rollout JSONL file and extract all ResponseItem entries.
+///
+/// JSONL rollout files contain one JSON object per line. Each line is a
+/// `RolloutItem`, which can be a `ResponseItem`, `EventMsg`, `SessionMeta`, etc.
+/// This function extracts only the `ResponseItem` variants, which represent
+/// the model-visible conversation history.
+fn read_response_items_from_rollout(
+    path: &Path,
+) -> Result<Vec<ResponseItem>, RolloutTransferError> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut items = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Parse each line as a RolloutItem
+        match serde_json::from_str::<RolloutItem>(&line) {
+            Ok(RolloutItem::ResponseItem(item)) => {
+                items.push(item);
+            }
+            Ok(_) => {
+                // Other RolloutItem variants (EventMsg, SessionMeta, etc.)
+                // are not part of the model-visible history
+            }
+            Err(err) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %err,
+                    "skipping unparseable rollout line"
+                );
+            }
+        }
+    }
+
+    Ok(items)
 }
 
 #[cfg(unix)]
@@ -981,5 +1075,133 @@ mod tests {
             ),
             Err(RolloutTransferError::FileTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn thread_rollout_exists_finds_existing_and_rejects_missing() {
+        let source = TempDir::new().unwrap();
+        let existing = Uuid::new_v4();
+        let missing = Uuid::new_v4();
+        rollout(source.path(), existing, None, "{}");
+        let store = CodexRolloutStore::new(source.path()).unwrap();
+
+        assert!(
+            store.thread_rollout_exists(existing),
+            "should find existing rollout"
+        );
+        assert!(
+            !store.thread_rollout_exists(missing),
+            "should not find missing rollout"
+        );
+    }
+
+    #[test]
+    fn read_rollout_history_extracts_response_items() {
+        let source = TempDir::new().unwrap();
+        let thread_id = Uuid::new_v4();
+
+        // RolloutItem uses serde(tag = "type", content = "payload", rename_all = "snake_case")
+        // So RolloutItem::ResponseItem(item) becomes {"type": "response_item", "payload": item}
+
+        // Session meta (not a ResponseItem, should be skipped)
+        let session_meta = serde_json::json!({
+            "type": "session_meta",
+            "payload": {"id": thread_id, "timestamp": "2026-08-06T00:00:00Z"}
+        });
+
+        // A ResponseItem::Message (user message) wrapped in RolloutItem::ResponseItem
+        let user_message = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg_001",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Hello, Codex!"}]
+            }
+        });
+
+        // An EventMsg (not a ResponseItem, should be skipped)
+        let event_msg = serde_json::json!({
+            "type": "event_msg",
+            "payload": {"type": "turn_started", "turn_id": "turn_001"}
+        });
+
+        // Another ResponseItem::Message (assistant message) wrapped in RolloutItem::ResponseItem
+        let assistant_message = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg_002",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hello! How can I help?"}]
+            }
+        });
+
+        let dir = source.path().join("sessions/2026/08/06");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("rollout-2026-08-06T00-00-00-{thread_id}.jsonl"));
+        let content = format!(
+            "{}\n{}\n{}\n{}\n",
+            session_meta, user_message, event_msg, assistant_message
+        );
+        fs::write(&path, content).unwrap();
+
+        let store = CodexRolloutStore::new(source.path()).unwrap();
+        let history = store.read_rollout_history(thread_id).unwrap();
+
+        // Should extract only the ResponseItem entries (2 messages)
+        assert_eq!(
+            history.len(),
+            2,
+            "should extract exactly 2 ResponseItem entries"
+        );
+
+        // Verify the extracted items are Message variants
+        assert!(
+            matches!(&history[0], ResponseItem::Message { role, .. } if role == "user"),
+            "first item should be user message"
+        );
+        assert!(
+            matches!(&history[1], ResponseItem::Message { role, .. } if role == "assistant"),
+            "second item should be assistant message"
+        );
+    }
+
+    #[test]
+    fn read_rollout_history_handles_missing_thread() {
+        let source = TempDir::new().unwrap();
+        let missing = Uuid::new_v4();
+        let store = CodexRolloutStore::new(source.path()).unwrap();
+
+        assert!(matches!(
+            store.read_rollout_history(missing),
+            Err(RolloutTransferError::Missing(_))
+        ));
+    }
+
+    #[test]
+    fn read_rollout_history_handles_empty_rollout() {
+        let source = TempDir::new().unwrap();
+        let thread_id = Uuid::new_v4();
+
+        // Create a rollout with only session meta (no ResponseItem entries)
+        let session_meta = serde_json::json!({
+            "timestamp": "2026-08-06T00:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": thread_id}
+        });
+
+        let dir = source.path().join("sessions/2026/08/06");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("rollout-2026-08-06T00-00-00-{thread_id}.jsonl"));
+        fs::write(&path, format!("{session_meta}\n")).unwrap();
+
+        let store = CodexRolloutStore::new(source.path()).unwrap();
+        let history = store.read_rollout_history(thread_id).unwrap();
+
+        assert!(
+            history.is_empty(),
+            "should return empty history for rollout without ResponseItems"
+        );
     }
 }

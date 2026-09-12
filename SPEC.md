@@ -36,7 +36,6 @@ in-turn background work.
 - Vibe Kanban source only. No other service or deployment changes are needed
   unless investigation proves that `modules/vibe-kanban-rebuild.nix` owns the
   faulty lifecycle; such a finding must be documented before editing it.
-
 ## Required behavior
 
 1. Every parsed Claude control request is either answered successfully while
@@ -80,7 +79,6 @@ in-turn background work.
   not regress.
 - New regression coverage fails against the faulty lifecycle and passes with
   the correction.
-
 ## Non-goals
 
 - Allowing Claude's native background Bash or polling tools.

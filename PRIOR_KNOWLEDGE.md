@@ -4,7 +4,6 @@
 
 The project knowledge base was searched for Claude hooks, background Bash,
 pollers, control requests, stream closure, and executor process lifecycle.
-
 ## Directly relevant knowledge
 
 ### `wiki/vk-pollers.md`
@@ -36,7 +35,6 @@ pollers, control requests, stream closure, and executor process lifecycle.
   silently discarding protocol obligations.
 
 ### `docs/knowledge-base/authoritative-snapshot-stream-handoffs.md`
-
 - A stream consumer must establish authoritative state before relying on the
   incremental tail, and ownership transfer must avoid gaps. Applied here, the
   protocol reader must retain ownership until requests accepted from the stream

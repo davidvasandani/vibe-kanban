@@ -27,6 +27,8 @@
         "reposDesc": "Repository scripts and configuration",
         "agents": "Agents",
         "agentsDesc": "Coding agent configurations",
+        "skills": "Skills",
+        "skillsDesc": "Shared agent skills and proposals",
         "mcp": "MCP Servers",
         "mcpDesc": "Model Context Protocol servers",
         "cli-tools": "CLI Tools",
@@ -69,6 +71,27 @@
       "load": "Load",
       "drain": "Drain",
       "resume": "Resume scheduling"
+    },
+    "skills": {
+      "title": "Skills",
+      "description": "Create and maintain shared agent skills. Changes open a pull request against {{baseBranch}} and become active only after review, merge, and deployment.",
+      "loading": "Loading managed skills…",
+      "unavailable": "Git-backed skill management is not configured on this machine.",
+      "add": "Add skill",
+      "delete": "Delete skill",
+      "untitled": "Untitled skill",
+      "empty": "Add a skill to begin.",
+      "fields": {
+        "name": "Name",
+        "description": "Description and trigger guidance",
+        "instructions": "Instructions (Markdown)"
+      },
+      "proposal": {
+        "title": "Propose changes",
+        "description": "Vibe Kanban validates the complete catalog and opens a reviewable GitHub pull request. The active agent catalog is never edited in place.",
+        "submit": "Open pull request ({{count}} changes)",
+        "open": "Open pull request"
+      }
     },
     "general": {
       "loading": "Loading settings...",

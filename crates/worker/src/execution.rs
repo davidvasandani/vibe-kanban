@@ -21,7 +21,9 @@ use executors::{
     actions::{Executable, ExecutorAction, ExecutorActionType},
     env::{ExecutionEnv, RepoContext},
     executors::{BaseCodingAgent, CodingAgent, ExecutorExitResult, StandardCodingAgentExecutor},
-    mcp_config::write_coding_agent_mcp_servers_to_path,
+    mcp_config::{
+        CodexConfigMode, write_coding_agent_mcp_servers_to_path, write_scoped_codex_config,
+    },
     mcp_refresh::McpRefreshHandle,
     profile::{ExecutorConfig, ExecutorProfile},
 };
@@ -83,6 +85,8 @@ pub enum ExecutionError {
     InvalidMcpSnapshot { executor: String },
     #[error("failed to materialize MCP configuration for executor {executor}")]
     McpMaterialization { executor: String },
+    #[error("execution {execution_id} Codex configuration: {stage}")]
+    CodexConfig { execution_id: Uuid, stage: String },
     #[error("Codex MCP status is unavailable")]
     McpReload,
     #[error("working directory resolves outside its authorized workspace")]
@@ -106,6 +110,10 @@ pub struct ExecutionSupervisor {
     path_authority: PathAuthority,
     mcp_config_root: PathBuf,
     coordinator_url: reqwest::Url,
+    #[cfg(test)]
+    codex_source: Option<PathBuf>,
+    #[cfg(test)]
+    codex_command: Option<PathBuf>,
     jobs: Arc<RwLock<HashMap<Uuid, Arc<WorkerJob>>>>,
     journal_capacity: usize,
     recovery_store: Option<RecoveryStore>,
@@ -326,6 +334,10 @@ impl ExecutionSupervisor {
             path_authority,
             mcp_config_root,
             coordinator_url: reqwest::Url::parse("http://127.0.0.1:3334").unwrap(),
+            #[cfg(test)]
+            codex_source: None,
+            #[cfg(test)]
+            codex_command: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             journal_capacity,
             recovery_store: None,
@@ -373,6 +385,10 @@ impl ExecutionSupervisor {
             path_authority,
             mcp_config_root,
             coordinator_url,
+            #[cfg(test)]
+            codex_source: None,
+            #[cfg(test)]
+            codex_command: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             journal_capacity: DEFAULT_JOURNAL_CAPACITY,
             recovery_store: Some(recovery_store.clone()),
@@ -449,31 +465,96 @@ impl ExecutionSupervisor {
         let workspace_path = self
             .path_authority
             .authorize_workspace_path(&dispatch.workspace_path)?;
-        let working_directory = authorize_working_directory(
+        let mut working_directory = authorize_working_directory(
             &workspace_path,
             &dispatch.working_directory,
             &self.path_authority,
         )?;
-        let action: WorkerAction = serde_json::from_value(dispatch.action.clone())?;
-        // Refuse at admission rather than inside the turn: a malformed profile
-        // would otherwise fail at spawn, after the job record exists and the
-        // user is waiting on an agent that was never going to start.
-        let executor_profile: Option<ExecutorProfile> = dispatch
+        let repo_context_directory = working_directory.clone();
+        let mut action: WorkerAction = serde_json::from_value(dispatch.action.clone())?;
+        // Resolve malformed Codex profiles before acceptance without echoing values.
+        let codex_config = executor_config_for_action(&action)
+            .filter(|config| config.executor == BaseCodingAgent::Codex)
+            .cloned();
+        let mut executor_profile: Option<ExecutorProfile> = dispatch
             .executor_profile_config
             .clone()
             .map(serde_json::from_value)
-            .transpose()?;
-        let prepared_mcp = match &dispatch.mcp_config_snapshot {
-            Some(snapshot) => Some(
-                self.prepare_mcp_snapshot(
+            .transpose()
+            .map_err(|error| {
+                if codex_config.is_some() {
+                    ExecutionError::CodexConfig {
+                        execution_id: dispatch.execution_id,
+                        stage: "profile parse failed".into(),
+                    }
+                } else {
+                    ExecutionError::InvalidAction(error)
+                }
+            })?;
+        let prepared_mcp = if let Some(config) = codex_config {
+            let failure = |stage: &str| ExecutionError::CodexConfig {
+                execution_id: dispatch.execution_id,
+                stage: stage.into(),
+            };
+            let agent = ExecutionEnv::new(RepoContext::default(), false, String::new())
+                .with_executor_profile(executor_profile.clone())
+                .resolve_coding_agent(&config)
+                .map_err(|_| failure("profile resolution failed"))?;
+            if !matches!(agent, CodingAgent::Codex(_)) {
+                return Err(failure("profile executor mismatch"));
+            }
+            working_directory = authorize_codex_action_directory(
+                &mut action,
+                &working_directory,
+                &workspace_path,
+                &self.path_authority,
+            )?;
+            let source = agent
+                .default_mcp_config_path()
+                .ok_or_else(|| failure("source path resolution failed"))?;
+            #[cfg(test)]
+            let source = self.codex_source.clone().unwrap_or(source);
+            #[cfg(test)]
+            let agent = {
+                let mut agent = agent;
+                if let (Some(command), CodingAgent::Codex(codex)) =
+                    (&self.codex_command, &mut agent)
+                {
+                    codex.cmd.base_command_override = Some(command.to_str().unwrap().into());
+                }
+                agent
+            };
+            let prepared = self
+                .prepare_codex_config(
                     dispatch.execution_id,
-                    &action,
-                    executor_profile.as_ref(),
-                    snapshot,
+                    agent,
+                    &source,
+                    &working_directory,
+                    dispatch.mcp_config_snapshot.as_ref(),
                 )
-                .await?,
-            ),
-            None => None,
+                .await?;
+            executor_profile = Some(ExecutorProfile {
+                recently_used_models: executor_profile
+                    .and_then(|profile| profile.recently_used_models),
+                configurations: HashMap::from([(
+                    config.variant.unwrap_or_else(|| "DEFAULT".into()),
+                    prepared.agent.clone(),
+                )]),
+            });
+            Some(prepared)
+        } else {
+            match &dispatch.mcp_config_snapshot {
+                Some(snapshot) => Some(
+                    self.prepare_mcp_snapshot(
+                        dispatch.execution_id,
+                        &action,
+                        executor_profile.as_ref(),
+                        snapshot,
+                    )
+                    .await?,
+                ),
+                None => None,
+            }
         };
         if matches!(&action, WorkerAction::Command(action) if action.program.trim().is_empty()) {
             return Err(ExecutionError::EmptyProgram);
@@ -512,7 +593,7 @@ impl ExecutionSupervisor {
         tokio::spawn(run_job(
             job.clone(),
             action,
-            working_directory,
+            (working_directory, repo_context_directory),
             dispatch.environment,
             executor_profile,
             prepared_mcp,
@@ -525,6 +606,79 @@ impl ExecutionSupervisor {
             state: JobState::Accepted,
             last_sequence: 1,
         })
+    }
+
+    async fn prepare_codex_config(
+        &self,
+        execution_id: Uuid,
+        mut agent: CodingAgent,
+        source_config: &Path,
+        working_directory: &Path,
+        snapshot: Option<&McpConfigSnapshot>,
+    ) -> Result<PreparedMcpConfig, ExecutionError> {
+        let failure = |stage: &str| ExecutionError::CodexConfig {
+            execution_id,
+            stage: stage.into(),
+        };
+        if let Some(snapshot) = snapshot
+            && (snapshot.validate_size().is_err()
+                || snapshot.executor != BaseCodingAgent::Codex.to_string())
+        {
+            return Err(ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            });
+        }
+        working_directory
+            .to_str()
+            .ok_or_else(|| failure("trust update failed; non-UTF-8 directory"))?;
+        let execution_root = self.mcp_config_root.join(execution_id.to_string());
+        let scoped_home = execution_root.join("codex");
+        let home = scoped_home
+            .to_str()
+            .ok_or_else(|| failure("scoped-home preparation failed; non-UTF-8 path"))?
+            .to_owned();
+        let CodingAgent::Codex(codex) = &mut agent else {
+            return Err(failure("profile executor mismatch"));
+        };
+        codex
+            .cmd
+            .env
+            .get_or_insert_with(HashMap::new)
+            .insert("CODEX_HOME".into(), home.clone());
+        match std::fs::remove_dir_all(&execution_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(failure("scoped-home preparation failed")),
+        }
+        // Own cleanup before the first fallible overlay operation.
+        let prepared = PreparedMcpConfig {
+            execution_root,
+            target_config: scoped_home.join("config.toml"),
+            environment: BTreeMap::from([("CODEX_HOME".into(), home)]),
+            agent,
+        };
+        let source_home = source_config
+            .parent()
+            .ok_or_else(|| failure("source path resolution failed"))?;
+        // A fresh Codex home has no sessions directory for the overlay to link.
+        // Create the persistent owner first so rollouts written by this execution
+        // survive disposal of the scoped home and remain available to follow-ups.
+        std::fs::create_dir_all(source_home.join("sessions"))
+            .map_err(|_| failure("session storage preparation failed"))?;
+        prepare_scoped_home(source_home, &scoped_home, Path::new("config.toml"))
+            .map_err(|_| failure("scoped-home preparation failed"))?;
+        let servers = snapshot.map(|snapshot| runtime_mcp_servers(snapshot, &self.coordinator_url));
+        write_scoped_codex_config(
+            source_config,
+            &prepared.target_config,
+            CodexConfigMode::Initial {
+                authorized_directory: working_directory,
+            },
+            servers.as_ref(),
+        )
+        .await
+        .map_err(|error| failure(&error.to_string()))?;
+        Ok(prepared)
     }
 
     async fn prepare_mcp_snapshot(
@@ -562,42 +716,21 @@ impl ExecutionSupervisor {
                     executor: snapshot.executor.clone(),
                 })?;
         let execution_root = self.mcp_config_root.join(execution_id.to_string());
+        let source_home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+            ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            }
+        })?;
         let (source_home, scoped_home, target_relative, environment) =
-            if config.executor == BaseCodingAgent::Codex {
-                let source_home =
-                    source_config
-                        .parent()
-                        .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
-                            executor: snapshot.executor.clone(),
-                        })?;
-                let scoped_home = execution_root.join("codex");
-                let target_relative = PathBuf::from("config.toml");
-                let environment = std::collections::BTreeMap::from([(
-                    "CODEX_HOME".into(),
-                    scoped_home.to_string_lossy().into_owned(),
-                )]);
-                (
-                    source_home.to_path_buf(),
-                    scoped_home,
-                    target_relative,
-                    environment,
-                )
-            } else {
-                let source_home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
-                    ExecutionError::InvalidMcpSnapshot {
-                        executor: snapshot.executor.clone(),
-                    }
-                })?;
-                non_codex_scoped_config_layout(
-                    &source_config,
-                    source_home,
-                    std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-                    &execution_root,
-                )
-                .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
-                    executor: snapshot.executor.clone(),
-                })?
-            };
+            non_codex_scoped_config_layout(
+                &source_config,
+                source_home,
+                std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+                &execution_root,
+            )
+            .ok_or_else(|| ExecutionError::InvalidMcpSnapshot {
+                executor: snapshot.executor.clone(),
+            })?;
         match std::fs::remove_dir_all(&execution_root) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -678,10 +811,21 @@ impl ExecutionSupervisor {
             (prepared.agent.clone(), prepared.target_config.clone())
         };
         let servers = runtime_mcp_servers(snapshot, &self.coordinator_url);
-        if write_coding_agent_mcp_servers_to_path(&agent, &target_config, &target_config, &servers)
+        let write_result = if matches!(agent, CodingAgent::Codex(_)) {
+            write_scoped_codex_config(
+                &target_config,
+                &target_config,
+                CodexConfigMode::Refresh,
+                Some(&servers),
+            )
             .await
-            .is_err()
-        {
+            .map_err(|error| error.to_string())
+        } else {
+            write_coding_agent_mcp_servers_to_path(&agent, &target_config, &target_config, &servers)
+                .await
+                .map_err(|error| error.to_string())
+        };
+        if write_result.is_err() {
             return Ok(WorkerMcpRefreshResult {
                 status: WorkerMcpRefreshStatus::MaterializationFailed,
                 servers: Vec::new(),
@@ -1023,12 +1167,13 @@ impl WorkerJob {
 async fn run_job(
     job: Arc<WorkerJob>,
     action: WorkerAction,
-    working_directory: PathBuf,
+    directories: (PathBuf, PathBuf),
     mut environment: std::collections::BTreeMap<String, String>,
     executor_profile: Option<ExecutorProfile>,
     prepared_mcp: Option<PreparedMcpConfig>,
     timeout_seconds: Option<u64>,
 ) {
+    let (working_directory, repo_context_directory) = directories;
     set_state(&job, JobState::Starting, ExecutionEventPayload::Starting).await;
     prepend_workspace_gobin_to_path(&mut environment);
     let inherited_path = environment
@@ -1061,11 +1206,11 @@ async fn run_job(
             // Admission already proved this workspace is enumerable and its
             // worktrees usable, so an error here is a race, not a state worth
             // failing the spawn over.
-            let repo_names = discover_repo_names(&working_directory)
+            let repo_names = discover_repo_names(&repo_context_directory)
                 .await
                 .unwrap_or_default();
             let mut env = ExecutionEnv::new(
-                RepoContext::new(working_directory.clone(), repo_names),
+                RepoContext::new(repo_context_directory, repo_names),
                 false,
                 String::new(),
             )
@@ -1340,6 +1485,8 @@ async fn set_state(job: &WorkerJob, state: JobState, payload: ExecutionEventPayl
 }
 
 async fn finish_status(job: &WorkerJob, status: ExitStatus) {
+    // Serialize terminal cleanup with publication/reload for this execution.
+    let _claim = job.mcp_refresh_claim.lock().await;
     let terminal_state = if job.state().await == JobState::Cancelling {
         TerminalState::Killed
     } else if status.success() {
@@ -1362,6 +1509,8 @@ async fn finish_status(job: &WorkerJob, status: ExitStatus) {
 }
 
 async fn finish_executor_result(job: &WorkerJob, result: ExecutorExitResult) {
+    // Serialize terminal cleanup with publication/reload for this execution.
+    let _claim = job.mcp_refresh_claim.lock().await;
     let terminal_state = executor_terminal_state(&job.state().await, result);
     let exit_code = match terminal_state {
         TerminalState::Completed => Some(0),
@@ -1394,6 +1543,8 @@ fn executor_terminal_state(current: &JobState, result: ExecutorExitResult) -> Te
 }
 
 async fn finish_failed(job: &WorkerJob, exit_code: Option<i32>, reason: String) {
+    // Serialize terminal cleanup with publication/reload for this execution.
+    let _claim = job.mcp_refresh_claim.lock().await;
     let _ = job.journal.lock().await.append(
         SystemTime::now(),
         ExecutionEventPayload::Structured {
@@ -1422,6 +1573,35 @@ fn terminal_evidence(
         signal,
         observed_at: Utc::now(),
     }
+}
+
+fn authorize_codex_action_directory(
+    action: &mut WorkerAction,
+    base: &Path,
+    workspace: &Path,
+    authority: &PathAuthority,
+) -> Result<PathBuf, ExecutionError> {
+    let WorkerAction::Executor(action) = action else {
+        unreachable!("Codex action")
+    };
+    let (effective, offset) = match &mut action.typ {
+        ExecutorActionType::CodingAgentInitialRequest(request) => {
+            (request.effective_dir(base), &mut request.working_dir)
+        }
+        ExecutorActionType::CodingAgentFollowUpRequest(request) => {
+            (request.effective_dir(base), &mut request.working_dir)
+        }
+        ExecutorActionType::ReviewRequest(request) => {
+            (request.effective_dir(base), &mut request.working_dir)
+        }
+        ExecutorActionType::ScriptRequest(_) => unreachable!("Codex action"),
+    };
+    let canonical = authority.authorize_workspace_path(&effective)?;
+    if !canonical.starts_with(workspace) {
+        return Err(ExecutionError::WorkingDirectoryOutsideWorkspace);
+    }
+    *offset = None;
+    Ok(canonical)
 }
 
 fn authorize_working_directory(
@@ -1471,6 +1651,396 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    fn codex_request(workspace: &Path, kind: &str, offset: &str) -> ExecutionDispatch {
+        let mut request = dispatch(workspace, "codex-fixture", "unused");
+        request.action = json!({"typ": {
+            "type": kind, "prompt": "fixture-context", "session_id": "fixture-session",
+            "executor_config": {"executor": "CODEX"}, "working_dir": offset
+        }, "next_action": null});
+        request
+    }
+
+    // The real Codex spawn path invokes this harmless child via its test binary.
+    #[tokio::test]
+    async fn codex_fake_child() {
+        let Ok(marker) = std::env::var("F558_MARKER") else {
+            return;
+        };
+        let home = PathBuf::from(std::env::var("CODEX_HOME").unwrap());
+        assert_eq!(home, PathBuf::from(std::env::var("EXPECTED_HOME").unwrap()));
+        let agent: CodingAgent = serde_json::from_value(json!({"CODEX": {}})).unwrap();
+        let config = executors::mcp_config::read_agent_config(
+            &home.join("config.toml"),
+            &agent.get_mcp_config(),
+        )
+        .await
+        .unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            config["projects"],
+            json!({cwd.to_str().unwrap(): {"trust_level": "trusted"}})
+        );
+        let expected: Vec<String> = std::env::var("EXPECTED_SERVERS")
+            .unwrap()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            config["mcp_servers"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let mut marker = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(marker)
+            .unwrap();
+        std::io::Write::write_all(&mut marker, cwd.to_str().unwrap().as_bytes()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_launch_matrix_reads_trust_at_actual_child_boundary() {
+        // Deployments deliberately ignore profile command overrides. Isolate
+        // this fixture process so it can never invoke the deployed vendor CLI.
+        if std::env::var_os("VIBE_CODEX_COMMAND").is_some() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "execution::tests::codex_launch_matrix_reads_trust_at_actual_child_boundary",
+                    "--nocapture",
+                ])
+                .env_remove("VIBE_CODEX_COMMAND")
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        for kind in [
+            "CodingAgentInitialRequest",
+            "CodingAgentFollowUpRequest",
+            "ReviewRequest",
+        ] {
+            for snapshot_kind in ["absent", "empty", "present"] {
+                let local_profile = false;
+                let (temp, mut supervisor, workspace) = fixture();
+                let repo = workspace.join("repo");
+                fs::create_dir(&repo).unwrap();
+                let source = temp.path().join("source/config.toml");
+                fs::create_dir(source.parent().unwrap()).unwrap();
+                let original = "model = 'keep'\n[mcp_servers.original]\ncommand = 'unused'\n";
+                fs::write(&source, original).unwrap();
+                supervisor.codex_source = Some(source.clone());
+                let marker = temp.path().join("started");
+                let fake = temp.path().join("fake-codex");
+                fs::write(
+                    &fake,
+                    "#!/bin/sh\n\
+                     test \"$CODEX_HOME\" = \"$EXPECTED_HOME\" || exit 41\n\
+                     grep -F \"[projects.\\\"$PWD\\\"]\" \"$CODEX_HOME/config.toml\" >/dev/null || exit 42\n\
+                     grep -F 'trust_level = \"trusted\"' \"$CODEX_HOME/config.toml\" >/dev/null || exit 43\n\
+                     printf %s \"$PWD\" > \"$F558_MARKER\"\n",
+                )
+                .unwrap();
+                fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+                let mut request = codex_request(
+                    &workspace,
+                    kind,
+                    repo.file_name().unwrap().to_str().unwrap(),
+                );
+                let profile = json!({"DEFAULT": {"CODEX": {"base_command_override": fake,
+                    "env": {"CODEX_HOME": "/wrong/profile"}}}});
+                if local_profile {
+                    supervisor.codex_command = Some(fake.clone());
+                } else {
+                    request.executor_profile_config = Some(profile.clone());
+                }
+                let expected = match snapshot_kind {
+                    "absent" => "original",
+                    "empty" => "",
+                    _ => "replacement",
+                };
+                if snapshot_kind != "absent" {
+                    request.mcp_config_snapshot = Some(McpConfigSnapshot {
+                        executor: "CODEX".into(),
+                        servers: if snapshot_kind == "empty" {
+                            BTreeMap::new()
+                        } else {
+                            BTreeMap::from([("replacement".into(), json!({"command": "unused"}))])
+                        },
+                    });
+                }
+                let execution_root = supervisor
+                    .mcp_config_root
+                    .join(request.execution_id.to_string());
+                request.environment = BTreeMap::from([
+                    ("CODEX_HOME".into(), "/wrong/dispatch".into()),
+                    (
+                        "EXPECTED_HOME".into(),
+                        execution_root.join("codex").to_str().unwrap().into(),
+                    ),
+                    ("EXPECTED_SERVERS".into(), expected.into()),
+                    ("F558_MARKER".into(), marker.to_str().unwrap().into()),
+                ]);
+                let id = request.execution_id;
+                let first = supervisor.dispatch(request.clone()).await.unwrap();
+                let replay = supervisor.dispatch(request.clone()).await.unwrap();
+                assert_eq!(first.worker_job_id, replay.worker_job_id);
+                let mut conflict = request;
+                conflict.request_digest = "changed-snapshot-and-action".into();
+                conflict.action["typ"]["working_dir"] = json!(".");
+                conflict.mcp_config_snapshot = Some(McpConfigSnapshot {
+                    executor: "CODEX".into(),
+                    servers: BTreeMap::new(),
+                });
+                assert!(matches!(
+                    supervisor.dispatch(conflict).await,
+                    Err(ExecutionError::DigestConflict { .. })
+                ));
+                wait_terminal(&supervisor, id).await;
+                assert!(
+                    marker.exists(),
+                    "{kind}/{snapshot_kind}/local={local_profile}: {:?}",
+                    supervisor.events(id, 0).await.unwrap()
+                );
+                assert_eq!(fs::read_to_string(&marker).unwrap(), repo.to_str().unwrap());
+                assert_eq!(fs::read_to_string(source).unwrap(), original);
+                assert_eq!(
+                    profile["DEFAULT"]["CODEX"]["env"]["CODEX_HOME"],
+                    "/wrong/profile"
+                );
+                assert!(!execution_root.exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_offsets_and_failures_reject_before_acceptance() {
+        use std::os::unix::fs::symlink;
+        for kind in [
+            "CodingAgentInitialRequest",
+            "CodingAgentFollowUpRequest",
+            "ReviewRequest",
+        ] {
+            let (temp, mut supervisor, workspace) = fixture();
+            let source = temp.path().join("source/config.toml");
+            fs::create_dir(source.parent().unwrap()).unwrap();
+            supervisor.codex_source = Some(source.clone());
+            let sibling = workspace.parent().unwrap().join("sibling");
+            fs::create_dir(&sibling).unwrap();
+            symlink(&sibling, workspace.join("escape")).unwrap();
+            fs::create_dir(workspace.join("repo")).unwrap();
+            symlink(workspace.join("repo"), workspace.join("alias")).unwrap();
+            for offset in [".", "repo/../repo", "alias"] {
+                let request = codex_request(&workspace, kind, offset);
+                let mut action: WorkerAction = serde_json::from_value(request.action).unwrap();
+                let directory = authorize_codex_action_directory(
+                    &mut action,
+                    &workspace,
+                    &workspace,
+                    &supervisor.path_authority,
+                )
+                .unwrap();
+                assert_eq!(
+                    directory,
+                    if offset == "." {
+                        workspace.clone()
+                    } else {
+                        workspace.join("repo")
+                    }
+                );
+                let WorkerAction::Executor(action) = action else {
+                    unreachable!()
+                };
+                let value = serde_json::to_value(action).unwrap();
+                assert!(value["typ"]["working_dir"].is_null());
+                assert_eq!(value["typ"]["prompt"], "fixture-context");
+            }
+            for offset in ["../sibling", "escape"] {
+                let request = codex_request(&workspace, kind, offset);
+                let id = request.execution_id;
+                assert!(supervisor.dispatch(request).await.is_err());
+                assert!(supervisor.job(id).await.is_none());
+                assert!(!supervisor.mcp_config_root.join(id.to_string()).exists());
+            }
+            for content in ["secret = 'SENTINEL", "projects = 'SENTINEL'"] {
+                fs::write(&source, content).unwrap();
+                let request = codex_request(&workspace, kind, "repo");
+                let id = request.execution_id;
+                let error = supervisor.dispatch(request).await.unwrap_err();
+                assert!(matches!(error, ExecutionError::CodexConfig { .. }));
+                assert!(!error.to_string().contains("SENTINEL"));
+                assert!(supervisor.job(id).await.is_none());
+                assert!(!supervisor.mcp_config_root.join(id.to_string()).exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_scoped_homes_are_private_and_failure_cleanup_is_owned() {
+        use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
+        let (temp, supervisor, workspace) = fixture();
+        let source = temp.path().join("source/config.toml");
+        let agent: CodingAgent = serde_json::from_value(json!({"CODEX": {}})).unwrap();
+        // Missing source and absent snapshot are valid, including the selected root.
+        let first = supervisor
+            .prepare_codex_config(Uuid::new_v4(), agent.clone(), &source, &workspace, None)
+            .await
+            .unwrap();
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, "").unwrap();
+        let repo = workspace.join("repo");
+        fs::create_dir(&repo).unwrap();
+        let second = supervisor
+            .prepare_codex_config(Uuid::new_v4(), agent.clone(), &source, &repo, None)
+            .await
+            .unwrap();
+        for (prepared, expected, absent) in
+            [(&first, &workspace, &repo), (&second, &repo, &workspace)]
+        {
+            // Parse via the executor's native reader, retaining exact keys.
+            let config = fs::read_to_string(&prepared.target_config).unwrap();
+            assert!(config.contains(expected.to_str().unwrap()));
+            if expected == &repo {
+                assert!(!config.contains(&format!("projects.\"{}\"]", absent.display())));
+            }
+            assert!(
+                !fs::symlink_metadata(&prepared.target_config)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(
+                fs::metadata(prepared.target_config.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert!(
+                fs::symlink_metadata(prepared.target_config.parent().unwrap().join("sessions"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+        fs::write(
+            second
+                .target_config
+                .parent()
+                .unwrap()
+                .join("sessions/rollout.jsonl"),
+            "persistent-session",
+        )
+        .unwrap();
+        let second_root = second.execution_root.clone();
+        drop(second);
+        assert!(!second_root.exists());
+        assert_eq!(
+            fs::read_to_string(source.parent().unwrap().join("sessions/rollout.jsonl")).unwrap(),
+            "persistent-session"
+        );
+        fs::remove_file(source.parent().unwrap().join("sessions/rollout.jsonl")).unwrap();
+        fs::remove_dir(source.parent().unwrap().join("sessions")).unwrap();
+        assert!(first.target_config.exists());
+        for stage in ["read", "preparation", "serialization", "write"] {
+            let id = Uuid::new_v4();
+            let mut snapshot = None;
+            let staged = source
+                .parent()
+                .unwrap()
+                .join(format!(".config.toml.{}.tmp", std::process::id()));
+            match stage {
+                "read" => {
+                    fs::remove_file(&source).unwrap();
+                    fs::create_dir(&source).unwrap();
+                }
+                "preparation" => {
+                    fs::remove_dir_all(source.parent().unwrap()).unwrap();
+                    fs::write(source.parent().unwrap(), "SENTINEL").unwrap();
+                }
+                "serialization" => {
+                    fs::remove_file(source.parent().unwrap()).unwrap();
+                    fs::create_dir(source.parent().unwrap()).unwrap();
+                    fs::write(&source, "").unwrap();
+                    snapshot = Some(McpConfigSnapshot {
+                        executor: "CODEX".into(),
+                        servers: BTreeMap::from([("invalid".into(), json!(null))]),
+                    });
+                }
+                "write" => {
+                    fs::create_dir(&staged).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let result = supervisor
+                .prepare_codex_config(id, agent.clone(), &source, &repo, snapshot.as_ref())
+                .await;
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("expected {stage} failure"),
+            };
+            assert!(!error.to_string().contains("SENTINEL"));
+            assert!(!supervisor.mcp_config_root.join(id.to_string()).exists());
+            assert!(first.target_config.exists());
+        }
+        let invalid = PathBuf::from(std::ffi::OsString::from_vec(b"/invalid/\xff".to_vec()));
+        assert!(
+            supervisor
+                .prepare_codex_config(Uuid::new_v4(), agent.clone(), &source, &invalid, None)
+                .await
+                .is_err()
+        );
+        let mut invalid_supervisor = supervisor.clone();
+        invalid_supervisor.mcp_config_root = invalid;
+        assert!(
+            invalid_supervisor
+                .prepare_codex_config(Uuid::new_v4(), agent, &source, &repo, None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_invalid_profile_and_snapshot_fail_before_writes() {
+        let (_temp, supervisor, workspace) = fixture();
+        for case in ["unknown", "mismatch", "snapshot"] {
+            let mut request = codex_request(&workspace, "CodingAgentInitialRequest", ".");
+            match case {
+                "unknown" => {
+                    request.action["typ"]["executor_config"]["variant"] =
+                        json!("MISSING_F558_VARIANT")
+                }
+                "mismatch" => {
+                    request.executor_profile_config = Some(json!({"DEFAULT": {"CLAUDE_CODE": {}}}))
+                }
+                "snapshot" => {
+                    request.mcp_config_snapshot = Some(McpConfigSnapshot {
+                        executor: "CLAUDE_CODE".into(),
+                        servers: BTreeMap::new(),
+                    })
+                }
+                _ => unreachable!(),
+            }
+            let id = request.execution_id;
+            assert!(supervisor.dispatch(request).await.is_err());
+            assert!(supervisor.job(id).await.is_none());
+            assert!(!supervisor.mcp_config_root.join(id.to_string()).exists());
+        }
+    }
 
     #[test]
     fn dispatched_gobin_is_prepended_to_worker_path() {
@@ -1585,12 +2155,17 @@ mod tests {
     #[derive(Default)]
     struct RefreshFixture {
         queued: AtomicUsize,
+        gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     }
 
     #[async_trait]
     impl McpRefreshControl for RefreshFixture {
         async fn queue_refresh(&self) -> Result<(), McpRefreshErrorCategory> {
             self.queued.fetch_add(1, AtomicOrdering::SeqCst);
+            if let Some((entered, release)) = &self.gate {
+                entered.notify_one();
+                release.notified().await;
+            }
             Ok(())
         }
 
@@ -1693,7 +2268,7 @@ mod tests {
         fs::create_dir_all(&scoped_home).unwrap();
         fs::write(
             scoped_home.join("config.toml"),
-            "model = 'preserved'\n[mcp_servers.snapshot-a]\ncommand = 'old'\n",
+            "model = 'preserved'\ntime = 1979-05-27T07:32:00Z\n[projects.'/exact/repo']\ntrust_level = 'trusted'\n[mcp_servers.snapshot-a]\ncommand = 'old'\n",
         )
         .unwrap();
         fs::write(scoped_home.join("history.jsonl"), "conversation-state").unwrap();
@@ -1748,6 +2323,9 @@ mod tests {
         let config = fs::read_to_string(scoped_home.join("config.toml")).unwrap();
         assert!(config.contains("model = \"preserved\""));
         assert!(config.contains("snapshot-b"));
+        assert!(config.contains("/exact/repo"));
+        assert!(config.contains("trust_level = \"trusted\""));
+        assert!(config.contains("1979-05-27T07:32:00Z"));
         assert!(!config.contains("snapshot-a"));
         assert!(config.contains("http://coordinator.internal:3334/base/mcp-gateway/connection-b"));
         assert_eq!(
@@ -1760,6 +2338,87 @@ mod tests {
             supervisor.job(execution_id).await.unwrap().state().await,
             JobState::Running
         );
+        let snapshot = McpConfigSnapshot {
+            executor: "CODEX".into(),
+            servers: BTreeMap::new(),
+        };
+        let job = supervisor.job(execution_id).await.unwrap();
+        let claim = job.mcp_refresh_claim.lock().await;
+        assert_eq!(
+            supervisor
+                .refresh_mcp(execution_id, &snapshot)
+                .await
+                .unwrap()
+                .status,
+            WorkerMcpRefreshStatus::Busy
+        );
+        drop(claim);
+        for content in [None, Some("secret = 'SENTINEL")] {
+            let path = scoped_home.join("config.toml");
+            fs::remove_file(&path).unwrap();
+            if let Some(content) = content {
+                fs::write(&path, content).unwrap();
+            }
+            assert_eq!(
+                supervisor
+                    .refresh_mcp(execution_id, &snapshot)
+                    .await
+                    .unwrap()
+                    .status,
+                WorkerMcpRefreshStatus::MaterializationFailed
+            );
+            assert_eq!(control.queued.load(AtomicOrdering::SeqCst), 1);
+            assert_eq!(job.state().await, JobState::Running);
+            if content.is_none() {
+                fs::write(&path, "").unwrap();
+            }
+        }
+        // Hold a real refresh at its reload boundary while terminal cleanup contends.
+        fs::write(scoped_home.join("config.toml"), &config).unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gated = Arc::new(RefreshFixture {
+            queued: AtomicUsize::new(0),
+            gate: Some((entered.clone(), release.clone())),
+        });
+        *job.mcp_refresh.write().await = Some(McpRefreshHandle(gated.clone()));
+        let refreshing = {
+            let supervisor = supervisor.clone();
+            let snapshot = snapshot.clone();
+            tokio::spawn(async move {
+                supervisor
+                    .refresh_mcp(execution_id, &snapshot)
+                    .await
+                    .unwrap()
+            })
+        };
+        entered.notified().await;
+        let finishing = {
+            let job = job.clone();
+            tokio::spawn(async move {
+                finish_executor_result(&job, ExecutorExitResult::Success).await;
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(!finishing.is_finished());
+        assert!(scoped_home.exists());
+        release.notify_one();
+        assert_eq!(
+            refreshing.await.unwrap().status,
+            WorkerMcpRefreshStatus::Queued
+        );
+        finishing.await.unwrap();
+        assert!(!scoped_home.exists());
+        assert_eq!(
+            supervisor
+                .refresh_mcp(execution_id, &snapshot)
+                .await
+                .unwrap()
+                .status,
+            WorkerMcpRefreshStatus::Unsupported
+        );
+        assert!(!scoped_home.exists());
+        assert_eq!(gated.queued.load(AtomicOrdering::SeqCst), 1);
     }
 
     #[tokio::test]

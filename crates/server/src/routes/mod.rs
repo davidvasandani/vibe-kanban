@@ -30,6 +30,7 @@ pub mod repo;
 pub mod scratch;
 pub mod search;
 pub mod sessions;
+pub mod skills;
 pub mod speckit;
 pub mod ssh_session;
 pub mod tags;
@@ -49,6 +50,7 @@ pub fn router(
         .merge(mcp_auth::router())
         .merge(mcp_gateway::management_router())
         .merge(pipelines::router())
+        .merge(skills::router())
         .merge(speckit::router())
         .merge(containers::router(&deployment))
         .merge(workspaces::router(&deployment))

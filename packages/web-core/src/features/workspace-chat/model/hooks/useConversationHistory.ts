@@ -43,6 +43,11 @@ import {
   loadProcessesInOrder,
   type LoadedProcessEntries,
 } from '../conversation-history-paging';
+import {
+  INITIAL_PLAN_REVEAL_STATE,
+  resolvePlanRevealTransition,
+  type PlanRevealState,
+} from '../plan-reveal-transition';
 
 export const useConversationHistory = ({
   onTimelineUpdated,
@@ -66,6 +71,7 @@ export const useConversationHistory = ({
   );
   const scopeGenerationRef = useRef(0);
   const loadEarlierInFlightRef = useRef(false);
+  const planRevealStateRef = useRef<PlanRevealState>(INITIAL_PLAN_REVEAL_STATE);
   const [hasEarlierHistory, setHasEarlierHistory] = useState(false);
   const [isLoadingEarlier, setIsLoadingEarlier] = useState(false);
   const [loadEarlierError, setLoadEarlierError] = useState<string | null>(null);
@@ -196,8 +202,6 @@ export const useConversationHistory = ({
       loading: boolean
     ) => {
       const timelineSource = buildTimelineSource(executionProcessState);
-      let modifiedAddEntryType = addEntryType;
-
       const latestEntry = Object.values(executionProcessState)
         .sort(
           (a, b) =>
@@ -211,17 +215,16 @@ export const useConversationHistory = ({
         .flatMap((processState) => processState.entries)
         .at(-1);
 
-      if (
-        latestEntry?.type === 'NORMALIZED_ENTRY' &&
-        latestEntry.content.entry_type.type === 'tool_use' &&
-        latestEntry.content.entry_type.tool_name === 'ExitPlanMode'
-      ) {
-        modifiedAddEntryType = 'plan';
-      }
+      const planRevealTransition = resolvePlanRevealTransition(
+        addEntryType,
+        latestEntry,
+        planRevealStateRef.current
+      );
+      planRevealStateRef.current = planRevealTransition.state;
 
       onTimelineUpdatedRef.current?.(
         timelineSource,
-        modifiedAddEntryType,
+        planRevealTransition.addEntryType,
         loading
       );
     },
@@ -482,6 +485,7 @@ export const useConversationHistory = ({
     loadedInitialEntries.current = false;
     emittedEmptyInitialRef.current = false;
     streamingProcessIdsRef.current.clear();
+    planRevealStateRef.current = INITIAL_PLAN_REVEAL_STATE;
     previousStatusMapRef.current.clear();
     loadEarlierInFlightRef.current = false;
     setHasEarlierHistory(false);
