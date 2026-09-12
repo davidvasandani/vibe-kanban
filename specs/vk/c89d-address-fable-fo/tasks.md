@@ -8,6 +8,8 @@ Plan: ./plan.md
 - [x] T004 Run focused tests, required formatting, and relevant checks; record results in specs/vk/c89d-address-fable-fo/validation.md. Depends T002/T003.
 - [x] T005 Obtain independent Codex review; resolve significant findings and reverify. Record in specs/vk/c89d-address-fable-fo/review.md. Depends T004.
 - [x] T006 Record reusable knowledge in wiki/workspace-creation-reliability.md and wiki/INDEX.md; commit. Depends T005.
-- [ ] T007 Open task PR against base branch, check validation, and merge. Depends T006.
+- [x] T007 Open task PR against base branch: [PR #279](https://github.com/davidvasandani/vibe-kanban/pull/279). Depends T006.
+
+Pipeline stage 13 owns the final checks and merge. GitHub records the authoritative merge result for PR #279; no task implementation remains.
 
 No implementation tasks are marked [P]: the shared ownership/state diagnosis determines the correction and test boundaries.

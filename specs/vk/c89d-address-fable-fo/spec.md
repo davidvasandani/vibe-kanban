@@ -27,7 +27,7 @@ Other services, speculative retries, unrelated UI redesign, dependency upgrades,
 - [x] Regression tests reproduce the defect and pass with the correction.
 - [x] Successful creation, permanent failure, and no-duplicate behavior remain correct.
 - [x] Required formatting/checks and independent review have recorded outcomes.
-- [ ] Knowledge is recorded and the task PR is merged.
+- [x] Knowledge is committed and [task PR #279](https://github.com/davidvasandani/vibe-kanban/pull/279) is open. The final merge is recorded by GitHub during pipeline stage 13.
 
 ## Open questions
 Resolved from coordinator logs: Sep 12 failures name repository administration lock contention; Sep 11 failures report a rejected Provisioning-to-Ready transition. Investigate both mechanisms, fixing those supported by reproducible evidence. Unsupported CURSOR_AGENT placement also appears in older logs and must remain a visible permanent failure. No user product decisions remain open.
