@@ -21,9 +21,11 @@ describe('mcpRefreshTooltip', () => {
     const tooltip = mcpRefreshTooltip(result());
 
     expect(tooltip).toContain(
-      'entra is configured but absent from the active Codex tool registry'
+      'entra is configured but absent from the active executor tool registry'
     );
-    expect(tooltip).toContain('Refresh MCP tools or restart the agent');
+    expect(tooltip).toContain(
+      'Restart the session or open a diagnostic issue'
+    );
   });
 
   it('calls out a registered Entra server with no usable tools', () => {
@@ -44,7 +46,7 @@ describe('mcpRefreshTooltip', () => {
     );
 
     expect(tooltip).toContain(
-      'entra is registered but exposes no usable tools'
+      'entra connected, but 0 tools are registered in the active executor'
     );
   });
 
