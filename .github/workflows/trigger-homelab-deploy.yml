@@ -2,10 +2,8 @@
 # merge to main, so vibe-kanban-dev.vasandani.dev redeploys without a manual
 # `gh workflow run`.
 #
-# This is a separate file from the upstream-managed `trigger-fork-deploy.yml`
-# (which points at 2001zhaozhao/vibe-kanban-private-deploy) so fork syncs from
-# BloopAI/vibe-kanban don't clobber our dispatch — the previous one was lost
-# that way (see hosts/think/think2.nix:449-453 in the homelab repo).
+# Keep this fork-specific workflow during upstream syncs so the homelab
+# dispatch remains the deployment source of truth.
 #
 # Requires repo secret HOMELAB_DEPLOY_TOKEN: a fine-grained PAT on
 # davidvasandani/homelab with `Contents: Read and write` (authorizes the

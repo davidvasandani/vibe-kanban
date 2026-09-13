@@ -91,18 +91,12 @@ And update VK_SHARED_API_BASE to use https://:
 VK_SHARED_API_BASE=https://localhost:3000
 ```
 
-## My Own Deployment
+## Deployment
 
-This is how I personally deploy this Vibe-Kanban fork.
-The fork fully supports a setup like this through the added Single User Mode feature.
-This lets me spin up my customized vibe-kanban with one command to work on my own projects,
-backed by a self-hosted remote server.
-
-### CI/CD setup:
-
-* On push to this fork repository, CI/CD is triggered via `trigger-fork-deploy` GitHub workflow.
-* The build & deploy workflow in my private Git repository is triggered to publish the backend Docker image.
-* The remote server Docker image is deployed to my private server via CI/CD or with a local direct-deployment script.
+Pushes to `main` run the `Trigger homelab CD` workflow. It sends the
+`vibe-kanban-deploy` repository-dispatch event to `davidvasandani/homelab`,
+including the merged commit SHA and branch ref in the client payload. The
+homelab workflow owns the build, health gating, and deployment of this fork.
 
 ### Remote server setup:
 
