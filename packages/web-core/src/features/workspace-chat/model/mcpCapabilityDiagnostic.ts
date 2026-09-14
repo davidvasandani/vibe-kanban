@@ -15,7 +15,8 @@ export function mcpCapabilityDiagnostic(
   result: McpRefreshResult | null,
   serverId: string
 ): McpCapabilityDiagnostic {
-  if (!result?.configured_server_ids.includes(serverId)) {
+  const server = result?.servers.find((item) => item.server_id === serverId);
+  if (!server && !result?.configured_server_ids.includes(serverId)) {
     return {
       state: 'not-configured',
       message: `${serverId} is not assigned to this executor profile.`,
@@ -35,7 +36,6 @@ export function mcpCapabilityDiagnostic(
         `${serverId} availability could not be confirmed after the MCP refresh failed.`,
     };
   }
-  const server = result.servers.find((item) => item.server_id === serverId);
   if (!server) {
     return {
       state: 'unavailable',
