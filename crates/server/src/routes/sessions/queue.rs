@@ -503,6 +503,12 @@ async fn queue_message(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<QueueMessageRequest>,
 ) -> Result<ResponseJson<ApiResponse<QueueStatus>>, ApiError> {
+    if deployment
+        .queued_message_service()
+        .has_mcp_restart(session.id)
+    {
+        supersede_mcp_session_restart(session.id, &deployment).await;
+    }
     let data = DraftFollowUpData {
         message: payload.message,
         executor_config: payload.executor_config,

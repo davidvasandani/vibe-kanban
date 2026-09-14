@@ -187,25 +187,32 @@ impl McpRefreshCoordinator {
             *generation
         };
         let now = Utc::now();
-        let connecting_servers = configured_server_ids
+        let mut connecting_servers = previous.map_or_else(Vec::new, |state| state.servers.clone());
+        let existing_server_ids = connecting_servers
             .iter()
-            .map(|server_id| McpServerRefreshSnapshot {
-                server_id: server_id.clone(),
-                status: executors::mcp_refresh::McpServerRefreshStatus::Connecting,
-                tool_count: None,
-                tool_names: None,
-                tool_schema_fingerprint: None,
-                resource_count: None,
-                prompt_count: None,
-                restart_occurred: None,
-                discovery_attempts: 0,
-                observed_errors: Vec::new(),
-                first_observed_at: Some(now),
-                last_observed_at: Some(now),
-                terminal_at: None,
-                error: None,
-            })
-            .collect();
+            .map(|server| server.server_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        connecting_servers.extend(
+            configured_server_ids
+                .iter()
+                .filter(|server_id| !existing_server_ids.contains(*server_id))
+                .map(|server_id| McpServerRefreshSnapshot {
+                    server_id: server_id.clone(),
+                    status: executors::mcp_refresh::McpServerRefreshStatus::Connecting,
+                    tool_count: None,
+                    tool_names: None,
+                    tool_schema_fingerprint: None,
+                    resource_count: None,
+                    prompt_count: None,
+                    restart_occurred: None,
+                    discovery_attempts: 0,
+                    observed_errors: Vec::new(),
+                    first_observed_at: Some(now),
+                    last_observed_at: Some(now),
+                    terminal_at: None,
+                    error: None,
+                }),
+        );
         let result = if supported {
             McpRefreshResult {
                 status: McpRefreshStatus::PendingNextTurn,
