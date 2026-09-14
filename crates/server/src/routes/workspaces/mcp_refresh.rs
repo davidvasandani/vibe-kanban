@@ -310,7 +310,7 @@ pub async fn restart_workspace(
             }
         }
 
-        let mut replay_failed = false;
+        let mut replay_failed = !failed_stop_ids.is_empty();
         for process in processes
             .iter()
             .filter(|process| process.run_reason.is_persistent())

@@ -892,7 +892,8 @@ impl LocalContainerService {
         let controls = self.mcp_refresh_controls.clone();
         let coordinator = self.mcp_refresh_coordinator.clone();
         tokio::spawn(async move {
-            let handle = match tokio::time::timeout(Duration::from_secs(30), signal).await {
+            let discovery_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let handle = match tokio::time::timeout_at(discovery_deadline, signal).await {
                 Ok(Ok(handle)) => handle,
                 Ok(Err(_)) | Err(_) => {
                     let pending = coordinator.status(session_id).await.filter(|state| {
@@ -959,7 +960,10 @@ impl LocalContainerService {
                     }
                     return;
                 }
-                let inventory = handle.0.list_servers().await;
+                let inventory =
+                    tokio::time::timeout_at(discovery_deadline, handle.0.list_servers())
+                        .await
+                        .unwrap_or(Err(McpRefreshErrorCategory::Timeout));
                 if controls.read().await.get(&session_id).is_some_and(
                     |(current_execution_id, _, _)| *current_execution_id != execution_id,
                 ) {
@@ -978,7 +982,10 @@ impl LocalContainerService {
                     }
                 }
             } else {
-                let inventory = handle.0.list_servers().await;
+                let inventory =
+                    tokio::time::timeout_at(discovery_deadline, handle.0.list_servers())
+                        .await
+                        .unwrap_or(Err(McpRefreshErrorCategory::Timeout));
                 if !controls.read().await.get(&session_id).is_some_and(
                     |(current_execution_id, _, _)| *current_execution_id == execution_id,
                 ) {
