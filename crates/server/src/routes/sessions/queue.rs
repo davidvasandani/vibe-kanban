@@ -90,7 +90,7 @@ pub async fn supersede_mcp_session_restart(session_id: uuid::Uuid, deployment: &
     {
         deployment
             .queued_message_service()
-            .cancel_queued(session_id);
+            .supersede_mcp_restart(session_id);
     }
     deployment
         .container()

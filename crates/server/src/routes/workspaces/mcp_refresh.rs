@@ -139,10 +139,23 @@ pub async fn restart_workspace(
                 "Session has no coding-agent execution to resume".to_string(),
             ));
         }
-        if ExecutionProcess::has_running_coding_agent_for_session(&deployment.db().pool, session.id)
-            .await?
-            && !payload.confirmed_running_restart
+    }
+    if !payload.confirmed_running_restart {
+        let mut workspace_has_running_agent = false;
+        for workspace_session in
+            Session::find_by_workspace_id(&deployment.db().pool, workspace.id).await?
         {
+            if ExecutionProcess::has_running_coding_agent_for_session(
+                &deployment.db().pool,
+                workspace_session.id,
+            )
+            .await?
+            {
+                workspace_has_running_agent = true;
+                break;
+            }
+        }
+        if workspace_has_running_agent {
             return Err(ApiError::Conflict(
                 "Restarting a running workspace requires explicit confirmation".to_string(),
             ));

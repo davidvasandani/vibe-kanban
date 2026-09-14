@@ -101,7 +101,6 @@ impl QueuedMessageService {
             Entry::Occupied(mut entry) if entry.get().restart_reservation == Some(reservation) => {
                 entry.get_mut().restart_agent = true;
                 entry.get_mut().restart_reservation = None;
-                entry.get_mut().remove_on_reservation_cancel = false;
                 Some(entry.get().queued_at)
             }
             _ => None,
@@ -160,6 +159,18 @@ impl QueuedMessageService {
         let removed = self.queue.remove(&session_id).map(|(_, v)| v);
         self.restart_resolution.notify_waiters();
         removed
+    }
+
+    pub fn supersede_mcp_restart(&self, session_id: Uuid) {
+        if let Entry::Occupied(mut entry) = self.queue.entry(session_id) {
+            if entry.get().remove_on_reservation_cancel {
+                entry.remove();
+            } else {
+                entry.get_mut().restart_agent = false;
+                entry.get_mut().restart_reservation = None;
+            }
+        }
+        self.restart_resolution.notify_waiters();
     }
 
     /// Get the queued message for a session (if any)
