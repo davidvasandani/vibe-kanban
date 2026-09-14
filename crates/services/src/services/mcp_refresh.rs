@@ -11,6 +11,7 @@ use uuid::Uuid;
 #[derive(Clone, Default)]
 pub struct McpRefreshCoordinator {
     states: Arc<RwLock<HashMap<Uuid, McpRefreshResult>>>,
+    generations: Arc<RwLock<HashMap<Uuid, u64>>>,
 }
 
 impl McpRefreshCoordinator {
@@ -60,7 +61,12 @@ impl McpRefreshCoordinator {
         }
 
         let previous = states.get(&session_id);
-        let generation = previous.map_or(1, |state| state.generation + 1);
+        let generation = {
+            let mut generations = self.generations.write().await;
+            let generation = generations.entry(session_id).or_default();
+            *generation = generation.saturating_add(1);
+            *generation
+        };
         let now = Utc::now();
         let connecting_servers = configured_server_ids
             .iter()
@@ -354,6 +360,27 @@ mod tests {
         assert_eq!(
             coordinator.status(session).await.unwrap().status,
             McpRefreshStatus::PendingNextTurn
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_status_does_not_reuse_a_generation() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let first = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+        coordinator.remove(session).await;
+        let second = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+
+        assert!(second.generation > first.generation);
+        assert!(
+            coordinator
+                .confirm(session, first.generation, Vec::new())
+                .await
+                .is_none()
         );
     }
 

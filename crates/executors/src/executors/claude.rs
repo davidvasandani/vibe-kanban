@@ -68,10 +68,20 @@ use crate::{
 
 const SUPPRESSED_STDERR_PATTERNS: &[&str] = &["[WARN] Fast mode requires the native binary"];
 
-#[derive(Default)]
 pub(crate) struct ClaudeMcpInventory {
     servers: RwLock<Option<Vec<McpServerRefreshSnapshot>>>,
     ready: Notify,
+    deadline: tokio::time::Instant,
+}
+
+impl Default for ClaudeMcpInventory {
+    fn default() -> Self {
+        Self {
+            servers: RwLock::new(None),
+            ready: Notify::new(),
+            deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+        }
+    }
 }
 
 impl ClaudeMcpInventory {
@@ -138,7 +148,7 @@ impl McpRefreshControl for ClaudeMcpInventory {
                 notified.await;
             }
         };
-        tokio::time::timeout(Duration::from_secs(30), wait)
+        tokio::time::timeout_at(self.deadline, wait)
             .await
             .map_err(|_| McpRefreshErrorCategory::Timeout)
     }

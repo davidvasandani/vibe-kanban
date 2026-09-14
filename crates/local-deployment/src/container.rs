@@ -3544,7 +3544,15 @@ impl ContainerService for LocalContainerService {
     }
 
     async fn clear_mcp_restart_tracking(&self, session_id: Uuid) {
-        self.mcp_refresh_coordinator.remove(session_id).await;
+        if let Some(state) = self.mcp_refresh_coordinator.status(session_id).await {
+            self.mcp_refresh_coordinator
+                .fail(
+                    session_id,
+                    state.generation,
+                    McpRefreshErrorCategory::ReloadFailed,
+                )
+                .await;
+        }
     }
 
     async fn mcp_refresh_status(
