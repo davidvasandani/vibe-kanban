@@ -3116,7 +3116,7 @@ impl LocalContainerService {
         if queued_msg.restart_agent {
             if !self
                 .queued_message_service
-                .wait_for_mcp_restart_start(ctx.session.id)
+                .wait_for_mcp_restart_start(ctx.session.id, queued_msg.queued_at)
                 .await
             {
                 self.queued_message_service

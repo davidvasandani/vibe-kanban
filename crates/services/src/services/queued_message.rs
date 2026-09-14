@@ -43,8 +43,8 @@ pub enum QueueStatus {
 pub struct QueuedMessageService {
     queue: Arc<DashMap<Uuid, QueuedMessage>>,
     blocked_mcp_restarts: Arc<DashMap<Uuid, ()>>,
-    workspace_mcp_restarts: Arc<DashMap<Uuid, ()>>,
-    cancelled_workspace_mcp_restarts: Arc<DashMap<Uuid, ()>>,
+    workspace_mcp_restarts: Arc<DashMap<Uuid, DateTime<Utc>>>,
+    cancelled_workspace_mcp_restarts: Arc<DashMap<Uuid, DateTime<Utc>>>,
     restart_resolution: Arc<Notify>,
 }
 
@@ -209,7 +209,9 @@ impl QueuedMessageService {
     pub fn block_mcp_restart_start(&self, session_id: Uuid) {
         self.cancelled_workspace_mcp_restarts.remove(&session_id);
         self.blocked_mcp_restarts.insert(session_id, ());
-        self.workspace_mcp_restarts.insert(session_id, ());
+        if let Some(queued_at) = self.queue.get(&session_id).map(|message| message.queued_at) {
+            self.workspace_mcp_restarts.insert(session_id, queued_at);
+        }
     }
 
     pub fn unblock_mcp_restart_start(&self, session_id: Uuid) {
@@ -231,11 +233,18 @@ impl QueuedMessageService {
     }
 
     pub fn cancel_workspace_mcp_restart(&self, session_id: Uuid) {
-        self.cancelled_workspace_mcp_restarts.insert(session_id, ());
+        if let Some((_, queued_at)) = self.workspace_mcp_restarts.remove(&session_id) {
+            self.cancelled_workspace_mcp_restarts
+                .insert(session_id, queued_at);
+        }
         self.unblock_mcp_restart_start(session_id);
     }
 
-    pub async fn wait_for_mcp_restart_start(&self, session_id: Uuid) -> bool {
+    pub async fn wait_for_mcp_restart_start(
+        &self,
+        session_id: Uuid,
+        queued_at: DateTime<Utc>,
+    ) -> bool {
         while self.is_mcp_restart_start_blocked(session_id) {
             let notified = self.restart_resolution.notified();
             tokio::pin!(notified);
@@ -245,9 +254,16 @@ impl QueuedMessageService {
             }
             notified.await;
         }
-        self.cancelled_workspace_mcp_restarts
-            .remove(&session_id)
-            .is_none()
+        if self
+            .cancelled_workspace_mcp_restarts
+            .get(&session_id)
+            .is_some_and(|cancelled_at| *cancelled_at == queued_at)
+        {
+            self.cancelled_workspace_mcp_restarts.remove(&session_id);
+            false
+        } else {
+            true
+        }
     }
 
     pub async fn wait_for_restart_resolution(&self, session_id: Uuid) {

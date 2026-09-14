@@ -222,7 +222,7 @@ async fn queue_mcp_restart_impl(
             tokio::spawn(async move {
                 if !deferred_deployment
                     .queued_message_service()
-                    .wait_for_mcp_restart_start(deferred_session.id)
+                    .wait_for_mcp_restart_start(deferred_session.id, queued.queued_at)
                     .await
                 {
                     deferred_deployment
