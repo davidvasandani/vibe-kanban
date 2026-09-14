@@ -212,11 +212,43 @@ async fn queue_mcp_restart_impl(
     };
 
     let result = if let Some(queued) = queued {
-        if queued.restart_agent {
-            deployment
+        if queued.restart_agent
+            && deployment
                 .queued_message_service()
-                .wait_for_mcp_restart_start(session.id)
-                .await;
+                .is_mcp_restart_start_blocked(session.id)
+        {
+            let deferred_deployment = deployment.clone();
+            let deferred_session = session.clone();
+            tokio::spawn(async move {
+                deferred_deployment
+                    .queued_message_service()
+                    .wait_for_mcp_restart_start(deferred_session.id)
+                    .await;
+                deferred_deployment
+                    .container()
+                    .reap_warm_process_for_mcp_restart(deferred_session.id)
+                    .await;
+                if super::follow_up(
+                    Extension(deferred_session.clone()),
+                    State(deferred_deployment.clone()),
+                    Json(super::CreateFollowUpAttempt {
+                        prompt: queued.data.message,
+                        executor_config: queued.data.executor_config,
+                        retry_process_id: None,
+                        force_when_dirty: None,
+                        perform_git_reset: None,
+                    }),
+                )
+                .await
+                .is_err()
+                {
+                    deferred_deployment
+                        .container()
+                        .clear_mcp_restart_tracking(deferred_session.id)
+                        .await;
+                }
+            });
+            return Ok(QueueMcpRestartResult::Queued);
         }
         deployment
             .container()

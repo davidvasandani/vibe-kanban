@@ -960,8 +960,8 @@ impl LocalContainerService {
                     return;
                 }
                 let inventory = handle.0.list_servers().await;
-                if !controls.read().await.get(&session_id).is_some_and(
-                    |(current_execution_id, _, _)| *current_execution_id == execution_id,
+                if controls.read().await.get(&session_id).is_some_and(
+                    |(current_execution_id, _, _)| *current_execution_id != execution_id,
                 ) {
                     return;
                 }
@@ -2131,7 +2131,13 @@ impl LocalContainerService {
                     if let Some(queued_msg) =
                         container.queued_message_service.take_queued(ctx.session.id)
                     {
-                        let should_execute_queued = queued_msg.restart_agent
+                        let should_execute_queued = (queued_msg.restart_agent
+                            && (ctx.execution_process.status == ExecutionProcessStatus::Failed
+                                || (ctx.execution_process.status
+                                    == ExecutionProcessStatus::Killed
+                                    && container
+                                        .queued_message_service
+                                        .is_mcp_restart_start_blocked(ctx.session.id))))
                             || !matches!(
                                 ctx.execution_process.status,
                                 ExecutionProcessStatus::Failed
