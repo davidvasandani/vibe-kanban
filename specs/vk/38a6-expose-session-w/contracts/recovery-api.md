@@ -29,11 +29,16 @@ Returns the current/last recovery generation or `null`.
 Request:
 
 ```json
-{ "resume_session_id": "optional UUID" }
+{
+  "resume_session_id": "optional UUID",
+  "confirmed_running_restart": false
+}
 ```
 
 The session defaults to the scoped orchestrator session in the MCP tool. HTTP
 callers provide it explicitly when a coding-agent continuation is required.
+Running-session teardown requires explicit confirmation; the MCP restart tool
+sets it because invoking that tool is the confirmation action.
 
 `GET /api/workspaces/{workspace_id}/mcp/restart`
 
@@ -85,4 +90,3 @@ required. The result is `McpRecoveryResult`.
 New worker-protocol snapshot fields are optional/defaulted. An older worker or
 an executor without runtime inventory produces a named `unsupported` terminal
 state, never a successful empty inventory.
-

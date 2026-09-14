@@ -140,7 +140,8 @@ impl McpServer {
         let url = self.url(&format!("/api/workspaces/{workspace_id}/mcp/restart"));
         let result: executors::mcp_recovery::McpRecoveryResult = match self
             .send_json(self.client.post(&url).json(&serde_json::json!({
-                        "resume_session_id": session_id
+                        "resume_session_id": session_id,
+                        "confirmed_running_restart": true
             })))
             .await
         {

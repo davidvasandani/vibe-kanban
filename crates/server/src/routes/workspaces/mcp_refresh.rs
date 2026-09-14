@@ -33,6 +33,8 @@ pub fn router() -> Router<DeploymentImpl> {
 #[derive(Debug, Default, Deserialize)]
 pub struct RestartWorkspaceRequest {
     pub resume_session_id: Option<Uuid>,
+    #[serde(default)]
+    pub confirmed_running_restart: bool,
 }
 
 static MCP_WORKSPACE_RESTARTS: LazyLock<Mutex<HashMap<Uuid, McpRecoveryResult>>> =
@@ -126,6 +128,26 @@ pub async fn restart_workspace(
         .as_ref()
         .and_then(|session| session.executor.clone())
         .unwrap_or_else(|| "unknown".to_string());
+    if let Some(session) = session.as_ref() {
+        let executions =
+            ExecutionProcess::find_by_session_id(&deployment.db().pool, session.id, false).await?;
+        if !executions.iter().any(|process| {
+            process.run_reason
+                == db::models::execution_process::ExecutionProcessRunReason::CodingAgent
+        }) {
+            return Err(ApiError::Conflict(
+                "Session has no coding-agent execution to resume".to_string(),
+            ));
+        }
+        if ExecutionProcess::has_running_coding_agent_for_session(&deployment.db().pool, session.id)
+            .await?
+            && !payload.confirmed_running_restart
+        {
+            return Err(ApiError::Conflict(
+                "Restarting a running workspace requires explicit confirmation".to_string(),
+            ));
+        }
+    }
     let servers = if let Some(session) = session.as_ref() {
         deployment
             .container()
