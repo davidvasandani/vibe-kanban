@@ -1,0 +1,124 @@
+---
+title: "Verify sandbox apps with the remote browser"
+description: "Expose one sandbox dev-server port temporarily and verify it through the shared Firecrawl browser"
+---
+
+Use a preview lease when your coding agent needs to inspect a sandbox-local web
+application through the centrally managed `firecrawl-browser` MCP. A lease gives
+the browser one temporary HTTPS URL and forwards requests to exactly one
+unprivileged port in one workspace. It does not install a browser in the
+sandbox.
+
+<Warning>
+Treat the URL returned by `create_preview_lease` as a temporary credential. Do
+not paste it into issues, commits, logs, or documentation. The capability is
+returned once, expires after four hours, and disappears immediately when you
+stop the lease.
+</Warning>
+
+## Complete agent workflow
+
+<Steps>
+<Step title="Start the dev server">
+  Start the application as a Vibe Kanban background helper so it survives the
+  current agent turn. Bind it to loopback and choose one unprivileged port.
+
+  ```text MCP tool call
+  spawn_background_helper({
+    "script": "pnpm --filter web dev --host 127.0.0.1 --port 4173 --strictPort",
+    "working_dir": "apps/family-os"
+  })
+  ```
+
+  Wait for the helper log to report `http://127.0.0.1:4173`. A strict port is
+  important: the lease must match the port the server actually uses.
+</Step>
+
+<Step title="Create the one-port lease">
+  Ask Vibe Kanban for a preview lease after the server is listening.
+
+  ```text MCP tool call
+  create_preview_lease({ "port": 4173 })
+  ```
+
+  The response contains a lease ID, expiry, `vite_host`, and a URL resembling
+  `https://<lease-id>.preview.vasandani.dev/__vk/open#...`. Vibe Kanban probes the selected port
+  before it returns the URL.
+</Step>
+
+<Step title="Allow the preview host in Vite">
+  Vite must accept the forwarded `Host`. Prefer the exact value returned as
+  `vite_host`:
+
+  ```typescript vite.config.ts
+  import { defineConfig } from 'vite';
+
+  export default defineConfig({
+    server: {
+      host: '127.0.0.1',
+      port: 4173,
+      strictPort: true,
+      allowedHosts: ['.preview.vasandani.dev'],
+    },
+  });
+  ```
+
+  Restart the helper after changing configuration, then recreate the lease.
+  Do not use `allowedHosts: true`.
+</Step>
+
+<Step title="Drive the existing remote browser">
+  Use only the existing `firecrawl-browser` MCP:
+
+  ```text MCP tool calls
+  create_session({})
+  navigate({ "sessionId": "<session-id>", "url": "<lease-url>" })
+  execute({
+    "sessionId": "<session-id>",
+    "code": "await page.getByRole('link', { name: 'Search' }).click(); await page.waitForLoadState('networkidle');"
+  })
+  screenshot({ "sessionId": "<session-id>" })
+  ```
+
+  The URL fragment is exchanged inside the page for a Secure, HttpOnly,
+  same-site cookie. The fragment is never sent in an HTTP request. Root-relative
+  assets, application routes, and HMR WebSockets then stay on the dedicated
+  preview origin.
+</Step>
+
+<Step title="Stop and prove cleanup">
+  Revoke the preview URL as soon as verification finishes, then close the remote
+  browser session and stop the application helper.
+
+  ```text MCP tool calls
+  stop_preview_lease({ "lease_id": "<lease-id>" })
+  close_session({ "sessionId": "<session-id>" })
+  stop_background_helper({ "execution_process_id": "<dev-server-helper-id>" })
+  ```
+
+  Navigating the same browser session again now returns `410 Gone`. Vibe Kanban
+  also ends the forwarding helper when the four-hour lease expires or the
+  workspace is archived or deleted.
+</Step>
+</Steps>
+
+## Failure guide
+
+| Error | Meaning | Action |
+|---|---|---|
+| `DEV_SERVER_UNAVAILABLE` | Nothing answered on the selected sandbox loopback port | Check the helper logs, bind address, strict port, and retry after it is listening |
+| `FORWARDING_UNAVAILABLE` | The coordinator could not establish the signed worker preview path | Check worker health and workspace affinity; retry after the worker reconnects |
+| `PUBLIC_URL_UNCONFIGURED` | The Vibe coordinator lacks its deployed preview origin | Deploy the Vibe Kanban preview configuration; do not create an ad-hoc tunnel |
+| `410 Gone` | The capability expired, was stopped, or its tracked helper ended | Create a fresh lease if the task is still active |
+| Remote browser tool connection error | `firecrawl-browser` itself is unreachable | Check the existing MCP connection and central browser service; do not install Chromium locally |
+| Vite “host not allowed” page | Vite rejected the lease-specific preview hostname | Add only the returned `vite_host` suffix to `server.allowedHosts` and restart Vite |
+
+## Security boundary
+
+Each lease uses its own browser origin, isolating cookies, storage, and service
+workers from every other lease. The public preview origin serves no workspace content without a valid lease
+cookie. Vibe Kanban stores only a SHA-256 digest of the 256-bit capability. Every
+request resolves the lease's fixed workspace, tracked helper execution, worker,
+and port before using the existing signed coordinator-to-worker preview
+transport. Callers cannot supply another target port, hostname, filesystem path,
+container socket, or proxy destination.
