@@ -76,10 +76,11 @@ impl QueuedMessageService {
 
     pub fn reserve_mcp_restart(&self, session_id: Uuid, data: DraftFollowUpData) -> Uuid {
         let reservation = Uuid::new_v4();
-        match self.queue.entry(session_id) {
+        let queued_at = match self.queue.entry(session_id) {
             Entry::Occupied(mut entry) => {
                 entry.get_mut().restart_reservation = Some(reservation);
                 entry.get_mut().remove_on_reservation_cancel = false;
+                entry.get().queued_at
             }
             Entry::Vacant(entry) => {
                 let queued = QueuedMessage {
@@ -90,8 +91,13 @@ impl QueuedMessageService {
                     restart_reservation: Some(reservation),
                     remove_on_reservation_cancel: true,
                 };
+                let queued_at = queued.queued_at;
                 entry.insert(queued);
+                queued_at
             }
+        };
+        if self.is_mcp_restart_start_blocked(session_id) {
+            self.workspace_mcp_restarts.insert(session_id, queued_at);
         }
         reservation
     }
