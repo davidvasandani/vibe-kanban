@@ -2873,7 +2873,34 @@ impl LocalContainerService {
                 tracing::error!(%execution_id, "Remote execution next action failed: {error}");
             }
         }
+        let mut started_queued_follow_up = false;
         if self.should_finalize(&ctx) {
+            self.queued_message_service
+                .wait_for_restart_resolution(ctx.session.id)
+                .await;
+            if let Some(queued_msg) = self.queued_message_service.take_queued(ctx.session.id) {
+                let should_execute_queued = (queued_msg.restart_agent
+                    && (ctx.execution_process.status == ExecutionProcessStatus::Failed
+                        || (ctx.execution_process.status == ExecutionProcessStatus::Killed
+                            && self
+                                .queued_message_service
+                                .is_mcp_restart_start_blocked(ctx.session.id))))
+                    || !matches!(
+                        ctx.execution_process.status,
+                        ExecutionProcessStatus::Failed
+                            | ExecutionProcessStatus::Killed
+                            | ExecutionProcessStatus::Interrupted
+                            | ExecutionProcessStatus::Indeterminate
+                    );
+                if should_execute_queued {
+                    started_queued_follow_up =
+                        self.start_queued_follow_up_message(&ctx, &queued_msg).await;
+                } else if queued_msg.restart_agent {
+                    self.clear_mcp_restart_tracking(ctx.session.id).await;
+                }
+            }
+        }
+        if self.should_finalize(&ctx) && !started_queued_follow_up {
             self.finalize_task(&ctx).await;
         }
         self.update_after_head_commits(execution_id).await;
