@@ -87,4 +87,27 @@ describe('mcpRefreshTooltip', () => {
 
     expect(tooltip).toContain('active tool count is unknown');
   });
+
+  it('surfaces arbitrary Claude registry servers instead of a fixed server list', () => {
+    const tooltip = mcpRefreshTooltip(
+      result({
+        configured_server_ids: ['brink'],
+        servers: [
+          {
+            server_id: 'brink',
+            status: 'connected_no_tools',
+            tool_count: 0,
+            resource_count: null,
+            prompt_count: null,
+            restart_occurred: null,
+            error: null,
+          },
+        ],
+      })
+    );
+
+    expect(tooltip).toContain('brink connected, but 0 tools are registered');
+    expect(tooltip).not.toContain('entra');
+    expect(tooltip).not.toContain('slack');
+  });
 });

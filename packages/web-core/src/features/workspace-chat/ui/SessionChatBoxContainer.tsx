@@ -967,11 +967,13 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
               label: canUseCodexRefresh
                 ? 'Refresh MCP tools'
                 : 'Restart agent for MCP changes',
-              tooltip: canUseCodexRefresh
+              tooltip: mcpRefresh.result
                 ? mcpRefresh.tooltip
-                : sessionHasRunningAgent
-                  ? 'Queue a fresh agent process after the current turn finishes'
-                  : 'Start a fresh agent process with the latest MCP configuration',
+                : canUseCodexRefresh
+                  ? mcpRefresh.tooltip
+                  : sessionHasRunningAgent
+                    ? 'Queue a fresh agent process after the current turn finishes'
+                    : 'Start a fresh agent process with the latest MCP configuration',
               disabled: canUseCodexRefresh
                 ? mcpRefresh.isRefreshing
                 : !executorConfig ||

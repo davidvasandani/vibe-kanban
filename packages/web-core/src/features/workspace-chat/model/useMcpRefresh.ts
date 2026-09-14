@@ -38,9 +38,16 @@ export function mcpRefreshTooltip(result: McpRefreshResult | null) {
   if (!result) {
     return 'Reload MCP configuration and verify the active executor tool registry';
   }
-  const slack = mcpCapabilityDiagnostic(result, 'slack');
-  const entra = mcpCapabilityDiagnostic(result, 'entra');
-  return `MCP refresh: ${result.status}. ${slack.message} ${entra.message}`;
+  const serverIds = Array.from(
+    new Set([
+      ...result.configured_server_ids,
+      ...result.servers.map((server) => server.server_id),
+    ])
+  ).sort();
+  const inventory = serverIds
+    .map((serverId) => mcpCapabilityDiagnostic(result, serverId).message)
+    .join(' ');
+  return `MCP registry: ${result.status}.${inventory ? ` ${inventory}` : ' No servers reported.'}`;
 }
 
 export function useMcpRefresh(
