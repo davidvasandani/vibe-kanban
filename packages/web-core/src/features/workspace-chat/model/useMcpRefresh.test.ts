@@ -23,9 +23,7 @@ describe('mcpRefreshTooltip', () => {
     expect(tooltip).toContain(
       'entra is configured but absent from the active executor tool registry'
     );
-    expect(tooltip).toContain(
-      'Restart the session or open a diagnostic issue'
-    );
+    expect(tooltip).toContain('Restart the session or open a diagnostic issue');
   });
 
   it('calls out a registered Entra server with no usable tools', () => {

@@ -21,12 +21,14 @@ impl McpRefreshCoordinator {
     pub async fn observe_inventory(
         &self,
         session_id: Uuid,
+        execution_started_at: chrono::DateTime<Utc>,
         mut configured_server_ids: Vec<String>,
         mut servers: Vec<McpServerRefreshSnapshot>,
     ) -> McpRefreshResult {
         let mut states = self.states.write().await;
         if let Some(current) = states.get(&session_id)
-            && current.status == McpRefreshStatus::PendingNextTurn
+            && (current.status == McpRefreshStatus::PendingNextTurn
+                || current.requested_at > execution_started_at)
         {
             return current.clone();
         }
@@ -81,7 +83,7 @@ impl McpRefreshCoordinator {
             },
             retryable: false,
             generation,
-            requested_at: now,
+            requested_at: execution_started_at,
             last_successful_refresh_at: (!partial).then_some(now),
             configured_server_ids,
             servers,
@@ -478,6 +480,7 @@ mod tests {
         let observed = coordinator
             .observe_inventory(
                 session,
+                Utc::now(),
                 vec!["brink".into(), "slack".into()],
                 vec![McpServerRefreshSnapshot {
                     server_id: "slack".into(),

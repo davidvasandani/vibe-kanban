@@ -971,7 +971,12 @@ impl LocalContainerService {
                 // result. Publish every normal startup so the panel cannot
                 // retain evidence from a previous executor process.
                 coordinator
-                    .observe_inventory(session_id, configured_server_ids, servers)
+                    .observe_inventory(
+                        session_id,
+                        execution_started_at,
+                        configured_server_ids,
+                        servers,
+                    )
                     .await;
             }
         });
@@ -4051,14 +4056,13 @@ impl ContainerService for LocalContainerService {
                     && state.requested_at <= execution_process.started_at
             })
             .map(|state| state.generation);
-        if dispatch.mcp_config_snapshot.is_some()
-            && let Some(expected_generation) = pending_mcp_generation
-        {
+        if let Some(snapshot) = dispatch.mcp_config_snapshot.clone() {
             let client = client.clone();
             let coordinator = self.mcp_refresh_coordinator.clone();
             let session_id = execution_process.session_id;
             let execution_id = execution_process.id;
-            let snapshot = dispatch.mcp_config_snapshot.clone().expect("checked above");
+            let execution_started_at = execution_process.started_at;
+            let configured_server_ids = snapshot.servers.keys().cloned().collect::<Vec<_>>();
             tokio::spawn(async move {
                 for _ in 0..30 {
                     let request = McpRefreshRequest {
@@ -4081,20 +4085,42 @@ impl ContainerService for LocalContainerService {
                             .into_iter()
                             .filter_map(|server| serde_json::from_value(server).ok())
                             .collect();
-                        coordinator
-                            .confirm(session_id, expected_generation, servers)
-                            .await;
+                        if let Some(expected_generation) = pending_mcp_generation {
+                            coordinator
+                                .confirm(session_id, expected_generation, servers)
+                                .await;
+                        } else {
+                            coordinator
+                                .observe_inventory(
+                                    session_id,
+                                    execution_started_at,
+                                    configured_server_ids,
+                                    servers,
+                                )
+                                .await;
+                        }
                         return;
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
-                coordinator
-                    .fail(
-                        session_id,
-                        expected_generation,
-                        McpRefreshErrorCategory::Timeout,
-                    )
-                    .await;
+                if let Some(expected_generation) = pending_mcp_generation {
+                    coordinator
+                        .fail(
+                            session_id,
+                            expected_generation,
+                            McpRefreshErrorCategory::Timeout,
+                        )
+                        .await;
+                } else {
+                    coordinator
+                        .observe_inventory(
+                            session_id,
+                            execution_started_at,
+                            configured_server_ids,
+                            Vec::new(),
+                        )
+                        .await;
+                }
             });
         }
         self.track_worker_msgs_in_store(execution_process, worker_node_id)

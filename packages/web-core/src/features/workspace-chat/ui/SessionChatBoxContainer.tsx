@@ -267,9 +267,18 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   const { isAttemptRunning, stopExecution, isStopping, processes } =
     useWorkspaceExecution(workspaceId);
   useEffect(() => {
-    if (workspaceId && sessionId) {
+    if (!workspaceId || !sessionId) return;
+    void refreshMcpStatus().catch(() => undefined);
+    // Runtime discovery is asynchronous and does not itself mutate the process
+    // list. Keep sampling through its bounded 30-second startup window.
+    const timer = window.setInterval(() => {
       void refreshMcpStatus().catch(() => undefined);
-    }
+    }, 2000);
+    const stop = window.setTimeout(() => window.clearInterval(timer), 32000);
+    return () => {
+      window.clearInterval(timer);
+      window.clearTimeout(stop);
+    };
   }, [processes, refreshMcpStatus, sessionId, workspaceId]);
 
   // Approvals state
