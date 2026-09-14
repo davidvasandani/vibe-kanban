@@ -21,6 +21,7 @@ use executors::{
 };
 use serde::Deserialize;
 use services::services::container::ContainerService;
+use tokio::sync::Notify;
 use utils::response::ApiResponse;
 use uuid::Uuid;
 
@@ -33,11 +34,21 @@ pub fn router() -> Router<DeploymentImpl> {
 #[derive(Debug, Default, Deserialize)]
 pub struct RestartWorkspaceRequest {
     pub resume_session_id: Option<Uuid>,
+    #[serde(default)]
+    pub defer_until_ack: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AcknowledgeWorkspaceRestartRequest {
+    pub generation: u64,
 }
 
 static MCP_WORKSPACE_RESTARTS: LazyLock<Mutex<HashMap<Uuid, McpRecoveryResult>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_WORKSPACE_RECOVERY_GENERATION: AtomicU64 = AtomicU64::new(1);
+type WorkspaceRestartAcknowledgments = HashMap<Uuid, (u64, std::sync::Arc<Notify>)>;
+static MCP_WORKSPACE_RESTART_ACKS: LazyLock<Mutex<WorkspaceRestartAcknowledgments>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct WorkspaceRestartGuard {
     workspace_id: Uuid,
@@ -47,6 +58,10 @@ struct WorkspaceRestartGuard {
 impl Drop for WorkspaceRestartGuard {
     fn drop(&mut self) {
         if self.active {
+            MCP_WORKSPACE_RESTART_ACKS
+                .lock()
+                .expect("MCP workspace restart acknowledgment lock poisoned")
+                .remove(&self.workspace_id);
             let mut operations = MCP_WORKSPACE_RESTARTS
                 .lock()
                 .expect("MCP workspace restart lock poisoned");
@@ -72,6 +87,23 @@ pub async fn workspace_restart_status(
         .get(&workspace.id)
         .cloned();
     Ok(ResponseJson(ApiResponse::success(result)))
+}
+
+pub async fn acknowledge_workspace_restart(
+    Extension(workspace): Extension<Workspace>,
+    Json(payload): Json<AcknowledgeWorkspaceRestartRequest>,
+) -> Result<ResponseJson<ApiResponse<bool>>, ApiError> {
+    let acknowledged = MCP_WORKSPACE_RESTART_ACKS
+        .lock()
+        .expect("MCP workspace restart acknowledgment lock poisoned")
+        .get(&workspace.id)
+        .filter(|(generation, _)| *generation == payload.generation)
+        .map(|(_, notify)| {
+            notify.notify_one();
+            true
+        })
+        .unwrap_or(false);
+    Ok(ResponseJson(ApiResponse::success(acknowledged)))
 }
 
 pub async fn restart_workspace(
@@ -168,12 +200,30 @@ pub async fn restart_workspace(
     let deployment_for_restart = deployment.clone();
     let workspace_for_restart = workspace.clone();
     let operation_generation = result.generation;
+    let restart_ack = payload.defer_until_ack.then(|| {
+        let notify = std::sync::Arc::new(Notify::new());
+        MCP_WORKSPACE_RESTART_ACKS
+            .lock()
+            .expect("MCP workspace restart acknowledgment lock poisoned")
+            .insert(workspace.id, (operation_generation, notify.clone()));
+        notify
+    });
     let task_guard = active_guard;
     tokio::spawn(async move {
         let _guard = task_guard;
-        // Give the HTTP/MCP transport a scheduling opportunity to flush the
-        // accepted response before this operation stops the calling process.
-        tokio::task::yield_now().await;
+        if let Some(restart_ack) = restart_ack {
+            if tokio::time::timeout(std::time::Duration::from_secs(30), restart_ack.notified())
+                .await
+                .is_err()
+            {
+                tracing::error!(workspace_id = %workspace_for_restart.id, "Workspace MCP restart was not acknowledged before its deadline");
+                return;
+            }
+            MCP_WORKSPACE_RESTART_ACKS
+                .lock()
+                .expect("MCP workspace restart acknowledgment lock poisoned")
+                .remove(&workspace_for_restart.id);
+        }
         let processes = match ExecutionProcess::find_all_running_by_workspace(
             &deployment_for_restart.db().pool,
             workspace_for_restart.id,

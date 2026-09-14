@@ -338,8 +338,14 @@ pub async fn restart_mcp_session(
     let cleanup_deployment = deployment.clone();
     let cleanup_session = session.clone();
     tokio::spawn(async move {
-        for _ in 0..35 {
+        loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
+            if cleanup_deployment
+                .queued_message_service()
+                .has_mcp_restart(cleanup_session.id)
+            {
+                continue;
+            }
             let terminal = cleanup_deployment
                 .container()
                 .mcp_refresh_status(cleanup_session.workspace_id, cleanup_session.id)
@@ -353,7 +359,15 @@ pub async fn restart_mcp_session(
                             | executors::mcp_refresh::McpRefreshStatus::Busy
                     )
                 });
-            if terminal {
+            if terminal
+                || cleanup_deployment
+                    .container()
+                    .mcp_refresh_status(cleanup_session.workspace_id, cleanup_session.id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_none()
+            {
                 break;
             }
         }

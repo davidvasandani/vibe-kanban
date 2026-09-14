@@ -139,16 +139,30 @@ impl McpServer {
 
         let url = self.url(&format!("/api/workspaces/{workspace_id}/mcp/restart"));
         let result: executors::mcp_recovery::McpRecoveryResult = match self
+            .send_json(self.client.post(&url).json(&serde_json::json!({
+                "resume_session_id": session_id,
+                "defer_until_ack": true
+            })))
+            .await
+        {
+            Ok(value) => value,
+            Err(error_result) => return Ok(Self::tool_error(error_result)),
+        };
+        let acknowledge_url = self.url(&format!("/api/workspaces/{workspace_id}/mcp/restart/ack"));
+        let acknowledged: bool = match self
             .send_json(
                 self.client
-                    .post(&url)
-                    .json(&serde_json::json!({ "resume_session_id": session_id })),
+                    .post(&acknowledge_url)
+                    .json(&serde_json::json!({ "generation": result.generation })),
             )
             .await
         {
             Ok(value) => value,
             Err(error_result) => return Ok(Self::tool_error(error_result)),
         };
+        if !acknowledged {
+            return Self::err("Workspace restart acknowledgment was rejected", None);
+        }
         Self::success(&result)
     }
 

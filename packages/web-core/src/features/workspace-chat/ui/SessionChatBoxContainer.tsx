@@ -200,6 +200,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
 
   const sessionId = session?.id;
   const mcpRefresh = useMcpRefresh(workspaceId, sessionId);
+  const refreshMcpStatus = mcpRefresh.refreshStatus;
   const queryClient = useQueryClient();
   const hostId = useHostId();
 
@@ -265,6 +266,11 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   // Execution state
   const { isAttemptRunning, stopExecution, isStopping, processes } =
     useWorkspaceExecution(workspaceId);
+  useEffect(() => {
+    if (workspaceId && sessionId) {
+      void refreshMcpStatus().catch(() => undefined);
+    }
+  }, [processes, refreshMcpStatus, sessionId, workspaceId]);
 
   // Approvals state
   const { getPendingForProcess } = useApprovals();
