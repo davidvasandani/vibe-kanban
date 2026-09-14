@@ -1,8 +1,8 @@
 use std::{
     collections::HashMap,
     sync::{
-        LazyLock, Mutex,
-        atomic::{AtomicU64, Ordering},
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -39,6 +39,8 @@ pub struct RestartWorkspaceRequest {
 
 static MCP_WORKSPACE_RESTARTS: LazyLock<Mutex<HashMap<Uuid, McpRecoveryResult>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static MCP_WORKSPACE_RESTART_FORCE: LazyLock<Mutex<HashMap<Uuid, Arc<AtomicBool>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_WORKSPACE_RECOVERY_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 struct WorkspaceRestartGuard {
@@ -62,18 +64,24 @@ impl Drop for RestartStartGate {
 impl Drop for WorkspaceRestartGuard {
     fn drop(&mut self) {
         if self.active {
-            let mut operations = MCP_WORKSPACE_RESTARTS
-                .lock()
-                .expect("MCP workspace restart lock poisoned");
-            if let Some(operation) = operations.get_mut(&self.workspace_id)
-                && matches!(
-                    operation.status,
-                    McpRecoveryStatus::Accepted | McpRecoveryStatus::InProgress
-                )
             {
-                operation.status = McpRecoveryStatus::Failed;
-                operation.completed_at = Some(Utc::now());
+                let mut operations = MCP_WORKSPACE_RESTARTS
+                    .lock()
+                    .expect("MCP workspace restart lock poisoned");
+                if let Some(operation) = operations.get_mut(&self.workspace_id)
+                    && matches!(
+                        operation.status,
+                        McpRecoveryStatus::Accepted | McpRecoveryStatus::InProgress
+                    )
+                {
+                    operation.status = McpRecoveryStatus::Failed;
+                    operation.completed_at = Some(Utc::now());
+                }
             }
+            MCP_WORKSPACE_RESTART_FORCE
+                .lock()
+                .expect("MCP workspace restart force lock poisoned")
+                .remove(&self.workspace_id);
         }
     }
 }
@@ -106,6 +114,14 @@ pub async fn restart_workspace(
         })
         .cloned()
     {
+        if payload.confirmed_running_restart
+            && let Some(force) = MCP_WORKSPACE_RESTART_FORCE
+                .lock()
+                .expect("MCP workspace restart force lock poisoned")
+                .get(&workspace.id)
+        {
+            force.store(true, Ordering::Release);
+        }
         current.status = McpRecoveryStatus::InProgress;
         current.disposition = McpRestartDisposition::AlreadyInProgress;
         return Ok(ResponseJson(ApiResponse::success(current)));
@@ -193,6 +209,7 @@ pub async fn restart_workspace(
         error: None,
     };
 
+    let force_running_restart = Arc::new(AtomicBool::new(payload.confirmed_running_restart));
     {
         let mut operations = MCP_WORKSPACE_RESTARTS
             .lock()
@@ -207,11 +224,23 @@ pub async fn restart_workspace(
             })
             .cloned()
         {
+            if payload.confirmed_running_restart
+                && let Some(force) = MCP_WORKSPACE_RESTART_FORCE
+                    .lock()
+                    .expect("MCP workspace restart force lock poisoned")
+                    .get(&workspace.id)
+            {
+                force.store(true, Ordering::Release);
+            }
             current.status = McpRecoveryStatus::InProgress;
             current.disposition = McpRestartDisposition::AlreadyInProgress;
             return Ok(ResponseJson(ApiResponse::success(current)));
         }
         operations.insert(workspace.id, result.clone());
+        MCP_WORKSPACE_RESTART_FORCE
+            .lock()
+            .expect("MCP workspace restart force lock poisoned")
+            .insert(workspace.id, force_running_restart.clone());
     }
     let active_guard = WorkspaceRestartGuard {
         workspace_id: workspace.id,
@@ -224,7 +253,6 @@ pub async fn restart_workspace(
     let deployment_for_restart = deployment.clone();
     let workspace_for_restart = workspace.clone();
     let operation_generation = result.generation;
-    let force_running_restart = payload.confirmed_running_restart;
     let resume_session_id = session.as_ref().map(|session| session.id);
     let task_guard = active_guard;
     tokio::spawn(async move {
@@ -273,7 +301,9 @@ pub async fn restart_workspace(
                 {
                     Ok(false) => break,
                     Ok(true) => {
-                        if force_running_restart && tokio::time::Instant::now() >= grace_deadline {
+                        if force_running_restart.load(Ordering::Acquire)
+                            && tokio::time::Instant::now() >= grace_deadline
+                        {
                             break;
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
