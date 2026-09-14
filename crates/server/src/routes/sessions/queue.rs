@@ -220,12 +220,12 @@ async fn queue_mcp_restart(
     Ok(ResponseJson(ApiResponse::success(result)))
 }
 
-fn executor_config(process: &ExecutionProcess) -> Result<ExecutorConfig, ApiError> {
+fn executor_config(process: &ExecutionProcess) -> Result<ExecutorConfig, String> {
     let action = process.executor_action().map_err(|error| {
-        ApiError::Conflict(format!(
+        format!(
             "Could not read executor configuration for {}: {error}",
             process.id
-        ))
+        )
     })?;
     match action.typ() {
         ExecutorActionType::CodingAgentInitialRequest(request) => {
@@ -234,10 +234,10 @@ fn executor_config(process: &ExecutionProcess) -> Result<ExecutorConfig, ApiErro
         ExecutorActionType::CodingAgentFollowUpRequest(request) => {
             Ok(request.executor_config.clone())
         }
-        _ => Err(ApiError::Conflict(format!(
+        _ => Err(format!(
             "Execution {} is not a resumable coding-agent task",
             process.id
-        ))),
+        )),
     }
 }
 
@@ -291,7 +291,7 @@ pub async fn restart_mcp_session(
         .ok_or_else(|| {
             ApiError::Conflict("Session has no coding-agent execution to restart".into())
         })?;
-    let config = executor_config(&latest)?;
+    let config = executor_config(&latest).map_err(ApiError::Conflict)?;
     let executor = config.executor.to_string();
     let tracking = deployment
         .container()

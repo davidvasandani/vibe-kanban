@@ -460,6 +460,10 @@ fn validated_mcp_snapshot(
     Ok(snapshot)
 }
 
+fn supports_live_mcp_refresh(executor: BaseCodingAgent) -> bool {
+    executor == BaseCodingAgent::Codex
+}
+
 fn push_worker_bytes(store: &MsgStore, encoded: &str, stderr: bool) {
     let message = match BASE64_STANDARD.decode(encoded) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -3307,7 +3311,7 @@ impl ContainerService for LocalContainerService {
                 .await?;
         let supported = profile
             .as_ref()
-            .is_some_and(|profile| profile.executor == BaseCodingAgent::Codex);
+            .is_some_and(|profile| supports_live_mcp_refresh(profile.executor));
         let configured_servers = if let Some(profile_id) = profile.as_ref()
             && let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id)
         {
@@ -4927,7 +4931,13 @@ mod mcp_snapshot_tests {
     use executors::executors::BaseCodingAgent;
     use serde_json::json;
 
-    use super::validated_mcp_snapshot;
+    use super::{supports_live_mcp_refresh, validated_mcp_snapshot};
+
+    #[test]
+    fn claude_code_live_mcp_refresh_is_explicitly_unsupported() {
+        assert!(!supports_live_mcp_refresh(BaseCodingAgent::ClaudeCode));
+        assert!(supports_live_mcp_refresh(BaseCodingAgent::Codex));
+    }
 
     #[test]
     fn snapshot_builder_preserves_non_codex_executor_identity_and_definition() {
