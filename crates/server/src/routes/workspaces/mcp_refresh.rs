@@ -33,8 +33,6 @@ pub fn router() -> Router<DeploymentImpl> {
 #[derive(Debug, Default, Deserialize)]
 pub struct RestartWorkspaceRequest {
     pub resume_session_id: Option<Uuid>,
-    #[serde(default)]
-    pub defer_until_session_idle: bool,
 }
 
 static MCP_WORKSPACE_RESTARTS: LazyLock<Mutex<HashMap<Uuid, McpRecoveryResult>>> =
@@ -170,12 +168,14 @@ pub async fn restart_workspace(
     let deployment_for_restart = deployment.clone();
     let workspace_for_restart = workspace.clone();
     let operation_generation = result.generation;
-    let defer_until_session_idle = payload.defer_until_session_idle;
     let resume_session_id = session.as_ref().map(|session| session.id);
     let task_guard = active_guard;
     tokio::spawn(async move {
         let _guard = task_guard;
-        if defer_until_session_idle && let Some(session_id) = resume_session_id {
+        // A supplied session can be the caller even when MCP runs in global
+        // mode, where there is no server-side scoped-session identity. Always
+        // let that turn finish delivering the tool result before teardown.
+        if let Some(session_id) = resume_session_id {
             loop {
                 match ExecutionProcess::has_running_coding_agent_for_session(
                     &deployment_for_restart.db().pool,

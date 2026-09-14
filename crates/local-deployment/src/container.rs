@@ -792,7 +792,7 @@ pub struct LocalContainerService {
     /// the leak where a `Completed` turn row is skipped by `try_stop`. Phase 2,
     /// see `specs/vk/826e-coding-agent-war/`.
     warm_app_servers: Arc<RwLock<HashMap<Uuid, WarmAppServer>>>,
-    mcp_refresh_controls: Arc<RwLock<HashMap<Uuid, (Uuid, McpRefreshHandle)>>>,
+    mcp_refresh_controls: Arc<RwLock<HashMap<Uuid, (Uuid, DateTime<Utc>, McpRefreshHandle)>>>,
     mcp_refresh_coordinator: McpRefreshCoordinator,
     workspace_touch_times: Arc<RwLock<HashMap<Uuid, Instant>>>,
     config: Arc<RwLock<Config>>,
@@ -910,10 +910,21 @@ impl LocalContainerService {
                     return;
                 }
             };
-            controls
-                .write()
-                .await
-                .insert(session_id, (execution_id, handle.clone()));
+            {
+                let mut controls = controls.write().await;
+                if controls
+                    .get(&session_id)
+                    .is_some_and(|(_, current_started_at, _)| {
+                        *current_started_at > execution_started_at
+                    })
+                {
+                    return;
+                }
+                controls.insert(
+                    session_id,
+                    (execution_id, execution_started_at, handle.clone()),
+                );
+            }
 
             if let Some(state) = coordinator
                 .status(session_id)
@@ -932,7 +943,13 @@ impl LocalContainerService {
                     }
                     return;
                 }
-                match handle.0.list_servers().await {
+                let inventory = handle.0.list_servers().await;
+                if !controls.read().await.get(&session_id).is_some_and(
+                    |(current_execution_id, _, _)| *current_execution_id == execution_id,
+                ) {
+                    return;
+                }
+                match inventory {
                     Ok(servers) => {
                         coordinator
                             .confirm(session_id, state.generation, servers)
@@ -944,6 +961,15 @@ impl LocalContainerService {
                             .await;
                     }
                 }
+            } else if let Ok(servers) = handle.0.list_servers().await
+                && controls.read().await.get(&session_id).is_some_and(
+                    |(current_execution_id, _, _)| *current_execution_id == execution_id,
+                )
+            {
+                // Inventory is active-session state, not merely a refresh
+                // result. Publish every normal startup so the panel cannot
+                // retain evidence from a previous executor process.
+                coordinator.observe_inventory(session_id, servers).await;
             }
         });
     }
@@ -2239,7 +2265,7 @@ impl LocalContainerService {
             let mut controls = container.mcp_refresh_controls.write().await;
             if controls
                 .get(&session_id)
-                .is_some_and(|(control_exec_id, _)| *control_exec_id == exec_id)
+                .is_some_and(|(control_exec_id, _, _)| *control_exec_id == exec_id)
             {
                 controls.remove(&session_id);
             }
@@ -3493,7 +3519,7 @@ impl ContainerService for LocalContainerService {
             .read()
             .await
             .get(&session_id)
-            .map(|(_, handle)| handle.clone());
+            .map(|(_, _, handle)| handle.clone());
         if let Some(control) = control
             && let Err(category) = control.0.queue_refresh().await
         {

@@ -128,9 +128,6 @@ impl McpServer {
             return Ok(Self::tool_error(error_result));
         }
         let session_id = session_id.or_else(|| self.orchestrator_session_id());
-        let defer_until_session_idle = self
-            .orchestrator_session_id()
-            .is_some_and(|scoped_session_id| session_id == Some(scoped_session_id));
         if self
             .orchestrator_session_id()
             .is_some_and(|scoped_session_id| {
@@ -143,8 +140,7 @@ impl McpServer {
         let url = self.url(&format!("/api/workspaces/{workspace_id}/mcp/restart"));
         let result: executors::mcp_recovery::McpRecoveryResult = match self
             .send_json(self.client.post(&url).json(&serde_json::json!({
-                        "resume_session_id": session_id,
-                        "defer_until_session_idle": defer_until_session_idle
+                        "resume_session_id": session_id
             })))
             .await
         {

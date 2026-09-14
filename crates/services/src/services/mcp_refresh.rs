@@ -15,6 +15,58 @@ pub struct McpRefreshCoordinator {
 }
 
 impl McpRefreshCoordinator {
+    /// Publish the inventory observed by an ordinary executor startup. This
+    /// keeps status tied to the active process even when no refresh was queued.
+    /// A pending refresh owns its generation and cannot be displaced here.
+    pub async fn observe_inventory(
+        &self,
+        session_id: Uuid,
+        mut servers: Vec<McpServerRefreshSnapshot>,
+    ) -> McpRefreshResult {
+        let mut states = self.states.write().await;
+        if let Some(current) = states.get(&session_id)
+            && current.status == McpRefreshStatus::PendingNextTurn
+        {
+            return current.clone();
+        }
+        servers.sort_by(|a, b| a.server_id.cmp(&b.server_id));
+        let configured_server_ids = servers
+            .iter()
+            .map(|server| server.server_id.clone())
+            .collect();
+        let partial = servers.iter().any(|server| {
+            matches!(
+                server.status,
+                executors::mcp_refresh::McpServerRefreshStatus::FailedRetained
+                    | executors::mcp_refresh::McpServerRefreshStatus::FailedUnavailable
+                    | executors::mcp_refresh::McpServerRefreshStatus::NotRegistered
+            )
+        });
+        let generation = {
+            let mut generations = self.generations.write().await;
+            let generation = generations.entry(session_id).or_default();
+            *generation = generation.saturating_add(1);
+            *generation
+        };
+        let now = Utc::now();
+        let result = McpRefreshResult {
+            status: if partial {
+                McpRefreshStatus::PartiallyRefreshed
+            } else {
+                McpRefreshStatus::Refreshed
+            },
+            retryable: false,
+            generation,
+            requested_at: now,
+            last_successful_refresh_at: (!partial).then_some(now),
+            configured_server_ids,
+            servers,
+            error: None,
+        };
+        states.insert(session_id, result.clone());
+        result
+    }
+
     pub async fn request(
         &self,
         session_id: Uuid,
@@ -382,6 +434,48 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn ordinary_inventory_replaces_a_stale_terminal_snapshot() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let pending = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+        coordinator
+            .fail(
+                session,
+                pending.generation,
+                McpRefreshErrorCategory::Timeout,
+            )
+            .await;
+
+        let observed = coordinator
+            .observe_inventory(
+                session,
+                vec![McpServerRefreshSnapshot {
+                    server_id: "slack".into(),
+                    status: McpServerRefreshStatus::Ready,
+                    tool_count: Some(12),
+                    tool_names: Some(Vec::new()),
+                    tool_schema_fingerprint: None,
+                    resource_count: Some(0),
+                    prompt_count: Some(0),
+                    restart_occurred: None,
+                    discovery_attempts: 1,
+                    observed_errors: Vec::new(),
+                    first_observed_at: None,
+                    last_observed_at: None,
+                    terminal_at: None,
+                    error: None,
+                }],
+            )
+            .await;
+
+        assert!(observed.generation > pending.generation);
+        assert_eq!(observed.status, McpRefreshStatus::Refreshed);
+        assert_eq!(observed.servers[0].tool_count, Some(12));
     }
 
     #[tokio::test]
