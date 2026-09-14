@@ -4208,28 +4208,69 @@ impl ContainerService for LocalContainerService {
                         client.mcp_status(worker_node_id, &request),
                     )
                     .await
-                        && status.status == WorkerMcpRefreshStatus::Queued
                     {
-                        let servers = status
-                            .servers
-                            .into_iter()
-                            .filter_map(|server| serde_json::from_value(server).ok())
-                            .collect();
-                        if let Some(expected_generation) = pending_mcp_generation {
-                            coordinator
-                                .confirm(session_id, expected_generation, servers)
-                                .await;
-                        } else {
-                            coordinator
-                                .observe_inventory(
-                                    session_id,
-                                    execution_started_at,
-                                    configured_server_ids,
-                                    servers,
-                                )
-                                .await;
+                        match status.status {
+                            WorkerMcpRefreshStatus::Queued => {
+                                let servers = status
+                                    .servers
+                                    .into_iter()
+                                    .filter_map(|server| serde_json::from_value(server).ok())
+                                    .collect();
+                                if let Some(expected_generation) = pending_mcp_generation {
+                                    coordinator
+                                        .confirm(session_id, expected_generation, servers)
+                                        .await;
+                                } else {
+                                    coordinator
+                                        .observe_inventory(
+                                            session_id,
+                                            execution_started_at,
+                                            configured_server_ids,
+                                            servers,
+                                        )
+                                        .await;
+                                }
+                                return;
+                            }
+                            WorkerMcpRefreshStatus::Unsupported => {
+                                if let Some(expected_generation) = pending_mcp_generation {
+                                    coordinator
+                                        .fail(
+                                            session_id,
+                                            expected_generation,
+                                            McpRefreshErrorCategory::Unsupported,
+                                        )
+                                        .await;
+                                }
+                                return;
+                            }
+                            WorkerMcpRefreshStatus::MaterializationFailed
+                            | WorkerMcpRefreshStatus::ReloadFailed => {
+                                let category = if status.status
+                                    == WorkerMcpRefreshStatus::MaterializationFailed
+                                {
+                                    McpRefreshErrorCategory::MaterializationFailed
+                                } else {
+                                    McpRefreshErrorCategory::ReloadFailed
+                                };
+                                if let Some(expected_generation) = pending_mcp_generation {
+                                    coordinator
+                                        .fail(session_id, expected_generation, category)
+                                        .await;
+                                } else {
+                                    coordinator
+                                        .observe_failure(
+                                            session_id,
+                                            execution_started_at,
+                                            configured_server_ids,
+                                            category,
+                                        )
+                                        .await;
+                                }
+                                return;
+                            }
+                            WorkerMcpRefreshStatus::Busy => {}
                         }
-                        return;
                     }
                     if tokio::time::Instant::now() < deadline {
                         tokio::time::sleep_until(std::cmp::min(

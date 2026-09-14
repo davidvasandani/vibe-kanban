@@ -17,7 +17,7 @@ use db::models::{execution_process::ExecutionProcess, session::Session, workspac
 use deployment::Deployment;
 use executors::{
     mcp_recovery::{McpRecoveryResult, McpRecoveryScope, McpRecoveryStatus, McpRestartDisposition},
-    mcp_refresh::McpRefreshResult,
+    mcp_refresh::{McpRefreshError, McpRefreshErrorCategory, McpRefreshResult},
 };
 use serde::Deserialize;
 use services::services::container::ContainerService;
@@ -335,6 +335,7 @@ pub async fn restart_workspace(
             .await;
         }
         let mut failed_stop_ids = std::collections::HashSet::new();
+        let mut process_failures = Vec::new();
         if let Ok(workspace_sessions) = Session::find_by_workspace_id(
             &deployment_for_restart.db().pool,
             workspace_for_restart.id,
@@ -365,6 +366,7 @@ pub async fn restart_workspace(
                 .await
             {
                 failed_stop_ids.insert(process.id);
+                process_failures.push(format!("{}: stop failed", process.id));
                 tracing::error!(execution_id = %process.id, %error, "Could not reconcile indeterminate process during workspace MCP restart");
             }
         }
@@ -388,11 +390,13 @@ pub async fn restart_workspace(
                     });
             if !safely_stopped {
                 replay_failed = true;
+                process_failures.push(format!("{}: stop could not be confirmed", process.id));
                 tracing::error!(execution_id = %process.id, "Persistent workspace process was not proven stopped; refusing to start a duplicate");
                 continue;
             }
             let Ok(action) = process.executor_action().cloned() else {
                 replay_failed = true;
+                process_failures.push(format!("{}: launch definition unavailable", process.id));
                 tracing::warn!(execution_id = %process.id, "Persistent workspace process has no replayable action");
                 continue;
             };
@@ -400,6 +404,7 @@ pub async fn restart_workspace(
                 Session::find_by_id(&deployment_for_restart.db().pool, process.session_id).await
             else {
                 replay_failed = true;
+                process_failures.push(format!("{}: owner session unavailable", process.id));
                 tracing::warn!(execution_id = %process.id, "Persistent workspace process has no owner session");
                 continue;
             };
@@ -414,6 +419,7 @@ pub async fn restart_workspace(
                 .await
             {
                 replay_failed = true;
+                process_failures.push(format!("{}: restart failed", process.id));
                 tracing::error!(execution_id = %process.id, %error, "Could not recreate persistent workspace process after MCP restart");
             }
         }
@@ -488,6 +494,17 @@ pub async fn restart_workspace(
                         {
                             operation.servers = status.servers;
                             operation.error = status.error;
+                            if replay_failed && operation.error.is_none() {
+                                operation.error = Some(McpRefreshError {
+                                    category: McpRefreshErrorCategory::Internal,
+                                    message: format!(
+                                        "Workspace process recovery was incomplete: {}.",
+                                        process_failures.join(", ")
+                                    ),
+                                    remediation: "Inspect the named workspace processes, correct their launch or stop failure, then retry the workspace restart.".to_string(),
+                                    retryable: true,
+                                });
+                            }
                             operation.completed_at = Some(Utc::now());
                             operation.status = if matches!(
                                 status.status,
@@ -525,6 +542,17 @@ pub async fn restart_workspace(
                 } else {
                     McpRecoveryStatus::Completed
                 };
+                if replay_failed {
+                    operation.error = Some(McpRefreshError {
+                        category: McpRefreshErrorCategory::Internal,
+                        message: format!(
+                            "Workspace process recovery was incomplete: {}.",
+                            process_failures.join(", ")
+                        ),
+                        remediation: "Inspect the named workspace processes, correct their launch or stop failure, then retry the workspace restart.".to_string(),
+                        retryable: true,
+                    });
+                }
                 operation.completed_at = Some(Utc::now());
             }
         }
