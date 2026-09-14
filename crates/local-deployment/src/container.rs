@@ -983,13 +983,13 @@ impl LocalContainerService {
                             )
                             .await;
                     }
-                    Err(_) => {
+                    Err(category) => {
                         coordinator
-                            .observe_inventory(
+                            .observe_failure(
                                 session_id,
                                 execution_started_at,
                                 configured_server_ids,
-                                Vec::new(),
+                                category,
                             )
                             .await;
                     }
@@ -4135,11 +4135,11 @@ impl ContainerService for LocalContainerService {
                         .await;
                 } else {
                     coordinator
-                        .observe_inventory(
+                        .observe_failure(
                             session_id,
                             execution_started_at,
                             configured_server_ids,
-                            Vec::new(),
+                            McpRefreshErrorCategory::Timeout,
                         )
                         .await;
                 }

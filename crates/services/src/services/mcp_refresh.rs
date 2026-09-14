@@ -93,6 +93,31 @@ impl McpRefreshCoordinator {
         result
     }
 
+    pub async fn observe_failure(
+        &self,
+        session_id: Uuid,
+        execution_started_at: chrono::DateTime<Utc>,
+        configured_server_ids: Vec<String>,
+        category: McpRefreshErrorCategory,
+    ) -> McpRefreshResult {
+        let observed = self
+            .observe_inventory(
+                session_id,
+                execution_started_at,
+                configured_server_ids,
+                Vec::new(),
+            )
+            .await;
+        if observed.status == McpRefreshStatus::PendingNextTurn
+            || observed.requested_at != execution_started_at
+        {
+            return observed;
+        }
+        self.fail(session_id, observed.generation, category)
+            .await
+            .unwrap_or(observed)
+    }
+
     pub async fn request(
         &self,
         session_id: Uuid,
@@ -207,7 +232,11 @@ impl McpRefreshCoordinator {
         }
         let now = Utc::now();
         for server in &mut state.servers {
-            if server.status == executors::mcp_refresh::McpServerRefreshStatus::Connecting {
+            if matches!(
+                server.status,
+                executors::mcp_refresh::McpServerRefreshStatus::Connecting
+                    | executors::mcp_refresh::McpServerRefreshStatus::NotRegistered
+            ) {
                 server.status = executors::mcp_refresh::McpServerRefreshStatus::FailedUnavailable;
                 server.discovery_attempts = server.discovery_attempts.saturating_add(1);
                 server.last_observed_at = Some(now);
@@ -509,6 +538,25 @@ mod tests {
             McpServerRefreshStatus::NotRegistered
         );
         assert_eq!(observed.servers[1].tool_count, Some(12));
+    }
+
+    #[tokio::test]
+    async fn ordinary_inventory_failure_preserves_the_discovery_error() {
+        let coordinator = McpRefreshCoordinator::default();
+        let result = coordinator
+            .observe_failure(
+                Uuid::new_v4(),
+                Utc::now(),
+                vec!["slack".into()],
+                McpRefreshErrorCategory::Timeout,
+            )
+            .await;
+
+        assert_eq!(result.status, McpRefreshStatus::Failed);
+        assert_eq!(
+            result.servers[0].observed_errors[0].code,
+            McpRefreshErrorCategory::Timeout
+        );
     }
 
     #[tokio::test]

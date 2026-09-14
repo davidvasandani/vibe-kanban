@@ -329,7 +329,7 @@ pub async fn restart_mcp_session(
         .container()
         .prepare_mcp_restart(session.workspace_id, session.id)
         .await?;
-    let result = queue_mcp_restart_impl(
+    let result = match queue_mcp_restart_impl(
         session,
         deployment,
         QueueMcpRestartRequest {
@@ -340,7 +340,17 @@ pub async fn restart_mcp_session(
         },
         false,
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            deployment
+                .container()
+                .clear_mcp_restart_tracking(session.id)
+                .await;
+            return Err(error);
+        }
+    };
     let disposition = match result {
         QueueMcpRestartResult::Queued => McpRestartDisposition::Queued,
         QueueMcpRestartResult::Started => McpRestartDisposition::Started,
