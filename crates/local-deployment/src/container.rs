@@ -962,22 +962,38 @@ impl LocalContainerService {
                             .await;
                     }
                 }
-            } else if let Ok(servers) = handle.0.list_servers().await
-                && controls.read().await.get(&session_id).is_some_and(
+            } else {
+                let inventory = handle.0.list_servers().await;
+                if !controls.read().await.get(&session_id).is_some_and(
                     |(current_execution_id, _, _)| *current_execution_id == execution_id,
-                )
-            {
+                ) {
+                    return;
+                }
                 // Inventory is active-session state, not merely a refresh
                 // result. Publish every normal startup so the panel cannot
                 // retain evidence from a previous executor process.
-                coordinator
-                    .observe_inventory(
-                        session_id,
-                        execution_started_at,
-                        configured_server_ids,
-                        servers,
-                    )
-                    .await;
+                match inventory {
+                    Ok(servers) => {
+                        coordinator
+                            .observe_inventory(
+                                session_id,
+                                execution_started_at,
+                                configured_server_ids,
+                                servers,
+                            )
+                            .await;
+                    }
+                    Err(_) => {
+                        coordinator
+                            .observe_inventory(
+                                session_id,
+                                execution_started_at,
+                                configured_server_ids,
+                                Vec::new(),
+                            )
+                            .await;
+                    }
+                }
             }
         });
     }
@@ -2120,6 +2136,9 @@ impl LocalContainerService {
                             {
                                 started_queued_follow_up = true;
                             } else {
+                                if queued_msg.restart_agent {
+                                    container.clear_mcp_restart_tracking(ctx.session.id).await;
+                                }
                                 container.finalize_task(&ctx).await;
                             }
                         } else {
@@ -2129,6 +2148,9 @@ impl LocalContainerService {
                                 ctx.session.id,
                                 ctx.execution_process.status
                             );
+                            if queued_msg.restart_agent {
+                                container.clear_mcp_restart_tracking(ctx.session.id).await;
+                            }
                             container.finalize_task(&ctx).await;
                         }
                     } else if !started_queued_follow_up {
