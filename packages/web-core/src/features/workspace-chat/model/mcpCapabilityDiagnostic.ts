@@ -59,6 +59,12 @@ export function mcpCapabilityDiagnostic(
         `${serverId} is registered but exposes no usable tools. Reconnect it, then refresh MCP tools.`,
     };
   }
+  if (server.tool_count == null) {
+    return {
+      state: 'unavailable',
+      message: `${serverId} is registered, but its active tool count is unknown. Restart the session or open a diagnostic issue.`,
+    };
+  }
   return {
     state: 'available',
     message: `${serverId} is available with ${server.tool_count} tool${server.tool_count === 1 ? '' : 's'}.`,

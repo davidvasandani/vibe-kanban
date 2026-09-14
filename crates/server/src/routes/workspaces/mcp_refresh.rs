@@ -122,7 +122,29 @@ pub async fn restart_workspace(
             }
             Some(session)
         }
-        None => Session::find_latest_by_workspace_id(&deployment.db().pool, workspace.id).await?,
+        None => {
+            let mut resumable = None;
+            for candidate in Session::find_by_workspace_id(&deployment.db().pool, workspace.id)
+                .await?
+                .into_iter()
+                .rev()
+            {
+                let executions = ExecutionProcess::find_by_session_id(
+                    &deployment.db().pool,
+                    candidate.id,
+                    false,
+                )
+                .await?;
+                if executions.iter().any(|process| {
+                    process.run_reason
+                        == db::models::execution_process::ExecutionProcessRunReason::CodingAgent
+                }) {
+                    resumable = Some(candidate);
+                    break;
+                }
+            }
+            resumable
+        }
     };
     let executor = session
         .as_ref()

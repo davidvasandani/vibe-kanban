@@ -67,4 +67,24 @@ describe('mcpRefreshTooltip', () => {
 
     expect(tooltip).toContain('entra is available with 3 tools');
   });
+
+  it('does not claim availability when the active tool count is unknown', () => {
+    const tooltip = mcpRefreshTooltip(
+      result({
+        servers: [
+          {
+            server_id: 'entra',
+            status: 'ready',
+            tool_count: null,
+            resource_count: null,
+            prompt_count: null,
+            restart_occurred: null,
+            error: null,
+          },
+        ],
+      })
+    );
+
+    expect(tooltip).toContain('active tool count is unknown');
+  });
 });
