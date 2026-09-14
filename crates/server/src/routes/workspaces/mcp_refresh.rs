@@ -176,6 +176,7 @@ pub async fn restart_workspace(
         // mode, where there is no server-side scoped-session identity. Always
         // let that turn finish delivering the tool result before teardown.
         if let Some(session_id) = resume_session_id {
+            let grace_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 match ExecutionProcess::has_running_coding_agent_for_session(
                     &deployment_for_restart.db().pool,
@@ -185,6 +186,9 @@ pub async fn restart_workspace(
                 {
                     Ok(false) => break,
                     Ok(true) => {
+                        if tokio::time::Instant::now() >= grace_deadline {
+                            break;
+                        }
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
                     Err(error) => {

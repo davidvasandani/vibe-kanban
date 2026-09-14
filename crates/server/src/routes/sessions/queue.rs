@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     sync::{LazyLock, Mutex},
     time::Duration,
 };
@@ -51,11 +51,12 @@ pub enum QueueMcpRestartResult {
     Started,
 }
 
-static ACTIVE_MCP_SESSION_RESTARTS: LazyLock<Mutex<HashSet<uuid::Uuid>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+static ACTIVE_MCP_SESSION_RESTARTS: LazyLock<Mutex<HashMap<uuid::Uuid, uuid::Uuid>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct ActiveSessionRestartGuard {
     session_id: uuid::Uuid,
+    token: uuid::Uuid,
     active: bool,
 }
 
@@ -68,10 +69,12 @@ impl ActiveSessionRestartGuard {
 impl Drop for ActiveSessionRestartGuard {
     fn drop(&mut self) {
         if self.active {
-            ACTIVE_MCP_SESSION_RESTARTS
+            let mut active = ACTIVE_MCP_SESSION_RESTARTS
                 .lock()
-                .expect("MCP session restart lock poisoned")
-                .remove(&self.session_id);
+                .expect("MCP session restart lock poisoned");
+            if active.get(&self.session_id) == Some(&self.token) {
+                active.remove(&self.session_id);
+            }
         }
     }
 }
@@ -267,11 +270,17 @@ pub async fn restart_mcp_session(
     session: &Session,
     deployment: &DeploymentImpl,
 ) -> Result<McpRecoveryResult, ApiError> {
+    let restart_token = uuid::Uuid::new_v4();
     let already_active = {
         let mut active = ACTIVE_MCP_SESSION_RESTARTS
             .lock()
             .expect("MCP session restart lock poisoned");
-        !active.insert(session.id)
+        if let std::collections::hash_map::Entry::Vacant(entry) = active.entry(session.id) {
+            entry.insert(restart_token);
+            false
+        } else {
+            true
+        }
     };
     if already_active
         && let Some(current) = deployment
@@ -303,6 +312,7 @@ pub async fn restart_mcp_session(
     }
     let mut active_guard = ActiveSessionRestartGuard {
         session_id: session.id,
+        token: restart_token,
         active: true,
     };
     let latest = ExecutionProcess::find_by_session_id(&deployment.db().pool, session.id, false)
@@ -341,6 +351,7 @@ pub async fn restart_mcp_session(
     let servers = tracking.servers;
     let cleanup_deployment = deployment.clone();
     let cleanup_session = session.clone();
+    let cleanup_token = restart_token;
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -375,10 +386,12 @@ pub async fn restart_mcp_session(
                 break;
             }
         }
-        ACTIVE_MCP_SESSION_RESTARTS
+        let mut active = ACTIVE_MCP_SESSION_RESTARTS
             .lock()
-            .expect("MCP session restart lock poisoned")
-            .remove(&cleanup_session.id);
+            .expect("MCP session restart lock poisoned");
+        if active.get(&cleanup_session.id) == Some(&cleanup_token) {
+            active.remove(&cleanup_session.id);
+        }
     });
     active_guard.disarm();
     Ok(McpRecoveryResult {

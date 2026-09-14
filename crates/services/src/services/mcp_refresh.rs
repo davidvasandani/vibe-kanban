@@ -21,6 +21,7 @@ impl McpRefreshCoordinator {
     pub async fn observe_inventory(
         &self,
         session_id: Uuid,
+        mut configured_server_ids: Vec<String>,
         mut servers: Vec<McpServerRefreshSnapshot>,
     ) -> McpRefreshResult {
         let mut states = self.states.write().await;
@@ -29,11 +30,35 @@ impl McpRefreshCoordinator {
         {
             return current.clone();
         }
+        configured_server_ids.sort();
+        configured_server_ids.dedup();
+        let now = Utc::now();
+        for configured_id in &configured_server_ids {
+            if !servers
+                .iter()
+                .any(|server| &server.server_id == configured_id)
+            {
+                servers.push(McpServerRefreshSnapshot {
+                    server_id: configured_id.clone(),
+                    status: executors::mcp_refresh::McpServerRefreshStatus::NotRegistered,
+                    tool_count: Some(0),
+                    tool_names: Some(Vec::new()),
+                    tool_schema_fingerprint: None,
+                    resource_count: None,
+                    prompt_count: None,
+                    restart_occurred: Some(false),
+                    discovery_attempts: 1,
+                    observed_errors: Vec::new(),
+                    first_observed_at: Some(now),
+                    last_observed_at: Some(now),
+                    terminal_at: Some(now),
+                    error: Some(safe_executor_error(
+                        McpRefreshErrorCategory::CapabilityListFailed,
+                    )),
+                });
+            }
+        }
         servers.sort_by(|a, b| a.server_id.cmp(&b.server_id));
-        let configured_server_ids = servers
-            .iter()
-            .map(|server| server.server_id.clone())
-            .collect();
         let partial = servers.iter().any(|server| {
             matches!(
                 server.status,
@@ -48,7 +73,6 @@ impl McpRefreshCoordinator {
             *generation = generation.saturating_add(1);
             *generation
         };
-        let now = Utc::now();
         let result = McpRefreshResult {
             status: if partial {
                 McpRefreshStatus::PartiallyRefreshed
@@ -454,6 +478,7 @@ mod tests {
         let observed = coordinator
             .observe_inventory(
                 session,
+                vec!["brink".into(), "slack".into()],
                 vec![McpServerRefreshSnapshot {
                     server_id: "slack".into(),
                     status: McpServerRefreshStatus::Ready,
@@ -474,8 +499,13 @@ mod tests {
             .await;
 
         assert!(observed.generation > pending.generation);
-        assert_eq!(observed.status, McpRefreshStatus::Refreshed);
-        assert_eq!(observed.servers[0].tool_count, Some(12));
+        assert_eq!(observed.status, McpRefreshStatus::PartiallyRefreshed);
+        assert_eq!(observed.servers[0].server_id, "brink");
+        assert_eq!(
+            observed.servers[0].status,
+            McpServerRefreshStatus::NotRegistered
+        );
+        assert_eq!(observed.servers[1].tool_count, Some(12));
     }
 
     #[tokio::test]

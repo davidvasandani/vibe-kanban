@@ -886,6 +886,7 @@ impl LocalContainerService {
         session_id: Uuid,
         execution_id: Uuid,
         execution_started_at: DateTime<Utc>,
+        configured_server_ids: Vec<String>,
         signal: McpRefreshSignal,
     ) {
         let controls = self.mcp_refresh_controls.clone();
@@ -969,7 +970,9 @@ impl LocalContainerService {
                 // Inventory is active-session state, not merely a refresh
                 // result. Publish every normal startup so the panel cannot
                 // retain evidence from a previous executor process.
-                coordinator.observe_inventory(session_id, servers).await;
+                coordinator
+                    .observe_inventory(session_id, configured_server_ids, servers)
+                    .await;
             }
         });
     }
@@ -4311,10 +4314,26 @@ impl ContainerService for LocalContainerService {
         let keep_warm = spawned.keep_warm && self.warm_agents_enabled();
         let warm_reuse = spawned.warm_reuse.take();
         if let Some(signal) = spawned.mcp_refresh.take() {
+            let configured_server_ids = if let Some(profile) =
+                ExecutionProcess::latest_executor_profile_for_session(
+                    &self.db.pool,
+                    execution_process.session_id,
+                )
+                .await?
+                && let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(&profile)
+            {
+                read_coding_agent_mcp_servers(&agent)
+                    .await
+                    .map(|servers| servers.keys().cloned().collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             self.register_mcp_refresh_control(
                 execution_process.session_id,
                 execution_process.id,
                 execution_process.started_at,
+                configured_server_ids,
                 signal,
             );
         } else if matches!(
