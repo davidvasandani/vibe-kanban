@@ -212,6 +212,12 @@ async fn queue_mcp_restart_impl(
     };
 
     let result = if let Some(queued) = queued {
+        if queued.restart_agent {
+            deployment
+                .queued_message_service()
+                .wait_for_mcp_restart_start(session.id)
+                .await;
+        }
         deployment
             .container()
             .reap_warm_process_for_mcp_restart(session.id)

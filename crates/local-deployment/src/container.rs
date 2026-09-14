@@ -895,14 +895,24 @@ impl LocalContainerService {
             let handle = match tokio::time::timeout(Duration::from_secs(30), signal).await {
                 Ok(Ok(handle)) => handle,
                 Ok(Err(_)) | Err(_) => {
-                    if let Some(state) = coordinator.status(session_id).await.filter(|state| {
+                    let pending = coordinator.status(session_id).await.filter(|state| {
                         state.status == McpRefreshStatus::PendingNextTurn
                             && state.requested_at <= execution_started_at
-                    }) {
+                    });
+                    if let Some(state) = pending {
                         coordinator
                             .fail(
                                 session_id,
                                 state.generation,
+                                McpRefreshErrorCategory::Timeout,
+                            )
+                            .await;
+                    } else {
+                        coordinator
+                            .observe_failure(
+                                session_id,
+                                execution_started_at,
+                                configured_server_ids,
                                 McpRefreshErrorCategory::Timeout,
                             )
                             .await;
