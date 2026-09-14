@@ -1,6 +1,9 @@
 use std::{
-    collections::HashSet,
-    sync::{LazyLock, Mutex},
+    collections::HashMap,
+    sync::{
+        LazyLock, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use axum::{
@@ -32,8 +35,9 @@ pub struct RestartWorkspaceRequest {
     pub resume_session_id: Option<Uuid>,
 }
 
-static ACTIVE_MCP_WORKSPACE_RESTARTS: LazyLock<Mutex<HashSet<Uuid>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+static MCP_WORKSPACE_RESTARTS: LazyLock<Mutex<HashMap<Uuid, McpRecoveryResult>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_WORKSPACE_RECOVERY_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 struct WorkspaceRestartGuard {
     workspace_id: Uuid,
@@ -43,12 +47,31 @@ struct WorkspaceRestartGuard {
 impl Drop for WorkspaceRestartGuard {
     fn drop(&mut self) {
         if self.active {
-            ACTIVE_MCP_WORKSPACE_RESTARTS
+            let mut operations = MCP_WORKSPACE_RESTARTS
                 .lock()
-                .expect("MCP workspace restart lock poisoned")
-                .remove(&self.workspace_id);
+                .expect("MCP workspace restart lock poisoned");
+            if let Some(operation) = operations.get_mut(&self.workspace_id)
+                && matches!(
+                    operation.status,
+                    McpRecoveryStatus::Accepted | McpRecoveryStatus::InProgress
+                )
+            {
+                operation.status = McpRecoveryStatus::Failed;
+                operation.completed_at = Some(Utc::now());
+            }
         }
     }
+}
+
+pub async fn workspace_restart_status(
+    Extension(workspace): Extension<Workspace>,
+) -> Result<ResponseJson<ApiResponse<Option<McpRecoveryResult>>>, ApiError> {
+    let result = MCP_WORKSPACE_RESTARTS
+        .lock()
+        .expect("MCP workspace restart lock poisoned")
+        .get(&workspace.id)
+        .cloned();
+    Ok(ResponseJson(ApiResponse::success(result)))
 }
 
 pub async fn restart_workspace(
@@ -56,16 +79,22 @@ pub async fn restart_workspace(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<RestartWorkspaceRequest>,
 ) -> Result<ResponseJson<ApiResponse<McpRecoveryResult>>, ApiError> {
-    let already_active = {
-        let mut active = ACTIVE_MCP_WORKSPACE_RESTARTS
-            .lock()
-            .expect("MCP workspace restart lock poisoned");
-        !active.insert(workspace.id)
-    };
-    let active_guard = WorkspaceRestartGuard {
-        workspace_id: workspace.id,
-        active: !already_active,
-    };
+    if let Some(mut current) = MCP_WORKSPACE_RESTARTS
+        .lock()
+        .expect("MCP workspace restart lock poisoned")
+        .get(&workspace.id)
+        .filter(|operation| {
+            matches!(
+                operation.status,
+                McpRecoveryStatus::Accepted | McpRecoveryStatus::InProgress
+            )
+        })
+        .cloned()
+    {
+        current.status = McpRecoveryStatus::InProgress;
+        current.disposition = McpRestartDisposition::AlreadyInProgress;
+        return Ok(ResponseJson(ApiResponse::success(current)));
+    }
     let session = match payload.resume_session_id {
         Some(session_id) => {
             let session = Session::find_by_id(&deployment.db().pool, session_id)
@@ -87,27 +116,20 @@ pub async fn restart_workspace(
     let servers = if let Some(session) = session.as_ref() {
         deployment
             .container()
-            .prepare_mcp_restart(workspace.id, session.id)
+            .mcp_refresh_status(workspace.id, session.id)
             .await?
-            .servers
+            .map(|status| status.servers)
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
     let result = McpRecoveryResult {
-        generation: Utc::now().timestamp_millis().unsigned_abs(),
+        generation: NEXT_WORKSPACE_RECOVERY_GENERATION.fetch_add(1, Ordering::Relaxed),
         scope: McpRecoveryScope::Workspace,
         workspace_id: workspace.id,
         session_id: session.as_ref().map(|session| session.id),
-        status: if already_active {
-            McpRecoveryStatus::InProgress
-        } else {
-            McpRecoveryStatus::Accepted
-        },
-        disposition: if already_active {
-            McpRestartDisposition::AlreadyInProgress
-        } else {
-            McpRestartDisposition::Queued
-        },
+        status: McpRecoveryStatus::Accepted,
+        disposition: McpRestartDisposition::Queued,
         requested_at: Utc::now(),
         completed_at: None,
         executor,
@@ -115,15 +137,21 @@ pub async fn restart_workspace(
         error: None,
     };
 
-    if already_active {
-        return Ok(ResponseJson(ApiResponse::success(result)));
-    }
+    MCP_WORKSPACE_RESTARTS
+        .lock()
+        .expect("MCP workspace restart lock poisoned")
+        .insert(workspace.id, result.clone());
+    let active_guard = WorkspaceRestartGuard {
+        workspace_id: workspace.id,
+        active: true,
+    };
 
     // The backend owns this task. In particular, killing the requesting agent's
     // process group cannot cancel the workspace restart after this handler has
     // accepted it.
     let deployment_for_restart = deployment.clone();
     let workspace_for_restart = workspace.clone();
+    let operation_generation = result.generation;
     let task_guard = active_guard;
     tokio::spawn(async move {
         let _guard = task_guard;
@@ -147,6 +175,7 @@ pub async fn restart_workspace(
             .try_stop(&workspace_for_restart, true)
             .await;
 
+        let mut replay_failed = false;
         for process in processes
             .iter()
             .filter(|process| process.run_reason.is_persistent())
@@ -164,16 +193,19 @@ pub async fn restart_workspace(
                 )
                     });
             if !safely_stopped {
+                replay_failed = true;
                 tracing::error!(execution_id = %process.id, "Persistent workspace process was not proven stopped; refusing to start a duplicate");
                 continue;
             }
             let Ok(action) = process.executor_action().cloned() else {
+                replay_failed = true;
                 tracing::warn!(execution_id = %process.id, "Persistent workspace process has no replayable action");
                 continue;
             };
             let Ok(Some(owner_session)) =
                 Session::find_by_id(&deployment_for_restart.db().pool, process.session_id).await
             else {
+                replay_failed = true;
                 tracing::warn!(execution_id = %process.id, "Persistent workspace process has no owner session");
                 continue;
             };
@@ -187,6 +219,7 @@ pub async fn restart_workspace(
                 )
                 .await
             {
+                replay_failed = true;
                 tracing::error!(execution_id = %process.id, %error, "Could not recreate persistent workspace process after MCP restart");
             }
         }
@@ -218,14 +251,77 @@ pub async fn restart_workspace(
             return;
         }
 
-        if let Some(session) = session
-            && let Err(error) = crate::routes::sessions::queue::restart_mcp_session(
+        if let Some(session) = session {
+            match crate::routes::sessions::queue::restart_mcp_session(
                 &session,
                 &deployment_for_restart,
             )
             .await
-        {
-            tracing::error!(session_id = %session.id, %error, "Could not resume session after workspace MCP restart");
+            {
+                Ok(_) => {
+                    for _ in 0..35 {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        let Ok(Some(status)) = deployment_for_restart
+                            .container()
+                            .mcp_refresh_status(workspace_for_restart.id, session.id)
+                            .await
+                        else {
+                            continue;
+                        };
+                        if matches!(
+                            status.status,
+                            executors::mcp_refresh::McpRefreshStatus::PendingNextTurn
+                                | executors::mcp_refresh::McpRefreshStatus::Busy
+                        ) {
+                            continue;
+                        }
+                        let mut operations = MCP_WORKSPACE_RESTARTS
+                            .lock()
+                            .expect("MCP workspace restart lock poisoned");
+                        if let Some(operation) = operations.get_mut(&workspace_for_restart.id)
+                            && operation.generation == operation_generation
+                        {
+                            operation.servers = status.servers;
+                            operation.error = status.error;
+                            operation.completed_at = Some(Utc::now());
+                            operation.status = if matches!(
+                                status.status,
+                                executors::mcp_refresh::McpRefreshStatus::Refreshed
+                            ) && !replay_failed
+                            {
+                                McpRecoveryStatus::Completed
+                            } else if matches!(
+                                status.status,
+                                executors::mcp_refresh::McpRefreshStatus::Failed
+                                    | executors::mcp_refresh::McpRefreshStatus::Unsupported
+                            ) {
+                                McpRecoveryStatus::Failed
+                            } else {
+                                McpRecoveryStatus::PartiallyCompleted
+                            };
+                        }
+                        return;
+                    }
+                    tracing::error!(session_id = %session.id, "Workspace MCP restart did not publish terminal inventory before its deadline");
+                }
+                Err(error) => {
+                    tracing::error!(session_id = %session.id, %error, "Could not resume session after workspace MCP restart");
+                }
+            }
+        } else {
+            let mut operations = MCP_WORKSPACE_RESTARTS
+                .lock()
+                .expect("MCP workspace restart lock poisoned");
+            if let Some(operation) = operations.get_mut(&workspace_for_restart.id)
+                && operation.generation == operation_generation
+            {
+                operation.status = if replay_failed {
+                    McpRecoveryStatus::PartiallyCompleted
+                } else {
+                    McpRecoveryStatus::Completed
+                };
+                operation.completed_at = Some(Utc::now());
+            }
         }
     });
 

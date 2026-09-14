@@ -894,13 +894,17 @@ impl LocalContainerService {
             let handle = match signal.await {
                 Ok(handle) => handle,
                 Err(_) => {
-                    if coordinator
+                    if let Some(state) = coordinator
                         .status(session_id)
                         .await
-                        .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
+                        .filter(|state| state.status == McpRefreshStatus::PendingNextTurn)
                     {
                         coordinator
-                            .fail(session_id, McpRefreshErrorCategory::InitializeFailed)
+                            .fail(
+                                session_id,
+                                state.generation,
+                                McpRefreshErrorCategory::InitializeFailed,
+                            )
                             .await;
                     }
                     return;
@@ -922,16 +926,22 @@ impl LocalContainerService {
                 // perform the atomic confirmation.
                 if state.requested_at > execution_started_at {
                     if let Err(category) = handle.0.queue_refresh().await {
-                        coordinator.fail(session_id, category).await;
+                        coordinator
+                            .fail(session_id, state.generation, category)
+                            .await;
                     }
                     return;
                 }
                 match handle.0.list_servers().await {
                     Ok(servers) => {
-                        coordinator.confirm(session_id, servers).await;
+                        coordinator
+                            .confirm(session_id, state.generation, servers)
+                            .await;
                     }
                     Err(category) => {
-                        coordinator.fail(session_id, category).await;
+                        coordinator
+                            .fail(session_id, state.generation, category)
+                            .await;
                     }
                 }
             }
@@ -3347,14 +3357,22 @@ impl ContainerService for LocalContainerService {
             let Some(profile_id) = profile.as_ref() else {
                 return Ok(self
                     .mcp_refresh_coordinator
-                    .fail(session_id, McpRefreshErrorCategory::Unsupported)
+                    .fail(
+                        session_id,
+                        result.generation,
+                        McpRefreshErrorCategory::Unsupported,
+                    )
                     .await
                     .unwrap_or(result));
             };
             let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id) else {
                 return Ok(self
                     .mcp_refresh_coordinator
-                    .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                    .fail(
+                        session_id,
+                        result.generation,
+                        McpRefreshErrorCategory::MaterializationFailed,
+                    )
                     .await
                     .unwrap_or(result));
             };
@@ -3365,7 +3383,11 @@ impl ContainerService for LocalContainerService {
                 Err(_) => {
                     return Ok(self
                         .mcp_refresh_coordinator
-                        .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                        .fail(
+                            session_id,
+                            result.generation,
+                            McpRefreshErrorCategory::MaterializationFailed,
+                        )
                         .await
                         .unwrap_or(result));
                 }
@@ -3375,7 +3397,11 @@ impl ContainerService for LocalContainerService {
                 Err(_) => {
                     return Ok(self
                         .mcp_refresh_coordinator
-                        .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                        .fail(
+                            session_id,
+                            result.generation,
+                            McpRefreshErrorCategory::MaterializationFailed,
+                        )
                         .await
                         .unwrap_or(result));
                 }
@@ -3383,7 +3409,11 @@ impl ContainerService for LocalContainerService {
             if snapshot.validate_size().is_err() {
                 return Ok(self
                     .mcp_refresh_coordinator
-                    .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                    .fail(
+                        session_id,
+                        result.generation,
+                        McpRefreshErrorCategory::MaterializationFailed,
+                    )
                     .await
                     .unwrap_or(result));
             }
@@ -3453,7 +3483,7 @@ impl ContainerService for LocalContainerService {
             };
             return Ok(self
                 .mcp_refresh_coordinator
-                .fail(session_id, failure)
+                .fail(session_id, result.generation, failure)
                 .await
                 .unwrap_or(result));
         }
@@ -3469,7 +3499,7 @@ impl ContainerService for LocalContainerService {
         {
             return Ok(self
                 .mcp_refresh_coordinator
-                .fail(session_id, category)
+                .fail(session_id, result.generation, category)
                 .await
                 .unwrap_or(result));
         }
@@ -3971,15 +4001,17 @@ impl ContainerService for LocalContainerService {
                 "Execution worker job was not pending during acceptance"
             )));
         }
+        let pending_mcp_generation = self
+            .mcp_refresh_coordinator
+            .status(execution_process.session_id)
+            .await
+            .filter(|state| {
+                state.status == McpRefreshStatus::PendingNextTurn
+                    && state.requested_at <= execution_process.started_at
+            })
+            .map(|state| state.generation);
         if dispatch.mcp_config_snapshot.is_some()
-            && self
-                .mcp_refresh_coordinator
-                .status(execution_process.session_id)
-                .await
-                .is_some_and(|state| {
-                    state.status == McpRefreshStatus::PendingNextTurn
-                        && state.requested_at <= execution_process.started_at
-                })
+            && let Some(expected_generation) = pending_mcp_generation
         {
             let client = client.clone();
             let coordinator = self.mcp_refresh_coordinator.clone();
@@ -4008,13 +4040,19 @@ impl ContainerService for LocalContainerService {
                             .into_iter()
                             .filter_map(|server| serde_json::from_value(server).ok())
                             .collect();
-                        coordinator.confirm(session_id, servers).await;
+                        coordinator
+                            .confirm(session_id, expected_generation, servers)
+                            .await;
                         return;
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
                 coordinator
-                    .fail(session_id, McpRefreshErrorCategory::Timeout)
+                    .fail(
+                        session_id,
+                        expected_generation,
+                        McpRefreshErrorCategory::Timeout,
+                    )
                     .await;
             });
         }
@@ -4208,15 +4246,16 @@ impl ContainerService for LocalContainerService {
                 if matches!(
                     execution_process.run_reason,
                     ExecutionProcessRunReason::CodingAgent
-                ) && self
+                ) && let Some(state) = self
                     .mcp_refresh_coordinator
                     .status(execution_process.session_id)
                     .await
-                    .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
+                    .filter(|state| state.status == McpRefreshStatus::PendingNextTurn)
                 {
                     self.mcp_refresh_coordinator
                         .fail(
                             execution_process.session_id,
+                            state.generation,
                             McpRefreshErrorCategory::ProcessLaunchFailed,
                         )
                         .await;
@@ -4243,15 +4282,16 @@ impl ContainerService for LocalContainerService {
         } else if matches!(
             execution_process.run_reason,
             ExecutionProcessRunReason::CodingAgent
-        ) && self
+        ) && let Some(state) = self
             .mcp_refresh_coordinator
             .status(execution_process.session_id)
             .await
-            .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
+            .filter(|state| state.status == McpRefreshStatus::PendingNextTurn)
         {
             self.mcp_refresh_coordinator
                 .fail(
                     execution_process.session_id,
+                    state.generation,
                     McpRefreshErrorCategory::Unsupported,
                 )
                 .await;

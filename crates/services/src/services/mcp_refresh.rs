@@ -113,10 +113,14 @@ impl McpRefreshCoordinator {
     pub async fn fail(
         &self,
         session_id: Uuid,
+        expected_generation: u64,
         category: McpRefreshErrorCategory,
     ) -> Option<McpRefreshResult> {
         let mut states = self.states.write().await;
         let state = states.get_mut(&session_id)?;
+        if state.generation != expected_generation {
+            return None;
+        }
         let now = Utc::now();
         for server in &mut state.servers {
             if server.status == executors::mcp_refresh::McpServerRefreshStatus::Connecting {
@@ -160,10 +164,14 @@ impl McpRefreshCoordinator {
     pub async fn confirm(
         &self,
         session_id: Uuid,
+        expected_generation: u64,
         mut servers: Vec<McpServerRefreshSnapshot>,
     ) -> Option<McpRefreshResult> {
         let mut states = self.states.write().await;
         let state = states.get_mut(&session_id)?;
+        if state.generation != expected_generation {
+            return None;
+        }
         if !matches!(state.status, McpRefreshStatus::PendingNextTurn) {
             return Some(state.clone());
         }
@@ -277,11 +285,14 @@ mod tests {
     async fn configured_server_missing_from_fresh_registry_is_terminal() {
         let coordinator = McpRefreshCoordinator::default();
         let session = Uuid::new_v4();
-        coordinator
+        let pending = coordinator
             .request_restart(session, vec!["slack".into()])
             .await;
 
-        let result = coordinator.confirm(session, Vec::new()).await.unwrap();
+        let result = coordinator
+            .confirm(session, pending.generation, Vec::new())
+            .await
+            .unwrap();
 
         assert_eq!(result.status, McpRefreshStatus::PartiallyRefreshed);
         assert_eq!(result.servers[0].server_id, "slack");
@@ -297,12 +308,16 @@ mod tests {
     async fn discovery_timeout_terminalizes_every_connecting_server() {
         let coordinator = McpRefreshCoordinator::default();
         let session = Uuid::new_v4();
-        coordinator
+        let pending = coordinator
             .request_restart(session, vec!["brink".into(), "slack".into()])
             .await;
 
         let result = coordinator
-            .fail(session, McpRefreshErrorCategory::Timeout)
+            .fail(
+                session,
+                pending.generation,
+                McpRefreshErrorCategory::Timeout,
+            )
             .await
             .unwrap();
 
@@ -316,15 +331,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_inventory_cannot_complete_a_superseding_restart_generation() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let stale = coordinator
+            .request(session, true, vec!["slack".into()])
+            .await;
+        let current = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+
+        assert!(
+            coordinator
+                .confirm(session, stale.generation, Vec::new())
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            coordinator.status(session).await.unwrap().generation,
+            current.generation
+        );
+        assert_eq!(
+            coordinator.status(session).await.unwrap().status,
+            McpRefreshStatus::PendingNextTurn
+        );
+    }
+
+    #[tokio::test]
     async fn failed_server_is_not_claimed_as_retained_without_executor_support() {
         let coordinator = McpRefreshCoordinator::default();
         let session = Uuid::new_v4();
-        coordinator
+        let first = coordinator
             .request(session, true, vec!["slack".into()])
             .await;
         coordinator
             .confirm(
                 session,
+                first.generation,
                 vec![McpServerRefreshSnapshot {
                     server_id: "slack".to_string(),
                     status: McpServerRefreshStatus::Ready,
@@ -343,12 +386,13 @@ mod tests {
                 }],
             )
             .await;
-        coordinator
+        let second = coordinator
             .request(session, true, vec!["slack".into()])
             .await;
         let result = coordinator
             .confirm(
                 session,
+                second.generation,
                 vec![McpServerRefreshSnapshot {
                     server_id: "slack".to_string(),
                     status: McpServerRefreshStatus::FailedUnavailable,
@@ -401,12 +445,13 @@ mod tests {
                 "generation-schema-changed",
             ),
         ] {
-            coordinator
+            let pending = coordinator
                 .request(session, true, vec!["personal_servicenow".to_string()])
                 .await;
             let result = coordinator
                 .confirm(
                     session,
+                    pending.generation,
                     vec![McpServerRefreshSnapshot {
                         server_id: "personal_servicenow".to_string(),
                         status: McpServerRefreshStatus::Ready,
