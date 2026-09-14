@@ -232,6 +232,9 @@ async fn queue_mcp_restart_impl(
                     return;
                 }
                 deferred_deployment
+                    .queued_message_service()
+                    .finish_workspace_mcp_restart(deferred_session.id);
+                deferred_deployment
                     .container()
                     .reap_warm_process_for_mcp_restart(deferred_session.id)
                     .await;
@@ -257,6 +260,9 @@ async fn queue_mcp_restart_impl(
             });
             return Ok(QueueMcpRestartResult::Queued);
         }
+        deployment
+            .queued_message_service()
+            .finish_workspace_mcp_restart(session.id);
         deployment
             .container()
             .reap_warm_process_for_mcp_restart(session.id)

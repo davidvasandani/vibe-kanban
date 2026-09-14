@@ -266,10 +266,23 @@ pub async fn restart_workspace(
             .await;
         let mut failed_stop_ids = std::collections::HashSet::new();
         for process in &processes {
+            let Ok(Some(current)) =
+                ExecutionProcess::find_by_id(&deployment_for_restart.db().pool, process.id).await
+            else {
+                failed_stop_ids.insert(process.id);
+                continue;
+            };
+            if !matches!(
+                current.status,
+                db::models::execution_process::ExecutionProcessStatus::Running
+                    | db::models::execution_process::ExecutionProcessStatus::Indeterminate
+            ) {
+                continue;
+            }
             if let Err(error) = deployment_for_restart
                 .container()
                 .stop_execution(
-                    process,
+                    &current,
                     db::models::execution_process::ExecutionProcessStatus::Killed,
                 )
                 .await
