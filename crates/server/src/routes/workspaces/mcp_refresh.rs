@@ -52,8 +52,7 @@ struct RestartStartGate {
 impl Drop for RestartStartGate {
     fn drop(&mut self) {
         if let Some(session_id) = self.session_id {
-            self.service.unblock_mcp_restart_start(session_id);
-            self.service.finish_workspace_mcp_restart(session_id);
+            self.service.cancel_workspace_mcp_restart(session_id);
         }
     }
 }
@@ -265,9 +264,8 @@ pub async fn restart_workspace(
             .container()
             .try_stop(&workspace_for_restart, true)
             .await;
-        for process in processes.iter().filter(|process| {
-            process.status == db::models::execution_process::ExecutionProcessStatus::Indeterminate
-        }) {
+        let mut failed_stop_ids = std::collections::HashSet::new();
+        for process in &processes {
             if let Err(error) = deployment_for_restart
                 .container()
                 .stop_execution(
@@ -276,6 +274,7 @@ pub async fn restart_workspace(
                 )
                 .await
             {
+                failed_stop_ids.insert(process.id);
                 tracing::error!(execution_id = %process.id, %error, "Could not reconcile indeterminate process during workspace MCP restart");
             }
         }
@@ -285,8 +284,8 @@ pub async fn restart_workspace(
             .iter()
             .filter(|process| process.run_reason.is_persistent())
         {
-            let safely_stopped =
-                ExecutionProcess::find_by_id(&deployment_for_restart.db().pool, process.id)
+            let safely_stopped = !failed_stop_ids.contains(&process.id)
+                && ExecutionProcess::find_by_id(&deployment_for_restart.db().pool, process.id)
                     .await
                     .ok()
                     .flatten()
@@ -335,8 +334,8 @@ pub async fn restart_workspace(
                 process.run_reason
                     == db::models::execution_process::ExecutionProcessRunReason::CodingAgent
             }) {
-                let stopped =
-                    ExecutionProcess::find_by_id(&deployment_for_restart.db().pool, process.id)
+                let stopped = !failed_stop_ids.contains(&process.id)
+                    && ExecutionProcess::find_by_id(&deployment_for_restart.db().pool, process.id)
                         .await
                         .ok()
                         .flatten()

@@ -44,6 +44,7 @@ pub struct QueuedMessageService {
     queue: Arc<DashMap<Uuid, QueuedMessage>>,
     blocked_mcp_restarts: Arc<DashMap<Uuid, ()>>,
     workspace_mcp_restarts: Arc<DashMap<Uuid, ()>>,
+    cancelled_workspace_mcp_restarts: Arc<DashMap<Uuid, ()>>,
     restart_resolution: Arc<Notify>,
 }
 
@@ -53,6 +54,7 @@ impl QueuedMessageService {
             queue: Arc::new(DashMap::new()),
             blocked_mcp_restarts: Arc::new(DashMap::new()),
             workspace_mcp_restarts: Arc::new(DashMap::new()),
+            cancelled_workspace_mcp_restarts: Arc::new(DashMap::new()),
             restart_resolution: Arc::new(Notify::new()),
         }
     }
@@ -213,18 +215,27 @@ impl QueuedMessageService {
 
     pub fn finish_workspace_mcp_restart(&self, session_id: Uuid) {
         self.workspace_mcp_restarts.remove(&session_id);
+        self.cancelled_workspace_mcp_restarts.remove(&session_id);
     }
 
-    pub async fn wait_for_mcp_restart_start(&self, session_id: Uuid) {
+    pub fn cancel_workspace_mcp_restart(&self, session_id: Uuid) {
+        self.cancelled_workspace_mcp_restarts.insert(session_id, ());
+        self.unblock_mcp_restart_start(session_id);
+    }
+
+    pub async fn wait_for_mcp_restart_start(&self, session_id: Uuid) -> bool {
         while self.is_mcp_restart_start_blocked(session_id) {
             let notified = self.restart_resolution.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             if !self.is_mcp_restart_start_blocked(session_id) {
-                return;
+                break;
             }
             notified.await;
         }
+        !self
+            .cancelled_workspace_mcp_restarts
+            .contains_key(&session_id)
     }
 
     pub async fn wait_for_restart_resolution(&self, session_id: Uuid) {

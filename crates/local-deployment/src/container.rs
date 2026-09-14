@@ -3078,9 +3078,16 @@ impl LocalContainerService {
         queued_msg: &services::services::queued_message::QueuedMessage,
     ) -> bool {
         if queued_msg.restart_agent {
-            self.queued_message_service
+            if !self
+                .queued_message_service
                 .wait_for_mcp_restart_start(ctx.session.id)
-                .await;
+                .await
+            {
+                self.queued_message_service
+                    .finish_workspace_mcp_restart(ctx.session.id);
+                self.clear_mcp_restart_tracking(ctx.session.id).await;
+                return false;
+            }
             self.queued_message_service
                 .finish_workspace_mcp_restart(ctx.session.id);
             self.reap_warm_server(&ctx.session.id).await;

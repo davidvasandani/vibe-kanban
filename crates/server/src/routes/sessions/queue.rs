@@ -220,10 +220,17 @@ async fn queue_mcp_restart_impl(
             let deferred_deployment = deployment.clone();
             let deferred_session = session.clone();
             tokio::spawn(async move {
-                deferred_deployment
+                if !deferred_deployment
                     .queued_message_service()
                     .wait_for_mcp_restart_start(deferred_session.id)
-                    .await;
+                    .await
+                {
+                    deferred_deployment
+                        .container()
+                        .clear_mcp_restart_tracking(deferred_session.id)
+                        .await;
+                    return;
+                }
                 deferred_deployment
                     .container()
                     .reap_warm_process_for_mcp_restart(deferred_session.id)
@@ -279,7 +286,16 @@ async fn queue_mcp_restart(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<QueueMcpRestartRequest>,
 ) -> Result<ResponseJson<ApiResponse<QueueMcpRestartResult>>, ApiError> {
-    let result = queue_mcp_restart_impl(&session, &deployment, payload, true).await?;
+    let result = match queue_mcp_restart_impl(&session, &deployment, payload, true).await {
+        Ok(result) => result,
+        Err(error) => {
+            deployment
+                .container()
+                .clear_mcp_restart_tracking(session.id)
+                .await;
+            return Err(error);
+        }
+    };
     Ok(ResponseJson(ApiResponse::success(result)))
 }
 
