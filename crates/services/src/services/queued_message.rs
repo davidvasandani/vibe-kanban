@@ -207,6 +207,7 @@ impl QueuedMessageService {
     }
 
     pub fn block_mcp_restart_start(&self, session_id: Uuid) {
+        self.cancelled_workspace_mcp_restarts.remove(&session_id);
         self.blocked_mcp_restarts.insert(session_id, ());
         self.workspace_mcp_restarts.insert(session_id, ());
     }

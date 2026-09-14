@@ -4153,7 +4153,8 @@ impl ContainerService for LocalContainerService {
             let execution_started_at = execution_process.started_at;
             let configured_server_ids = snapshot.servers.keys().cloned().collect::<Vec<_>>();
             tokio::spawn(async move {
-                for _ in 0..30 {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                while tokio::time::Instant::now() < deadline {
                     let request = McpRefreshRequest {
                         authority: RequestAuthority {
                             protocol_version: PROTOCOL_VERSION,
@@ -4166,7 +4167,11 @@ impl ContainerService for LocalContainerService {
                         execution_id,
                         snapshot: snapshot.clone(),
                     };
-                    if let Ok(status) = client.mcp_status(worker_node_id, &request).await
+                    if let Ok(Ok(status)) = tokio::time::timeout_at(
+                        deadline,
+                        client.mcp_status(worker_node_id, &request),
+                    )
+                    .await
                         && status.status == WorkerMcpRefreshStatus::Queued
                     {
                         let servers = status
@@ -4190,7 +4195,13 @@ impl ContainerService for LocalContainerService {
                         }
                         return;
                     }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if tokio::time::Instant::now() < deadline {
+                        tokio::time::sleep_until(std::cmp::min(
+                            deadline,
+                            tokio::time::Instant::now() + Duration::from_secs(1),
+                        ))
+                        .await;
+                    }
                 }
                 if let Some(expected_generation) = pending_mcp_generation {
                     coordinator
