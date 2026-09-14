@@ -895,11 +895,10 @@ impl LocalContainerService {
             let handle = match tokio::time::timeout(Duration::from_secs(30), signal).await {
                 Ok(Ok(handle)) => handle,
                 Ok(Err(_)) | Err(_) => {
-                    if let Some(state) = coordinator
-                        .status(session_id)
-                        .await
-                        .filter(|state| state.status == McpRefreshStatus::PendingNextTurn)
-                    {
+                    if let Some(state) = coordinator.status(session_id).await.filter(|state| {
+                        state.status == McpRefreshStatus::PendingNextTurn
+                            && state.requested_at <= execution_started_at
+                    }) {
                         coordinator
                             .fail(
                                 session_id,
@@ -3033,6 +3032,9 @@ impl LocalContainerService {
         queued_msg: &services::services::queued_message::QueuedMessage,
     ) -> bool {
         if queued_msg.restart_agent {
+            self.queued_message_service
+                .wait_for_mcp_restart_start(ctx.session.id)
+                .await;
             self.reap_warm_server(&ctx.session.id).await;
         }
         if let Err(e) =
@@ -3344,7 +3346,12 @@ impl ContainerService for LocalContainerService {
     async fn reap_warm_processes_for_session(&self, session_id: Uuid) {
         self.reap_warm_server(&session_id).await;
         self.mcp_refresh_controls.write().await.remove(&session_id);
-        self.mcp_refresh_coordinator.remove(session_id).await;
+        if !self
+            .queued_message_service
+            .is_mcp_restart_start_blocked(session_id)
+        {
+            self.mcp_refresh_coordinator.remove(session_id).await;
+        }
     }
 
     async fn reap_warm_process_for_mcp_restart(&self, session_id: Uuid) {

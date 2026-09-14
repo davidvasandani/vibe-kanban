@@ -44,6 +44,19 @@ struct WorkspaceRestartGuard {
     active: bool,
 }
 
+struct RestartStartGate {
+    service: services::services::queued_message::QueuedMessageService,
+    session_id: Option<Uuid>,
+}
+
+impl Drop for RestartStartGate {
+    fn drop(&mut self) {
+        if let Some(session_id) = self.session_id {
+            self.service.unblock_mcp_restart_start(session_id);
+        }
+    }
+}
+
 impl Drop for WorkspaceRestartGuard {
     fn drop(&mut self) {
         if self.active {
@@ -172,6 +185,15 @@ pub async fn restart_workspace(
     let task_guard = active_guard;
     tokio::spawn(async move {
         let _guard = task_guard;
+        let mut restart_start_gate = RestartStartGate {
+            service: deployment_for_restart.queued_message_service().clone(),
+            session_id: session.as_ref().map(|session| session.id),
+        };
+        if let Some(session_id) = restart_start_gate.session_id {
+            restart_start_gate
+                .service
+                .block_mcp_restart_start(session_id);
+        }
         let mut session_restart_queued = false;
         if let Some(session) = session.as_ref()
             && ExecutionProcess::has_running_coding_agent_for_session(
@@ -331,6 +353,12 @@ pub async fn restart_workspace(
         if !coding_agents_stopped {
             tracing::error!(workspace_id = %workspace_for_restart.id, "Coding-agent stop was not proven; refusing to start a duplicate continuation");
             return;
+        }
+
+        if let Some(session_id) = restart_start_gate.session_id.take() {
+            restart_start_gate
+                .service
+                .unblock_mcp_restart_start(session_id);
         }
 
         if let Some(session) = session {

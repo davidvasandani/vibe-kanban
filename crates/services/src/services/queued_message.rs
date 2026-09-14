@@ -42,6 +42,7 @@ pub enum QueueStatus {
 #[derive(Clone)]
 pub struct QueuedMessageService {
     queue: Arc<DashMap<Uuid, QueuedMessage>>,
+    blocked_mcp_restarts: Arc<DashMap<Uuid, ()>>,
     restart_resolution: Arc<Notify>,
 }
 
@@ -49,6 +50,7 @@ impl QueuedMessageService {
     pub fn new() -> Self {
         Self {
             queue: Arc::new(DashMap::new()),
+            blocked_mcp_restarts: Arc::new(DashMap::new()),
             restart_resolution: Arc::new(Notify::new()),
         }
     }
@@ -187,6 +189,31 @@ impl QueuedMessageService {
         self.queue
             .get(&session_id)
             .is_some_and(|message| message.restart_agent || message.restart_reservation.is_some())
+    }
+
+    pub fn block_mcp_restart_start(&self, session_id: Uuid) {
+        self.blocked_mcp_restarts.insert(session_id, ());
+    }
+
+    pub fn unblock_mcp_restart_start(&self, session_id: Uuid) {
+        self.blocked_mcp_restarts.remove(&session_id);
+        self.restart_resolution.notify_waiters();
+    }
+
+    pub fn is_mcp_restart_start_blocked(&self, session_id: Uuid) -> bool {
+        self.blocked_mcp_restarts.contains_key(&session_id)
+    }
+
+    pub async fn wait_for_mcp_restart_start(&self, session_id: Uuid) {
+        while self.is_mcp_restart_start_blocked(session_id) {
+            let notified = self.restart_resolution.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.is_mcp_restart_start_blocked(session_id) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     pub async fn wait_for_restart_resolution(&self, session_id: Uuid) {
