@@ -128,7 +128,9 @@ impl McpServer {
             return Ok(Self::tool_error(error_result));
         }
         let session_id = session_id.or_else(|| self.orchestrator_session_id());
-        let defer_until_session_idle = self.orchestrator_session_id() == session_id;
+        let defer_until_session_idle = self
+            .orchestrator_session_id()
+            .is_some_and(|scoped_session_id| session_id == Some(scoped_session_id));
         if self
             .orchestrator_session_id()
             .is_some_and(|scoped_session_id| {

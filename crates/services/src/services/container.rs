@@ -377,6 +377,8 @@ pub trait ContainerService {
         )))
     }
 
+    async fn clear_mcp_restart_tracking(&self, _session_id: Uuid) {}
+
     async fn mcp_refresh_status(
         &self,
         workspace_id: Uuid,

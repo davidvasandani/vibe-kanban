@@ -3543,6 +3543,10 @@ impl ContainerService for LocalContainerService {
             .await)
     }
 
+    async fn clear_mcp_restart_tracking(&self, session_id: Uuid) {
+        self.mcp_refresh_coordinator.remove(session_id).await;
+    }
+
     async fn mcp_refresh_status(
         &self,
         workspace_id: Uuid,

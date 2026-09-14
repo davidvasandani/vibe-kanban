@@ -76,7 +76,7 @@ impl Drop for ActiveSessionRestartGuard {
     }
 }
 
-pub fn supersede_mcp_session_restart(session_id: uuid::Uuid, deployment: &DeploymentImpl) {
+pub async fn supersede_mcp_session_restart(session_id: uuid::Uuid, deployment: &DeploymentImpl) {
     ACTIVE_MCP_SESSION_RESTARTS
         .lock()
         .expect("MCP session restart lock poisoned")
@@ -89,6 +89,10 @@ pub fn supersede_mcp_session_restart(session_id: uuid::Uuid, deployment: &Deploy
             .queued_message_service()
             .cancel_queued(session_id);
     }
+    deployment
+        .container()
+        .clear_mcp_restart_tracking(session_id)
+        .await;
 }
 
 struct RestartReservationGuard {
@@ -435,6 +439,12 @@ async fn cancel_queued_message(
     Extension(session): Extension<Session>,
     State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<QueueStatus>>, ApiError> {
+    if deployment
+        .queued_message_service()
+        .has_mcp_restart(session.id)
+    {
+        supersede_mcp_session_restart(session.id, &deployment).await;
+    }
     deployment
         .queued_message_service()
         .cancel_queued(session.id);

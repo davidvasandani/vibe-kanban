@@ -210,7 +210,8 @@ pub async fn restart_workspace(
             crate::routes::sessions::queue::supersede_mcp_session_restart(
                 session.id,
                 &deployment_for_restart,
-            );
+            )
+            .await;
         }
         deployment_for_restart
             .container()
