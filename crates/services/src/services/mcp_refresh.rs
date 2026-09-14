@@ -254,13 +254,18 @@ impl McpRefreshCoordinator {
             return None;
         }
         let now = Utc::now();
-        for server in &mut state.servers {
-            if matches!(
-                server.status,
-                executors::mcp_refresh::McpServerRefreshStatus::Connecting
-                    | executors::mcp_refresh::McpServerRefreshStatus::NotRegistered
-            ) {
+        for server_id in state.configured_server_ids.clone() {
+            if let Some(server) = state
+                .servers
+                .iter_mut()
+                .find(|server| server.server_id == server_id)
+            {
                 server.status = executors::mcp_refresh::McpServerRefreshStatus::FailedUnavailable;
+                server.tool_count = Some(0);
+                server.tool_names = Some(Vec::new());
+                server.tool_schema_fingerprint = None;
+                server.resource_count = None;
+                server.prompt_count = None;
                 server.discovery_attempts = server.discovery_attempts.saturating_add(1);
                 server.last_observed_at = Some(now);
                 server.terminal_at = Some(now);
@@ -269,6 +274,26 @@ impl McpRefreshCoordinator {
                     observed_at: now,
                 });
                 server.error = Some(safe_executor_error(category.clone()));
+            } else {
+                state.servers.push(McpServerRefreshSnapshot {
+                    server_id,
+                    status: executors::mcp_refresh::McpServerRefreshStatus::FailedUnavailable,
+                    tool_count: Some(0),
+                    tool_names: Some(Vec::new()),
+                    tool_schema_fingerprint: None,
+                    resource_count: None,
+                    prompt_count: None,
+                    restart_occurred: None,
+                    discovery_attempts: 1,
+                    observed_errors: vec![McpDiscoveryObservation {
+                        code: category.clone(),
+                        observed_at: now,
+                    }],
+                    first_observed_at: Some(now),
+                    last_observed_at: Some(now),
+                    terminal_at: Some(now),
+                    error: Some(safe_executor_error(category.clone())),
+                });
             }
         }
         state.status = McpRefreshStatus::Failed;
