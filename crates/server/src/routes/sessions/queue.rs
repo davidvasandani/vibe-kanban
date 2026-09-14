@@ -9,7 +9,7 @@ use axum::{
     response::Json as ResponseJson, routing::get,
 };
 use db::models::{
-    execution_process::{ExecutionProcess, ExecutionProcessRunReason},
+    execution_process::{ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus},
     scratch::DraftFollowUpData,
     session::Session,
 };
@@ -375,8 +375,18 @@ pub async fn restart_mcp_session(
         token: restart_token,
         active: true,
     };
-    let latest = ExecutionProcess::find_by_session_id(&deployment.db().pool, session.id, false)
-        .await?
+    let executions =
+        ExecutionProcess::find_by_session_id(&deployment.db().pool, session.id, false).await?;
+    if executions.iter().any(|process| {
+        process.run_reason == ExecutionProcessRunReason::CodingAgent
+            && process.status == ExecutionProcessStatus::Indeterminate
+    }) {
+        return Err(ApiError::Conflict(
+            "Session has an indeterminate coding-agent execution; use restart_workspace to reconcile it before starting a replacement"
+                .into(),
+        ));
+    }
+    let latest = executions
         .into_iter()
         .rev()
         .find(|process| process.run_reason == ExecutionProcessRunReason::CodingAgent)

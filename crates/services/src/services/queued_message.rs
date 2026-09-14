@@ -245,9 +245,9 @@ impl QueuedMessageService {
             }
             notified.await;
         }
-        !self
-            .cancelled_workspace_mcp_restarts
-            .contains_key(&session_id)
+        self.cancelled_workspace_mcp_restarts
+            .remove(&session_id)
+            .is_none()
     }
 
     pub async fn wait_for_restart_resolution(&self, session_id: Uuid) {

@@ -56,7 +56,11 @@ struct RestartStartGate {
 impl Drop for RestartStartGate {
     fn drop(&mut self) {
         if let Some(session_id) = self.session_id {
-            self.service.cancel_workspace_mcp_restart(session_id);
+            if self.service.has_mcp_restart(session_id) {
+                self.service.cancel_workspace_mcp_restart(session_id);
+            } else {
+                self.service.finish_workspace_mcp_restart(session_id);
+            }
         }
     }
 }
