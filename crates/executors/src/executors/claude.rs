@@ -85,8 +85,20 @@ impl Default for ClaudeMcpInventory {
 }
 
 impl ClaudeMcpInventory {
-    pub(crate) async fn observe_tools(&self, tools: &[serde_json::Value]) {
+    pub(crate) async fn observe_tools(
+        &self,
+        tools: &[serde_json::Value],
+        mcp_servers: &[serde_json::Value],
+    ) {
         let mut by_server: HashMap<String, Vec<String>> = HashMap::new();
+        for server in mcp_servers {
+            let status = server.get("status").and_then(serde_json::Value::as_str);
+            if status.is_none_or(|status| status == "connected")
+                && let Some(name) = server.get("name").and_then(serde_json::Value::as_str)
+            {
+                by_server.entry(name.to_string()).or_default();
+            }
+        }
         for tool in tools {
             let name = tool
                 .as_str()
@@ -109,7 +121,11 @@ impl ClaudeMcpInventory {
                 tool_names.dedup();
                 McpServerRefreshSnapshot {
                     server_id,
-                    status: McpServerRefreshStatus::Ready,
+                    status: if tool_names.is_empty() {
+                        McpServerRefreshStatus::ConnectedNoTools
+                    } else {
+                        McpServerRefreshStatus::Ready
+                    },
                     tool_count: Some(tool_names.len() as u32),
                     tool_names: Some(tool_names),
                     // Claude's init event provides names, not schemas.
@@ -2777,6 +2793,8 @@ pub enum ClaudeJson {
         session_id: Option<String>,
         cwd: Option<String>,
         tools: Option<Vec<serde_json::Value>>,
+        #[serde(default)]
+        mcp_servers: Vec<serde_json::Value>,
         model: Option<String>,
         #[serde(default, rename = "apiKeySource")]
         api_key_source: Option<String>,
@@ -3600,12 +3618,15 @@ mod tests {
     async fn startup_inventory_groups_registered_mcp_tools_by_server() {
         let inventory = ClaudeMcpInventory::default();
         inventory
-            .observe_tools(&[
-                serde_json::json!("Read"),
-                serde_json::json!("mcp__slack__conversations_replies"),
-                serde_json::json!({ "name": "mcp__slack__conversations_history" }),
-                serde_json::json!("mcp__brink__sales_split"),
-            ])
+            .observe_tools(
+                &[
+                    serde_json::json!("Read"),
+                    serde_json::json!("mcp__slack__conversations_replies"),
+                    serde_json::json!({ "name": "mcp__slack__conversations_history" }),
+                    serde_json::json!("mcp__brink__sales_split"),
+                ],
+                &[],
+            )
             .await;
 
         let servers = inventory.list_servers().await.unwrap();
@@ -3614,6 +3635,34 @@ mod tests {
         assert_eq!(servers[0].tool_count, Some(1));
         assert_eq!(servers[1].server_id, "slack");
         assert_eq!(servers[1].tool_count, Some(2));
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_preserves_connected_zero_tool_servers() {
+        let inventory = ClaudeMcpInventory::default();
+        inventory
+            .observe_tools(
+                &[],
+                &[serde_json::json!({ "name": "resources_only", "status": "connected" })],
+            )
+            .await;
+
+        let servers = inventory.list_servers().await.unwrap();
+        assert_eq!(servers[0].status, McpServerRefreshStatus::ConnectedNoTools);
+        assert_eq!(servers[0].tool_count, Some(0));
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_does_not_mark_failed_servers_connected() {
+        let inventory = ClaudeMcpInventory::default();
+        inventory
+            .observe_tools(
+                &[],
+                &[serde_json::json!({ "name": "failed_server", "status": "failed" })],
+            )
+            .await;
+
+        assert!(inventory.list_servers().await.unwrap().is_empty());
     }
 
     #[test]

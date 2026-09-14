@@ -484,11 +484,12 @@ impl ClaudeAgentClient {
         if let Ok(ClaudeJson::System {
             subtype: Some(subtype),
             tools: Some(tools),
+            mcp_servers,
             ..
         }) = serde_json::from_str::<ClaudeJson>(line)
             && subtype == "init"
         {
-            self.mcp_inventory.observe_tools(&tools).await;
+            self.mcp_inventory.observe_tools(&tools, &mcp_servers).await;
         }
         self.log_writer.log_raw(line).await
     }
