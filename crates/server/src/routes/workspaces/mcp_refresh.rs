@@ -172,6 +172,27 @@ pub async fn restart_workspace(
     let task_guard = active_guard;
     tokio::spawn(async move {
         let _guard = task_guard;
+        let mut session_restart_queued = false;
+        if let Some(session) = session.as_ref()
+            && ExecutionProcess::has_running_coding_agent_for_session(
+                &deployment_for_restart.db().pool,
+                session.id,
+            )
+            .await
+            .unwrap_or(false)
+        {
+            crate::routes::sessions::queue::supersede_mcp_session_restart(
+                session.id,
+                &deployment_for_restart,
+            )
+            .await;
+            session_restart_queued = crate::routes::sessions::queue::restart_mcp_session(
+                session,
+                &deployment_for_restart,
+            )
+            .await
+            .is_ok();
+        }
         // A supplied session can be the caller even when MCP runs in global
         // mode, where there is no server-side scoped-session identity. Always
         // let that turn finish delivering the tool result before teardown.
@@ -210,7 +231,7 @@ pub async fn restart_workspace(
                 return;
             }
         };
-        if let Some(session) = session.as_ref() {
+        if !session_restart_queued && let Some(session) = session.as_ref() {
             crate::routes::sessions::queue::supersede_mcp_session_restart(
                 session.id,
                 &deployment_for_restart,
@@ -313,12 +334,17 @@ pub async fn restart_workspace(
         }
 
         if let Some(session) = session {
-            match crate::routes::sessions::queue::restart_mcp_session(
-                &session,
-                &deployment_for_restart,
-            )
-            .await
-            {
+            let restart_result = if session_restart_queued {
+                Ok(())
+            } else {
+                crate::routes::sessions::queue::restart_mcp_session(
+                    &session,
+                    &deployment_for_restart,
+                )
+                .await
+                .map(|_| ())
+            };
+            match restart_result {
                 Ok(_) => {
                     for _ in 0..35 {
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;

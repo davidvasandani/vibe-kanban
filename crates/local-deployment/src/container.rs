@@ -892,9 +892,9 @@ impl LocalContainerService {
         let controls = self.mcp_refresh_controls.clone();
         let coordinator = self.mcp_refresh_coordinator.clone();
         tokio::spawn(async move {
-            let handle = match signal.await {
-                Ok(handle) => handle,
-                Err(_) => {
+            let handle = match tokio::time::timeout(Duration::from_secs(30), signal).await {
+                Ok(Ok(handle)) => handle,
+                Ok(Err(_)) | Err(_) => {
                     if let Some(state) = coordinator
                         .status(session_id)
                         .await
@@ -904,7 +904,7 @@ impl LocalContainerService {
                             .fail(
                                 session_id,
                                 state.generation,
-                                McpRefreshErrorCategory::InitializeFailed,
+                                McpRefreshErrorCategory::Timeout,
                             )
                             .await;
                     }
@@ -2122,8 +2122,7 @@ impl LocalContainerService {
                     if let Some(queued_msg) =
                         container.queued_message_service.take_queued(ctx.session.id)
                     {
-                        let should_execute_queued = (queued_msg.restart_agent
-                            && ctx.execution_process.status == ExecutionProcessStatus::Failed)
+                        let should_execute_queued = queued_msg.restart_agent
                             || !matches!(
                                 ctx.execution_process.status,
                                 ExecutionProcessStatus::Failed
