@@ -937,6 +937,12 @@ impl LocalContainerService {
                 // Queue it on this live thread and let the following turn
                 // perform the atomic confirmation.
                 if state.requested_at > execution_started_at {
+                    if coordinator
+                        .is_restart_generation(session_id, state.generation)
+                        .await
+                    {
+                        return;
+                    }
                     if let Err(category) = handle.0.queue_refresh().await {
                         coordinator
                             .fail(session_id, state.generation, category)

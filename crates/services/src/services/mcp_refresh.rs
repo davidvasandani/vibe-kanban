@@ -12,6 +12,7 @@ use uuid::Uuid;
 pub struct McpRefreshCoordinator {
     states: Arc<RwLock<HashMap<Uuid, McpRefreshResult>>>,
     generations: Arc<RwLock<HashMap<Uuid, u64>>>,
+    restart_generations: Arc<RwLock<HashMap<Uuid, u64>>>,
 }
 
 impl McpRefreshCoordinator {
@@ -124,8 +125,13 @@ impl McpRefreshCoordinator {
         supported: bool,
         configured_server_ids: Vec<String>,
     ) -> McpRefreshResult {
-        self.request_inner(session_id, supported, configured_server_ids, false)
-            .await
+        let result = self
+            .request_inner(session_id, supported, configured_server_ids, false)
+            .await;
+        if result.status != McpRefreshStatus::Busy {
+            self.restart_generations.write().await.remove(&session_id);
+        }
+        result
     }
 
     /// A fresh process supersedes a wedged live-refresh generation. Unlike a
@@ -136,8 +142,18 @@ impl McpRefreshCoordinator {
         session_id: Uuid,
         configured_server_ids: Vec<String>,
     ) -> McpRefreshResult {
-        self.request_inner(session_id, true, configured_server_ids, true)
+        let result = self
+            .request_inner(session_id, true, configured_server_ids, true)
+            .await;
+        self.restart_generations
+            .write()
             .await
+            .insert(session_id, result.generation);
+        result
+    }
+
+    pub async fn is_restart_generation(&self, session_id: Uuid, generation: u64) -> bool {
+        self.restart_generations.read().await.get(&session_id) == Some(&generation)
     }
 
     async fn request_inner(
@@ -467,6 +483,26 @@ mod tests {
         assert_eq!(
             coordinator.status(session).await.unwrap().status,
             McpRefreshStatus::PendingNextTurn
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_live_refresh_does_not_erase_restart_generation_identity() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let restart = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+
+        let busy = coordinator
+            .request(session, true, vec!["slack".into()])
+            .await;
+
+        assert_eq!(busy.status, McpRefreshStatus::Busy);
+        assert!(
+            coordinator
+                .is_restart_generation(session, restart.generation)
+                .await
         );
     }
 

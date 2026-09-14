@@ -221,6 +221,20 @@ pub async fn restart_workspace(
             .container()
             .try_stop(&workspace_for_restart, true)
             .await;
+        for process in processes.iter().filter(|process| {
+            process.status == db::models::execution_process::ExecutionProcessStatus::Indeterminate
+        }) {
+            if let Err(error) = deployment_for_restart
+                .container()
+                .stop_execution(
+                    process,
+                    db::models::execution_process::ExecutionProcessStatus::Killed,
+                )
+                .await
+            {
+                tracing::error!(execution_id = %process.id, %error, "Could not reconcile indeterminate process during workspace MCP restart");
+            }
+        }
 
         let mut replay_failed = false;
         for process in processes
