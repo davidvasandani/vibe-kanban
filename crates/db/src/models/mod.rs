@@ -7,6 +7,7 @@ pub mod execution_worker_job;
 pub mod file;
 pub mod mcp_gateway;
 pub mod merge;
+pub mod preview_lease;
 pub mod project;
 pub mod pull_request;
 pub mod repo;

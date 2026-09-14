@@ -1050,6 +1050,12 @@ pub trait ContainerService {
 
         Workspace::set_archived(pool, workspace_id, true).await?;
 
+        // Revoke external preview capabilities before stopping their helper
+        // processes, so archive fails closed even while process teardown is in
+        // flight. Repeated archive attempts remain idempotent.
+        db::models::preview_lease::PreviewLease::revoke_active_by_workspace(pool, workspace_id)
+            .await?;
+
         // Stop running dev servers and background helpers (pollers included —
         // a poller is a background helper, see ARCHIVE_STOPPED_RUN_REASONS).
         for run_reason in ARCHIVE_STOPPED_RUN_REASONS {

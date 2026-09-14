@@ -4,9 +4,11 @@ use axum::{
     response::Json as ResponseJson,
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use db::models::{
     execution_process::{ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus},
+    preview_lease::PreviewLease,
     session::{CreateSession, Session},
     workspace::Workspace,
     workspace_repo::WorkspaceRepo,
@@ -19,8 +21,10 @@ use executors::actions::{
         validate_interval,
     },
 };
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use services::services::container::ContainerService;
+use sha2::{Digest, Sha256};
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
@@ -106,6 +110,44 @@ pub struct ListPollersResponse {
     pub count: u32,
 }
 
+const PREVIEW_LEASE_SECONDS: i64 = 4 * 60 * 60;
+
+#[derive(Debug, Deserialize, TS)]
+pub struct CreatePreviewLeaseRequest {
+    pub port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StopPreviewLeasePath {
+    pub lease_id: Uuid,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct PreviewLeaseSummary {
+    pub id: Uuid,
+    pub port: u16,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, TS)]
+pub struct CreatePreviewLeaseResponse {
+    pub lease: PreviewLeaseSummary,
+    /// Contains the capability only in this creation response. It is never stored.
+    pub url: String,
+    pub vite_host: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(tag = "type", rename_all = "snake_case")]
+pub enum CreatePreviewLeaseError {
+    InvalidPort,
+    PublicUrlUnconfigured,
+    TooManyHelpers,
+    ForwardingUnavailable,
+    DevServerUnavailable,
+}
+
 pub fn router() -> Router<DeploymentImpl> {
     Router::new()
         .route("/dev-server/start", post(start_dev_server))
@@ -113,9 +155,216 @@ pub fn router() -> Router<DeploymentImpl> {
         .route("/background-helpers/start", post(start_background_helper))
         .route("/pollers", get(list_pollers))
         .route("/pollers/start", post(start_poller))
+        .route(
+            "/preview-leases",
+            get(list_preview_leases).post(create_preview_lease),
+        )
+        .route("/preview-leases/{lease_id}/stop", post(stop_preview_lease))
         .route("/cleanup", post(run_cleanup_script))
         .route("/archive", post(run_archive_script))
         .route("/stop", post(stop_workspace_execution))
+}
+
+fn preview_token_digest(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+fn valid_preview_port(port: u16) -> bool {
+    port >= 1024
+}
+
+fn preview_lease_summary(lease: &PreviewLease) -> PreviewLeaseSummary {
+    PreviewLeaseSummary {
+        id: lease.id,
+        port: lease.target_port as u16,
+        expires_at: lease.expires_at,
+    }
+}
+
+#[axum::debug_handler]
+pub async fn list_preview_leases(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<Vec<PreviewLeaseSummary>>>, ApiError> {
+    let leases = PreviewLease::find_active_by_workspace(&deployment.db().pool, workspace.id)
+        .await?
+        .iter()
+        .map(preview_lease_summary)
+        .collect();
+    Ok(ResponseJson(ApiResponse::success(leases)))
+}
+
+#[axum::debug_handler]
+pub async fn create_preview_lease(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    Json(request): Json<CreatePreviewLeaseRequest>,
+) -> Result<ResponseJson<ApiResponse<CreatePreviewLeaseResponse, CreatePreviewLeaseError>>, ApiError>
+{
+    if !valid_preview_port(request.port) {
+        return Ok(ResponseJson(ApiResponse::error_with_data_and_message(
+            CreatePreviewLeaseError::InvalidPort,
+            "Preview port must be an unprivileged TCP port between 1024 and 65535.",
+        )));
+    }
+    let public_host = match std::env::var("VK_PUBLIC_PREVIEW_URL")
+        .ok()
+        .and_then(|value| url::Url::parse(&value).ok().map(|url| (value, url)))
+    {
+        Some((_value, url))
+            if url.scheme() == "https"
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && url.port().is_none()
+                && url.host_str().is_some() =>
+        {
+            let host = url.host_str().unwrap().to_string();
+            host
+        }
+        _ => {
+            return Ok(ResponseJson(ApiResponse::error_with_data_and_message(
+                CreatePreviewLeaseError::PublicUrlUnconfigured,
+                "Remote preview is not configured: set VK_PUBLIC_PREVIEW_URL to the dedicated HTTPS preview origin.",
+            )));
+        }
+    };
+    let session = match prepare_helper_start(&deployment, &workspace, None).await? {
+        Ok(session) => session,
+        Err(_) => {
+            return Ok(ResponseJson(ApiResponse::error_with_data_and_message(
+                CreatePreviewLeaseError::TooManyHelpers,
+                "Remote preview could not start because this workspace already has five background helpers; stop one and retry.",
+            )));
+        }
+    };
+    let action = ExecutorAction::new(
+        ExecutorActionType::ScriptRequest(ScriptRequest {
+            script: format!("exec sleep {PREVIEW_LEASE_SECONDS}"),
+            language: ScriptRequestLanguage::Bash,
+            context: ScriptContext::BackgroundHelper,
+            working_dir: None,
+            poller: None,
+        }),
+        None,
+    );
+    let process = deployment
+        .container()
+        .start_execution(
+            &workspace,
+            &session,
+            &action,
+            &ExecutionProcessRunReason::BackgroundHelper,
+        )
+        .await?;
+    let mut token_bytes = [0_u8; 32];
+    rand::thread_rng().fill_bytes(&mut token_bytes);
+    let token = URL_SAFE_NO_PAD.encode(token_bytes);
+    let expires_at = Utc::now() + chrono::Duration::seconds(PREVIEW_LEASE_SECONDS);
+    let lease = PreviewLease::create(
+        &deployment.db().pool,
+        workspace.id,
+        process.id,
+        request.port,
+        &preview_token_digest(&token),
+        expires_at,
+    )
+    .await?;
+
+    let probe_result = crate::routes::preview::probe_preview_lease(&deployment, &lease).await;
+    if !matches!(
+        probe_result,
+        crate::routes::preview::PreviewProbeResult::Ready
+    ) {
+        PreviewLease::revoke(&deployment.db().pool, lease.id).await?;
+        let _ = deployment
+            .container()
+            .stop_execution(&process, ExecutionProcessStatus::Killed)
+            .await;
+        let (error, message) = match probe_result {
+            crate::routes::preview::PreviewProbeResult::ForwardingUnavailable => (
+                CreatePreviewLeaseError::ForwardingUnavailable,
+                "Remote preview forwarding is unavailable. Check worker health and workspace affinity, then retry after the worker reconnects.",
+            ),
+            crate::routes::preview::PreviewProbeResult::DevServerUnavailable => (
+                CreatePreviewLeaseError::DevServerUnavailable,
+                "The selected dev server is unavailable. Start it on 127.0.0.1 at the requested port, wait until it is listening, and retry.",
+            ),
+            crate::routes::preview::PreviewProbeResult::Ready => unreachable!(),
+        };
+        return Ok(ResponseJson(ApiResponse::error_with_data_and_message(
+            error, message,
+        )));
+    }
+
+    Ok(ResponseJson(ApiResponse::success(
+        CreatePreviewLeaseResponse {
+            lease: preview_lease_summary(&lease),
+            url: format!(
+                "https://{}.{}{}#{token}",
+                lease.id, public_host, "/__vk/open"
+            ),
+            vite_host: format!(".{public_host}"),
+        },
+    )))
+}
+
+#[cfg(test)]
+mod preview_lease_tests {
+    use super::*;
+
+    #[test]
+    fn preview_ports_are_unprivileged_and_never_defaulted() {
+        assert!(!valid_preview_port(0));
+        assert!(!valid_preview_port(1023));
+        assert!(valid_preview_port(1024));
+        assert!(valid_preview_port(u16::MAX));
+    }
+
+    #[test]
+    fn token_digest_does_not_retain_capability() {
+        let token = "preview-secret-that-must-not-be-stored";
+        let digest = preview_token_digest(token);
+        assert_eq!(digest.len(), 64);
+        assert!(!digest.contains(token));
+        assert_eq!(digest, preview_token_digest(token));
+    }
+}
+
+#[axum::debug_handler]
+pub async fn stop_preview_lease(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    axum::extract::Path(StopPreviewLeasePath { lease_id }): axum::extract::Path<
+        StopPreviewLeasePath,
+    >,
+) -> Result<ResponseJson<ApiResponse<PreviewLeaseSummary>>, ApiError> {
+    let Some(lease) = PreviewLease::find_by_id(&deployment.db().pool, lease_id).await? else {
+        return Err(ApiError::Workspace(
+            db::models::workspace::WorkspaceError::ValidationError(
+                "Preview lease not found".into(),
+            ),
+        ));
+    };
+    if lease.workspace_id != workspace.id {
+        return Err(ApiError::Workspace(
+            db::models::workspace::WorkspaceError::ValidationError(
+                "Preview lease not found".into(),
+            ),
+        ));
+    }
+    PreviewLease::revoke(&deployment.db().pool, lease.id).await?;
+    if let Some(process) =
+        ExecutionProcess::find_by_id(&deployment.db().pool, lease.execution_process_id).await?
+    {
+        let _ = deployment
+            .container()
+            .stop_execution(&process, ExecutionProcessStatus::Killed)
+            .await;
+    }
+    Ok(ResponseJson(ApiResponse::success(preview_lease_summary(
+        &lease,
+    ))))
 }
 
 #[axum::debug_handler]

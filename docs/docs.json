@@ -26,6 +26,7 @@
           "index",
           "getting-started",
           "browser-testing",
+          "remote-browser-dev-server-verification",
           "issue-management",
           "reviewing-code",
           "remote-access",
