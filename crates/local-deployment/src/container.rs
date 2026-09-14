@@ -4188,6 +4188,8 @@ impl ContainerService for LocalContainerService {
             let execution_id = execution_process.id;
             let execution_started_at = execution_process.started_at;
             let configured_server_ids = snapshot.servers.keys().cloned().collect::<Vec<_>>();
+            let inventory_expected = snapshot.executor == BaseCodingAgent::Codex.to_string()
+                || snapshot.executor == BaseCodingAgent::ClaudeCode.to_string();
             tokio::spawn(async move {
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
                 while tokio::time::Instant::now() < deadline {
@@ -4233,6 +4235,16 @@ impl ContainerService for LocalContainerService {
                                 return;
                             }
                             WorkerMcpRefreshStatus::Unsupported => {
+                                if inventory_expected {
+                                    if tokio::time::Instant::now() < deadline {
+                                        tokio::time::sleep_until(std::cmp::min(
+                                            deadline,
+                                            tokio::time::Instant::now() + Duration::from_secs(1),
+                                        ))
+                                        .await;
+                                    }
+                                    continue;
+                                }
                                 if let Some(expected_generation) = pending_mcp_generation {
                                     coordinator
                                         .fail(
