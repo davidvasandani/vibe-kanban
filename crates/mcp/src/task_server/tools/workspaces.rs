@@ -98,6 +98,10 @@ struct McpRestartWorkspaceRequest {
         description = "Session to resume after restart. Defaults to the orchestrator session in scoped mode."
     )]
     session_id: Option<Uuid>,
+    #[schemars(
+        description = "Allow forced interruption if a running turn does not finish after the response-delivery grace period. Defaults to false."
+    )]
+    force_if_running: Option<bool>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -118,6 +122,7 @@ impl McpServer {
         Parameters(McpRestartWorkspaceRequest {
             workspace_id,
             session_id,
+            force_if_running,
         }): Parameters<McpRestartWorkspaceRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         let workspace_id = match self.resolve_workspace_id(workspace_id) {
@@ -141,7 +146,7 @@ impl McpServer {
         let result: executors::mcp_recovery::McpRecoveryResult = match self
             .send_json(self.client.post(&url).json(&serde_json::json!({
                         "resume_session_id": session_id,
-                        "confirmed_running_restart": true
+                        "confirmed_running_restart": force_if_running.unwrap_or(false)
             })))
             .await
         {

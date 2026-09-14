@@ -37,8 +37,9 @@ Request:
 
 The session defaults to the scoped orchestrator session in the MCP tool. HTTP
 callers provide it explicitly when a coding-agent continuation is required.
-Running-session teardown requires explicit confirmation; the MCP restart tool
-sets it because invoking that tool is the confirmation action.
+The default waits for the selected running turn to finish. Setting
+`confirmed_running_restart` opts into forced interruption after a short
+response-delivery grace period.
 
 `GET /api/workspaces/{workspace_id}/mcp/restart`
 
@@ -77,7 +78,8 @@ Input:
 ```json
 {
   "workspace_id": "optional UUID",
-  "session_id": "optional UUID to resume"
+  "session_id": "optional UUID to resume",
+  "force_if_running": false
 }
 ```
 

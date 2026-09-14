@@ -140,27 +140,6 @@ pub async fn restart_workspace(
             ));
         }
     }
-    if !payload.confirmed_running_restart {
-        let mut workspace_has_running_agent = false;
-        for workspace_session in
-            Session::find_by_workspace_id(&deployment.db().pool, workspace.id).await?
-        {
-            if ExecutionProcess::has_running_coding_agent_for_session(
-                &deployment.db().pool,
-                workspace_session.id,
-            )
-            .await?
-            {
-                workspace_has_running_agent = true;
-                break;
-            }
-        }
-        if workspace_has_running_agent {
-            return Err(ApiError::Conflict(
-                "Restarting a running workspace requires explicit confirmation".to_string(),
-            ));
-        }
-    }
     let servers = if let Some(session) = session.as_ref() {
         deployment
             .container()
@@ -216,6 +195,7 @@ pub async fn restart_workspace(
     let deployment_for_restart = deployment.clone();
     let workspace_for_restart = workspace.clone();
     let operation_generation = result.generation;
+    let force_running_restart = payload.confirmed_running_restart;
     let resume_session_id = session.as_ref().map(|session| session.id);
     let task_guard = active_guard;
     tokio::spawn(async move {
@@ -264,7 +244,7 @@ pub async fn restart_workspace(
                 {
                     Ok(false) => break,
                     Ok(true) => {
-                        if tokio::time::Instant::now() >= grace_deadline {
+                        if force_running_restart && tokio::time::Instant::now() >= grace_deadline {
                             break;
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -295,20 +275,23 @@ pub async fn restart_workspace(
             )
             .await;
         }
-        deployment_for_restart
-            .container()
-            .try_stop(&workspace_for_restart, true)
-            .await;
         let mut failed_stop_ids = std::collections::HashSet::new();
+        if let Ok(workspace_sessions) = Session::find_by_workspace_id(
+            &deployment_for_restart.db().pool,
+            workspace_for_restart.id,
+        )
+        .await
+        {
+            for workspace_session in workspace_sessions {
+                deployment_for_restart
+                    .container()
+                    .reap_warm_processes_for_session(workspace_session.id)
+                    .await;
+            }
+        }
         for process in &processes {
-            let Ok(Some(current)) =
-                ExecutionProcess::find_by_id(&deployment_for_restart.db().pool, process.id).await
-            else {
-                failed_stop_ids.insert(process.id);
-                continue;
-            };
             if !matches!(
-                current.status,
+                process.status,
                 db::models::execution_process::ExecutionProcessStatus::Running
                     | db::models::execution_process::ExecutionProcessStatus::Indeterminate
             ) {
@@ -317,7 +300,7 @@ pub async fn restart_workspace(
             if let Err(error) = deployment_for_restart
                 .container()
                 .stop_execution(
-                    &current,
+                    process,
                     db::models::execution_process::ExecutionProcessStatus::Killed,
                 )
                 .await
