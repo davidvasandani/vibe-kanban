@@ -53,6 +53,7 @@ impl Drop for RestartStartGate {
     fn drop(&mut self) {
         if let Some(session_id) = self.session_id {
             self.service.unblock_mcp_restart_start(session_id);
+            self.service.finish_workspace_mcp_restart(session_id);
         }
     }
 }

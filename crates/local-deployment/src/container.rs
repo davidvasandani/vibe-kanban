@@ -2137,7 +2137,7 @@ impl LocalContainerService {
                                     == ExecutionProcessStatus::Killed
                                     && container
                                         .queued_message_service
-                                        .is_mcp_restart_start_blocked(ctx.session.id))))
+                                        .is_workspace_mcp_restart(ctx.session.id))))
                             || !matches!(
                                 ctx.execution_process.status,
                                 ExecutionProcessStatus::Failed
@@ -2884,7 +2884,7 @@ impl LocalContainerService {
                         || (ctx.execution_process.status == ExecutionProcessStatus::Killed
                             && self
                                 .queued_message_service
-                                .is_mcp_restart_start_blocked(ctx.session.id))))
+                                .is_workspace_mcp_restart(ctx.session.id))))
                     || !matches!(
                         ctx.execution_process.status,
                         ExecutionProcessStatus::Failed
@@ -2895,6 +2895,9 @@ impl LocalContainerService {
                 if should_execute_queued {
                     started_queued_follow_up =
                         self.start_queued_follow_up_message(&ctx, &queued_msg).await;
+                    if !started_queued_follow_up && queued_msg.restart_agent {
+                        self.clear_mcp_restart_tracking(ctx.session.id).await;
+                    }
                 } else if queued_msg.restart_agent {
                     self.clear_mcp_restart_tracking(ctx.session.id).await;
                 }
@@ -3078,6 +3081,8 @@ impl LocalContainerService {
             self.queued_message_service
                 .wait_for_mcp_restart_start(ctx.session.id)
                 .await;
+            self.queued_message_service
+                .finish_workspace_mcp_restart(ctx.session.id);
             self.reap_warm_server(&ctx.session.id).await;
         }
         if let Err(e) =
