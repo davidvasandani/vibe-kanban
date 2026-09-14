@@ -39,10 +39,6 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
             "/mcp/restart",
             get(mcp_refresh::workspace_restart_status).post(mcp_refresh::restart_workspace),
         )
-        .route(
-            "/mcp/restart/ack",
-            post(mcp_refresh::acknowledge_workspace_restart),
-        )
         .nest("/git", git::router())
         .nest("/execution", execution::router())
         .nest("/integration", integration::router())

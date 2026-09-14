@@ -131,10 +131,11 @@ impl McpRefreshControl for ClaudeMcpInventory {
     async fn list_servers(&self) -> Result<Vec<McpServerRefreshSnapshot>, McpRefreshErrorCategory> {
         let wait = async {
             loop {
+                let notified = self.ready.notified();
                 if let Some(servers) = self.servers.read().await.clone() {
                     return servers;
                 }
-                self.ready.notified().await;
+                notified.await;
             }
         };
         tokio::time::timeout(Duration::from_secs(30), wait)
