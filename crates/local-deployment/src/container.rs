@@ -893,9 +893,10 @@ impl LocalContainerService {
         let coordinator = self.mcp_refresh_coordinator.clone();
         tokio::spawn(async move {
             let discovery_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-            let handle = match tokio::time::timeout_at(discovery_deadline, signal).await {
+            let mut signal = signal;
+            let handle = match tokio::time::timeout_at(discovery_deadline, &mut signal).await {
                 Ok(Ok(handle)) => handle,
-                Ok(Err(_)) | Err(_) => {
+                Ok(Err(_)) => {
                     let pending = coordinator.status(session_id).await.filter(|state| {
                         state.status == McpRefreshStatus::PendingNextTurn
                             && state.requested_at <= execution_started_at
@@ -919,6 +920,34 @@ impl LocalContainerService {
                             .await;
                     }
                     return;
+                }
+                Err(_) => {
+                    let pending = coordinator.status(session_id).await.filter(|state| {
+                        state.status == McpRefreshStatus::PendingNextTurn
+                            && state.requested_at <= execution_started_at
+                    });
+                    if let Some(state) = pending {
+                        coordinator
+                            .fail(
+                                session_id,
+                                state.generation,
+                                McpRefreshErrorCategory::Timeout,
+                            )
+                            .await;
+                    } else {
+                        coordinator
+                            .observe_failure(
+                                session_id,
+                                execution_started_at,
+                                configured_server_ids.clone(),
+                                McpRefreshErrorCategory::Timeout,
+                            )
+                            .await;
+                    }
+                    match signal.await {
+                        Ok(handle) => handle,
+                        Err(_) => return,
+                    }
                 }
             };
             {

@@ -124,10 +124,8 @@ pub async fn restart_workspace(
         }
         None => {
             let mut resumable = None;
-            for candidate in Session::find_by_workspace_id(&deployment.db().pool, workspace.id)
-                .await?
-                .into_iter()
-                .rev()
+            for candidate in
+                Session::find_by_workspace_id(&deployment.db().pool, workspace.id).await?
             {
                 let executions = ExecutionProcess::find_by_session_id(
                     &deployment.db().pool,
@@ -139,8 +137,17 @@ pub async fn restart_workspace(
                     process.run_reason
                         == db::models::execution_process::ExecutionProcessRunReason::CodingAgent
                 }) {
-                    resumable = Some(candidate);
-                    break;
+                    let running = ExecutionProcess::has_running_coding_agent_for_session(
+                        &deployment.db().pool,
+                        candidate.id,
+                    )
+                    .await?;
+                    if resumable.is_none() || running {
+                        resumable = Some(candidate);
+                    }
+                    if running {
+                        break;
+                    }
                 }
             }
             resumable
