@@ -76,6 +76,21 @@ impl Drop for ActiveSessionRestartGuard {
     }
 }
 
+pub fn supersede_mcp_session_restart(session_id: uuid::Uuid, deployment: &DeploymentImpl) {
+    ACTIVE_MCP_SESSION_RESTARTS
+        .lock()
+        .expect("MCP session restart lock poisoned")
+        .remove(&session_id);
+    if deployment
+        .queued_message_service()
+        .has_mcp_restart(session_id)
+    {
+        deployment
+            .queued_message_service()
+            .cancel_queued(session_id);
+    }
+}
+
 struct RestartReservationGuard {
     service: QueuedMessageService,
     session_id: uuid::Uuid,
@@ -102,6 +117,7 @@ async fn queue_mcp_restart_impl(
     session: &Session,
     deployment: &DeploymentImpl,
     payload: QueueMcpRestartRequest,
+    prepare_tracking: bool,
 ) -> Result<QueueMcpRestartResult, ApiError> {
     let was_running =
         db::models::execution_process::ExecutionProcess::has_running_coding_agent_for_session(
@@ -145,14 +161,16 @@ async fn queue_mcp_restart_impl(
             return Err(error.into());
         }
     };
+    if running && !payload.confirmed_running_restart {
+        return Ok(QueueMcpRestartResult::ConfirmationRequired);
+    }
+    if prepare_tracking {
+        deployment
+            .container()
+            .prepare_mcp_restart(session.workspace_id, session.id)
+            .await?;
+    }
     let queued = if running {
-        if !payload.confirmed_running_restart {
-            deployment
-                .queued_message_service()
-                .cancel_mcp_restart(session.id, reservation);
-            reservation_guard.disarm();
-            return Ok(QueueMcpRestartResult::ConfirmationRequired);
-        }
         let queued_at = deployment
             .queued_message_service()
             .commit_mcp_restart(session.id, reservation);
@@ -216,7 +234,7 @@ async fn queue_mcp_restart(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<QueueMcpRestartRequest>,
 ) -> Result<ResponseJson<ApiResponse<QueueMcpRestartResult>>, ApiError> {
-    let result = queue_mcp_restart_impl(&session, &deployment, payload).await?;
+    let result = queue_mcp_restart_impl(&session, &deployment, payload, true).await?;
     Ok(ResponseJson(ApiResponse::success(result)))
 }
 
@@ -306,6 +324,7 @@ pub async fn restart_mcp_session(
             // Calling the restart endpoint is itself the explicit confirmation.
             confirmed_running_restart: true,
         },
+        false,
     )
     .await?;
     let disposition = match result {

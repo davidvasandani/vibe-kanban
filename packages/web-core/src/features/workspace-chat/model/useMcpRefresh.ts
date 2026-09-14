@@ -161,6 +161,7 @@ export function useMcpRefresh(
 
   return {
     isRefreshing: isRefreshing || isReconcilingBusy,
+    refreshStatus: readStatus,
     refresh,
     result,
     tooltip,

@@ -608,6 +608,9 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
       } else if (result === 'started') {
         toast.success('Agent restarted with the latest MCP configuration.');
       }
+      if (result === 'queued' || result === 'started') {
+        await mcpRefresh.refreshStatus().catch(() => undefined);
+      }
     } catch {
       toast.error('Agent restart failed.');
     } finally {
@@ -618,6 +621,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     executorConfig,
     isQueueLoading,
     isSending,
+    mcpRefresh,
     send,
     sessionHasRunningAgent,
     sessionId,

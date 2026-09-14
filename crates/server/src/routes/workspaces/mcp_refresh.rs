@@ -137,10 +137,26 @@ pub async fn restart_workspace(
         error: None,
     };
 
-    MCP_WORKSPACE_RESTARTS
-        .lock()
-        .expect("MCP workspace restart lock poisoned")
-        .insert(workspace.id, result.clone());
+    {
+        let mut operations = MCP_WORKSPACE_RESTARTS
+            .lock()
+            .expect("MCP workspace restart lock poisoned");
+        if let Some(mut current) = operations
+            .get(&workspace.id)
+            .filter(|operation| {
+                matches!(
+                    operation.status,
+                    McpRecoveryStatus::Accepted | McpRecoveryStatus::InProgress
+                )
+            })
+            .cloned()
+        {
+            current.status = McpRecoveryStatus::InProgress;
+            current.disposition = McpRestartDisposition::AlreadyInProgress;
+            return Ok(ResponseJson(ApiResponse::success(current)));
+        }
+        operations.insert(workspace.id, result.clone());
+    }
     let active_guard = WorkspaceRestartGuard {
         workspace_id: workspace.id,
         active: true,
@@ -170,6 +186,12 @@ pub async fn restart_workspace(
                 return;
             }
         };
+        if let Some(session) = session.as_ref() {
+            crate::routes::sessions::queue::supersede_mcp_session_restart(
+                session.id,
+                &deployment_for_restart,
+            );
+        }
         deployment_for_restart
             .container()
             .try_stop(&workspace_for_restart, true)
