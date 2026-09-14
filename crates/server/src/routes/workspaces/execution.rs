@@ -219,8 +219,7 @@ pub async fn create_preview_lease(
                 && url.port().is_none()
                 && url.host_str().is_some() =>
         {
-            let host = url.host_str().unwrap().to_string();
-            host
+            url.host_str().unwrap().to_string()
         }
         _ => {
             return Ok(ResponseJson(ApiResponse::error_with_data_and_message(
