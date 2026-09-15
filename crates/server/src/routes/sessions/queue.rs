@@ -98,6 +98,13 @@ pub async fn supersede_mcp_session_restart(session_id: uuid::Uuid, deployment: &
         .await;
 }
 
+fn has_active_mcp_session_restart(session_id: uuid::Uuid) -> bool {
+    ACTIVE_MCP_SESSION_RESTARTS
+        .lock()
+        .expect("MCP session restart lock poisoned")
+        .contains_key(&session_id)
+}
+
 struct RestartReservationGuard {
     service: QueuedMessageService,
     session_id: uuid::Uuid,
@@ -503,12 +510,14 @@ async fn queue_message(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<QueueMessageRequest>,
 ) -> Result<ResponseJson<ApiResponse<QueueStatus>>, ApiError> {
-    deployment
+    let had_deferred_restart = deployment
         .queued_message_service()
         .cancel_deferred_mcp_restart(session.id);
-    if deployment
-        .queued_message_service()
-        .has_mcp_restart(session.id)
+    if had_deferred_restart
+        || has_active_mcp_session_restart(session.id)
+        || deployment
+            .queued_message_service()
+            .has_mcp_restart(session.id)
     {
         supersede_mcp_session_restart(session.id, &deployment).await;
     }
@@ -541,10 +550,17 @@ async fn cancel_queued_message(
     Extension(session): Extension<Session>,
     State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<QueueStatus>>, ApiError> {
-    deployment
+    let had_deferred_restart = deployment
         .queued_message_service()
         .cancel_deferred_mcp_restart(session.id);
-    supersede_mcp_session_restart(session.id, &deployment).await;
+    if had_deferred_restart
+        || has_active_mcp_session_restart(session.id)
+        || deployment
+            .queued_message_service()
+            .has_mcp_restart(session.id)
+    {
+        supersede_mcp_session_restart(session.id, &deployment).await;
+    }
     deployment
         .queued_message_service()
         .cancel_queued(session.id);
