@@ -114,14 +114,27 @@ impl ClaudeMcpInventory {
             let Some(name) = name.and_then(|name| name.strip_prefix("mcp__")) else {
                 continue;
             };
-            let Some((server_id, _)) = name.split_once("__") else {
+            let known_server = by_server
+                .keys()
+                .chain(failed_servers.keys())
+                .filter(|server_id| {
+                    name.strip_prefix(server_id.as_str())
+                        .is_some_and(|suffix| suffix.starts_with("__"))
+                })
+                .max_by_key(|server_id| server_id.len())
+                .cloned();
+            let server_id = known_server.or_else(|| {
+                name.split_once("__")
+                    .map(|(server_id, _)| server_id.to_string())
+            });
+            let Some(server_id) = server_id else {
                 continue;
             };
             by_server
-                .entry(server_id.to_string())
+                .entry(server_id.clone())
                 .or_default()
                 .push(format!("mcp__{name}"));
-            failed_servers.remove(server_id);
+            failed_servers.remove(&server_id);
         }
         let mut servers: Vec<_> = by_server
             .into_iter()
@@ -3666,6 +3679,26 @@ mod tests {
         assert_eq!(servers[0].tool_count, Some(1));
         assert_eq!(servers[1].server_id, "slack");
         assert_eq!(servers[1].tool_count, Some(2));
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_matches_complete_server_names() {
+        let inventory = ClaudeMcpInventory::default();
+        inventory
+            .observe_tools(
+                &[serde_json::json!("mcp__team__slack__search")],
+                &[
+                    serde_json::json!({ "name": "team", "status": "connected" }),
+                    serde_json::json!({ "name": "team__slack", "status": "connected" }),
+                ],
+            )
+            .await;
+
+        let servers = inventory.list_servers().await.unwrap();
+        assert_eq!(servers[0].server_id, "team");
+        assert_eq!(servers[0].tool_count, Some(0));
+        assert_eq!(servers[1].server_id, "team__slack");
+        assert_eq!(servers[1].tool_count, Some(1));
     }
 
     #[tokio::test]
