@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Error as AnyhowError, anyhow};
 use async_trait::async_trait;
+use dashmap::DashMap;
 use db::{
     DBService,
     models::{
@@ -71,6 +72,25 @@ use uuid::Uuid;
 use worktree_manager::WorktreeError;
 
 use crate::services::{execution_process, normalized_log_cache, notification::NotificationService};
+
+static WORKSPACE_EXECUTION_GATES: LazyLock<DashMap<Uuid, Arc<RwLock<()>>>> =
+    LazyLock::new(DashMap::new);
+
+fn workspace_execution_gate(workspace_id: Uuid) -> Arc<RwLock<()>> {
+    WORKSPACE_EXECUTION_GATES
+        .entry(workspace_id)
+        .or_insert_with(|| Arc::new(RwLock::new(())))
+        .clone()
+}
+
+/// Exclude ordinary execution launches while a workspace process group is
+/// being rebuilt. Acquiring the write side also waits for any launch that
+/// crossed the boundary immediately before recovery began.
+pub async fn lock_workspace_execution_starts(
+    workspace_id: Uuid,
+) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+    workspace_execution_gate(workspace_id).write_owned().await
+}
 
 /// Store the settled entries a historical replay produced, so the next reader
 /// replays them instead of re-normalizing the raw log.
@@ -1979,6 +1999,44 @@ pub trait ContainerService {
         run_reason: &ExecutionProcessRunReason,
         execution_process_id: Uuid,
     ) -> Result<ExecutionProcess, ContainerError> {
+        let _launch_guard = workspace_execution_gate(workspace.id).read_owned().await;
+        self.start_execution_with_id_during_workspace_restart(
+            workspace,
+            session,
+            executor_action,
+            run_reason,
+            execution_process_id,
+        )
+        .await
+    }
+
+    /// Recovery-only execution entry point. The caller must hold the
+    /// workspace's exclusive execution-start guard.
+    async fn start_execution_during_workspace_restart(
+        &self,
+        workspace: &Workspace,
+        session: &Session,
+        executor_action: &ExecutorAction,
+        run_reason: &ExecutionProcessRunReason,
+    ) -> Result<ExecutionProcess, ContainerError> {
+        self.start_execution_with_id_during_workspace_restart(
+            workspace,
+            session,
+            executor_action,
+            run_reason,
+            Uuid::new_v4(),
+        )
+        .await
+    }
+
+    async fn start_execution_with_id_during_workspace_restart(
+        &self,
+        workspace: &Workspace,
+        session: &Session,
+        executor_action: &ExecutorAction,
+        run_reason: &ExecutionProcessRunReason,
+        execution_process_id: Uuid,
+    ) -> Result<ExecutionProcess, ContainerError> {
         // Create new execution process record
         // Capture current HEAD per repository as the "before" commit for this execution
         let repositories =
@@ -2314,9 +2372,27 @@ mod tests {
 
     use super::{
         HistoricalNormalizationLifetime, HistoricalNormalizationRegistry, LogMsg,
-        cache_execution_from_history, is_indexed_entry_patch, replay_materialized_log,
-        reset_would_discard_uncommitted_work, scope_initial_prompt_to_working_dir,
+        cache_execution_from_history, is_indexed_entry_patch, lock_workspace_execution_starts,
+        replay_materialized_log, reset_would_discard_uncommitted_work,
+        scope_initial_prompt_to_working_dir, workspace_execution_gate,
     };
+
+    #[tokio::test]
+    async fn workspace_restart_gate_excludes_ordinary_execution_starts() {
+        let workspace_id = Uuid::new_v4();
+        let restart_guard = lock_workspace_execution_starts(workspace_id).await;
+        let ordinary_start =
+            tokio::spawn(async move { workspace_execution_gate(workspace_id).read_owned().await });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!ordinary_start.is_finished());
+
+        drop(restart_guard);
+        tokio::time::timeout(Duration::from_secs(1), ordinary_start)
+            .await
+            .expect("ordinary launch should resume when restart finishes")
+            .expect("launch waiter should not panic");
+    }
 
     #[test]
     fn indexed_entry_patches_are_kept_and_repo_diff_patches_are_not() {

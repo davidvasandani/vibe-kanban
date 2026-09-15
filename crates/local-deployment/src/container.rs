@@ -3113,22 +3113,17 @@ impl LocalContainerService {
         ctx: &ExecutionContext,
         queued_msg: &services::services::queued_message::QueuedMessage,
     ) -> bool {
-        // Workspace restart teardown gates every session, including ordinary
-        // follow-ups in sessions other than the one that requested recovery.
-        // Keep the claimed message in this task until replay has completed.
-        if !self
-            .queued_message_service
-            .wait_for_mcp_restart_start(ctx.session.id, queued_msg.queued_at)
-            .await
-        {
-            if queued_msg.restart_agent {
+        if queued_msg.restart_agent {
+            if !self
+                .queued_message_service
+                .wait_for_mcp_restart_start(ctx.session.id, queued_msg.queued_at)
+                .await
+            {
                 self.queued_message_service
                     .finish_workspace_mcp_restart(ctx.session.id);
                 self.clear_mcp_restart_tracking(ctx.session.id).await;
+                return false;
             }
-            return false;
-        }
-        if queued_msg.restart_agent {
             self.queued_message_service
                 .finish_workspace_mcp_restart(ctx.session.id);
             self.reap_warm_server(&ctx.session.id).await;

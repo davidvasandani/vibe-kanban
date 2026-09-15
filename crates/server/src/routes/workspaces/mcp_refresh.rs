@@ -50,16 +50,12 @@ struct WorkspaceRestartGuard {
 
 struct RestartStartGate {
     service: services::services::queued_message::QueuedMessageService,
-    session_ids: Vec<Uuid>,
-    restart_session_id: Option<Uuid>,
+    session_id: Option<Uuid>,
 }
 
 impl Drop for RestartStartGate {
     fn drop(&mut self) {
-        for session_id in self.session_ids.drain(..) {
-            self.service.unblock_mcp_restart_start(session_id);
-        }
-        if let Some(session_id) = self.restart_session_id {
+        if let Some(session_id) = self.session_id {
             self.service.cancel_workspace_mcp_restart(session_id);
         }
     }
@@ -260,33 +256,20 @@ pub async fn restart_workspace(
     let task_guard = active_guard;
     tokio::spawn(async move {
         let _guard = task_guard;
-        let workspace_session_ids = match Session::find_by_workspace_id(
-            &deployment_for_restart.db().pool,
-            workspace_for_restart.id,
-        )
-        .await
-        {
-            Ok(sessions) => sessions.into_iter().map(|session| session.id).collect(),
-            Err(error) => {
-                tracing::error!(workspace_id = %workspace_for_restart.id, %error, "Could not enumerate sessions for workspace restart launch gate");
-                return;
-            }
-        };
         let mut restart_start_gate = RestartStartGate {
             service: deployment_for_restart.queued_message_service().clone(),
-            session_ids: workspace_session_ids,
-            restart_session_id: session.as_ref().map(|session| session.id),
+            session_id: session.as_ref().map(|session| session.id),
         };
-        for session_id in &restart_start_gate.session_ids {
-            restart_start_gate
-                .service
-                .block_execution_start(*session_id);
-        }
-        if let Some(session_id) = restart_start_gate.restart_session_id {
+        if let Some(session_id) = restart_start_gate.session_id {
             restart_start_gate
                 .service
                 .block_mcp_restart_start(session_id);
         }
+        let workspace_launch_guard =
+            services::services::container::lock_workspace_execution_starts(
+                workspace_for_restart.id,
+            )
+            .await;
         let mut session_restart_queued = false;
         if let Some(session) = session.as_ref()
             && ExecutionProcess::has_running_coding_agent_for_session(
@@ -446,7 +429,7 @@ pub async fn restart_workspace(
             };
             if let Err(error) = deployment_for_restart
                 .container()
-                .start_execution(
+                .start_execution_during_workspace_restart(
                     &workspace_for_restart,
                     &owner_session,
                     &action,
@@ -487,7 +470,8 @@ pub async fn restart_workspace(
             return;
         }
 
-        for session_id in restart_start_gate.session_ids.drain(..) {
+        drop(workspace_launch_guard);
+        if let Some(session_id) = restart_start_gate.session_id.take() {
             restart_start_gate
                 .service
                 .unblock_mcp_restart_start(session_id);

@@ -226,13 +226,6 @@ impl QueuedMessageService {
         }
     }
 
-    /// Prevent any queued execution for a session from starting while its
-    /// workspace process group is being restarted. Unlike an MCP restart
-    /// reservation, this does not change the queued message's identity.
-    pub fn block_execution_start(&self, session_id: Uuid) {
-        self.blocked_mcp_restarts.insert(session_id, ());
-    }
-
     pub fn unblock_mcp_restart_start(&self, session_id: Uuid) {
         self.blocked_mcp_restarts.remove(&session_id);
         self.restart_resolution.notify_waiters();
