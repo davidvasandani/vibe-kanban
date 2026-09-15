@@ -510,10 +510,10 @@ async fn queue_message(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<QueueMessageRequest>,
 ) -> Result<ResponseJson<ApiResponse<QueueStatus>>, ApiError> {
-    let deferred_restart = deployment
+    let workspace_restart = deployment
         .queued_message_service()
-        .has_deferred_mcp_restart(session.id);
-    if !deferred_restart
+        .is_workspace_mcp_restart(session.id);
+    if !workspace_restart
         && (has_active_mcp_session_restart(session.id)
             || deployment
                 .queued_message_service()

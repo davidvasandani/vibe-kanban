@@ -59,7 +59,7 @@ use crate::{
     },
     mcp_refresh::{
         McpRefreshControl, McpRefreshErrorCategory, McpRefreshHandle, McpServerRefreshSnapshot,
-        McpServerRefreshStatus,
+        McpServerRefreshStatus, safe_executor_error,
     },
     model_selector::PermissionPolicy,
     profile::ExecutorConfig,
@@ -91,12 +91,20 @@ impl ClaudeMcpInventory {
         mcp_servers: &[serde_json::Value],
     ) {
         let mut by_server: HashMap<String, Vec<String>> = HashMap::new();
+        let mut failed_servers = HashMap::new();
         for server in mcp_servers {
             let status = server.get("status").and_then(serde_json::Value::as_str);
-            if status.is_none_or(|status| status == "connected")
-                && let Some(name) = server.get("name").and_then(serde_json::Value::as_str)
-            {
-                by_server.entry(name.to_string()).or_default();
+            if let Some(name) = server.get("name").and_then(serde_json::Value::as_str) {
+                if status.is_none_or(|status| status == "connected") {
+                    by_server.entry(name.to_string()).or_default();
+                } else {
+                    let category = if status.is_some_and(|status| status.contains("auth")) {
+                        McpRefreshErrorCategory::AuthenticationFailed
+                    } else {
+                        McpRefreshErrorCategory::InitializeFailed
+                    };
+                    failed_servers.insert(name.to_string(), category);
+                }
             }
         }
         for tool in tools {
@@ -113,6 +121,7 @@ impl ClaudeMcpInventory {
                 .entry(server_id.to_string())
                 .or_default()
                 .push(format!("mcp__{name}"));
+            failed_servers.remove(server_id);
         }
         let mut servers: Vec<_> = by_server
             .into_iter()
@@ -142,6 +151,28 @@ impl ClaudeMcpInventory {
                 }
             })
             .collect();
+        let now = chrono::Utc::now();
+        servers.extend(failed_servers.into_iter().map(|(server_id, category)| {
+            McpServerRefreshSnapshot {
+                server_id,
+                status: McpServerRefreshStatus::FailedUnavailable,
+                tool_count: Some(0),
+                tool_names: Some(Vec::new()),
+                tool_schema_fingerprint: None,
+                resource_count: None,
+                prompt_count: None,
+                restart_occurred: Some(true),
+                discovery_attempts: 1,
+                observed_errors: vec![crate::mcp_refresh::McpDiscoveryObservation {
+                    code: category.clone(),
+                    observed_at: now,
+                }],
+                first_observed_at: Some(now),
+                last_observed_at: Some(now),
+                terminal_at: Some(now),
+                error: Some(safe_executor_error(category)),
+            }
+        }));
         servers.sort_by(|a, b| a.server_id.cmp(&b.server_id));
         *self.servers.write().await = Some(servers);
         self.ready.notify_waiters();
@@ -3653,7 +3684,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_inventory_does_not_mark_failed_servers_connected() {
+    async fn startup_inventory_preserves_failed_project_servers() {
         let inventory = ClaudeMcpInventory::default();
         inventory
             .observe_tools(
@@ -3662,7 +3693,14 @@ mod tests {
             )
             .await;
 
-        assert!(inventory.list_servers().await.unwrap().is_empty());
+        let servers = inventory.list_servers().await.unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].server_id, "failed_server");
+        assert_eq!(servers[0].status, McpServerRefreshStatus::FailedUnavailable);
+        assert_eq!(
+            servers[0].error.as_ref().map(|error| &error.category),
+            Some(&McpRefreshErrorCategory::InitializeFailed)
+        );
     }
 
     #[test]
