@@ -1,4 +1,4 @@
-# Implementation plan
+# Implementation plan: Require bounded pollers
 
 1. Execute the repository SpecKit command instructions, refreshing applicable constitution principles and writing feature artifacts for this workspace.
 2. Extend PollerSpec with optional stop_command and timeout_secs; validate new requests, retain legacy JSON compatibility, and compile bounded shell execution with stop checks and a whole-process deadline.
