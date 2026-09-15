@@ -253,7 +253,6 @@ pub async fn restart_workspace(
     let deployment_for_restart = deployment.clone();
     let workspace_for_restart = workspace.clone();
     let operation_generation = result.generation;
-    let resume_session_id = session.as_ref().map(|session| session.id);
     let task_guard = active_guard;
     tokio::spawn(async move {
         let _guard = task_guard;
@@ -290,28 +289,26 @@ pub async fn restart_workspace(
         // A supplied session can be the caller even when MCP runs in global
         // mode, where there is no server-side scoped-session identity. Always
         // let that turn finish delivering the tool result before teardown.
-        if let Some(session_id) = resume_session_id {
-            let grace_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                match ExecutionProcess::has_running_coding_agent_for_session(
-                    &deployment_for_restart.db().pool,
-                    session_id,
-                )
-                .await
-                {
-                    Ok(false) => break,
-                    Ok(true) => {
-                        if force_running_restart.load(Ordering::Acquire)
-                            && tokio::time::Instant::now() >= grace_deadline
-                        {
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let grace_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match ExecutionProcess::find_running_coding_agents_by_workspace(
+                &deployment_for_restart.db().pool,
+                workspace_for_restart.id,
+            )
+            .await
+            {
+                Ok(processes) if processes.is_empty() => break,
+                Ok(_) => {
+                    if force_running_restart.load(Ordering::Acquire)
+                        && tokio::time::Instant::now() >= grace_deadline
+                    {
+                        break;
                     }
-                    Err(error) => {
-                        tracing::error!(%session_id, %error, "Could not observe the calling session before workspace restart");
-                        return;
-                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(error) => {
+                    tracing::error!(workspace_id = %workspace_for_restart.id, %error, "Could not observe running coding agents before workspace restart");
+                    return;
                 }
             }
         }
