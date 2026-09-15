@@ -1999,7 +1999,13 @@ pub trait ContainerService {
         run_reason: &ExecutionProcessRunReason,
         execution_process_id: Uuid,
     ) -> Result<ExecutionProcess, ContainerError> {
-        let _launch_guard = workspace_execution_gate(workspace.id).read_owned().await;
+        let _launch_guard = workspace_execution_gate(workspace.id)
+            .try_read_owned()
+            .map_err(|_| {
+                ContainerError::Other(anyhow!(
+                    "Workspace execution start rejected while its process group is restarting"
+                ))
+            })?;
         self.start_execution_with_id_during_workspace_restart(
             workspace,
             session,
@@ -2378,20 +2384,23 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn workspace_restart_gate_excludes_ordinary_execution_starts() {
+    async fn workspace_restart_gate_rejects_ordinary_execution_starts() {
         let workspace_id = Uuid::new_v4();
         let restart_guard = lock_workspace_execution_starts(workspace_id).await;
-        let ordinary_start =
-            tokio::spawn(async move { workspace_execution_gate(workspace_id).read_owned().await });
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        assert!(!ordinary_start.is_finished());
+        assert!(
+            workspace_execution_gate(workspace_id)
+                .try_read_owned()
+                .is_err(),
+            "ordinary launch should fail promptly rather than deadlock an active agent"
+        );
 
         drop(restart_guard);
-        tokio::time::timeout(Duration::from_secs(1), ordinary_start)
-            .await
-            .expect("ordinary launch should resume when restart finishes")
-            .expect("launch waiter should not panic");
+        assert!(
+            workspace_execution_gate(workspace_id)
+                .try_read_owned()
+                .is_ok(),
+            "ordinary launch should be admitted after restart finishes"
+        );
     }
 
     #[test]

@@ -326,6 +326,7 @@ fn executor_config(process: &ExecutionProcess) -> Result<ExecutorConfig, String>
         ExecutorActionType::CodingAgentFollowUpRequest(request) => {
             Ok(request.executor_config.clone())
         }
+        ExecutorActionType::ReviewRequest(request) => Ok(request.executor_config.clone()),
         _ => Err(format!(
             "Execution {} is not a resumable coding-agent task",
             process.id
