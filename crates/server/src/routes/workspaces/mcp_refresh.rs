@@ -367,6 +367,24 @@ pub async fn restart_workspace(
                 tracing::error!(execution_id = %process.id, %error, "Could not reconcile indeterminate process during workspace MCP restart");
             }
         }
+        for process in &processes {
+            let stop_confirmed =
+                ExecutionProcess::find_by_id(&deployment_for_restart.db().pool, process.id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|current| {
+                        !matches!(
+                    current.status,
+                    db::models::execution_process::ExecutionProcessStatus::Running
+                        | db::models::execution_process::ExecutionProcessStatus::Indeterminate
+                )
+                    });
+            if !stop_confirmed && failed_stop_ids.insert(process.id) {
+                process_failures.push(format!("{}: stop could not be confirmed", process.id));
+                tracing::error!(execution_id = %process.id, "Workspace process stop was not proven during MCP restart");
+            }
+        }
 
         let mut replay_failed = !failed_stop_ids.is_empty();
         for process in processes
@@ -387,7 +405,6 @@ pub async fn restart_workspace(
                     });
             if !safely_stopped {
                 replay_failed = true;
-                process_failures.push(format!("{}: stop could not be confirmed", process.id));
                 tracing::error!(execution_id = %process.id, "Persistent workspace process was not proven stopped; refusing to start a duplicate");
                 continue;
             }
