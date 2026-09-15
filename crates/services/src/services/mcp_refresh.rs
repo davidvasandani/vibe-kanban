@@ -248,6 +248,8 @@ impl McpRefreshCoordinator {
         expected_generation: u64,
         category: McpRefreshErrorCategory,
     ) -> Option<McpRefreshResult> {
+        let fresh_process_restart =
+            self.restart_generations.read().await.get(&session_id) == Some(&expected_generation);
         let mut states = self.states.write().await;
         let state = states.get_mut(&session_id)?;
         if state.generation != expected_generation {
@@ -260,6 +262,15 @@ impl McpRefreshCoordinator {
                 .iter_mut()
                 .find(|server| server.server_id == server_id)
             {
+                if !fresh_process_restart
+                    && !matches!(
+                        server.status,
+                        executors::mcp_refresh::McpServerRefreshStatus::Connecting
+                            | executors::mcp_refresh::McpServerRefreshStatus::NotRegistered
+                    )
+                {
+                    continue;
+                }
                 server.status = executors::mcp_refresh::McpServerRefreshStatus::FailedUnavailable;
                 server.tool_count = Some(0);
                 server.tool_names = Some(Vec::new());

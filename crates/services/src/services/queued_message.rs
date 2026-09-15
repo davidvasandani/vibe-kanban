@@ -62,15 +62,16 @@ impl QueuedMessageService {
     /// Queue a message for a session. Replaces any existing queued message.
     pub fn queue_message(&self, session_id: Uuid, data: DraftFollowUpData) -> QueuedMessage {
         let workspace_restart = self.is_workspace_mcp_restart(session_id);
+        let replaces_unclaimed_restart = workspace_restart && self.queue.contains_key(&session_id);
         let queued = QueuedMessage {
             session_id,
             data,
             queued_at: Utc::now(),
-            restart_agent: workspace_restart,
+            restart_agent: replaces_unclaimed_restart,
             restart_reservation: None,
             remove_on_reservation_cancel: false,
         };
-        if workspace_restart {
+        if replaces_unclaimed_restart {
             self.workspace_mcp_restarts
                 .insert(session_id, queued.queued_at);
         }
