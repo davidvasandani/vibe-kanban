@@ -233,6 +233,11 @@ impl QueuedMessageService {
         self.workspace_mcp_restarts.contains_key(&session_id)
     }
 
+    pub fn has_deferred_mcp_restart(&self, session_id: Uuid) -> bool {
+        self.workspace_mcp_restarts.contains_key(&session_id)
+            && !self.queue.contains_key(&session_id)
+    }
+
     pub fn finish_workspace_mcp_restart(&self, session_id: Uuid) {
         self.workspace_mcp_restarts.remove(&session_id);
         self.cancelled_workspace_mcp_restarts.remove(&session_id);

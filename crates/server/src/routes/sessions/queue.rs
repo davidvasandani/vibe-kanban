@@ -510,14 +510,14 @@ async fn queue_message(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<QueueMessageRequest>,
 ) -> Result<ResponseJson<ApiResponse<QueueStatus>>, ApiError> {
-    let had_deferred_restart = deployment
+    let deferred_restart = deployment
         .queued_message_service()
-        .cancel_deferred_mcp_restart(session.id);
-    if had_deferred_restart
-        || has_active_mcp_session_restart(session.id)
-        || deployment
-            .queued_message_service()
-            .has_mcp_restart(session.id)
+        .has_deferred_mcp_restart(session.id);
+    if !deferred_restart
+        && (has_active_mcp_session_restart(session.id)
+            || deployment
+                .queued_message_service()
+                .has_mcp_restart(session.id))
     {
         supersede_mcp_session_restart(session.id, &deployment).await;
     }
