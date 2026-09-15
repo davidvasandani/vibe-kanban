@@ -1,37 +1,16 @@
-# Remove obsolete private-deployment workflow
+# Require bounded pollers
 
-## Background
-
-The repository currently runs two deployment dispatch workflows on pushes to
-`main`. The legacy `Trigger Deployment` workflow targets a private deployment
-repository and requires a token that is no longer configured, so it produces a
-false failing CI result. `Trigger homelab CD` is the supported deployment path.
+## Problem and scope
+Vibe Kanban pollers can continue after their useful work is complete. Require an explicit automatic stopping rule for every newly created poller: a nonblank stop-condition command, a positive wall-clock time limit, or both. A stop command exits zero when polling should stop; nonzero means continue. Manual stop remains available.
 
 ## Requirements
+- Enforce the rule at the HTTP boundary and expose both fields through MCP.
+- Persist and return the stopping configuration alongside the command and interval.
+- Evaluate the stop condition before each tick. A time limit bounds the entire poller, including a hung tick or stop condition, and terminates descendant processes.
+- When both rules are supplied, either may stop the poller. Reject blank stop commands, zero limits, and missing rules with actionable errors.
+- Preserve readability of historical poller records through optional fields; give legacy executions a finite fallback when recompiling them.
+- Display stopping rules in the existing poller details and update agent guidance.
+- Add meaningful validation and process-lifecycle tests, regenerate shared types, format, and review independently.
 
-- Delete the legacy `.github/workflows/trigger-fork-deploy.yml` workflow.
-- Preserve `.github/workflows/trigger-homelab-deploy.yml` behavior: pushes to
-  `main` and manual runs dispatch `vibe-kanban-deploy` to
-  `davidvasandani/homelab`, with `github.sha` and `github.ref_name` in the
-  client payload.
-- Leave `.github/workflows/test.yml` unchanged.
-- Remove documentation describing the retired private deployment workflow and
-  replace it with a concise description of the active homelab dispatch.
-- Make no changes to the homelab repository or any other service.
-
-## Validation
-
-- Confirm the obsolete workflow file is absent.
-- Search the repository for the retired repository target, workflow name, and
-  token secret.
-- Parse all remaining GitHub Actions workflow YAML.
-- Assert the homelab workflow's push trigger, repository, event type, token,
-  and SHA/ref payload are unchanged from the pre-change version; explanatory
-  comments may be updated to remove stale references.
-- Assert the standard Test workflow is byte-for-byte unchanged.
-
-## Non-goals
-
-- Changing the homelab deployment workflow or its infrastructure.
-- Changing application code, dependencies, tests, or other services.
-- Removing the active `HOMELAB_DEPLOY_TOKEN` requirement.
+## Acceptance
+A request without either rule fails before spawning. Stop-command and deadline pollers terminate automatically; both rules work together. Restart recovery preserves deadlines rather than extending lifetimes. Existing records remain deserializable. No other service is changed.

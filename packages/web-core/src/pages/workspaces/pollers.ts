@@ -12,6 +12,8 @@ export interface WorkspacePoller {
   id: string;
   command: string;
   intervalSecs: number;
+  stopCommand?: string | null;
+  timeoutSecs?: number | null;
   status: ExecutionProcess['status'];
   startedAt: string;
 }
@@ -38,6 +40,8 @@ export function selectPollers(
         id: process.id,
         command: action.poller.command,
         intervalSecs: action.poller.interval_secs,
+        stopCommand: action.poller.stop_command,
+        timeoutSecs: action.poller.timeout_secs,
         status: process.status,
         startedAt: process.started_at,
       },

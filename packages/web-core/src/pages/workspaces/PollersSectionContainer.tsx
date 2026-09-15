@@ -78,6 +78,14 @@ function PollerRow({ poller }: { poller: WorkspacePoller }) {
         </code>
         <div className="mt-0.5 flex flex-wrap gap-x-2 text-xs text-low">
           <span>{formatInterval(poller.intervalSecs)}</span>
+          {poller.timeoutSecs != null && (
+            <span>time limit {poller.timeoutSecs}s</span>
+          )}
+          {poller.stopCommand && (
+            <span className="max-w-full truncate" title={poller.stopCommand}>
+              stops when successful: <code>{poller.stopCommand}</code>
+            </span>
+          )}
           <span
             className={STATUS_CLASS[poller.status]}
             data-testid="poller-status"
