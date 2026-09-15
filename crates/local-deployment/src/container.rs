@@ -3206,7 +3206,7 @@ impl LocalContainerService {
 
         let action = ExecutorAction::new(action_type, cleanup_action.map(Box::new));
 
-        self.start_execution(
+        self.start_execution_after_workspace_restart(
             &ctx.workspace,
             &ctx.session,
             &action,

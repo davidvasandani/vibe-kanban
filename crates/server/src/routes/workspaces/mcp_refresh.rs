@@ -265,11 +265,6 @@ pub async fn restart_workspace(
                 .service
                 .block_mcp_restart_start(session_id);
         }
-        let workspace_launch_guard =
-            services::services::container::lock_workspace_execution_starts(
-                workspace_for_restart.id,
-            )
-            .await;
         let mut session_restart_queued = false;
         if let Some(session) = session.as_ref()
             && ExecutionProcess::has_running_coding_agent_for_session(
@@ -317,6 +312,11 @@ pub async fn restart_workspace(
                 }
             }
         }
+        let workspace_launch_guard =
+            services::services::container::lock_workspace_execution_starts(
+                workspace_for_restart.id,
+            )
+            .await;
         let processes = match ExecutionProcess::find_all_running_by_workspace(
             &deployment_for_restart.db().pool,
             workspace_for_restart.id,

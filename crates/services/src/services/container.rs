@@ -2035,6 +2035,27 @@ pub trait ContainerService {
         .await
     }
 
+    /// Start a continuation that has already been claimed by execution
+    /// finalization. Unlike a new user/tool launch, this waits for workspace
+    /// recovery so cleanup chains and dequeued follow-ups are not lost.
+    async fn start_execution_after_workspace_restart(
+        &self,
+        workspace: &Workspace,
+        session: &Session,
+        executor_action: &ExecutorAction,
+        run_reason: &ExecutionProcessRunReason,
+    ) -> Result<ExecutionProcess, ContainerError> {
+        let _launch_guard = workspace_execution_gate(workspace.id).read_owned().await;
+        self.start_execution_with_id_during_workspace_restart(
+            workspace,
+            session,
+            executor_action,
+            run_reason,
+            Uuid::new_v4(),
+        )
+        .await
+    }
+
     async fn start_execution_with_id_during_workspace_restart(
         &self,
         workspace: &Workspace,
@@ -2320,8 +2341,13 @@ pub trait ContainerService {
             ) => ExecutionProcessRunReason::CodingAgent,
         };
 
-        self.start_execution(&ctx.workspace, &ctx.session, next_action, &next_run_reason)
-            .await?;
+        self.start_execution_after_workspace_restart(
+            &ctx.workspace,
+            &ctx.session,
+            next_action,
+            &next_run_reason,
+        )
+        .await?;
 
         tracing::debug!("Started next action: {:?}", next_action);
         Ok(())
@@ -2401,6 +2427,23 @@ mod tests {
                 .is_ok(),
             "ordinary launch should be admitted after restart finishes"
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_restart_gate_defers_owned_lifecycle_continuations() {
+        let workspace_id = Uuid::new_v4();
+        let restart_guard = lock_workspace_execution_starts(workspace_id).await;
+        let continuation =
+            tokio::spawn(async move { workspace_execution_gate(workspace_id).read_owned().await });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!continuation.is_finished());
+
+        drop(restart_guard);
+        tokio::time::timeout(Duration::from_secs(1), continuation)
+            .await
+            .expect("owned continuation should resume when restart finishes")
+            .expect("continuation waiter should not panic");
     }
 
     #[test]
