@@ -18,6 +18,10 @@ struct McpSpawnPollerRequest {
         description = "Seconds between ticks. Required and never defaulted: must be between 5 and 86400."
     )]
     interval_secs: u32,
+    /// Completion predicate checked before each tick; exit zero stops polling.
+    stop_command: Option<String>,
+    /// Positive total lifetime in seconds. Required unless stop_command is supplied.
+    timeout_secs: Option<u32>,
     #[schemars(
         description = "Optional directory to run the command in, relative to the workspace root. Must not be absolute or contain '..'."
     )]
@@ -58,6 +62,10 @@ struct PollerPayload {
     status: ExecutionProcessStatus,
     command: String,
     interval_secs: u32,
+    /// Completion predicate checked before each tick; exit zero stops polling.
+    stop_command: Option<String>,
+    /// Positive total lifetime in seconds. Required unless stop_command is supplied.
+    timeout_secs: Option<u32>,
     working_dir: Option<String>,
     started_at: String,
 }
@@ -72,6 +80,10 @@ struct PollerSummary {
     command: String,
     #[schemars(description = "Seconds between ticks")]
     interval_secs: u32,
+    /// Completion predicate checked before each tick; exit zero stops polling.
+    stop_command: Option<String>,
+    /// Positive total lifetime in seconds. Required unless stop_command is supplied.
+    timeout_secs: Option<u32>,
     #[schemars(description = "Directory the poller runs in, relative to the workspace root")]
     working_dir: Option<String>,
     #[schemars(description = "When the poller was started")]
@@ -99,13 +111,15 @@ struct McpStopPollerResponse {
 #[tool_router(router = pollers_tools_router, vis = "pub")]
 impl McpServer {
     #[tool(
-        description = "Run a command on a repeating interval as a Vibe Kanban poller. It is spawned in its own process group and survives the end of the current agent turn and Vibe Kanban restarts. Use this instead of a background shell or the CLI's own monitor/watch tools, which are terminated when the turn ends. Vibe Kanban tracks it: it appears in the Processes tab and can be stopped with stop_poller or from the UI. `interval_secs` is required and never defaulted. `workspace_id` is optional if running inside that workspace context."
+        description = "Run a command on a repeating interval as a Vibe Kanban poller. It is spawned in its own process group and survives the end of the current agent turn and Vibe Kanban restarts. Use this instead of a background shell or the CLI's own monitor/watch tools, which are terminated when the turn ends. Vibe Kanban tracks it: it appears in the Processes tab and can be stopped with stop_poller or from the UI. `interval_secs` is required and never defaulted. You must supply a nonblank `stop_command` (checked before each tick; exit zero stops) or a positive `timeout_secs` (total lifetime including hung commands), or both. A manual stop action does not satisfy this requirement. `workspace_id` is optional if running inside that workspace context."
     )]
     async fn spawn_poller(
         &self,
         Parameters(McpSpawnPollerRequest {
             command,
             interval_secs,
+            stop_command,
+            timeout_secs,
             working_dir,
             workspace_id,
         }): Parameters<McpSpawnPollerRequest>,
@@ -125,6 +139,8 @@ impl McpServer {
         let payload = serde_json::json!({
             "command": command,
             "interval_secs": interval_secs,
+            "stop_command": stop_command,
+            "timeout_secs": timeout_secs,
             "working_dir": working_dir,
         });
 
@@ -173,6 +189,8 @@ impl McpServer {
                 status: Self::execution_process_status_label(&poller.status).to_string(),
                 command: poller.command,
                 interval_secs: poller.interval_secs,
+                stop_command: poller.stop_command,
+                timeout_secs: poller.timeout_secs,
                 working_dir: poller.working_dir,
                 started_at: poller.started_at,
             })
@@ -215,6 +233,25 @@ impl McpServer {
 #[cfg(test)]
 mod tests {
     use executors::actions::script::{MAX_POLLER_INTERVAL_SECS, MIN_POLLER_INTERVAL_SECS};
+
+    #[test]
+    fn parses_stopping_rules_and_legacy_list_metadata() {
+        let request: super::McpSpawnPollerRequest = serde_json::from_value(serde_json::json!({
+            "command": "echo tick", "interval_secs": 60,
+            "stop_command": "test -f done", "timeout_secs": 300
+        }))
+        .unwrap();
+        assert_eq!(request.stop_command.as_deref(), Some("test -f done"));
+        assert_eq!(request.timeout_secs, Some(300));
+        let legacy: super::ListPollersPayload = serde_json::from_value(serde_json::json!({
+            "pollers": [{"id": uuid::Uuid::new_v4(), "status": "running",
+                "command": "echo tick", "interval_secs": 60, "working_dir": null,
+                "started_at": "2026-09-15T00:00:00Z"}]
+        }))
+        .unwrap();
+        assert!(legacy.pollers[0].stop_command.is_none());
+        assert!(legacy.pollers[0].timeout_secs.is_none());
+    }
 
     /// `spawn_poller`'s `interval_secs` description quotes these bounds as
     /// literals, because a schemars description must be a string literal. If the

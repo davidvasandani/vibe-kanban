@@ -61,7 +61,7 @@ pub const DENY_BACKGROUND_BASH_CALLBACK_ID: &str = "DENY_BACKGROUND_BASH_CALLBAC
 /// (`spawn_poller`, which runs the command in its own surviving process group)
 /// and — mirroring [`SCHEDULE_WAKEUP_DENY_REASON`] — tells the agent to keep
 /// working rather than park its turn.
-pub const BACKGROUND_BASH_DENY_REASON: &str = "Background processes are not supported inside a Vibe Kanban turn: this turn's process group is terminated when the turn ends, so anything started with run_in_background is reaped with it and any output you meant to poll is silently lost. Run the command in the foreground instead. If it genuinely needs to outlive this turn, use the `spawn_poller` MCP tool, which runs it in its own process group that survives the turn and is visible in the workspace UI. Either way, keep working in this turn instead of waiting on a background process.";
+pub const BACKGROUND_BASH_DENY_REASON: &str = "Background processes are not supported inside a Vibe Kanban turn: this turn's process group is terminated when the turn ends, so anything started with run_in_background is reaped with it and any output you meant to poll is silently lost. Run the command in the foreground instead. If it genuinely needs to outlive this turn, use the `spawn_poller` MCP tool, which runs it in its own process group that survives the turn and is visible in the workspace UI. Supply stop_command (exit zero to stop), a positive timeout_secs, or both. Either way, keep working in this turn instead of waiting on a background process.";
 
 /// True only when a `PreToolUse` hook input explicitly asks for a background
 /// `Bash` spawn.

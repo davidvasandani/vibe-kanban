@@ -1,14 +1,10 @@
 # Implementation plan
 
-1. Capture the current `Trigger homelab CD` and `Test` workflow contents so
-   validation can prove they were not functionally or textually changed.
-2. Delete `.github/workflows/trigger-fork-deploy.yml`, removing the obsolete
-   push/manual workflow, its private repository target, and its required
-   `DEPLOY_REPO_TOKEN` secret reference.
-3. Replace the README's obsolete private CI/CD deployment description with the
-   active homelab dispatch path and its SHA/ref payload contract.
-4. Validate all remaining workflow YAML, search for stale private-deployment
-   references, and verify the homelab and Test workflow invariants.
-5. Run an independent Codex review of the complete diff, resolve every
-   confirmed significant finding, and repeat validation and review until no
-   significant findings remain.
+1. Execute the repository SpecKit command instructions, refreshing applicable constitution principles and writing feature artifacts for this workspace.
+2. Extend PollerSpec with optional stop_command and timeout_secs; validate new requests, retain legacy JSON compatibility, and compile bounded shell execution with stop checks and a whole-process deadline.
+3. Carry the fields through HTTP/MCP create and list contracts, generated types, and existing poller UI projections. Update agent instructions.
+4. Add process-level tests for stop success/failure, hanging commands, deadline cleanup, invalid requests, and legacy metadata. Run install, generation, formatting, and relevant checks.
+5. Run an independent Codex diff review; resolve significant findings and recheck.
+6. Update and commit poller knowledge with this task id, then open and merge a pull request once verified.
+
+Read `PRIOR_KNOWLEDGE.md` for existing lifecycle and contract constraints. Application changes are confined to Vibe Kanban. Workspace-provisioned SpecKit commands place their Vibe Kanban feature artifacts in `../homelab/specs/vk/bd71-require-all-poll/`.

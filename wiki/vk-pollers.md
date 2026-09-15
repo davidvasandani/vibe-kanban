@@ -276,3 +276,57 @@ exercise the bulk query against migrated SQLite and serialized executor actions.
 - vk/5cd1-debug-this-vk-ba
 
 - vk/dc76-add-polling-to-w
+
+## Automatic stopping rules
+
+**Task:** `vk/bd71-require-all-poll`  
+**Workspace:** `bd7136e0-1243-44dd-846e-443381de0aca`
+
+New pollers require `stop_command`, positive `timeout_secs`, or both. A stop
+command is a completion predicate checked **before** each tick: zero stops;
+nonzero continues. Blank supplied predicates and zero supplied limits are
+rejected even when the other field is valid. Manual `stop_poller` availability
+does not satisfy creation validation. Use both rules when a predicate or tick
+might hang.
+
+The new fields remain optional in persisted `PollerSpec` JSON so old rows are
+readable. Existing live legacy processes keep their original script; compiling
+legacy metadata without either rule applies a one-day fallback. HTTP/MCP list
+responses and the existing execution stream carry the fields; the drawer still
+adds no request.
+
+### A deadline belongs to the process group
+
+A server-owned timer would disappear on restart or reset during recovery. The
+compiled script instead starts a Bash/sleep watchdog in the same process group
+that `ScriptRequest::spawn` owns. `$$` identifies that group's leader. Re-adopting
+the live group preserves the original deadline. Predicate completion cancels
+and reaps the watchdog, whose cancellation trap kills and reaps its sleep.
+Deadline expiry logs its reason and kills the whole group, including resistant
+ordinary descendants. Deliberately escaping the group is outside this contract.
+
+Two tested pitfalls explain the implementation:
+
+- GNU `timeout` is not a standard macOS runtime dependency. Reuse the Bash and
+  sleep tools already required by pollers; lifecycle fixtures deliberately omit
+  timeout/gtimeout from PATH.
+- TERM plus delayed KILL can lose grandchildren: the supervisor may exit when
+  the monitored shell exits on TERM, before escalating against a descendant
+  that ignored TERM. Test with a **separate shell** that ignores TERM and writes
+  a marker after the deadline; a superficially similar inline background/wait
+  fixture failed to expose this leak.
+
+### Cleanup must survive the stopping mechanism
+
+SIGKILL skips EXIT traps. Scratch output/status therefore live in one atomically
+created private directory. The watchdog removes that directory **before** group
+termination. Removing only the files has a race: a finishing tick's EXIT trap
+can recreate its status file between unlink and KILL. Removing their parent
+directory prevents recreation, and open unlinked output files disappear when
+the killed processes close their descriptors.
+
+Regression tests assert empty scratch storage after both timeout and successful
+predicates, no surviving watchdog on successful completion, and no delayed
+writes from resistant descendants. The fixtures use Bash's kill builtin for
+process-group cleanup rather than assuming the host's external kill utility has
+the same negative-PID behavior.

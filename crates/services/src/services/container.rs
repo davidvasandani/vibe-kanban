@@ -2816,6 +2816,8 @@ mod tests {
         let spec = PollerSpec {
             command: "git fetch --dry-run origin main".to_string(),
             interval_secs: 60,
+            stop_command: None,
+            timeout_secs: Some(60),
         };
         let poller_id = Uuid::new_v4();
         ExecutionProcess::create(

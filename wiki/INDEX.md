@@ -78,7 +78,9 @@ contributed to it.
   response delivery, the `exit N`-in-a-subshell trap that would silently
   swallow tick failures, and the drawer summary that rides a stream the layout
   already had; workspace-wide Polling classification through the existing bulk
-  summary, approval/run precedence, and why dropped history still counts as live.
+  summary, approval/run precedence, and why dropped history still counts as live;
+  required stopping rules, portable process-group deadlines, and scratch cleanup
+  before forced termination (`vk/bd71-require-all-poll`).
 - [codex-credential-refresh.md](codex-credential-refresh.md) — Why concurrent
   `codex app-server` processes sharing one ChatGPT `auth.json` hit "refresh token
   already used" (rotating single-use refresh tokens + Codex's guarded reload but

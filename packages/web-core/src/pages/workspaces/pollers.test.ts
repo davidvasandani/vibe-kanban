@@ -11,7 +11,12 @@ function process(
     id?: string;
     runReason?: ExecutionProcessRunReason;
     status?: ExecutionProcessStatus;
-    poller?: { command: string; interval_secs: number } | null;
+    poller?: {
+      command: string;
+      interval_secs: number;
+      stop_command?: string | null;
+      timeout_secs?: number | null;
+    } | null;
     actionType?: 'ScriptRequest' | 'CodingAgentInitialRequest';
   } = {}
 ): ExecutionProcess {
@@ -63,6 +68,21 @@ describe('selectPollers', () => {
         startedAt: '2026-08-31T05:00:00Z',
       },
     ]);
+  });
+
+  it('retains both stopping rules from persisted metadata', () => {
+    const [poller] = selectPollers([
+      process({
+        poller: {
+          command: 'git fetch',
+          interval_secs: 60,
+          stop_command: 'test -f done',
+          timeout_secs: 600,
+        },
+      }),
+    ]);
+    expect(poller.stopCommand).toBe('test -f done');
+    expect(poller.timeoutSecs).toBe(600);
   });
 
   it('excludes a plain background helper, which carries no poller spec', () => {
