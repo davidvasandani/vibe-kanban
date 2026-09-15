@@ -1,37 +1,22 @@
-# Remove obsolete private-deployment workflow
+# Slack MCP availability in Vibe Kanban sessions
 
-## Background
-
-The repository currently runs two deployment dispatch workflows on pushes to
-`main`. The legacy `Trigger Deployment` workflow targets a private deployment
-repository and requires a token that is no longer configured, so it produces a
-false failing CI result. `Trigger homelab CD` is the supported deployment path.
+## Problem and scope
+Slack MCP tools are unavailable in VK sessions. Diagnose configuration propagation,
+launcher startup, authentication and tool discovery using redacted evidence.
+Changes are limited to VK and, if needed, its hosting in
+`homelab/modules/vibe-kanban-rebuild.nix`; other services require clarification.
 
 ## Requirements
+- Identify and reproduce the failure before selecting a fix.
+- Preserve configured Slack credentials, custom servers and the pinned fork's
+  attachment support. Never log credentials or perform Slack message writes.
+- Make Slack initialize and expose tools in new and resumed VK sessions.
+- Cover the reproduced failure with appropriate regression verification and
+  report any remaining live validation limits.
+- Follow the requested SpecKit stages, independent review, knowledge recording,
+  and pull request/merge workflow.
 
-- Delete the legacy `.github/workflows/trigger-fork-deploy.yml` workflow.
-- Preserve `.github/workflows/trigger-homelab-deploy.yml` behavior: pushes to
-  `main` and manual runs dispatch `vibe-kanban-deploy` to
-  `davidvasandani/homelab`, with `github.sha` and `github.ref_name` in the
-  client payload.
-- Leave `.github/workflows/test.yml` unchanged.
-- Remove documentation describing the retired private deployment workflow and
-  replace it with a concise description of the active homelab dispatch.
-- Make no changes to the homelab repository or any other service.
-
-## Validation
-
-- Confirm the obsolete workflow file is absent.
-- Search the repository for the retired repository target, workflow name, and
-  token secret.
-- Parse all remaining GitHub Actions workflow YAML.
-- Assert the homelab workflow's push trigger, repository, event type, token,
-  and SHA/ref payload are unchanged from the pre-change version; explanatory
-  comments may be updated to remove stale references.
-- Assert the standard Test workflow is byte-for-byte unchanged.
-
-## Non-goals
-
-- Changing the homelab deployment workflow or its infrastructure.
-- Changing application code, dependencies, tests, or other services.
-- Removing the active `HOMELAB_DEPLOY_TOKEN` requirement.
+## Acceptance
+A read-only MCP initialization/tool-list probe succeeds under the relevant
+session environment, or a precise external blocker is documented. Targeted
+checks pass and the reviewed change is merged through a pull request.
