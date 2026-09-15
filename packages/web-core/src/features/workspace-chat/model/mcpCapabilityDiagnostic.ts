@@ -15,8 +15,14 @@ export function mcpCapabilityDiagnostic(
   result: McpRefreshResult | null,
   serverId: string
 ): McpCapabilityDiagnostic {
-  const server = result?.servers.find((item) => item.server_id === serverId);
-  if (!server && !result?.configured_server_ids.includes(serverId)) {
+  if (!result) {
+    return {
+      state: 'not-configured',
+      message: `${serverId} is not assigned to this executor profile.`,
+    };
+  }
+  const server = result.servers.find((item) => item.server_id === serverId);
+  if (!server && !result.configured_server_ids.includes(serverId)) {
     return {
       state: 'not-configured',
       message: `${serverId} is not assigned to this executor profile.`,
