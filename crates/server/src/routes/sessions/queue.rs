@@ -503,6 +503,9 @@ async fn queue_message(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<QueueMessageRequest>,
 ) -> Result<ResponseJson<ApiResponse<QueueStatus>>, ApiError> {
+    deployment
+        .queued_message_service()
+        .cancel_deferred_mcp_restart(session.id);
     if deployment
         .queued_message_service()
         .has_mcp_restart(session.id)
@@ -538,12 +541,10 @@ async fn cancel_queued_message(
     Extension(session): Extension<Session>,
     State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<QueueStatus>>, ApiError> {
-    if deployment
+    deployment
         .queued_message_service()
-        .has_mcp_restart(session.id)
-    {
-        supersede_mcp_session_restart(session.id, &deployment).await;
-    }
+        .cancel_deferred_mcp_restart(session.id);
+    supersede_mcp_session_restart(session.id, &deployment).await;
     deployment
         .queued_message_service()
         .cancel_queued(session.id);

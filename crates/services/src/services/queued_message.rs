@@ -246,6 +246,20 @@ impl QueuedMessageService {
         self.unblock_mcp_restart_start(session_id);
     }
 
+    /// Cancel a continuation that has already been claimed by finalization,
+    /// without releasing the workspace teardown gate that still owns it.
+    pub fn cancel_deferred_mcp_restart(&self, session_id: Uuid) {
+        if let Some(queued_at) = self
+            .workspace_mcp_restarts
+            .get(&session_id)
+            .map(|entry| *entry)
+        {
+            self.cancelled_workspace_mcp_restarts
+                .insert(session_id, queued_at);
+            self.restart_resolution.notify_waiters();
+        }
+    }
+
     pub async fn wait_for_mcp_restart_start(
         &self,
         session_id: Uuid,
