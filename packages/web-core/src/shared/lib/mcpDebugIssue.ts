@@ -21,6 +21,14 @@ export type McpDebugAvailability =
 
 const activeMcpDebugCreations = new Set<string>();
 
+export function buildMcpGithubIssueUrl(serverName: string, diagnostic: string) {
+  const params = new URLSearchParams({
+    title: `MCP unavailable: ${serverName}`,
+    body: `## MCP recovery diagnostic\n\n\`\`\`text\n${diagnostic}\n\`\`\``,
+  });
+  return `https://github.com/davidvasandani/vibe-kanban/issues/new?${params.toString()}`;
+}
+
 export function buildMcpRuntimeDiagnostic({
   result,
   executor,

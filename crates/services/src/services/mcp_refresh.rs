@@ -256,7 +256,13 @@ impl McpRefreshCoordinator {
             return None;
         }
         let now = Utc::now();
-        for server_id in state.configured_server_ids.clone() {
+        let mut failed_server_ids = state.configured_server_ids.clone();
+        if fresh_process_restart {
+            failed_server_ids.extend(state.servers.iter().map(|server| server.server_id.clone()));
+            failed_server_ids.sort();
+            failed_server_ids.dedup();
+        }
+        for server_id in failed_server_ids {
             if let Some(server) = state
                 .servers
                 .iter_mut()

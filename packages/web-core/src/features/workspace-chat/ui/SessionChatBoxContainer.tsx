@@ -76,6 +76,7 @@ import { useMcpRefresh } from '../model/useMcpRefresh';
 import { useProjectContextOptional } from '@/shared/hooks/useProjectContext';
 import {
   acquireMcpDebugCreation,
+  buildMcpGithubIssueUrl,
   buildMcpDebugIssueRequest,
   buildMcpRuntimeDiagnostic,
   mcpDebugAvailability,
@@ -954,7 +955,6 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
       ) ?? [];
     const offerMcpIssue =
       unusableServers.length > 0 &&
-      !!projectContext &&
       !!effectiveExecutor &&
       !!workspaceId &&
       !!sessionId;
@@ -997,13 +997,29 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
               disabled: false,
               onClick: () => {
                 if (
-                  !projectContext ||
                   !effectiveExecutor ||
                   !workspaceId ||
                   !sessionId ||
                   !mcpRefresh.result
                 )
                   return;
+                const serverName = unusableServers
+                  .map((server) => server.server_id)
+                  .join(', ');
+                const diagnostic = buildMcpRuntimeDiagnostic({
+                  result: mcpRefresh.result,
+                  executor: effectiveExecutor,
+                  workspaceId,
+                  sessionId,
+                });
+                if (!projectContext) {
+                  window.open(
+                    buildMcpGithubIssueUrl(serverName, diagnostic),
+                    '_blank',
+                    'noopener,noreferrer'
+                  );
+                  return;
+                }
                 const availability = mcpDebugAvailability(
                   true,
                   projectContext.statuses
@@ -1014,20 +1030,11 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
                   );
                   return;
                 }
-                const serverName = unusableServers
-                  .map((server) => server.server_id)
-                  .join(', ');
                 const key = mcpDebugCreationKey(
                   projectContext.projectId,
                   `runtime:${workspaceId}:${sessionId}:${mcpRefresh.result.generation}`
                 );
                 if (!acquireMcpDebugCreation(key)) return;
-                const diagnostic = buildMcpRuntimeDiagnostic({
-                  result: mcpRefresh.result,
-                  executor: effectiveExecutor,
-                  workspaceId,
-                  sessionId,
-                });
                 const { persisted } = projectContext.insertIssue(
                   buildMcpDebugIssueRequest({
                     projectId: projectContext.projectId,
