@@ -548,7 +548,9 @@ build or test loop, polling for a condition — use the `spawn_poller` MCP tool 
 from the `vibe_kanban` server. It takes a `command` and an `interval_secs` \
 (5-86400), runs in its own process group, survives the end of this turn and Vibe \
 Kanban restarts, and is visible and stoppable in the workspace UI. Companion \
-tools: `list_pollers`, `stop_poller`.
+tools: `list_pollers`, `stop_poller`. Every poller must supply `stop_command` \
+(a completion predicate: exit zero stops) or a positive `timeout_secs` (total \
+lifetime including hung commands), or both. Manual stopping alone is insufficient.
 
 Do not try to work around this with `nohup`, `setsid`, `&`, `disown`, or a \
 detached subshell: those are reaped with the turn just the same. Prefer running \

@@ -874,6 +874,8 @@ mod tests {
                 poller: Some(PollerSpec {
                     command: "echo tick".into(),
                     interval_secs: 60,
+                    stop_command: None,
+                    timeout_secs: Some(60),
                 }),
             }),
             None,

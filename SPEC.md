@@ -1,22 +1,16 @@
-# Slack MCP availability in Vibe Kanban sessions
+# Require bounded pollers
 
 ## Problem and scope
-Slack MCP tools are unavailable in VK sessions. Diagnose configuration propagation,
-launcher startup, authentication and tool discovery using redacted evidence.
-Changes are limited to VK and, if needed, its hosting in
-`homelab/modules/vibe-kanban-rebuild.nix`; other services require clarification.
+Vibe Kanban pollers can continue after their useful work is complete. Require an explicit automatic stopping rule for every newly created poller: a nonblank stop-condition command, a positive wall-clock time limit, or both. A stop command exits zero when polling should stop; nonzero means continue. Manual stop remains available.
 
 ## Requirements
-- Identify and reproduce the failure before selecting a fix.
-- Preserve configured Slack credentials, custom servers and the pinned fork's
-  attachment support. Never log credentials or perform Slack message writes.
-- Make Slack initialize and expose tools in new and resumed VK sessions.
-- Cover the reproduced failure with appropriate regression verification and
-  report any remaining live validation limits.
-- Follow the requested SpecKit stages, independent review, knowledge recording,
-  and pull request/merge workflow.
+- Enforce the rule at the HTTP boundary and expose both fields through MCP.
+- Persist and return the stopping configuration alongside the command and interval.
+- Evaluate the stop condition before each tick. A time limit bounds the entire poller, including a hung tick or stop condition, and terminates descendant processes.
+- When both rules are supplied, either may stop the poller. Reject blank stop commands, zero limits, and missing rules with actionable errors.
+- Preserve readability of historical poller records through optional fields; give legacy executions a finite fallback when recompiling them.
+- Display stopping rules in the existing poller details and update agent guidance.
+- Add meaningful validation and process-lifecycle tests, regenerate shared types, format, and review independently.
 
 ## Acceptance
-A read-only MCP initialization/tool-list probe succeeds under the relevant
-session environment, or a precise external blocker is documented. Targeted
-checks pass and the reviewed change is merged through a pull request.
+A request without either rule fails before spawning. Stop-command and deadline pollers terminate automatically; both rules work together. Restart recovery preserves deadlines rather than extending lifetimes. Existing records remain deserializable. No other service is changed.

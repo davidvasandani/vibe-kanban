@@ -72,6 +72,9 @@ pub struct StartBackgroundHelperRequest {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
 pub enum StartPollerError {
+    MissingStopRule,
+    EmptyStopCommand,
+    InvalidTimeout,
     EmptyCommand,
     /// The interval was zero, below `MIN_POLLER_INTERVAL_SECS`, or above
     /// `MAX_POLLER_INTERVAL_SECS`. Never silently defaulted: a defaulted
@@ -87,6 +90,12 @@ pub struct StartPollerRequest {
     pub command: String,
     /// Seconds between ticks.
     pub interval_secs: u32,
+    /// Completion predicate: exit zero stops before the next tick.
+    #[serde(default)]
+    pub stop_command: Option<String>,
+    /// Positive total lifetime in seconds; required unless stop_command is set.
+    #[serde(default)]
+    pub timeout_secs: Option<u32>,
     /// Optional path to run the command in, relative to the workspace root.
     #[serde(default)]
     pub working_dir: Option<String>,
@@ -100,6 +109,10 @@ pub struct PollerSummary {
     pub status: ExecutionProcessStatus,
     pub command: String,
     pub interval_secs: u32,
+    #[serde(default)]
+    pub stop_command: Option<String>,
+    #[serde(default)]
+    pub timeout_secs: Option<u32>,
     pub working_dir: Option<String>,
     pub started_at: DateTime<Utc>,
 }
@@ -711,6 +724,8 @@ pub async fn list_pollers(
 fn poller_spec_from_request(
     command: String,
     interval_secs: u32,
+    stop_command: Option<String>,
+    timeout_secs: Option<u32>,
 ) -> Result<PollerSpec, StartPollerError> {
     if command.trim().is_empty() {
         return Err(StartPollerError::EmptyCommand);
@@ -718,9 +733,23 @@ fn poller_spec_from_request(
     if !validate_interval(interval_secs) {
         return Err(StartPollerError::InvalidInterval);
     }
+    if stop_command
+        .as_ref()
+        .is_some_and(|command| command.trim().is_empty())
+    {
+        return Err(StartPollerError::EmptyStopCommand);
+    }
+    if timeout_secs == Some(0) {
+        return Err(StartPollerError::InvalidTimeout);
+    }
+    if stop_command.is_none() && timeout_secs.is_none() {
+        return Err(StartPollerError::MissingStopRule);
+    }
     Ok(PollerSpec {
         command,
         interval_secs,
+        stop_command,
+        timeout_secs,
     })
 }
 
@@ -737,6 +766,8 @@ fn poller_summary(process: &ExecutionProcess) -> Option<PollerSummary> {
         status: process.status.clone(),
         command: spec.command.clone(),
         interval_secs: spec.interval_secs,
+        stop_command: spec.stop_command.clone(),
+        timeout_secs: spec.timeout_secs,
         working_dir: script.working_dir.clone(),
         started_at: process.started_at,
     })
@@ -751,6 +782,15 @@ fn poller_summary(process: &ExecutionProcess) -> Option<PollerSummary> {
 /// failure and the corrective action (Constitution XXI).
 fn start_poller_error_message(error: &StartPollerError) -> &'static str {
     match error {
+        StartPollerError::MissingStopRule => {
+            "Poller requires stop_command (exit zero to stop) or a positive timeout_secs, or both."
+        }
+        StartPollerError::EmptyStopCommand => {
+            "Poller stop_command is empty: supply a nonblank completion predicate or omit it and supply timeout_secs."
+        }
+        StartPollerError::InvalidTimeout => {
+            "Poller timeout_secs must be a positive number of seconds; zero disables a deadline and is not allowed."
+        }
         StartPollerError::EmptyCommand => {
             "Poller command is empty: supply the command to run on each tick."
         }
@@ -776,7 +816,12 @@ pub async fn start_poller(
     State(deployment): State<DeploymentImpl>,
     Json(request): Json<StartPollerRequest>,
 ) -> Result<ResponseJson<ApiResponse<ExecutionProcess, StartPollerError>>, ApiError> {
-    let spec = match poller_spec_from_request(request.command, request.interval_secs) {
+    let spec = match poller_spec_from_request(
+        request.command,
+        request.interval_secs,
+        request.stop_command,
+        request.timeout_secs,
+    ) {
         Ok(spec) => spec,
         Err(error) => {
             let message = start_poller_error_message(&error);
@@ -1011,22 +1056,55 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    poller_spec_from_request("echo hi".to_string(), interval),
+                    poller_spec_from_request("echo hi".to_string(), interval, None, Some(60)),
                     Err(StartPollerError::InvalidInterval)
                 ),
                 "interval {interval} should be rejected, not defaulted"
             );
         }
 
-        let spec = poller_spec_from_request("echo hi".to_string(), MIN_POLLER_INTERVAL_SECS)
-            .expect("the minimum interval is valid");
+        let spec = poller_spec_from_request(
+            "echo hi".to_string(),
+            MIN_POLLER_INTERVAL_SECS,
+            None,
+            Some(60),
+        )
+        .expect("the minimum interval is valid");
         assert_eq!(spec.interval_secs, MIN_POLLER_INTERVAL_SECS);
+    }
+
+    #[test]
+    fn requires_valid_explicit_stopping_rules() {
+        let create = |stop: Option<&str>, timeout| {
+            poller_spec_from_request("echo hi".into(), 60, stop.map(str::to_owned), timeout)
+        };
+        assert!(matches!(
+            create(None, None),
+            Err(StartPollerError::MissingStopRule)
+        ));
+        assert!(matches!(
+            create(Some("  "), Some(60)),
+            Err(StartPollerError::EmptyStopCommand)
+        ));
+        assert!(matches!(
+            create(Some("true"), Some(0)),
+            Err(StartPollerError::InvalidTimeout)
+        ));
+        for (stop, timeout) in [
+            (Some("true"), None),
+            (None, Some(1)),
+            (Some("false"), Some(u32::MAX)),
+        ] {
+            let spec = create(stop, timeout).unwrap();
+            assert_eq!(spec.stop_command.as_deref(), stop);
+            assert_eq!(spec.timeout_secs, timeout);
+        }
     }
 
     #[test]
     fn an_empty_command_surfaces_as_empty_command() {
         assert!(matches!(
-            poller_spec_from_request("   ".to_string(), 60),
+            poller_spec_from_request("   ".to_string(), 60, None, Some(60)),
             Err(StartPollerError::EmptyCommand)
         ));
     }
@@ -1039,6 +1117,9 @@ mod tests {
     #[test]
     fn every_rejection_carries_a_message_that_names_the_problem() {
         let cases = [
+            (StartPollerError::MissingStopRule, "stop_command"),
+            (StartPollerError::EmptyStopCommand, "stop_command"),
+            (StartPollerError::InvalidTimeout, "timeout_secs"),
             (StartPollerError::EmptyCommand, "empty"),
             (StartPollerError::InvalidInterval, "interval_secs"),
             (StartPollerError::InvalidWorkingDir, "working_dir"),
@@ -1180,6 +1261,8 @@ mod tests {
                 Some(PollerSpec {
                     command: "git fetch --dry-run".to_string(),
                     interval_secs: 60,
+                    stop_command: None,
+                    timeout_secs: Some(60),
                 }),
             )
             .await;
@@ -1213,6 +1296,8 @@ mod tests {
             Some(PollerSpec {
                 command: "git fetch --dry-run origin main".to_string(),
                 interval_secs: 90,
+                stop_command: Some("test -f done".into()),
+                timeout_secs: Some(60),
             }),
         )
         .await;
@@ -1231,6 +1316,8 @@ mod tests {
         // loop.
         assert_eq!(pollers[0].command, "git fetch --dry-run origin main");
         assert_eq!(pollers[0].interval_secs, 90);
+        assert_eq!(pollers[0].stop_command.as_deref(), Some("test -f done"));
+        assert_eq!(pollers[0].timeout_secs, Some(60));
         assert_eq!(pollers[0].status, ExecutionProcessStatus::Running);
     }
 }

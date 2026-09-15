@@ -890,7 +890,7 @@ script: string,
  */
 working_dir: string | null, };
 
-export type StartPollerError = { "type": "empty_command" } | { "type": "invalid_interval" } | { "type": "invalid_working_dir" } | { "type": "too_many_helpers" };
+export type StartPollerError = { "type": "missing_stop_rule" } | { "type": "empty_stop_command" } | { "type": "invalid_timeout" } | { "type": "empty_command" } | { "type": "invalid_interval" } | { "type": "invalid_working_dir" } | { "type": "too_many_helpers" };
 
 export type StartPollerRequest = { 
 /**
@@ -902,11 +902,19 @@ command: string,
  */
 interval_secs: number, 
 /**
+ * Completion predicate: exit zero stops before the next tick.
+ */
+stop_command: string | null, 
+/**
+ * Positive total lifetime in seconds; required unless stop_command is set.
+ */
+timeout_secs: number | null, 
+/**
  * Optional path to run the command in, relative to the workspace root.
  */
 working_dir: string | null, };
 
-export type PollerSummary = { id: string, status: ExecutionProcessStatus, command: string, interval_secs: number, working_dir: string | null, started_at: string, };
+export type PollerSummary = { id: string, status: ExecutionProcessStatus, command: string, interval_secs: number, stop_command: string | null, timeout_secs: number | null, working_dir: string | null, started_at: string, };
 
 export type ListPollersResponse = { pollers: Array<PollerSummary>, count: number, };
 
@@ -1309,7 +1317,15 @@ command: string,
  * Seconds between ticks. Validated to
  * `[MIN_POLLER_INTERVAL_SECS, MAX_POLLER_INTERVAL_SECS]`; zero is rejected.
  */
-interval_secs: number, };
+interval_secs: number, 
+/**
+ * Completion predicate, checked before each tick. Exit zero stops polling.
+ */
+stop_command: string | null, 
+/**
+ * Total lifetime, including blocked commands and interval waits.
+ */
+timeout_secs: number | null, };
 
 export type ScriptContext = "SetupScript" | "CleanupScript" | "ArchiveScript" | "DevServer" | "ToolInstallScript" | "BackgroundHelper";
 
