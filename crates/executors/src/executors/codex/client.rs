@@ -909,6 +909,8 @@ fn mcp_refresh_snapshot(server: McpServerStatus) -> McpServerRefreshSnapshot {
         server_id: server.name,
         status: if auth_failed {
             McpServerRefreshStatus::FailedUnavailable
+        } else if server.tools.is_empty() {
+            McpServerRefreshStatus::ConnectedNoTools
         } else {
             McpServerRefreshStatus::Ready
         },
@@ -919,6 +921,11 @@ fn mcp_refresh_snapshot(server: McpServerStatus) -> McpServerRefreshSnapshot {
         prompt_count: None,
         // The pinned status protocol does not expose reuse/restart.
         restart_occurred: None,
+        discovery_attempts: 1,
+        observed_errors: Vec::new(),
+        first_observed_at: Some(chrono::Utc::now()),
+        last_observed_at: Some(chrono::Utc::now()),
+        terminal_at: Some(chrono::Utc::now()),
         error: auth_failed
             .then(|| safe_executor_error(McpRefreshErrorCategory::AuthenticationFailed)),
     }

@@ -125,6 +125,33 @@ follow-up `run_session_prompt`; use `list_all_messages` when the recent window
 does not contain enough context. A nudge that ignores the agent's messages is
 the same blind retry regardless of how it's phrased.
 
+## Recovering a wedged MCP session
+
+Two scoped tools restart executor state without replacing durable user state:
+
+- `restart_session(session_id?, workspace_id?)` queues a fresh coding-agent
+  process through the ordinary continuation handoff. In orchestrator mode both
+  IDs default to the current context. A session may call the tool on itself: the
+  backend commits the restart reservation before the current turn exits, then
+  the exit monitor starts the continuation with the existing transcript.
+- `restart_workspace(workspace_id?, session_id?)` is heavier. The backend stops
+  every workspace-owned process, cold-starts the selected coding-agent session,
+  and replays persistent dev-server/background-helper actions that have durable
+  launch definitions. Worktree files, Git state, sessions, and conversations
+  are not recreated or reset.
+
+Both return a structured recovery generation and per-server registry state.
+`connecting` is bounded: executor startup inventory must resolve within 30
+seconds or VK publishes a named terminal failure. A successful connection with
+zero registered tools is represented separately from a ready tool inventory.
+
+Codex supports `refresh_mcp_tools` through its app-server reload/status protocol.
+Claude Code does **not** support in-place refresh and returns `unsupported` with
+`restart_session` as remediation. A fresh Claude process does report its
+registered tool names in `system/init.tools`; VK captures that executor-owned
+inventory so configured-but-absent servers end in `not_registered` instead of
+“still connecting” indefinitely.
+
 ## Backend resolution (important)
 
 `resolve_base_url` (`src/bin/vibe_kanban_mcp.rs:100-134`) decides which backend the

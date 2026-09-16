@@ -210,6 +210,7 @@ fn generate_mock_logs(prompt: &str) -> Vec<String> {
             session_id: Some(session_id.clone()),
             cwd: None,
             tools: None,
+            mcp_servers: vec![],
             model: Some("qa-mock-executor".to_string()),
             api_key_source: Some("unknown".to_string()),
             status: None,

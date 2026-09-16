@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Error as AnyhowError, anyhow};
 use async_trait::async_trait;
+use dashmap::DashMap;
 use db::{
     DBService,
     models::{
@@ -71,6 +72,25 @@ use uuid::Uuid;
 use worktree_manager::WorktreeError;
 
 use crate::services::{execution_process, normalized_log_cache, notification::NotificationService};
+
+static WORKSPACE_EXECUTION_GATES: LazyLock<DashMap<Uuid, Arc<RwLock<()>>>> =
+    LazyLock::new(DashMap::new);
+
+fn workspace_execution_gate(workspace_id: Uuid) -> Arc<RwLock<()>> {
+    WORKSPACE_EXECUTION_GATES
+        .entry(workspace_id)
+        .or_insert_with(|| Arc::new(RwLock::new(())))
+        .clone()
+}
+
+/// Exclude ordinary execution launches while a workspace process group is
+/// being rebuilt. Acquiring the write side also waits for any launch that
+/// crossed the boundary immediately before recovery began.
+pub async fn lock_workspace_execution_starts(
+    workspace_id: Uuid,
+) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+    workspace_execution_gate(workspace_id).write_owned().await
+}
 
 /// Store the settled entries a historical replay produced, so the next reader
 /// replays them instead of re-normalizing the raw log.
@@ -363,6 +383,25 @@ pub trait ContainerService {
         workspace_id: Uuid,
         session_id: Uuid,
     ) -> Result<McpRefreshResult, ContainerError>;
+
+    /// Start a fresh-process MCP inventory generation without asking the
+    /// current executor to reload in place. The replacement execution confirms
+    /// this generation from its own startup registry.
+    async fn prepare_mcp_restart(
+        &self,
+        _workspace_id: Uuid,
+        _session_id: Uuid,
+    ) -> Result<McpRefreshResult, ContainerError> {
+        Err(ContainerError::Other(anyhow!(
+            "Fresh-process MCP inventory tracking is unsupported"
+        )))
+    }
+
+    async fn clear_mcp_restart_tracking(&self, _session_id: Uuid) {}
+
+    /// Fail only the recovery generation owned by a deferred continuation.
+    /// Implementations must ignore this call if a newer generation replaced it.
+    async fn fail_mcp_restart_generation(&self, _session_id: Uuid, _generation: u64) {}
 
     async fn mcp_refresh_status(
         &self,
@@ -1299,6 +1338,12 @@ pub trait ContainerService {
     /// `specs/vk/826e-coding-agent-war/`.
     async fn reap_warm_processes_for_session(&self, _session_id: Uuid) {}
 
+    /// Reap a warm executor before a deliberate MCP restart while preserving
+    /// the pending recovery generation that the replacement process confirms.
+    async fn reap_warm_process_for_mcp_restart(&self, session_id: Uuid) {
+        self.reap_warm_processes_for_session(session_id).await;
+    }
+
     async fn ensure_container_exists(
         &self,
         workspace: &Workspace,
@@ -1958,6 +2003,71 @@ pub trait ContainerService {
         run_reason: &ExecutionProcessRunReason,
         execution_process_id: Uuid,
     ) -> Result<ExecutionProcess, ContainerError> {
+        let _launch_guard = workspace_execution_gate(workspace.id)
+            .try_read_owned()
+            .map_err(|_| {
+                ContainerError::Other(anyhow!(
+                    "Workspace execution start rejected while its process group is restarting"
+                ))
+            })?;
+        self.start_execution_with_id_during_workspace_restart(
+            workspace,
+            session,
+            executor_action,
+            run_reason,
+            execution_process_id,
+        )
+        .await
+    }
+
+    /// Recovery-only execution entry point. The caller must hold the
+    /// workspace's exclusive execution-start guard.
+    async fn start_execution_during_workspace_restart(
+        &self,
+        workspace: &Workspace,
+        session: &Session,
+        executor_action: &ExecutorAction,
+        run_reason: &ExecutionProcessRunReason,
+    ) -> Result<ExecutionProcess, ContainerError> {
+        self.start_execution_with_id_during_workspace_restart(
+            workspace,
+            session,
+            executor_action,
+            run_reason,
+            Uuid::new_v4(),
+        )
+        .await
+    }
+
+    /// Start a continuation that has already been claimed by execution
+    /// finalization. Unlike a new user/tool launch, this waits for workspace
+    /// recovery so cleanup chains and dequeued follow-ups are not lost.
+    async fn start_execution_after_workspace_restart(
+        &self,
+        workspace: &Workspace,
+        session: &Session,
+        executor_action: &ExecutorAction,
+        run_reason: &ExecutionProcessRunReason,
+    ) -> Result<ExecutionProcess, ContainerError> {
+        let _launch_guard = workspace_execution_gate(workspace.id).read_owned().await;
+        self.start_execution_with_id_during_workspace_restart(
+            workspace,
+            session,
+            executor_action,
+            run_reason,
+            Uuid::new_v4(),
+        )
+        .await
+    }
+
+    async fn start_execution_with_id_during_workspace_restart(
+        &self,
+        workspace: &Workspace,
+        session: &Session,
+        executor_action: &ExecutorAction,
+        run_reason: &ExecutionProcessRunReason,
+        execution_process_id: Uuid,
+    ) -> Result<ExecutionProcess, ContainerError> {
         // Create new execution process record
         // Capture current HEAD per repository as the "before" commit for this execution
         let repositories =
@@ -2235,8 +2345,13 @@ pub trait ContainerService {
             ) => ExecutionProcessRunReason::CodingAgent,
         };
 
-        self.start_execution(&ctx.workspace, &ctx.session, next_action, &next_run_reason)
-            .await?;
+        self.start_execution_after_workspace_restart(
+            &ctx.workspace,
+            &ctx.session,
+            next_action,
+            &next_run_reason,
+        )
+        .await?;
 
         tracing::debug!("Started next action: {:?}", next_action);
         Ok(())
@@ -2293,9 +2408,47 @@ mod tests {
 
     use super::{
         HistoricalNormalizationLifetime, HistoricalNormalizationRegistry, LogMsg,
-        cache_execution_from_history, is_indexed_entry_patch, replay_materialized_log,
-        reset_would_discard_uncommitted_work, scope_initial_prompt_to_working_dir,
+        cache_execution_from_history, is_indexed_entry_patch, lock_workspace_execution_starts,
+        replay_materialized_log, reset_would_discard_uncommitted_work,
+        scope_initial_prompt_to_working_dir, workspace_execution_gate,
     };
+
+    #[tokio::test]
+    async fn workspace_restart_gate_rejects_ordinary_execution_starts() {
+        let workspace_id = Uuid::new_v4();
+        let restart_guard = lock_workspace_execution_starts(workspace_id).await;
+        assert!(
+            workspace_execution_gate(workspace_id)
+                .try_read_owned()
+                .is_err(),
+            "ordinary launch should fail promptly rather than deadlock an active agent"
+        );
+
+        drop(restart_guard);
+        assert!(
+            workspace_execution_gate(workspace_id)
+                .try_read_owned()
+                .is_ok(),
+            "ordinary launch should be admitted after restart finishes"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_restart_gate_defers_owned_lifecycle_continuations() {
+        let workspace_id = Uuid::new_v4();
+        let restart_guard = lock_workspace_execution_starts(workspace_id).await;
+        let continuation =
+            tokio::spawn(async move { workspace_execution_gate(workspace_id).read_owned().await });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!continuation.is_finished());
+
+        drop(restart_guard);
+        tokio::time::timeout(Duration::from_secs(1), continuation)
+            .await
+            .expect("owned continuation should resume when restart finishes")
+            .expect("continuation waiter should not panic");
+    }
 
     #[test]
     fn indexed_entry_patches_are_kept_and_repo_diff_patches_are_not() {

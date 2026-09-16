@@ -50,9 +50,12 @@ pub struct McpRefreshError {
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum McpServerRefreshStatus {
+    Connecting,
     Ready,
+    ConnectedNoTools,
     FailedRetained,
     FailedUnavailable,
+    NotRegistered,
     Removed,
     Disabled,
 }
@@ -72,7 +75,24 @@ pub struct McpServerRefreshSnapshot {
     pub resource_count: Option<u32>,
     pub prompt_count: Option<u32>,
     pub restart_occurred: Option<bool>,
+    #[serde(default)]
+    pub discovery_attempts: u32,
+    #[serde(default)]
+    pub observed_errors: Vec<McpDiscoveryObservation>,
+    #[serde(default)]
+    pub first_observed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_observed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub terminal_at: Option<DateTime<Utc>>,
     pub error: Option<McpRefreshError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
+#[ts(export)]
+pub struct McpDiscoveryObservation {
+    pub code: McpRefreshErrorCategory,
+    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
@@ -144,7 +164,7 @@ pub fn safe_executor_error(category: McpRefreshErrorCategory) -> McpRefreshError
         ),
         McpRefreshErrorCategory::Unsupported => (
             "This executor cannot refresh MCP tools in place.",
-            "Start the next turn with an executor that supports live MCP refresh.",
+            "Call restart_session to preserve the conversation and rediscover MCP tools in a fresh executor process.",
             false,
         ),
         McpRefreshErrorCategory::ExecutableUnavailable => (

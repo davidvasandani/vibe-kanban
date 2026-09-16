@@ -5,6 +5,7 @@ import {
   acquireMcpDebugCreation,
   buildMcpDebugIssueDescription,
   buildMcpDebugIssueRequest,
+  buildMcpRuntimeDiagnostic,
   buildMcpDebugIssueTitle,
   canStartMcpDebugCreation,
   markdownFenceFor,
@@ -145,6 +146,70 @@ describe('mcpDebugIssue', () => {
     expect(request.description).toContain(
       'without changing secret-redaction or OAuth semantics'
     );
+  });
+
+  it('builds a runtime registry diagnostic with required recovery evidence', () => {
+    const diagnostic = buildMcpRuntimeDiagnostic({
+      executor: BaseCodingAgent.CLAUDE_CODE,
+      workspaceId: 'workspace-1',
+      sessionId: 'session-1',
+      result: {
+        status: 'partially_refreshed',
+        retryable: false,
+        generation: 4,
+        requested_at: '2026-09-12T00:00:00Z',
+        last_successful_refresh_at: null,
+        configured_server_ids: ['sgsc-mcp', 'slack'],
+        servers: [
+          {
+            server_id: 'sgsc-mcp',
+            status: 'ready',
+            tool_count: 300,
+            tool_names: null,
+            tool_schema_fingerprint: null,
+            resource_count: 0,
+            prompt_count: null,
+            restart_occurred: true,
+            discovery_attempts: 1,
+            observed_errors: [],
+            first_observed_at: '2026-09-12T00:00:00Z',
+            last_observed_at: '2026-09-12T00:00:01Z',
+            terminal_at: '2026-09-12T00:00:01Z',
+            error: null,
+          },
+          {
+            server_id: 'slack',
+            status: 'failed_unavailable',
+            tool_count: 0,
+            tool_names: [],
+            tool_schema_fingerprint: null,
+            resource_count: null,
+            prompt_count: null,
+            restart_occurred: true,
+            discovery_attempts: 2,
+            observed_errors: [
+              {
+                code: 'timeout',
+                observed_at: '2026-09-12T00:00:30Z',
+              },
+            ],
+            first_observed_at: '2026-09-12T00:00:00Z',
+            last_observed_at: '2026-09-12T00:00:30Z',
+            terminal_at: '2026-09-12T00:00:30Z',
+            error: null,
+          },
+        ],
+        error: null,
+      },
+    });
+
+    expect(diagnostic).toContain('Executor: Claude Code');
+    expect(diagnostic).toContain('Workspace ID: workspace-1');
+    expect(diagnostic).toContain('sgsc-mcp: ready; tools=300');
+    expect(diagnostic).toContain(
+      'slack: failed_unavailable; tools=0; attempts=2'
+    );
+    expect(diagnostic).toContain('2026-09-12T00:00:30Z: timeout');
   });
 
   it('computes top-of-column sort order for empty columns', () => {

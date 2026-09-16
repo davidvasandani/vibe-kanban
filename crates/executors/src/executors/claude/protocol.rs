@@ -329,6 +329,7 @@ mod tests {
             RepoContext::default(),
             String::new(),
             CancellationToken::new(),
+            Arc::new(crate::executors::claude::ClaudeMcpInventory::default()),
         )
     }
 

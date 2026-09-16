@@ -68,11 +68,21 @@ import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { queueApi, sessionsApi } from '@/shared/lib/api';
 import { RenameSessionDialog } from '@vibe/ui/components/RenameSessionDialog';
 import type { TurnNavigationItem } from '@vibe/ui/components/TurnNavigationPopup';
-import { ArrowsClockwiseIcon } from '@phosphor-icons/react';
+import { ArrowsClockwiseIcon, BugIcon } from '@phosphor-icons/react';
 import { ConfirmDialog } from '@/shared/dialogs/shared/ConfirmDialog';
 import { toast } from 'sonner';
 import { restartAgentForMcpChanges } from '../model/restartAgentForMcpChanges';
 import { useMcpRefresh } from '../model/useMcpRefresh';
+import { useProjectContextOptional } from '@/shared/hooks/useProjectContext';
+import {
+  acquireMcpDebugCreation,
+  buildMcpGithubIssueUrl,
+  buildMcpDebugIssueRequest,
+  buildMcpRuntimeDiagnostic,
+  mcpDebugAvailability,
+  mcpDebugCreationKey,
+  releaseMcpDebugCreation,
+} from '@/shared/lib/mcpDebugIssue';
 
 /**
  * Follow-up prompt sent when resuming a run interrupted by a server restart.
@@ -191,6 +201,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
 
   const sessionId = session?.id;
   const mcpRefresh = useMcpRefresh(workspaceId, sessionId);
+  const refreshMcpStatus = mcpRefresh.refreshStatus;
   const queryClient = useQueryClient();
   const hostId = useHostId();
 
@@ -209,6 +220,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     [queryClient, hostId, workspaceId]
   );
   const appNavigation = useAppNavigation();
+  const projectContext = useProjectContextOptional();
 
   const { executeAction } = useActions();
   const actionCtx = useActionVisibilityContext();
@@ -255,6 +267,20 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   // Execution state
   const { isAttemptRunning, stopExecution, isStopping, processes } =
     useWorkspaceExecution(workspaceId);
+  useEffect(() => {
+    if (!workspaceId || !sessionId) return;
+    void refreshMcpStatus().catch(() => undefined);
+    // Runtime discovery is asynchronous and does not itself mutate the process
+    // list. Keep sampling through its bounded 30-second startup window.
+    const timer = window.setInterval(() => {
+      void refreshMcpStatus().catch(() => undefined);
+    }, 2000);
+    const stop = window.setTimeout(() => window.clearInterval(timer), 32000);
+    return () => {
+      window.clearInterval(timer);
+      window.clearTimeout(stop);
+    };
+  }, [processes, refreshMcpStatus, sessionId, workspaceId]);
 
   // Approvals state
   const { getPendingForProcess } = useApprovals();
@@ -598,6 +624,9 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
       } else if (result === 'started') {
         toast.success('Agent restarted with the latest MCP configuration.');
       }
+      if (result === 'queued' || result === 'started') {
+        await mcpRefresh.refreshStatus().catch(() => undefined);
+      }
     } catch {
       toast.error('Agent restart failed.');
     } finally {
@@ -608,6 +637,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     executorConfig,
     isQueueLoading,
     isSending,
+    mcpRefresh,
     send,
     sessionHasRunningAgent,
     sessionId,
@@ -914,6 +944,20 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     const canUseCodexRefresh =
       effectiveExecutor === BaseCodingAgent.CODEX &&
       mcpRefresh.result?.status !== 'unsupported';
+    const unusableServers =
+      mcpRefresh.result?.servers.filter(
+        (server) =>
+          server.status === 'failed_retained' ||
+          server.status === 'failed_unavailable' ||
+          server.status === 'not_registered' ||
+          server.status === 'connected_no_tools' ||
+          (server.status === 'ready' && server.tool_count === 0)
+      ) ?? [];
+    const offerMcpIssue =
+      unusableServers.length > 0 &&
+      !!effectiveExecutor &&
+      !!workspaceId &&
+      !!sessionId;
     return [
       ...(workspaceId && sessionId
         ? [
@@ -923,11 +967,13 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
               label: canUseCodexRefresh
                 ? 'Refresh MCP tools'
                 : 'Restart agent for MCP changes',
-              tooltip: canUseCodexRefresh
+              tooltip: mcpRefresh.result
                 ? mcpRefresh.tooltip
-                : sessionHasRunningAgent
-                  ? 'Queue a fresh agent process after the current turn finishes'
-                  : 'Start a fresh agent process with the latest MCP configuration',
+                : canUseCodexRefresh
+                  ? mcpRefresh.tooltip
+                  : sessionHasRunningAgent
+                    ? 'Queue a fresh agent process after the current turn finishes'
+                    : 'Start a fresh agent process with the latest MCP configuration',
               disabled: canUseCodexRefresh
                 ? mcpRefresh.isRefreshing
                 : !executorConfig ||
@@ -937,6 +983,79 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
               onClick: canUseCodexRefresh
                 ? mcpRefresh.refresh
                 : handleRestartForMcpChanges,
+            },
+          ]
+        : []),
+      ...(offerMcpIssue
+        ? [
+            {
+              id: 'open-mcp-diagnostic-issue',
+              icon: BugIcon,
+              label: 'Open VK issue for MCP failure',
+              tooltip:
+                'Create a prefilled issue with the active executor registry diagnostic',
+              disabled: false,
+              onClick: () => {
+                if (
+                  !effectiveExecutor ||
+                  !workspaceId ||
+                  !sessionId ||
+                  !mcpRefresh.result
+                )
+                  return;
+                const serverName = unusableServers
+                  .map((server) => server.server_id)
+                  .join(', ');
+                const diagnostic = buildMcpRuntimeDiagnostic({
+                  result: mcpRefresh.result,
+                  executor: effectiveExecutor,
+                  workspaceId,
+                  sessionId,
+                });
+                if (!projectContext) {
+                  window.open(
+                    buildMcpGithubIssueUrl(serverName, diagnostic),
+                    '_blank',
+                    'noopener,noreferrer'
+                  );
+                  return;
+                }
+                const availability = mcpDebugAvailability(
+                  true,
+                  projectContext.statuses
+                );
+                if (!availability.available) {
+                  toast.error(
+                    'This project has no status column for the issue.'
+                  );
+                  return;
+                }
+                const key = mcpDebugCreationKey(
+                  projectContext.projectId,
+                  `runtime:${workspaceId}:${sessionId}:${mcpRefresh.result.generation}`
+                );
+                if (!acquireMcpDebugCreation(key)) return;
+                const { persisted } = projectContext.insertIssue(
+                  buildMcpDebugIssueRequest({
+                    projectId: projectContext.projectId,
+                    status: availability.status,
+                    issues: projectContext.issues,
+                    serverName,
+                    executor: effectiveExecutor,
+                    diagnostic,
+                  })
+                );
+                void persisted
+                  .then(() => toast.success('MCP diagnostic issue created.'))
+                  .catch((error) =>
+                    toast.error(
+                      error instanceof Error
+                        ? error.message
+                        : 'Failed to create MCP diagnostic issue.'
+                    )
+                  )
+                  .finally(() => releaseMcpDebugCreation(key));
+              },
             },
           ]
         : []),
@@ -970,8 +1089,9 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     isRestartingForMcp,
     isSending,
     mcpRefresh,
-    sessionHasRunningAgent,
+    projectContext,
     sessionId,
+    sessionHasRunningAgent,
     workspaceId,
   ]);
 

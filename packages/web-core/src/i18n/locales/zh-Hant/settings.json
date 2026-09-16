@@ -23,6 +23,8 @@
         "reposDesc": "儲存庫腳本與設定",
         "agents": "代理",
         "agentsDesc": "編碼代理設定",
+        "skills": "技能",
+        "skillsDesc": "共享代理技能與提案",
         "mcp": "MCP 伺服器",
         "mcpDesc": "模型上下文協議伺服器",
         "cli-tools": "CLI 工具",
@@ -47,6 +49,27 @@
         "pipelinesDesc": "Pipeline TOML files and defaults",
         "workers": "叢集工作節點",
         "workersDesc": "工作節點健康狀況、儲存空間與排程"
+      }
+    },
+    "skills": {
+      "title": "技能",
+      "description": "建立及管理共享代理技能。變更會針對 {{baseBranch}} 建立拉取請求。",
+      "loading": "正在載入技能…",
+      "unavailable": "此機器未設定以 Git 管理技能。",
+      "add": "新增技能",
+      "delete": "刪除技能",
+      "untitled": "未命名技能",
+      "empty": "新增技能以開始。",
+      "fields": {
+        "name": "名稱",
+        "description": "描述與觸發指南",
+        "instructions": "說明 (Markdown)"
+      },
+      "proposal": {
+        "title": "提議變更",
+        "description": "Vibe Kanban 會驗證目錄並建立可審核的拉取請求。",
+        "submit": "建立拉取請求（{{count}} 項變更）",
+        "open": "開啟拉取請求"
       }
     },
     "general": {

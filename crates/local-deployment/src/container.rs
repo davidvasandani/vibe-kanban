@@ -460,6 +460,10 @@ fn validated_mcp_snapshot(
     Ok(snapshot)
 }
 
+fn supports_live_mcp_refresh(executor: BaseCodingAgent) -> bool {
+    executor == BaseCodingAgent::Codex
+}
+
 fn push_worker_bytes(store: &MsgStore, encoded: &str, stderr: bool) {
     let message = match BASE64_STANDARD.decode(encoded) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -765,6 +769,8 @@ fn dispatched_executor_profile(config: &ExecutorConfig) -> Option<ExecutorProfil
     })
 }
 
+type McpRefreshControls = Arc<RwLock<HashMap<Uuid, (Uuid, DateTime<Utc>, McpRefreshHandle)>>>;
+
 #[derive(Clone)]
 pub struct LocalContainerService {
     db: DBService,
@@ -788,7 +794,7 @@ pub struct LocalContainerService {
     /// the leak where a `Completed` turn row is skipped by `try_stop`. Phase 2,
     /// see `specs/vk/826e-coding-agent-war/`.
     warm_app_servers: Arc<RwLock<HashMap<Uuid, WarmAppServer>>>,
-    mcp_refresh_controls: Arc<RwLock<HashMap<Uuid, (Uuid, McpRefreshHandle)>>>,
+    mcp_refresh_controls: McpRefreshControls,
     mcp_refresh_coordinator: McpRefreshCoordinator,
     workspace_touch_times: Arc<RwLock<HashMap<Uuid, Instant>>>,
     config: Arc<RwLock<Config>>,
@@ -882,30 +888,85 @@ impl LocalContainerService {
         session_id: Uuid,
         execution_id: Uuid,
         execution_started_at: DateTime<Utc>,
+        configured_server_ids: Vec<String>,
         signal: McpRefreshSignal,
     ) {
         let controls = self.mcp_refresh_controls.clone();
         let coordinator = self.mcp_refresh_coordinator.clone();
         tokio::spawn(async move {
-            let handle = match signal.await {
-                Ok(handle) => handle,
-                Err(_) => {
-                    if coordinator
-                        .status(session_id)
-                        .await
-                        .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
-                    {
+            let discovery_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let mut signal = signal;
+            let handle = match tokio::time::timeout_at(discovery_deadline, &mut signal).await {
+                Ok(Ok(handle)) => handle,
+                Ok(Err(_)) => {
+                    let pending = coordinator.status(session_id).await.filter(|state| {
+                        state.status == McpRefreshStatus::PendingNextTurn
+                            && state.requested_at <= execution_started_at
+                    });
+                    if let Some(state) = pending {
                         coordinator
-                            .fail(session_id, McpRefreshErrorCategory::InitializeFailed)
+                            .fail(
+                                session_id,
+                                state.generation,
+                                McpRefreshErrorCategory::Timeout,
+                            )
+                            .await;
+                    } else {
+                        coordinator
+                            .observe_failure(
+                                session_id,
+                                execution_started_at,
+                                configured_server_ids,
+                                McpRefreshErrorCategory::Timeout,
+                            )
                             .await;
                     }
                     return;
                 }
+                Err(_) => {
+                    let pending = coordinator.status(session_id).await.filter(|state| {
+                        state.status == McpRefreshStatus::PendingNextTurn
+                            && state.requested_at <= execution_started_at
+                    });
+                    if let Some(state) = pending {
+                        coordinator
+                            .fail(
+                                session_id,
+                                state.generation,
+                                McpRefreshErrorCategory::Timeout,
+                            )
+                            .await;
+                    } else {
+                        coordinator
+                            .observe_failure(
+                                session_id,
+                                execution_started_at,
+                                configured_server_ids.clone(),
+                                McpRefreshErrorCategory::Timeout,
+                            )
+                            .await;
+                    }
+                    match signal.await {
+                        Ok(handle) => handle,
+                        Err(_) => return,
+                    }
+                }
             };
-            controls
-                .write()
-                .await
-                .insert(session_id, (execution_id, handle.clone()));
+            {
+                let mut controls = controls.write().await;
+                if controls
+                    .get(&session_id)
+                    .is_some_and(|(_, current_started_at, _)| {
+                        *current_started_at > execution_started_at
+                    })
+                {
+                    return;
+                }
+                controls.insert(
+                    session_id,
+                    (execution_id, execution_started_at, handle.clone()),
+                );
+            }
 
             if let Some(state) = coordinator
                 .status(session_id)
@@ -917,17 +978,73 @@ impl LocalContainerService {
                 // Queue it on this live thread and let the following turn
                 // perform the atomic confirmation.
                 if state.requested_at > execution_started_at {
+                    if coordinator
+                        .is_restart_generation(session_id, state.generation)
+                        .await
+                    {
+                        return;
+                    }
                     if let Err(category) = handle.0.queue_refresh().await {
-                        coordinator.fail(session_id, category).await;
+                        coordinator
+                            .fail(session_id, state.generation, category)
+                            .await;
                     }
                     return;
                 }
-                match handle.0.list_servers().await {
+                let inventory =
+                    tokio::time::timeout_at(discovery_deadline, handle.0.list_servers())
+                        .await
+                        .unwrap_or(Err(McpRefreshErrorCategory::Timeout));
+                if controls.read().await.get(&session_id).is_some_and(
+                    |(current_execution_id, _, _)| *current_execution_id != execution_id,
+                ) {
+                    return;
+                }
+                match inventory {
                     Ok(servers) => {
-                        coordinator.confirm(session_id, servers).await;
+                        coordinator
+                            .confirm(session_id, state.generation, servers)
+                            .await;
                     }
                     Err(category) => {
-                        coordinator.fail(session_id, category).await;
+                        coordinator
+                            .fail(session_id, state.generation, category)
+                            .await;
+                    }
+                }
+            } else {
+                let inventory =
+                    tokio::time::timeout_at(discovery_deadline, handle.0.list_servers())
+                        .await
+                        .unwrap_or(Err(McpRefreshErrorCategory::Timeout));
+                if controls.read().await.get(&session_id).is_none_or(
+                    |(current_execution_id, _, _)| *current_execution_id != execution_id,
+                ) {
+                    return;
+                }
+                // Inventory is active-session state, not merely a refresh
+                // result. Publish every normal startup so the panel cannot
+                // retain evidence from a previous executor process.
+                match inventory {
+                    Ok(servers) => {
+                        coordinator
+                            .observe_inventory(
+                                session_id,
+                                execution_started_at,
+                                configured_server_ids,
+                                servers,
+                            )
+                            .await;
+                    }
+                    Err(category) => {
+                        coordinator
+                            .observe_failure(
+                                session_id,
+                                execution_started_at,
+                                configured_server_ids,
+                                category,
+                            )
+                            .await;
                     }
                 }
             }
@@ -2053,7 +2170,12 @@ impl LocalContainerService {
                         container.queued_message_service.take_queued(ctx.session.id)
                     {
                         let should_execute_queued = (queued_msg.restart_agent
-                            && ctx.execution_process.status == ExecutionProcessStatus::Failed)
+                            && (ctx.execution_process.status == ExecutionProcessStatus::Failed
+                                || (ctx.execution_process.status
+                                    == ExecutionProcessStatus::Killed
+                                    && container
+                                        .queued_message_service
+                                        .is_workspace_mcp_restart(ctx.session.id))))
                             || !matches!(
                                 ctx.execution_process.status,
                                 ExecutionProcessStatus::Failed
@@ -2072,6 +2194,9 @@ impl LocalContainerService {
                             {
                                 started_queued_follow_up = true;
                             } else {
+                                if queued_msg.restart_agent {
+                                    container.clear_mcp_restart_tracking(ctx.session.id).await;
+                                }
                                 container.finalize_task(&ctx).await;
                             }
                         } else {
@@ -2081,6 +2206,9 @@ impl LocalContainerService {
                                 ctx.session.id,
                                 ctx.execution_process.status
                             );
+                            if queued_msg.restart_agent {
+                                container.clear_mcp_restart_tracking(ctx.session.id).await;
+                            }
                             container.finalize_task(&ctx).await;
                         }
                     } else if !started_queued_follow_up {
@@ -2225,7 +2353,7 @@ impl LocalContainerService {
             let mut controls = container.mcp_refresh_controls.write().await;
             if controls
                 .get(&session_id)
-                .is_some_and(|(control_exec_id, _)| *control_exec_id == exec_id)
+                .is_some_and(|(control_exec_id, _, _)| *control_exec_id == exec_id)
             {
                 controls.remove(&session_id);
             }
@@ -2783,7 +2911,37 @@ impl LocalContainerService {
                 tracing::error!(%execution_id, "Remote execution next action failed: {error}");
             }
         }
+        let mut started_queued_follow_up = false;
         if self.should_finalize(&ctx) {
+            self.queued_message_service
+                .wait_for_restart_resolution(ctx.session.id)
+                .await;
+            if let Some(queued_msg) = self.queued_message_service.take_queued(ctx.session.id) {
+                let should_execute_queued = (queued_msg.restart_agent
+                    && (ctx.execution_process.status == ExecutionProcessStatus::Failed
+                        || (ctx.execution_process.status == ExecutionProcessStatus::Killed
+                            && self
+                                .queued_message_service
+                                .is_workspace_mcp_restart(ctx.session.id))))
+                    || !matches!(
+                        ctx.execution_process.status,
+                        ExecutionProcessStatus::Failed
+                            | ExecutionProcessStatus::Killed
+                            | ExecutionProcessStatus::Interrupted
+                            | ExecutionProcessStatus::Indeterminate
+                    );
+                if should_execute_queued {
+                    started_queued_follow_up =
+                        self.start_queued_follow_up_message(&ctx, &queued_msg).await;
+                    if !started_queued_follow_up && queued_msg.restart_agent {
+                        self.clear_mcp_restart_tracking(ctx.session.id).await;
+                    }
+                } else if queued_msg.restart_agent {
+                    self.clear_mcp_restart_tracking(ctx.session.id).await;
+                }
+            }
+        }
+        if self.should_finalize(&ctx) && !started_queued_follow_up {
             self.finalize_task(&ctx).await;
         }
         self.update_after_head_commits(execution_id).await;
@@ -2958,6 +3116,18 @@ impl LocalContainerService {
         queued_msg: &services::services::queued_message::QueuedMessage,
     ) -> bool {
         if queued_msg.restart_agent {
+            if !self
+                .queued_message_service
+                .wait_for_mcp_restart_start(ctx.session.id, queued_msg.queued_at)
+                .await
+            {
+                self.queued_message_service
+                    .finish_workspace_mcp_restart(ctx.session.id);
+                self.clear_mcp_restart_tracking(ctx.session.id).await;
+                return false;
+            }
+            self.queued_message_service
+                .finish_workspace_mcp_restart(ctx.session.id);
             self.reap_warm_server(&ctx.session.id).await;
         }
         if let Err(e) =
@@ -3038,7 +3208,7 @@ impl LocalContainerService {
 
         let action = ExecutorAction::new(action_type, cleanup_action.map(Box::new));
 
-        self.start_execution(
+        self.start_execution_after_workspace_restart(
             &ctx.workspace,
             &ctx.session,
             &action,
@@ -3269,7 +3439,17 @@ impl ContainerService for LocalContainerService {
     async fn reap_warm_processes_for_session(&self, session_id: Uuid) {
         self.reap_warm_server(&session_id).await;
         self.mcp_refresh_controls.write().await.remove(&session_id);
-        self.mcp_refresh_coordinator.remove(session_id).await;
+        if !self
+            .queued_message_service
+            .is_mcp_restart_start_blocked(session_id)
+        {
+            self.mcp_refresh_coordinator.remove(session_id).await;
+        }
+    }
+
+    async fn reap_warm_process_for_mcp_restart(&self, session_id: Uuid) {
+        self.reap_warm_server(&session_id).await;
+        self.mcp_refresh_controls.write().await.remove(&session_id);
     }
 
     fn db(&self) -> &DBService {
@@ -3302,7 +3482,7 @@ impl ContainerService for LocalContainerService {
                 .await?;
         let supported = profile
             .as_ref()
-            .is_some_and(|profile| profile.executor == BaseCodingAgent::Codex);
+            .is_some_and(|profile| supports_live_mcp_refresh(profile.executor));
         let configured_servers = if let Some(profile_id) = profile.as_ref()
             && let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id)
         {
@@ -3338,14 +3518,22 @@ impl ContainerService for LocalContainerService {
             let Some(profile_id) = profile.as_ref() else {
                 return Ok(self
                     .mcp_refresh_coordinator
-                    .fail(session_id, McpRefreshErrorCategory::Unsupported)
+                    .fail(
+                        session_id,
+                        result.generation,
+                        McpRefreshErrorCategory::Unsupported,
+                    )
                     .await
                     .unwrap_or(result));
             };
             let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id) else {
                 return Ok(self
                     .mcp_refresh_coordinator
-                    .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                    .fail(
+                        session_id,
+                        result.generation,
+                        McpRefreshErrorCategory::MaterializationFailed,
+                    )
                     .await
                     .unwrap_or(result));
             };
@@ -3356,7 +3544,11 @@ impl ContainerService for LocalContainerService {
                 Err(_) => {
                     return Ok(self
                         .mcp_refresh_coordinator
-                        .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                        .fail(
+                            session_id,
+                            result.generation,
+                            McpRefreshErrorCategory::MaterializationFailed,
+                        )
                         .await
                         .unwrap_or(result));
                 }
@@ -3366,7 +3558,11 @@ impl ContainerService for LocalContainerService {
                 Err(_) => {
                     return Ok(self
                         .mcp_refresh_coordinator
-                        .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                        .fail(
+                            session_id,
+                            result.generation,
+                            McpRefreshErrorCategory::MaterializationFailed,
+                        )
                         .await
                         .unwrap_or(result));
                 }
@@ -3374,7 +3570,11 @@ impl ContainerService for LocalContainerService {
             if snapshot.validate_size().is_err() {
                 return Ok(self
                     .mcp_refresh_coordinator
-                    .fail(session_id, McpRefreshErrorCategory::MaterializationFailed)
+                    .fail(
+                        session_id,
+                        result.generation,
+                        McpRefreshErrorCategory::MaterializationFailed,
+                    )
                     .await
                     .unwrap_or(result));
             }
@@ -3444,7 +3644,7 @@ impl ContainerService for LocalContainerService {
             };
             return Ok(self
                 .mcp_refresh_coordinator
-                .fail(session_id, failure)
+                .fail(session_id, result.generation, failure)
                 .await
                 .unwrap_or(result));
         }
@@ -3454,13 +3654,13 @@ impl ContainerService for LocalContainerService {
             .read()
             .await
             .get(&session_id)
-            .map(|(_, handle)| handle.clone());
+            .map(|(_, _, handle)| handle.clone());
         if let Some(control) = control
             && let Err(category) = control.0.queue_refresh().await
         {
             return Ok(self
                 .mcp_refresh_coordinator
-                .fail(session_id, category)
+                .fail(session_id, result.generation, category)
                 .await
                 .unwrap_or(result));
         }
@@ -3470,6 +3670,60 @@ impl ContainerService for LocalContainerService {
         // `register_mcp_refresh_control`, which reads the complete status and
         // atomically confirms this pending generation.
         Ok(result)
+    }
+
+    async fn prepare_mcp_restart(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<McpRefreshResult, ContainerError> {
+        let session = Session::find_by_id(&self.db.pool, session_id)
+            .await?
+            .ok_or(SessionError::NotFound)?;
+        if session.workspace_id != workspace_id {
+            return Err(ContainerError::Other(anyhow!(
+                "Session does not belong to workspace"
+            )));
+        }
+        let profile =
+            ExecutionProcess::latest_executor_profile_for_session(&self.db.pool, session_id)
+                .await?;
+        let configured_server_ids = if let Some(profile_id) = profile.as_ref()
+            && let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(profile_id)
+        {
+            read_coding_agent_mcp_servers(&agent)
+                .await
+                .map(|servers| servers.keys().cloned().collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        Ok(self
+            .mcp_refresh_coordinator
+            .request_restart(session_id, configured_server_ids)
+            .await)
+    }
+
+    async fn clear_mcp_restart_tracking(&self, session_id: Uuid) {
+        if let Some(state) = self.mcp_refresh_coordinator.status(session_id).await {
+            self.mcp_refresh_coordinator
+                .fail(
+                    session_id,
+                    state.generation,
+                    McpRefreshErrorCategory::ReloadFailed,
+                )
+                .await;
+        }
+    }
+
+    async fn fail_mcp_restart_generation(&self, session_id: Uuid, generation: u64) {
+        self.mcp_refresh_coordinator
+            .fail(
+                session_id,
+                generation,
+                McpRefreshErrorCategory::ReloadFailed,
+            )
+            .await;
     }
 
     async fn mcp_refresh_status(
@@ -3930,23 +4184,27 @@ impl ContainerService for LocalContainerService {
                 "Execution worker job was not pending during acceptance"
             )));
         }
-        if dispatch.mcp_config_snapshot.is_some()
-            && self
-                .mcp_refresh_coordinator
-                .status(execution_process.session_id)
-                .await
-                .is_some_and(|state| {
-                    state.status == McpRefreshStatus::PendingNextTurn
-                        && state.requested_at <= execution_process.started_at
-                })
-        {
+        let pending_mcp_generation = self
+            .mcp_refresh_coordinator
+            .status(execution_process.session_id)
+            .await
+            .filter(|state| {
+                state.status == McpRefreshStatus::PendingNextTurn
+                    && state.requested_at <= execution_process.started_at
+            })
+            .map(|state| state.generation);
+        if let Some(snapshot) = dispatch.mcp_config_snapshot.clone() {
             let client = client.clone();
             let coordinator = self.mcp_refresh_coordinator.clone();
             let session_id = execution_process.session_id;
             let execution_id = execution_process.id;
-            let snapshot = dispatch.mcp_config_snapshot.clone().expect("checked above");
+            let execution_started_at = execution_process.started_at;
+            let configured_server_ids = snapshot.servers.keys().cloned().collect::<Vec<_>>();
+            let inventory_expected = snapshot.executor == BaseCodingAgent::Codex.to_string()
+                || snapshot.executor == BaseCodingAgent::ClaudeCode.to_string();
             tokio::spawn(async move {
-                for _ in 0..30 {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                while tokio::time::Instant::now() < deadline {
                     let request = McpRefreshRequest {
                         authority: RequestAuthority {
                             protocol_version: PROTOCOL_VERSION,
@@ -3959,22 +4217,111 @@ impl ContainerService for LocalContainerService {
                         execution_id,
                         snapshot: snapshot.clone(),
                     };
-                    if let Ok(status) = client.mcp_status(worker_node_id, &request).await
-                        && status.status == WorkerMcpRefreshStatus::Queued
+                    if let Ok(Ok(status)) = tokio::time::timeout_at(
+                        deadline,
+                        client.mcp_status(worker_node_id, &request),
+                    )
+                    .await
                     {
-                        let servers = status
-                            .servers
-                            .into_iter()
-                            .filter_map(|server| serde_json::from_value(server).ok())
-                            .collect();
-                        coordinator.confirm(session_id, servers).await;
-                        return;
+                        match status.status {
+                            WorkerMcpRefreshStatus::Queued => {
+                                let servers = status
+                                    .servers
+                                    .into_iter()
+                                    .filter_map(|server| serde_json::from_value(server).ok())
+                                    .collect();
+                                if let Some(expected_generation) = pending_mcp_generation {
+                                    coordinator
+                                        .confirm(session_id, expected_generation, servers)
+                                        .await;
+                                } else {
+                                    coordinator
+                                        .observe_inventory(
+                                            session_id,
+                                            execution_started_at,
+                                            configured_server_ids,
+                                            servers,
+                                        )
+                                        .await;
+                                }
+                                return;
+                            }
+                            WorkerMcpRefreshStatus::Unsupported => {
+                                if inventory_expected {
+                                    if tokio::time::Instant::now() < deadline {
+                                        tokio::time::sleep_until(std::cmp::min(
+                                            deadline,
+                                            tokio::time::Instant::now() + Duration::from_secs(1),
+                                        ))
+                                        .await;
+                                    }
+                                    continue;
+                                }
+                                if let Some(expected_generation) = pending_mcp_generation {
+                                    coordinator
+                                        .fail(
+                                            session_id,
+                                            expected_generation,
+                                            McpRefreshErrorCategory::Unsupported,
+                                        )
+                                        .await;
+                                }
+                                return;
+                            }
+                            WorkerMcpRefreshStatus::MaterializationFailed
+                            | WorkerMcpRefreshStatus::ReloadFailed => {
+                                let category = if status.status
+                                    == WorkerMcpRefreshStatus::MaterializationFailed
+                                {
+                                    McpRefreshErrorCategory::MaterializationFailed
+                                } else {
+                                    McpRefreshErrorCategory::ReloadFailed
+                                };
+                                if let Some(expected_generation) = pending_mcp_generation {
+                                    coordinator
+                                        .fail(session_id, expected_generation, category)
+                                        .await;
+                                } else {
+                                    coordinator
+                                        .observe_failure(
+                                            session_id,
+                                            execution_started_at,
+                                            configured_server_ids,
+                                            category,
+                                        )
+                                        .await;
+                                }
+                                return;
+                            }
+                            WorkerMcpRefreshStatus::Busy => {}
+                        }
                     }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if tokio::time::Instant::now() < deadline {
+                        tokio::time::sleep_until(std::cmp::min(
+                            deadline,
+                            tokio::time::Instant::now() + Duration::from_secs(1),
+                        ))
+                        .await;
+                    }
                 }
-                coordinator
-                    .fail(session_id, McpRefreshErrorCategory::Timeout)
-                    .await;
+                if let Some(expected_generation) = pending_mcp_generation {
+                    coordinator
+                        .fail(
+                            session_id,
+                            expected_generation,
+                            McpRefreshErrorCategory::Timeout,
+                        )
+                        .await;
+                } else {
+                    coordinator
+                        .observe_failure(
+                            session_id,
+                            execution_started_at,
+                            configured_server_ids,
+                            McpRefreshErrorCategory::Timeout,
+                        )
+                        .await;
+                }
             });
         }
         self.track_worker_msgs_in_store(execution_process, worker_node_id)
@@ -4167,15 +4514,16 @@ impl ContainerService for LocalContainerService {
                 if matches!(
                     execution_process.run_reason,
                     ExecutionProcessRunReason::CodingAgent
-                ) && self
+                ) && let Some(state) = self
                     .mcp_refresh_coordinator
                     .status(execution_process.session_id)
                     .await
-                    .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
+                    .filter(|state| state.status == McpRefreshStatus::PendingNextTurn)
                 {
                     self.mcp_refresh_coordinator
                         .fail(
                             execution_process.session_id,
+                            state.generation,
                             McpRefreshErrorCategory::ProcessLaunchFailed,
                         )
                         .await;
@@ -4193,24 +4541,41 @@ impl ContainerService for LocalContainerService {
         let keep_warm = spawned.keep_warm && self.warm_agents_enabled();
         let warm_reuse = spawned.warm_reuse.take();
         if let Some(signal) = spawned.mcp_refresh.take() {
+            let configured_server_ids = if let Some(profile) =
+                ExecutionProcess::latest_executor_profile_for_session(
+                    &self.db.pool,
+                    execution_process.session_id,
+                )
+                .await?
+                && let Some(agent) = ExecutorConfigs::get_cached().get_coding_agent(&profile)
+            {
+                read_coding_agent_mcp_servers(&agent)
+                    .await
+                    .map(|servers| servers.keys().cloned().collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             self.register_mcp_refresh_control(
                 execution_process.session_id,
                 execution_process.id,
                 execution_process.started_at,
+                configured_server_ids,
                 signal,
             );
         } else if matches!(
             execution_process.run_reason,
             ExecutionProcessRunReason::CodingAgent
-        ) && self
+        ) && let Some(state) = self
             .mcp_refresh_coordinator
             .status(execution_process.session_id)
             .await
-            .is_some_and(|state| state.status == McpRefreshStatus::PendingNextTurn)
+            .filter(|state| state.status == McpRefreshStatus::PendingNextTurn)
         {
             self.mcp_refresh_coordinator
                 .fail(
                     execution_process.session_id,
+                    state.generation,
                     McpRefreshErrorCategory::Unsupported,
                 )
                 .await;
@@ -4890,7 +5255,13 @@ mod mcp_snapshot_tests {
     use executors::executors::BaseCodingAgent;
     use serde_json::json;
 
-    use super::validated_mcp_snapshot;
+    use super::{supports_live_mcp_refresh, validated_mcp_snapshot};
+
+    #[test]
+    fn claude_code_live_mcp_refresh_is_explicitly_unsupported() {
+        assert!(!supports_live_mcp_refresh(BaseCodingAgent::ClaudeCode));
+        assert!(supports_live_mcp_refresh(BaseCodingAgent::Codex));
+    }
 
     #[test]
     fn snapshot_builder_preserves_non_codex_executor_identity_and_definition() {

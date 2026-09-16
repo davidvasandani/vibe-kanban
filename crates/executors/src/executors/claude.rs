@@ -16,7 +16,10 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use tokio::{
+    process::Command,
+    sync::{Notify, RwLock},
+};
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 use workspace_utils::{
@@ -54,12 +57,162 @@ use crate::{
             shell_command_parsing::CommandCategory,
         },
     },
+    mcp_refresh::{
+        McpRefreshControl, McpRefreshErrorCategory, McpRefreshHandle, McpServerRefreshSnapshot,
+        McpServerRefreshStatus, safe_executor_error,
+    },
     model_selector::PermissionPolicy,
     profile::ExecutorConfig,
     stdout_dup::create_stdout_pipe_writer,
 };
 
 const SUPPRESSED_STDERR_PATTERNS: &[&str] = &["[WARN] Fast mode requires the native binary"];
+
+pub(crate) struct ClaudeMcpInventory {
+    servers: RwLock<Option<Vec<McpServerRefreshSnapshot>>>,
+    ready: Notify,
+    deadline: tokio::time::Instant,
+}
+
+impl Default for ClaudeMcpInventory {
+    fn default() -> Self {
+        Self {
+            servers: RwLock::new(None),
+            ready: Notify::new(),
+            deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+        }
+    }
+}
+
+impl ClaudeMcpInventory {
+    pub(crate) async fn observe_tools(
+        &self,
+        tools: &[serde_json::Value],
+        mcp_servers: &[serde_json::Value],
+    ) {
+        let mut by_server: HashMap<String, Vec<String>> = HashMap::new();
+        let mut failed_servers = HashMap::new();
+        for server in mcp_servers {
+            let status = server.get("status").and_then(serde_json::Value::as_str);
+            if let Some(name) = server.get("name").and_then(serde_json::Value::as_str) {
+                if status.is_none_or(|status| status == "connected") {
+                    by_server.entry(name.to_string()).or_default();
+                } else {
+                    let category = if status.is_some_and(|status| status.contains("auth")) {
+                        McpRefreshErrorCategory::AuthenticationFailed
+                    } else {
+                        McpRefreshErrorCategory::InitializeFailed
+                    };
+                    failed_servers.insert(name.to_string(), category);
+                }
+            }
+        }
+        for tool in tools {
+            let name = tool
+                .as_str()
+                .or_else(|| tool.get("name").and_then(serde_json::Value::as_str));
+            let Some(name) = name.and_then(|name| name.strip_prefix("mcp__")) else {
+                continue;
+            };
+            let known_server = by_server
+                .keys()
+                .chain(failed_servers.keys())
+                .filter(|server_id| {
+                    name.strip_prefix(server_id.as_str())
+                        .is_some_and(|suffix| suffix.starts_with("__"))
+                })
+                .max_by_key(|server_id| server_id.len())
+                .cloned();
+            let server_id = known_server.or_else(|| {
+                name.split_once("__")
+                    .map(|(server_id, _)| server_id.to_string())
+            });
+            let Some(server_id) = server_id else {
+                continue;
+            };
+            by_server
+                .entry(server_id.clone())
+                .or_default()
+                .push(format!("mcp__{name}"));
+            failed_servers.remove(&server_id);
+        }
+        let mut servers: Vec<_> = by_server
+            .into_iter()
+            .map(|(server_id, mut tool_names)| {
+                tool_names.sort();
+                tool_names.dedup();
+                McpServerRefreshSnapshot {
+                    server_id,
+                    status: if tool_names.is_empty() {
+                        McpServerRefreshStatus::ConnectedNoTools
+                    } else {
+                        McpServerRefreshStatus::Ready
+                    },
+                    tool_count: Some(tool_names.len() as u32),
+                    tool_names: Some(tool_names),
+                    // Claude's init event provides names, not schemas.
+                    tool_schema_fingerprint: None,
+                    resource_count: None,
+                    prompt_count: None,
+                    restart_occurred: Some(true),
+                    discovery_attempts: 1,
+                    observed_errors: Vec::new(),
+                    first_observed_at: Some(chrono::Utc::now()),
+                    last_observed_at: Some(chrono::Utc::now()),
+                    terminal_at: Some(chrono::Utc::now()),
+                    error: None,
+                }
+            })
+            .collect();
+        let now = chrono::Utc::now();
+        servers.extend(failed_servers.into_iter().map(|(server_id, category)| {
+            McpServerRefreshSnapshot {
+                server_id,
+                status: McpServerRefreshStatus::FailedUnavailable,
+                tool_count: Some(0),
+                tool_names: Some(Vec::new()),
+                tool_schema_fingerprint: None,
+                resource_count: None,
+                prompt_count: None,
+                restart_occurred: Some(true),
+                discovery_attempts: 1,
+                observed_errors: vec![crate::mcp_refresh::McpDiscoveryObservation {
+                    code: category.clone(),
+                    observed_at: now,
+                }],
+                first_observed_at: Some(now),
+                last_observed_at: Some(now),
+                terminal_at: Some(now),
+                error: Some(safe_executor_error(category)),
+            }
+        }));
+        servers.sort_by(|a, b| a.server_id.cmp(&b.server_id));
+        *self.servers.write().await = Some(servers);
+        self.ready.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl McpRefreshControl for ClaudeMcpInventory {
+    async fn queue_refresh(&self) -> Result<(), McpRefreshErrorCategory> {
+        Err(McpRefreshErrorCategory::Unsupported)
+    }
+
+    async fn list_servers(&self) -> Result<Vec<McpServerRefreshSnapshot>, McpRefreshErrorCategory> {
+        let wait = async {
+            loop {
+                let notified = self.ready.notified();
+                if let Some(servers) = self.servers.read().await.clone() {
+                    return servers;
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout_at(self.deadline, wait)
+            .await
+            .map_err(|_| McpRefreshErrorCategory::Timeout)
+    }
+}
 
 fn base_command(claude_code_router: bool) -> &'static str {
     if claude_code_router {
@@ -818,6 +971,9 @@ impl ClaudeCode {
         let repo_context = env.repo_context.clone();
         let commit_reminder_prompt = env.commit_reminder_prompt.clone();
         let cancel_for_task = cancel.clone();
+        let mcp_inventory = Arc::new(ClaudeMcpInventory::default());
+        let (mcp_refresh_tx, mcp_refresh_rx) = tokio::sync::oneshot::channel();
+        let _ = mcp_refresh_tx.send(McpRefreshHandle(mcp_inventory.clone()));
         tokio::spawn(async move {
             let log_writer = LogWriter::new(new_stdout);
             let client = ClaudeAgentClient::new(
@@ -826,6 +982,7 @@ impl ClaudeCode {
                 repo_context,
                 commit_reminder_prompt,
                 cancel_for_task.clone(),
+                mcp_inventory,
             );
             let protocol_peer =
                 ProtocolPeer::spawn(child_stdin, child_stdout, client.clone(), cancel_for_task);
@@ -858,7 +1015,7 @@ impl ClaudeCode {
             cancel: Some(cancel),
             keep_warm: false,
             warm_reuse: None,
-            mcp_refresh: None,
+            mcp_refresh: Some(mcp_refresh_rx),
         })
     }
 }
@@ -2680,6 +2837,8 @@ pub enum ClaudeJson {
         session_id: Option<String>,
         cwd: Option<String>,
         tools: Option<Vec<serde_json::Value>>,
+        #[serde(default)]
+        mcp_servers: Vec<serde_json::Value>,
         model: Option<String>,
         #[serde(default, rename = "apiKeySource")]
         api_key_source: Option<String>,
@@ -3496,6 +3655,84 @@ mod tests {
         assert_eq!(
             entries[0].content,
             "System initialized with model: claude-sonnet-4-20250514"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_groups_registered_mcp_tools_by_server() {
+        let inventory = ClaudeMcpInventory::default();
+        inventory
+            .observe_tools(
+                &[
+                    serde_json::json!("Read"),
+                    serde_json::json!("mcp__slack__conversations_replies"),
+                    serde_json::json!({ "name": "mcp__slack__conversations_history" }),
+                    serde_json::json!("mcp__brink__sales_split"),
+                ],
+                &[],
+            )
+            .await;
+
+        let servers = inventory.list_servers().await.unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].server_id, "brink");
+        assert_eq!(servers[0].tool_count, Some(1));
+        assert_eq!(servers[1].server_id, "slack");
+        assert_eq!(servers[1].tool_count, Some(2));
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_matches_complete_server_names() {
+        let inventory = ClaudeMcpInventory::default();
+        inventory
+            .observe_tools(
+                &[serde_json::json!("mcp__team__slack__search")],
+                &[
+                    serde_json::json!({ "name": "team", "status": "connected" }),
+                    serde_json::json!({ "name": "team__slack", "status": "connected" }),
+                ],
+            )
+            .await;
+
+        let servers = inventory.list_servers().await.unwrap();
+        assert_eq!(servers[0].server_id, "team");
+        assert_eq!(servers[0].tool_count, Some(0));
+        assert_eq!(servers[1].server_id, "team__slack");
+        assert_eq!(servers[1].tool_count, Some(1));
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_preserves_connected_zero_tool_servers() {
+        let inventory = ClaudeMcpInventory::default();
+        inventory
+            .observe_tools(
+                &[],
+                &[serde_json::json!({ "name": "resources_only", "status": "connected" })],
+            )
+            .await;
+
+        let servers = inventory.list_servers().await.unwrap();
+        assert_eq!(servers[0].status, McpServerRefreshStatus::ConnectedNoTools);
+        assert_eq!(servers[0].tool_count, Some(0));
+    }
+
+    #[tokio::test]
+    async fn startup_inventory_preserves_failed_project_servers() {
+        let inventory = ClaudeMcpInventory::default();
+        inventory
+            .observe_tools(
+                &[],
+                &[serde_json::json!({ "name": "failed_server", "status": "failed" })],
+            )
+            .await;
+
+        let servers = inventory.list_servers().await.unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].server_id, "failed_server");
+        assert_eq!(servers[0].status, McpServerRefreshStatus::FailedUnavailable);
+        assert_eq!(
+            servers[0].error.as_ref().map(|error| &error.category),
+            Some(&McpRefreshErrorCategory::InitializeFailed)
         );
     }
 

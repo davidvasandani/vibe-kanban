@@ -23,6 +23,8 @@
         "reposDesc": "Scripts et configuration des dépôts",
         "agents": "Agents",
         "agentsDesc": "Configurations des agents de codage",
+        "skills": "Compétences",
+        "skillsDesc": "Compétences partagées et propositions",
         "mcp": "Serveurs MCP",
         "mcpDesc": "Serveurs Model Context Protocol",
         "cli-tools": "Outils CLI",
@@ -47,6 +49,27 @@
         "pipelinesDesc": "Pipeline TOML files and defaults",
         "workers": "Workers du cluster",
         "workersDesc": "État des workers, stockage et planification"
+      }
+    },
+    "skills": {
+      "title": "Compétences",
+      "description": "Créez et gérez des compétences partagées. Les modifications ouvrent une pull request vers {{baseBranch}}.",
+      "loading": "Chargement des compétences…",
+      "unavailable": "La gestion des compétences avec Git n’est pas configurée.",
+      "add": "Ajouter une compétence",
+      "delete": "Supprimer la compétence",
+      "untitled": "Compétence sans titre",
+      "empty": "Ajoutez une compétence pour commencer.",
+      "fields": {
+        "name": "Nom",
+        "description": "Description et guide de déclenchement",
+        "instructions": "Instructions (Markdown)"
+      },
+      "proposal": {
+        "title": "Proposer des modifications",
+        "description": "Vibe Kanban valide le catalogue et ouvre une pull request révisable.",
+        "submit": "Ouvrir la pull request ({{count}} modifications)",
+        "open": "Ouvrir la pull request"
       }
     },
     "general": {

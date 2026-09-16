@@ -21,9 +21,9 @@ describe('mcpRefreshTooltip', () => {
     const tooltip = mcpRefreshTooltip(result());
 
     expect(tooltip).toContain(
-      'entra is configured but absent from the active Codex tool registry'
+      'entra is configured but absent from the active executor tool registry'
     );
-    expect(tooltip).toContain('Refresh MCP tools or restart the agent');
+    expect(tooltip).toContain('Restart the session or open a diagnostic issue');
   });
 
   it('calls out a registered Entra server with no usable tools', () => {
@@ -44,7 +44,7 @@ describe('mcpRefreshTooltip', () => {
     );
 
     expect(tooltip).toContain(
-      'entra is registered but exposes no usable tools'
+      'entra connected, but 0 tools are registered in the active executor'
     );
   });
 
@@ -66,5 +66,48 @@ describe('mcpRefreshTooltip', () => {
     );
 
     expect(tooltip).toContain('entra is available with 3 tools');
+  });
+
+  it('does not claim availability when the active tool count is unknown', () => {
+    const tooltip = mcpRefreshTooltip(
+      result({
+        servers: [
+          {
+            server_id: 'entra',
+            status: 'ready',
+            tool_count: null,
+            resource_count: null,
+            prompt_count: null,
+            restart_occurred: null,
+            error: null,
+          },
+        ],
+      })
+    );
+
+    expect(tooltip).toContain('active tool count is unknown');
+  });
+
+  it('surfaces arbitrary Claude registry servers instead of a fixed server list', () => {
+    const tooltip = mcpRefreshTooltip(
+      result({
+        configured_server_ids: ['brink'],
+        servers: [
+          {
+            server_id: 'brink',
+            status: 'connected_no_tools',
+            tool_count: 0,
+            resource_count: null,
+            prompt_count: null,
+            restart_occurred: null,
+            error: null,
+          },
+        ],
+      })
+    );
+
+    expect(tooltip).toContain('brink connected, but 0 tools are registered');
+    expect(tooltip).not.toContain('entra');
+    expect(tooltip).not.toContain('slack');
   });
 });

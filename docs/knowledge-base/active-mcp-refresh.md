@@ -2,7 +2,7 @@
 
 Contributing tasks: `8c27-refresh-mcp-tool`, `9151-reloading-mcp-no`,
 `cc71-refresh-mcp-shou`, `mcp-agent-restart`, `vk/d71c-refresh-active-w`,
-`vk/84ef-restore-slack-mc`
+`vk/84ef-restore-slack-mc`, `vk/38a6-expose-session-w`
 
 ## Executor-neutral restart fallback
 
@@ -153,3 +153,52 @@ It starts a new app-server/MCP process from current native configuration while
 preserving the logical workspace and conversation. Settings connectivity tests
 and plugin-manager installation status are separate views: neither refreshes an
 already-running agent's callable schema.
+
+## Session and workspace recovery
+
+Recovery must be backend-owned before it stops the calling agent. A session
+restart reserves a normal continuation, records a fresh inventory generation,
+and lets the exit monitor remain the single consumer. Carry that generation
+through every deferred cancellation and failure path: looking up the current
+generation during old cleanup can terminalise a newer replacement operation.
+
+A workspace restart additionally stops every workspace-owned process and
+replays persistent processes from their durable launch definitions. Protect the
+teardown boundary with a per-workspace read/write launch gate:
+
+- ordinary user and tool launches take the read side and fail promptly while
+  teardown owns the write side;
+- lifecycle continuations that already consumed queue state wait for the read
+  side, so cleanup chains and follow-ups resume instead of disappearing;
+- recovery-owned persistent replay bypasses the read side explicitly while the
+  caller holds the write guard;
+- non-forced recovery waits for coding agents before acquiring the write side,
+  then rechecks under the guard to close the check-to-lock race.
+
+Never report workspace recovery as complete unless every captured running or
+indeterminate process has a verified terminal database state. A failed stop
+must prevent duplicate replay. Release the launch guard only after teardown and
+persistent replay, before starting the selected session continuation.
+
+## Runtime inventory truth
+
+Configured server names, control-plane connection state, and the active
+session's registered tools are different facts. Runtime status must come from
+the executor process that owns the callable registry. Preserve server identity
+when parsing executor tool names, including identifiers that contain the
+executor's own delimiter.
+
+Every configured server must reach a bounded terminal outcome. Distinguish at
+least ready, connected with zero tools, retained after failure, unavailable,
+and not registered. `ConnectedNoTools` is a partial recovery outcome, not a
+success, and must not advance `last_successful_refresh_at`. Similarly, an
+unsupported in-place refresh may report its limitation immediately but must
+not suppress startup inventory or timeout evidence from the already-active
+process.
+
+The MCP panel should render the same runtime inventory used by session tools.
+When a server is unusable, issue diagnostics should include only secret-safe
+structured evidence: server IDs, timestamped public error categories, executor,
+workspace/session IDs, registered server tool counts, and discovery-attempt
+counts. Keep issue creation available without project context by falling back
+to a prefilled upstream issue URL.

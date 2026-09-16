@@ -2,8 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use chrono::Utc;
 use executors::mcp_refresh::{
-    McpRefreshErrorCategory, McpRefreshResult, McpRefreshStatus, McpServerRefreshSnapshot,
-    safe_executor_error,
+    McpDiscoveryObservation, McpRefreshErrorCategory, McpRefreshResult, McpRefreshStatus,
+    McpServerRefreshSnapshot, safe_executor_error,
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -11,20 +11,168 @@ use uuid::Uuid;
 #[derive(Clone, Default)]
 pub struct McpRefreshCoordinator {
     states: Arc<RwLock<HashMap<Uuid, McpRefreshResult>>>,
+    generations: Arc<RwLock<HashMap<Uuid, u64>>>,
+    restart_generations: Arc<RwLock<HashMap<Uuid, u64>>>,
+}
+
+fn is_unsuccessful_server(server: &McpServerRefreshSnapshot) -> bool {
+    matches!(
+        server.status,
+        executors::mcp_refresh::McpServerRefreshStatus::ConnectedNoTools
+            | executors::mcp_refresh::McpServerRefreshStatus::FailedRetained
+            | executors::mcp_refresh::McpServerRefreshStatus::FailedUnavailable
+            | executors::mcp_refresh::McpServerRefreshStatus::NotRegistered
+    )
 }
 
 impl McpRefreshCoordinator {
+    /// Publish the inventory observed by an ordinary executor startup. This
+    /// keeps status tied to the active process even when no refresh was queued.
+    /// A pending refresh owns its generation and cannot be displaced here.
+    pub async fn observe_inventory(
+        &self,
+        session_id: Uuid,
+        execution_started_at: chrono::DateTime<Utc>,
+        mut configured_server_ids: Vec<String>,
+        mut servers: Vec<McpServerRefreshSnapshot>,
+    ) -> McpRefreshResult {
+        let mut states = self.states.write().await;
+        if let Some(current) = states.get(&session_id)
+            && (current.status == McpRefreshStatus::PendingNextTurn
+                || (current.status != McpRefreshStatus::Unsupported
+                    && current.requested_at > execution_started_at))
+        {
+            return current.clone();
+        }
+        configured_server_ids.sort();
+        configured_server_ids.dedup();
+        let now = Utc::now();
+        for configured_id in &configured_server_ids {
+            if !servers
+                .iter()
+                .any(|server| &server.server_id == configured_id)
+            {
+                servers.push(McpServerRefreshSnapshot {
+                    server_id: configured_id.clone(),
+                    status: executors::mcp_refresh::McpServerRefreshStatus::NotRegistered,
+                    tool_count: Some(0),
+                    tool_names: Some(Vec::new()),
+                    tool_schema_fingerprint: None,
+                    resource_count: None,
+                    prompt_count: None,
+                    restart_occurred: Some(false),
+                    discovery_attempts: 1,
+                    observed_errors: Vec::new(),
+                    first_observed_at: Some(now),
+                    last_observed_at: Some(now),
+                    terminal_at: Some(now),
+                    error: Some(safe_executor_error(
+                        McpRefreshErrorCategory::CapabilityListFailed,
+                    )),
+                });
+            }
+        }
+        servers.sort_by(|a, b| a.server_id.cmp(&b.server_id));
+        let partial = servers.iter().any(is_unsuccessful_server);
+        let generation = {
+            let mut generations = self.generations.write().await;
+            let generation = generations.entry(session_id).or_default();
+            *generation = generation.saturating_add(1);
+            *generation
+        };
+        let result = McpRefreshResult {
+            status: if partial {
+                McpRefreshStatus::PartiallyRefreshed
+            } else {
+                McpRefreshStatus::Refreshed
+            },
+            retryable: false,
+            generation,
+            requested_at: execution_started_at,
+            last_successful_refresh_at: (!partial).then_some(now),
+            configured_server_ids,
+            servers,
+            error: None,
+        };
+        states.insert(session_id, result.clone());
+        result
+    }
+
+    pub async fn observe_failure(
+        &self,
+        session_id: Uuid,
+        execution_started_at: chrono::DateTime<Utc>,
+        configured_server_ids: Vec<String>,
+        category: McpRefreshErrorCategory,
+    ) -> McpRefreshResult {
+        let observed = self
+            .observe_inventory(
+                session_id,
+                execution_started_at,
+                configured_server_ids,
+                Vec::new(),
+            )
+            .await;
+        if observed.status == McpRefreshStatus::PendingNextTurn
+            || observed.requested_at != execution_started_at
+        {
+            return observed;
+        }
+        self.fail(session_id, observed.generation, category)
+            .await
+            .unwrap_or(observed)
+    }
+
     pub async fn request(
         &self,
         session_id: Uuid,
         supported: bool,
+        configured_server_ids: Vec<String>,
+    ) -> McpRefreshResult {
+        let result = self
+            .request_inner(session_id, supported, configured_server_ids, false)
+            .await;
+        if result.status != McpRefreshStatus::Busy {
+            self.restart_generations.write().await.remove(&session_id);
+        }
+        result
+    }
+
+    /// A fresh process supersedes a wedged live-refresh generation. Unlike a
+    /// second refresh click, restart must not return `busy` forever merely
+    /// because the generation it is intended to recover never completed.
+    pub async fn request_restart(
+        &self,
+        session_id: Uuid,
+        configured_server_ids: Vec<String>,
+    ) -> McpRefreshResult {
+        let result = self
+            .request_inner(session_id, true, configured_server_ids, true)
+            .await;
+        self.restart_generations
+            .write()
+            .await
+            .insert(session_id, result.generation);
+        result
+    }
+
+    pub async fn is_restart_generation(&self, session_id: Uuid, generation: u64) -> bool {
+        self.restart_generations.read().await.get(&session_id) == Some(&generation)
+    }
+
+    async fn request_inner(
+        &self,
+        session_id: Uuid,
+        supported: bool,
         mut configured_server_ids: Vec<String>,
+        supersede_pending: bool,
     ) -> McpRefreshResult {
         configured_server_ids.sort();
         configured_server_ids.dedup();
         let mut states = self.states.write().await;
         if let Some(current) = states.get(&session_id)
             && matches!(current.status, McpRefreshStatus::PendingNextTurn)
+            && !supersede_pending
         {
             let mut busy = current.clone();
             busy.status = McpRefreshStatus::Busy;
@@ -36,8 +184,39 @@ impl McpRefreshCoordinator {
         }
 
         let previous = states.get(&session_id);
-        let generation = previous.map_or(1, |state| state.generation + 1);
+        let generation = {
+            let mut generations = self.generations.write().await;
+            let generation = generations.entry(session_id).or_default();
+            *generation = generation.saturating_add(1);
+            *generation
+        };
         let now = Utc::now();
+        let mut connecting_servers = previous.map_or_else(Vec::new, |state| state.servers.clone());
+        let existing_server_ids = connecting_servers
+            .iter()
+            .map(|server| server.server_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        connecting_servers.extend(
+            configured_server_ids
+                .iter()
+                .filter(|server_id| !existing_server_ids.contains(*server_id))
+                .map(|server_id| McpServerRefreshSnapshot {
+                    server_id: server_id.clone(),
+                    status: executors::mcp_refresh::McpServerRefreshStatus::Connecting,
+                    tool_count: None,
+                    tool_names: None,
+                    tool_schema_fingerprint: None,
+                    resource_count: None,
+                    prompt_count: None,
+                    restart_occurred: None,
+                    discovery_attempts: 0,
+                    observed_errors: Vec::new(),
+                    first_observed_at: Some(now),
+                    last_observed_at: Some(now),
+                    terminal_at: None,
+                    error: None,
+                }),
+        );
         let result = if supported {
             McpRefreshResult {
                 status: McpRefreshStatus::PendingNextTurn,
@@ -47,7 +226,7 @@ impl McpRefreshCoordinator {
                 last_successful_refresh_at: previous
                     .and_then(|state| state.last_successful_refresh_at),
                 configured_server_ids,
-                servers: previous.map_or_else(Vec::new, |state| state.servers.clone()),
+                servers: connecting_servers,
                 error: None,
             }
         } else {
@@ -70,10 +249,74 @@ impl McpRefreshCoordinator {
     pub async fn fail(
         &self,
         session_id: Uuid,
+        expected_generation: u64,
         category: McpRefreshErrorCategory,
     ) -> Option<McpRefreshResult> {
+        let fresh_process_restart =
+            self.restart_generations.read().await.get(&session_id) == Some(&expected_generation);
         let mut states = self.states.write().await;
         let state = states.get_mut(&session_id)?;
+        if state.generation != expected_generation {
+            return None;
+        }
+        let now = Utc::now();
+        let mut failed_server_ids = state.configured_server_ids.clone();
+        if fresh_process_restart {
+            failed_server_ids.extend(state.servers.iter().map(|server| server.server_id.clone()));
+            failed_server_ids.sort();
+            failed_server_ids.dedup();
+        }
+        for server_id in failed_server_ids {
+            if let Some(server) = state
+                .servers
+                .iter_mut()
+                .find(|server| server.server_id == server_id)
+            {
+                if !fresh_process_restart
+                    && !matches!(
+                        server.status,
+                        executors::mcp_refresh::McpServerRefreshStatus::Connecting
+                            | executors::mcp_refresh::McpServerRefreshStatus::NotRegistered
+                    )
+                {
+                    continue;
+                }
+                server.status = executors::mcp_refresh::McpServerRefreshStatus::FailedUnavailable;
+                server.tool_count = Some(0);
+                server.tool_names = Some(Vec::new());
+                server.tool_schema_fingerprint = None;
+                server.resource_count = None;
+                server.prompt_count = None;
+                server.discovery_attempts = server.discovery_attempts.saturating_add(1);
+                server.last_observed_at = Some(now);
+                server.terminal_at = Some(now);
+                server.observed_errors.push(McpDiscoveryObservation {
+                    code: category.clone(),
+                    observed_at: now,
+                });
+                server.error = Some(safe_executor_error(category.clone()));
+            } else {
+                state.servers.push(McpServerRefreshSnapshot {
+                    server_id,
+                    status: executors::mcp_refresh::McpServerRefreshStatus::FailedUnavailable,
+                    tool_count: Some(0),
+                    tool_names: Some(Vec::new()),
+                    tool_schema_fingerprint: None,
+                    resource_count: None,
+                    prompt_count: None,
+                    restart_occurred: None,
+                    discovery_attempts: 1,
+                    observed_errors: vec![McpDiscoveryObservation {
+                        code: category.clone(),
+                        observed_at: now,
+                    }],
+                    first_observed_at: Some(now),
+                    last_observed_at: Some(now),
+                    terminal_at: Some(now),
+                    error: Some(safe_executor_error(category.clone())),
+                });
+            }
+        }
         state.status = McpRefreshStatus::Failed;
         state.retryable = true;
         state.error = Some(safe_executor_error(category));
@@ -103,21 +346,44 @@ impl McpRefreshCoordinator {
     pub async fn confirm(
         &self,
         session_id: Uuid,
+        expected_generation: u64,
         mut servers: Vec<McpServerRefreshSnapshot>,
     ) -> Option<McpRefreshResult> {
         let mut states = self.states.write().await;
         let state = states.get_mut(&session_id)?;
+        if state.generation != expected_generation {
+            return None;
+        }
         if !matches!(state.status, McpRefreshStatus::PendingNextTurn) {
             return Some(state.clone());
         }
+        for configured_id in &state.configured_server_ids {
+            if !servers
+                .iter()
+                .any(|server| &server.server_id == configured_id)
+            {
+                servers.push(McpServerRefreshSnapshot {
+                    server_id: configured_id.clone(),
+                    status: executors::mcp_refresh::McpServerRefreshStatus::NotRegistered,
+                    tool_count: Some(0),
+                    tool_names: Some(Vec::new()),
+                    tool_schema_fingerprint: None,
+                    resource_count: None,
+                    prompt_count: None,
+                    restart_occurred: Some(true),
+                    discovery_attempts: 1,
+                    observed_errors: Vec::new(),
+                    first_observed_at: Some(Utc::now()),
+                    last_observed_at: Some(Utc::now()),
+                    terminal_at: Some(Utc::now()),
+                    error: Some(safe_executor_error(
+                        McpRefreshErrorCategory::CapabilityListFailed,
+                    )),
+                });
+            }
+        }
         servers.sort_by(|a, b| a.server_id.cmp(&b.server_id));
-        let partial = servers.iter().any(|server| {
-            matches!(
-                server.status,
-                executors::mcp_refresh::McpServerRefreshStatus::FailedRetained
-                    | executors::mcp_refresh::McpServerRefreshStatus::FailedUnavailable
-            )
-        });
+        let partial = servers.iter().any(is_unsuccessful_server);
         state.status = if partial {
             McpRefreshStatus::PartiallyRefreshed
         } else {
@@ -147,6 +413,55 @@ mod tests {
 
     use super::*;
 
+    fn connected_without_tools(server_id: &str) -> McpServerRefreshSnapshot {
+        McpServerRefreshSnapshot {
+            server_id: server_id.into(),
+            status: McpServerRefreshStatus::ConnectedNoTools,
+            tool_count: Some(0),
+            tool_names: Some(Vec::new()),
+            tool_schema_fingerprint: None,
+            resource_count: Some(0),
+            prompt_count: Some(0),
+            restart_occurred: Some(true),
+            discovery_attempts: 1,
+            observed_errors: Vec::new(),
+            first_observed_at: Some(Utc::now()),
+            last_observed_at: Some(Utc::now()),
+            terminal_at: Some(Utc::now()),
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_tool_inventory_is_partial_for_restart_and_startup() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let pending = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+        let restarted = coordinator
+            .confirm(
+                session,
+                pending.generation,
+                vec![connected_without_tools("slack")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(restarted.status, McpRefreshStatus::PartiallyRefreshed);
+        assert!(restarted.last_successful_refresh_at.is_none());
+
+        let startup = coordinator
+            .observe_inventory(
+                Uuid::new_v4(),
+                Utc::now(),
+                vec!["brink".into()],
+                vec![connected_without_tools("brink")],
+            )
+            .await;
+        assert_eq!(startup.status, McpRefreshStatus::PartiallyRefreshed);
+        assert!(startup.last_successful_refresh_at.is_none());
+    }
+
     #[tokio::test]
     async fn concurrent_request_is_retryable_busy() {
         let coordinator = McpRefreshCoordinator::default();
@@ -172,6 +487,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsupported_refresh_does_not_suppress_active_startup_inventory() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let execution_started_at = Utc::now();
+        let unsupported = coordinator
+            .request(session, false, vec!["slack".into()])
+            .await;
+        assert_eq!(unsupported.status, McpRefreshStatus::Unsupported);
+
+        let observed = coordinator
+            .observe_inventory(
+                session,
+                execution_started_at,
+                vec!["slack".into()],
+                vec![McpServerRefreshSnapshot {
+                    server_id: "slack".into(),
+                    status: McpServerRefreshStatus::Ready,
+                    tool_count: Some(12),
+                    tool_names: Some(Vec::new()),
+                    tool_schema_fingerprint: None,
+                    resource_count: Some(0),
+                    prompt_count: Some(0),
+                    restart_occurred: Some(false),
+                    discovery_attempts: 1,
+                    observed_errors: Vec::new(),
+                    first_observed_at: Some(Utc::now()),
+                    last_observed_at: Some(Utc::now()),
+                    terminal_at: None,
+                    error: None,
+                }],
+            )
+            .await;
+
+        assert_eq!(observed.status, McpRefreshStatus::Refreshed);
+        assert_eq!(observed.servers[0].tool_count, Some(12));
+    }
+
+    #[tokio::test]
     async fn request_exposes_only_sorted_configured_server_ids() {
         let result = McpRefreshCoordinator::default()
             .request(
@@ -181,19 +534,237 @@ mod tests {
             )
             .await;
         assert_eq!(result.configured_server_ids, ["logmein", "slack"]);
-        assert!(result.servers.is_empty());
+        assert_eq!(result.servers.len(), 2);
+        assert!(
+            result
+                .servers
+                .iter()
+                .all(|server| server.status == McpServerRefreshStatus::Connecting)
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_server_missing_from_fresh_registry_is_terminal() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let pending = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+
+        let result = coordinator
+            .confirm(session, pending.generation, Vec::new())
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, McpRefreshStatus::PartiallyRefreshed);
+        assert_eq!(result.servers[0].server_id, "slack");
+        assert_eq!(
+            result.servers[0].status,
+            McpServerRefreshStatus::NotRegistered
+        );
+        assert_eq!(result.servers[0].tool_count, Some(0));
+        assert!(result.servers[0].terminal_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn discovery_timeout_terminalizes_every_connecting_server() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let pending = coordinator
+            .request_restart(session, vec!["brink".into(), "slack".into()])
+            .await;
+
+        let result = coordinator
+            .fail(
+                session,
+                pending.generation,
+                McpRefreshErrorCategory::Timeout,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, McpRefreshStatus::Failed);
+        assert!(result.servers.iter().all(|server| {
+            server.status == McpServerRefreshStatus::FailedUnavailable
+                && server.discovery_attempts == 1
+                && server.observed_errors[0].code == McpRefreshErrorCategory::Timeout
+                && server.terminal_at.is_some()
+        }));
+    }
+
+    #[tokio::test]
+    async fn stale_inventory_cannot_complete_a_superseding_restart_generation() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let stale = coordinator
+            .request(session, true, vec!["slack".into()])
+            .await;
+        let current = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+
+        assert!(
+            coordinator
+                .confirm(session, stale.generation, Vec::new())
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            coordinator.status(session).await.unwrap().generation,
+            current.generation
+        );
+        assert_eq!(
+            coordinator.status(session).await.unwrap().status,
+            McpRefreshStatus::PendingNextTurn
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_cannot_fail_a_superseding_restart_generation() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let stale = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+        let current = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+
+        assert!(
+            coordinator
+                .fail(
+                    session,
+                    stale.generation,
+                    McpRefreshErrorCategory::ReloadFailed,
+                )
+                .await
+                .is_none()
+        );
+        let status = coordinator.status(session).await.unwrap();
+        assert_eq!(status.generation, current.generation);
+        assert_eq!(status.status, McpRefreshStatus::PendingNextTurn);
+    }
+
+    #[tokio::test]
+    async fn busy_live_refresh_does_not_erase_restart_generation_identity() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let restart = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+
+        let busy = coordinator
+            .request(session, true, vec!["slack".into()])
+            .await;
+
+        assert_eq!(busy.status, McpRefreshStatus::Busy);
+        assert!(
+            coordinator
+                .is_restart_generation(session, restart.generation)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_status_does_not_reuse_a_generation() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let first = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+        coordinator.remove(session).await;
+        let second = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+
+        assert!(second.generation > first.generation);
+        assert!(
+            coordinator
+                .confirm(session, first.generation, Vec::new())
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_inventory_replaces_a_stale_terminal_snapshot() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let pending = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+        coordinator
+            .fail(
+                session,
+                pending.generation,
+                McpRefreshErrorCategory::Timeout,
+            )
+            .await;
+
+        let observed = coordinator
+            .observe_inventory(
+                session,
+                Utc::now(),
+                vec!["brink".into(), "slack".into()],
+                vec![McpServerRefreshSnapshot {
+                    server_id: "slack".into(),
+                    status: McpServerRefreshStatus::Ready,
+                    tool_count: Some(12),
+                    tool_names: Some(Vec::new()),
+                    tool_schema_fingerprint: None,
+                    resource_count: Some(0),
+                    prompt_count: Some(0),
+                    restart_occurred: None,
+                    discovery_attempts: 1,
+                    observed_errors: Vec::new(),
+                    first_observed_at: None,
+                    last_observed_at: None,
+                    terminal_at: None,
+                    error: None,
+                }],
+            )
+            .await;
+
+        assert!(observed.generation > pending.generation);
+        assert_eq!(observed.status, McpRefreshStatus::PartiallyRefreshed);
+        assert_eq!(observed.servers[0].server_id, "brink");
+        assert_eq!(
+            observed.servers[0].status,
+            McpServerRefreshStatus::NotRegistered
+        );
+        assert_eq!(observed.servers[1].tool_count, Some(12));
+    }
+
+    #[tokio::test]
+    async fn ordinary_inventory_failure_preserves_the_discovery_error() {
+        let coordinator = McpRefreshCoordinator::default();
+        let result = coordinator
+            .observe_failure(
+                Uuid::new_v4(),
+                Utc::now(),
+                vec!["slack".into()],
+                McpRefreshErrorCategory::Timeout,
+            )
+            .await;
+
+        assert_eq!(result.status, McpRefreshStatus::Failed);
+        assert_eq!(
+            result.servers[0].observed_errors[0].code,
+            McpRefreshErrorCategory::Timeout
+        );
     }
 
     #[tokio::test]
     async fn failed_server_is_not_claimed_as_retained_without_executor_support() {
         let coordinator = McpRefreshCoordinator::default();
         let session = Uuid::new_v4();
-        coordinator
+        let first = coordinator
             .request(session, true, vec!["slack".into()])
             .await;
         coordinator
             .confirm(
                 session,
+                first.generation,
                 vec![McpServerRefreshSnapshot {
                     server_id: "slack".to_string(),
                     status: McpServerRefreshStatus::Ready,
@@ -203,16 +774,22 @@ mod tests {
                     resource_count: Some(2),
                     prompt_count: None,
                     restart_occurred: None,
+                    discovery_attempts: 1,
+                    observed_errors: Vec::new(),
+                    first_observed_at: None,
+                    last_observed_at: None,
+                    terminal_at: None,
                     error: None,
                 }],
             )
             .await;
-        coordinator
+        let second = coordinator
             .request(session, true, vec!["slack".into()])
             .await;
         let result = coordinator
             .confirm(
                 session,
+                second.generation,
                 vec![McpServerRefreshSnapshot {
                     server_id: "slack".to_string(),
                     status: McpServerRefreshStatus::FailedUnavailable,
@@ -222,6 +799,11 @@ mod tests {
                     resource_count: Some(0),
                     prompt_count: None,
                     restart_occurred: None,
+                    discovery_attempts: 1,
+                    observed_errors: Vec::new(),
+                    first_observed_at: None,
+                    last_observed_at: None,
+                    terminal_at: None,
                     error: Some(safe_executor_error(
                         McpRefreshErrorCategory::AuthenticationFailed,
                     )),
@@ -260,12 +842,13 @@ mod tests {
                 "generation-schema-changed",
             ),
         ] {
-            coordinator
+            let pending = coordinator
                 .request(session, true, vec!["personal_servicenow".to_string()])
                 .await;
             let result = coordinator
                 .confirm(
                     session,
+                    pending.generation,
                     vec![McpServerRefreshSnapshot {
                         server_id: "personal_servicenow".to_string(),
                         status: McpServerRefreshStatus::Ready,
@@ -275,6 +858,11 @@ mod tests {
                         resource_count: Some(0),
                         prompt_count: None,
                         restart_occurred: None,
+                        discovery_attempts: 1,
+                        observed_errors: Vec::new(),
+                        first_observed_at: None,
+                        last_observed_at: None,
+                        terminal_at: None,
                         error: None,
                     }],
                 )

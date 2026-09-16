@@ -23,6 +23,8 @@
         "reposDesc": "リポジトリスクリプトと設定",
         "agents": "エージェント",
         "agentsDesc": "コーディングエージェントの設定",
+        "skills": "スキル",
+        "skillsDesc": "共有エージェントスキルと提案",
         "mcp": "MCPサーバー",
         "mcpDesc": "モデルコンテキストプロトコルサーバー",
         "cli-tools": "CLI ツール",
@@ -47,6 +49,27 @@
         "pipelinesDesc": "Pipeline TOML files and defaults",
         "workers": "クラスターワーカー",
         "workersDesc": "ワーカーの正常性、ストレージ、スケジューリング"
+      }
+    },
+    "skills": {
+      "title": "スキル",
+      "description": "共有エージェントスキルを作成・管理します。変更は {{baseBranch}} へのプルリクエストになります。",
+      "loading": "スキルを読み込み中…",
+      "unavailable": "Git ベースのスキル管理が設定されていません。",
+      "add": "スキルを追加",
+      "delete": "スキルを削除",
+      "untitled": "無題のスキル",
+      "empty": "スキルを追加して開始します。",
+      "fields": {
+        "name": "名前",
+        "description": "説明と起動ガイド",
+        "instructions": "手順 (Markdown)"
+      },
+      "proposal": {
+        "title": "変更を提案",
+        "description": "Vibe Kanban がカタログを検証し、レビュー可能なプルリクエストを作成します。",
+        "submit": "プルリクエストを作成 ({{count}} 件)",
+        "open": "プルリクエストを開く"
       }
     },
     "general": {

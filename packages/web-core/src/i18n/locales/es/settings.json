@@ -23,6 +23,8 @@
         "reposDesc": "Scripts y configuración de repositorios",
         "agents": "Agentes",
         "agentsDesc": "Configuraciones de agentes",
+        "skills": "Habilidades",
+        "skillsDesc": "Habilidades compartidas y propuestas",
         "mcp": "Servidores MCP",
         "mcpDesc": "Servidores de Protocolo de Contexto de Modelo (MCP)",
         "cli-tools": "Herramientas de CLI",
@@ -47,6 +49,27 @@
         "pipelinesDesc": "Pipeline TOML files and defaults",
         "workers": "Trabajadores del clúster",
         "workersDesc": "Estado de los trabajadores, almacenamiento y programación"
+      }
+    },
+    "skills": {
+      "title": "Habilidades",
+      "description": "Crea y administra habilidades compartidas. Los cambios abren una solicitud de cambios contra {{baseBranch}}.",
+      "loading": "Cargando habilidades…",
+      "unavailable": "La administración de habilidades con Git no está configurada.",
+      "add": "Añadir habilidad",
+      "delete": "Eliminar habilidad",
+      "untitled": "Habilidad sin título",
+      "empty": "Añade una habilidad para comenzar.",
+      "fields": {
+        "name": "Nombre",
+        "description": "Descripción y guía de activación",
+        "instructions": "Instrucciones (Markdown)"
+      },
+      "proposal": {
+        "title": "Proponer cambios",
+        "description": "Vibe Kanban valida el catálogo y abre una solicitud de cambios revisable.",
+        "submit": "Abrir solicitud ({{count}} cambios)",
+        "open": "Abrir solicitud"
       }
     },
     "general": {
