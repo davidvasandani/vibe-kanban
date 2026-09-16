@@ -50,6 +50,12 @@ WITH accessible AS (
  FROM projects p JOIN accessible o ON o.id = p.organization_id
  WHERE strpos(lower(p.name), lower($2)) > 0
  UNION ALL
+ SELECT 'issue', i.id, i.title, i.simple_id || ' · ' || o.name || ' / ' || p.name,
+ '', o.id, p.id, NULL, i.id, false
+ FROM issues i JOIN projects p ON p.id = i.project_id
+ JOIN accessible o ON o.id = p.organization_id
+ WHERE strpos(lower(i.simple_id), lower($2)) > 0
+ UNION ALL
  SELECT 'workspace', w.id, coalesce(w.name, 'Workspace'), o.name || ' / ' || p.name,
  '', o.id, p.id, w.local_workspace_id, w.issue_id, w.archived
  FROM workspaces w JOIN projects p ON p.id = w.project_id

@@ -202,5 +202,6 @@ contributed to it.
   phase evidence, terminal-state precedence, host-scoped progress polling, and
   truthful unknown/legacy presentation (`vk/855b-show-the-steps-w`).
 - [global-search.md](global-search.md) — Search across remote metadata and host
-  conversations: authorization, relay targeting, deadline isolation, Unicode
-  matching, historical session navigation and organization redirect coordination.
+  conversations: authorization, issue-ID identity/routing, relay targeting,
+  deadline isolation, Unicode matching, historical session navigation and
+  organization redirect coordination.

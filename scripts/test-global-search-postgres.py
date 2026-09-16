@@ -27,6 +27,7 @@ with tempfile.TemporaryDirectory(prefix='vk-search-pg-') as directory:
             CREATE TABLE organizations(id uuid PRIMARY KEY, name text);
             CREATE TABLE organization_member_metadata(organization_id uuid, user_id uuid);
             CREATE TABLE projects(id uuid PRIMARY KEY, name text, organization_id uuid);
+            CREATE TABLE issues(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), project_id uuid, simple_id text, title text);
             CREATE TABLE workspaces(id uuid PRIMARY KEY, name text, project_id uuid, local_workspace_id uuid, issue_id uuid, archived boolean, owner_user_id uuid);
             INSERT INTO organizations VALUES
               ('00000000-0000-0000-0000-000000000001', 'Needle org'),
@@ -36,6 +37,9 @@ with tempfile.TemporaryDirectory(prefix='vk-search-pg-') as directory:
               ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000010'),
               ('00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000010');
             INSERT INTO projects SELECT id, name || ' project', id FROM organizations;
+            INSERT INTO issues(project_id, simple_id, title) VALUES
+              ('00000000-0000-0000-0000-000000000001', 'VAS-602', 'Search visible issue IDs'),
+              ('00000000-0000-0000-0000-000000000002', 'VAS-603', 'Secret issue');
             INSERT INTO workspaces SELECT id, name || ' workspace', id, id, NULL, true, '00000000-0000-0000-0000-000000000010' FROM organizations;
             INSERT INTO workspaces VALUES ('00000000-0000-0000-0000-000000000099', 'Needle other owner', '00000000-0000-0000-0000-000000000001', NULL, NULL, false, '00000000-0000-0000-0000-000000000011');
             """
@@ -47,11 +51,18 @@ with tempfile.TemporaryDirectory(prefix='vk-search-pg-') as directory:
             assert len(rows) == 6, rows
             assert not any('secret' in row or 'other owner' in row for row in rows), rows
             assert sum(row.startswith('workspace|') and row.endswith('|t') for row in rows) == 2
+            issue_rows = search('vas-602')
+            assert len(issue_rows) == 1, issue_rows
+            assert issue_rows[0].startswith('issue|'), issue_rows
+            assert 'Search visible issue IDs|VAS-602 · Needle org / Needle org project|' in issue_rows[0], issue_rows
+            assert search('VAS-603') == []
             assert search('%_') == []
             assert search("' OR true --") == []
             subprocess.run(command, input="INSERT INTO projects SELECT gen_random_uuid(), 'Needle ' || n, '00000000-0000-0000-0000-000000000001' FROM generate_series(1,30) n;", text=True, check=True)
             assert sum(row.startswith('project|') for row in search('needle')) == 21
-            print('PASS: remote search membership, cross-org coverage, ownership, archived results, literal terms and category bounds')
+            subprocess.run(command, input="INSERT INTO issues(project_id, simple_id, title) SELECT '00000000-0000-0000-0000-000000000001', 'VAS-' || n, 'Issue ' || n FROM generate_series(700,729) n;", text=True, check=True)
+            assert sum(row.startswith('issue|') for row in search('vas-7')) == 21
+            print('PASS: remote search membership, cross-org coverage, issue IDs, ownership, archived results, literal terms and category bounds')
         finally:
             server.terminate()
             try:

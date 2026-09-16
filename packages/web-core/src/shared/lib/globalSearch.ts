@@ -2,7 +2,7 @@ import { makeRequest, listRelayHosts } from '@/shared/lib/remoteApi';
 import { makeLocalApiRequest } from '@/shared/lib/localApiTransport';
 
 export interface GlobalSearchResult {
-  kind: 'organization' | 'project' | 'workspace' | 'chat';
+  kind: 'organization' | 'project' | 'issue' | 'workspace' | 'chat';
   id: string;
   title: string;
   context: string;
