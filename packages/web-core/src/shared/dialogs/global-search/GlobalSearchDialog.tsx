@@ -126,54 +126,55 @@ export function GlobalSearchDialog({
             </p>
           )}
           <CommandList>
-            {(['organization', 'project', 'workspace', 'chat'] as const).map(
-              (kind) => {
-                const results =
-                  data?.results.filter((r) => r.kind === kind) ?? [];
-                return (
-                  results.length > 0 && (
-                    <CommandGroup
-                      key={kind}
-                      heading={
-                        {
-                          organization: 'Organizations',
-                          project: 'Projects',
-                          workspace: 'Workspaces',
-                          chat: 'Chat',
-                        }[kind]
-                      }
-                    >
-                      {results.map((result) => (
-                        <CommandItem
-                          key={`${result.hostId}:${kind}:${result.id}`}
-                          value={`${result.hostId}:${kind}:${result.id}`}
-                          onSelect={() => select(result)}
-                          className="flex flex-col items-start gap-1"
-                        >
-                          <span className="text-high break-all">
-                            {result.title}
-                            {result.archived ? ' (archived)' : ''}
+            {(
+              ['organization', 'project', 'issue', 'workspace', 'chat'] as const
+            ).map((kind) => {
+              const results =
+                data?.results.filter((r) => r.kind === kind) ?? [];
+              return (
+                results.length > 0 && (
+                  <CommandGroup
+                    key={kind}
+                    heading={
+                      {
+                        organization: 'Organizations',
+                        project: 'Projects',
+                        issue: 'Issues',
+                        workspace: 'Workspaces',
+                        chat: 'Chat',
+                      }[kind]
+                    }
+                  >
+                    {results.map((result) => (
+                      <CommandItem
+                        key={`${result.hostId}:${kind}:${result.id}`}
+                        value={`${result.hostId}:${kind}:${result.id}`}
+                        onSelect={() => select(result)}
+                        className="flex flex-col items-start gap-1"
+                      >
+                        <span className="text-high break-all">
+                          {result.title}
+                          {result.archived ? ' (archived)' : ''}
+                        </span>
+                        <span className="text-low break-all">
+                          {result.hostName ? `${result.hostName} · ` : ''}
+                          {result.context}
+                          {result.kind === 'workspace' &&
+                          result.hostId === undefined
+                            ? ' · Open project context'
+                            : ''}
+                        </span>
+                        {result.snippet && (
+                          <span className="line-clamp-3 whitespace-pre-wrap break-all">
+                            {result.snippet}
                           </span>
-                          <span className="text-low break-all">
-                            {result.hostName ? `${result.hostName} · ` : ''}
-                            {result.context}
-                            {result.kind === 'workspace' &&
-                            result.hostId === undefined
-                              ? ' · Open project context'
-                              : ''}
-                          </span>
-                          {result.snippet && (
-                            <span className="line-clamp-3 whitespace-pre-wrap break-all">
-                              {result.snippet}
-                            </span>
-                          )}
-                        </CommandItem>
-                      ))}
-                    </CommandGroup>
-                  )
-                );
-              }
-            )}
+                        )}
+                      </CommandItem>
+                    ))}
+                  </CommandGroup>
+                )
+              );
+            })}
           </CommandList>
         </Command>
       </DialogContent>

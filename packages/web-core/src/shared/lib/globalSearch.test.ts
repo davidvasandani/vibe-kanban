@@ -89,7 +89,7 @@ describe('global search', () => {
     expect(
       searchResultHref({
         ...result,
-        kind: 'workspace',
+        kind: 'issue',
         project_id: 'p',
         issue_id: 'i',
       })
