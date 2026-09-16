@@ -196,6 +196,23 @@
         "name": "Nombre"
       },
       "columnError": "No se pudo mostrar este chat. Abre la vista completa."
+    },
+    "activeCount_one": "{{count}} espacio de trabajo activo",
+    "activeCount_other": "{{count}} espacios de trabajo activos",
+    "duplicateWarning": {
+      "title": "Esta incidencia ya tiene espacios de trabajo activos",
+      "description": "Abre un espacio de trabajo existente para continuar o inicia otro a continuación.",
+      "dismiss": "Descartar aviso",
+      "branchUnavailable": "Rama no disponible",
+      "openPr": "Solicitud de incorporación abierta",
+      "changes": "Tiene cambios",
+      "open": "Abrir espacio de trabajo",
+      "activity": {
+        "creating": "Creando",
+        "running": "En ejecución",
+        "idle": "Sin ejecutar",
+        "unknown": "Actividad no disponible"
+      }
     }
   },
   "fileTree": {

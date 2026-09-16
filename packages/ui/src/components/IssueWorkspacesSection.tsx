@@ -1,3 +1,4 @@
+import { Badge } from './Badge';
 import { useTranslation } from 'react-i18next';
 import {
   IssueWorkspaceCard,
@@ -42,12 +43,23 @@ export function IssueWorkspacesSection({
 }: IssueWorkspacesSectionProps) {
   const { t } = useTranslation('common');
 
+  const activeCount = workspaces.filter(
+    (workspace) => !workspace.archived
+  ).length;
+
   return (
     <CollapsibleSectionHeader
       title={t('workspaces.title')}
       persistKey="kanban-issue-workspaces"
       defaultExpanded={true}
       actions={actions}
+      headerExtra={
+        activeCount > 1 ? (
+          <Badge variant="outline" className="text-brand whitespace-nowrap">
+            {t('workspaces.activeCount', { count: activeCount })}
+          </Badge>
+        ) : undefined
+      }
     >
       <div className="px-base p-base flex flex-col gap-base border-t">
         {isLoading ? (

@@ -213,6 +213,23 @@
       "updated": "Server affinity updated",
       "updateFailed": "Failed to update server affinity",
       "restartFailed": "Affinity changed, but the task could not be restarted"
+    },
+    "activeCount_one": "{{count}} active workspace",
+    "activeCount_other": "{{count}} active workspaces",
+    "duplicateWarning": {
+      "title": "This issue already has active workspaces",
+      "description": "Open an existing workspace to continue its work, or start another workspace below.",
+      "dismiss": "Dismiss warning",
+      "branchUnavailable": "Branch unavailable",
+      "openPr": "Open pull request",
+      "changes": "Has changes",
+      "open": "Open workspace",
+      "activity": {
+        "creating": "Creating",
+        "running": "Running",
+        "idle": "Not running",
+        "unknown": "Activity unavailable"
+      }
     }
   },
   "fileTree": {

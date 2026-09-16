@@ -196,6 +196,23 @@
         "name": "名稱"
       },
       "columnError": "無法顯示此對話。請開啟完整檢視。"
+    },
+    "activeCount_one": "{{count}} 個活躍工作區",
+    "activeCount_other": "{{count}} 個活躍工作區",
+    "duplicateWarning": {
+      "title": "此議題已有活躍工作區",
+      "description": "開啟現有工作區以繼續工作，或在下方啟動另一個工作區。",
+      "dismiss": "關閉警告",
+      "branchUnavailable": "分支資訊無法取得",
+      "openPr": "有未合併的提取請求",
+      "changes": "有變更",
+      "open": "開啟工作區",
+      "activity": {
+        "creating": "正在建立",
+        "running": "執行中",
+        "idle": "未執行",
+        "unknown": "活動資訊無法取得"
+      }
     }
   },
   "fileTree": {

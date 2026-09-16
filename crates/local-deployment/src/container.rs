@@ -12,9 +12,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
 use cluster_protocol::{
     CancellationPhase, CancellationRequest, EventAcknowledgement, ExecutionDispatch,
-    ExecutionEventPayload, InteractionRequest, InteractionResponse, McpConfigSnapshot,
-    McpRefreshRequest, PROTOCOL_VERSION, PersistencePolicy, RequestAuthority, TerminalState,
-    WorkerMcpRefreshStatus,
+    ExecutionEventPayload, InteractionRequest, InteractionResponse, JobState, JobSummary,
+    McpConfigSnapshot, McpRefreshRequest, PROTOCOL_VERSION, PersistencePolicy, RequestAuthority,
+    TerminalEvidence, TerminalState, WorkerMcpRefreshStatus,
 };
 use command_group::AsyncGroupChild;
 use db::{
@@ -194,6 +194,53 @@ fn should_ack_worker_batch(cursor: u64, has_terminal: bool) -> bool {
     cursor > 0 && !has_terminal
 }
 
+/// Output retention and terminal truth have separate lifetimes. Only accept
+/// independently retained evidence for this exact dispatch, at or beyond the
+/// gap boundary; an active or contradictory summary cannot resolve a gap.
+fn replay_gap_terminal_evidence(
+    known: &ExecutionWorkerJob,
+    worker_node_id: Uuid,
+    execution_id: Uuid,
+    earliest_available: u64,
+    summary: &JobSummary,
+) -> Option<(
+    ExecutionWorkerDispatchState,
+    ExecutionProcessStatus,
+    TerminalEvidence,
+)> {
+    if known.worker_node_id != worker_node_id
+        || known.execution_process_id != execution_id
+        || summary.execution_id != execution_id
+        || summary.worker_job_id != known.worker_job_id
+        || summary.request_digest != known.request_digest
+        || summary.last_sequence < earliest_available
+        || summary.last_sequence < u64::try_from(known.worker_last_sequence).ok()?
+    {
+        return None;
+    }
+    let evidence = summary.terminal.as_ref()?;
+    let (worker_state, process_state) = match (&summary.state, &evidence.state) {
+        (JobState::Completed, TerminalState::Completed) => (
+            ExecutionWorkerDispatchState::Completed,
+            ExecutionProcessStatus::Completed,
+        ),
+        (JobState::Failed, TerminalState::Failed) => (
+            ExecutionWorkerDispatchState::Failed,
+            ExecutionProcessStatus::Failed,
+        ),
+        (JobState::Killed, TerminalState::Killed) => (
+            ExecutionWorkerDispatchState::Killed,
+            ExecutionProcessStatus::Killed,
+        ),
+        (JobState::Interrupted, TerminalState::Interrupted) => (
+            ExecutionWorkerDispatchState::Interrupted,
+            ExecutionProcessStatus::Interrupted,
+        ),
+        _ => return None,
+    };
+    Some((worker_state, process_state, evidence.clone()))
+}
+
 fn worker_job_has_positive_liveness(
     job: &ExecutionWorkerJob,
     now: DateTime<Utc>,
@@ -232,8 +279,10 @@ mod final_output_reconciliation_tests {
     use uuid::Uuid;
 
     use super::{
-        history_has_final_assistant_message, normalized_final_assistant_state,
-        should_ack_worker_batch, wait_for_unfinalized_output, worker_job_has_positive_liveness,
+        ExecutionProcessStatus, ExecutionWorkerDispatchState, ExecutionWorkerJob, JobState,
+        JobSummary, TerminalEvidence, TerminalState, Utc, history_has_final_assistant_message,
+        normalized_final_assistant_state, replay_gap_terminal_evidence, should_ack_worker_batch,
+        wait_for_unfinalized_output, worker_job_has_positive_liveness,
         worker_lease_is_turn_evidence,
     };
 
@@ -323,6 +372,128 @@ mod final_output_reconciliation_tests {
         job.dispatch_state =
             db::models::execution_worker_job::ExecutionWorkerDispatchState::Completed;
         assert!(!worker_job_has_positive_liveness(&job, now, true));
+    }
+
+    #[test]
+    fn replay_gap_recovers_only_matching_terminal_evidence() {
+        let now = Utc::now();
+        let known = ExecutionWorkerJob {
+            execution_process_id: Uuid::new_v4(),
+            worker_node_id: Uuid::new_v4(),
+            worker_job_id: Uuid::new_v4(),
+            request_digest: "digest".into(),
+            dispatch_state: ExecutionWorkerDispatchState::Running,
+            last_event_sequence: 2,
+            worker_last_sequence: 5,
+            lease_expires_at: None,
+            output_complete: true,
+            terminal_evidence: None,
+            dispatched_at: now,
+            accepted_at: Some(now),
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let summary = JobSummary {
+            execution_id: known.execution_process_id,
+            worker_job_id: known.worker_job_id,
+            workspace_id: Uuid::new_v4(),
+            request_digest: known.request_digest.clone(),
+            state: JobState::Completed,
+            last_sequence: 10,
+            terminal: Some(TerminalEvidence {
+                state: TerminalState::Completed,
+                exit_code: Some(0),
+                signal: None,
+                observed_at: now,
+            }),
+        };
+        let resolve = |summary: &JobSummary| {
+            replay_gap_terminal_evidence(
+                &known,
+                known.worker_node_id,
+                known.execution_process_id,
+                7,
+                summary,
+            )
+        };
+        for (state, terminal, worker, process) in [
+            (
+                JobState::Completed,
+                TerminalState::Completed,
+                ExecutionWorkerDispatchState::Completed,
+                ExecutionProcessStatus::Completed,
+            ),
+            (
+                JobState::Failed,
+                TerminalState::Failed,
+                ExecutionWorkerDispatchState::Failed,
+                ExecutionProcessStatus::Failed,
+            ),
+            (
+                JobState::Killed,
+                TerminalState::Killed,
+                ExecutionWorkerDispatchState::Killed,
+                ExecutionProcessStatus::Killed,
+            ),
+            (
+                JobState::Interrupted,
+                TerminalState::Interrupted,
+                ExecutionWorkerDispatchState::Interrupted,
+                ExecutionProcessStatus::Interrupted,
+            ),
+        ] {
+            let mut candidate = summary.clone();
+            candidate.state = state;
+            candidate.terminal.as_mut().unwrap().state = terminal;
+            let (worker_state, process_state, evidence) = resolve(&candidate).unwrap();
+            assert_eq!(worker_state, worker);
+            assert_eq!(process_state, process);
+            assert_eq!(Some(evidence), candidate.terminal);
+        }
+        for change in 0..8 {
+            let mut candidate = summary.clone();
+            match change {
+                0 => candidate.execution_id = Uuid::new_v4(),
+                1 => candidate.worker_job_id = Uuid::new_v4(),
+                2 => candidate.request_digest = "different".into(),
+                3 => candidate.last_sequence = 6,
+                4 => candidate.terminal = None,
+                5 => candidate.state = JobState::Running,
+                6 => candidate.state = JobState::Quarantined,
+                _ => candidate.terminal.as_mut().unwrap().state = TerminalState::Failed,
+            }
+            assert!(
+                resolve(&candidate).is_none(),
+                "invalid evidence case {change}"
+            );
+        }
+        assert!(
+            replay_gap_terminal_evidence(
+                &known,
+                Uuid::new_v4(),
+                known.execution_process_id,
+                7,
+                &summary
+            )
+            .is_none()
+        );
+        assert!(
+            replay_gap_terminal_evidence(&known, known.worker_node_id, Uuid::new_v4(), 7, &summary)
+                .is_none()
+        );
+        let mut later_known = known.clone();
+        later_known.worker_last_sequence = 11;
+        assert!(
+            replay_gap_terminal_evidence(
+                &later_known,
+                known.worker_node_id,
+                known.execution_process_id,
+                7,
+                &summary
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2531,37 +2702,110 @@ impl LocalContainerService {
                         retry_delay = Duration::from_millis(100);
                         batch
                     }
-                    Err(services::services::cluster::WorkerClientError::ReplayGap { .. }) => {
-                        let _ = ExecutionWorkerJob::mark_output_incomplete(&db.pool, execution_id)
+                    Err(services::services::cluster::WorkerClientError::ReplayGap {
+                        requested_after,
+                        earliest_available,
+                    }) => {
+                        tracing::warn!(%execution_id, %worker_node_id, requested_after,
+                            earliest_available, "Worker output replay gap; checking retained terminal evidence");
+                        let recovered = match (
+                            ExecutionWorkerJob::find_by_execution_id(&db.pool, execution_id).await,
+                            client.inventory(worker_node_id).await,
+                        ) {
+                            (Ok(Some(known)), Ok(inventory)) => {
+                                inventory.iter().find_map(|summary| {
+                                    replay_gap_terminal_evidence(
+                                        &known,
+                                        worker_node_id,
+                                        execution_id,
+                                        earliest_available.max(cursor),
+                                        summary,
+                                    )
+                                })
+                            }
+                            (known, inventory) => {
+                                tracing::warn!(%execution_id, database_error = ?known.err(),
+                                    inventory_error = ?inventory.err(),
+                                    "Unable to verify terminal evidence after replay gap");
+                                None
+                            }
+                        };
+                        let (worker_state, process_state, evidence) = match recovered {
+                            Some((worker_state, process_state, evidence)) => {
+                                (worker_state, process_state, Some(evidence))
+                            }
+                            None => (
+                                ExecutionWorkerDispatchState::Indeterminate,
+                                ExecutionProcessStatus::Indeterminate,
+                                None,
+                            ),
+                        };
+                        let evidence_json = evidence
+                            .as_ref()
+                            .map(serde_json::to_value)
+                            .transpose()
+                            .expect("terminal evidence is serializable");
+                        // Keep captured evidence until BOTH database records persist.
+                        // Never acknowledge a cursor across missing events.
+                        loop {
+                            let result: Result<(), anyhow::Error> = async {
+                                if !ExecutionWorkerJob::mark_output_incomplete(
+                                    &db.pool,
+                                    execution_id,
+                                )
+                                .await?
+                                {
+                                    anyhow::bail!(
+                                        "worker job disappeared during replay-gap reconciliation"
+                                    );
+                                }
+                                if !ExecutionWorkerJob::update_state(
+                                    &db.pool,
+                                    execution_id,
+                                    worker_state,
+                                    evidence_json.as_ref(),
+                                    Some(
+                                        evidence.as_ref().map_or_else(Utc::now, |e| e.observed_at),
+                                    ),
+                                )
+                                .await?
+                                {
+                                    anyhow::bail!(
+                                        "worker job disappeared during replay-gap reconciliation"
+                                    );
+                                }
+                                if !ExecutionProcess::was_stopped(&db.pool, execution_id).await {
+                                    update_completion_with_retry(
+                                        &db,
+                                        execution_id,
+                                        process_state.clone(),
+                                        evidence.as_ref().and_then(|e| e.exit_code).map(i64::from),
+                                    )
+                                    .await?;
+                                }
+                                Ok(())
+                            }
                             .await;
-                        let _ = ExecutionWorkerJob::update_state(
-                            &db.pool,
-                            execution_id,
-                            ExecutionWorkerDispatchState::Indeterminate,
-                            None,
-                            Some(Utc::now()),
-                        )
-                        .await;
-                        if let Err(error) = update_completion_with_retry(
-                            &db,
-                            execution_id,
-                            ExecutionProcessStatus::Indeterminate,
-                            None,
-                        )
-                        .await
-                        {
-                            tracing::error!(%execution_id, %error, "Failed to persist replay-gap reconciliation");
-                            tokio::time::sleep(retry_delay).await;
-                            continue;
+                            match result {
+                                Ok(()) => break,
+                                Err(error) => {
+                                    tracing::error!(%execution_id, %error, "Failed to persist replay-gap reconciliation");
+                                    tokio::time::sleep(retry_delay).await;
+                                    retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
+                                }
+                            }
                         }
-                        store.push(LogMsg::Stderr(
-                            "Worker output replay gap; execution state is indeterminate".into(),
-                        ));
-                        // Remove (and cache) before finishing so a client that
-                        // subscribes after this point re-derives from disk
-                        // instead of attaching to a store whose live broadcast
-                        // will never carry another message (see the terminal
-                        // arm below for the full explanation).
+                        let outcome = if evidence.is_some() {
+                            format!(
+                                "execution outcome recovered from worker terminal evidence: {process_state:?}"
+                            )
+                        } else {
+                            "execution state is indeterminate".into()
+                        };
+                        store.push(LogMsg::Stderr(format!(
+                            "Worker output replay gap after sequence {requested_after} (earliest retained: {earliest_available}); output is incomplete; {outcome}"
+                        )));
+                        container.finalize_remote_execution(execution_id).await;
                         container.finish_msg_store(&execution_id).await;
                         break;
                     }

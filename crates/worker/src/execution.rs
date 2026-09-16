@@ -667,6 +667,26 @@ impl ExecutionSupervisor {
             .map_err(|_| failure("session storage preparation failed"))?;
         prepare_scoped_home(source_home, &scoped_home, Path::new("config.toml"))
             .map_err(|_| failure("scoped-home preparation failed"))?;
+        // Reserve sqlite_home as a real execution-owned directory. The generic
+        // overlay may have linked a same-named source entry: unlink only the
+        // alias, never the persistent source or its database sidecars.
+        let sqlite_home = scoped_home.join("sqlite");
+        match std::fs::symlink_metadata(&sqlite_home) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                std::fs::remove_file(&sqlite_home)
+                    .map_err(|_| failure("SQLite directory preparation failed"))?;
+            }
+            Ok(_) => return Err(failure("SQLite directory preparation failed")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(failure("SQLite directory preparation failed")),
+        }
+        std::fs::create_dir(&sqlite_home)
+            .map_err(|_| failure("SQLite directory preparation failed"))?;
+        std::fs::set_permissions(&sqlite_home, {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::Permissions::from_mode(0o700)
+        })
+        .map_err(|_| failure("SQLite directory preparation failed"))?;
         let servers = snapshot.map(|snapshot| runtime_mcp_servers(snapshot, &self.coordinator_url));
         write_scoped_codex_config(
             source_config,
@@ -1886,6 +1906,70 @@ mod tests {
                 assert!(!supervisor.mcp_config_root.join(id.to_string()).exists());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn codex_sqlite_directory_is_private_while_rollouts_survive_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+        let (temp, supervisor, workspace) = fixture();
+        let source_home = temp.path().join("source");
+        fs::create_dir_all(source_home.join("sqlite")).unwrap();
+        fs::write(source_home.join("sqlite/state.sqlite"), "shared-index").unwrap();
+        fs::write(source_home.join("auth.json"), "auth-fixture").unwrap();
+        let source = source_home.join("config.toml");
+        fs::write(&source, "sqlite_home = '/persistent/global'\n").unwrap();
+        let agent: CodingAgent = serde_json::from_value(json!({"CODEX": {}})).unwrap();
+        let mut homes = Vec::new();
+        for _ in 0..2 {
+            homes.push(
+                supervisor
+                    .prepare_codex_config(Uuid::new_v4(), agent.clone(), &source, &workspace, None)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let first_home = homes[0].target_config.parent().unwrap().to_path_buf();
+        for prepared in &homes {
+            let home = prepared.target_config.parent().unwrap();
+            let sqlite = home.join("sqlite");
+            assert!(
+                !fs::symlink_metadata(&sqlite)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(
+                fs::metadata(&sqlite).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert!(!sqlite.join("state.sqlite").exists());
+            fs::write(sqlite.join("state.sqlite"), "private-index").unwrap();
+            fs::write(sqlite.join("state.sqlite-wal"), "private-wal").unwrap();
+            assert_eq!(
+                fs::read_to_string(home.join("auth.json")).unwrap(),
+                "auth-fixture"
+            );
+        }
+        fs::write(
+            first_home.join("sessions/rollout.jsonl"),
+            "persistent-rollout",
+        )
+        .unwrap();
+        drop(homes);
+        assert!(!first_home.exists());
+        assert_eq!(
+            fs::read_to_string(source_home.join("sessions/rollout.jsonl")).unwrap(),
+            "persistent-rollout"
+        );
+        assert_eq!(
+            fs::read_to_string(source_home.join("sqlite/state.sqlite")).unwrap(),
+            "shared-index"
+        );
+        assert!(!source_home.join("sqlite/state.sqlite-wal").exists());
+        assert_eq!(
+            fs::read_to_string(source).unwrap(),
+            "sqlite_home = '/persistent/global'\n"
+        );
     }
 
     #[tokio::test]

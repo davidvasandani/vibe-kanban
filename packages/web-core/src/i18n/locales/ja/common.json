@@ -196,6 +196,23 @@
         "name": "名前順"
       },
       "columnError": "このチャットを表示できませんでした。フルビューで開いてください。"
+    },
+    "activeCount_one": "アクティブなワークスペース {{count}} 件",
+    "activeCount_other": "アクティブなワークスペース {{count}} 件",
+    "duplicateWarning": {
+      "title": "この課題には既にアクティブなワークスペースがあります",
+      "description": "既存のワークスペースを開いて作業を続けるか、下から別のワークスペースを開始できます。",
+      "dismiss": "警告を閉じる",
+      "branchUnavailable": "ブランチ情報なし",
+      "openPr": "未完了のプルリクエストあり",
+      "changes": "変更あり",
+      "open": "ワークスペースを開く",
+      "activity": {
+        "creating": "作成中",
+        "running": "実行中",
+        "idle": "停止中",
+        "unknown": "アクティビティ情報なし"
+      }
     }
   },
   "fileTree": {
