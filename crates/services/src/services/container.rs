@@ -399,6 +399,10 @@ pub trait ContainerService {
 
     async fn clear_mcp_restart_tracking(&self, _session_id: Uuid) {}
 
+    /// Fail only the recovery generation owned by a deferred continuation.
+    /// Implementations must ignore this call if a newer generation replaced it.
+    async fn fail_mcp_restart_generation(&self, _session_id: Uuid, _generation: u64) {}
+
     async fn mcp_refresh_status(
         &self,
         workspace_id: Uuid,

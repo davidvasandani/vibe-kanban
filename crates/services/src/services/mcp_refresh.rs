@@ -620,6 +620,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_cleanup_cannot_fail_a_superseding_restart_generation() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let stale = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+        let current = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+
+        assert!(
+            coordinator
+                .fail(
+                    session,
+                    stale.generation,
+                    McpRefreshErrorCategory::ReloadFailed,
+                )
+                .await
+                .is_none()
+        );
+        let status = coordinator.status(session).await.unwrap();
+        assert_eq!(status.generation, current.generation);
+        assert_eq!(status.status, McpRefreshStatus::PendingNextTurn);
+    }
+
+    #[tokio::test]
     async fn busy_live_refresh_does_not_erase_restart_generation_identity() {
         let coordinator = McpRefreshCoordinator::default();
         let session = Uuid::new_v4();

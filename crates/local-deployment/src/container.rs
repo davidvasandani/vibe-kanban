@@ -3714,6 +3714,16 @@ impl ContainerService for LocalContainerService {
         }
     }
 
+    async fn fail_mcp_restart_generation(&self, session_id: Uuid, generation: u64) {
+        self.mcp_refresh_coordinator
+            .fail(
+                session_id,
+                generation,
+                McpRefreshErrorCategory::ReloadFailed,
+            )
+            .await;
+    }
+
     async fn mcp_refresh_status(
         &self,
         workspace_id: Uuid,

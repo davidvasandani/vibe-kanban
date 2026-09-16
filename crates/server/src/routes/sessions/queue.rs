@@ -131,7 +131,7 @@ async fn queue_mcp_restart_impl(
     session: &Session,
     deployment: &DeploymentImpl,
     payload: QueueMcpRestartRequest,
-    prepare_tracking: bool,
+    existing_tracking_generation: Option<u64>,
 ) -> Result<QueueMcpRestartResult, ApiError> {
     let was_running =
         db::models::execution_process::ExecutionProcess::has_running_coding_agent_for_session(
@@ -178,12 +178,15 @@ async fn queue_mcp_restart_impl(
     if running && !payload.confirmed_running_restart {
         return Ok(QueueMcpRestartResult::ConfirmationRequired);
     }
-    if prepare_tracking {
+    let tracking_generation = if let Some(generation) = existing_tracking_generation {
+        generation
+    } else {
         deployment
             .container()
             .prepare_mcp_restart(session.workspace_id, session.id)
-            .await?;
-    }
+            .await?
+            .generation
+    };
     let queued = if running {
         let queued_at = deployment
             .queued_message_service()
@@ -226,6 +229,7 @@ async fn queue_mcp_restart_impl(
         {
             let deferred_deployment = deployment.clone();
             let deferred_session = session.clone();
+            let deferred_generation = tracking_generation;
             tokio::spawn(async move {
                 if !deferred_deployment
                     .queued_message_service()
@@ -234,7 +238,7 @@ async fn queue_mcp_restart_impl(
                 {
                     deferred_deployment
                         .container()
-                        .clear_mcp_restart_tracking(deferred_session.id)
+                        .fail_mcp_restart_generation(deferred_session.id, deferred_generation)
                         .await;
                     return;
                 }
@@ -261,7 +265,7 @@ async fn queue_mcp_restart_impl(
                 {
                     deferred_deployment
                         .container()
-                        .clear_mcp_restart_tracking(deferred_session.id)
+                        .fail_mcp_restart_generation(deferred_session.id, deferred_generation)
                         .await;
                 }
             });
@@ -299,7 +303,7 @@ async fn queue_mcp_restart(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<QueueMcpRestartRequest>,
 ) -> Result<ResponseJson<ApiResponse<QueueMcpRestartResult>>, ApiError> {
-    let result = match queue_mcp_restart_impl(&session, &deployment, payload, true).await {
+    let result = match queue_mcp_restart_impl(&session, &deployment, payload, None).await {
         Ok(result) => result,
         Err(error) => {
             deployment
@@ -416,7 +420,7 @@ pub async fn restart_mcp_session(
             // Calling the restart endpoint is itself the explicit confirmation.
             confirmed_running_restart: true,
         },
-        false,
+        Some(tracking.generation),
     )
     .await
     {
@@ -424,7 +428,7 @@ pub async fn restart_mcp_session(
         Err(error) => {
             deployment
                 .container()
-                .clear_mcp_restart_tracking(session.id)
+                .fail_mcp_restart_generation(session.id, tracking.generation)
                 .await;
             return Err(error);
         }
