@@ -627,7 +627,39 @@
     "creatingTitle": "워크스페이스 생성 중…",
     "creatingBody": "다른 페이지로 이동해도 생성 작업은 백그라운드에서 계속됩니다.",
     "failedTitle": "워크스페이스 생성 실패",
-    "failedFallback": "새 워크스페이스를 만들어 다시 시도하세요."
+    "failedFallback": "새 워크스페이스를 만들어 다시 시도하세요.",
+    "queued": "생성 시작을 기다리는 중…",
+    "loading": "진행 정보를 기다리는 중…",
+    "unavailable": "진행 정보를 사용할 수 없습니다. 생성이 계속 진행될 수 있으며 자동으로 다시 연결합니다.",
+    "stopped": "생성이 중지되었습니다. 마지막으로 보고된 단계가 아래에 표시됩니다.",
+    "opening": "생성 완료. 워크스페이스를 여는 중…",
+    "backgroundTask": "마지막으로 보고된 백그라운드 작업: {{task}}",
+    "stepsLabel": "워크스페이스 생성 단계",
+    "lastReported": "마지막 업데이트: {{time}}",
+    "steps": {
+      "repositories": "저장소 연결",
+      "context": "첨부 파일 및 컨텍스트 준비",
+      "placement": "실행 위치 선택",
+      "worktrees": "워크트리 및 설정 준비",
+      "execution": "설정 스크립트 및 에이전트 시작",
+      "finalizing": "워크스페이스 마무리"
+    },
+    "tasks": {
+      "repositories": "선택한 저장소를 등록하는 중입니다.",
+      "context": "첨부 파일을 준비하고 사용 가능한 컨텍스트를 가져오는 중입니다.",
+      "placement": "실행 위치를 선택하고 예약하는 중입니다.",
+      "worktrees": "워크트리와 파일을 준비하는 중입니다. 저장소 접근을 기다릴 수 있습니다.",
+      "execution": "세션을 생성하고 설정 스크립트 및/또는 에이전트를 시작하는 중입니다.",
+      "finalizing": "생성 완료 상태를 저장하는 중입니다."
+    },
+    "states": {
+      "complete": "완료",
+      "running": "진행 중",
+      "failed": "실패",
+      "pending": "시작 전",
+      "lastReported": "마지막 보고",
+      "unknown": "알 수 없음"
+    }
   },
   "metricsDiskAlerts": {
     "warning": "디스크 공간 부족",

@@ -1,16 +1,10 @@
-# Implementation plan: Global Search
+# Implementation plan — workspace creation progress
 
-1. Follow the workspace-provisioned SpecKit commands; their exact artifact root
-   is `../homelab/specs/vk/8f5e-global-search`. These are Vibe Kanban task documents,
-   not changes to another service. Carry forward `../PRIOR_KNOWLEDGE.md`.
-2. Add bounded read-only local search for workspace metadata and stored chat
-   turn prompts/final assistant messages, without reconstructing execution logs.
-3. Add membership-scoped remote search for organizations, projects and workspaces.
-4. Add a shared global search dialog and API aggregation, using authenticated
-   remote and local/relay transports. Show unavailable sources explicitly.
-5. Integrate a search button into both shells with a keyboard shortcut. Preserve
-   org/project/host/session context during result navigation.
-6. Test contracts and rendered behavior; install dependencies, format, run checks
-   and lint, and obtain independent Codex diff review; address findings.
-7. Record reusable knowledge and validation, commit task documents and code, open
-   and merge PRs against the actual repository base branches.
+1. Preserve existing queued/running/ready/failed lifecycle and background ownership.
+2. Add bounded, durable workspace-scoped phase reporting and an authenticated read endpoint. Terminal lifecycle state overrides stale phase activity.
+3. Instrument real creation boundaries: repository association, attachments/context, placement, worktree/configuration preparation, and initial execution startup.
+4. Extend the shared creation status view with ordered steps, current work, accessible statuses, and truthful unavailable/failed fallbacks. Poll only while pending and preserve ready navigation.
+5. Add lifecycle and UI regression coverage, regenerate shared types, install dependencies, format and run applicable checks.
+6. Independently review the diff with Codex, resolve significant findings, record reusable knowledge, commit and open/merge PRs.
+
+SpecKit artifacts follow the workspace-provisioned command paths under `homelab/specs/vk/855b-show-the-steps-w/`; product code remains in `vibe-kanban`. No other service changes are planned.

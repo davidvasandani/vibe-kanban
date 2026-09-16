@@ -1,37 +1,20 @@
-# Technical specification: Global Search
+# Workspace creation progress
 
-Provide one globally accessible search experience across organizations, projects,
-workspaces, and persisted chat content available to the current user. Results must
-identify their category and context and navigate to the corresponding entity or
-conversation. Search must not depend on the currently selected organization or
-project and must preserve existing authorization boundaries.
+Task: vk/855b-show-the-steps-w
 
-Use the existing application shell and dialog conventions. Support keyboard and
-pointer use, debounced queries, loading, empty, error and partial-failure states.
-Match names and chat text case-insensitively using literal search terms. Do not
-search tool output, credentials, or raw execution logs as conversational messages.
-Bound server work and response sizes; do not download all chat transcripts into
-the browser. Empty queries perform no expensive search. Stale responses must not
-replace newer results. Include archived workspaces where accessible, and label
-context clearly. No other service or deployment changes are in scope.
+## Problem and outcome
+The workspace creation view currently shows a spinner with no explanation of the work taking place. Display actual creation steps and background activity while the existing asynchronous creation operation runs, including after navigation away and return.
 
-Inspect existing local/remote ownership before selecting endpoint locations.
-Reuse existing identity and navigation mechanisms. Add regression coverage for
-matching, authorization, result bounds and navigation as applicable; run repository
-format, checks and lint, followed by independent Codex review. Document limitations
-and reusable knowledge before opening and merging the pull request.
+## Requirements
+- Show ordered creation steps, distinguishing waiting, running, completed, and failed states from backend evidence.
+- Identify the current background work (repository preparation, workspace configuration, and agent startup as supported by the existing creation flow).
+- Preserve request-independent creation, single-consumer claiming, existing error reporting, and ready-state navigation.
+- Keep progress scoped to the workspace, readable in narrow layouts, and accessible.
+- Do not expose shell output, credentials, or invented percentage completion.
+- Scope changes to the Vibe Kanban repository; deployment changes only if required for this feature.
 
-## Implemented contract
+## Technical approach
+Inspect the existing durable creation lifecycle and extend its observable state with bounded step information. Reuse existing authenticated workspace reads or a workspace-scoped progress endpoint, and existing frontend query conventions. Persist enough progress for reload/reconnect; terminal failure must stop any running indicators.
 
-Global Search is available in both app rails, mobile navigation drawers, and
-Ctrl/Cmd+Shift+F. Queries are debounced 250 ms and accept 2–200 characters.
-`/api/global-search` searches workspace names/branches and persisted chat prompts
-and final replies using Unicode matching. `/v1/global-search` searches remote
-metadata using membership and workspace-owner filters. Results are capped at 20
-per category per source; database work has a three-second deadline and frontend
-aggregation a twelve-second deadline independent of transport cancellation.
-
-Search spans authorized online hosts and reports unavailable sources. Direct
-workspace hits retain host/session navigation and cloud parent context; cloud-only
-workspace hits explicitly open linked issue/project context. Raw execution logs,
-intermediate assistant commentary and tool output are outside chat coverage.
+## Acceptance and verification
+Exercise slow creation, navigation/reload, successful handoff, failure, and recovery after restart. Add focused backend lifecycle and frontend projection tests, regenerate any shared contracts, and run repository formatting and applicable checks. Complete SpecKit artifacts, independent Codex review, knowledge-base update, then open and merge the task PR.

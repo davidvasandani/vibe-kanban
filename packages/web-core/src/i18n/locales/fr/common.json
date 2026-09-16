@@ -627,7 +627,39 @@
     "creatingTitle": "Création de l’espace de travail…",
     "creatingBody": "Vous pouvez quitter cette page. La création continuera en arrière-plan.",
     "failedTitle": "Échec de la création de l’espace de travail",
-    "failedFallback": "Créez un nouvel espace de travail pour réessayer."
+    "failedFallback": "Créez un nouvel espace de travail pour réessayer.",
+    "queued": "En attente du début de la création…",
+    "loading": "En attente des détails de progression…",
+    "unavailable": "Progression indisponible. La création peut continuer ; reconnexion automatique.",
+    "stopped": "La création est arrêtée. La dernière étape signalée apparaît ci-dessous.",
+    "opening": "Création terminée. Ouverture de l’espace de travail…",
+    "backgroundTask": "Dernière tâche en arrière-plan signalée : {{task}}",
+    "stepsLabel": "Étapes de création de l’espace de travail",
+    "lastReported": "Dernière mise à jour : {{time}}",
+    "steps": {
+      "repositories": "Associer les dépôts",
+      "context": "Préparer les pièces jointes et le contexte",
+      "placement": "Choisir le lieu d’exécution",
+      "worktrees": "Préparer les arbres de travail et la configuration",
+      "execution": "Lancer les scripts de préparation et l’agent",
+      "finalizing": "Finaliser l’espace de travail"
+    },
+    "tasks": {
+      "repositories": "Enregistrement des dépôts sélectionnés.",
+      "context": "Préparation des pièces jointes et import du contexte disponible.",
+      "placement": "Choix et réservation du lieu d’exécution.",
+      "worktrees": "Préparation des arbres de travail et fichiers ; peut attendre l’accès au dépôt.",
+      "execution": "Création de la session et démarrage des scripts de préparation et/ou de l’agent.",
+      "finalizing": "Enregistrement de la fin de création."
+    },
+    "states": {
+      "complete": "Terminé",
+      "running": "En cours",
+      "failed": "Échec",
+      "pending": "Non commencé",
+      "lastReported": "Dernier signalement",
+      "unknown": "Inconnu"
+    }
   },
   "metricsDiskAlerts": {
     "warning": "Espace disque faible",
