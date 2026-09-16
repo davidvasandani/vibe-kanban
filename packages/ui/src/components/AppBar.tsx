@@ -7,6 +7,7 @@ import {
 import type { ReactNode } from 'react';
 import {
   LayoutIcon,
+  MagnifyingGlassIcon,
   DownloadSimpleIcon,
   LinkIcon,
   PlusIcon,
@@ -66,6 +67,7 @@ interface AppBarProps {
   onOpenSettings?: () => void;
   /** Opens the command bar from the bottom utility cluster. */
   onOpenCommandBar?: () => void;
+  onOpenGlobalSearch?: () => void;
   starCount?: number | null;
   onlineCount?: number | null;
   appVersion?: string | null;
@@ -223,6 +225,7 @@ export function AppBar({
   orgSlot,
   onOpenSettings,
   onOpenCommandBar,
+  onOpenGlobalSearch,
   updateVersion,
   onUpdateClick,
 }: AppBarProps) {
@@ -537,6 +540,18 @@ export function AppBar({
 
       {/* Bottom section: Settings + Command bar + Notifications + User popover */}
       <div className="mt-auto pt-base flex flex-col items-center gap-4">
+        {onOpenGlobalSearch && (
+          <Tooltip content="Global Search (Ctrl/⌘ Shift F)" side="right">
+            <button
+              type="button"
+              onClick={onOpenGlobalSearch}
+              className={getStandardAppBarButtonClassName({})}
+              aria-label="Global Search"
+            >
+              <MagnifyingGlassIcon className="size-icon-base" weight="bold" />
+            </button>
+          </Tooltip>
+        )}
         {onOpenCommandBar && (
           <Tooltip content="Command bar" side="right">
             <button

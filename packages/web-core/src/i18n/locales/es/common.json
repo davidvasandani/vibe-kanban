@@ -632,12 +632,6 @@
   "metricsDiskAlerts": {
     "warning": "Poco espacio en disco",
     "critical": "Espacio en disco crítico",
-    "available": "disponible",
-    "used": "usado",
-    "resolving": "Resolviendo el problema…",
-    "action": "Crear o abrir una incidencia de remediación",
-    "noProject": "Vincula este espacio de trabajo a un proyecto para crear una incidencia.",
-    "resolveFailed": "No se pudo resolver la incidencia de poco espacio en disco: {{error}}",
     "nodeCount_one": "{{severity}} · {{count}} nodo",
     "nodeCount_other": "{{severity}} · {{count}} nodos"
   },

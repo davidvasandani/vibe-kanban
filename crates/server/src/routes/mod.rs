@@ -16,6 +16,7 @@ pub mod attachments;
 pub mod events;
 pub mod execution_processes;
 pub mod frontend;
+pub mod global_search;
 pub mod health;
 pub mod host_relay;
 pub mod mcp_auth;
@@ -67,6 +68,7 @@ pub fn router(
         .merge(workers::worker_router(&deployment))
         .merge(scratch::router(&deployment))
         .merge(search::router(&deployment))
+        .merge(global_search::router())
         .merge(preview::api_router())
         .merge(releases::router())
         .merge(sessions::router(&deployment))

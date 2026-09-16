@@ -1,3 +1,7 @@
+import {
+  GlobalSearchDialog,
+  useGlobalSearchShortcut,
+} from '@/shared/dialogs/global-search/GlobalSearchDialog';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DropResult } from '@hello-pangea/dnd';
 import { Outlet, useNavigate, useParams } from '@tanstack/react-router';
@@ -78,6 +82,8 @@ export function SharedAppLayout() {
   const { data: onlineCount } = useDiscordOnlineCount();
   const { data: starCount } = useGitHubStars();
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  useGlobalSearchShortcut(useCallback(() => setSearchOpen(true), []));
   const [isAppBarHovered, setIsAppBarHovered] = useState(false);
   const { hosts: remoteCloudHosts } = useRemoteCloudHostsAppBarModel();
   const { hostId: routeHostId } = useParams({ strict: false });
@@ -315,6 +321,18 @@ export function SharedAppLayout() {
 
   return (
     <SyncErrorProvider>
+      <GlobalSearchDialog
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        local
+        remote={isSignedIn}
+        onSelectOrganization={(id) => {
+          // Search owns the destination; suppress the org switcher's default redirect.
+          prevOrgIdRef.current = id;
+          setSelectedOrgId(id);
+        }}
+      />
+
       <div
         className={cn(
           'bg-primary',
@@ -358,6 +376,7 @@ export function SharedAppLayout() {
             />
             {/* Desktop AppBar sidebar. */}
             <AppBar
+              onOpenGlobalSearch={() => setSearchOpen(true)}
               projects={orderedProjects}
               hosts={remoteCloudHosts}
               activeHostId={activeHostId}
@@ -467,6 +486,16 @@ export function SharedAppLayout() {
           onClose={() => setIsDrawerOpen(false)}
         >
           <div className="flex flex-col h-full">
+            <button
+              type="button"
+              className="p-4 text-left text-high border-b border-border"
+              onClick={() => {
+                setIsDrawerOpen(false);
+                setSearchOpen(true);
+              }}
+            >
+              Global Search
+            </button>
             {/* Header: org name + org switcher + close button */}
             <div className="flex items-center justify-between p-4 border-b border-border gap-2">
               <div className="flex items-center gap-1 min-w-0 flex-1">
