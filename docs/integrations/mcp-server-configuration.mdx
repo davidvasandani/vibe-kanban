@@ -38,14 +38,14 @@ You can add the same template more than once. The first instance takes the templ
 The generic Slack template installs a pinned build of the
 [davidvasandani/slack-mcp-server](https://github.com/davidvasandani/slack-mcp-server)
 fork rather than the upstream npm package, because the fork adds attachment
-retrieval:
+retrieval and complete Block Kit message reads:
 
 ```json
 {
   "command": "npx",
   "args": [
     "-y",
-    "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz",
+    "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.3/slack-mcp-server-vk-1.3.0-vk.3.tgz",
     "--transport",
     "stdio"
   ],
@@ -53,13 +53,14 @@ retrieval:
 }
 ```
 
-Release **v1.3.0-vk.2** is based on upstream 1.3.0 and includes fork commit
-`04633fb892dc6dd38c3faffe29ff9b30829560c6`. The tarball is a launcher: it
+Release **v1.3.0-vk.3** is based on upstream 1.3.0 and includes fork commit
+`f1a548e`. The tarball is a launcher: it
 downloads the server binary for your platform from that same release, verifies
 it against a SHA-256 recorded at build time, caches it, and runs it. A
 verification failure is fatal — the connector never falls back to a different
 build. Paste your Slack user token (`xoxp-…`) in place of `YOUR_TOKEN` when
-using this local stdio form.
+using this local stdio form. Grant `users:read.email` and reinstall your app to
+enable profile email lookup; missing permission returns an explicit error.
 
 Clustered self-hosted deployments can instead set
 `VIBE_KANBAN_SLACK_MCP_URL` to one operator-hosted Streamable HTTP endpoint.
