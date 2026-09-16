@@ -126,6 +126,48 @@ it('lets the shell coordinate an organization change before navigating a result'
   expect(selectOrg).toHaveBeenCalledWith('org');
 });
 
+it('shows issue IDs in their own group and coordinates selection', async () => {
+  const selectOrg = vi.fn();
+  vi.mocked(searchGlobally).mockResolvedValue({
+    results: [
+      {
+        kind: 'issue',
+        id: 'issue-id',
+        title: 'Searching by Issue ID should work',
+        context: 'VAS-602 · Vibe Kanban / Vibe Kanban',
+        snippet: '',
+        archived: false,
+        project_id: 'project-id',
+        issue_id: 'issue-id',
+        organization_id: 'org-id',
+      },
+    ],
+    truncated: false,
+    unavailable: [],
+  });
+  act(() =>
+    root.render(
+      <GlobalSearchDialog
+        open
+        onOpenChange={vi.fn()}
+        local
+        remote
+        onSelectOrganization={selectOrg}
+      />
+    )
+  );
+  typeQuery('vas-602');
+  await act(async () => vi.advanceTimersByTimeAsync(250));
+  expect(document.body.textContent).toContain('Issues');
+  expect(document.body.textContent).toContain(
+    'Searching by Issue ID should work'
+  );
+  expect(document.body.textContent).toContain('VAS-602');
+  const item = document.querySelector<HTMLElement>('[cmdk-item]')!;
+  act(() => item.click());
+  expect(selectOrg).toHaveBeenCalledWith('org-id');
+});
+
 it('opens from Ctrl+Shift+F without intercepting ordinary browser find', () => {
   const open = vi.fn();
   function Shortcut() {

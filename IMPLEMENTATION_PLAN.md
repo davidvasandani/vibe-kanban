@@ -1,16 +1,21 @@
-# Implementation plan: Global Search
+# Implementation Plan: Search by Issue ID
 
-1. Follow the workspace-provisioned SpecKit commands; their exact artifact root
-   is `../homelab/specs/vk/8f5e-global-search`. These are Vibe Kanban task documents,
-   not changes to another service. Carry forward `../PRIOR_KNOWLEDGE.md`.
-2. Add bounded read-only local search for workspace metadata and stored chat
-   turn prompts/final assistant messages, without reconstructing execution logs.
-3. Add membership-scoped remote search for organizations, projects and workspaces.
-4. Add a shared global search dialog and API aggregation, using authenticated
-   remote and local/relay transports. Show unavailable sources explicitly.
-5. Integrate a search button into both shells with a keyboard shortcut. Preserve
-   org/project/host/session context during result navigation.
-6. Test contracts and rendered behavior; install dependencies, format, run checks
-   and lint, and obtain independent Codex diff review; address findings.
-7. Record reusable knowledge and validation, commit task documents and code, open
-   and merge PRs against the actual repository base branches.
+1. Inspect the current remote global-search SQL, result contract, frontend
+   aggregation/rendering, route construction, and focused test harnesses.
+2. Add membership-scoped issue rows to remote global search, matching the
+   human-readable `simple_id`, returning the issue UUID and owning project UUID,
+   and participating in the existing per-category cap/truncation behavior.
+3. Extend the frontend result kind and Global Search dialog with an Issues
+   group whose result text exposes both `simple_id` and title and whose selection
+   uses the existing organization coordination and issue-detail route builder.
+4. Add regression coverage for case-insensitive issue-ID matching,
+   authorization boundaries, result limits, issue rendering, organization
+   selection, and issue-detail navigation.
+5. Run focused frontend and backend/SQL tests, then repository formatting and
+   proportionate type/lint checks; address regressions.
+6. Run the required independent Codex diff review and iterate until it has no
+   significant findings.
+7. Update the Global Search knowledge-base page and index with reusable lessons,
+   tag it with `vk/b1df-searching-by-iss`, and commit the knowledge-base update.
+8. Commit the implementation, push the task branch, open a pull request against
+   the repository base branch, wait for required checks as needed, and merge it.

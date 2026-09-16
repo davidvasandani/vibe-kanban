@@ -595,3 +595,10 @@ than create a parallel optimistic message store), IV (keep the fix in shared
 (retain snapshot authority and rehydration), and XXXV (enforce session identity
 when reconciling the returned process). No new principle or version change is
 required.
+
+`vk/b1df-searching-by-iss`: reaffirm II (test authorization, matching, display,
+and routing), III/VI (extend the existing global-search result envelope and
+route builder), IV (keep shared dialog behavior in `web-core`), VII (display
+the human-readable `simple_id` while routing by UUID), and XXXV (scope issue
+results to their own organization and project identities). No new principle or
+version change is required.
