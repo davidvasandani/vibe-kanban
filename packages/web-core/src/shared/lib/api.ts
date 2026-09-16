@@ -87,6 +87,7 @@ import {
   Session,
   Workspace,
   WorkspacePlacement,
+  WorkspaceCreationProgress,
   UpdateWorkspaceAffinityRequest,
   WorkspaceAffinityUpdateResponse,
   WorkerNode,
@@ -487,6 +488,15 @@ export const workspacesApi = {
   get: async (workspaceId: string): Promise<Workspace> => {
     const response = await makeRequest(`/api/workspaces/${workspaceId}`);
     return handleApiResponse<Workspace>(response);
+  },
+
+  getCreationProgress: async (
+    workspaceId: string
+  ): Promise<WorkspaceCreationProgress> => {
+    const response = await makeRequest(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/creation-progress`
+    );
+    return handleApiResponse<WorkspaceCreationProgress>(response);
   },
 
   getPlacement: async (workspaceId: string): Promise<WorkspacePlacement> => {

@@ -9,6 +9,7 @@ use db::models::{
     },
     worker_node::WorkerNode,
     workspace::{CreateWorkspace, Workspace, WorkspacePlacement},
+    workspace_creation_progress::{WorkspaceCreationPhase, WorkspaceCreationProgress},
 };
 use deployment::Deployment;
 use executors::profile::ExecutorConfig;
@@ -305,6 +306,12 @@ async fn run_create_and_start_workspace(
     attachment_ids: Option<Vec<Uuid>>,
     placement_intent: PlacementIntent,
 ) -> Result<(), ApiError> {
+    WorkspaceCreationProgress::report(
+        &deployment.db().pool,
+        workspace.id,
+        WorkspaceCreationPhase::Repositories,
+    )
+    .await;
     let mut managed_workspace = deployment
         .workspace_manager()
         .load_managed_workspace(workspace)
@@ -317,6 +324,12 @@ async fn run_create_and_start_workspace(
             .map_err(ApiError::from)?;
     }
 
+    WorkspaceCreationProgress::report(
+        &deployment.db().pool,
+        managed_workspace.workspace.id,
+        WorkspaceCreationPhase::Context,
+    )
+    .await;
     if let Some(ids) = &attachment_ids {
         managed_workspace.associate_attachments(ids).await?;
     }
@@ -406,6 +419,12 @@ async fn run_create_and_start_workspace(
 
     let workspace = managed_workspace.workspace.clone();
 
+    WorkspaceCreationProgress::report(
+        &deployment.db().pool,
+        workspace.id,
+        WorkspaceCreationPhase::Placement,
+    )
+    .await;
     if deployment.cluster_config().enabled && placement_intent != PlacementIntent::Coordinator {
         let workers = WorkerNode::fetch_all(&deployment.db().pool).await?;
         let executor_profile = executor_config.profile_id().to_string();
@@ -445,6 +464,12 @@ async fn run_create_and_start_workspace(
         .start_workspace(&workspace, executor_config.clone(), workspace_prompt)
         .await?;
 
+    WorkspaceCreationProgress::report(
+        &deployment.db().pool,
+        workspace.id,
+        WorkspaceCreationPhase::Finalizing,
+    )
+    .await;
     deployment
         .track_if_analytics_allowed(
             "workspace_created_and_started",

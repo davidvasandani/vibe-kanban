@@ -19,4 +19,5 @@ pub mod tag;
 pub mod task;
 pub mod worker_node;
 pub mod workspace;
+pub mod workspace_creation_progress;
 pub mod workspace_repo;

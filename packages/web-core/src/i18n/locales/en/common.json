@@ -627,7 +627,39 @@
     "creatingTitle": "Creating workspace…",
     "creatingBody": "You can navigate away. Creation will continue in the background.",
     "failedTitle": "Workspace creation failed",
-    "failedFallback": "Create a new workspace to try again."
+    "failedFallback": "Create a new workspace to try again.",
+    "queued": "Waiting for creation to start…",
+    "loading": "Waiting for progress details…",
+    "unavailable": "Progress updates are unavailable. Creation may still be running; reconnecting automatically.",
+    "stopped": "Creation stopped. The last reported step is shown below.",
+    "opening": "Creation complete. Opening workspace…",
+    "backgroundTask": "Last reported background task: {{task}}",
+    "stepsLabel": "Workspace creation steps",
+    "lastReported": "Last update: {{time}}",
+    "steps": {
+      "repositories": "Associate repositories",
+      "context": "Prepare attachments and context",
+      "placement": "Select execution location",
+      "worktrees": "Prepare worktrees and configuration",
+      "execution": "Launch setup scripts and agent",
+      "finalizing": "Finalize workspace"
+    },
+    "tasks": {
+      "repositories": "Registering the selected repositories.",
+      "context": "Preparing attachments and importing available issue/project context.",
+      "placement": "Choosing and reserving the execution location.",
+      "worktrees": "Preparing repository worktrees and workspace files; this may wait for repository access.",
+      "execution": "Creating the session and starting configured setup scripts and/or the coding agent.",
+      "finalizing": "Saving the completed creation state."
+    },
+    "states": {
+      "complete": "Complete",
+      "running": "Running",
+      "failed": "Failed",
+      "pending": "Not started",
+      "lastReported": "Last reported",
+      "unknown": "Unknown"
+    }
   },
   "metricsDiskAlerts": {
     "warning": "Low disk",

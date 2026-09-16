@@ -627,7 +627,39 @@
     "creatingTitle": "Creando espacio de trabajo…",
     "creatingBody": "Puedes salir de esta página. La creación continuará en segundo plano.",
     "failedTitle": "No se pudo crear el espacio de trabajo",
-    "failedFallback": "Crea un nuevo espacio de trabajo para intentarlo de nuevo."
+    "failedFallback": "Crea un nuevo espacio de trabajo para intentarlo de nuevo.",
+    "queued": "Esperando el inicio de la creación…",
+    "loading": "Esperando detalles del progreso…",
+    "unavailable": "El progreso no está disponible. La creación puede continuar; se reconectará automáticamente.",
+    "stopped": "La creación se detuvo. Abajo se muestra el último paso registrado.",
+    "opening": "Creación completada. Abriendo el espacio de trabajo…",
+    "backgroundTask": "Última tarea en segundo plano registrada: {{task}}",
+    "stepsLabel": "Pasos de creación del espacio de trabajo",
+    "lastReported": "Última actualización: {{time}}",
+    "steps": {
+      "repositories": "Asociar repositorios",
+      "context": "Preparar adjuntos y contexto",
+      "placement": "Seleccionar ubicación de ejecución",
+      "worktrees": "Preparar árboles de trabajo y configuración",
+      "execution": "Iniciar scripts de preparación y agente",
+      "finalizing": "Finalizar espacio de trabajo"
+    },
+    "tasks": {
+      "repositories": "Registrando los repositorios seleccionados.",
+      "context": "Preparando adjuntos e importando el contexto disponible.",
+      "placement": "Eligiendo y reservando la ubicación de ejecución.",
+      "worktrees": "Preparando árboles de trabajo y archivos; puede esperar al acceso al repositorio.",
+      "execution": "Creando la sesión e iniciando scripts de preparación y/o el agente.",
+      "finalizing": "Guardando el estado de creación completada."
+    },
+    "states": {
+      "complete": "Completado",
+      "running": "En curso",
+      "failed": "Fallido",
+      "pending": "Sin iniciar",
+      "lastReported": "Último registro",
+      "unknown": "Desconocido"
+    }
   },
   "metricsDiskAlerts": {
     "warning": "Poco espacio en disco",

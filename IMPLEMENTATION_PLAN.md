@@ -1,21 +1,10 @@
-# Implementation Plan: Search by Issue ID
+# Implementation plan — workspace creation progress
 
-1. Inspect the current remote global-search SQL, result contract, frontend
-   aggregation/rendering, route construction, and focused test harnesses.
-2. Add membership-scoped issue rows to remote global search, matching the
-   human-readable `simple_id`, returning the issue UUID and owning project UUID,
-   and participating in the existing per-category cap/truncation behavior.
-3. Extend the frontend result kind and Global Search dialog with an Issues
-   group whose result text exposes both `simple_id` and title and whose selection
-   uses the existing organization coordination and issue-detail route builder.
-4. Add regression coverage for case-insensitive issue-ID matching,
-   authorization boundaries, result limits, issue rendering, organization
-   selection, and issue-detail navigation.
-5. Run focused frontend and backend/SQL tests, then repository formatting and
-   proportionate type/lint checks; address regressions.
-6. Run the required independent Codex diff review and iterate until it has no
-   significant findings.
-7. Update the Global Search knowledge-base page and index with reusable lessons,
-   tag it with `vk/b1df-searching-by-iss`, and commit the knowledge-base update.
-8. Commit the implementation, push the task branch, open a pull request against
-   the repository base branch, wait for required checks as needed, and merge it.
+1. Preserve existing queued/running/ready/failed lifecycle and background ownership.
+2. Add bounded, durable workspace-scoped phase reporting and an authenticated read endpoint. Terminal lifecycle state overrides stale phase activity.
+3. Instrument real creation boundaries: repository association, attachments/context, placement, worktree/configuration preparation, and initial execution startup.
+4. Extend the shared creation status view with ordered steps, current work, accessible statuses, and truthful unavailable/failed fallbacks. Poll only while pending and preserve ready navigation.
+5. Add lifecycle and UI regression coverage, regenerate shared types, install dependencies, format and run applicable checks.
+6. Independently review the diff with Codex, resolve significant findings, record reusable knowledge, commit and open/merge PRs.
+
+SpecKit artifacts follow the workspace-provisioned command paths under `homelab/specs/vk/855b-show-the-steps-w/`; product code remains in `vibe-kanban`. No other service changes are planned.

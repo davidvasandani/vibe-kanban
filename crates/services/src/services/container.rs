@@ -26,6 +26,7 @@ use db::{
         repo::Repo,
         session::{CreateSession, Session, SessionError},
         workspace::{Workspace, WorkspaceError},
+        workspace_creation_progress::{WorkspaceCreationPhase, WorkspaceCreationProgress},
         workspace_repo::WorkspaceRepo,
     },
 };
@@ -1889,8 +1890,20 @@ pub trait ContainerService {
         executor_config: ExecutorConfig,
         prompt: String,
     ) -> Result<ExecutionProcess, ContainerError> {
+        WorkspaceCreationProgress::report(
+            &self.db().pool,
+            workspace.id,
+            WorkspaceCreationPhase::Worktrees,
+        )
+        .await;
         // Create container
         self.create(workspace).await?;
+        WorkspaceCreationProgress::report(
+            &self.db().pool,
+            workspace.id,
+            WorkspaceCreationPhase::Execution,
+        )
+        .await;
 
         let repos = WorkspaceRepo::find_repos_for_workspace(&self.db().pool, workspace.id).await?;
 

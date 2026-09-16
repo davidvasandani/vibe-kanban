@@ -52,6 +52,30 @@ On the self-hosted coordinator, the active database is `db.v2.sqlite`; retained
 service's file descriptors rather than assuming the first matching filename is
 current.
 
+## Creation progress is boundary evidence
+
+The workspace remains the creation operation identity. Its queued/running/ready/
+failed lifecycle is authoritative; the separate `workspace_creation_progress`
+row stores only the last reported ordered phase and timestamp. Read them together
+with one LEFT JOIN through `/api/workspaces/{id}/creation-progress` so terminal
+failure or restart overrides stale phase activity. Rows cascade with workspace
+deletion, and reports can only advance while the lifecycle is running.
+
+Report at existing workflow boundaries, without adding retries of provisioning:
+repository association, context preparation, placement, container/worktree
+creation, initial execution launch, and finalization. `start_workspace` may launch
+sequential setup scripts before the coding agent; launch is not proof that setup
+or the agent's work has completed. Reporting is best effort and must never fail
+or replay the real operation.
+
+Progress queries belong to the creation guard and include both host and workspace
+in their cache key. Poll only pending operations; ordinary workspace reads still
+own ready-state handoff. Render missing historical evidence as unknown, not as
+proof that a phase never started. A failed read may retain last-reported evidence,
+but must stop presenting it as verified current activity. Test navigation,
+rehydration, missing legacy rows, failed snapshots, and restart recovery.
+
 ## Contributed by
 
 - `vk/40fb-workspace-creati`
+- `vk/855b-show-the-steps-w`

@@ -627,7 +627,39 @@
     "creatingTitle": "正在创建工作区…",
     "creatingBody": "你可以离开此页面，创建过程将在后台继续。",
     "failedTitle": "工作区创建失败",
-    "failedFallback": "请创建新的工作区后重试。"
+    "failedFallback": "请创建新的工作区后重试。",
+    "queued": "正在等待开始创建…",
+    "loading": "正在等待进度详情…",
+    "unavailable": "进度更新不可用。创建可能仍在进行，将自动重新连接。",
+    "stopped": "创建已停止。下方显示最后报告的步骤。",
+    "opening": "创建完成。正在打开工作区…",
+    "backgroundTask": "最后报告的后台任务：{{task}}",
+    "stepsLabel": "工作区创建步骤",
+    "lastReported": "最后更新：{{time}}",
+    "steps": {
+      "repositories": "关联仓库",
+      "context": "准备附件和上下文",
+      "placement": "选择执行位置",
+      "worktrees": "准备工作树和配置",
+      "execution": "启动设置脚本和代理",
+      "finalizing": "完成工作区创建"
+    },
+    "tasks": {
+      "repositories": "正在注册所选仓库。",
+      "context": "正在准备附件并导入可用的上下文。",
+      "placement": "正在选择并预留执行位置。",
+      "worktrees": "正在准备工作树和文件，可能需要等待仓库访问权限。",
+      "execution": "正在创建会话并启动配置的设置脚本和/或编程代理。",
+      "finalizing": "正在保存创建完成状态。"
+    },
+    "states": {
+      "complete": "已完成",
+      "running": "进行中",
+      "failed": "失败",
+      "pending": "未开始",
+      "lastReported": "最后报告",
+      "unknown": "未知"
+    }
   },
   "metricsDiskAlerts": {
     "warning": "磁盘空间不足",
