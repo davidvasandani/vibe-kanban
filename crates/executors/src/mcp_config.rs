@@ -206,6 +206,22 @@ pub async fn write_scoped_codex_config(
         authorized_directory,
     } = mode
     {
+        // A shared state DB records absolute rollout paths through CODEX_HOME.
+        // Those aliases disappear when the worker removes this execution home.
+        // Keep the index (including its WAL/SHM files) private, while the worker
+        // continues linking persistent rollouts and authentication. The pinned
+        // Codex config schema supports sqlite_home ahead of CODEX_SQLITE_HOME.
+        let sqlite_home = target
+            .parent()
+            .ok_or(CodexConfigError::Write)?
+            .join("sqlite");
+        if !sqlite_home.is_absolute() {
+            return Err(CodexConfigError::Write);
+        }
+        document.insert(
+            "sqlite_home".into(),
+            toml::Value::String(sqlite_home.to_str().ok_or(CodexConfigError::Write)?.into()),
+        );
         let key = authorized_directory
             .to_str()
             .ok_or(CodexConfigError::Trust)?;
@@ -1500,6 +1516,47 @@ mod tests {
 #[cfg(test)]
 mod scoped_codex_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn scoped_sqlite_index_overrides_shared_home_and_survives_refresh() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("config.toml");
+        let source_content = "sqlite_home = '/persistent/shared-index'\nmodel = 'keep'\n";
+        fs::write(&source, source_content).await.unwrap();
+        for execution in ["first", "second"] {
+            let target = root.path().join(execution).join("config.toml");
+            write_scoped_codex_config(
+                &source,
+                &target,
+                CodexConfigMode::Initial {
+                    authorized_directory: root.path(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            for refresh in [false, true] {
+                if refresh {
+                    write_scoped_codex_config(
+                        &target,
+                        &target,
+                        CodexConfigMode::Refresh,
+                        Some(&HashMap::new()),
+                    )
+                    .await
+                    .unwrap();
+                }
+                let config: toml::Table =
+                    fs::read_to_string(&target).await.unwrap().parse().unwrap();
+                assert_eq!(
+                    config["sqlite_home"].as_str(),
+                    target.parent().unwrap().join("sqlite").to_str()
+                );
+                assert_eq!(config["model"].as_str(), Some("keep"));
+            }
+        }
+        assert_eq!(fs::read_to_string(source).await.unwrap(), source_content);
+    }
 
     #[tokio::test]
     async fn native_preservation_isolation_and_refresh() {
