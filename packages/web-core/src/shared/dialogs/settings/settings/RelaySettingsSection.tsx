@@ -52,7 +52,12 @@ export function RelaySettingsSectionContent({
   const runtime = useAppRuntime();
 
   if (runtime === 'local') {
-    return <LocalRelaySettingsSectionContent onClose={onClose} />;
+    return (
+      <LocalRelaySettingsSectionContent
+        initialState={initialState}
+        onClose={onClose}
+      />
+    );
   }
 
   return (
@@ -187,7 +192,9 @@ function SignInPrompt() {
 
 function LocalRelaySettingsSectionContent({
   onClose,
+  initialState,
 }: {
+  initialState?: RelaySettingsSectionInitialState;
   onClose?: () => void;
 }) {
   const { t } = useTranslation(['settings', 'common']);
@@ -208,7 +215,9 @@ function LocalRelaySettingsSectionContent({
   const [enrollmentError, setEnrollmentError] = useState<string | null>(null);
   const [removingClientId, setRemovingClientId] = useState<string | null>(null);
   const [enrollmentCodeCopied, setEnrollmentCodeCopied] = useState(false);
-  const [selectedRole, setSelectedRole] = useState<RelayRole | null>(null);
+  const [selectedRole, setSelectedRole] = useState<RelayRole | null>(
+    initialState?.hostId ? 'client' : null
+  );
 
   const {
     data: pairedClients = [],
@@ -332,6 +341,15 @@ function LocalRelaySettingsSectionContent({
 
   return (
     <div className="space-y-8">
+      {isSignedIn ? (
+        <RemoteCloudHostsSettingsCardContent
+          initialHostId={initialState?.hostId}
+          showPairing={selectedRole === 'client'}
+          onClose={onClose}
+        />
+      ) : (
+        <SignInPrompt />
+      )}
       <RelayRoleChooser
         selectedRole={selectedRole}
         onSelect={(role) => setSelectedRole(role)}
@@ -581,28 +599,6 @@ function LocalRelaySettingsSectionContent({
                 </div>
               )}
             </div>
-          )}
-        </SettingsCard>
-      )}
-
-      {selectedRole === 'client' && (
-        <SettingsCard
-          title={t('settings.relay.client.panelTitle', 'Connect to a host')}
-          headerAction={
-            <a
-              href={RELAY_REMOTE_CONTROL_DOCS_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="text-sm text-brand hover:underline"
-            >
-              {t('settings.relay.docsLink', 'Read docs')}
-            </a>
-          }
-        >
-          {isSignedIn ? (
-            <RemoteCloudHostsSettingsCardContent onClose={onClose} />
-          ) : (
-            <SignInPrompt />
           )}
         </SettingsCard>
       )}
