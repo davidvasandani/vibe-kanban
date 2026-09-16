@@ -1,4 +1,8 @@
 import {
+  GlobalSearchDialog,
+  useGlobalSearchShortcut,
+} from "@/shared/dialogs/global-search/GlobalSearchDialog";
+import {
   useCallback,
   useEffect,
   useMemo,
@@ -56,6 +60,8 @@ function getHostInitials(name: string): string {
 
 export function RemoteAppShell({ children }: RemoteAppShellProps) {
   const navigate = useNavigate();
+  const [searchOpen, setSearchOpen] = useState(false);
+  useGlobalSearchShortcut(useCallback(() => setSearchOpen(true), []));
   const location = useLocation();
   const { hostId: routeHostId } = useParams({ strict: false });
   const { isSignedIn } = useAuth();
@@ -266,6 +272,15 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
           : "h-screen",
       )}
     >
+      {isSignedIn && (
+        <GlobalSearchDialog
+          open={searchOpen}
+          onOpenChange={setSearchOpen}
+          local={false}
+          remote
+        />
+      )}
+
       {showCloudShutdownBanner && (
         <CloudShutdownExportBanner onClick={handleExportClick} />
       )}
@@ -273,6 +288,9 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
       <div className="flex min-h-0 flex-1">
         {!isMobile && (
           <AppBar
+            onOpenGlobalSearch={
+              isSignedIn ? () => setSearchOpen(true) : undefined
+            }
             projects={projects}
             hosts={relayHosts}
             onPairHostClick={isSignedIn ? handlePairHostClick : undefined}
@@ -351,6 +369,18 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
               </button>
             </div>
 
+            {isSignedIn && (
+              <button
+                type="button"
+                className="p-4 text-left text-high border-b border-border"
+                onClick={() => {
+                  setIsDrawerOpen(false);
+                  setSearchOpen(true);
+                }}
+              >
+                Global Search
+              </button>
+            )}
             {/* Home link */}
             <button
               type="button"

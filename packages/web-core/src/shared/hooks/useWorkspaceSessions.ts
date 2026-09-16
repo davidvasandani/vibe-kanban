@@ -1,3 +1,4 @@
+import { useLocation, useNavigate } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { sessionsApi } from '@/shared/lib/api';
@@ -37,6 +38,13 @@ export function useWorkspaceSessions(
   options: UseWorkspaceSessionsOptions = {}
 ): UseWorkspaceSessionsResult {
   const hostId = useHostId();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const searchStr = location.searchStr;
+  const requestedSessionId = new URLSearchParams(searchStr).get(
+    'searchSessionId'
+  );
+  const appliedSearchRef = useRef<string>();
   const { enabled = true } = options;
   const [selection, setSelection] = useState<SessionSelection | undefined>(
     undefined
@@ -58,16 +66,34 @@ export function useWorkspaceSessions(
 
     if (sessions.length > 0) {
       // Sessions are ordered by most recently used, so first is the most recently used
-      // Always select first session when sessions are available for this workspace
-      // Only preserve new session mode within the same workspace
+      // Preserve a valid explicit selection across refetches in the same workspace.
       setSelection((prev) => {
-        if (prev?.mode === 'new' && !workspaceChanged) return prev;
+        if (
+          !workspaceChanged &&
+          (prev?.mode === 'new' ||
+            (prev?.mode === 'existing' &&
+              sessions.some((s) => s.id === prev.sessionId)))
+        )
+          return prev;
         return { mode: 'existing', sessionId: sessions[0].id };
       });
     } else {
       setSelection(undefined);
     }
   }, [workspaceId, sessions]);
+
+  useEffect(() => {
+    const requestKey = `${hostId}:${workspaceId}:${requestedSessionId}`;
+    if (!requestedSessionId) {
+      appliedSearchRef.current = undefined;
+      return;
+    }
+    if (appliedSearchRef.current === requestKey) return;
+    if (sessions.some((session) => session.id === requestedSessionId)) {
+      appliedSearchRef.current = requestKey;
+      setSelection({ mode: 'existing', sessionId: requestedSessionId });
+    }
+  }, [hostId, workspaceId, requestedSessionId, sessions]);
 
   const isNewSessionMode = selection?.mode === 'new' || sessions.length === 0;
   const selectedSessionId =
@@ -78,19 +104,42 @@ export function useWorkspaceSessions(
     [sessions, selectedSessionId]
   );
 
-  const selectSession = useCallback((sessionId: string) => {
-    setSelection({ mode: 'existing', sessionId });
-  }, []);
+  const clearSearchSession = useCallback(() => {
+    if (!requestedSessionId) return;
+    const params = new URLSearchParams(searchStr);
+    params.delete('searchSessionId');
+    const query = params.toString();
+    void navigate({
+      href: `${location.pathname}${query ? `?${query}` : ''}${location.hash ? `#${location.hash}` : ''}`,
+      replace: true,
+    });
+  }, [
+    requestedSessionId,
+    searchStr,
+    location.pathname,
+    location.hash,
+    navigate,
+  ]);
+
+  const selectSession = useCallback(
+    (sessionId: string) => {
+      clearSearchSession();
+      setSelection({ mode: 'existing', sessionId });
+    },
+    [clearSearchSession]
+  );
 
   const selectLatestSession = useCallback(() => {
+    clearSearchSession();
     if (sessions.length > 0) {
       setSelection({ mode: 'existing', sessionId: sessions[0].id });
     }
-  }, [sessions]);
+  }, [sessions, clearSearchSession]);
 
   const startNewSession = useCallback(() => {
+    clearSearchSession();
     setSelection({ mode: 'new' });
-  }, []);
+  }, [clearSearchSession]);
 
   return {
     sessions,

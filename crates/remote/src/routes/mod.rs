@@ -31,6 +31,7 @@ pub(crate) mod electric_proxy;
 pub(crate) mod error;
 mod export;
 mod github_app;
+mod global_search;
 pub mod hosts;
 mod identity;
 pub mod issue_assignees;
@@ -122,6 +123,7 @@ pub fn router(state: AppState) -> Router {
         .merge(hosts::router())
         .merge(projects::router())
         .merge(organizations::router())
+        .merge(global_search::router())
         .merge(organization_env_vars::router())
         .merge(organization_members::protected_router())
         .merge(oauth::protected_router())

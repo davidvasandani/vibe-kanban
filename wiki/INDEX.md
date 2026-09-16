@@ -199,3 +199,6 @@ contributed to it.
   Repository-ID admin queue identity, bounded pre-operation lease contention
   waits, cancellation and fencing limits, original-code regression proof, and
   distinguishing rejected placement transitions from SQL failures.
+- [global-search.md](global-search.md) — Search across remote metadata and host
+  conversations: authorization, relay targeting, deadline isolation, Unicode
+  matching, historical session navigation and organization redirect coordination.
