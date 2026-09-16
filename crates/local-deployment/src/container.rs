@@ -769,6 +769,8 @@ fn dispatched_executor_profile(config: &ExecutorConfig) -> Option<ExecutorProfil
     })
 }
 
+type McpRefreshControls = Arc<RwLock<HashMap<Uuid, (Uuid, DateTime<Utc>, McpRefreshHandle)>>>;
+
 #[derive(Clone)]
 pub struct LocalContainerService {
     db: DBService,
@@ -792,7 +794,7 @@ pub struct LocalContainerService {
     /// the leak where a `Completed` turn row is skipped by `try_stop`. Phase 2,
     /// see `specs/vk/826e-coding-agent-war/`.
     warm_app_servers: Arc<RwLock<HashMap<Uuid, WarmAppServer>>>,
-    mcp_refresh_controls: Arc<RwLock<HashMap<Uuid, (Uuid, DateTime<Utc>, McpRefreshHandle)>>>,
+    mcp_refresh_controls: McpRefreshControls,
     mcp_refresh_coordinator: McpRefreshCoordinator,
     workspace_touch_times: Arc<RwLock<HashMap<Uuid, Instant>>>,
     config: Arc<RwLock<Config>>,
@@ -1015,8 +1017,8 @@ impl LocalContainerService {
                     tokio::time::timeout_at(discovery_deadline, handle.0.list_servers())
                         .await
                         .unwrap_or(Err(McpRefreshErrorCategory::Timeout));
-                if !controls.read().await.get(&session_id).is_some_and(
-                    |(current_execution_id, _, _)| *current_execution_id == execution_id,
+                if controls.read().await.get(&session_id).is_none_or(
+                    |(current_execution_id, _, _)| *current_execution_id != execution_id,
                 ) {
                     return;
                 }
