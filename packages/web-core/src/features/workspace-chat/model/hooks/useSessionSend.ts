@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import type { ExecutorConfig } from 'shared/types';
+import type { ExecutionProcess, ExecutorConfig } from 'shared/types';
 import { sessionsApi } from '@/shared/lib/api';
 import { useCreateSession } from './useCreateSession';
 
@@ -14,6 +14,8 @@ interface UseSessionSendOptions {
   onSelectSession?: (sessionId: string) => void;
   /** Unified executor config (executor + variant + overrides) */
   executorConfig?: ExecutorConfig | null;
+  /** Reconcile the process returned by a successful existing-session send. */
+  onFollowUpAccepted?: (process: ExecutionProcess) => void;
 }
 
 interface UseSessionSendResult {
@@ -42,6 +44,7 @@ export function useSessionSend({
   isNewSessionMode,
   onSelectSession,
   executorConfig,
+  onFollowUpAccepted,
 }: UseSessionSendOptions): UseSessionSendResult {
   const { mutateAsync: createSession, isPending: isCreatingSession } =
     useCreateSession();
@@ -85,13 +88,14 @@ export function useSessionSend({
         if (!sessionId) return false;
         setIsSendingFollowUp(true);
         try {
-          await sessionsApi.followUp(sessionId, {
+          const process = await sessionsApi.followUp(sessionId, {
             prompt: trimmed,
             executor_config: executorConfig,
             retry_process_id: null,
             force_when_dirty: null,
             perform_git_reset: null,
           });
+          onFollowUpAccepted?.(process);
           return true;
         } catch (e: unknown) {
           const err = e as { message?: string };
@@ -109,6 +113,7 @@ export function useSessionSend({
       createSession,
       onSelectSession,
       executorConfig,
+      onFollowUpAccepted,
     ]
   );
 

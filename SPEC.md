@@ -1,139 +1,100 @@
-# Technical Specification: Recover Wedged MCP Sessions
+# Technical Specification: Show Sent Chat Messages Without Refreshing
 
 ## Objective
 
-Give an active Vibe Kanban coding-agent session a bounded, observable recovery
-path when one or more configured MCP servers never become usable. Recovery must
-preserve the conversation, worktree, and Git state, and it must be callable from
-the session that needs recovery.
+Ensure that a successfully submitted follow-up message appears in the active
+Vibe Kanban conversation immediately and remains visible as live execution data
+arrives, without requiring a browser refresh.
+
+## Problem
+
+The existing-session send path waits for the execution-process WebSocket to
+announce the process returned by the successful follow-up request. When that
+stream update is delayed or missed, the composer is cleared but the new user
+turn is absent from the conversation until a page refresh rebuilds history from
+the server. This makes a successful send look lost even though the backend has
+accepted it.
 
 ## Scope
 
-This feature changes only the Vibe Kanban repository. Deployment changes, if
-required by implementation evidence, are limited to the service's governing
-`homelab/modules/vibe-kanban-rebuild.nix` module.
+This change is limited to the Vibe Kanban service repository. No other service
+or deployment configuration is changed.
 
-The feature includes:
-
-1. MCP tools `restart_session` and `restart_workspace`.
-2. Backend restart operations that preserve durable session/workspace state.
-3. A bounded MCP discovery lifecycle with explicit per-server terminal status.
-4. Accurate reporting of active-session registry state in the MCP settings UI.
-5. An action that offers to create a prefilled Vibe Kanban issue containing MCP
-   diagnostics when a configured server is unusable.
-6. Explicit unsupported-executor results from `refresh_mcp_tools`, including a
-   confirmed behavior contract for `CLAUDE_CODE`.
+The feature covers follow-up messages sent from an existing session. New
+session creation, queued follow-ups, approval responses, and backend execution
+semantics remain unchanged unless shared reconciliation logic requires focused
+tests to prove they are unaffected.
 
 ## Functional Requirements
 
-### Restart session
+1. After the follow-up API succeeds, the execution process returned by that
+   response must be reconciled into the client-side execution-process state.
+2. Conversation history must discover and render that process even if the
+   WebSocket notification is delayed, arrives before the HTTP response, or is
+   not observed by the current connection.
+3. HTTP and WebSocket delivery of the same process must be idempotent: one send
+   produces one visible user turn and one live-log subscription.
+4. The submitted text must be represented by the server-returned execution
+   process rather than by a second, synthetic message record, so server IDs,
+   timestamps, executor configuration, and later status transitions remain
+   authoritative.
+5. The composer and attachments are cleared only after the backend accepts the
+   follow-up, preserving the current failure behavior.
+6. Session changes must not leak a reconciled process into another session.
+7. The existing execution-process stream remains the authority for subsequent
+   process updates and removal/reset behavior.
 
-- Expose `restart_session(session_id?)` from the Vibe Kanban MCP server.
-- In orchestrator/scoped mode, omitted `session_id` resolves to the current
-  session. In global mode, the identifier is required.
-- Restart the session's coding-agent executor process and start a continuation
-  turn from the existing durable conversation rather than creating a new
-  conversation or deleting prior execution records.
-- A call originating inside the target session must acknowledge and schedule
-  the restart through backend-owned lifecycle control so the tool response is
-  not lost when the caller's process exits.
-- Re-run MCP discovery from a clean executor process.
-- Return the restart disposition and per-server discovery outcomes, including
-  server name, lifecycle state, registered tool count, terminal error code and
-  message where applicable, and timestamps.
+## UX Requirements
 
-### Restart workspace
+- A successfully sent follow-up appears in the conversation during the same UI
+  interaction, with no manual reload.
+- No duplicate user bubble or visual flicker is introduced when the stream
+  later reports the same process.
+- Failed sends continue to leave the draft available and surface the existing
+  error feedback.
 
-- Expose `restart_workspace(workspace_id?)` from the Vibe Kanban MCP server.
-- In orchestrator/scoped mode, omitted `workspace_id` resolves to the current
-  workspace. In global mode, the identifier is required.
-- Stop and recreate the workspace-owned process group without deleting or
-  recreating its worktree, repository checkout, conversation, or Git state.
-- Resume the current session after the backend has safely transferred restart
-  ownership away from the calling executor.
-- Return the same per-server MCP outcome shape as `restart_session`.
+## Technical Direction
 
-### MCP discovery state
-
-- Model configured servers with explicit states at least equivalent to
-  `connecting`, `usable`, and `failed`.
-- A server is usable only when the active executor's tool registry has completed
-  discovery; status must include the number of registered tools, including zero.
-- Connection attempts must reach `usable` or a named terminal failure within a
-  bounded, configured deadline. Repeated `CONNECT_TIMEOUT` or
-  `CONNECTION_CLOSED` events cannot reset that deadline indefinitely.
-- Preserve an event summary containing observed error codes and timestamps and
-  the count of tool-discovery attempts.
-- The `/mcp` UI must display the active session registry state. A transport-level
-  connection cannot be presented as equivalent to tools being registered.
-
-### Refresh behavior
-
-- `refresh_mcp_tools` must report whether the selected executor supports active
-  refresh and whether the refresh was actually queued/applied.
-- Unsupported executors return an explicit terminal unsupported result. The
-  implementation and documentation must state whether `CLAUDE_CODE` supports
-  refresh, backed by an executor-level test.
-
-### Issue offer
-
-- When MCP discovery reaches a terminal unusable state, or when transport state
-  and registry state disagree, the UI surfaces a non-blocking offer to open a
-  Vibe Kanban issue.
-- The issue draft includes server names, error codes and timestamps, executor,
-  workspace and session IDs, successfully registered servers with tool counts,
-  and discovery-attempt counts.
-- Opening the draft requires a user action; detection alone must not create an
-  external issue.
-
-## Safety and State Guarantees
-
-- Restart operations are idempotent while a restart is already pending/running.
-- Durable transcript, execution history, worktree files, and Git metadata remain
-  intact across either restart.
-- Backend-owned orchestration must prevent the calling process from killing the
-  recovery operation as a side effect of its own termination.
-- Authorization and orchestrator workspace scoping match existing session and
-  workspace tools; callers cannot restart resources outside their allowed scope.
-- Responses and UI diagnostics must not include MCP credentials, headers, token
-  values, or raw environment variables.
-
-## API and Contract Direction
-
-- Add backend routes for session and workspace restart plus a read model for MCP
-  discovery status. Exact paths and payload names will be finalized by SpecKit.
-- Add shared Rust/TypeScript response types generated through the existing type
-  generation path; generated files are not edited manually.
-- MCP tool results use structured JSON payloads rather than success-only text so
-  agents can distinguish recovery, terminal failure, and unsupported behavior.
+- Introduce a narrowly scoped client-side reconciliation path from the
+  successful `sessionsApi.followUp` response into the execution-process data
+  consumed by conversation history.
+- Key reconciliation by execution-process ID and validate the active session
+  before accepting it.
+- Preserve the WebSocket snapshot and patch behavior; the HTTP response closes
+  the creation-notification race but does not replace live status/log streams.
+- Prefer a testable pure reducer/helper or provider action over component-local
+  duplicated conversation entries.
 
 ## Verification
 
-- Unit tests cover default-context resolution, scope rejection, idempotency,
-  unsupported refresh behavior, deadline transition, status aggregation, and
-  secret redaction.
-- Integration tests simulate a healthy server, clean authentication failure,
-  repeated timeout/connection-close failure, and a connected server that
-  registers zero tools.
-- A self-restart test invokes `restart_session` from the target session and
-  verifies that a continuation retains prior conversation while discovery ends
-  in either usable or named terminal state.
-- Workspace restart tests verify unchanged worktree and Git state.
-- UI tests verify registry-accurate labels and the prefilled issue action.
+Automated tests must cover:
+
+1. A successful follow-up becomes visible from the API response before any
+   WebSocket process patch.
+2. A later WebSocket patch/snapshot for that ID does not duplicate the turn.
+3. A WebSocket update that wins the race with the API response remains
+   idempotent.
+4. A process belonging to a different session is rejected or ignored.
+5. A failed follow-up does not insert a process and does not clear the draft.
+6. Existing live status updates continue to replace the reconciled process.
+
+Run focused frontend tests plus the repository-required formatting and relevant
+type/lint checks.
 
 ## Out of Scope
 
-- Repairing Slack, Brink, Cloudflare, or Atlassian credentials or server
-  implementations.
-- Restarting unrelated homelab services or hosts.
-- Automatically filing an issue without user confirmation.
-- Guaranteeing a third-party MCP server becomes healthy; the guarantee is a
-  bounded, truthful terminal outcome.
+- Changes to the homelab deployment module or any other hosted service.
+- Changing backend follow-up persistence or executor startup semantics.
+- Redesigning conversation history, queued messages, or the composer.
+- Fabricating an optimistic process before the server accepts the request.
 
 ## Acceptance Criteria
 
-The implementation is complete when all acceptance criteria in the task are
-covered by automated tests or an explicit, reproducible verification, the
-project documentation describes both restart tools and executor refresh support,
-an independent Codex review reports no significant findings, reusable knowledge
-is recorded, and the resulting pull request is merged into the base branch.
+- Reproduction with a delayed or absent execution-process stream notification
+  shows the sent follow-up without refreshing.
+- Normal stream delivery yields exactly one rendered turn.
+- Automated regression coverage exercises both orderings of the HTTP/WebSocket
+  race and session isolation.
+- Independent Codex review reports no significant findings.
+- Reusable knowledge is recorded in the project knowledge base, and the task's
+  pull request is merged into the base branch.

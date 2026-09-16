@@ -21,6 +21,7 @@ import { useApprovalFeedbackOptional } from '../model/contexts/ApprovalFeedbackC
 import { useMessageEditContext } from '../model/contexts/MessageEditContext';
 import { useEntries, useTokenUsage } from '../model/contexts/EntriesContext';
 import { useExecutionProcesses } from '@/shared/hooks/useExecutionProcesses';
+import { useExecutionProcessesContext } from '@/shared/hooks/useExecutionProcessesContext';
 import { useReviewOptional } from '@/shared/hooks/useReview';
 import { useActions } from '@/shared/hooks/useActions';
 import { useTodos } from '../model/hooks/useTodos';
@@ -265,6 +266,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   }, [entries]);
 
   // Execution state
+  const { reconcileExecutionProcess } = useExecutionProcessesContext();
   const { isAttemptRunning, stopExecution, isStopping, processes } =
     useWorkspaceExecution(workspaceId);
   useEffect(() => {
@@ -568,6 +570,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     isNewSessionMode,
     onSelectSession,
     executorConfig,
+    onFollowUpAccepted: reconcileExecutionProcess,
   });
 
   const sessionHasRunningAgent = useMemo(
