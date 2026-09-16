@@ -1,63 +1,25 @@
-# Implementation Plan: Show Sent Chat Messages Without Refreshing
+# Implementation Plan: Timestamp the Workspace Chat Log
 
-## 1. Confirm the creation-notification race
-
-1. Trace the existing-session send from `SessionChatBoxContainer` through
-   `useSessionSend` and `sessionsApi.followUp`.
-2. Confirm that the returned `ExecutionProcess` is currently discarded and
-   conversation discovery depends exclusively on the session process
-   WebSocket.
-3. Preserve the current backend and composer success/failure contracts.
-
-## 2. Add an execution-process reconciliation boundary
-
-1. Extend `ExecutionProcessesContext` with a function that accepts a
-   server-returned execution process for the provider's active session.
-2. Keep response-backed processes in provider-owned state scoped to the current
-   session.
-3. Build one ID-keyed projection where stream values supersede response-backed
-   values for matching IDs.
-4. Ignore processes whose `session_id` does not match the active provider
-   session.
-5. Remove or harmlessly shadow response-backed values once the stream contains
-   the same IDs, preventing duplicate rows and subscriptions.
-
-## 3. Reconcile successful sends
-
-1. Allow `useSessionSend` to receive a successful-follow-up callback.
-2. Pass the exact `ExecutionProcess` returned by
-   `sessionsApi.followUp` to that callback before reporting send success.
-3. Wire the chat container to the reconciliation function from its existing
-   execution-process provider.
-4. Retain existing composer clearing, attachment clearing, error handling, and
-   new-session behavior.
-
-## 4. Add regression coverage
-
-1. Test provider reconciliation before stream delivery.
-2. Test stream-after-response and stream-before-response races, asserting one
-   process per ID and stream authority over newer values.
-3. Test session mismatch rejection and provider reset on session change.
-4. Test `useSessionSend` invokes reconciliation only for successful existing
-   session follow-ups and preserves failure behavior.
-5. Where practical, assert conversation history observes the reconciled
-   process and opens only one live process stream.
-
-## 5. Verify the change
-
-1. Install locked dependencies if the worktree is not already prepared.
-2. Run focused Vitest suites for execution processes, the provider, send logic,
-   and conversation history.
-3. Run Prettier/formatting and relevant frontend type/lint checks.
-4. Run the repository-required broader checks in proportion to the frontend-only
-   change and record any unrelated pre-existing failures.
-
-## 6. Review, document, and ship
-
-1. Run an independent Codex diff review and address every confirmed significant
-   finding; repeat until clean.
-2. Add the reusable HTTP-response/stream reconciliation pattern to the project
-   knowledge base with this task ID and refresh its index.
-3. Commit the knowledge-base update.
-4. Push the task branch, open a pull request against the base branch, monitor
-   its checks, address failures, and merge the pull request.
+1. Refresh the SpecKit constitution and create the task-scoped feature
+   artifacts for `vk/a22f-time-stamp-chat`.
+2. Trace normalized-entry timestamps through process history derivation,
+   aggregation, row modeling, and chat UI components; document the exact
+   ownership boundary and fallback rules.
+3. Add pure timestamp parsing/formatting behavior with focused tests for valid,
+   absent, and malformed values.
+4. Preserve authoritative process creation times on client-derived user and
+   script entries, with derivation tests.
+5. Add compact, accessible timestamp presentation to every logged message,
+   event, action, and grouped row without changing semantic row keys or order.
+6. Add rendered-component regression tests for representative user, assistant,
+   event/action, and aggregation paths.
+7. Install dependencies if needed, format affected code, and run focused tests,
+   frontend type checks, lint, and the relevant repository checks.
+8. Perform a browser visual check of a workspace conversation when a runnable
+   local fixture is available; record any environment limitation otherwise.
+9. Run independent Codex diff review, address confirmed findings, and repeat
+   verification/review until no significant findings remain.
+10. Update the project knowledge base with reusable timestamp-flow lessons,
+    refresh its index, and commit those changes.
+11. Commit the implementation, open a pull request against the base branch,
+    monitor required checks, resolve failures, and merge the pull request.

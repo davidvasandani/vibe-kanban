@@ -153,12 +153,14 @@ export const useConversationHistory = ({
   const patchWithKey = (
     patch: PatchType,
     executionProcessId: string,
-    index: number
+    index: number,
+    processCreatedAt: string
   ) => {
     return {
       ...patch,
       patchKey: `${executionProcessId}:${index}`,
       executionProcessId,
+      processCreatedAt,
     };
   };
 
@@ -244,7 +246,12 @@ export const useConversationHistory = ({
         const controller = streamJsonPatchEntries<PatchType>(url, {
           onEntries(entries) {
             const patchesWithKey = entries.map((entry, index) =>
-              patchWithKey(entry, executionProcess.id, index)
+              patchWithKey(
+                entry,
+                executionProcess.id,
+                index,
+                executionProcess.created_at
+              )
             );
             mergeIntoDisplayed((state) => {
               state[executionProcess.id] = {
@@ -293,7 +300,9 @@ export const useConversationHistory = ({
     for (const { process, entries } of loaded) {
       state[process.id] = {
         executionProcess: process,
-        entries: entries.map((e, idx) => patchWithKey(e, process.id, idx)),
+        entries: entries.map((e, idx) =>
+          patchWithKey(e, process.id, idx, process.created_at)
+        ),
       };
     }
     return state;
@@ -603,7 +612,7 @@ export const useConversationHistory = ({
         if (entries.length === 0) continue;
 
         const entriesWithKey = entries.map((e, idx) =>
-          patchWithKey(e, process.id, idx)
+          patchWithKey(e, process.id, idx, process.created_at)
         );
 
         mergeIntoDisplayed((state) => {

@@ -258,6 +258,16 @@ member set forces a resnapshot rather than interpolation. Every streamed
 collection is keyed by stable identity — never by array position — so that
 membership changing mid-stream cannot make a `replace` land on the wrong row.
 
+### XX. User-visible time preserves event provenance
+User-visible timestamps come from the authoritative record of when an event
+occurred, never from when a client rendered, received, replayed, or grouped it.
+When a derived UI row represents a persisted parent event, it inherits that
+parent's timestamp. Missing or malformed time remains visibly absent rather than
+being replaced with the current clock. Formatting may follow the user's locale,
+but storage values, ordering, stable row identity, and replay semantics remain
+unchanged. Compact time labels expose an accessible full date and time whenever
+the abbreviated display is ambiguous.
+
 Sampling tasks terminate. A background sampler holds only a weak reference to
 its owner, re-checks each tick that a consumer still exists, exits when none
 does, and never holds a lock across an await.

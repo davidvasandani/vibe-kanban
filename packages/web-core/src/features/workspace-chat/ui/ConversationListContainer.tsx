@@ -75,6 +75,7 @@ function renderRowContent(
   if (isAggregatedGroup(entry)) {
     return (
       <DisplayConversationEntry
+        displayEntry={entry}
         expansionKey={entry.patchKey}
         aggregatedGroup={entry}
         aggregatedDiffGroup={null}
@@ -91,6 +92,7 @@ function renderRowContent(
   if (isAggregatedDiffGroup(entry)) {
     return (
       <DisplayConversationEntry
+        displayEntry={entry}
         expansionKey={entry.patchKey}
         aggregatedGroup={null}
         aggregatedDiffGroup={entry}
@@ -107,6 +109,7 @@ function renderRowContent(
   if (isAggregatedThinkingGroup(entry)) {
     return (
       <DisplayConversationEntry
+        displayEntry={entry}
         expansionKey={entry.patchKey}
         aggregatedGroup={null}
         aggregatedDiffGroup={null}
@@ -130,6 +133,7 @@ function renderRowContent(
   if (entry.type === 'NORMALIZED_ENTRY') {
     return (
       <DisplayConversationEntry
+        displayEntry={entry}
         expansionKey={entry.patchKey}
         entry={entry.content}
         aggregatedGroup={null}
