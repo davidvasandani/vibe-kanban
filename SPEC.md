@@ -1,18 +1,29 @@
-# Warn before starting duplicate issue workspaces
+# Archive linked workspaces when an issue is marked Done
 
-Task: vk/fe2d-warn-when-starti
+Task: vk/88c5-marking-an-issue
 
 ## Outcome
-When preparing a workspace linked to an issue, show a dismissible advisory if that exact issue already has non-archived workspaces. Identify each by name, branch and known status, and offer navigation to an existing workspace. Creating another workspace remains allowed without an acknowledgement gate. Display an active-workspace count on the issue when more than one exists.
+Changing an issue to Done archives its linked workspaces, so they leave the active workspace list in the right drawer and remain accessible through existing archived workspace controls.
 
-## Contract
-- Match the persisted issue UUID, never titles or fuzzy similarity.
-- Count all linked non-archived workspaces; archived siblings do not trigger warnings.
-- Reuse existing shared project/workspace data and navigation, including remote-only records.
-- Highlight workspace-scoped open PR or unmerged-change evidence where available. Unknown evidence must remain unknown, not be inferred from another sibling.
-- Dismissal is local to the current issue and observed sibling set; newly appearing siblings restore the advisory.
-- Loading or unavailable enrichment must not block intentional starts.
-- No backend rejection, hard uniqueness rule, service deployment, title deduplication or pre-merge overlap detection.
+## Requirements
+- Apply the behavior on a successful transition into the project's Done status, using the existing status model.
+- Archive every linked, unarchived workspace; preserve already archived workspaces and unrelated issues/workspaces.
+- Persist archive state through the existing workspace lifecycle and propagate updates to the drawer without requiring a page reload.
+- Cover individual and bulk status mutation paths where supported. A failed status change must not archive workspaces.
+- Reopening an issue does not automatically unarchive workspaces. Archiving must not delete workspaces or their history.
+- Limit implementation to Vibe Kanban; no other service changes.
 
-## Validation
-Cover zero/one/multiple active siblings, archived records, identical titles on different issues, partial metadata, sibling-specific PR evidence, dismiss/reappear behavior, navigation and continued creation. Run relevant frontend checks, repository formatting and independent Codex review before knowledge capture and PR merge.
+## Technical direction
+Inspect issue status persistence, local/remote workspace links, and existing archive operations. Implement at the shared mutation boundary where possible, preserving authorization and existing lifecycle side effects. Reuse live workspace updates and add regression coverage for Done, other statuses, repeated updates, multiple links, and unrelated workspaces.
+
+## Verification and delivery
+Complete the requested ordered pipeline, focused tests and repository checks, independent Codex review, reusable project knowledge, and a merged pull request. Refine this specification after the required prior-knowledge recall and SpecKit analysis.
+
+## Confirmed implementation boundary
+Prior-knowledge recall and code tracing found remote single/bulk updates already
+archive their remote workspaces. The missing boundary is LinkedIssueProvider in
+the workspace drawer: unlike ProjectProvider, it does not reconcile archive state.
+Subscribe there to the existing project workspace shape, filter by linked issue,
+and reuse the existing reconciliation hook and local archive endpoint. No schema,
+backend, or deployment changes are required. Task-specific SpecKit artifacts live
+at `../homelab/specs/vk/88c5-marking-an-issue/` as specified by the workspace commands.

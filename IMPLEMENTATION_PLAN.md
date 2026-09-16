@@ -1,9 +1,8 @@
-# Implementation plan — vk/fe2d-warn-when-starti
+# Implementation plan — vk/88c5-marking-an-issue
 
-1. Complete SpecKit constitution, feature specification, clarification, technical plan, tasks and analysis in pipeline order. Refresh stale task paths in the checked-in command templates.
-2. Reuse project-scoped synced workspaces and PRs for exact issue matching. Join available local workspace metadata by local workspace ID; retain remote-only siblings with explicit unknown branch/status.
-3. Add a shared presentational advisory and create-mode container. Show it before submit, allow dismissal and existing-workspace navigation, preserve the existing creation mutation and submit guard.
-4. Add a plural active-workspace badge to the issue workspace section header, visible while collapsed.
-5. Add focused projection and rendered-component regressions for filtering, identity, evidence, dismissal, navigation and passive visibility. Install frozen dependencies, run checks and formatting.
-6. Run independent Codex CLI review, resolve significant findings and reverify.
-7. Record reusable knowledge, update index, commit, open PR against main and merge after required checks.
+1. Read prior knowledge at workspace `PRIOR_KNOWLEDGE.md`; trace remote terminal-status archival through ProjectProvider reconciliation to local workspace persistence and drawer subscriptions.
+2. Execute the task-specific workspace SpecKit commands in order, storing artifacts at their specified homelab path. Reaffirm service and hosting constitutions; document the concrete missing boundary and acceptance cases.
+3. Extend the existing reconciliation/archive mechanism at that boundary. Preserve authorization, identity, transactional remote writes, archive-only semantics, and independent workspace failures.
+4. Add focused regressions for the observed failure, persisted archive propagation, repeated updates, unrelated workspaces, and retries. Install locked dependencies before verification and run required formatting plus relevant checks.
+5. Run independent Codex CLI diff review, fix confirmed findings, and re-verify.
+6. Update and commit reusable service knowledge tagged with this task. Commit artifacts and code, open pull request(s) against their base branches, and merge after required checks.
