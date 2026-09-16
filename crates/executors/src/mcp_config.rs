@@ -1018,7 +1018,7 @@ mod tests {
     /// replacement gets noticed. The binaries the launcher then downloads are
     /// digest-checked by the launcher itself, on every machine.
     const SLACK_MCP_LAUNCHER_SHA256: &str =
-        "220e521bed303b8513eecfd45df196a24ed4e70307ef6f57c921cfbfae308c75";
+        "82e6d78d6da16c177c4aad7db0a74327de3cbbcc1db67c4add50fecdba7ecebf";
     const SLACK_MCP_INSTALL_SPEC: &str = "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.3/slack-mcp-server-vk-1.3.0-vk.3.tgz";
 
     #[test]
