@@ -1,20 +1,18 @@
-# Workspace creation progress
+# Warn before starting duplicate issue workspaces
 
-Task: vk/855b-show-the-steps-w
+Task: vk/fe2d-warn-when-starti
 
-## Problem and outcome
-The workspace creation view currently shows a spinner with no explanation of the work taking place. Display actual creation steps and background activity while the existing asynchronous creation operation runs, including after navigation away and return.
+## Outcome
+When preparing a workspace linked to an issue, show a dismissible advisory if that exact issue already has non-archived workspaces. Identify each by name, branch and known status, and offer navigation to an existing workspace. Creating another workspace remains allowed without an acknowledgement gate. Display an active-workspace count on the issue when more than one exists.
 
-## Requirements
-- Show ordered creation steps, distinguishing waiting, running, completed, and failed states from backend evidence.
-- Identify the current background work (repository preparation, workspace configuration, and agent startup as supported by the existing creation flow).
-- Preserve request-independent creation, single-consumer claiming, existing error reporting, and ready-state navigation.
-- Keep progress scoped to the workspace, readable in narrow layouts, and accessible.
-- Do not expose shell output, credentials, or invented percentage completion.
-- Scope changes to the Vibe Kanban repository; deployment changes only if required for this feature.
+## Contract
+- Match the persisted issue UUID, never titles or fuzzy similarity.
+- Count all linked non-archived workspaces; archived siblings do not trigger warnings.
+- Reuse existing shared project/workspace data and navigation, including remote-only records.
+- Highlight workspace-scoped open PR or unmerged-change evidence where available. Unknown evidence must remain unknown, not be inferred from another sibling.
+- Dismissal is local to the current issue and observed sibling set; newly appearing siblings restore the advisory.
+- Loading or unavailable enrichment must not block intentional starts.
+- No backend rejection, hard uniqueness rule, service deployment, title deduplication or pre-merge overlap detection.
 
-## Technical approach
-Inspect the existing durable creation lifecycle and extend its observable state with bounded step information. Reuse existing authenticated workspace reads or a workspace-scoped progress endpoint, and existing frontend query conventions. Persist enough progress for reload/reconnect; terminal failure must stop any running indicators.
-
-## Acceptance and verification
-Exercise slow creation, navigation/reload, successful handoff, failure, and recovery after restart. Add focused backend lifecycle and frontend projection tests, regenerate any shared contracts, and run repository formatting and applicable checks. Complete SpecKit artifacts, independent Codex review, knowledge-base update, then open and merge the task PR.
+## Validation
+Cover zero/one/multiple active siblings, archived records, identical titles on different issues, partial metadata, sibling-specific PR evidence, dismiss/reappear behavior, navigation and continued creation. Run relevant frontend checks, repository formatting and independent Codex review before knowledge capture and PR merge.

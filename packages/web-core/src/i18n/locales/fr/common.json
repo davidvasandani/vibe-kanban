@@ -196,6 +196,23 @@
         "name": "Nom"
       },
       "columnError": "Impossible d'afficher cette conversation. Ouvrez la vue complète."
+    },
+    "activeCount_one": "{{count}} espace de travail actif",
+    "activeCount_other": "{{count}} espaces de travail actifs",
+    "duplicateWarning": {
+      "title": "Ce ticket a déjà des espaces de travail actifs",
+      "description": "Ouvrez un espace de travail existant pour continuer, ou démarrez-en un autre ci-dessous.",
+      "dismiss": "Masquer cet avertissement",
+      "branchUnavailable": "Branche indisponible",
+      "openPr": "Pull request ouverte",
+      "changes": "Modifications présentes",
+      "open": "Ouvrir cet espace de travail",
+      "activity": {
+        "creating": "Création en cours",
+        "running": "En cours d’exécution",
+        "idle": "À l’arrêt",
+        "unknown": "Activité indisponible"
+      }
     }
   },
   "fileTree": {
