@@ -77,7 +77,7 @@ their phase/layer.
   tests, generated-type checks, and `pnpm run check`. ESLint and clippy pass;
   the final lint guard reports six pre-existing unrelated
   `metricsDiskAlerts.*` locale keys (depends on T001-T017).
-- [ ] T019 Run independent Codex diff review, address confirmed significant
+- [x] T019 Run independent Codex diff review, address confirmed significant
   findings, rerun affected verification, and repeat until clean (depends on
   T018).
 - [ ] T020 Distill reusable knowledge tagged `vk/38a6-expose-session-w`, update
