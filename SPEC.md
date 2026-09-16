@@ -1,20 +1,18 @@
-# Workspace creation progress
+# Sidebar metadata reliability
 
-Task: vk/855b-show-the-steps-w
+Task: vk/113f-sidebar-randomly
 
-## Problem and outcome
-The workspace creation view currently shows a spinner with no explanation of the work taking place. Display actual creation steps and background activity while the existing asynchronous creation operation runs, including after navigation away and return.
+## Problem
+Workspace sidebar rows intermittently retain their names and pins while losing metadata and moving into Idle. The supplied screenshot shows the failure across many rows simultaneously.
 
-## Requirements
-- Show ordered creation steps, distinguishing waiting, running, completed, and failed states from backend evidence.
-- Identify the current background work (repository preparation, workspace configuration, and agent startup as supported by the existing creation flow).
-- Preserve request-independent creation, single-consumer claiming, existing error reporting, and ready-state navigation.
-- Keep progress scoped to the workspace, readable in narrow layouts, and accessible.
-- Do not expose shell output, credentials, or invented percentage completion.
-- Scope changes to the Vibe Kanban repository; deployment changes only if required for this feature.
+## Required behavior
+- Preserve accurate workspace metadata and activity grouping through routine refreshes and transient connection failures.
+- Recover automatically when the authoritative data source reconnects.
+- Apply real metadata changes, including explicit clearing, without retaining stale information indefinitely.
+- Keep workspace identity and organization isolation intact.
 
-## Technical approach
-Inspect the existing durable creation lifecycle and extend its observable state with bounded step information. Reuse existing authenticated workspace reads or a workspace-scoped progress endpoint, and existing frontend query conventions. Persist enough progress for reload/reconnect; terminal failure must stop any running indicators.
+## Technical scope
+Trace sidebar rendering, workspace enrichment, streaming updates, and query lifecycles to establish the cause. Correct the smallest responsible boundary; avoid masking authoritative removals with unconditional sticky UI state. Limit changes to Vibe Kanban; no other services require changes.
 
-## Acceptance and verification
-Exercise slow creation, navigation/reload, successful handoff, failure, and recovery after restart. Add focused backend lifecycle and frontend projection tests, regenerate any shared contracts, and run repository formatting and applicable checks. Complete SpecKit artifacts, independent Codex review, knowledge-base update, then open and merge the task PR.
+## Acceptance
+Regression coverage reproduces metadata loss and verifies recovery, valid updates, and workspace isolation. Run appropriate tests, type checks, lint and formatting, independent Codex review, record reusable knowledge, and open and merge a PR.

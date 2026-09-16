@@ -1,10 +1,13 @@
-# Implementation plan — workspace creation progress
+# Implementation plan
 
-1. Preserve existing queued/running/ready/failed lifecycle and background ownership.
-2. Add bounded, durable workspace-scoped phase reporting and an authenticated read endpoint. Terminal lifecycle state overrides stale phase activity.
-3. Instrument real creation boundaries: repository association, attachments/context, placement, worktree/configuration preparation, and initial execution startup.
-4. Extend the shared creation status view with ordered steps, current work, accessible statuses, and truthful unavailable/failed fallbacks. Poll only while pending and preserve ready navigation.
-5. Add lifecycle and UI regression coverage, regenerate shared types, install dependencies, format and run applicable checks.
-6. Independently review the diff with Codex, resolve significant findings, record reusable knowledge, commit and open/merge PRs.
+Task: vk/113f-sidebar-randomly
 
-SpecKit artifacts follow the workspace-provisioned command paths under `homelab/specs/vk/855b-show-the-steps-w/`; product code remains in `vibe-kanban`. No other service changes are planned.
+1. Complete the ordered SpecKit constitution, specification, clarification, plan, tasks, and analysis stages using workspace command instructions.
+2. Fix `packages/web-core/src/shared/hooks/useWorkspaces.ts`: reject failed summary requests so React Query retains successful cached metadata; accept authoritative empty results; remove cross-host placeholder reuse.
+3. Add hook-level regression tests using a real QueryClient for active/archived failures, automatic refresh recovery, explicit clearing, initial failure, and host isolation.
+4. Install frozen dependencies, run targeted tests, frontend checks/lint, required format, and broader checks as feasible; document actual results.
+5. Run independent Codex CLI review, resolve significant findings and verify again.
+6. Record reusable query-cache authority knowledge and task tag in the project knowledge base and index; commit.
+7. Open and merge a PR against the repository base branch after required checks pass.
+
+No infrastructure changes are planned. SpecKit workspace command outputs belong at `homelab/specs/vk/113f-sidebar-randomly/`; service implementation and root spec/plan belong in `vibe-kanban/`.
