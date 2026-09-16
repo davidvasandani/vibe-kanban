@@ -1,16 +1,21 @@
-# Implementation plan: Global Search
+# Implementation plan — Remote machine management
 
-1. Follow the workspace-provisioned SpecKit commands; their exact artifact root
-   is `../homelab/specs/vk/8f5e-global-search`. These are Vibe Kanban task documents,
-   not changes to another service. Carry forward `../PRIOR_KNOWLEDGE.md`.
-2. Add bounded read-only local search for workspace metadata and stored chat
-   turn prompts/final assistant messages, without reconstructing execution logs.
-3. Add membership-scoped remote search for organizations, projects and workspaces.
-4. Add a shared global search dialog and API aggregation, using authenticated
-   remote and local/relay transports. Show unavailable sources explicitly.
-5. Integrate a search button into both shells with a keyboard shortcut. Preserve
-   org/project/host/session context during result navigation.
-6. Test contracts and rendered behavior; install dependencies, format, run checks
-   and lint, and obtain independent Codex diff review; address findings.
-7. Record reusable knowledge and validation, commit task documents and code, open
-   and merge PRs against the actual repository base branches.
+1. Complete the active workspace SpecKit constitution, specify, clarify, plan,
+   tasks and analyze commands; use workspace-root PRIOR_KNOWLEDGE.md.
+2. In `packages/web-core/src/shared/dialogs/settings/settings/RemoteCloudHostsSettingsCard.tsx`,
+   separate inventory from optional pairing UI. Render inventory first regardless
+   of discovery candidates, with explicit accessible navigation/removal actions,
+   named confirmation, date/identity/status and refresh/loading/error states.
+3. In `RelaySettingsSection.tsx` in the same directory, show machine management
+   on the initial Remote Access screen, retain Host/Client setup and support
+   initial pairing target in both runtimes. Avoid duplicate inventories.
+4. Reuse query definitions in `useRelayRemoteHostMutations.ts`; ensure settings
+   queries use the correct runtime and expose failures without changing app-bar
+   behavior. Discovery failure disables opening but preserves paired records.
+5. Add matching settings locale copy and targeted UI regression tests for no
+   discovery candidates, offline/remove, failures, status gating and navigation.
+6. Install frozen dependencies, run tests, format, check and lint. Review all
+   resulting diff changes and exclude incidental formatter churn.
+7. Run independent Codex CLI review, address significant findings and recheck.
+8. Record reusable knowledge with task tag, commit artifacts/code, open and
+   merge PR(s) against the repositories' actual base branches.

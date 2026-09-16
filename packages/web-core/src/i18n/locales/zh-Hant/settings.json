@@ -698,6 +698,22 @@
       "overview": {
         "available": "Available",
         "unavailable": "Unavailable"
+      },
+      "management": {
+        "title": "已配對機器",
+        "description": "管理與此用戶端配對的遠端機器。",
+        "refresh": "重新整理",
+        "loading": "正在載入已配對機器…",
+        "loadError": "無法載入已配對機器。請重新整理後再試。",
+        "statusError": "無法檢查連線狀態。請重新整理後再試。",
+        "empty": "尚無已配對機器。請透過用戶端設定配對機器。",
+        "online": "線上",
+        "offline": "離線",
+        "unpaired": "需要配對",
+        "unknown": "狀態未知",
+        "pairedAt": "配對日期：{{date}}",
+        "open": "開啟工作區",
+        "removeConfirm": "從此用戶端移除與 {{name}} 的配對？遠端工作區不會被刪除。"
       }
     },
     "remoteProjects": {

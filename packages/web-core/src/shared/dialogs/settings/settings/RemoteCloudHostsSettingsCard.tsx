@@ -5,10 +5,9 @@ import { useNavigate, useParams } from '@tanstack/react-router';
 import { PrimaryButton } from '@vibe/ui/components/PrimaryButton';
 import {
   usePairRemoteCloudHostMutation,
-  useRemoteCloudHostsState,
   useRemoveRemoteCloudHostMutation,
 } from '@/shared/hooks/useRemoteCloudHosts';
-import type { RelayPairedHost } from 'shared/types';
+import { relayApi } from '@/shared/lib/api';
 import {
   SettingsField,
   SettingsInput,
@@ -29,7 +28,9 @@ export function RemoteCloudHostsSettingsCardContent({
   initialHostId,
   mode = 'local',
   onClose,
+  showPairing = true,
 }: {
+  showPairing?: boolean;
   initialHostId?: string;
   mode?: 'local' | 'remote';
   onClose?: () => void;
@@ -46,17 +47,23 @@ export function RemoteCloudHostsSettingsCardContent({
   const hasAppliedInitialHostRef = useRef(false);
   const { machineId } = useUserSystem();
 
-  const { data: relayHosts = [], isLoading: relayHostsLoading } = useQuery({
-    ...useRelayRemoteHostsQuery(),
-  });
   const isRemoteMode = mode === 'remote';
-  const { data: localData, isLoading: localStateLoading } =
-    useRemoteCloudHostsState();
-  const { data: remotePairedHosts = [], isLoading: remotePairedHostsLoading } =
-    useQuery({
-      ...useRelayRemotePairedHostsQuery(),
-      enabled: isRemoteMode,
-    });
+  const relayQuery = useQuery({
+    ...useRelayRemoteHostsQuery(),
+    refetchInterval: 10000,
+  });
+  const relayHosts = useMemo(() => relayQuery.data ?? [], [relayQuery.data]);
+  const relayHostsLoading = relayQuery.isLoading;
+  const localQuery = useQuery({
+    queryKey: ['relay', 'local', 'paired-hosts'],
+    queryFn: () => relayApi.listPairedRelayHosts(),
+    enabled: !isRemoteMode,
+  });
+  const remoteQuery = useQuery({
+    ...useRelayRemotePairedHostsQuery(),
+    enabled: isRemoteMode,
+  });
+  const pairedQuery = isRemoteMode ? remoteQuery : localQuery;
   const { mutateAsync: pairLocalHost, isPending: isPairingLocal } =
     usePairRemoteCloudHostMutation();
   const { mutateAsync: removeLocalHost, isPending: isRemovingLocal } =
@@ -99,7 +106,7 @@ export function RemoteCloudHostsSettingsCardContent({
       return;
     }
 
-    if (relayHostsLoading) {
+    if (relayHostsLoading || relayQuery.isError) {
       return;
     }
 
@@ -115,7 +122,12 @@ export function RemoteCloudHostsSettingsCardContent({
     setErrorMessage(null);
     setSuccessMessage(null);
     hasAppliedInitialHostRef.current = true;
-  }, [initialHostId, pairableRelayHosts, relayHostsLoading]);
+  }, [
+    initialHostId,
+    pairableRelayHosts,
+    relayHostsLoading,
+    relayQuery.isError,
+  ]);
 
   const relayHostOptions = useMemo(
     () =>
@@ -127,35 +139,35 @@ export function RemoteCloudHostsSettingsCardContent({
   );
 
   const connectedHosts = useMemo(() => {
-    if (isRemoteMode) {
-      return remotePairedHosts
-        .map((host: RelayPairedHost) => {
-          const liveHost = relayHosts.find(
-            (entry) => entry.id === host.host_id
-          );
-          return {
-            id: host.host_id,
-            name: liveHost?.name ?? host.host_name ?? host.host_id,
-            status: liveHost?.status ?? 'offline',
-            pairedAt: host.paired_at ?? '',
-            lastUsedAt: host.paired_at ?? '',
-          };
-        })
-        .sort((a, b) => b.lastUsedAt.localeCompare(a.lastUsedAt));
-    }
+    const liveById = new Map(relayHosts.map((host) => [host.id, host]));
+    return (pairedQuery.data ?? [])
+      .map((host) => {
+        const liveHost = liveById.get(host.host_id);
+        return {
+          id: host.host_id,
+          name: liveHost?.name ?? host.host_name ?? host.host_id,
+          status:
+            relayQuery.isError || !relayQuery.data
+              ? 'unknown'
+              : (liveHost?.status ?? 'offline'),
+          pairedAt: host.paired_at,
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  }, [pairedQuery.data, relayHosts, relayQuery.isError, relayQuery.data]);
 
-    const hosts = localData?.hosts ?? [];
-    return [...hosts].sort((a, b) => b.lastUsedAt.localeCompare(a.lastUsedAt));
-  }, [isRemoteMode, localData?.hosts, relayHosts, remotePairedHosts]);
-
-  const isLoading = isRemoteMode ? remotePairedHostsLoading : localStateLoading;
+  const isLoading = pairedQuery.isLoading;
+  const refresh = () =>
+    Promise.all([pairedQuery.refetch(), relayQuery.refetch()]);
   const isPairing = isRemoteMode ? isPairingRemote : isPairingLocal;
   const isRemoving = isRemoteMode ? isRemovingRemote : isRemovingLocal;
 
   const canSubmitPairing =
     !!selectedHostId &&
     normalizeEnrollmentCode(pairingCode).length === 6 &&
-    !isPairing;
+    !isPairing &&
+    !relayQuery.isError &&
+    !relayHostsLoading;
 
   const resetForm = () => {
     setHostName('');
@@ -206,6 +218,7 @@ export function RemoteCloudHostsSettingsCardContent({
           enrollment_code: normalizedCode,
         });
       }
+      await refresh();
       setSuccessMessage(
         t(
           'settings.relay.remoteCloudHost.connectSuccess',
@@ -220,10 +233,9 @@ export function RemoteCloudHostsSettingsCardContent({
 
   const handleRemove = async (hostId: string) => {
     const confirmed = window.confirm(
-      t(
-        'settings.relay.remoteCloudHost.removeConfirm',
-        'Remove this remote cloud host from local settings?'
-      )
+      t('settings.relay.management.removeConfirm', {
+        name: connectedHosts.find((host) => host.id === hostId)?.name ?? hostId,
+      })
     );
 
     if (!confirmed) {
@@ -240,7 +252,9 @@ export function RemoteCloudHostsSettingsCardContent({
       } else {
         await removeLocalHost(hostId);
       }
+      await refresh();
       if (hostId === routeHostId) {
+        onClose?.();
         void navigate({ to: '/' });
       }
     } catch (error) {
@@ -251,7 +265,7 @@ export function RemoteCloudHostsSettingsCardContent({
   };
 
   const handleGoToHostWorkspaces = (hostId: string, status?: string) => {
-    if (status === 'offline') {
+    if (status !== 'online') {
       return;
     }
 
@@ -271,164 +285,213 @@ export function RemoteCloudHostsSettingsCardContent({
       )}
 
       {errorMessage && (
-        <div className="bg-error/10 border border-error/50 rounded-sm p-3 text-error text-sm">
+        <div
+          role="alert"
+          className="bg-error/10 border border-error/50 rounded-sm p-3 text-error text-sm"
+        >
           {errorMessage}
         </div>
       )}
 
-      <SettingsField
-        label={t('settings.relay.client.pair.hostLabel', 'Host to pair to')}
+      <section
+        className="space-y-3"
+        aria-label={t('settings.relay.management.title')}
       >
-        <SettingsSelect
-          value={selectedHostId}
-          options={relayHostOptions}
-          onChange={setSelectedHostId}
-          placeholder={t(
-            'settings.relay.remoteCloudHost.hostPlaceholder',
-            relayHostsLoading
-              ? 'Loading hosts...'
-              : pairableRelayHosts.length === 0
-                ? 'No hosts available'
-                : 'Select a host'
-          )}
-          disabled={relayHostsLoading || relayHostOptions.length === 0}
-        />
-      </SettingsField>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-high">
+              {t('settings.relay.management.title')}
+            </h3>
+            <p className="text-sm text-low">
+              {t('settings.relay.management.description')}
+            </p>
+          </div>
+          <PrimaryButton
+            variant="secondary"
+            value={t('settings.relay.management.refresh')}
+            onClick={() => void refresh()}
+            disabled={pairedQuery.isFetching || relayQuery.isFetching}
+            actionIcon={
+              pairedQuery.isFetching || relayQuery.isFetching
+                ? 'spinner'
+                : undefined
+            }
+          />
+        </div>
+        {isLoading && (
+          <p role="status" className="text-sm text-low">
+            {t('settings.relay.management.loading')}
+          </p>
+        )}
+        {pairedQuery.isError && (
+          <p role="alert" className="text-sm text-error">
+            {t('settings.relay.management.loadError')}
+          </p>
+        )}
+        {relayQuery.isError && (
+          <p role="alert" className="text-sm text-error">
+            {t('settings.relay.management.statusError')}
+          </p>
+        )}
+        {!isLoading && !pairedQuery.isError && connectedHosts.length === 0 && (
+          <p className="rounded-sm border border-border p-3 text-sm text-low">
+            {t('settings.relay.management.empty')}
+          </p>
+        )}
+        <ul className="space-y-2">
+          {connectedHosts.map((host) => {
+            const date = host.pairedAt ? new Date(host.pairedAt) : null;
+            return (
+              <li
+                key={host.id}
+                className="rounded-sm border border-border bg-secondary/30 p-3 flex flex-wrap items-center justify-between gap-3"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="text-base font-medium text-high break-words">
+                    {host.name}
+                  </p>
+                  <p className="text-sm text-low break-all">{host.id}</p>
+                  <p
+                    className={
+                      host.status === 'online'
+                        ? 'text-sm text-success'
+                        : 'text-sm text-low'
+                    }
+                  >
+                    {host.status === 'online'
+                      ? t('settings.relay.management.online')
+                      : host.status === 'offline'
+                        ? t('settings.relay.management.offline')
+                        : host.status === 'unpaired'
+                          ? t('settings.relay.management.unpaired')
+                          : t('settings.relay.management.unknown')}
+                    {date && Number.isFinite(date.getTime()) && (
+                      <>
+                        {' '}
+                        ·{' '}
+                        {t('settings.relay.management.pairedAt', {
+                          date: date.toLocaleDateString(),
+                        })}
+                      </>
+                    )}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <PrimaryButton
+                    variant="secondary"
+                    value={t('settings.relay.management.open')}
+                    onClick={() =>
+                      handleGoToHostWorkspaces(host.id, host.status)
+                    }
+                    disabled={host.status !== 'online' || isRemoving}
+                  />
+                  <PrimaryButton
+                    variant="tertiary"
+                    value={t('settings.relay.remoteCloudHost.remove', 'Remove')}
+                    onClick={() => void handleRemove(host.id)}
+                    disabled={isRemoving}
+                    actionIcon={
+                      removingHostId === host.id ? 'spinner' : undefined
+                    }
+                  />
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      </section>
 
-      {!relayHostsLoading && pairableRelayHosts.length === 0 && (
-        <p className="text-sm text-low">
-          {t(
-            'settings.relay.remoteCloudHost.hostsUnavailable',
-            'No hosts found yet. Make sure another device is running as a host and has paired with this account.'
-          )}
-        </p>
-      )}
-
-      {selectedHostId && (
-        <>
+      {showPairing && (
+        <div className="space-y-4 border-t border-border pt-4">
           <SettingsField
-            label={t(
-              'settings.relay.client.pair.nameLabel',
-              'How this device appears on that host (optional)'
-            )}
+            label={t('settings.relay.client.pair.hostLabel', 'Host to pair to')}
           >
-            <SettingsInput
-              value={hostName}
-              onChange={setHostName}
+            <SettingsSelect
+              value={selectedHostId}
+              options={relayHostOptions}
+              onChange={setSelectedHostId}
               placeholder={t(
-                'settings.relay.remoteCloudHost.namePlaceholder',
-                defaultClientName
+                'settings.relay.remoteCloudHost.hostPlaceholder',
+                relayHostsLoading
+                  ? 'Loading hosts...'
+                  : pairableRelayHosts.length === 0
+                    ? 'No hosts available'
+                    : 'Select a host'
               )}
+              disabled={
+                isPairing ||
+                relayHostsLoading ||
+                relayQuery.isError ||
+                relayHostOptions.length === 0
+              }
             />
           </SettingsField>
 
-          <SettingsField
-            label={t(
-              'settings.relay.client.pair.pairingCodeLabel',
-              'Pairing code from the host'
-            )}
-            description={t(
-              'settings.relay.client.pair.pairingCodeHelp',
-              'Enter the 6-character code shown on the host you want to connect to.'
-            )}
-          >
-            <PairingCodeInput value={pairingCode} onChange={setPairingCode} />
-          </SettingsField>
-
-          <div className="flex items-center gap-2">
-            <PrimaryButton
-              value={t(
-                'settings.relay.client.pair.confirm',
-                'Pair this device'
-              )}
-              onClick={() => void handleConnect()}
-              disabled={!canSubmitPairing}
-              actionIcon={isPairing ? 'spinner' : undefined}
-            />
-            <PrimaryButton
-              variant="tertiary"
-              value={t('common:buttons.cancel')}
-              onClick={resetForm}
-              disabled={isPairing}
-            />
-          </div>
-
-          <hr className="border-border" />
-
-          <div className="space-y-2">
-            <span className="text-sm font-medium text-normal">
-              {t(
-                'settings.relay.client.connectedHosts.title',
-                'Connected hosts'
-              )}
-            </span>
-
-            {!isLoading && connectedHosts.length === 0 && (
-              <div className="rounded-sm border border-border bg-secondary/30 p-3 text-sm text-low">
+          {!relayHostsLoading &&
+            !relayQuery.isError &&
+            pairableRelayHosts.length === 0 && (
+              <p className="text-sm text-low">
                 {t(
-                  'settings.relay.remoteCloudHost.empty',
-                  'No hosts paired yet.'
+                  'settings.relay.remoteCloudHost.hostsUnavailable',
+                  'No hosts found yet. Make sure another device is running as a host and has paired with this account.'
                 )}
-              </div>
+              </p>
             )}
 
-            {!isLoading && connectedHosts.length > 0 && (
-              <div className="space-y-2">
-                {connectedHosts.map((host) => {
-                  const isOffline = isRemoteMode && host.status === 'offline';
+          {selectedHostId && (
+            <>
+              <SettingsField
+                label={t(
+                  'settings.relay.client.pair.nameLabel',
+                  'How this device appears on that host (optional)'
+                )}
+              >
+                <SettingsInput
+                  value={hostName}
+                  onChange={setHostName}
+                  placeholder={t(
+                    'settings.relay.remoteCloudHost.namePlaceholder',
+                    defaultClientName
+                  )}
+                />
+              </SettingsField>
 
-                  return (
-                    <div
-                      key={host.id}
-                      className={[
-                        'rounded-sm border border-border bg-secondary/30 p-3 flex items-center justify-between gap-3',
-                        isOffline
-                          ? 'opacity-80'
-                          : 'cursor-pointer hover:bg-secondary/50',
-                      ].join(' ')}
-                      onClick={(event) => {
-                        const target = event.target as HTMLElement | null;
-                        if (
-                          target?.closest('[data-relay-host-action="remove"]')
-                        ) {
-                          return;
-                        }
-                        void handleGoToHostWorkspaces(host.id, host.status);
-                      }}
-                      role="button"
-                      tabIndex={0}
-                    >
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-high truncate">
-                          {host.name}
-                        </p>
-                        <p className="text-xs text-low truncate">
-                          {isRemoteMode && host.status
-                            ? `${host.status === 'online' ? 'Online' : 'Offline'}${host.pairedAt ? ` · Paired ${new Date(host.pairedAt).toLocaleDateString()}` : ''}`
-                            : host.id}
-                        </p>
-                      </div>
-                      <span data-relay-host-action="remove">
-                        <PrimaryButton
-                          variant="tertiary"
-                          value={t(
-                            'settings.relay.remoteCloudHost.remove',
-                            'Remove'
-                          )}
-                          onClick={() => void handleRemove(host.id)}
-                          disabled={isRemoving}
-                          actionIcon={
-                            removingHostId === host.id ? 'spinner' : undefined
-                          }
-                        />
-                      </span>
-                    </div>
-                  );
-                })}
+              <SettingsField
+                label={t(
+                  'settings.relay.client.pair.pairingCodeLabel',
+                  'Pairing code from the host'
+                )}
+                description={t(
+                  'settings.relay.client.pair.pairingCodeHelp',
+                  'Enter the 6-character code shown on the host you want to connect to.'
+                )}
+              >
+                <PairingCodeInput
+                  value={pairingCode}
+                  onChange={setPairingCode}
+                />
+              </SettingsField>
+
+              <div className="flex items-center gap-2">
+                <PrimaryButton
+                  value={t(
+                    'settings.relay.client.pair.confirm',
+                    'Pair this device'
+                  )}
+                  onClick={() => void handleConnect()}
+                  disabled={!canSubmitPairing}
+                  actionIcon={isPairing ? 'spinner' : undefined}
+                />
+                <PrimaryButton
+                  variant="tertiary"
+                  value={t('common:buttons.cancel')}
+                  onClick={resetForm}
+                  disabled={isPairing}
+                />
               </div>
-            )}
-          </div>
-        </>
+            </>
+          )}
+        </div>
       )}
     </div>
   );

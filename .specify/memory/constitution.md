@@ -595,3 +595,8 @@ than create a parallel optimistic message store), IV (keep the fix in shared
 (retain snapshot authority and rehydration), and XXXV (enforce session identity
 when reconciling the returned process). No new principle or version change is
 required.
+
+`vk/24ed-remote-machine-m`: reaffirm II (observable UI regressions), III/VI
+(reuse relay queries and mutations), IV (both frontend runtimes), and XXXIV/XXXV
+(paired identity survives absent discovery; unknown connectivity is explicit).
+No new principle or version change is required.

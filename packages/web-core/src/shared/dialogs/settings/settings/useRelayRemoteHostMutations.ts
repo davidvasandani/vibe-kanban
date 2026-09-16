@@ -119,14 +119,7 @@ export function useRelayRemoteHostsQuery() {
 export function useRelayRemotePairedHostsQuery() {
   return {
     queryKey: RELAY_REMOTE_PAIRED_HOSTS_QUERY_KEY,
-    queryFn: async () => {
-      try {
-        return await listPairedRelayHosts();
-      } catch (error) {
-        console.error('Failed to load paired hosts', error);
-        return [];
-      }
-    },
+    queryFn: listPairedRelayHosts,
   };
 }
 
