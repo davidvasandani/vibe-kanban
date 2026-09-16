@@ -26,19 +26,39 @@ vi.mock('@/shared/hooks/useExecutionProcesses', async (importOriginal) => {
 function process(
   runReason: ExecutionProcess['run_reason'],
   status: ExecutionProcess['status'],
-  dropped = false
+  dropped = false,
+  overrides: Partial<ExecutionProcess> = {}
 ): ExecutionProcess {
   return {
     id: `${runReason}-${status}-${dropped}`,
+    session_id: 'session',
     run_reason: runReason,
     status,
     dropped,
+    created_at: '2026-09-16T00:00:00Z',
+    ...overrides,
   } as ExecutionProcess;
 }
 
+let reconcileProcess:
+  | ((executionProcess: ExecutionProcess) => void)
+  | undefined;
+
 function Consumer() {
-  const { isAttemptRunningVisible } = useExecutionProcessesContext();
-  return <div data-running={String(isAttemptRunningVisible)} />;
+  const {
+    executionProcessesAll,
+    isAttemptRunningVisible,
+    reconcileExecutionProcess,
+  } = useExecutionProcessesContext();
+  reconcileProcess = reconcileExecutionProcess;
+  return (
+    <div
+      data-running={String(isAttemptRunningVisible)}
+      data-processes={executionProcessesAll
+        .map((item) => `${item.id}:${item.status}`)
+        .join(',')}
+    />
+  );
 }
 
 function setProcesses(processes: ExecutionProcess[]) {
@@ -60,6 +80,7 @@ describe('ExecutionProcessesProvider composer activity boundary', () => {
 
   beforeEach(() => {
     executionHook.use.mockReset();
+    reconcileProcess = undefined;
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -124,6 +145,134 @@ describe('ExecutionProcessesProvider composer activity boundary', () => {
     );
     expect(container.firstElementChild?.getAttribute('data-running')).toBe(
       'false'
+    );
+  });
+
+  it('projects a server-confirmed process before the stream reports it', () => {
+    setProcesses([]);
+    act(() =>
+      root.render(
+        <ExecutionProcessesProvider sessionId="session">
+          <Consumer />
+        </ExecutionProcessesProvider>
+      )
+    );
+
+    act(() => {
+      reconcileProcess?.(
+        process('codingagent', 'running', false, { id: 'accepted' })
+      );
+    });
+
+    expect(container.firstElementChild?.getAttribute('data-processes')).toBe(
+      'accepted:running'
+    );
+  });
+
+  it('lets the stream supersede and later remove a reconciled process', () => {
+    setProcesses([]);
+    act(() =>
+      root.render(
+        <ExecutionProcessesProvider sessionId="session">
+          <Consumer />
+        </ExecutionProcessesProvider>
+      )
+    );
+    act(() => {
+      reconcileProcess?.(
+        process('codingagent', 'running', false, { id: 'accepted' })
+      );
+    });
+
+    setProcesses([
+      process('codingagent', 'completed', false, { id: 'accepted' }),
+    ]);
+    act(() =>
+      root.render(
+        <ExecutionProcessesProvider sessionId="session">
+          <Consumer />
+        </ExecutionProcessesProvider>
+      )
+    );
+    expect(container.firstElementChild?.getAttribute('data-processes')).toBe(
+      'accepted:completed'
+    );
+
+    setProcesses([]);
+    act(() =>
+      root.render(
+        <ExecutionProcessesProvider sessionId="session">
+          <Consumer />
+        </ExecutionProcessesProvider>
+      )
+    );
+    expect(container.firstElementChild?.getAttribute('data-processes')).toBe(
+      ''
+    );
+  });
+
+  it('does not duplicate a process when the stream wins the race', () => {
+    setProcesses([
+      process('codingagent', 'running', false, { id: 'streamed' }),
+    ]);
+    act(() =>
+      root.render(
+        <ExecutionProcessesProvider sessionId="session">
+          <Consumer />
+        </ExecutionProcessesProvider>
+      )
+    );
+    act(() => {
+      reconcileProcess?.(
+        process('codingagent', 'running', false, { id: 'streamed' })
+      );
+    });
+
+    expect(container.firstElementChild?.getAttribute('data-processes')).toBe(
+      'streamed:running'
+    );
+  });
+
+  it('rejects mismatched and stale-session process responses', () => {
+    setProcesses([]);
+    act(() =>
+      root.render(
+        <ExecutionProcessesProvider sessionId="session">
+          <Consumer />
+        </ExecutionProcessesProvider>
+      )
+    );
+    const staleReconcile = reconcileProcess;
+
+    act(() => {
+      reconcileProcess?.(
+        process('codingagent', 'running', false, {
+          id: 'mismatch',
+          session_id: 'other',
+        })
+      );
+    });
+    expect(container.firstElementChild?.getAttribute('data-processes')).toBe(
+      ''
+    );
+
+    act(() =>
+      root.render(
+        <ExecutionProcessesProvider sessionId="next-session">
+          <Consumer />
+        </ExecutionProcessesProvider>
+      )
+    );
+    act(() => {
+      staleReconcile?.(
+        process('codingagent', 'running', false, {
+          id: 'stale',
+          session_id: 'session',
+        })
+      );
+    });
+    expect(container.firstElementChild?.getAttribute('data-processes')).toBe(
+      ''
     );
   });
 });

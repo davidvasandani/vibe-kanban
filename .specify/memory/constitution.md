@@ -575,3 +575,13 @@ contract), III/VI (extend existing preview settings and navigation machinery),
 IV (implement shared behavior in `web-core` for both frontends), and XXI (reuse
 the existing proxy/development URL normalization convention). No new principle
 or version change is required.
+
+## Task applicability review — 2026-09-16
+
+`vk/8a08-frontend-not-ref`: reaffirm II (test both HTTP/WebSocket race
+orderings), III/VI (extend the existing execution-process projection rather
+than create a parallel optimistic message store), IV (keep the fix in shared
+`web-core`), XII (make the asynchronous creation handoff idempotent), XXX
+(retain snapshot authority and rehydration), and XXXV (enforce session identity
+when reconciling the returned process). No new principle or version change is
+required.
