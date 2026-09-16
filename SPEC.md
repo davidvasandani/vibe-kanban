@@ -1,18 +1,18 @@
-# Sidebar metadata reliability
+# Warn before starting duplicate issue workspaces
 
-Task: vk/113f-sidebar-randomly
+Task: vk/fe2d-warn-when-starti
 
-## Problem
-Workspace sidebar rows intermittently retain their names and pins while losing metadata and moving into Idle. The supplied screenshot shows the failure across many rows simultaneously.
+## Outcome
+When preparing a workspace linked to an issue, show a dismissible advisory if that exact issue already has non-archived workspaces. Identify each by name, branch and known status, and offer navigation to an existing workspace. Creating another workspace remains allowed without an acknowledgement gate. Display an active-workspace count on the issue when more than one exists.
 
-## Required behavior
-- Preserve accurate workspace metadata and activity grouping through routine refreshes and transient connection failures.
-- Recover automatically when the authoritative data source reconnects.
-- Apply real metadata changes, including explicit clearing, without retaining stale information indefinitely.
-- Keep workspace identity and organization isolation intact.
+## Contract
+- Match the persisted issue UUID, never titles or fuzzy similarity.
+- Count all linked non-archived workspaces; archived siblings do not trigger warnings.
+- Reuse existing shared project/workspace data and navigation, including remote-only records.
+- Highlight workspace-scoped open PR or unmerged-change evidence where available. Unknown evidence must remain unknown, not be inferred from another sibling.
+- Dismissal is local to the current issue and observed sibling set; newly appearing siblings restore the advisory.
+- Loading or unavailable enrichment must not block intentional starts.
+- No backend rejection, hard uniqueness rule, service deployment, title deduplication or pre-merge overlap detection.
 
-## Technical scope
-Trace sidebar rendering, workspace enrichment, streaming updates, and query lifecycles to establish the cause. Correct the smallest responsible boundary; avoid masking authoritative removals with unconditional sticky UI state. Limit changes to Vibe Kanban; no other services require changes.
-
-## Acceptance
-Regression coverage reproduces metadata loss and verifies recovery, valid updates, and workspace isolation. Run appropriate tests, type checks, lint and formatting, independent Codex review, record reusable knowledge, and open and merge a PR.
+## Validation
+Cover zero/one/multiple active siblings, archived records, identical titles on different issues, partial metadata, sibling-specific PR evidence, dismiss/reappear behavior, navigation and continued creation. Run relevant frontend checks, repository formatting and independent Codex review before knowledge capture and PR merge.

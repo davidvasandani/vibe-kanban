@@ -1,12 +1,10 @@
-# Prior knowledge: sidebar metadata loss
+# Prior knowledge — vk/fe2d-warn-when-starti
 
-Task: vk/113f-sidebar-randomly
+Searched the existing Vibe Kanban knowledge base (`vibe-kanban/wiki/INDEX.md` and topic pages) for issue identity, creation, workspace navigation and issue sections. The knowledge base is populated; no KB edits made during recall.
 
-Searched the Vibe Kanban wiki and docs/knowledge-base for sidebar, metadata, stream, and enrichment. Relevant pages:
+- `wiki/create-mode-repo-branch-defaulting.md`: workspace creation is the shared `CreateChatBoxContainer` create-mode flow, distinct from issue creation. Preserve repository selection and draft state.
+- `wiki/kanban-issue-panel-sections.md`: issue workspace sections are shared UI components supplied by web-core containers. A section-header signal remains useful when collapsed. Rendered UI tests use remote-web's jsdom harness; set NODE_ENV=test.
+- `wiki/workspace-creation-reliability.md`: creation is a durable asynchronous lifecycle. Advisory UI must leave its start and recovery contract intact.
+- `wiki/workspace-navbar-breadcrumbs.md`: human issue identifiers are display text; UUIDs remain routing and matching authority.
 
-- `vibe-kanban/docs/knowledge-base/authoritative-snapshot-stream-handoffs.md`: retain last authoritative data through transport failure; replace on successful snapshots; reset when identity changes.
-- `vibe-kanban/wiki/vk-pollers.md`: sidebar poller/activity grouping comes from bulk workspace summaries, not per-row execution subscriptions.
-- `vibe-kanban/wiki/workspace-carousel-view.md`: summaries refresh every 15 seconds and drive metadata and grouping across consumers.
-- `vibe-kanban/wiki/electric-sync-fallback.md`: errors and recovery must remain distinct; successful fallback restores authority.
-
-Source inspection confirms `useWorkspaces.ts` combines WebSocket identity/pins with HTTP summary metadata. Its summary fetcher converts HTTP, API, and transport errors into successful empty maps, replacing the React Query cache. This explains simultaneous metadata loss while names and pins survive. `keepPreviousData` also spans query-key changes and should not leak summaries between hosts. Preserve same-key query data by rejecting failures and allow successful empty snapshots to clear it.
+Implementation implication: reuse project-synced workspace/PR records and shared create-mode UI; do not introduce title matching, a backend uniqueness constraint or another creation path. Preserve workspace identity when joining status/PR enrichment.

@@ -607,3 +607,9 @@ version change is required.
 (reuse relay queries and mutations), IV (both frontend runtimes), and XXXIV/XXXV
 (paired identity survives absent discovery; unknown connectivity is explicit).
 No new principle or version change is required.
+
+`vk/fe2d-warn-when-starti`: reaffirm II (observable regression coverage),
+III/VI (reuse creation and synced workspace data), IV (shared UI/container
+boundaries), and XXXV (issue and workspace identity for all evidence).
+Duplicate-start advice remains dismissible and never a uniqueness constraint.
+No new principle or version change is required.
