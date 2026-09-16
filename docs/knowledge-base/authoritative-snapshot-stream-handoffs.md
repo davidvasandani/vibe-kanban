@@ -1,6 +1,7 @@
 # Authoritative snapshot and live-stream handoffs
 
-Tags: `vk/3488-fix-stale-execut`, `c89d-address-fable-fo`
+Tags: `vk/3488-fix-stale-execut`, `c89d-address-fable-fo`,
+`vk/8a08-frontend-not-ref`
 
 ## Subscribe before taking the snapshot
 
@@ -77,3 +78,24 @@ When relay framing carries a server close such as 1011, emit its code and reason
 to consumers but close the browser-owned underlying socket without attempting
 to originate a reserved close code. Preserve `wasClean` for normal code 1000 so
 clean completion does not reconnect.
+
+## Bridge acknowledged creations into the streamed projection
+
+A mutation response can be durable creation evidence even when the collection's
+live notification is delayed or missed by the current connection. Discarding
+the created record and waiting only for a patch creates a user-visible gap: the
+mutation succeeds, local input clears, and the new entity does not appear until
+a later full snapshot.
+
+Reconcile the complete server-returned entity into the same ID-keyed projection
+consumed by the UI. This is response-backed reconciliation, not a fabricated
+pre-acceptance optimistic record. Apply live snapshot/patch values last so they
+supersede the bridge value, then retire the bridge once live delivery contains
+that ID. Keeping a separate unkeyed UI record forces fragile matching and risks
+duplicates.
+
+Scope the bridge to the collection identity. Validate late responses against the
+current scope at callback time, filter the merged projection by that scope, and
+clear bridge state when scope changes. Tests must exercise response-first,
+stream-first, live supersession/removal, and a response settling after a scope
+switch.
