@@ -1,8 +1,9 @@
-# Implementation plan — vk/88c5-marking-an-issue
+# Implementation plan — vk/1d23-vk-worker-output
 
-1. Read prior knowledge at workspace `PRIOR_KNOWLEDGE.md`; trace remote terminal-status archival through ProjectProvider reconciliation to local workspace persistence and drawer subscriptions.
-2. Execute the task-specific workspace SpecKit commands in order, storing artifacts at their specified homelab path. Reaffirm service and hosting constitutions; document the concrete missing boundary and acceptance cases.
-3. Extend the existing reconciliation/archive mechanism at that boundary. Preserve authorization, identity, transactional remote writes, archive-only semantics, and independent workspace failures.
-4. Add focused regressions for the observed failure, persisted archive propagation, repeated updates, unrelated workspaces, and retries. Install locked dependencies before verification and run required formatting plus relevant checks.
-5. Run independent Codex CLI diff review, fix confirmed findings, and re-verify.
-6. Update and commit reusable service knowledge tagged with this task. Commit artifacts and code, open pull request(s) against their base branches, and merge after required checks.
+1. Use workspace PRIOR_KNOWLEDGE.md to trace durable worker cursors, bounded replay retention, coordinator restart adoption, and output persistence.
+2. Run workspace SpecKit command instructions in order, writing task artifacts to homelab/specs/vk/1d23-vk-worker-output/ and reaffirming applicable constitutions.
+3. Reproduce the mismatch between acknowledged replay state and the coordinator's polling position; identify the smallest safe correction, including transcript recovery and acknowledgement ordering as necessary.
+4. Install locked dependencies, implement regression coverage and correction, preserve explicit indeterminate outcomes for real gaps, and improve diagnostic context.
+5. Run required formatting and focused Rust checks/tests; record environmental limits accurately.
+6. Obtain independent Codex diff review, fix confirmed findings, and re-verify.
+7. Update and commit reusable knowledge tagged with this task, then commit code/artifacts, open PRs against the repositories' base branches and merge after required checks.

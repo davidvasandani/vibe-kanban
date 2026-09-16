@@ -613,3 +613,8 @@ III/VI (reuse creation and synced workspace data), IV (shared UI/container
 boundaries), and XXXV (issue and workspace identity for all evidence).
 Duplicate-start advice remains dismissible and never a uniqueness constraint.
 No new principle or version change is required.
+
+`vk/1d23-vk-worker-output`: reaffirm II (regressions), XVI (evidence-backed
+distributed execution), and XXX (authoritative execution state). Resume replay
+from durable execution-scoped evidence and retain uncertainty for real gaps.
+No new principle or version change is required.
