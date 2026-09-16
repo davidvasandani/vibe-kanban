@@ -83,5 +83,5 @@ their phase/layer.
 - [x] T020 Distill reusable knowledge tagged `vk/38a6-expose-session-w`, update
   `docs/knowledge-base/INDEX.md`, and commit the knowledge base (depends on
   T019).
-- [ ] T021 Open a pull request against the base branch, monitor required checks,
+- [x] T021 Open a pull request against the base branch, monitor required checks,
   fix any failures, and merge it (depends on T020).
