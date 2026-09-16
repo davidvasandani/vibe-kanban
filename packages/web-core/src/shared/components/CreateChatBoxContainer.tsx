@@ -1,3 +1,4 @@
+import { IssueWorkspaceWarningContainer } from '@/shared/components/IssueWorkspaceWarningContainer';
 import { useMemo, useCallback, useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
@@ -333,6 +334,13 @@ export function CreateChatBoxContainer({
     <div className="relative flex flex-1 flex-col bg-primary h-full">
       <div className="flex flex-1 items-center justify-center px-base">
         <div className="flex w-chat max-w-full flex-col gap-base">
+          {linkedIssue && (
+            <IssueWorkspaceWarningContainer
+              key={`${linkedIssue.remoteProjectId}:${linkedIssue.issueId}`}
+              projectId={linkedIssue.remoteProjectId}
+              issueId={linkedIssue.issueId}
+            />
+          )}
           {showRepoPickerStep && (
             <>
               <h2 className="mb-double text-center text-4xl font-medium tracking-tight text-high">

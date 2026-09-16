@@ -196,6 +196,23 @@
         "name": "名称"
       },
       "columnError": "无法渲染此对话。请打开完整视图。"
+    },
+    "activeCount_one": "{{count}} 个活跃工作区",
+    "activeCount_other": "{{count}} 个活跃工作区",
+    "duplicateWarning": {
+      "title": "此议题已有活跃工作区",
+      "description": "打开现有工作区以继续工作，或在下方启动另一个工作区。",
+      "dismiss": "关闭警告",
+      "branchUnavailable": "分支信息不可用",
+      "openPr": "有未合并的拉取请求",
+      "changes": "有更改",
+      "open": "打开工作区",
+      "activity": {
+        "creating": "正在创建",
+        "running": "运行中",
+        "idle": "未运行",
+        "unknown": "活动信息不可用"
+      }
     }
   },
   "fileTree": {

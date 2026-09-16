@@ -18,6 +18,8 @@ contributed to it.
 
 ## Pages
 
+- [issue-workspace-advisory.md](issue-workspace-advisory.md) — Exact issue matching, sibling-scoped evidence, dismissible creation warnings, collapsed active counts and host-safe navigation.
+
 - [preview-app-url-persistence.md](preview-app-url-persistence.md) — Embedded
   preview origins and in-app routes are separate authorities: persist only the
   transport-clean path/query/hash, restore it at iframe lifecycle boundaries,

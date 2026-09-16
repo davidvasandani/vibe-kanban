@@ -196,6 +196,23 @@
         "name": "이름순"
       },
       "columnError": "이 채팅을 표시하지 못했습니다. 전체 보기로 여세요."
+    },
+    "activeCount_one": "활성 워크스페이스 {{count}}개",
+    "activeCount_other": "활성 워크스페이스 {{count}}개",
+    "duplicateWarning": {
+      "title": "이 이슈에는 이미 활성 워크스페이스가 있습니다",
+      "description": "기존 워크스페이스를 열어 작업을 계속하거나 아래에서 새 워크스페이스를 시작하세요.",
+      "dismiss": "경고 닫기",
+      "branchUnavailable": "브랜치 정보 없음",
+      "openPr": "열린 풀 리퀘스트",
+      "changes": "변경 사항 있음",
+      "open": "워크스페이스 열기",
+      "activity": {
+        "creating": "생성 중",
+        "running": "실행 중",
+        "idle": "실행 중 아님",
+        "unknown": "활동 정보 없음"
+      }
     }
   },
   "fileTree": {
