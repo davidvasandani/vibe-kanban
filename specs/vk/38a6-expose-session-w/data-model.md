@@ -70,4 +70,3 @@ active generation instead of creating another.
   handoff.
 - Execution history, normalized transcript, worktree paths, and Git repositories
   are retained; recovery results reference them and do not replace them.
-

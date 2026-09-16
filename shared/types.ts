@@ -1288,12 +1288,7 @@ export type McpRecoveryStatus = "accepted" | "in_progress" | "completed" | "part
 
 export type McpRestartDisposition = "queued" | "started" | "already_in_progress";
 
-export type McpRecoveryResult = { generation: bigint, scope: McpRecoveryScope, workspace_id: string, session_id: string | null, status: McpRecoveryStatus, disposition: McpRestartDisposition, requested_at: string, completed_at: string | null, executor: string, 
-/**
- * Executor-owned registry snapshot. An empty vector means the replacement
- * process has not published a registry yet, never that discovery succeeded.
- */
-servers: Array<McpServerRefreshSnapshot>, error: McpRefreshError | null, };
+export type McpRecoveryResult = { generation: bigint, scope: McpRecoveryScope, workspace_id: string, session_id: string | null, status: McpRecoveryStatus, disposition: McpRestartDisposition, requested_at: string, completed_at: string | null, executor: string, servers: Array<McpServerRefreshSnapshot>, error: McpRefreshError | null, };
 
 export type ExecutorActionType = { "type": "CodingAgentInitialRequest" } & CodingAgentInitialRequest | { "type": "CodingAgentFollowUpRequest" } & CodingAgentFollowUpRequest | { "type": "ScriptRequest" } & ScriptRequest | { "type": "ReviewRequest" } & ReviewRequest;
 

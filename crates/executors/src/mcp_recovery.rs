@@ -36,6 +36,9 @@ pub enum McpRestartDisposition {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
 #[ts(export)]
+/// Recovery state including the executor-owned registry snapshot. An empty
+/// server vector means the replacement process has not published a registry
+/// yet, never that discovery succeeded.
 pub struct McpRecoveryResult {
     pub generation: u64,
     pub scope: McpRecoveryScope,
@@ -46,8 +49,6 @@ pub struct McpRecoveryResult {
     pub requested_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub executor: String,
-    /// Executor-owned registry snapshot. An empty vector means the replacement
-    /// process has not published a registry yet, never that discovery succeeded.
     #[serde(default)]
     pub servers: Vec<McpServerRefreshSnapshot>,
     pub error: Option<McpRefreshError>,
