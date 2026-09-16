@@ -1,10 +1,19 @@
 # Global search across remote metadata and host conversations
 
 The searchable data has two authorities. Remote PostgreSQL owns organizations,
-projects and cloud workspace metadata; local SQLite owns workspace branches,
-sessions and persisted coding-agent turns. Search the remote membership/owner
-scope and each authorized host independently. The selected organization, active
-host and currently mounted Electric collections cannot define global coverage.
+projects, issues and cloud workspace metadata; local SQLite owns workspace
+branches, sessions and persisted coding-agent turns. Search the remote
+membership/owner scope and each authorized host independently. The selected
+organization, active host and currently mounted Electric collections cannot
+define global coverage.
+
+Issue search belongs in the remote membership-scoped query, not in active
+Electric collections or local host fan-out. Match the human-readable
+`issues.simple_id` for user-entered issue IDs, but carry the issue and project
+UUIDs separately for routing. A result should display `simple_id` and project
+context while navigating to `/projects/{project_id}/issues/{issue_id}`; internal
+UUIDs are identity, never a substitute display label. Adding a result category
+must participate in the existing per-category cap and truncation sentinel.
 
 ## Transport and partial failure
 
@@ -59,3 +68,4 @@ to validate the actual remote SQL in an isolated temporary database.
 ## Contributed by
 
 - vk/8f5e-global-search
+- vk/b1df-searching-by-iss
