@@ -698,6 +698,22 @@
       "overview": {
         "available": "Available",
         "unavailable": "Unavailable"
+      },
+      "management": {
+        "title": "已配对机器",
+        "description": "管理与此客户端配对的远程机器。",
+        "refresh": "刷新",
+        "loading": "正在加载已配对机器…",
+        "loadError": "无法加载已配对机器。请刷新重试。",
+        "statusError": "无法检查连接状态。请刷新重试。",
+        "empty": "尚无已配对机器。请通过客户端设置配对机器。",
+        "online": "在线",
+        "offline": "离线",
+        "unpaired": "需要配对",
+        "unknown": "状态未知",
+        "pairedAt": "配对日期：{{date}}",
+        "open": "打开工作区",
+        "removeConfirm": "从此客户端移除与 {{name}} 的配对？远程工作区不会被删除。"
       }
     },
     "remoteProjects": {
