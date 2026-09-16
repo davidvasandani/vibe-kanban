@@ -290,33 +290,59 @@ pub async fn restart_workspace(
         // mode, where there is no server-side scoped-session identity. Always
         // let that turn finish delivering the tool result before teardown.
         let grace_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
+        let workspace_launch_guard = loop {
+            let ready_to_lock = match ExecutionProcess::find_running_coding_agents_by_workspace(
+                &deployment_for_restart.db().pool,
+                workspace_for_restart.id,
+            )
+            .await
+            {
+                Ok(processes) if processes.is_empty() => true,
+                Ok(_) => {
+                    if force_running_restart.load(Ordering::Acquire)
+                        && tokio::time::Instant::now() >= grace_deadline
+                    {
+                        true
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        false
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(workspace_id = %workspace_for_restart.id, %error, "Could not observe running coding agents before workspace restart");
+                    return;
+                }
+            };
+            if !ready_to_lock {
+                continue;
+            }
+            let guard = services::services::container::lock_workspace_execution_starts(
+                workspace_for_restart.id,
+            )
+            .await;
             match ExecutionProcess::find_running_coding_agents_by_workspace(
                 &deployment_for_restart.db().pool,
                 workspace_for_restart.id,
             )
             .await
             {
-                Ok(processes) if processes.is_empty() => break,
+                Ok(processes)
+                    if processes.is_empty()
+                        || (force_running_restart.load(Ordering::Acquire)
+                            && tokio::time::Instant::now() >= grace_deadline) =>
+                {
+                    break guard;
+                }
                 Ok(_) => {
-                    if force_running_restart.load(Ordering::Acquire)
-                        && tokio::time::Instant::now() >= grace_deadline
-                    {
-                        break;
-                    }
+                    drop(guard);
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
                 Err(error) => {
-                    tracing::error!(workspace_id = %workspace_for_restart.id, %error, "Could not observe running coding agents before workspace restart");
+                    tracing::error!(workspace_id = %workspace_for_restart.id, %error, "Could not verify coding-agent state under workspace restart launch gate");
                     return;
                 }
             }
-        }
-        let workspace_launch_guard =
-            services::services::container::lock_workspace_execution_starts(
-                workspace_for_restart.id,
-            )
-            .await;
+        };
         let processes = match ExecutionProcess::find_all_running_by_workspace(
             &deployment_for_restart.db().pool,
             workspace_for_restart.id,
