@@ -1,7 +1,7 @@
 # Authoritative snapshot and live-stream handoffs
 
 Tags: `vk/3488-fix-stale-execut`, `c89d-address-fable-fo`,
-`vk/8a08-frontend-not-ref`
+`vk/8a08-frontend-not-ref`, `vk/113f-sidebar-randomly`
 
 ## Subscribe before taking the snapshot
 
@@ -99,3 +99,26 @@ current scope at callback time, filter the merged projection by that scope, and
 clear bridge state when scope changes. Tests must exercise response-first,
 stream-first, live supersession/removal, and a response settling after a scope
 switch.
+
+## A failed refresh is not an empty snapshot
+
+Workspace sidebar names and pins come from the workspace stream, while PR,
+diff, approval, poller and unseen-activity metadata come from a separate bulk
+summary query in `packages/web-core/src/shared/hooks/useWorkspaces.ts`. Losing
+all enrichment while retaining names can therefore indicate a summary-cache
+failure rather than workspace deletion.
+
+Reject failed summary requests. Returning an empty map after an HTTP, API or
+transport failure tells React Query that an authoritative empty snapshot arrived
+and replaces the last successful metadata. Rejection preserves same-key cached
+data and permits normal retry/poll recovery. A successful empty array or explicit
+null/false/zero fields must still replace the previous snapshot.
+
+Do not use `keepPreviousData` to retain data through same-key refresh failures;
+React Query already retains it. That placeholder also carries data across query
+keys and can show another host's metadata when workspace IDs overlap. Keep host
+and archive status in the query identity. Test the real QueryClient with failed
+refreshes, automatic polling recovery, explicit clears, initial failure, and
+late responses after a host switch.
+
+Contributed by: `vk/113f-sidebar-randomly`.

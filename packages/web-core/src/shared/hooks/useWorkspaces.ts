@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from 'react';
-import { useQuery, keepPreviousData } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { useJsonPatchWsStream } from '@/shared/hooks/useJsonPatchWsStream';
 import { workspaceSummaryKeys } from '@/shared/hooks/workspaceSummaryKeys';
 import { makeLocalApiRequest } from '@/shared/lib/localApiTransport';
@@ -111,36 +111,32 @@ async function fetchWorkspaceSummariesByArchived(
   archived: boolean,
   hostId: string | null
 ): Promise<Map<string, WorkspaceSummary>> {
-  try {
-    const basePath = hostId ? `/api/host/${hostId}` : '/api';
-    const response = await makeLocalApiRequest(
-      `${basePath}/workspaces/summaries`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ archived }),
-      }
-    );
-
-    if (!response.ok) {
-      console.warn('Failed to fetch workspace summaries:', response.status);
-      return new Map();
+  const basePath = hostId ? `/api/host/${hostId}` : '/api';
+  const response = await makeLocalApiRequest(
+    `${basePath}/workspaces/summaries`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ archived }),
     }
+  );
 
-    const data: ApiResponse<WorkspaceSummaryResponse> = await response.json();
-    if (!data.success || !data.data?.summaries) {
-      return new Map();
-    }
-
-    const map = new Map<string, WorkspaceSummary>();
-    for (const summary of data.data.summaries) {
-      map.set(summary.workspace_id, summary);
-    }
-    return map;
-  } catch (err) {
-    console.warn('Error fetching workspace summaries:', err);
-    return new Map();
+  // Failed refreshes must reject so React Query retains this scope's last
+  // successful snapshot instead of replacing sidebar metadata with an empty map.
+  if (!response.ok) {
+    throw new Error(`Failed to fetch workspace summaries (${response.status})`);
   }
+
+  const data: ApiResponse<WorkspaceSummaryResponse> = await response.json();
+  if (!data.success || !Array.isArray(data.data?.summaries)) {
+    throw new Error('Invalid workspace summaries response');
+  }
+
+  const map = new Map<string, WorkspaceSummary>();
+  for (const summary of data.data.summaries) {
+    map.set(summary.workspace_id, summary);
+  }
+  return map;
 }
 
 export function useWorkspaces(): UseWorkspacesResult {
@@ -186,7 +182,6 @@ export function useWorkspaces(): UseWorkspacesResult {
       refetchInterval: 15000,
       refetchOnWindowFocus: false,
       refetchOnMount: 'always',
-      placeholderData: keepPreviousData,
     });
 
   // Fetch summaries for archived workspaces
@@ -199,7 +194,6 @@ export function useWorkspaces(): UseWorkspacesResult {
       refetchInterval: 15000,
       refetchOnWindowFocus: false,
       refetchOnMount: 'always',
-      placeholderData: keepPreviousData,
     });
 
   const workspaces = useMemo(() => {

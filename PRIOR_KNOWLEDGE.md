@@ -1,20 +1,12 @@
-# Prior knowledge: Global Search
+# Prior knowledge: sidebar metadata loss
 
-Searched the existing `vibe-kanban/wiki` and `vibe-kanban/docs/knowledge-base`
-for search, chat, organization, navigation and authorization. The knowledge base
-is populated; no pages were modified during recall.
+Task: vk/113f-sidebar-randomly
 
-- `wiki/appbar-rail-and-org-tiles.md`: organization selection lives in
-  useOrganizationStore; useUserOrganizations obtains accessible organizations.
-  RemoteAppShell scopes projects by active organization. Global search must
-  deliberately query beyond that active organization.
-- `wiki/electric-sync-fallback.md`: Electric collections are cached and can fall
-  back to REST. Avoid tying search completeness to currently mounted shapes.
-- `wiki/workspace-navbar-breadcrumbs.md`: workspace issue_id is a UUID, while
-  simple_id is display identity. Navigate using authoritative IDs and preserve
-  project/workspace context when asynchronous data is unavailable.
-- `docs/knowledge-base/lazy-loading-normalized-conversation-history.md`:
-  conversation history is paged; loading displayed chat is not a complete global
-  search source. Search persisted content on the server with bounded results.
+Searched the Vibe Kanban wiki and docs/knowledge-base for sidebar, metadata, stream, and enrichment. Relevant pages:
 
-Task: vk/8f5e-global-search
+- `vibe-kanban/docs/knowledge-base/authoritative-snapshot-stream-handoffs.md`: retain last authoritative data through transport failure; replace on successful snapshots; reset when identity changes.
+- `vibe-kanban/wiki/vk-pollers.md`: sidebar poller/activity grouping comes from bulk workspace summaries, not per-row execution subscriptions.
+- `vibe-kanban/wiki/workspace-carousel-view.md`: summaries refresh every 15 seconds and drive metadata and grouping across consumers.
+- `vibe-kanban/wiki/electric-sync-fallback.md`: errors and recovery must remain distinct; successful fallback restores authority.
+
+Source inspection confirms `useWorkspaces.ts` combines WebSocket identity/pins with HTTP summary metadata. Its summary fetcher converts HTTP, API, and transport errors into successful empty maps, replacing the React Query cache. This explains simultaneous metadata loss while names and pins survive. `keepPreviousData` also spans query-key changes and should not leak summaries between hosts. Preserve same-key query data by rejecting failures and allow successful empty snapshots to clear it.
