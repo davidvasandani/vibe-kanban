@@ -198,7 +198,9 @@ contributed to it.
 - [workspace-creation-reliability.md](workspace-creation-reliability.md) —
   Repository-ID admin queue identity, bounded pre-operation lease contention
   waits, cancellation and fencing limits, original-code regression proof, and
-  distinguishing rejected placement transitions from SQL failures.
+  distinguishing rejected placement transitions from SQL failures; durable creation
+  phase evidence, terminal-state precedence, host-scoped progress polling, and
+  truthful unknown/legacy presentation (`vk/855b-show-the-steps-w`).
 - [global-search.md](global-search.md) — Search across remote metadata and host
   conversations: authorization, relay targeting, deadline isolation, Unicode
   matching, historical session navigation and organization redirect coordination.
