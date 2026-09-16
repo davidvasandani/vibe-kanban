@@ -1,6 +1,6 @@
 # Clustered workspace execution and shared-storage safety
 
-Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`, `8475-bubblewrap-missi`, `2fe7-vk-coordinator-m`, `eef5-coordinator-miss`, `VAS-448`
+Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`, `8475-bubblewrap-missi`, `2fe7-vk-coordinator-m`, `eef5-coordinator-miss`, `VAS-448`, `vk/1d23-vk-worker-output`
 
 ## Keep authority central and process ownership local
 
@@ -345,3 +345,31 @@ role evaluation with focused tests. Then run a two-node deployment exercise
 that disconnects the coordinator, cancels a process group, removes the shared
 mount, and verifies worktree integrity. Passing local tests does not replace
 that deployment gate.
+
+## Replay gaps and retained terminal evidence
+
+Contributed by: `vk/1d23-vk-worker-output`.
+
+The worker's default event journal holds 4,096 events and evicts old events on
+append, independently of acknowledgements. `EventJournal` keeps terminal evidence
+separately. A real output gap therefore does not by itself prove that the
+execution outcome is unknown.
+
+On `WorkerClientError::ReplayGap`, the coordinator checks authenticated worker
+inventory against the durable dispatch: execution ID, worker node/job IDs and
+request digest must match, the terminal state must agree with its evidence, and
+the summary sequence must not precede the gap or previously observed worker
+sequence. Matching completed/failed/killed/interrupted evidence can recover the
+outcome. Active, missing, contradictory, stale or unreachable evidence retains
+indeterminate status.
+
+Always persist `output_complete = false`; recovered exit evidence does not
+reconstruct missing stdout, stderr or interaction events. Never acknowledge a
+cursor across the missing range. Keep captured terminal evidence until both
+worker-job and process state writes succeed, and include requested/earliest
+sequence boundaries in diagnostics. Normal finalization follows persistence.
+A larger journal or a suppressed warning does not establish missing evidence.
+
+The exact original retention-loss trigger needs the affected execution identity
+and event boundaries. Stale Codex rollout warnings alone do not prove journal
+overflow caused a particular incident.

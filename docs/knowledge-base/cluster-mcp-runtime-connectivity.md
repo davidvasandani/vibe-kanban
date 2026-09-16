@@ -1,7 +1,7 @@
 # Cluster MCP runtime connectivity
 
 Contributing tasks: `VAS-356`, `VAS-375`, `268b-debug-vk-error`,
-`vk/f558-update-vk-to-aut`
+`vk/f558-update-vk-to-aut`, `vk/1d23-vk-worker-output`
 
 An MCP configuration can be valid, persisted, and successfully tested by the
 coordinator while remaining unusable by an executor on a worker. Treat these as
@@ -122,3 +122,29 @@ accept rules by consumer. Adding VK workers for Firecrawl TCP 3410 must not gran
 those workers access to logmein ports 8189/8190. Keep the final targeted drop and
 add a CI invariant that positively asserts the intended accepts and negatively
 asserts the forbidden cross-port access.
+
+## Keep Codex SQLite indices out of disposable path aliases
+
+Contributed by: `vk/1d23-vk-worker-output`.
+
+Linking persistent `sessions` into an execution-scoped Codex home preserves the
+files, but not the absolute alias paths recorded in a shared Codex state database.
+Once `PreparedMcpConfig` removes that execution root, indexed paths through it
+become stale. For a reported thread, an on-host check found the old alias absent
+and the corresponding persistent rollout still present. Codex's rollout lookup
+logs `state db returned stale rollout path` and falls back to file discovery.
+
+Initial scoped configuration sets `sqlite_home` to a private `sqlite` child of
+that execution home, overriding source configuration and the vendor environment
+fallback. The worker reserves a real owner-only directory there: if its generic
+overlay linked a same-named source entry, it removes only that alias before
+creating the private directory. Database files and WAL/SHM sidecars then share one
+execution lifetime. MCP refresh preserves `sqlite_home`; persistent sessions and
+authentication remain linked, and source configuration/databases remain untouched.
+
+The native key and precedence were verified in the pinned Codex `rust-v0.144.1`
+source (`44918ea`, `core/config.schema.json` and `core/src/config/mod.rs`). Rollout
+fallback behavior is in `rollout/src/list.rs`. Fresh indices can incur backfill
+cost. This change applies to new scoped executions and deliberately does not
+rewrite existing vendor databases or claim that every stale path means a deleted
+transcript. Preserve the error diagnostic rather than merely hiding it.
