@@ -15,4 +15,4 @@ Plan: ./plan.md. Independent files within each [P] layer may be edited together.
 ## Layer 4
 - [x] T005 Independent Codex review; fix confirmed findings and reverify (T004).
 - [x] T006 Document reusable behavior in `wiki/issue-workspace-advisory.md`, update `wiki/INDEX.md`, commit (T005).
-- [ ] T007 Open task PR against main and merge after checks (T006).
+- [x] T007 Open task PR against main (T006): https://github.com/davidvasandani/vibe-kanban/pull/296. Pipeline stage 13 merges after checks; GitHub PR state is the authoritative merge record.
