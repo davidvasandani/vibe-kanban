@@ -39,7 +39,8 @@ impl McpRefreshCoordinator {
         let mut states = self.states.write().await;
         if let Some(current) = states.get(&session_id)
             && (current.status == McpRefreshStatus::PendingNextTurn
-                || current.requested_at > execution_started_at)
+                || (current.status != McpRefreshStatus::Unsupported
+                    && current.requested_at > execution_started_at))
         {
             return current.clone();
         }
@@ -483,6 +484,44 @@ mod tests {
             .await;
         assert_eq!(result.status, McpRefreshStatus::Unsupported);
         assert!(!result.retryable);
+    }
+
+    #[tokio::test]
+    async fn unsupported_refresh_does_not_suppress_active_startup_inventory() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let execution_started_at = Utc::now();
+        let unsupported = coordinator
+            .request(session, false, vec!["slack".into()])
+            .await;
+        assert_eq!(unsupported.status, McpRefreshStatus::Unsupported);
+
+        let observed = coordinator
+            .observe_inventory(
+                session,
+                execution_started_at,
+                vec!["slack".into()],
+                vec![McpServerRefreshSnapshot {
+                    server_id: "slack".into(),
+                    status: McpServerRefreshStatus::Ready,
+                    tool_count: Some(12),
+                    tool_names: Some(Vec::new()),
+                    tool_schema_fingerprint: None,
+                    resource_count: Some(0),
+                    prompt_count: Some(0),
+                    restart_occurred: Some(false),
+                    discovery_attempts: 1,
+                    observed_errors: Vec::new(),
+                    first_observed_at: Some(Utc::now()),
+                    last_observed_at: Some(Utc::now()),
+                    terminal_at: None,
+                    error: None,
+                }],
+            )
+            .await;
+
+        assert_eq!(observed.status, McpRefreshStatus::Refreshed);
+        assert_eq!(observed.servers[0].tool_count, Some(12));
     }
 
     #[tokio::test]
