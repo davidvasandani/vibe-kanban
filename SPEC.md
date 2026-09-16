@@ -1,20 +1,29 @@
-# Workspace creation progress
+# Archive linked workspaces when an issue is marked Done
 
-Task: vk/855b-show-the-steps-w
+Task: vk/88c5-marking-an-issue
 
-## Problem and outcome
-The workspace creation view currently shows a spinner with no explanation of the work taking place. Display actual creation steps and background activity while the existing asynchronous creation operation runs, including after navigation away and return.
+## Outcome
+Changing an issue to Done archives its linked workspaces, so they leave the active workspace list in the right drawer and remain accessible through existing archived workspace controls.
 
 ## Requirements
-- Show ordered creation steps, distinguishing waiting, running, completed, and failed states from backend evidence.
-- Identify the current background work (repository preparation, workspace configuration, and agent startup as supported by the existing creation flow).
-- Preserve request-independent creation, single-consumer claiming, existing error reporting, and ready-state navigation.
-- Keep progress scoped to the workspace, readable in narrow layouts, and accessible.
-- Do not expose shell output, credentials, or invented percentage completion.
-- Scope changes to the Vibe Kanban repository; deployment changes only if required for this feature.
+- Apply the behavior on a successful transition into the project's Done status, using the existing status model.
+- Archive every linked, unarchived workspace; preserve already archived workspaces and unrelated issues/workspaces.
+- Persist archive state through the existing workspace lifecycle and propagate updates to the drawer without requiring a page reload.
+- Cover individual and bulk status mutation paths where supported. A failed status change must not archive workspaces.
+- Reopening an issue does not automatically unarchive workspaces. Archiving must not delete workspaces or their history.
+- Limit implementation to Vibe Kanban; no other service changes.
 
-## Technical approach
-Inspect the existing durable creation lifecycle and extend its observable state with bounded step information. Reuse existing authenticated workspace reads or a workspace-scoped progress endpoint, and existing frontend query conventions. Persist enough progress for reload/reconnect; terminal failure must stop any running indicators.
+## Technical direction
+Inspect issue status persistence, local/remote workspace links, and existing archive operations. Implement at the shared mutation boundary where possible, preserving authorization and existing lifecycle side effects. Reuse live workspace updates and add regression coverage for Done, other statuses, repeated updates, multiple links, and unrelated workspaces.
 
-## Acceptance and verification
-Exercise slow creation, navigation/reload, successful handoff, failure, and recovery after restart. Add focused backend lifecycle and frontend projection tests, regenerate any shared contracts, and run repository formatting and applicable checks. Complete SpecKit artifacts, independent Codex review, knowledge-base update, then open and merge the task PR.
+## Verification and delivery
+Complete the requested ordered pipeline, focused tests and repository checks, independent Codex review, reusable project knowledge, and a merged pull request. Refine this specification after the required prior-knowledge recall and SpecKit analysis.
+
+## Confirmed implementation boundary
+Prior-knowledge recall and code tracing found remote single/bulk updates already
+archive their remote workspaces. The missing boundary is LinkedIssueProvider in
+the workspace drawer: unlike ProjectProvider, it does not reconcile archive state.
+Subscribe there to the existing project workspace shape, filter by linked issue,
+and reuse the existing reconciliation hook and local archive endpoint. No schema,
+backend, or deployment changes are required. Task-specific SpecKit artifacts live
+at `../homelab/specs/vk/88c5-marking-an-issue/` as specified by the workspace commands.
