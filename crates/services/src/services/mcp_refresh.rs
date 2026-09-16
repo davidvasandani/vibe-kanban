@@ -15,6 +15,16 @@ pub struct McpRefreshCoordinator {
     restart_generations: Arc<RwLock<HashMap<Uuid, u64>>>,
 }
 
+fn is_unsuccessful_server(server: &McpServerRefreshSnapshot) -> bool {
+    matches!(
+        server.status,
+        executors::mcp_refresh::McpServerRefreshStatus::ConnectedNoTools
+            | executors::mcp_refresh::McpServerRefreshStatus::FailedRetained
+            | executors::mcp_refresh::McpServerRefreshStatus::FailedUnavailable
+            | executors::mcp_refresh::McpServerRefreshStatus::NotRegistered
+    )
+}
+
 impl McpRefreshCoordinator {
     /// Publish the inventory observed by an ordinary executor startup. This
     /// keeps status tied to the active process even when no refresh was queued.
@@ -62,14 +72,7 @@ impl McpRefreshCoordinator {
             }
         }
         servers.sort_by(|a, b| a.server_id.cmp(&b.server_id));
-        let partial = servers.iter().any(|server| {
-            matches!(
-                server.status,
-                executors::mcp_refresh::McpServerRefreshStatus::FailedRetained
-                    | executors::mcp_refresh::McpServerRefreshStatus::FailedUnavailable
-                    | executors::mcp_refresh::McpServerRefreshStatus::NotRegistered
-            )
-        });
+        let partial = servers.iter().any(is_unsuccessful_server);
         let generation = {
             let mut generations = self.generations.write().await;
             let generation = generations.entry(session_id).or_default();
@@ -379,14 +382,7 @@ impl McpRefreshCoordinator {
             }
         }
         servers.sort_by(|a, b| a.server_id.cmp(&b.server_id));
-        let partial = servers.iter().any(|server| {
-            matches!(
-                server.status,
-                executors::mcp_refresh::McpServerRefreshStatus::FailedRetained
-                    | executors::mcp_refresh::McpServerRefreshStatus::FailedUnavailable
-                    | executors::mcp_refresh::McpServerRefreshStatus::NotRegistered
-            )
-        });
+        let partial = servers.iter().any(is_unsuccessful_server);
         state.status = if partial {
             McpRefreshStatus::PartiallyRefreshed
         } else {
@@ -415,6 +411,55 @@ mod tests {
     use executors::mcp_refresh::{McpServerRefreshSnapshot, McpServerRefreshStatus};
 
     use super::*;
+
+    fn connected_without_tools(server_id: &str) -> McpServerRefreshSnapshot {
+        McpServerRefreshSnapshot {
+            server_id: server_id.into(),
+            status: McpServerRefreshStatus::ConnectedNoTools,
+            tool_count: Some(0),
+            tool_names: Some(Vec::new()),
+            tool_schema_fingerprint: None,
+            resource_count: Some(0),
+            prompt_count: Some(0),
+            restart_occurred: Some(true),
+            discovery_attempts: 1,
+            observed_errors: Vec::new(),
+            first_observed_at: Some(Utc::now()),
+            last_observed_at: Some(Utc::now()),
+            terminal_at: Some(Utc::now()),
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_tool_inventory_is_partial_for_restart_and_startup() {
+        let coordinator = McpRefreshCoordinator::default();
+        let session = Uuid::new_v4();
+        let pending = coordinator
+            .request_restart(session, vec!["slack".into()])
+            .await;
+        let restarted = coordinator
+            .confirm(
+                session,
+                pending.generation,
+                vec![connected_without_tools("slack")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(restarted.status, McpRefreshStatus::PartiallyRefreshed);
+        assert!(restarted.last_successful_refresh_at.is_none());
+
+        let startup = coordinator
+            .observe_inventory(
+                Uuid::new_v4(),
+                Utc::now(),
+                vec!["brink".into()],
+                vec![connected_without_tools("brink")],
+            )
+            .await;
+        assert_eq!(startup.status, McpRefreshStatus::PartiallyRefreshed);
+        assert!(startup.last_successful_refresh_at.is_none());
+    }
 
     #[tokio::test]
     async fn concurrent_request_is_retryable_busy() {
