@@ -1,100 +1,86 @@
-# Technical Specification: Show Sent Chat Messages Without Refreshing
+# Technical Specification: Timestamp the Workspace Chat Log
 
 ## Objective
 
-Ensure that a successfully submitted follow-up message appears in the active
-Vibe Kanban conversation immediately and remains visible as live execution data
-arrives, without requiring a browser refresh.
+Make the chronology of a workspace conversation explicit by showing a readable
+timestamp on every visible chat-log item: messages, events, and actions.
 
 ## Problem
 
-The existing-session send path waits for the execution-process WebSocket to
-announce the process returned by the successful follow-up request. When that
-stream update is delayed or missed, the composer is cleared but the new user
-turn is absent from the conversation until a page refresh rebuilds history from
-the server. This makes a successful send look lost even though the backend has
-accepted it.
+The normalized conversation stream carries timestamps for persisted log
+entries, but the chat UI does not render them. Several client-derived entries
+also discard the execution process time by setting their timestamp to `null`.
+As a result, users cannot tell when a message was sent or when an agent event or
+tool action occurred.
 
 ## Scope
 
-This change is limited to the Vibe Kanban service repository. No other service
-or deployment configuration is changed.
-
-The feature covers follow-up messages sent from an existing session. New
-session creation, queued follow-ups, approval responses, and backend execution
-semantics remain unchanged unless shared reconciliation logic requires focused
-tests to prove they are unaffected.
+This change is limited to the Vibe Kanban source repository and its workspace
+chat UI. It does not change another service or homelab deployment configuration.
 
 ## Functional Requirements
 
-1. After the follow-up API succeeds, the execution process returned by that
-   response must be reconciled into the client-side execution-process state.
-2. Conversation history must discover and render that process even if the
-   WebSocket notification is delayed, arrives before the HTTP response, or is
-   not observed by the current connection.
-3. HTTP and WebSocket delivery of the same process must be idempotent: one send
-   produces one visible user turn and one live-log subscription.
-4. The submitted text must be represented by the server-returned execution
-   process rather than by a second, synthetic message record, so server IDs,
-   timestamps, executor configuration, and later status transitions remain
-   authoritative.
-5. The composer and attachments are cleared only after the backend accepts the
-   follow-up, preserving the current failure behavior.
-6. Session changes must not leak a reconciled process into another session.
-7. The existing execution-process stream remains the authority for subsequent
-   process updates and removal/reset behavior.
+1. Every visible normalized chat entry that represents a message, event, or
+   action displays a timestamp.
+2. Persisted normalized entries use their own server-provided timestamp.
+3. Client-derived user-message and script entries use the authoritative
+   execution-process creation time rather than the browser clock.
+4. Grouped entries display a timestamp that accurately represents the grouped
+   activity, without expanding the group.
+5. Synthetic transient UI entries that do not represent a logged event (for
+   example loading or navigation affordances) need not display a timestamp.
+6. Missing or invalid timestamps degrade safely and do not render misleading
+   dates or break the conversation.
+7. Timestamp formatting follows the user's locale and exposes the full local
+   date and time while keeping the chat log visually compact.
 
 ## UX Requirements
 
-- A successfully sent follow-up appears in the conversation during the same UI
-  interaction, with no manual reload.
-- No duplicate user bubble or visual flicker is introduced when the stream
-  later reports the same process.
-- Failed sends continue to leave the draft available and surface the existing
-  error feedback.
+- Timestamps are secondary metadata and must not overpower message or action
+  content.
+- The compact display is understandable within a single-day conversation and
+  the full local date/time is available accessibly and on hover.
+- Existing expansion, edit, retry, reset, approval, and virtualization behavior
+  remains unchanged.
 
 ## Technical Direction
 
-- Introduce a narrowly scoped client-side reconciliation path from the
-  successful `sessionsApi.followUp` response into the execution-process data
-  consumed by conversation history.
-- Key reconciliation by execution-process ID and validate the active session
-  before accepting it.
-- Preserve the WebSocket snapshot and patch behavior; the HTTP response closes
-  the creation-notification race but does not replace live status/log streams.
-- Prefer a testable pure reducer/helper or provider action over component-local
-  duplicated conversation entries.
+- Preserve or derive timestamps at the conversation-entry derivation boundary.
+- Add one reusable timestamp formatter/presentation primitive and apply it at a
+  shared chat-row boundary where possible, with explicit handling for grouped
+  rows.
+- Keep locale formatting deterministic under test by separating timestamp
+  validation/formatting from presentation.
+- Do not edit generated shared types directly.
 
 ## Verification
 
 Automated tests must cover:
 
-1. A successful follow-up becomes visible from the API response before any
-   WebSocket process patch.
-2. A later WebSocket patch/snapshot for that ID does not duplicate the turn.
-3. A WebSocket update that wins the race with the API response remains
-   idempotent.
-4. A process belonging to a different session is rejected or ignored.
-5. A failed follow-up does not insert a process and does not clear the draft.
-6. Existing live status updates continue to replace the reconciled process.
+1. Valid timestamps render as compact localized times with full date/time
+   metadata.
+2. Invalid or absent timestamps render no timestamp and do not throw.
+3. Derived user messages and script actions inherit the execution-process
+   creation time.
+4. Message, event/action, and grouped-row rendering receive timestamp metadata.
+5. Existing conversation row identity and virtualization semantics are intact.
 
-Run focused frontend tests plus the repository-required formatting and relevant
-type/lint checks.
+Run focused frontend tests, type checking, linting, and repository-required
+formatting appropriate to the affected packages.
 
 ## Out of Scope
 
-- Changes to the homelab deployment module or any other hosted service.
-- Changing backend follow-up persistence or executor startup semantics.
-- Redesigning conversation history, queued messages, or the composer.
-- Fabricating an optimistic process before the server accepts the request.
+- Database or API schema changes.
+- Changing the ordering or retention of conversation entries.
+- Timestamping composer drafts, loading indicators, or non-log controls.
+- Changes to the homelab repository or any other deployed service.
 
 ## Acceptance Criteria
 
-- Reproduction with a delayed or absent execution-process stream notification
-  shows the sent follow-up without refreshing.
-- Normal stream delivery yields exactly one rendered turn.
-- Automated regression coverage exercises both orderings of the HTTP/WebSocket
-  race and session isolation.
-- Independent Codex review reports no significant findings.
-- Reusable knowledge is recorded in the project knowledge base, and the task's
-  pull request is merged into the base branch.
+- A workspace chat visibly identifies when each logged message, event, and
+  action occurred.
+- The time shown comes from server-backed entry/process data.
+- Missing or malformed timestamps are handled without regressions.
+- Automated coverage passes and independent Codex review reports no significant
+  findings.
+- Reusable knowledge is recorded and the task pull request is merged.

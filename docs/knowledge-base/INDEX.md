@@ -6,6 +6,7 @@ update pages (and this index) when a task ships something reusable.
 
 | Page | Summary | Contributing tasks |
 | --- | --- | --- |
+| [conversation-timestamp-provenance](conversation-timestamp-provenance.md) | Preserve authoritative event/process time through normalized chat projections, format it at the shared row boundary, select aggregate time, and suppress metadata for deliberately hidden entries | `vk/a22f-time-stamp-chat` |
 | [agent-facing-fail-loud-boundaries](agent-facing-fail-loud-boundaries.md) | Test typed API failures at the envelope surfaced by MCP, provide corrective messages, trace dead vendor fields through history, and enforce verified strict config at process launch | `vk/94c0-three-loose-ends` |
 | [locale-key-consistency](locale-key-consistency.md) | Trustworthy locale key-set gates: one collation for `sort` and `comm`, parse-failure preservation, placeholder identity, plural conventions, and full CI-boundary verification | `vk/94c0-three-loose-ends` |
 | [repository-scoped-ui-projections](repository-scoped-ui-projections.md) | Identity-keyed child enrichment, truthful unknown loading state, why aggregate PR summaries cannot label repository rows, and pure association testing | `vk/63e0-git-panel-shows` |

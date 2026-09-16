@@ -58,6 +58,7 @@ import type {
   AggregatedPatchGroup,
   AggregatedDiffGroup,
   AggregatedThinkingGroup,
+  DisplayEntry,
 } from '@/shared/hooks/useConversationHistory/types';
 import {
   CaretDownIcon,
@@ -66,8 +67,10 @@ import {
   GlobeIcon,
   PencilSimpleIcon,
 } from '@phosphor-icons/react';
+import { ConversationTimestamp } from './ConversationTimestamp';
 
 type Props = {
+  displayEntry: DisplayEntry;
   expansionKey: string;
   executionProcessId: string;
   workspaceWithSession: WorkspaceWithSession;
@@ -1397,6 +1400,7 @@ const DisplayConversationEntrySpaced = (props: Props) => {
       )}
     >
       <DisplayConversationEntry {...props} />
+      <ConversationTimestamp entry={props.displayEntry} />
     </div>
   );
 };
