@@ -698,6 +698,22 @@
       "overview": {
         "available": "Available",
         "unavailable": "Unavailable"
+      },
+      "management": {
+        "title": "Equipos vinculados",
+        "description": "Administra los equipos remotos vinculados con este cliente.",
+        "refresh": "Actualizar",
+        "loading": "Cargando equipos vinculados…",
+        "loadError": "No se pudieron cargar los equipos vinculados. Actualiza para reintentar.",
+        "statusError": "No se pudo comprobar la conexión. Actualiza para reintentar.",
+        "empty": "Aún no hay equipos vinculados. Usa la configuración de cliente para vincular uno.",
+        "online": "En línea",
+        "offline": "Sin conexión",
+        "unpaired": "Vinculación requerida",
+        "unknown": "Estado desconocido",
+        "pairedAt": "Vinculado el {{date}}",
+        "open": "Abrir espacios de trabajo",
+        "removeConfirm": "¿Eliminar la vinculación con {{name}} de este cliente? No se eliminarán los espacios de trabajo remotos."
       }
     },
     "remoteProjects": {

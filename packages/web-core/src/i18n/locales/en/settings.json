@@ -851,6 +851,22 @@
       },
       "client": {
         "label": "Client"
+      },
+      "management": {
+        "title": "Paired machines",
+        "description": "Manage remote machines paired with this client.",
+        "refresh": "Refresh",
+        "loading": "Loading paired machines…",
+        "loadError": "Could not load paired machines. Refresh to try again.",
+        "statusError": "Could not check connection status. Refresh to try again.",
+        "empty": "No machines paired yet. Use client setup to pair a machine.",
+        "online": "Online",
+        "offline": "Offline",
+        "unpaired": "Pairing required",
+        "unknown": "Status unknown",
+        "pairedAt": "Paired {{date}}",
+        "open": "Open workspaces",
+        "removeConfirm": "Remove the pairing with {{name}} from this client? Remote workspaces will not be deleted."
       }
     },
     "remoteProjects": {

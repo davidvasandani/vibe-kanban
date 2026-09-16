@@ -698,6 +698,22 @@
       "overview": {
         "available": "Available",
         "unavailable": "Unavailable"
+      },
+      "management": {
+        "title": "Machines associées",
+        "description": "Gérez les machines distantes associées à ce client.",
+        "refresh": "Actualiser",
+        "loading": "Chargement des machines associées…",
+        "loadError": "Impossible de charger les machines associées. Actualisez pour réessayer.",
+        "statusError": "Impossible de vérifier la connexion. Actualisez pour réessayer.",
+        "empty": "Aucune machine associée. Utilisez la configuration du client pour en associer une.",
+        "online": "En ligne",
+        "offline": "Hors ligne",
+        "unpaired": "Association requise",
+        "unknown": "État inconnu",
+        "pairedAt": "Associée le {{date}}",
+        "open": "Ouvrir les espaces de travail",
+        "removeConfirm": "Supprimer l’association avec {{name}} de ce client ? Les espaces de travail distants ne seront pas supprimés."
       }
     },
     "remoteProjects": {
