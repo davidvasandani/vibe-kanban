@@ -87,6 +87,15 @@ also shares an async cell for executable discovery, avoiding one redundant
 The long-batch regression must exceed the admission deadline and overlap
 another refresh; short simulated probes would hide this failure.
 
+### Deployed lazy-admission result
+
+PR #306 (`6cb1d71`) was checked on 2026-09-17 at 17:25 UTC. All 31
+profiles returned unauthenticated, with zero unknown/busy/timeout statuses.
+A sanitized agent CLI request independently confirmed the shared SSO session
+had expired. Refresh SSO before evaluating authenticated acceptance after a
+long deployment; completed status checks and successful authentication are
+different assertions.
+
 ## Contributed by
 
 - vk/c817-aws-sso-sign-in

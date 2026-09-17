@@ -18,7 +18,7 @@ contributed to it.
 
 ## Pages
 
-- [aws-sso-agent-state.md](aws-sso-agent-state.md) — Shared AWS state, scoped homes, profile selection, host-versus-agent availability evidence, and bounded authentication probes. Lazy admission prevents same-batch queue expiry; executable discovery is shared per refresh.
+- [aws-sso-agent-state.md](aws-sso-agent-state.md) — Shared AWS state, scoped homes, profile selection, host-versus-agent availability evidence, and bounded authentication probes. Lazy admission prevents same-batch queue expiry; executable discovery is shared per refresh. Deployed check: zero unknown statuses with an expired session.
 
 - [mcp-oauth-connection-identity.md](mcp-oauth-connection-identity.md) — Preserve owner-bound gateway identity across identifier changes and both OAuth completion paths.
 

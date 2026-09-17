@@ -24,4 +24,6 @@ Deployment check: revision `d154bab` is running on the coordinator. Live all-pro
 
 - [x] T014 Lazily admit profile probes and share executable discovery per refresh.
 - [x] T015 Verify long overlapping batches, format, independently review, and record evidence.
-- [ ] T016 Update knowledge, merge the fix, and recheck deployed statuses.
+- [x] T016 Update knowledge, merge the fix, and recheck deployed statuses.
+
+- [ ] T017 After fresh Settings sign-in, verify deployed profiles and agent CLI/SDK authentication. At 17:25 UTC all 31 profiles correctly reported unauthenticated, with zero unknown results; agent CLI confirmed session expiry.
