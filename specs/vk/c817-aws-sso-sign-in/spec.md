@@ -39,3 +39,15 @@ Resolved by /speckit.clarify:
 - The execution budget is 15 seconds and starts after admission; admission waiting is capped at 30 seconds with a distinct busy message.
 - Results remain attached to the correct profiles; cancellation frees capacity and terminates any active CLI subprocess.
 - The 31-profile ai-foundry session reports authenticated after its successful sign-in. Live bounded reproduction passed all 31 with four concurrent probes.
+
+## Follow-up: lazy profile admission
+
+Live validation of #304 exposed that eagerly starting 31 admission deadlines
+causes later profiles to expire behind their own batch. Admit at most four
+profile futures per list while retaining the process-wide semaphore and
+per-admission/per-execution deadlines. Preserve profile ordering. Resolve the
+AWS executable once per refresh, under the same global capacity limit, using
+a request-local async cell; do not retain stale executable paths across refreshes.
+Verify overlapping 31-profile batches whose total duration exceeds 30 seconds,
+including ordered identity results and the global process limit. Then run the
+AWS tests, formatting, independent Codex review, knowledge update, and PR merge.

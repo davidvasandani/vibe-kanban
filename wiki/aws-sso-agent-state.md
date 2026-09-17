@@ -74,6 +74,19 @@ all-profile status acceptance, and record busy admission separately from
 execution timeout. Investigate the competing work before simply increasing
 timeouts or declaring the status panel healthy.
 
+### Admission windows for large profile lists
+
+Follow-up from task `vk/c817-aws-sso-sign-in`: eagerly polling all profile
+futures starts every queue deadline together. A shared semaphore alone can
+therefore reject healthy late profiles behind their own batch. Feed at most
+four futures at a time into that semaphore using an ordered buffered stream.
+This preserves result association and process-wide limits while allowing a
+large refresh to exceed one profile's admission timeout overall. Each refresh
+also shares an async cell for executable discovery, avoiding one redundant
+`aws --version` subprocess per profile without caching paths across refreshes.
+The long-batch regression must exceed the admission deadline and overlap
+another refresh; short simulated probes would hide this failure.
+
 ## Contributed by
 
 - vk/c817-aws-sso-sign-in
