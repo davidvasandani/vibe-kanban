@@ -41,6 +41,27 @@ Acceptance requires both CLI STS identity and a Node SDK default provider in
 an agent shell after rollout; filesystem tests alone cannot prove live AWS
 authentication. No token, exported access key, or cache content belongs in logs.
 
+## Authentication status probes need a shared concurrency budget
+
+A successful SSO login and a completed STS identity check are distinct events.
+The original status endpoint used `join_all` to start an AWS CLI process for
+every profile with a five-second deadline. On the coordinator, one probe
+succeeded in 1.23 seconds, while 30 of 31 simultaneous probes timed out. Running
+four at a time passed all 31 in 15.89 seconds (slowest probe: 3.1 seconds).
+The error was process contention, not failed login or inaccessible credentials.
+
+`probe_profile_auth` now shares four permits across the entire server process,
+including overlapping list requests and post-login verification. Admission can
+wait up to 30 seconds; admitted work then receives its own 15-second execution
+budget. A queue timeout reports busy capacity, while an execution timeout says
+how long the actual check was allowed to run. `join_all` still preserves the
+profile/result ordering; futures waiting for permits do not spawn processes.
+The permit and kill-on-drop CLI guard both release on request cancellation.
+
+Do not revert to a per-request limit: two refreshes would multiply the process
+count. Do not start the execution timer while a probe is waiting in the queue:
+healthy queued profiles would again appear unknown without being checked.
+
 ## Contributed by
 
 - vk/c817-aws-sso-sign-in

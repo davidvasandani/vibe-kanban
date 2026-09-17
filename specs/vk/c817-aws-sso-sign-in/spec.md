@@ -33,3 +33,9 @@ Resolved by /speckit.clarify:
 - Select a named profile with AWS_PROFILE (or CLI --profile); do not choose one of 31 profiles automatically.
 - Report host availability and agent availability as unverified in Settings unless actually probed. No new remote probing API is required for this task.
 - No remaining open questions.
+
+## Follow-up acceptance: reliable status checks
+- At most four AWS auth probes execute concurrently per server process, including overlapping list and post-login requests.
+- The execution budget is 15 seconds and starts after admission; admission waiting is capped at 30 seconds with a distinct busy message.
+- Results remain attached to the correct profiles; cancellation frees capacity and terminates any active CLI subprocess.
+- The 31-profile ai-foundry session reports authenticated after its successful sign-in. Live bounded reproduction passed all 31 with four concurrent probes.
