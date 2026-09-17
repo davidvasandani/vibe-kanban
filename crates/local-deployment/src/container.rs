@@ -2469,21 +2469,21 @@ impl LocalContainerService {
                         &ctx.workspace,
                     )
                     .await;
-                    let workspace_name =
-                        Workspace::find_by_id_with_status(&container.db.pool, ctx.workspace.id)
+                    let current_workspace =
+                        Workspace::find_by_id(&container.db.pool, ctx.workspace.id)
                             .await
                             .ok()
-                            .flatten()
-                            .and_then(|ws| ws.workspace.name);
+                            .flatten();
                     let client = client.clone();
                     let workspace_id = ctx.workspace.id;
-                    let archived = ctx.workspace.archived;
+                    let workspace_name = current_workspace.as_ref().and_then(|ws| ws.name.clone());
+                    let archived = current_workspace.map(|ws| ws.archived);
                     tokio::spawn(async move {
                         remote_sync::sync_workspace_to_remote(
                             &client,
                             workspace_id,
                             workspace_name.map(Some),
-                            Some(archived),
+                            archived,
                             stats.as_ref(),
                         )
                         .await;
@@ -3673,6 +3673,12 @@ fn failure_exit_status() -> std::process::ExitStatus {
 
 #[async_trait]
 impl ContainerService for LocalContainerService {
+    async fn activate_workspace(&self, workspace_id: Uuid) -> Result<(), ContainerError> {
+        remote_sync::activate_workspace(&self.db.pool, self.remote_client.as_ref(), workspace_id)
+            .await?;
+        Ok(())
+    }
+
     fn msg_stores(&self) -> &Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>> {
         &self.msg_stores
     }

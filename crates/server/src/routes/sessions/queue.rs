@@ -535,6 +535,13 @@ async fn queue_message(
         .queued_message_service()
         .queue_message(session.id, data);
 
+    // Publish before activation can await remote I/O: finalization must be
+    // able to claim this message if the current turn ends during that wait.
+    deployment
+        .container()
+        .activate_workspace(session.workspace_id)
+        .await?;
+
     deployment
         .track_if_analytics_allowed(
             "follow_up_queued",

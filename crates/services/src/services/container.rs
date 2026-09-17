@@ -1085,6 +1085,12 @@ pub trait ContainerService {
 
     /// Archive a workspace: set archived flag, stop running persistent
     /// processes (dev servers, background helpers), and run archive script.
+    /// Accept renewed activity through the same path for direct and queued prompts.
+    async fn activate_workspace(&self, workspace_id: Uuid) -> Result<(), ContainerError> {
+        Workspace::set_archived(&self.db().pool, workspace_id, false).await?;
+        Ok(())
+    }
+
     async fn archive_workspace(&self, workspace_id: Uuid) -> Result<(), ContainerError> {
         let pool = &self.db().pool;
 
@@ -2122,7 +2128,7 @@ pub trait ContainerService {
         )
         .await?;
         if *run_reason != ExecutionProcessRunReason::ArchiveScript {
-            Workspace::set_archived(&self.db().pool, workspace.id, false).await?;
+            self.activate_workspace(workspace.id).await?;
         }
 
         if let Some(prompt) = match executor_action.typ() {

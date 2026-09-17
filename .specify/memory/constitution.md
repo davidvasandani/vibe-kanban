@@ -618,3 +618,10 @@ No new principle or version change is required.
 distributed execution), and XXX (authoritative execution state). Resume replay
 from durable execution-scoped evidence and retain uncertainty for real gaps.
 No new principle or version change is required.
+
+## Task applicability review — 2026-09-17
+
+`vk/e464-issue-and-worksp`: reaffirm II (transition regressions), III/VI
+(reuse archive and workspace synchronization paths), V (atomic remote workspace
+and issue mutations), XII (queued acceptance), and XXI (project-scoped,
+case-insensitive status naming). No new principle or version change is required.
