@@ -13,3 +13,12 @@ Task: vk/c817-aws-sso-sign-in
 - Deployment PR https://github.com/davidvasandani/homelab/pull/1240 and application PR https://github.com/davidvasandani/vibe-kanban/pull/302 merged. Shared AWS-state setup is active on think2 and think5. An actual agent shell on think3 sees all 31 ai-foundry profiles.
 - Live non-login agent shell resolves AWS CLI 2.34.24 from PATH. Both `aws sts get-caller-identity` and Node `@aws-sdk/credential-provider-node` 3.972.83 `defaultProvider()` reach the intended SSO state but report an expired token. Removed static access-key variables for both checks; no credential values were printed. Successful live authentication remains unverified until a fresh Settings sign-in.
 - Live login-shell checking exposed a second PATH boundary: shell startup replaces the service PATH. Follow-up deployment PR https://github.com/davidvasandani/homelab/pull/1242 adds AWS CLI to the system profile too. Its Nix evaluation, formatting, 9 Python tests and independent Codex review passed.
+
+## Authentication-probe follow-up evidence
+
+- After the user's new Settings sign-in, the actual agent CLI STS check passed in 1.54 seconds and Node's default provider resolved temporary credentials successfully; no secrets printed.
+- Coordinator single STS probe: success, 1.23 seconds. Simultaneous 31-profile reproduction with the old five-second budget: 30 timed out, one succeeded.
+- Coordinator reproduction with four concurrent probes and 15-second execution budgets: all 31 succeeded in 15.89 seconds; slowest probe 3.1 seconds.
+- Required dependency setup and repository formatting passed. Focused Rust tests are running; deployed API validation follows merge/rollout.
+- Actual pre-fix `/api/aws/profiles`: all 31 statuses unknown, 10.44 seconds.
+- Reproduction including the application's additional AWS CLI version lookup before each STS call: four shared slots, 30-second admission budget, all 31 succeeded in 21.82 seconds.

@@ -20,3 +20,8 @@ Regression coverage must exercise isolated HOME, absent AWS state, refreshed sta
 
 ## Out of scope
 Other services, static access-key provisioning, IAM permission changes, and the related MCP connection defect.
+
+## Follow-up: reliable AWS authentication probes
+A fresh sign-in succeeds but the status checker starts 31 AWS CLI subprocesses simultaneously and kills them after five seconds. Live reproduction: a single host probe passed in 1.23 seconds; 30 of 31 unbounded concurrent probes timed out. Four concurrent probes passed all 31 in 15.89 seconds, slowest 3.1 seconds.
+
+Limit authentication probes to four per server process across list requests and post-login verification. Give admitted probes 15 seconds to finish. Bound admission waiting separately to 30 seconds, reporting busy capacity distinctly from an executed probe timing out. Preserve profile/result association, credential-environment isolation, failure classification, and kill-on-cancellation. Add regressions for overlapping batches, waiting budgets, timeout/cancellation permit release and status mapping.
