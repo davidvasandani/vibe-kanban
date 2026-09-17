@@ -625,3 +625,8 @@ No new principle or version change is required.
 (reuse archive and workspace synchronization paths), V (atomic remote workspace
 and issue mutations), XII (queued acceptance), and XXI (project-scoped,
 case-insensitive status naming). No new principle or version change is required.
+
+`vk/e89d-debug-atlassian`: reaffirm II (OAuth reconnect regressions), III/VI
+(reuse existing gateway persistence), and identity-preserving projections:
+renaming a configured MCP identifier must not silently replace its bound OAuth
+connection. No principle or version change is required.

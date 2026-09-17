@@ -18,6 +18,8 @@ contributed to it.
 
 ## Pages
 
+- [mcp-oauth-connection-identity.md](mcp-oauth-connection-identity.md) — Preserve owner-bound gateway identity across identifier changes and both OAuth completion paths.
+
 - [issue-workspace-lifecycle.md](issue-workspace-lifecycle.md) — Comment-driven activation, transactional Done reopening, queue handoff ordering and local/remote sync boundaries.
 
 - [issue-workspace-advisory.md](issue-workspace-advisory.md) — Exact issue matching, sibling-scoped evidence, dismissible creation warnings, collapsed active counts and host-safe navigation.
