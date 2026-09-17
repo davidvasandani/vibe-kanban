@@ -17,7 +17,7 @@ use std::{
 
 use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
+use tokio::sync::{Mutex, OnceCell, OwnedMutexGuard, Semaphore};
 use ts_rs::TS;
 
 use super::cli_tools::{self, CliToolId};
@@ -1051,14 +1051,33 @@ async fn run_auth_probe(
     }
 }
 
-async fn probe_profile_auth(profile_name: &str) -> AwsAuthStatus {
+// Do not start every profile's admission deadline at the beginning of a large
+// refresh: later profiles would time out behind their own batch's healthy work.
+async fn collect_auth_probes(
+    probes: impl IntoIterator<Item = impl Future<Output = AwsAuthStatus>>,
+) -> Vec<AwsAuthStatus> {
+    stream::iter(probes)
+        .buffered(AUTH_PROBE_CONCURRENCY)
+        .collect()
+        .await
+}
+
+async fn probe_profile_auth(
+    profile_name: &str,
+    executable: &OnceCell<Option<PathBuf>>,
+) -> AwsAuthStatus {
     static CAPACITY: OnceLock<Semaphore> = OnceLock::new();
     run_auth_probe(
         CAPACITY.get_or_init(|| Semaphore::new(AUTH_PROBE_CONCURRENCY)),
         AUTH_PROBE_QUEUE_TIMEOUT,
         AUTH_PROBE_TIMEOUT,
         async {
-            let Some(executable) = cli_tools::effective_binary_for(CliToolId::Aws).await else {
+            // Discovery runs `aws --version`. Share it within a refresh, but never
+            // across refreshes where an installed tool may have changed.
+            let Some(executable) = executable
+                .get_or_init(|| cli_tools::effective_binary_for(CliToolId::Aws))
+                .await
+            else {
                 return AwsAuthStatus::CliMissing;
             };
             let mut command = tokio::process::Command::new(executable);
@@ -1461,10 +1480,12 @@ async fn discover_with(
 pub async fn list_profile_statuses() -> Result<Vec<AwsSsoProfileStatus>, AwsSsoError> {
     let content = read_config(&aws_config_path())?;
     let profiles = list_profile_entries_in(&content)?;
-    let statuses = futures::future::join_all(
+    let executable = OnceCell::new();
+    let statuses = collect_auth_probes(
         profiles
             .iter()
-            .map(|(profile, _, _)| async { probe_profile_auth(&profile.name).await }),
+            .map(|(profile, _, _)| probe_profile_auth(&profile.name, &executable))
+            .collect::<Vec<_>>(),
     )
     .await;
     Ok(profiles
@@ -1523,7 +1544,7 @@ pub async fn profile_status(name: &str) -> Result<AwsSsoProfileStatus, AwsSsoErr
         .into_iter()
         .find(|(profile, _, _)| profile.name == name)
         .ok_or_else(|| AwsSsoError::NotFound(name.to_string()))?;
-    let auth = probe_profile_auth(name).await;
+    let auth = probe_profile_auth(name, &OnceCell::new()).await;
     Ok(AwsSsoProfileStatus {
         profile,
         auth,
@@ -1868,6 +1889,14 @@ sso_registration_scopes = sso:account:access codewhisperer:analysis
         assert!(validate_profile_name("default", false).is_err());
     }
 
+    #[test]
+    fn profile_status_future_is_send() {
+        // Axum handlers require Send. Keep borrowed iterator closures out of
+        // the buffered stream's state, without polling any futures eagerly.
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(list_profile_statuses());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn auth_probe_capacity_is_shared_across_overlapping_batches() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1875,11 +1904,12 @@ sso_registration_scopes = sso:account:access codewhisperer:analysis
         let capacity = Semaphore::new(AUTH_PROBE_CONCURRENCY);
         let active = AtomicUsize::new(0);
         let peak = AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
         let batch = |offset| {
-            futures::future::join_all((0..31).map(|index| {
-                let capacity = &capacity;
-                let active = &active;
-                let peak = &peak;
+            let capacity = &capacity;
+            let active = &active;
+            let peak = &peak;
+            collect_auth_probes((0..31).map(move |index| {
                 async move {
                     run_auth_probe(
                         capacity,
@@ -1889,7 +1919,8 @@ sso_registration_scopes = sso:account:access codewhisperer:analysis
                             let count = active.fetch_add(1, Ordering::SeqCst) + 1;
                             peak.fetch_max(count, Ordering::SeqCst);
                             // Finish out of order to catch profile/result mismatches.
-                            tokio::time::sleep(Duration::from_millis(100 + (index % 3) * 20)).await;
+                            tokio::time::sleep(Duration::from_millis(10_000 + (index % 3) * 20))
+                                .await;
                             active.fetch_sub(1, Ordering::SeqCst);
                             AwsAuthStatus::Authenticated {
                                 identity: format!("profile-{}", offset + index),
@@ -1901,6 +1932,9 @@ sso_registration_scopes = sso:account:access codewhisperer:analysis
             }))
         };
         let (first, second) = tokio::join!(batch(0), batch(31));
+        // Total batch time exceeds the admission deadline. Every profile must
+        // still get checked, even when another refresh competes for capacity.
+        assert!(started.elapsed() > AUTH_PROBE_QUEUE_TIMEOUT);
         for (index, status) in first.into_iter().chain(second).enumerate() {
             assert_eq!(
                 status,

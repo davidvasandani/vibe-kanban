@@ -7,3 +7,8 @@ Rebased onto current main afterward. Conflicts were limited to active-task SpecK
 ## Authentication-probe follow-up review
 
 Independent `codex review --uncommitted` on the shared four-probe limit and separate admission/execution budgets reported: “No actionable defects were identified.” It confirmed profile association, classification and cancellation cleanup. Tests run separately.
+
+Lazy-admission follow-up: independent `codex review --uncommitted` reported
+no actionable regressions. It verified ordered results, global probe limits,
+and prevention of same-batch queue expiry. Local compilation subsequently
+required explicit move captures in the test closure; production code unchanged.

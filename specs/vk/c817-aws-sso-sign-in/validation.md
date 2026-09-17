@@ -32,3 +32,9 @@ Task: vk/c817-aws-sso-sign-in
 - Stopped the rollout poller, allowed outstanding requests to finish, and ran one isolated refresh: 4 authenticated, 27 unknown. **All-31 deployed acceptance did not pass.**
 - Host has six CPUs and load average around 66. Vibe Kanban has a three-CPU quota; its cgroup CPU pressure was about 78% some / 39% full over ten seconds. Its server process had 19 Git children during the check. These observations show substantial competing work; they do not establish the individual Git operations' purpose or justify changing another service.
 - Original host-to-agent acceptance passed after fresh sign-in (CLI STS and Node default provider). The concurrency regression suite and independent code review passed. The probe fix is deployed, but remaining timeouts under sustained production CPU contention remain an unresolved operational limitation. No all-authenticated rollout marker was produced.
+
+## Lazy-admission follow-up
+
+- Fixed an additional cause of busy results: all 31 eagerly polled profile futures started admission deadlines together. Each refresh now admits at most four futures into the global semaphore and resolves the executable once per refresh.
+- `pnpm install --frozen-lockfile`, `pnpm run format`, and `cargo test -p services aws_sso` passed (34 AWS tests). The overlapping 31-profile regression now simulates ten-second probes, runs beyond the 30-second admission window overall, and verifies every identity in order with peak concurrency four.
+- Independent Codex CLI review found no actionable regressions. Deployment verification remains pending for this follow-up; #304's partial live result is not sufficient.

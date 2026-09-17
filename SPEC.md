@@ -25,3 +25,15 @@ Other services, static access-key provisioning, IAM permission changes, and the 
 A fresh sign-in succeeds but the status checker starts 31 AWS CLI subprocesses simultaneously and kills them after five seconds. Live reproduction: a single host probe passed in 1.23 seconds; 30 of 31 unbounded concurrent probes timed out. Four concurrent probes passed all 31 in 15.89 seconds, slowest 3.1 seconds.
 
 Limit authentication probes to four per server process across list requests and post-login verification. Give admitted probes 15 seconds to finish. Bound admission waiting separately to 30 seconds, reporting busy capacity distinctly from an executed probe timing out. Preserve profile/result association, credential-environment isolation, failure classification, and kill-on-cancellation. Add regressions for overlapping batches, waiting budgets, timeout/cancellation permit release and status mapping.
+
+## Follow-up: lazy profile admission
+
+Live validation of #304 exposed that eagerly starting 31 admission deadlines
+causes later profiles to expire behind their own batch. Admit at most four
+profile futures per list while retaining the process-wide semaphore and
+per-admission/per-execution deadlines. Preserve profile ordering. Resolve the
+AWS executable once per refresh, under the same global capacity limit, using
+a request-local async cell; do not retain stale executable paths across refreshes.
+Verify overlapping 31-profile batches whose total duration exceeds 30 seconds,
+including ordered identity results and the global process limit. Then run the
+AWS tests, formatting, independent Codex review, knowledge update, and PR merge.

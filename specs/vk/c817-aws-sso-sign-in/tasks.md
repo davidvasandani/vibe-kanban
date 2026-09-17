@@ -21,3 +21,7 @@ Delivery: deployment PR #1240 and application PR #302 merged. Login-shell follow
 - [x] T013 Update `wiki/aws-sso-agent-state.md`, commit knowledge, open and merge the follow-up PR, and check deployed statuses.
 
 Deployment check: revision `d154bab` is running on the coordinator. Live all-profile acceptance is **not passing** under observed CPU contention: isolated refresh returned 4 authenticated and 27 unknown. See validation.md; do not treat merge/deployment as proof of all-profile authentication.
+
+- [x] T014 Lazily admit profile probes and share executable discovery per refresh.
+- [x] T015 Verify long overlapping batches, format, independently review, and record evidence.
+- [ ] T016 Update knowledge, merge the fix, and recheck deployed statuses.

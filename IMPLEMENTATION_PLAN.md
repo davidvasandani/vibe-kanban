@@ -15,3 +15,15 @@ Task: vk/c817-aws-sso-sign-in
 3. Preserve ordered list results and existing credential sanitization. Test overlapping batches, queue/execution distinction, cancellation and classification.
 4. Run focused services tests, required setup/format and relevant backend checks; independently review the diff.
 5. Update project knowledge and task evidence, commit, then open and merge a scoped PR. Verify deployed Settings API statuses after rollout.
+
+## Follow-up: lazy profile admission
+
+Live validation of #304 exposed that eagerly starting 31 admission deadlines
+causes later profiles to expire behind their own batch. Admit at most four
+profile futures per list while retaining the process-wide semaphore and
+per-admission/per-execution deadlines. Preserve profile ordering. Resolve the
+AWS executable once per refresh, under the same global capacity limit, using
+a request-local async cell; do not retain stale executable paths across refreshes.
+Verify overlapping 31-profile batches whose total duration exceeds 30 seconds,
+including ordered identity results and the global process limit. Then run the
+AWS tests, formatting, independent Codex review, knowledge update, and PR merge.
