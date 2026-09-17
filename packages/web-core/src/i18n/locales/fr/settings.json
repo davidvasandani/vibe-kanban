@@ -813,7 +813,7 @@
     },
     "cliTools": {
       "title": "Outils CLI",
-      "description": "Installe des versions épinglées d’outils CLI dans un répertoire géré par l’application. Les outils sont ajoutés au PATH des agents, mais une copie présente sur cette machine reste prioritaire. L’application ne stocke jamais les identifiants.",
+      "description": "Installez les outils CLI sur l’hôte sélectionné. Les vérifications concernent uniquement cet hôte ; la disponibilité dans l’agent n’est pas vérifiée. Chaque CLI gère ses identifiants.",
       "loading": "Vérification de la disponibilité des outils…",
       "docs": "Documentation du fournisseur",
       "actions": {
@@ -837,8 +837,8 @@
         "retry": "Réessayer"
       },
       "status": {
-        "host": "Fourni par cette machine : {{path}}",
-        "app": "Installé par Vibe Kanban ({{version}})",
+        "host": "Hôte uniquement (agent non vérifié) : {{path}}",
+        "app": "Installé sur l’hôte par Vibe Kanban ({{version}} ; agent non vérifié)",
         "outdated": "le catalogue épingle désormais {{version}}",
         "shadowed": "la copie de la machine est prioritaire dans le PATH",
         "notAvailable": "Non installé. Version du catalogue : {{version}}",
@@ -847,7 +847,7 @@
     },
     "aws": {
       "title": "AWS",
-      "description": "Gérez les profils SSO AWS dans le ~/.aws/config de cette machine et connectez-vous avec la CLI AWS. Vibe Kanban n'écrit que la configuration du profil ; les identifiants et jetons restent dans le stockage propre de la CLI AWS.",
+      "description": "Gérez les profils AWS SSO et connectez-vous sur l’hôte sélectionné. Le statut vérifie uniquement l’authentification de l’hôte. L’agent doit accéder à la même configuration et au même cache SSO ; sélectionnez un profil avec AWS_PROFILE. AWS CLI gère les jetons.",
       "loading": "Chargement des profils AWS…",
       "empty": "Aucun profil SSO configuré pour l'instant. Ajoutez-en un pour activer l'accès AWS sur cette machine.",
       "cliMissing": "La CLI AWS n'est pas disponible sur cette machine. Installez-la depuis la section Outils CLI pour vérifier l'état et vous connecter.",
@@ -868,10 +868,10 @@
         "delete": "Supprimer le profil"
       },
       "auth": {
-        "authenticated": "Authentifié",
-        "unauthenticated": "Non connecté",
-        "unknown": "État inconnu",
-        "cliMissing": "CLI AWS indisponible"
+        "authenticated": "Authentifié sur l’hôte",
+        "unauthenticated": "Non connecté sur l’hôte",
+        "unknown": "Authentification de l’hôte inconnue",
+        "cliMissing": "AWS CLI indisponible sur l’hôte"
       },
       "delete": {
         "confirm": "Supprimer le profil SSO « {{name}} » de ~/.aws/config ?"

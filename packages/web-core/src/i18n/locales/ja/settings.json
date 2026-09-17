@@ -813,7 +813,7 @@
     },
     "cliTools": {
       "title": "CLI ツール",
-      "description": "ベンダー CLI ツールの固定バージョンをアプリ管理ディレクトリにインストールします。ツールはエージェントの PATH に追加されますが、このマシンに既にあるコピーが優先されます。認証情報は保存されません。",
+      "description": "選択したホストに CLI ツールをインストールします。確認対象はそのホストのみで、エージェントシェルでの利用可否は未確認です。認証情報は各 CLI が管理します。",
       "loading": "ツールの利用可否を確認中…",
       "docs": "ベンダーのドキュメント",
       "actions": {
@@ -837,8 +837,8 @@
         "retry": "再試行"
       },
       "status": {
-        "host": "このマシンが提供: {{path}}",
-        "app": "Vibe Kanban がインストール ({{version}})",
+        "host": "ホストのみ（エージェントは未確認）: {{path}}",
+        "app": "Vibe Kanban がホストにインストール（{{version}}、エージェントは未確認）",
         "outdated": "カタログの固定バージョンは {{version}} です",
         "shadowed": "マシン側のコピーが PATH で優先されます",
         "notAvailable": "未インストール。カタログバージョン: {{version}}",
@@ -847,7 +847,7 @@
     },
     "aws": {
       "title": "AWS",
-      "description": "このマシンの ~/.aws/config にある AWS SSO プロファイルを管理し、AWS CLI でサインインします。Vibe Kanban が書き込むのはプロファイル設定のみで、認証情報とトークンは AWS CLI 自身のストレージに保存されます。",
+      "description": "選択したホストで AWS SSO プロファイルを管理し、サインインします。状態確認はホストの認証のみが対象です。エージェントは同じ AWS 設定と SSO キャッシュにアクセスする必要があります。AWS_PROFILE でプロファイルを選択してください。トークンは AWS CLI が管理します。",
       "loading": "AWS プロファイルを読み込み中…",
       "empty": "SSO プロファイルはまだ設定されていません。追加すると、このマシンで AWS にアクセスできるようになります。",
       "cliMissing": "このマシンでは AWS CLI を利用できません。CLI ツールセクションからインストールすると、状態確認とサインインができます。",
@@ -868,10 +868,10 @@
         "delete": "プロファイルを削除"
       },
       "auth": {
-        "authenticated": "認証済み",
-        "unauthenticated": "未サインイン",
-        "unknown": "状態不明",
-        "cliMissing": "AWS CLI が利用不可"
+        "authenticated": "ホストで認証済み",
+        "unauthenticated": "ホストで未サインイン",
+        "unknown": "ホストの認証状態は不明",
+        "cliMissing": "ホストで AWS CLI を利用できません"
       },
       "delete": {
         "confirm": "SSO プロファイル「{{name}}」を ~/.aws/config から削除しますか？"

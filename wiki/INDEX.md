@@ -18,6 +18,8 @@ contributed to it.
 
 ## Pages
 
+- [aws-sso-agent-state.md](aws-sso-agent-state.md) — Shared AWS state, scoped homes, profile selection, and host-versus-agent availability evidence.
+
 - [mcp-oauth-connection-identity.md](mcp-oauth-connection-identity.md) — Preserve owner-bound gateway identity across identifier changes and both OAuth completion paths.
 
 - [issue-workspace-lifecycle.md](issue-workspace-lifecycle.md) — Comment-driven activation, transactional Done reopening, queue handoff ordering and local/remote sync boundaries.

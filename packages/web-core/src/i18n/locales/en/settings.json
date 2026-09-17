@@ -698,7 +698,7 @@
     },
     "cliTools": {
       "title": "CLI Tools",
-      "description": "Install pinned vendor CLI tools and launch supported sign-in flows. A copy already provided by this machine always wins. Credentials remain stored and managed by each vendor CLI.",
+      "description": "Install pinned vendor CLI tools on the selected host. Checks below verify that host only; agent shell availability is not verified. Credentials remain managed by each vendor CLI.",
       "loading": "Checking tool availability…",
       "docs": "Vendor documentation",
       "actions": {
@@ -722,8 +722,8 @@
         "retry": "Retry"
       },
       "status": {
-        "host": "Provided by this machine: {{path}}",
-        "app": "Installed by Vibe Kanban ({{version}})",
+        "host": "Host only (agent not verified): {{path}}",
+        "app": "Installed on host by Vibe Kanban ({{version}}; agent not verified)",
         "outdated": "catalog now pins {{version}}",
         "shadowed": "the machine's copy takes precedence on PATH",
         "notAvailable": "Not installed. Catalog version: {{version}}",
@@ -732,7 +732,7 @@
     },
     "aws": {
       "title": "AWS",
-      "description": "Manage AWS SSO profiles in this machine's ~/.aws/config and sign in with the AWS CLI. Vibe Kanban writes profile configuration only; credentials and tokens stay in the AWS CLI's own storage.",
+      "description": "Manage AWS SSO profiles and sign in on the selected host. Status checks verify host authentication only. Agent shells need access to the same AWS configuration and SSO cache; select a profile with AWS_PROFILE. Tokens remain managed by the AWS CLI.",
       "loading": "Loading AWS profiles…",
       "empty": "No SSO profiles configured yet. Add one to enable AWS access on this machine.",
       "cliMissing": "The AWS CLI is not available on this machine. Install it from the CLI Tools section to check status and sign in.",
@@ -753,10 +753,10 @@
         "delete": "Delete profile"
       },
       "auth": {
-        "authenticated": "Authenticated",
-        "unauthenticated": "Not signed in",
-        "unknown": "Status unknown",
-        "cliMissing": "AWS CLI not available"
+        "authenticated": "Authenticated on host",
+        "unauthenticated": "Not signed in on host",
+        "unknown": "Host authentication status unknown",
+        "cliMissing": "AWS CLI not available on host"
       },
       "delete": {
         "confirm": "Delete the SSO profile \"{{name}}\" from ~/.aws/config?"

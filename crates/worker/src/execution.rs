@@ -2589,6 +2589,41 @@ mod tests {
     }
 
     #[test]
+    fn scoped_home_sees_shared_aws_login_and_atomic_token_refresh() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let shared = temp.path().join("shared-aws");
+        let scoped = temp.path().join("scoped");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        symlink(&shared, source.join(".aws")).unwrap();
+        prepare_scoped_home(&source, &scoped, Path::new(".gemini/settings.json")).unwrap();
+        assert!(!scoped.join(".aws/config").exists());
+
+        // Login can happen after the execution home was prepared.
+        fs::create_dir_all(shared.join("sso/cache")).unwrap();
+        fs::write(shared.join("config"), "[profile fixture]").unwrap();
+        fs::write(shared.join("sso/cache/fixture.json"), "first").unwrap();
+        assert_eq!(
+            fs::read_to_string(scoped.join(".aws/config")).unwrap(),
+            "[profile fixture]"
+        );
+        fs::write(shared.join("sso/cache/replacement.json"), "refreshed").unwrap();
+        fs::rename(
+            shared.join("sso/cache/replacement.json"),
+            shared.join("sso/cache/fixture.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(scoped.join(".aws/sso/cache/fixture.json")).unwrap(),
+            "refreshed"
+        );
+        assert!(!source.join(".gemini/settings.json").exists());
+    }
+
+    #[test]
     fn scoped_home_can_start_without_a_global_home() {
         let temp = TempDir::new().unwrap();
         let missing_source = temp.path().join("missing");
