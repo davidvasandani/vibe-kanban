@@ -1484,7 +1484,8 @@ pub async fn list_profile_statuses() -> Result<Vec<AwsSsoProfileStatus>, AwsSsoE
     let statuses = collect_auth_probes(
         profiles
             .iter()
-            .map(|(profile, _, _)| probe_profile_auth(&profile.name, &executable)),
+            .map(|(profile, _, _)| probe_profile_auth(&profile.name, &executable))
+            .collect::<Vec<_>>(),
     )
     .await;
     Ok(profiles
@@ -1886,6 +1887,14 @@ sso_registration_scopes = sso:account:access codewhisperer:analysis
     fn default_is_a_valid_login_reference_but_not_writable() {
         assert!(validate_profile_name("default", true).is_ok());
         assert!(validate_profile_name("default", false).is_err());
+    }
+
+    #[test]
+    fn profile_status_future_is_send() {
+        // Axum handlers require Send. Keep borrowed iterator closures out of
+        // the buffered stream's state, without polling any futures eagerly.
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(list_profile_statuses());
     }
 
     #[tokio::test(start_paused = true)]
