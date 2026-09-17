@@ -22,3 +22,5 @@ Task: vk/c817-aws-sso-sign-in
 - Required dependency setup and repository formatting passed. `cargo test -p services aws_sso` passed all 34 tests, including the five new deterministic concurrency/budget/cancellation regressions. Deployed API validation follows merge/rollout.
 - Actual pre-fix `/api/aws/profiles`: all 31 statuses unknown, 10.44 seconds.
 - Reproduction including the application's additional AWS CLI version lookup before each STS call: four shared slots, 30-second admission budget, all 31 succeeded in 21.82 seconds.
+
+- Follow-up PR https://github.com/davidvasandani/vibe-kanban/pull/304 merged as `d154bab586f257dd8568aa250460b723e606a6b7`. Implementation CI run 35205139451 passed backend tests, Clippy, generated-type/SQLx checks, and remote tests; frontend checks were correctly skipped for the backend-only change.

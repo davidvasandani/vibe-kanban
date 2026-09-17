@@ -12,7 +12,7 @@ Plan: ./plan.md
 - [x] T008 Update `wiki/managed-cli-tool-catalog.md`, add AWS topic and refresh `wiki/INDEX.md`, tag and commit knowledge (depends T007).
 - [x] T009 Open and merge scoped repository PRs against base branches (depends T008).
 
-Delivery: deployment PR #1240 and application PR #302 merged. Login-shell follow-up: homelab PR #1242. Live authentication acceptance awaits fresh SSO sign-in; CLI and SDK both reach the expired shared session.
+Delivery: deployment PR #1240 and application PR #302 merged. Login-shell follow-up: homelab PR #1242. After a fresh Settings sign-in, live agent CLI STS and Node default-provider authentication both passed without pasted credentials.
 
 ## Status-probe follow-up
 - [x] T010 Specify the fix from live probe timing evidence in `SPEC.md`, `IMPLEMENTATION_PLAN.md`, and `spec.md`.
