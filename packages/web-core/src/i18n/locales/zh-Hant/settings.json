@@ -813,7 +813,7 @@
     },
     "cliTools": {
       "title": "CLI 工具",
-      "description": "將供應商 CLI 工具的固定版本安裝到應用程式管理的目錄中。工具會加入代理的 PATH，但本機已有的副本永遠優先。應用程式絕不會儲存工具憑證。",
+      "description": "在所選主機上安裝 CLI 工具。以下檢查僅驗證該主機，不驗證代理 shell 中的可用性。憑證由各 CLI 管理。",
       "loading": "正在檢查工具可用性…",
       "docs": "供應商文件",
       "actions": {
@@ -837,8 +837,8 @@
         "retry": "重試"
       },
       "status": {
-        "host": "由本機提供：{{path}}",
-        "app": "由 Vibe Kanban 安裝（{{version}}）",
+        "host": "僅主機（代理未驗證）：{{path}}",
+        "app": "由 Vibe Kanban 安裝在主機上（{{version}}；代理未驗證）",
         "outdated": "目錄目前固定為 {{version}}",
         "shadowed": "本機副本在 PATH 中優先",
         "notAvailable": "未安裝。目錄版本：{{version}}",
@@ -847,7 +847,7 @@
     },
     "aws": {
       "title": "AWS",
-      "description": "管理此機器 ~/.aws/config 中的 AWS SSO 設定檔，並使用 AWS CLI 登入。Vibe Kanban 只寫入設定檔設定；憑證與權杖保留在 AWS CLI 自身的儲存空間中。",
+      "description": "在所選主機上管理 AWS SSO 設定並登入。狀態檢查僅驗證主機身分驗證。代理 shell 需要存取相同的 AWS 設定和 SSO 快取；請使用 AWS_PROFILE 選擇設定。權杖由 AWS CLI 管理。",
       "loading": "正在載入 AWS 設定檔…",
       "empty": "尚未設定 SSO 設定檔。新增一個即可在此機器上啟用 AWS 存取。",
       "cliMissing": "此機器上沒有可用的 AWS CLI。請從 CLI 工具區段安裝，以便檢查狀態並登入。",
@@ -868,10 +868,10 @@
         "delete": "刪除設定檔"
       },
       "auth": {
-        "authenticated": "已驗證",
-        "unauthenticated": "未登入",
-        "unknown": "狀態不明",
-        "cliMissing": "AWS CLI 無法使用"
+        "authenticated": "已在主機上驗證",
+        "unauthenticated": "主機未登入",
+        "unknown": "主機驗證狀態未知",
+        "cliMissing": "主機上無可用的 AWS CLI"
       },
       "delete": {
         "confirm": "要從 ~/.aws/config 刪除 SSO 設定檔「{{name}}」嗎？"
