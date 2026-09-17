@@ -8,6 +8,6 @@ Plan: ./plan.md
 - [x] T004 [P] Correct host-scope labels in `packages/web-core/src/i18n/locales/*/settings.json`.
 - [x] T005 Wire migration service and AWS CLI PATH in `homelab/modules/vibe-kanban-rebuild.nix`; extend `homelab/tests/vibe-kanban-cluster.nix` (depends T002).
 - [ ] T006 Run Python/Nix/Rust/frontend checks and required format; record live acceptance evidence or limits (depends T002–T005).
-- [ ] T007 Independent Codex CLI review; fix significant findings and re-verify (depends T002–T005; may overlap pending verification, all checks required before merge).
-- [ ] T008 Update `wiki/managed-cli-tool-catalog.md`, add AWS topic and refresh `wiki/INDEX.md`, tag and commit knowledge (depends T007).
+- [x] T007 Independent Codex CLI review; fix significant findings and re-verify (depends T002–T005; may overlap pending verification, all checks required before merge).
+- [x] T008 Update `wiki/managed-cli-tool-catalog.md`, add AWS topic and refresh `wiki/INDEX.md`, tag and commit knowledge (depends T007).
 - [ ] T009 Open and merge scoped repository PRs against base branches (depends T008).
