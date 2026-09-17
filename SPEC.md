@@ -1,16 +1,18 @@
-# Issue and workspace lifecycle
+# Debug Atlassian Rovo MCP reconnect
 
-Task: vk/e464-issue-and-worksp
+Task: vk/e89d-debug-atlassian
 
-## Problem
-A user resuming work by commenting on an archived workspace expects it to become active. When an archived workspace linked to a Done issue becomes active, the issue must return to In Progress.
+## Observed problem
+The supplied screenshot shows Atlassian Rovo marked shared-gateway connected while executor connection tests return HTTP 401 invalid_token. Completing OAuth reports “No matching MCP assignments remained after OAuth completed”.
 
 ## Requirements
-- Accepting a new user comment/follow-up on an archived workspace automatically unarchives that workspace.
-- Every archived-to-active workspace transition, including explicit unarchive and comment-driven activation, reopens its linked Done issue to the project's In Progress status.
-- Preserve statuses other than Done; preserve already-active workspaces and unlinked workspace behavior.
-- Apply behavior in backend lifecycle paths so UI and API clients behave consistently. Reuse existing issue/status synchronization conventions.
-- Do not reactivate on reads or invalid requests. Cover transition boundaries and comment flows with focused regression tests.
+Trace the OAuth start, exchange, shared gateway persistence, settings assignments, and connection-test paths. Correct the authoritative assignment update so reconnect applies credentials to the configured server and assigned executors. Preserve unrelated definitions and assignments, detect concurrent deletion or replacement, and never expose credentials in errors or diagnostics. Connected status must reflect its documented meaning without concealing a failed reconnect.
 
-## Scope and delivery
-Only Vibe Kanban source is in scope. No changes to other services. Follow the requested knowledge recall and SpecKit stages before implementation; verify, independently review, document reusable knowledge, and open and merge a PR against the base branch.
+## Scope
+Vibe Kanban only. Hosting changes, if evidenced necessary, are limited to homelab/modules/vibe-kanban-rebuild.nix. No changes to Atlassian or other services.
+
+## Acceptance
+Add focused regression coverage for initial shared connection, reconnect, missing/replaced assignments, and unaffected unrelated servers as applicable to the diagnosed cause. Run required formatting and relevant checks, independent Codex review, record reusable knowledge, then open and merge a PR against the base branch. A live OAuth grant may require the user's browser; automated verification must not claim to prove a live grant.
+
+## Initial hypothesis
+The OAuth completion path reads native executor snapshots; determine whether these remain authoritative after migration to settings-owned MCP configuration before selecting a fix.

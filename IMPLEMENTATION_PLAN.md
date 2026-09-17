@@ -1,11 +1,8 @@
-# Implementation plan
-Task: vk/e464-issue-and-worksp
+# Implementation plan — Atlassian Rovo reconnect
 
-1. Refresh SpecKit constitution applicability and feature artifacts for this task, resolving comment semantics from existing request paths.
-2. Trace comment acceptance, queue acceptance, workspace archive mutations and remote issue synchronization.
-3. Unarchive upon accepted workspace comments using the established lifecycle service.
-4. Extend remote workspace mutation transaction to reopen only linked Done issues on archived-to-active transitions.
-5. Add regression coverage for transitions, unchanged statuses, unlinked workspaces, and accepted comment paths.
-6. Run locked dependency setup, required formatting, and relevant checks/tests.
-7. Run independent Codex diff review; fix confirmed findings and reverify.
-8. Commit reusable knowledge with task tag, create PR against base, and merge after verification.
+1. Trace configured gateway identity through OAuth start, callback, and manual completion; compare reconnect matching with identifier migrations and URL adapters.
+2. Complete SpecKit constitution, specification, clarification, plan, tasks, and analysis in order.
+3. Preserve the original connection identity across reconnect and update only assignments still matching the original configured server; retain unrelated entries.
+4. Add focused regression tests for reconnect after identifier migration and ordinary connect/reconnect, including changed/deleted definitions.
+5. Install frozen dependencies, format, and run targeted checks. Review the diff independently with Codex CLI and address confirmed findings.
+6. Update and commit reusable knowledge, open a pull request against the verified base branch, and merge after required checks.
