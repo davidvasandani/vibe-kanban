@@ -14,5 +14,5 @@ Vibe Kanban only. Hosting changes, if evidenced necessary, are limited to homela
 ## Acceptance
 Add focused regression coverage for initial shared connection, reconnect, missing/replaced assignments, and unaffected unrelated servers as applicable to the diagnosed cause. Run required formatting and relevant checks, independent Codex review, record reusable knowledge, then open and merge a PR against the base branch. A live OAuth grant may require the user's browser; automated verification must not claim to prove a live grant.
 
-## Initial hypothesis
-The OAuth completion path reads native executor snapshots; determine whether these remain authoritative after migration to settings-owned MCP configuration before selecting a fix.
+## Diagnosis
+Native executor snapshots remain the implementation’s settings authority. Reconnect re-derived the gateway UUID from a renamed server identifier, storing credentials in a different row and failing to match original gateway assignments. Preserve the owner-bound UUID resolved at OAuth start.
