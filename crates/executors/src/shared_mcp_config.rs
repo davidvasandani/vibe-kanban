@@ -1538,7 +1538,7 @@ mod tests {
 
     use super::*;
 
-    const SLACK_MCP_INSTALL_SPEC: &str = "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz";
+    const SLACK_MCP_INSTALL_SPEC: &str = "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.3/slack-mcp-server-vk-1.3.0-vk.3.tgz";
 
     fn snapshot(
         executor: BaseCodingAgent,
@@ -1748,7 +1748,10 @@ SLACK_MCP_XOXP_TOKEN = "{token}"
 
     #[test]
     fn pinned_stdio_slack_migrates_to_http_without_the_token() {
-        let historical = canonical_definition(&slack_json_entry("xoxp-must-disappear"));
+        let historical = canonical_definition(&slack_json_entry_with_spec(
+            "xoxp-must-disappear",
+            "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz",
+        ));
         assert!(is_legacy_bundled_slack_definition(&historical));
 
         let migrated = migrate_bundled_slack_definition(

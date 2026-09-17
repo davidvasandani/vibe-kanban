@@ -1024,7 +1024,7 @@ mod tests {
     /// refreshing [`SLACK_MCP_LAUNCHER_SHA256`] and the version named in
     /// `docs/integrations/mcp-server-configuration.mdx` in the same change —
     /// Renovate's `packageRule` for this pin says so too.
-    const SLACK_MCP_FORK_TAG: &str = "v1.3.0-vk.2";
+    const SLACK_MCP_FORK_TAG: &str = "v1.3.0-vk.3";
     /// SHA-256 of the pinned launcher tarball. npm — not VK — fetches this
     /// tarball when an agent launches the server, so nothing verifies it at
     /// install time, and GitHub allows a release asset to be replaced under an
@@ -1034,8 +1034,8 @@ mod tests {
     /// replacement gets noticed. The binaries the launcher then downloads are
     /// digest-checked by the launcher itself, on every machine.
     const SLACK_MCP_LAUNCHER_SHA256: &str =
-        "220e521bed303b8513eecfd45df196a24ed4e70307ef6f57c921cfbfae308c75";
-    const SLACK_MCP_INSTALL_SPEC: &str = "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.2/slack-mcp-server-vk-1.3.0-vk.2.tgz";
+        "82e6d78d6da16c177c4aad7db0a74327de3cbbcc1db67c4add50fecdba7ecebf";
+    const SLACK_MCP_INSTALL_SPEC: &str = "https://github.com/davidvasandani/slack-mcp-server/releases/download/v1.3.0-vk.3/slack-mcp-server-vk-1.3.0-vk.3.tgz";
 
     #[test]
     fn slack_preconfigured_server_matches_the_documented_stdio_contract() {
