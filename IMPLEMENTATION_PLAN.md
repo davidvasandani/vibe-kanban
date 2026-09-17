@@ -1,9 +1,11 @@
-# Implementation plan — vk/1d23-vk-worker-output
+# Implementation plan
+Task: vk/e464-issue-and-worksp
 
-1. Use workspace PRIOR_KNOWLEDGE.md to trace durable worker cursors, bounded replay retention, coordinator restart adoption, and output persistence.
-2. Run workspace SpecKit command instructions in order, writing task artifacts to homelab/specs/vk/1d23-vk-worker-output/ and reaffirming applicable constitutions.
-3. Recover replay-gap outcomes only from identity-matching retained terminal evidence, leaving the output incomplete and missing events unacknowledged. Isolate scoped Codex SQLite indices while preserving transcripts/authentication and MCP refresh.
-4. Install locked dependencies and test terminal evidence identity/state/sequence boundaries, eviction, private SQLite directories, source preservation, surviving transcripts and refresh. Preserve indeterminate outcomes without terminal evidence; include cursor boundaries in diagnostics.
-5. Run required formatting and focused Rust checks/tests; record environmental limits accurately.
-6. Obtain independent Codex diff review, fix confirmed findings, and re-verify.
-7. Update and commit reusable knowledge tagged with this task, then commit code/artifacts, open PRs against the repositories' base branches and merge after required checks.
+1. Refresh SpecKit constitution applicability and feature artifacts for this task, resolving comment semantics from existing request paths.
+2. Trace comment acceptance, queue acceptance, workspace archive mutations and remote issue synchronization.
+3. Unarchive upon accepted workspace comments using the established lifecycle service.
+4. Extend remote workspace mutation transaction to reopen only linked Done issues on archived-to-active transitions.
+5. Add regression coverage for transitions, unchanged statuses, unlinked workspaces, and accepted comment paths.
+6. Run locked dependency setup, required formatting, and relevant checks/tests.
+7. Run independent Codex diff review; fix confirmed findings and reverify.
+8. Commit reusable knowledge with task tag, create PR against base, and merge after verification.
