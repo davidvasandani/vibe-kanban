@@ -38,3 +38,5 @@ Task: vk/c817-aws-sso-sign-in
 - Fixed an additional cause of busy results: all 31 eagerly polled profile futures started admission deadlines together. Each refresh now admits at most four futures into the global semaphore and resolves the executable once per refresh.
 - `pnpm install --frozen-lockfile`, `pnpm run format`, and `cargo test -p services aws_sso` passed (34 AWS tests). The overlapping 31-profile regression now simulates ten-second probes, runs beyond the 30-second admission window overall, and verifies every identity in order with peak concurrency four.
 - Independent Codex CLI review found no actionable regressions. Deployment verification remains pending for this follow-up; #304's partial live result is not sufficient.
+
+- Final follow-up verification: all 35 AWS tests passed, including a compile-time assertion that the profile-list future is Send for the Axum handler. CI run 35227546136 passed backend tests, Clippy, generated types/SQLx, and remote tests. Final independent Codex review found no actionable regressions. PR #306 merged as `6cb1d719f72bcd47b4428e4e9382e133d5f9145b`.

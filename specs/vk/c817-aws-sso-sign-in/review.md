@@ -12,3 +12,8 @@ Lazy-admission follow-up: independent `codex review --uncommitted` reported
 no actionable regressions. It verified ordered results, global probe limits,
 and prevention of same-batch queue expiry. Local compilation subsequently
 required explicit move captures in the test closure; production code unchanged.
+
+After CI exposed the Axum Send requirement, the iterator's unpolled futures
+were materialized before buffering, and a compile-time regression was added.
+Final `codex review --base origin/main` reported no actionable regressions.
+All 35 AWS tests and the full applicable CI suite passed before PR #306 merged.
