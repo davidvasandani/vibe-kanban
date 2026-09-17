@@ -23,11 +23,11 @@ workspace reopens its completed issue so the board reflects resumed work.
 Issue-level comments without a workspace target, reopening parent issues, schema/status category redesign, other services and deployment changes.
 
 ## Acceptance Criteria
-- [ ] Accepted direct and queued comments reactivate archived workspaces.
-- [ ] Explicit and synchronized archived-to-active transitions reopen Done issues.
-- [ ] Repeated active updates, metadata edits and archive requests do not reopen Done issues.
-- [ ] Non-Done, unlinked, and missing-target-status cases are safe.
-- [ ] A failed remote mutation cannot commit only one half of the lifecycle transition.
+- [x] Accepted direct and queued comments reactivate archived workspaces.
+- [x] Explicit and synchronized archived-to-active transitions reopen Done issues.
+- [x] Repeated active updates, metadata edits and archive requests do not reopen Done issues.
+- [x] Non-Done, unlinked, and missing-target-status cases are safe.
+- [x] A failed remote mutation cannot commit only one half of the lifecycle transition.
 
 ## Open Questions
 None; clarify stage records semantics and rationale.
