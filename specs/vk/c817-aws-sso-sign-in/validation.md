@@ -38,3 +38,12 @@ Task: vk/c817-aws-sso-sign-in
 - Fixed an additional cause of busy results: all 31 eagerly polled profile futures started admission deadlines together. Each refresh now admits at most four futures into the global semaphore and resolves the executable once per refresh.
 - `pnpm install --frozen-lockfile`, `pnpm run format`, and `cargo test -p services aws_sso` passed (34 AWS tests). The overlapping 31-profile regression now simulates ten-second probes, runs beyond the 30-second admission window overall, and verifies every identity in order with peak concurrency four.
 - Independent Codex CLI review found no actionable regressions. Deployment verification remains pending for this follow-up; #304's partial live result is not sufficient.
+
+- Final follow-up verification: all 35 AWS tests passed, including a compile-time assertion that the profile-list future is Send for the Axum handler. CI run 35227546136 passed backend tests, Clippy, generated types/SQLx, and remote tests. Final independent Codex review found no actionable regressions. PR #306 merged as `6cb1d719f72bcd47b4428e4e9382e133d5f9145b`.
+
+## Deployed lazy-admission check (2026-09-17 17:25 UTC)
+
+- Coordinator `/api/info` reports `6cb1d71`, matching PR #306. A single `/api/aws/profiles` refresh returned all 31 profiles unauthenticated, with **zero unknown/busy/timeout results**.
+- An actual agent `aws sts get-caller-identity` call, with ambient static-key variables removed, confirmed an expired SSO session. No credential values or identity details were logged.
+- The deployment crossed the previous credential lifetime. Fresh Settings sign-in is required for the final all-authenticated check; the observed expired-session result must not be described as successful authentication.
+- Stopped the rollout monitor; no repeating AWS verification requests remain.
