@@ -18,7 +18,7 @@ contributed to it.
 
 ## Pages
 
-- [aws-sso-agent-state.md](aws-sso-agent-state.md) — Shared AWS state, scoped homes, profile selection, and host-versus-agent availability evidence.
+- [aws-sso-agent-state.md](aws-sso-agent-state.md) — Shared AWS state, scoped homes, profile selection, host-versus-agent availability evidence, and bounded authentication probes.
 
 - [mcp-oauth-connection-identity.md](mcp-oauth-connection-identity.md) — Preserve owner-bound gateway identity across identifier changes and both OAuth completion paths.
 

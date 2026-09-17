@@ -19,6 +19,6 @@ Task: vk/c817-aws-sso-sign-in
 - After the user's new Settings sign-in, the actual agent CLI STS check passed in 1.54 seconds and Node's default provider resolved temporary credentials successfully; no secrets printed.
 - Coordinator single STS probe: success, 1.23 seconds. Simultaneous 31-profile reproduction with the old five-second budget: 30 timed out, one succeeded.
 - Coordinator reproduction with four concurrent probes and 15-second execution budgets: all 31 succeeded in 15.89 seconds; slowest probe 3.1 seconds.
-- Required dependency setup and repository formatting passed. Focused Rust tests are running; deployed API validation follows merge/rollout.
+- Required dependency setup and repository formatting passed. `cargo test -p services aws_sso` passed all 34 tests, including the five new deterministic concurrency/budget/cancellation regressions. Deployed API validation follows merge/rollout.
 - Actual pre-fix `/api/aws/profiles`: all 31 statuses unknown, 10.44 seconds.
 - Reproduction including the application's additional AWS CLI version lookup before each STS call: four shared slots, 30-second admission budget, all 31 succeeded in 21.82 seconds.

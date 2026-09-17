@@ -17,5 +17,5 @@ Delivery: deployment PR #1240 and application PR #302 merged. Login-shell follow
 ## Status-probe follow-up
 - [x] T010 Specify the fix from live probe timing evidence in `SPEC.md`, `IMPLEMENTATION_PLAN.md`, and `spec.md`.
 - [x] T011 Implement shared concurrency and separate queue/execution budgets with regressions in `crates/services/src/services/aws_sso.rs`.
-- [ ] T012 Run verification and independent Codex review; record evidence in `validation.md` and `review.md`.
+- [x] T012 Run verification and independent Codex review; record evidence in `validation.md` and `review.md`.
 - [ ] T013 Update `wiki/aws-sso-agent-state.md`, commit knowledge, open and merge the follow-up PR, and check deployed statuses.
