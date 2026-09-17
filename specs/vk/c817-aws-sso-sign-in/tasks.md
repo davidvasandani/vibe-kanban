@@ -10,6 +10,6 @@ Plan: ./plan.md
 - [x] T006 Run Python/Nix/Rust/frontend checks and required format; record live acceptance evidence or limits (depends T002–T005).
 - [x] T007 Independent Codex CLI review; fix significant findings and re-verify (depends T002–T005; may overlap pending verification, all checks required before merge).
 - [x] T008 Update `wiki/managed-cli-tool-catalog.md`, add AWS topic and refresh `wiki/INDEX.md`, tag and commit knowledge (depends T007).
-- [ ] T009 Open and merge scoped repository PRs against base branches (depends T008).
+- [x] T009 Open and merge scoped repository PRs against base branches (depends T008).
 
-Delivery: deployment PR #1240 merged; application PR #302 has green CI and is awaiting final merge.
+Delivery: deployment PR #1240 and application PR #302 merged. Login-shell follow-up: homelab PR #1242. Live authentication acceptance awaits fresh SSO sign-in; CLI and SDK both reach the expired shared session.

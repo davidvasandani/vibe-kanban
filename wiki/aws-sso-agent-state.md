@@ -31,6 +31,9 @@ new turn after rollout. Codex only scopes CODEX_HOME and inherits service HOME.
 AWS CLI must also be in both coordinator and worker systemd service PATHs.
 A host's `/run/current-system/sw/bin/aws` is not proof of worker availability;
 including `pkgs.awscli2` in the service paths installs its Nix closure there.
+Login shells rebuild PATH from the system profile, so the rebuild module also
+includes AWS CLI in `environment.systemPackages`. Validate login and non-login
+shells separately.
 
 Select a named profile explicitly with `AWS_PROFILE` (or CLI `--profile`).
 Signing into an SSO session does not choose a default among its profiles.
