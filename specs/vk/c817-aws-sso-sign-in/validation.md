@@ -47,3 +47,11 @@ Task: vk/c817-aws-sso-sign-in
 - An actual agent `aws sts get-caller-identity` call, with ambient static-key variables removed, confirmed an expired SSO session. No credential values or identity details were logged.
 - The deployment crossed the previous credential lifetime. Fresh Settings sign-in is required for the final all-authenticated check; the observed expired-session result must not be described as successful authentication.
 - Stopped the rollout monitor; no repeating AWS verification requests remain.
+
+## Final authenticated acceptance (2026-09-17 18:57 UTC)
+
+- User completed fresh Settings → AWS sign-in.
+- Deployed revision `679b284` includes PR #306. `/api/aws/profiles` returned **31 authenticated / 31 total**, with zero unknown, busy, timeout, or unauthenticated results.
+- Actual agent `aws sts get-caller-identity` succeeded with ambient static-key variables removed.
+- Node `@aws-sdk/credential-provider-node` 3.972.83 `defaultProvider()` succeeded in the agent environment, resolving temporary credentials expiring at `2026-09-18T02:55:44.000Z`. No credential values or account identities were printed.
+- This completes the authenticated acceptance left pending during the expired-session check. Prior failure observations above are historical and superseded by this successful check.

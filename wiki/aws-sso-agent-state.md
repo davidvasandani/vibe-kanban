@@ -96,6 +96,14 @@ had expired. Refresh SSO before evaluating authenticated acceptance after a
 long deployment; completed status checks and successful authentication are
 different assertions.
 
+### Final authenticated acceptance
+
+After a fresh Settings sign-in, deployed revision `679b284` (including PR #306)
+returned all 31 profiles authenticated with zero unknown statuses. Both the
+agent CLI STS call and Node SDK default provider succeeded with ambient static
+access keys removed. Task `vk/c817-aws-sso-sign-in` therefore verified the full
+Settings → shared AWS state → agent CLI/SDK path, as well as profile reporting.
+
 ## Contributed by
 
 - vk/c817-aws-sso-sign-in
