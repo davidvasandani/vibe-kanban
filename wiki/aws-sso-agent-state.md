@@ -62,6 +62,18 @@ Do not revert to a per-request limit: two refreshes would multiply the process
 count. Do not start the execution timer while a probe is waiting in the queue:
 healthy queued profiles would again appear unknown without being checked.
 
+### Production verification limit
+
+Task `vk/c817-aws-sso-sign-in` deployed the bounded probe fix in PR #304
+(revision `d154bab`). On 2026-09-17, an isolated live refresh still returned
+4 authenticated and 27 unknown profiles while the service's three-CPU cgroup
+experienced high CPU pressure and ran 19 Git children. Bounded concurrency
+prevents probe fan-out; it does not guarantee completion under competing
+service work. Keep successful host-to-agent credential checks distinct from
+all-profile status acceptance, and record busy admission separately from
+execution timeout. Investigate the competing work before simply increasing
+timeouts or declaring the status panel healthy.
+
 ## Contributed by
 
 - vk/c817-aws-sso-sign-in

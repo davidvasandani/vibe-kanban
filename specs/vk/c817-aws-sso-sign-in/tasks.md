@@ -12,10 +12,12 @@ Plan: ./plan.md
 - [x] T008 Update `wiki/managed-cli-tool-catalog.md`, add AWS topic and refresh `wiki/INDEX.md`, tag and commit knowledge (depends T007).
 - [x] T009 Open and merge scoped repository PRs against base branches (depends T008).
 
-Delivery: deployment PR #1240 and application PR #302 merged. Login-shell follow-up: homelab PR #1242. Live authentication acceptance awaits fresh SSO sign-in; CLI and SDK both reach the expired shared session.
+Delivery: deployment PR #1240 and application PR #302 merged. Login-shell follow-up: homelab PR #1242. After a fresh Settings sign-in, live agent CLI STS and Node default-provider authentication both passed without pasted credentials.
 
 ## Status-probe follow-up
 - [x] T010 Specify the fix from live probe timing evidence in `SPEC.md`, `IMPLEMENTATION_PLAN.md`, and `spec.md`.
 - [x] T011 Implement shared concurrency and separate queue/execution budgets with regressions in `crates/services/src/services/aws_sso.rs`.
 - [x] T012 Run verification and independent Codex review; record evidence in `validation.md` and `review.md`.
-- [ ] T013 Update `wiki/aws-sso-agent-state.md`, commit knowledge, open and merge the follow-up PR, and check deployed statuses.
+- [x] T013 Update `wiki/aws-sso-agent-state.md`, commit knowledge, open and merge the follow-up PR, and check deployed statuses.
+
+Deployment check: revision `d154bab` is running on the coordinator. Live all-profile acceptance is **not passing** under observed CPU contention: isolated refresh returned 4 authenticated and 27 unknown. See validation.md; do not treat merge/deployment as proof of all-profile authentication.

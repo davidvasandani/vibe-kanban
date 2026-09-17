@@ -22,3 +22,13 @@ Task: vk/c817-aws-sso-sign-in
 - Required dependency setup and repository formatting passed. `cargo test -p services aws_sso` passed all 34 tests, including the five new deterministic concurrency/budget/cancellation regressions. Deployed API validation follows merge/rollout.
 - Actual pre-fix `/api/aws/profiles`: all 31 statuses unknown, 10.44 seconds.
 - Reproduction including the application's additional AWS CLI version lookup before each STS call: four shared slots, 30-second admission budget, all 31 succeeded in 21.82 seconds.
+
+- Follow-up PR https://github.com/davidvasandani/vibe-kanban/pull/304 merged as `d154bab586f257dd8568aa250460b723e606a6b7`. Implementation CI run 35205139451 passed backend tests, Clippy, generated-type/SQLx checks, and remote tests; frontend checks were correctly skipped for the backend-only change.
+
+## Deployed follow-up check (2026-09-17 11:12–11:15 UTC)
+
+- Coordinator `/api/info` reports `d154bab`, matching the merged probe fix. Rebuild service finished.
+- First deployed refresh: 2 authenticated, 29 unknown. A subsequent refresh reported 8 authenticated, 19 busy-admission results, and 4 execution timeouts.
+- Stopped the rollout poller, allowed outstanding requests to finish, and ran one isolated refresh: 4 authenticated, 27 unknown. **All-31 deployed acceptance did not pass.**
+- Host has six CPUs and load average around 66. Vibe Kanban has a three-CPU quota; its cgroup CPU pressure was about 78% some / 39% full over ten seconds. Its server process had 19 Git children during the check. These observations show substantial competing work; they do not establish the individual Git operations' purpose or justify changing another service.
+- Original host-to-agent acceptance passed after fresh sign-in (CLI STS and Node default provider). The concurrency regression suite and independent code review passed. The probe fix is deployed, but remaining timeouts under sustained production CPU contention remain an unresolved operational limitation. No all-authenticated rollout marker was produced.
