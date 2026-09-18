@@ -446,6 +446,37 @@ mod tests {
     }
 
     #[test]
+    fn continuation_requests_exclude_response_turns_on_the_wire() {
+        use codex_app_server_protocol::{ClientRequest, RequestId, ThreadStartParams};
+
+        let params = ThreadStartParams {
+            model: Some("gpt-6-astra".into()),
+            cwd: Some("/workspace".into()),
+            developer_instructions: Some("Keep working".into()),
+            ..Default::default()
+        };
+        let fork = super::fork_params_from("original-thread".into(), params.clone());
+        let resume = super::resume_params_from("original-thread".into(), params, None);
+        for request in [
+            ClientRequest::ThreadFork {
+                request_id: RequestId::Integer(1),
+                params: fork,
+            },
+            ClientRequest::ThreadResume {
+                request_id: RequestId::Integer(2),
+                params: resume,
+            },
+        ] {
+            let wire = serde_json::to_value(request).unwrap();
+            assert_eq!(wire["params"]["excludeTurns"], true);
+            assert_eq!(wire["params"]["threadId"], "original-thread");
+            assert_eq!(wire["params"]["model"], "gpt-6-astra");
+            assert_eq!(wire["params"]["cwd"], "/workspace");
+            assert_eq!(wire["params"]["developerInstructions"], "Keep working");
+        }
+    }
+
+    #[test]
     fn resume_params_from_preserves_thread_start_params() {
         use std::collections::HashMap;
 
@@ -513,7 +544,10 @@ mod tests {
         let resume = resume_params_from(thread_id.clone(), params, Some(history.clone()));
 
         assert_eq!(resume.thread_id, thread_id);
-        assert_eq!(resume.history, Some(history));
+        assert_eq!(resume.history, Some(history.clone()));
+        let wire = serde_json::to_value(&resume).unwrap();
+        assert_eq!(wire["excludeTurns"], true);
+        assert_eq!(wire["history"], serde_json::to_value(history).unwrap());
     }
 }
 
@@ -573,6 +607,9 @@ pub(crate) fn compose_developer_instructions(configured: Option<&str>) -> Option
 pub(crate) fn fork_params_from(thread_id: String, params: ThreadStartParams) -> ThreadForkParams {
     ThreadForkParams {
         thread_id,
+        // Only omit response hydration; Codex still retains the model history.
+        // Full histories can overflow the remote worker output journal.
+        exclude_turns: true,
         model: params.model,
         model_provider: params.model_provider,
         cwd: params.cwd,
@@ -593,6 +630,9 @@ pub(crate) fn resume_params_from(
 ) -> ThreadResumeParams {
     ThreadResumeParams {
         thread_id,
+        // Only omit response hydration; Codex still retains the model history.
+        // Full histories can overflow the remote worker output journal.
+        exclude_turns: true,
         model: params.model,
         model_provider: params.model_provider,
         cwd: params.cwd,

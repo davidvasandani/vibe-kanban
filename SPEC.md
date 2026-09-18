@@ -1,39 +1,22 @@
-# AWS SSO and CLI availability in agent shells
+# MCP transport failure must not block unrelated Vibe Kanban work
 
-Task: vk/c817-aws-sso-sign-in
+Task: vk/669e-mcp-blocks-progr
 
 ## Problem
-AWS Settings authenticates the service host and CLI Tools discovers host binaries, while agent turns may run with an isolated home and store on another worker. Success in Settings therefore does not establish usable agent credentials or tools.
+The user reports that a session working on Homelab/VAS-623/FAIKE cannot proceed after an rmcp HTTP transport worker reports a fatal channel closure for https://windows-mcp.vasandani.dev/mcp at 2026-09-18T14:10:33Z. The log identifies a failed MCP connection, but does not by itself establish that the agent process failed or why progress stopped.
 
-## Required behavior
-- Make the AWS configuration and short-lived SSO session established in Settings available to agent turns without copying secrets into conversation, logs, or version control.
-- Preserve sandbox isolation outside the intended AWS state. Account for worker affinity, missing state, token refresh, and subsequent turns.
-- Provide AWS CLI on the actual agent PATH, including its runtime closure where Nix store views differ.
-- CLI Tools must distinguish host availability from verified agent availability; never imply remote worker reachability from a host probe.
-- AWS status must clearly identify its scope and distinguish a timed-out check from successful agent authentication.
+## Scope
+Investigate Vibe Kanban session/executor handling of MCP connection failures and implement the smallest evidence-backed correction. Changes are limited to Vibe Kanban and its deployment configuration. Repairing Windows MCP, FAIKE, Vercel, Squarespace, or another service requires scope clarification.
 
-## Proposed approach to validate during planning
-Trace Settings host selection and executor home/environment construction. Prefer exposing the intended service AWS state at the agent home using the existing sandbox mechanisms. Use the CLI-managed AWS storage layout so both CLI and Node SDK default providers find SSO state; do not invent an unsupported cache environment variable. Ensure installed tools reach the executor environment, or explicitly label them host-only. Scope infrastructure changes to Vibe Kanban deployment.
+## Requirements
+- Identify the affected session and correlate transport errors with agent turn status and terminal events.
+- Distinguish a single optional MCP transport failure from an agent turn failure; preserve useful diagnostics without falsely ending or blocking unrelated work.
+- Preserve actual executor failures and authentication/security boundaries.
+- Keep working tools available and provide actionable recovery when the failed tool is needed.
+- Add focused regression coverage for any confirmed failure-handling defect.
 
-## Acceptance and verification
-Regression coverage must exercise isolated HOME, absent AWS state, refreshed state on later turns, tool path visibility, and truthful Settings labels. Where an authenticated live session is available, verify both aws sts get-caller-identity and a Node SDK default credential provider from an agent shell without exposing credentials. Report live verification limitations honestly. Run repository checks and independent Codex review; record reusable knowledge, then open and merge PRs against the base branch.
+## Acceptance
+Reproduce or establish the causal failure path from source and session evidence, implement and test the correction, complete SpecKit artifacts and independent review, record reusable knowledge, and open and merge a PR. Do not claim that the external Windows service is repaired based on changes to Vibe Kanban.
 
-## Out of scope
-Other services, static access-key provisioning, IAM permission changes, and the related MCP connection defect.
-
-## Follow-up: reliable AWS authentication probes
-A fresh sign-in succeeds but the status checker starts 31 AWS CLI subprocesses simultaneously and kills them after five seconds. Live reproduction: a single host probe passed in 1.23 seconds; 30 of 31 unbounded concurrent probes timed out. Four concurrent probes passed all 31 in 15.89 seconds, slowest 3.1 seconds.
-
-Limit authentication probes to four per server process across list requests and post-login verification. Give admitted probes 15 seconds to finish. Bound admission waiting separately to 30 seconds, reporting busy capacity distinctly from an executed probe timing out. Preserve profile/result association, credential-environment isolation, failure classification, and kill-on-cancellation. Add regressions for overlapping batches, waiting budgets, timeout/cancellation permit release and status mapping.
-
-## Follow-up: lazy profile admission
-
-Live validation of #304 exposed that eagerly starting 31 admission deadlines
-causes later profiles to expire behind their own batch. Admit at most four
-profile futures per list while retaining the process-wide semaphore and
-per-admission/per-execution deadlines. Preserve profile ordering. Resolve the
-AWS executable once per refresh, under the same global capacity limit, using
-a request-local async cell; do not retain stale executable paths across refreshes.
-Verify overlapping 31-profile batches whose total duration exceeds 30 seconds,
-including ordered identity results and the global process limit. Then run the
-AWS tests, formatting, independent Codex review, knowledge update, and PR merge.
+## Confirmed cause and selected correction
+The coordinator stopped tracking this execution after a worker output replay gap, not an MCP-specific termination signal. A partially received thread/fork response and Codex's hydration warning identify the unnecessary historical-turn response burst. Request excludeTurns=true for fork and resume, retaining conversation context and explicit fallback history. Arbitrary-output journal redesign and recovery of already-lost output are outside this correction.

@@ -51,3 +51,25 @@ a request-local async cell; do not retain stale executable paths across refreshe
 Verify overlapping 31-profile batches whose total duration exceeds 30 seconds,
 including ordered identity results and the global process limit. Then run the
 AWS tests, formatting, independent Codex review, knowledge update, and PR merge.
+
+# Follow-up specification: MCP blocks progress
+
+Task: vk/669e-mcp-blocks-progr. This section uses the exact path designated by `/speckit.specify`; prior task specifications above remain preserved.
+
+## User story
+As a Vibe Kanban user, I need unrelated work to remain usable when an optional MCP server disconnects, and I need the actual reason when my agent turn stops.
+
+## Functional requirements
+- FR-M1: Correlate reported diagnostics with the same execution's authoritative status.
+- FR-M2: A connection-level diagnostic alone must not establish process failure or success.
+- FR-M3: Preserve terminal outcome evidence and make missing evidence explicit, without stranding subsequent turns.
+- FR-M4: Retain original diagnostics and settings ownership of MCP definitions.
+
+## Acceptance criteria
+- The reported execution's stopping path is identified from source and available runtime evidence.
+- Any changed failure/recovery behavior has focused regression coverage; real failures remain visible.
+- No external service configuration is changed.
+
+## Open questions
+- Resolved by `/speckit.clarify`: coordinator journal at 14:10:37.785878Z reports a replay gap after event 41, earliest retained 5358. Raw output ends in a partial JSON-RPC response id 3 containing a forked thread. The preceding Codex deprecation notification explicitly warns that full-history hydration requires excludeTurns=true. No user product decision remains open.
+- Narrowed acceptance: fork and resume must request metadata without serialized historical turns while preserving model conversation history, explicit fallback history, thread identity, and settings. Genuine replay gaps remain explicit; general worker spool redesign is out of scope.

@@ -29,3 +29,15 @@ Deployment check: revision `d154bab` is running on the coordinator. Live all-pro
 - [x] T017 After fresh Settings sign-in, verify deployed profiles and agent CLI/SDK authentication. At 17:25 UTC all 31 profiles correctly reported unauthenticated, with zero unknown results; agent CLI confirmed session expiry.
 
 Final acceptance passed after fresh Settings sign-in: deployed revision `679b284` returned all 31 profiles authenticated; sanitized agent CLI STS and Node SDK default-provider checks both succeeded.
+
+## MCP follow-up — vk/669e-mcp-blocks-progr
+
+Applied `/speckit.tasks`. These tasks follow the MCP plan addendum; earlier task checkboxes are historical.
+
+- [x] T901 Correlate execution and source evidence in `mcp-research.md`.
+- [x] T902 Set metadata-only fork/resume requests and add wire regressions in `crates/executors/src/executors/codex.rs` (depends on T901).
+- [ ] T903 Verify protocol behavior, run focused tests and formatting; document results in `mcp-research.md` (depends on T902).
+- [x] T904 Run independent Codex review and address findings; document results in `mcp-research.md` (depends on T903).
+- [ ] T905 Update `docs/knowledge-base/cluster-mcp-runtime-connectivity.md` and `docs/knowledge-base/INDEX.md`, commit knowledge and implementation, open and merge PR (depends on T904).
+
+No [P] implementation tasks: the change and its regressions share one file. Stable T9xx identifiers distinguish this follow-up from the existing AWS tasks.
