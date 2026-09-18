@@ -148,3 +148,32 @@ fallback behavior is in `rollout/src/list.rs`. Fresh indices can incur backfill
 cost. This change applies to new scoped executions and deliberately does not
 rewrite existing vendor databases or claim that every stale path means a deleted
 transcript. Preserve the error diagnostic rather than merely hiding it.
+
+## Codex continuation history can overflow the worker output journal
+
+Contributed by: `vk/669e-mcp-blocks-progr`.
+
+An rmcp `worker quit with fatal: Transport channel closed` line describes one
+MCP transport worker, not necessarily the coding-agent process. Correlate it
+with the execution's worker-job record and coordinator logs. In the reported
+FAIKE execution, the actual transition to indeterminate followed a replay gap:
+the coordinator had consumed sequence 41 while the earliest retained worker
+event was already 5358. The retained stdout ended partway through the
+`thread/fork` response; preceding MCP errors were merely the last complete
+messages the UI could display.
+
+The Codex fork/resume parameter helpers now set `exclude_turns: true`
+(`excludeTurns` on the wire). This requests thread metadata without hydrating
+historical turns into the response. Codex still reads the conversation history
+for model context, and explicit fallback `history` inputs remain unchanged.
+VK's response normalizer needs thread identity/model/reasoning metadata, not
+those historical turns; existing experimental-API initialization permits the
+field. Chat and review share the fork helper.
+
+The contract was checked in pinned protocol/source revision `44918ea`
+(`rust-v0.144.1`, `protocol/v2/thread.rs` and `thread_processor.rs`) and exercised
+against the deployed Codex 0.154.0 protocol with isolated synthetic history.
+Wire regressions cover fork, resume, and explicit-history resume. This removes
+the unnecessary continuation-history burst; it does not make the bounded worker
+journal lossless for arbitrary output, repair external MCP connectivity, or
+recover already-missing output. Preserve genuine replay-gap indeterminacy.
