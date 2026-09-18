@@ -332,6 +332,8 @@ fn executor_config_for_auto_resume(action: &ExecutorAction) -> Option<ExecutorCo
 #[derive(Debug, Error)]
 pub enum ContainerError {
     #[error(transparent)]
+    EnvironmentSecret(#[from] super::environment_secrets::EnvironmentSecretError),
+    #[error(transparent)]
     GitServiceError(#[from] GitServiceError),
     #[error(transparent)]
     Sqlx(#[from] SqlxError),
@@ -413,7 +415,11 @@ pub trait ContainerService {
     /// Resolve the owning organization's environment variables for a
     /// workspace. Implementations must degrade to an empty map when the
     /// workspace is local-only or the remote configuration is unavailable.
-    async fn resolve_org_env_vars(&self, workspace: &Workspace) -> HashMap<String, String>;
+    /// Explicit secret-reference failures must stop the launch.
+    async fn resolve_org_env_vars(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<HashMap<String, String>, ContainerError>;
 
     async fn touch(&self, workspace: &Workspace) -> Result<(), ContainerError>;
 
