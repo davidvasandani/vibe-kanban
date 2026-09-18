@@ -175,6 +175,8 @@ impl From<ContainerError> for ApiError {
             // Must stay above the catch-all: falling into `Container` is what
             // renders a failure as "An internal error occurred".
             ContainerError::SharedStore(msg) => ApiError::ClusterProvisioning(msg),
+            // This typed error contains only curated, secret-free diagnostics.
+            ContainerError::EnvironmentSecret(error) => ApiError::BadRequest(error.to_string()),
             other => ApiError::Container(other),
         }
     }
@@ -680,6 +682,21 @@ mod cluster_provisioning_error_tests {
     use services::services::container::ContainerError;
 
     use super::ApiError;
+
+    #[tokio::test]
+    async fn environment_secret_error_is_actionable_in_http_response() {
+        use services::services::environment_secrets::EnvironmentSecretError;
+
+        let response = ApiError::from(ContainerError::EnvironmentSecret(
+            EnvironmentSecretError::MissingToken,
+        ))
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("OP_SERVICE_ACCOUNT_TOKEN"));
+        assert!(!body.contains("An internal error occurred"));
+    }
 
     /// The whole point of the shared-store error channel is what reaches the
     /// operator. Two one-line match arms stand between the store and the

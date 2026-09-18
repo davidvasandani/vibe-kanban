@@ -1,11 +1,19 @@
-# Implementation plan — vk/669e-mcp-blocks-progr
+# Implementation plan — vk/b0d4-env-vars-value-f
 
-1. Correlate the reported MCP line with the FAIKE workspace's Codex execution and terminal status using read-only session evidence.
-2. Execute the repository SpecKit command instructions in order, retaining their exact designated artifact path; explicitly identify this task in those artifacts.
-3. Trace Codex stderr normalization, structured protocol errors, turn completion, and relevant UI error presentation. Establish whether the transport diagnostic is causal.
-4. Implement the smallest supported Vibe Kanban correction and focused regressions. If evidence instead requires another service's changes, stop for scope clarification.
-5. Install locked dependencies, run targeted checks and repository formatting, and inspect the diff for unrelated changes.
-6. Run an independent Codex CLI diff review; resolve significant findings and re-verify.
-7. Update and commit project knowledge with this task identifier, then open and merge the tested PR against the repository base branch.
+1. Follow the workspace SpecKit commands in order; preserve their homelab paths.
+2. Inspect the existing CLI catalog, environment fetch/merge, terminal and worker
+   consumers, and shared settings UI. Verify the 1Password CLI contract.
+3. Add a bounded asynchronous resolver using explicit service-account auth and
+   host/app-installed CLI discovery, no shell, no raw provider errors. Retain
+   exact literal/secret bytes, atomic map replacement, and fresh per-launch reads.
+4. Make the shared workspace env resolver fallible for reference failures and
+   propagate errors through local, worker-dispatch, and terminal launch paths.
+5. Explain literal and op:// values in organization settings and docs.
+6. Add deterministic fake-provider tests for precedence, failures, redaction,
+   cancellation/timeouts, and exact values; run formatting and relevant checks.
+7. Run independent Codex CLI review; fix findings and re-verify.
+8. Update and commit the knowledge base with task tags and index entry.
+9. Commit changes, open PRs against each repository's base as needed for mandated
+   SpecKit artifacts, wait for required checks, and merge.
 
-Prior knowledge: ../PRIOR_KNOWLEDGE.md. External MCP repair and the FAIKE deployment work are outside scope.
+Prior knowledge: ../PRIOR_KNOWLEDGE.md (workspace environment inheritance and fail-loud boundaries). No new package dependency expected.

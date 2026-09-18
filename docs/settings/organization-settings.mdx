@@ -133,6 +133,41 @@ Click **Manage Billing** to open the billing portal in a new tab where you can:
 - Update payment methods
 - View invoices and billing history
 
+## Environment variables
+
+You can enter a literal value or a complete 1Password reference in the existing
+value field, such as `op://Homelab/item-id/credential`. Values remain masked and
+encrypted at rest; Vibe Kanban stores the reference, not the resolved secret.
+
+1. Install **1Password CLI** through **Settings → CLI Tools** on the Vibe Kanban
+   machine, or provide `op` on the service's PATH. For clustered workspaces, this
+   is the coordinator machine that prepares execution environments.
+2. Add `OP_SERVICE_ACCOUNT_TOKEN` as a literal organisation environment variable,
+   using a service account with read access to the referenced vault. You can also
+   supply it through the Vibe Kanban service environment. The organisation value
+   takes precedence, including when it is invalid or empty.
+3. Add your variable with the complete `op://vault/item/field` reference as its
+   value. Section-qualified references are supported by the CLI as well.
+4. Start a new agent execution, script, development server, or workspace terminal.
+   Vibe Kanban reads the field before launch and passes the result through its
+   existing environment transport, including to cluster workers.
+
+New launches read references afresh, so rotated secrets apply without editing
+settings. Already-running processes keep their original environment. Literal
+strings are unchanged; embedded references and returned values are not expanded.
+The bootstrap token itself cannot be a reference. Configured token variables
+retain their existing inheritance into workspace processes.
+
+If an explicit reference cannot be read, the launch fails with a sanitised error.
+Check the reference, token, vault permissions, CLI installation, and connectivity.
+The lookup phase has a 30-second limit. Fields must be NUL-free UTF-8 text no
+larger than 64 KiB; whitespace and trailing newlines are preserved. Existing
+best-effort fetching of organisation settings is unchanged: when the settings
+service is unavailable, workspace launch can still proceed without those values.
+
+See the [1Password secret reference documentation](https://developer.1password.com/docs/cli/secret-references/)
+for reference syntax and vault access setup.
+
 ## Danger Zone
 
 <Warning>

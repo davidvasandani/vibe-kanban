@@ -90,7 +90,7 @@ export function OrganizationEnvVarsCard({ organizationId }: Props) {
   return (
     <SettingsCard
       title="Environment variables"
-      description="Variables stored encrypted at rest and scoped to this organization."
+      description="Variables stored encrypted at rest and scoped to this organization. Enter a literal value or an op://vault/item/field reference. 1Password references require OP_SERVICE_ACCOUNT_TOKEN and the 1Password CLI on the Vibe Kanban service."
     >
       {error && (
         <div className="bg-error/10 border border-error/50 rounded-sm p-3 text-error text-sm">
@@ -122,7 +122,7 @@ export function OrganizationEnvVarsCard({ organizationId }: Props) {
                     <Input
                       autoFocus
                       type="password"
-                      placeholder="New value"
+                      placeholder="New value or op://vault/item/field"
                       value={editing.value}
                       onChange={(e) =>
                         setEditing({ id: envVar.id, value: e.target.value })
@@ -200,7 +200,7 @@ export function OrganizationEnvVarsCard({ organizationId }: Props) {
             />
             <Input
               type="password"
-              placeholder="value"
+              placeholder="value or op://vault/item/field"
               value={newValue}
               onChange={(e) => setNewValue(e.target.value)}
               className="flex-1"

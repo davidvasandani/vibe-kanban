@@ -3992,8 +3992,12 @@ impl ContainerService for LocalContainerService {
         Ok(self.mcp_refresh_coordinator.status(session_id).await)
     }
 
-    async fn resolve_org_env_vars(&self, workspace: &Workspace) -> HashMap<String, String> {
-        self.resolve_org_env_vars_inner(workspace).await
+    async fn resolve_org_env_vars(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<HashMap<String, String>, ContainerError> {
+        let values = self.resolve_org_env_vars_inner(workspace).await;
+        Ok(services::services::environment_secrets::resolve_environment_secrets(values).await?)
     }
 
     async fn touch(&self, workspace: &Workspace) -> Result<(), ContainerError> {
@@ -4272,7 +4276,7 @@ impl ContainerService for LocalContainerService {
         })?;
 
         let mut environment = BTreeMap::new();
-        environment.extend(self.resolve_org_env_vars(workspace).await);
+        environment.extend(self.resolve_org_env_vars(workspace).await?);
         // Send only workspace-relative Go state. The worker must construct PATH
         // from its own supervised environment; coordinator Nix store paths are
         // not necessarily valid on a heterogeneous worker.
@@ -4634,9 +4638,9 @@ impl ContainerService for LocalContainerService {
         // execution (initial, setup, follow-up) flows through — so all agent
         // processes in the workspace receive them. Applied BEFORE the VK_* context
         // below so an org var can never clobber the internal workspace contract.
-        // Best-effort: on any failure we log and start without them rather than
-        // block the workspace.
-        let org_env_vars = self.resolve_org_env_vars(workspace).await;
+        // Fetching settings remains best-effort. Once a value explicitly names a
+        // secret reference, resolution must succeed before any process starts.
+        let org_env_vars = self.resolve_org_env_vars(workspace).await?;
         if !org_env_vars.is_empty() {
             env.merge(&org_env_vars);
         }

@@ -97,7 +97,10 @@ async fn terminal_ws(
         }
     }
 
-    let mut environment = deployment.container().resolve_org_env_vars(&attempt).await;
+    let mut environment = deployment
+        .container()
+        .resolve_org_env_vars(&attempt)
+        .await?;
 
     let placement = WorkspacePlacement::find(&deployment.db().pool, attempt.id).await?;
     if let Some(worker_node_id) = terminal_worker_id(placement) {

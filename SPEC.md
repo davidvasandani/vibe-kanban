@@ -1,22 +1,44 @@
-# MCP transport failure must not block unrelated Vibe Kanban work
+# Technical specification: 1Password environment variable references
 
-Task: vk/669e-mcp-blocks-progr
+Task: `vk/b0d4-env-vars-value-f`.
 
-## Problem
-The user reports that a session working on Homelab/VAS-623/FAIKE cannot proceed after an rmcp HTTP transport worker reports a fatal channel closure for https://windows-mcp.vasandani.dev/mcp at 2026-09-18T14:10:33Z. The log identifies a failed MCP connection, but does not by itself establish that the agent process failed or why progress stopped.
+## Outcome and scope
+Vibe Kanban organization Env Vars accept either literal strings or
+complete `op://vault/item/[section/]field` references in the existing value field.
+For example, `op://Homelab/7mn7ndpzix7pbdb2llruaygwha/credential` resolves to the
+credential when preparing an execution. Existing literal values remain unchanged.
+Only Vibe Kanban application code and its directly relevant deployment configuration
+are in scope.
 
-## Scope
-Investigate Vibe Kanban session/executor handling of MCP connection failures and implement the smallest evidence-backed correction. Changes are limited to Vibe Kanban and its deployment configuration. Repairing Windows MCP, FAIKE, Vercel, Squarespace, or another service requires scope clarification.
+## Contract
+- Persist the supplied reference through the existing encrypted string storage;
+  never replace it with a resolved value in settings or API responses.
+- Merge organization values with existing precedence before resolving.
+- Authenticate using the effective literal `OP_SERVICE_ACCOUNT_TOKEN` environment
+  variable, with the service process environment as fallback when not configured.
+  Do not recursively resolve references or use a reference as the bootstrap token.
+- Resolve only entire values beginning with `op://`; do not interpolate literal
+  strings or execute shell input. Resolve afresh for each execution preparation.
+- Apply resolved values to agents and supported script/process launches, including
+  worker execution paths through existing environment transport.
+- Reference lookup failure, missing credentials, or missing runtime prerequisites
+  must stop that launch with an actionable, sanitized error. Never silently supply
+  a reference or partial environment to the child.
+- Do not expose tokens, reference paths, resolved values, or provider diagnostics
+  in errors/logs. Keep existing masking and access controls.
+- Explain literal/reference support beside the existing settings value field.
 
-## Requirements
-- Identify the affected session and correlate transport errors with agent turn status and terminal events.
-- Distinguish a single optional MCP transport failure from an agent turn failure; preserve useful diagnostics without falsely ending or blocking unrelated work.
-- Preserve actual executor failures and authentication/security boundaries.
-- Keep working tools available and provide actionable recovery when the failed tool is needed.
-- Add focused regression coverage for any confirmed failure-handling defect.
+## Implementation direction
+Reuse the existing organization environment preparation boundary in
+`crates/local-deployment/src/container.rs`; add a small tested resolver at an
+appropriate shared layer. Evaluate existing 1Password support before selecting
+the provider integration. Keep wire types and database storage unchanged.
 
-## Acceptance
-Reproduce or establish the causal failure path from source and session evidence, implement and test the correction, complete SpecKit artifacts and independent review, record reusable knowledge, and open and merge a PR. Do not claim that the external Windows service is repaired based on changes to Vibe Kanban.
-
-## Confirmed cause and selected correction
-The coordinator stopped tracking this execution after a worker output replay gap, not an MCP-specific termination signal. A partially received thread/fork response and Codex's hydration warning identify the unnecessary historical-turn response burst. Request excludeTurns=true for fork and resume, retaining conversation context and explicit fallback history. Arbitrary-output journal redesign and recovery of already-lost output are outside this correction.
+## Acceptance and verification
+Test literal passthrough, mixed values, token selection,
+missing/invalid bootstrap credentials, multiple references, exact returned bytes,
+provider failure, bounded/cancelled lookup, and secret-safe errors. Verify all
+environment consumers and the UI helper text. Run repository formatting, focused
+tests, type/lint checks as feasible, and independent Codex diff review. Document
+any unavailable checks explicitly. Record reusable findings, then open and merge
+the task PR after review and required checks.
