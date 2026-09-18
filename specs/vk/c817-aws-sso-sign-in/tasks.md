@@ -36,8 +36,8 @@ Applied `/speckit.tasks`. These tasks follow the MCP plan addendum; earlier task
 
 - [x] T901 Correlate execution and source evidence in `mcp-research.md`.
 - [x] T902 Set metadata-only fork/resume requests and add wire regressions in `crates/executors/src/executors/codex.rs` (depends on T901).
-- [ ] T903 Verify protocol behavior, run focused tests and formatting; document results in `mcp-research.md` (depends on T902).
+- [x] T903 Verify protocol behavior, run focused tests and formatting; document results in `mcp-research.md` (depends on T902).
 - [x] T904 Run independent Codex review and address findings; document results in `mcp-research.md` (depends on T903).
-- [ ] T905 Update `docs/knowledge-base/cluster-mcp-runtime-connectivity.md` and `docs/knowledge-base/INDEX.md`, commit knowledge and implementation, open and merge PR (depends on T904).
+- [x] T905 Update `docs/knowledge-base/cluster-mcp-runtime-connectivity.md` and `docs/knowledge-base/INDEX.md`, commit knowledge and implementation, and open PR (depends on T904). Final merge follows successful CI in pipeline stage 13.
 
 No [P] implementation tasks: the change and its regressions share one file. Stable T9xx identifiers distinguish this follow-up from the existing AWS tasks.
