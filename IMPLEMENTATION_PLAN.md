@@ -1,29 +1,11 @@
-# Implementation plan
-Task: vk/c817-aws-sso-sign-in
+# Implementation plan — vk/669e-mcp-blocks-progr
 
-1. Recall project knowledge and trace coordinator AWS storage, worker scoped homes, shared CLI installation, and service PATH.
-2. Refresh task-owned SpecKit commands, review constitution, specify behavior, resolve questions, and write a file-grounded technical plan and tasks; analyze before implementation.
-3. Expose AWS state through the Vibe Kanban deployment's shared service storage and existing worker home overlay, preserving live login/refresh state and service-user permissions.
-4. Ensure AWS CLI is in the worker toolchain; describe machine scope honestly in CLI Tools and AWS Settings, including remote-worker limitations.
-5. Add regression checks for the actual boundaries, run relevant Rust/frontend/Nix verification and required setup/format checks.
-6. Run independent Codex diff review, address confirmed findings, and re-verify.
-7. Record reusable knowledge with task identity and commit it. Open and merge scoped PRs against each repository's base branch only after review and verification.
+1. Correlate the reported MCP line with the FAIKE workspace's Codex execution and terminal status using read-only session evidence.
+2. Execute the repository SpecKit command instructions in order, retaining their exact designated artifact path; explicitly identify this task in those artifacts.
+3. Trace Codex stderr normalization, structured protocol errors, turn completion, and relevant UI error presentation. Establish whether the transport diagnostic is causal.
+4. Implement the smallest supported Vibe Kanban correction and focused regressions. If evidence instead requires another service's changes, stop for scope clarification.
+5. Install locked dependencies, run targeted checks and repository formatting, and inspect the diff for unrelated changes.
+6. Run an independent Codex CLI diff review; resolve significant findings and re-verify.
+7. Update and commit project knowledge with this task identifier, then open and merge the tested PR against the repository base branch.
 
-## Follow-up: status probe timeouts
-1. Amend the existing spec using the live single/unbounded/bounded host results.
-2. Add a shared four-permit probe gate in `crates/services/src/services/aws_sso.rs`; separate 30-second admission waiting from the 15-second execution budget.
-3. Preserve ordered list results and existing credential sanitization. Test overlapping batches, queue/execution distinction, cancellation and classification.
-4. Run focused services tests, required setup/format and relevant backend checks; independently review the diff.
-5. Update project knowledge and task evidence, commit, then open and merge a scoped PR. Verify deployed Settings API statuses after rollout.
-
-## Follow-up: lazy profile admission
-
-Live validation of #304 exposed that eagerly starting 31 admission deadlines
-causes later profiles to expire behind their own batch. Admit at most four
-profile futures per list while retaining the process-wide semaphore and
-per-admission/per-execution deadlines. Preserve profile ordering. Resolve the
-AWS executable once per refresh, under the same global capacity limit, using
-a request-local async cell; do not retain stale executable paths across refreshes.
-Verify overlapping 31-profile batches whose total duration exceeds 30 seconds,
-including ordered identity results and the global process limit. Then run the
-AWS tests, formatting, independent Codex review, knowledge update, and PR merge.
+Prior knowledge: ../PRIOR_KNOWLEDGE.md. External MCP repair and the FAIKE deployment work are outside scope.

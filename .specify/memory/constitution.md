@@ -634,3 +634,7 @@ connection. No principle or version change is required.
 ## Review: vk/c817-aws-sso-sign-in
 
 Applied `/speckit.constitution`: existing principles II, VI, VIII, and XI cover regression checks, reuse of worker home overlays, explicit credential sharing, and evidence-based availability. Credential files remain vendor-managed and must never enter logs or artifacts. No new principle is required.
+
+## Review: vk/669e-mcp-blocks-progr
+
+Applied `/speckit.constitution`: reaffirm II (regression evidence), VI (reuse existing lifecycle machinery), IX/XI (retain diagnostics without confusing their scope), XVIII/XXX (worker-backed terminal state and explicit indeterminacy), and XXIV (settings own MCP definitions). No new principle is required.

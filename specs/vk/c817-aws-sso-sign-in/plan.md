@@ -19,3 +19,15 @@ Reuses shared storage and scoped homes (VI), tests contracts (II), explicitly de
 
 ## Dependencies and risk
 Two repositories require coordinated rollout. Existing agent turns retain their already-created home overlays; start a new turn after deployment. SSO cache remains vendor-managed and refresh concurrency is unchanged. Shared service identity can access all configured SSO profiles, as the settings operator already authorized. No arbitrary coordinator path is forwarded to unconfigured workers.
+
+# MCP follow-up technical plan — vk/669e-mcp-blocks-progr
+
+Applied `/speckit.plan`. Reference the MCP follow-up section of spec.md and workspace PRIOR_KNOWLEDGE.md.
+
+1. In crates/executors/src/executors/codex.rs set exclude_turns=true in fork_params_from and resume_params_from. Both chat and review reuse the fork helper. Existing experimental API initialization already enables this typed protocol field.
+2. Add wire-serialization regressions for fork, resume, and explicit-history resume. Assert excludeTurns=true and preservation of thread/model/config/instruction/history inputs.
+3. Verify the deployed CLI's support with an isolated, metadata-only protocol probe (no user turn), and verify the pinned Rust source semantics. Keep runtime files and credentials out of artifacts.
+4. Run locked dependency setup, focused executor tests, repository formatting, and independent Codex review.
+5. Record the incident's transport-versus-lifecycle distinction and the response-history contract in the knowledge base; open and merge the PR.
+
+Constitution: II regression contract, VI existing helper reuse, IX protocol evidence, XI original diagnostics preserved, XVIII/XXX genuine replay gaps remain indeterminate. No schema, database, dependency, worker journal, or MCP configuration changes. General high-volume output backpressure remains a separate concern; this change removes unused historical hydration at its source.
