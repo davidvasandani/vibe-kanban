@@ -4,7 +4,11 @@ import type {
   FilesystemSample,
   MetricsNode,
 } from 'shared/types';
-import { classifyFilesystem, classifyNode } from './diskAlerts';
+import {
+  classifyFilesystem,
+  classifyNode,
+  rollupDiskAlerts,
+} from './diskAlerts';
 
 const thresholds: DiskAlertThresholds = {
   warning_free_percent: 10,
@@ -24,6 +28,49 @@ const filesystem = (available: number, total = 100 * 1024 ** 3) =>
   }) as FilesystemSample;
 
 describe('classifyFilesystem', () => {
+  it.each(['tmpfs', 'ramfs'])(
+    'excludes %s from disk alerts regardless of mount point or usage',
+    (fsType) => {
+      const deployedThresholds = {
+        warning_free_percent: 20,
+        warning_free_bytes: 30n * 1024n ** 3n,
+        critical_free_percent: 12,
+        critical_free_bytes: 15n * 1024n ** 3n,
+      };
+      for (const mountPoint of ['/dev/shm', '/tmp', '/scratch']) {
+        for (const available of [7.74 * 1024 ** 3, 0]) {
+          expect(
+            classifyFilesystem(
+              {
+                ...filesystem(available, 7.74 * 1024 ** 3),
+                fs_type: fsType,
+                device: fsType,
+                mount_point: mountPoint,
+              },
+              deployedThresholds
+            )
+          ).toBeNull();
+        }
+      }
+    }
+  );
+
+  it.each(['ext4', 'xfs', 'btrfs', 'nfs', 'nfs4'])(
+    'preserves real storage alerts for %s even under /tmp',
+    (fsType) => {
+      expect(
+        classifyFilesystem(
+          {
+            ...filesystem(512 * 1024 ** 2),
+            fs_type: fsType,
+            mount_point: '/tmp',
+          },
+          thresholds
+        )?.severity
+      ).toBe('critical');
+    }
+  );
+
   it.each(['/boot', '/boot/', '/boot/efi'])(
     'ignores boot filesystem mounted at %s',
     (mountPoint) => {
@@ -144,5 +191,35 @@ describe('classifyNode availability', () => {
         thresholds
       )
     ).toBeNull();
+  });
+});
+
+describe('disk alert rollup', () => {
+  it('omits RAM-only alerts while retaining genuine disk shortages', () => {
+    const ram = {
+      ...filesystem(0, 8 * 1024 ** 3),
+      mount_point: '/dev/shm',
+      device: 'tmpfs',
+      fs_type: 'tmpfs',
+    };
+    const nodes = [
+      {
+        node_id: 'ram-only',
+        availability: { status: 'available' },
+        latest: { filesystems: [ram, filesystem(60 * 1024 ** 3)] },
+      },
+      {
+        node_id: 'disk-full',
+        availability: { status: 'available' },
+        latest: { filesystems: [ram, filesystem(512 * 1024 ** 2)] },
+      },
+    ] as MetricsNode[];
+    const result = rollupDiskAlerts(nodes, thresholds);
+    expect(result.affectedNodes).toBe(1);
+    expect(result.severity).toBe('critical');
+    expect(result.alerts[0].nodeId).toBe('disk-full');
+    expect(
+      result.alerts[0].filesystems.map((alert) => alert.filesystem.mount_point)
+    ).toEqual(['/']);
   });
 });
