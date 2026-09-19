@@ -33,6 +33,12 @@ const finiteNumber = (value: unknown): number | null => {
 };
 
 const isDiskAlertEligible = (filesystem: FilesystemSample): boolean => {
+  // RAM-backed capacity is not disk space: an empty /dev/shm can be smaller
+  // than the configured absolute free-space threshold. Keep it in metrics,
+  // but do not offer disk remediation for it.
+  if (filesystem.fs_type === 'tmpfs' || filesystem.fs_type === 'ramfs') {
+    return false;
+  }
   const mountPoint = filesystem.mount_point.replace(/\/+$/, '');
   return mountPoint !== '/boot' && !mountPoint.startsWith('/boot/');
 };
