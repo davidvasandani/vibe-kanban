@@ -130,3 +130,11 @@ CI gap worth closing separately: `.github/workflows/test.yml` runs
 test`, even though web-core has a `test` script and a large suite. Frontend
 regressions added there — including this task's link-policy tests — do not gate
 merges today.
+
+Second CI gap, fixed here: the `backend` paths filter in
+`.github/workflows/test.yml` was a hand-kept crate enumeration that had drifted
+to 15 of 33 workspace members, `crates/mcp` among the omissions. A change
+touching only an omitted crate skipped backend-test/clippy entirely and reported
+green — this task's own Rust changes did exactly that on the first CI run.
+Because those jobs operate on the whole workspace, the filter should be
+`crates/**`, not a list that must be remembered.

@@ -56,26 +56,12 @@ jobs:
               - '.github/workflows/test.yml'
               - '.github/actions/**'
             backend:
-              - 'crates/api-types/**'
-              # cluster-protocol, node-metrics and worker are workspace members
-              # whose tests run in backend-test; without them here a change
-              # touching only those crates skips the job entirely and reads as
-              # a pass.
-              - 'crates/cluster-protocol/**'
-              - 'crates/db/**'
-              - 'crates/deployment/**'
-              - 'crates/executors/**'
-              - 'crates/git/**'
-              - 'crates/local-deployment/**'
-              - 'crates/node-metrics/**'
-              - 'crates/remote/**'
-              - 'crates/review/**'
-              - 'crates/server/**'
-              - 'crates/services/**'
-              - 'crates/utils/**'
-              - 'crates/worker/**'
-              - 'crates/workspace-manager/**'
-              - 'crates/worktree-manager/**'
+              # Every crate, not an enumeration. backend-test/clippy operate on
+              # the whole workspace, so a crate missing from a hand-kept list
+              # skips the job entirely and reads as a pass — this list had
+              # drifted to 15 of 33 workspace members (`crates/mcp` among the
+              # omissions), which is the exact trap its own comment warned about.
+              - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'shared/**'
