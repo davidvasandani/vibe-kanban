@@ -1,125 +1,78 @@
 import { useEffect } from 'react';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
-import { LinkNode } from '@lexical/link';
+import { $isLinkNode, LinkNode } from '@lexical/link';
+import { $getNodeByKey } from 'lexical';
 
-/**
- * Sanitize href to block dangerous protocols.
- * Returns undefined if the href is blocked.
- */
-function sanitizeHref(href?: string): string | undefined {
-  if (typeof href !== 'string') return undefined;
+// Only the canonical UUID route is allowed; arbitrary relative paths (including
+// protocol-relative URLs) remain disabled. Both web apps own this route.
+// Matched case-sensitively throughout: issue lookup is an exact match against
+// the lowercase UUIDs Postgres emits, and route params are never normalised, so
+// `/PROJECTS/...` or an upper-case UUID would only ever be a dead link.
+const uuid = '[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}';
+const issueRoute = new RegExp(`^/projects/${uuid}/issues/${uuid}$`);
+
+function updateLink(dom: HTMLAnchorElement, href: string) {
   const trimmed = href.trim();
-  // Block dangerous protocols
-  if (/^(javascript|vbscript|data):/i.test(trimmed)) return undefined;
-  // Allow anchors and common relative forms (but they'll be disabled)
-  if (
-    trimmed.startsWith('#') ||
-    trimmed.startsWith('./') ||
-    trimmed.startsWith('../') ||
-    trimmed.startsWith('/')
-  )
-    return trimmed;
-  // Allow only https
-  if (/^https:\/\//i.test(trimmed)) return trimmed;
-  // Block everything else by default
-  return undefined;
+  const external = /^https:\/\//i.test(trimmed);
+  const clickable = external || issueRoute.test(trimmed);
+
+  if (clickable) {
+    dom.setAttribute('href', trimmed);
+    if (external) {
+      dom.setAttribute('target', '_blank');
+      dom.setAttribute('rel', 'noopener noreferrer');
+    } else {
+      // Issue routes belong to this app: keep them in the current window.
+      // `_blank` is wrong for them because in the Tauri build `on_new_window`
+      // denies the window and hands the relative URL to the system browser,
+      // dropping the user out of the desktop app. (Either way this is a full
+      // document navigation, not a client-side route change — see the
+      // knowledge base for why that is accepted for now.)
+      dom.removeAttribute('target');
+      dom.removeAttribute('rel');
+    }
+    dom.style.removeProperty('pointer-events');
+    dom.removeAttribute('role');
+    dom.removeAttribute('aria-disabled');
+    dom.onclick = (e) => e.stopPropagation();
+  } else {
+    dom.removeAttribute('href');
+    dom.removeAttribute('target');
+    dom.removeAttribute('rel');
+    dom.style.pointerEvents = 'none';
+    dom.setAttribute('role', 'link');
+    dom.setAttribute('aria-disabled', 'true');
+    // No `title` or `cursor` hint here: `pointer-events: none` stops the anchor
+    // being hit-tested, so neither could ever render. Giving disabled links real
+    // feedback means dropping `pointer-events` and guarding the click instead,
+    // which changes click-through behaviour — out of scope here.
+    dom.onclick = null;
+  }
 }
 
-/**
- * Check if href is an external HTTPS link.
- */
-function isExternalHref(href?: string): boolean {
-  if (!href) return false;
-  return /^https:\/\//i.test(href);
-}
-
-/**
- * Plugin that handles link sanitization and security attributes in read-only mode.
- * - Blocks dangerous protocols (javascript:, vbscript:, data:)
- * - External HTTPS links: clickable with target="_blank" and rel="noopener noreferrer"
- * - Internal/relative links: rendered but not clickable
- */
+/** Keep external HTTPS and explicit issue links usable in read-only messages. */
 export function ReadOnlyLinkPlugin() {
   const [editor] = useLexicalComposerContext();
 
-  useEffect(() => {
-    // Register a mutation listener to modify link DOM elements
-    const unregister = editor.registerMutationListener(
-      LinkNode,
-      (mutations) => {
-        for (const [nodeKey, mutation] of mutations) {
-          if (mutation === 'destroyed') continue;
-
-          const dom = editor.getElementByKey(nodeKey);
-          if (!dom || !(dom instanceof HTMLAnchorElement)) continue;
-
-          const href = dom.getAttribute('href');
-          const safeHref = sanitizeHref(href ?? undefined);
-
-          if (!safeHref) {
-            // Dangerous protocol - remove href entirely
-            dom.removeAttribute('href');
-            dom.style.cursor = 'not-allowed';
-            dom.style.pointerEvents = 'none';
-            continue;
+  useEffect(
+    () =>
+      // `skipInitialization` defaults to false, so links that already exist when
+      // this mounts arrive here as 'created' — no separate initial sweep needed.
+      editor.registerMutationListener(LinkNode, (mutations) => {
+        editor.read(() => {
+          for (const [nodeKey, mutation] of mutations) {
+            if (mutation === 'destroyed') continue;
+            const dom = editor.getElementByKey(nodeKey);
+            const node = $getNodeByKey(nodeKey);
+            if (dom instanceof HTMLAnchorElement && $isLinkNode(node)) {
+              // Read the model: a previous pass may have removed the DOM href.
+              updateLink(dom, node.getURL());
+            }
           }
-
-          const isExternal = isExternalHref(safeHref);
-
-          if (isExternal) {
-            // External HTTPS link - add security attributes
-            dom.setAttribute('target', '_blank');
-            dom.setAttribute('rel', 'noopener noreferrer');
-            dom.onclick = (e) => e.stopPropagation();
-          } else {
-            // Internal/relative link - disable clicking
-            dom.removeAttribute('href');
-            dom.style.cursor = 'not-allowed';
-            dom.style.pointerEvents = 'none';
-            dom.setAttribute('role', 'link');
-            dom.setAttribute('aria-disabled', 'true');
-            dom.title = href ?? '';
-          }
-        }
-      }
-    );
-
-    // Also handle existing links on mount by triggering a read
-    editor.getEditorState().read(() => {
-      const root = editor.getRootElement();
-      if (!root) return;
-
-      const links = root.querySelectorAll('a');
-      links.forEach((link) => {
-        const href = link.getAttribute('href');
-        const safeHref = sanitizeHref(href ?? undefined);
-
-        if (!safeHref) {
-          link.removeAttribute('href');
-          link.style.cursor = 'not-allowed';
-          link.style.pointerEvents = 'none';
-          return;
-        }
-
-        const isExternal = isExternalHref(safeHref);
-
-        if (isExternal) {
-          link.setAttribute('target', '_blank');
-          link.setAttribute('rel', 'noopener noreferrer');
-          link.onclick = (e) => e.stopPropagation();
-        } else {
-          link.removeAttribute('href');
-          link.style.cursor = 'not-allowed';
-          link.style.pointerEvents = 'none';
-          link.setAttribute('role', 'link');
-          link.setAttribute('aria-disabled', 'true');
-          link.title = href ?? '';
-        }
-      });
-    });
-
-    return unregister;
-  }, [editor]);
+        });
+      }),
+    [editor]
+  );
 
   return null;
 }
