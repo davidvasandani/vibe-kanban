@@ -10,24 +10,31 @@ the local and remote web applications: `/projects/{project}/issues/{issue}`.
 Do not derive a browser origin from `VIBE_BACKEND_URL`: in clustered deployments
 that address is an internal coordinator transport endpoint.
 
-Cover every issue reference in a payload, not just the top-level record. A bare
-id an agent cannot turn into a link is the failure this contract exists to
-prevent, so `issue_url`, `related_issue_url`, `parent_issue_url` and sub-issue
-URLs all travel with their records. Derive each from the identity actually on
-the record; `related_issue_url` stays null when the authoritative project record
-is unavailable rather than guessing. A parent's project is safe to reuse because
-sub-issue discovery is itself project-scoped, so parent and child always share
-one project — record that invariant next to the code that leans on it.
+Build every destination from identity that is actually on the record in hand.
+`issue_url`, `related_issue_url` and sub-issue URLs qualify; `related_issue_url`
+stays null when the authoritative project record is unavailable rather than
+guessing.
+
+`parent_issue_id` deliberately ships **without** a URL. A parent can live in a
+different project: `create_issue` resolves `parent_issue_id` through
+`resolve_issue_id`, which searches every visible project, and the FK
+(`parent_issue_id UUID REFERENCES issues(id)`) carries no same-project
+constraint. Splicing the parent id into the child's project route yields a link
+that looks valid and 404s, which is worse than no link — `ProjectProvider`
+resolves issues by exact lookup within one project. `fetch_sub_issues` being
+project-scoped proves only that same-project children are *discoverable*, not
+that cross-project parents are impossible; do not read it as an invariant.
+Agents reach a parent through `get_issue`, which returns its real `issue_url`.
 
 ## Scope the guidance to where the route resolves
 
 An application-relative route is only meaningful inside the Vibe Kanban UI.
 Telling agents to link "every issue reference" is too broad: the same agent
-writes pull request bodies, commit messages and Slack posts, where a root-relative
-path resolves against the wrong origin and 404s. Instruct linking inside Vibe
-Kanban prose and naming the issue key elsewhere. There is no authoritative public
-web origin available to the MCP server, so an absolute URL cannot be offered
-without inventing one.
+writes pull request bodies, commit messages and Slack posts, where a
+root-relative path resolves against the wrong origin and 404s. Instruct linking
+inside Vibe Kanban prose and naming the issue key elsewhere. There is no
+authoritative public web origin available to the MCP server, so an absolute URL
+cannot be offered without inventing one.
 
 Server instructions are assembled per launch mode, and the modes do not expose
 the same tools: orchestrator mode registers no remote-issue tools at all, so
@@ -46,12 +53,18 @@ link becomes allowed. Use `editor.read` when resolving nodes from DOM elements;
 `editor.getEditorState().read` does not provide the active editor that DOM-node
 lookup requires.
 
-Scope regex case-insensitivity to the parts that are genuinely case-insensitive.
-A blanket `i` flag over the whole route also accepts `/PROJECTS/...`, which the
-router does not serve, so the plugin would mark a dead link clickable. Hex digits
-take the `i`; the path segments do not. Watch for fixtures that make such a test
-vacuous: all-numeric UUIDs make `toUpperCase()` a no-op, so the case is asserted
+Match the route case-sensitively, end to end. Issue lookup is an exact match
+against the lowercase UUIDs Postgres emits and route params are never
+normalised, so neither `/PROJECTS/...` nor an upper-case UUID resolves — an `i`
+flag only ever admits dead links. Watch for fixtures that make such a test
+vacuous: all-numeric UUIDs make `toUpperCase()` a no-op, so case is asserted
 only with letter-bearing UUIDs.
+
+`target="_blank"` is for external links only. An issue route belongs to this
+app, and opening it in a new tab cold-reloads the SPA; worse, in the Tauri build
+`on_new_window` denies the window and hands the URL to the system browser, which
+cannot resolve an app-relative path at all — the desktop user is dropped out of
+the app onto a broken page. Keep in-app routes in the current window.
 
 A disabled link carries `role="link"`, `aria-disabled`, and `pointer-events:
 none`. Do not add a `title` hint to that branch: `pointer-events: none` stops the
@@ -63,4 +76,4 @@ Regression tests should import real Markdown into Lexical and inspect anchors,
 exercise late plugin mounting and URL changes, and retain unsafe-path coverage.
 Backend tests should inspect serialized MCP content and verify that nested
 records use their own project identity, with no guessed destination for missing
-records.
+or cross-project records.

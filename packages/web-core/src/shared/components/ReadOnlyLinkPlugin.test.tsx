@@ -94,20 +94,38 @@ describe('read-only issue references', () => {
     expect(link.getAttribute('href')).toBe(issueUrl);
   });
 
+  it('keeps an issue reference in the current window, not a new tab', async () => {
+    // `_blank` cold-reloads the SPA, and the Tauri build hands new windows to
+    // the system browser, which cannot resolve an app-relative route.
+    const link = await renderLink(issueUrl);
+    expect(link.getAttribute('href')).toBe(issueUrl);
+    expect(link.hasAttribute('target')).toBe(false);
+    expect(link.hasAttribute('rel')).toBe(false);
+  });
+
+  it('opens external links in a new tab with a safe rel', async () => {
+    const link = await renderLink('https://example.com/issue/1');
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
   it('preserves an accessible issue anchor and stops parent click handling', async () => {
     const link = await renderLink(issueUrl);
     expect(link.getAttribute('href')).toBe(issueUrl);
-    expect(link.getAttribute('target')).toBe('_blank');
-    expect(link.getAttribute('rel')).toBe('noopener noreferrer');
     expect(link.getAttribute('aria-disabled')).toBeNull();
     expect(link.tabIndex).toBe(0);
     let bubbled = false;
     container.addEventListener('click', () => {
       bubbled = true;
     });
+    // The anchor is a real navigable link now, and jsdom cannot navigate; block
+    // activation so the assertion is about propagation, not jsdom's warning.
+    const block = (e: Event) => e.preventDefault();
+    document.addEventListener('click', block, true);
     link.dispatchEvent(
       new MouseEvent('click', { bubbles: true, cancelable: true })
     );
+    document.removeEventListener('click', block, true);
     expect(bubbled).toBe(false);
   });
 
@@ -117,16 +135,12 @@ describe('read-only issue references', () => {
     expect(link.getAttribute('href')).toBe(issueUrl);
   });
 
-  it.each([
-    'https://example.com/issue/1',
-    hexIssueUrl,
-    hexIssueUrl
-      .toUpperCase()
-      .replace('/PROJECTS/', '/projects/')
-      .replace('/ISSUES/', '/issues/'),
-  ])('preserves allowed destination %s', async (href) => {
-    expect((await renderLink(href)).getAttribute('href')).toBe(href);
-  });
+  it.each(['https://example.com/issue/1', hexIssueUrl])(
+    'preserves allowed destination %s',
+    async (href) => {
+      expect((await renderLink(href)).getAttribute('href')).toBe(href);
+    }
+  );
 
   it.each([
     'javascript:alert(1)',
@@ -139,9 +153,14 @@ describe('read-only issue references', () => {
     '#fragment',
     '../file',
     'http://example.com',
-    // The app only serves the lowercase route, so a shouted path is a dead link.
+    // Issue lookup is an exact match against lowercase UUIDs and route params
+    // are never normalised, so any shouted variant is a dead link.
     issueUrl.replace('/projects/', '/Projects/'),
     issueUrl.replace('/issues/', '/Issues/'),
+    hexIssueUrl
+      .toUpperCase()
+      .replace('/PROJECTS/', '/projects/')
+      .replace('/ISSUES/', '/issues/'),
   ])('disables unsupported destination %s', async (href) => {
     const link = await renderLink(href);
     expect(link.hasAttribute('href')).toBe(false);

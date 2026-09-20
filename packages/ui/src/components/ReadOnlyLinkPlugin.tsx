@@ -5,19 +5,30 @@ import { $getNearestNodeFromDOMNode, $getNodeByKey } from 'lexical';
 
 // Only the canonical UUID route is allowed; arbitrary relative paths (including
 // protocol-relative URLs) remain disabled. Both web apps own this route.
-// Hex digits are case-insensitive, the path segments are not: the app serves
-// only the lowercase route, so `/PROJECTS/...` would be a dead link.
-const uuid = '[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}';
+// Matched case-sensitively throughout: issue lookup is an exact match against
+// the lowercase UUIDs Postgres emits, and route params are never normalised, so
+// `/PROJECTS/...` or an upper-case UUID would only ever be a dead link.
+const uuid = '[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}';
 const issueRoute = new RegExp(`^/projects/${uuid}/issues/${uuid}$`);
 
 function updateLink(dom: HTMLAnchorElement, href: string) {
   const trimmed = href.trim();
-  const clickable = /^https:\/\//i.test(trimmed) || issueRoute.test(trimmed);
+  const external = /^https:\/\//i.test(trimmed);
+  const clickable = external || issueRoute.test(trimmed);
 
   if (clickable) {
     dom.setAttribute('href', trimmed);
-    dom.setAttribute('target', '_blank');
-    dom.setAttribute('rel', 'noopener noreferrer');
+    if (external) {
+      dom.setAttribute('target', '_blank');
+      dom.setAttribute('rel', 'noopener noreferrer');
+    } else {
+      // Issue routes belong to this app: keep them in the current window.
+      // `_blank` would cold-reload the SPA in a new tab, and in the Tauri
+      // build `on_new_window` denies the window and hands the relative URL to
+      // the system browser, dropping the user out of the desktop app.
+      dom.removeAttribute('target');
+      dom.removeAttribute('rel');
+    }
     dom.style.removeProperty('cursor');
     dom.style.removeProperty('pointer-events');
     dom.removeAttribute('role');
