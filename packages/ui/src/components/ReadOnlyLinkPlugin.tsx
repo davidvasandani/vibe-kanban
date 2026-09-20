@@ -22,7 +22,6 @@ function updateLink(dom: HTMLAnchorElement, href: string) {
     dom.style.removeProperty('pointer-events');
     dom.removeAttribute('role');
     dom.removeAttribute('aria-disabled');
-    dom.removeAttribute('title');
     dom.onclick = (e) => e.stopPropagation();
   } else {
     dom.removeAttribute('href');
@@ -32,8 +31,8 @@ function updateLink(dom: HTMLAnchorElement, href: string) {
     dom.style.pointerEvents = 'none';
     dom.setAttribute('role', 'link');
     dom.setAttribute('aria-disabled', 'true');
-    // Keep the destination discoverable on hover even though it is inert.
-    dom.title = trimmed;
+    // No `title` hint here: `pointer-events: none` stops the anchor being
+    // hit-tested, so a tooltip on it could never render.
     dom.onclick = null;
   }
 }

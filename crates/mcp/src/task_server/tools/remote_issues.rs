@@ -128,6 +128,10 @@ struct IssueSummary {
     priority: Option<String>,
     #[schemars(description = "Parent issue ID if this is a subissue")]
     parent_issue_id: Option<String>,
+    #[schemars(
+        description = "Application-relative parent issue URL if this is a subissue; use this exact destination in Markdown issue references."
+    )]
+    parent_issue_url: Option<String>,
     #[schemars(description = "When the issue was created")]
     created_at: String,
     #[schemars(description = "When the issue was last updated")]
@@ -220,6 +224,10 @@ struct IssueDetails {
     priority: Option<String>,
     #[schemars(description = "Parent issue ID if this is a subissue")]
     parent_issue_id: Option<String>,
+    #[schemars(
+        description = "Application-relative parent issue URL if this is a subissue; use this exact destination in Markdown issue references."
+    )]
+    parent_issue_url: Option<String>,
     #[schemars(description = "Optional planned start date")]
     start_date: Option<String>,
     #[schemars(description = "Optional planned target date")]
@@ -793,6 +801,11 @@ impl McpServer {
                 .map(Self::issue_priority_label)
                 .map(str::to_string),
             parent_issue_id: issue.parent_issue_id.map(|id| id.to_string()),
+            // Sub-issues are only ever discovered within their parent's project
+            // (see `fetch_sub_issues`), so the parent shares this project.
+            parent_issue_url: issue
+                .parent_issue_id
+                .map(|id| Self::issue_url(issue.project_id, id)),
             created_at: issue.created_at.to_rfc3339(),
             updated_at: issue.updated_at.to_rfc3339(),
             pull_request_count: pull_requests.pull_requests.len(),
@@ -833,6 +846,11 @@ impl McpServer {
                 .map(Self::issue_priority_label)
                 .map(str::to_string),
             parent_issue_id: issue.parent_issue_id.map(|id| id.to_string()),
+            // Sub-issues are only ever discovered within their parent's project
+            // (see `fetch_sub_issues`), so the parent shares this project.
+            parent_issue_url: issue
+                .parent_issue_id
+                .map(|id| Self::issue_url(issue.project_id, id)),
             start_date: issue.start_date.map(|date| date.to_rfc3339()),
             target_date: issue.target_date.map(|date| date.to_rfc3339()),
             completed_at: issue.completed_at.map(|date| date.to_rfc3339()),
@@ -1103,6 +1121,31 @@ mod tests {
             response["issue_url"],
             "/projects/11111111-1111-1111-1111-111111111111/issues/22222222-2222-2222-2222-222222222222"
         );
+    }
+
+    #[test]
+    fn parent_reference_carries_a_destination_only_when_there_is_a_parent() {
+        super::super::tests::install_rustls_provider();
+        let server = McpServer::new_global("http://internal-coordinator:3000");
+        let prs = ListPullRequestsResponse {
+            pull_requests: vec![],
+        };
+        let mut issue = issue_fixture();
+        assert!(
+            server
+                .issue_to_summary(&issue, None, &prs)
+                .parent_issue_url
+                .is_none()
+        );
+
+        issue.parent_issue_id = Some(Uuid::from_u128(9));
+        let summary = serde_json::to_value(server.issue_to_summary(&issue, None, &prs)).unwrap();
+        // The parent lives in the same project, not the sub-issue's own id.
+        assert_eq!(
+            summary["parent_issue_url"],
+            "/projects/11111111-1111-1111-1111-111111111111/issues/00000000-0000-0000-0000-000000000009"
+        );
+        assert_ne!(summary["parent_issue_url"], summary["issue_url"]);
     }
 
     #[test]

@@ -574,7 +574,7 @@ impl McpServer {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{collections::BTreeSet, sync::Once};
 
     #[test]
@@ -593,7 +593,7 @@ mod tests {
 
     static RUSTLS_PROVIDER: Once = Once::new();
 
-    pub(super) fn install_rustls_provider() {
+    pub(crate) fn install_rustls_provider() {
         RUSTLS_PROVIDER.call_once(|| {
             rustls::crypto::aws_lc_rs::default_provider()
                 .install_default()

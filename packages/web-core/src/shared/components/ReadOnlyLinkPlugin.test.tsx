@@ -146,7 +146,6 @@ describe('read-only issue references', () => {
     const link = await renderLink(href);
     expect(link.hasAttribute('href')).toBe(false);
     expect(link.getAttribute('aria-disabled')).toBe('true');
-    expect(link.title).toBe(href);
   });
 
   it('restores interactivity after a disabled link changes to an issue', async () => {
@@ -155,7 +154,6 @@ describe('read-only issue references', () => {
     expect(link.getAttribute('href')).toBe(issueUrl);
     expect(link.style.pointerEvents).toBe('');
     expect(link.getAttribute('aria-disabled')).toBeNull();
-    expect(link.hasAttribute('title')).toBe(false);
     const disabled = await changeHref('javascript:alert(1)');
     expect(disabled.hasAttribute('href')).toBe(false);
     expect(disabled.hasAttribute('target')).toBe(false);
