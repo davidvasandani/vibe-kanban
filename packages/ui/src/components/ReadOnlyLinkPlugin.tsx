@@ -1,121 +1,68 @@
 import { useEffect } from 'react';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
-import { LinkNode } from '@lexical/link';
+import { $isLinkNode, LinkNode } from '@lexical/link';
+import { $getNearestNodeFromDOMNode, $getNodeByKey } from 'lexical';
 
-/**
- * Sanitize href to block dangerous protocols.
- * Returns undefined if the href is blocked.
- */
-function sanitizeHref(href?: string): string | undefined {
-  if (typeof href !== 'string') return undefined;
+// Only the canonical UUID route is allowed; arbitrary relative paths (including
+// protocol-relative URLs) remain disabled. Both web apps own this route.
+const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const issueRoute = new RegExp(`^/projects/${uuid}/issues/${uuid}$`, 'i');
+
+function updateLink(dom: HTMLAnchorElement, href: string) {
   const trimmed = href.trim();
-  // Block dangerous protocols
-  if (/^(javascript|vbscript|data):/i.test(trimmed)) return undefined;
-  // Allow anchors and common relative forms (but they'll be disabled)
-  if (
-    trimmed.startsWith('#') ||
-    trimmed.startsWith('./') ||
-    trimmed.startsWith('../') ||
-    trimmed.startsWith('/')
-  )
-    return trimmed;
-  // Allow only https
-  if (/^https:\/\//i.test(trimmed)) return trimmed;
-  // Block everything else by default
-  return undefined;
+  const clickable = /^https:\/\//i.test(trimmed) || issueRoute.test(trimmed);
+
+  if (clickable) {
+    dom.setAttribute('href', trimmed);
+    dom.setAttribute('target', '_blank');
+    dom.setAttribute('rel', 'noopener noreferrer');
+    dom.style.removeProperty('cursor');
+    dom.style.removeProperty('pointer-events');
+    dom.removeAttribute('role');
+    dom.removeAttribute('aria-disabled');
+    dom.onclick = (e) => e.stopPropagation();
+  } else {
+    dom.removeAttribute('href');
+    dom.removeAttribute('target');
+    dom.removeAttribute('rel');
+    dom.style.cursor = 'not-allowed';
+    dom.style.pointerEvents = 'none';
+    dom.setAttribute('role', 'link');
+    dom.setAttribute('aria-disabled', 'true');
+    dom.onclick = null;
+  }
 }
 
-/**
- * Check if href is an external HTTPS link.
- */
-function isExternalHref(href?: string): boolean {
-  if (!href) return false;
-  return /^https:\/\//i.test(href);
-}
-
-/**
- * Plugin that handles link sanitization and security attributes in read-only mode.
- * - Blocks dangerous protocols (javascript:, vbscript:, data:)
- * - External HTTPS links: clickable with target="_blank" and rel="noopener noreferrer"
- * - Internal/relative links: rendered but not clickable
- */
+/** Keep external HTTPS and explicit issue links usable in read-only messages. */
 export function ReadOnlyLinkPlugin() {
   const [editor] = useLexicalComposerContext();
 
   useEffect(() => {
-    // Register a mutation listener to modify link DOM elements
     const unregister = editor.registerMutationListener(
       LinkNode,
       (mutations) => {
-        for (const [nodeKey, mutation] of mutations) {
-          if (mutation === 'destroyed') continue;
-
-          const dom = editor.getElementByKey(nodeKey);
-          if (!dom || !(dom instanceof HTMLAnchorElement)) continue;
-
-          const href = dom.getAttribute('href');
-          const safeHref = sanitizeHref(href ?? undefined);
-
-          if (!safeHref) {
-            // Dangerous protocol - remove href entirely
-            dom.removeAttribute('href');
-            dom.style.cursor = 'not-allowed';
-            dom.style.pointerEvents = 'none';
-            continue;
+        editor.read(() => {
+          for (const [nodeKey, mutation] of mutations) {
+            if (mutation === 'destroyed') continue;
+            const dom = editor.getElementByKey(nodeKey);
+            const node = $getNodeByKey(nodeKey);
+            if (dom instanceof HTMLAnchorElement && $isLinkNode(node)) {
+              // Read the model: a previous pass may have removed the DOM href.
+              updateLink(dom, node.getURL());
+            }
           }
-
-          const isExternal = isExternalHref(safeHref);
-
-          if (isExternal) {
-            // External HTTPS link - add security attributes
-            dom.setAttribute('target', '_blank');
-            dom.setAttribute('rel', 'noopener noreferrer');
-            dom.onclick = (e) => e.stopPropagation();
-          } else {
-            // Internal/relative link - disable clicking
-            dom.removeAttribute('href');
-            dom.style.cursor = 'not-allowed';
-            dom.style.pointerEvents = 'none';
-            dom.setAttribute('role', 'link');
-            dom.setAttribute('aria-disabled', 'true');
-            dom.title = href ?? '';
-          }
-        }
+        });
       }
     );
 
-    // Also handle existing links on mount by triggering a read
-    editor.getEditorState().read(() => {
-      const root = editor.getRootElement();
-      if (!root) return;
-
-      const links = root.querySelectorAll('a');
-      links.forEach((link) => {
-        const href = link.getAttribute('href');
-        const safeHref = sanitizeHref(href ?? undefined);
-
-        if (!safeHref) {
-          link.removeAttribute('href');
-          link.style.cursor = 'not-allowed';
-          link.style.pointerEvents = 'none';
-          return;
-        }
-
-        const isExternal = isExternalHref(safeHref);
-
-        if (isExternal) {
-          link.setAttribute('target', '_blank');
-          link.setAttribute('rel', 'noopener noreferrer');
-          link.onclick = (e) => e.stopPropagation();
-        } else {
-          link.removeAttribute('href');
-          link.style.cursor = 'not-allowed';
-          link.style.pointerEvents = 'none';
-          link.setAttribute('role', 'link');
-          link.setAttribute('aria-disabled', 'true');
-          link.title = href ?? '';
-        }
-      });
+    editor.read(() => {
+      editor
+        .getRootElement()
+        ?.querySelectorAll('a')
+        .forEach((dom) => {
+          const node = $getNearestNodeFromDOMNode(dom);
+          if ($isLinkNode(node)) updateLink(dom, node.getURL());
+        });
     });
 
     return unregister;
