@@ -60,6 +60,11 @@ flag only ever admits dead links. Watch for fixtures that make such a test
 vacuous: all-numeric UUIDs make `toUpperCase()` a no-op, so case is asserted
 only with letter-bearing UUIDs.
 
+Registering the mutation listener is sufficient on its own: `skipInitialization`
+defaults to false, so `LinkNode`s that already exist when the plugin mounts arrive
+as 'created' mutations. A second `querySelectorAll('a')` sweep at mount is
+redundant, not defensive.
+
 `target="_blank"` is for external links only. An issue route belongs to this
 app, and opening it in a new tab cold-reloads the SPA; worse, in the Tauri build
 `on_new_window` denies the window and hands the URL to the system browser, which
@@ -77,3 +82,11 @@ exercise late plugin mounting and URL changes, and retain unsafe-path coverage.
 Backend tests should inspect serialized MCP content and verify that nested
 records use their own project identity, with no guessed destination for missing
 or cross-project records.
+
+Known limitation, accepted: a clickable issue route is a plain anchor, so
+following it is a full document navigation that re-bootstraps the SPA rather
+than a client-side route change. No web package has a global anchor-click
+interceptor, and the plugin lives in `packages/ui` with no router access, so
+client-side routing would mean threading a navigate callback through
+`WYSIWYGEditor` and its call sites. The link resolves correctly (the server has
+an SPA fallback), so this is a polish item, not a broken destination.

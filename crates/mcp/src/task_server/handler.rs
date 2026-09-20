@@ -36,13 +36,15 @@ impl ServerHandler for McpServer {
         };
         let mut instruction = format!(
             "{preamble} Use list/read tools first when you need IDs or current state. \
-             Inside Vibe Kanban prose (issue descriptions, comments, session messages), write every \
+             In prose that is read inside Vibe Kanban (comments, session messages), write every \
              issue reference as a Markdown link to the returned issue_url or related_issue_url, \
              e.g. [VAS-646](/projects/<project_id>/issues/<issue_id>) — not a bare issue key. \
              If a result has no URL, call {missing_url_lookup}; never build one from an issue key or \
-             the backend host. These are application-relative Vibe Kanban routes, so do not paste \
-             them where an absolute URL is required (pull request bodies, Slack, email, commit \
-             messages); name the issue key there instead. TOOLS: {}.",
+             the backend host. These are application-relative Vibe Kanban routes, so they only \
+             resolve in the Vibe Kanban UI: do not put them anywhere the text leaves the app, \
+             including pull request bodies, commit messages, Slack, email, or fields mirrored to a \
+             linked external tracker (issue descriptions sync outbound to Jira). Name the issue key \
+             there instead. TOOLS: {}.",
             tool_names.join(", ")
         );
         if self.context.is_some() {
@@ -91,7 +93,9 @@ mod tests {
         crate::task_server::tools::tests::install_rustls_provider();
         let global = instructions(&McpServer::new_global("http://coordinator:3000"));
         assert!(global.contains("Markdown link"), "{global}");
-        assert!(global.contains("absolute URL is required"), "{global}");
+        assert!(global.contains("leaves the app"), "{global}");
+        // VK issue descriptions sync outbound to Jira, where the route 404s.
+        assert!(global.contains("Jira"), "{global}");
         // The transport host must never be offered as a browser origin.
         assert!(!global.contains("coordinator:3000"), "{global}");
     }

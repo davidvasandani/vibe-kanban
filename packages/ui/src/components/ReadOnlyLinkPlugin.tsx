@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
 import { $isLinkNode, LinkNode } from '@lexical/link';
-import { $getNearestNodeFromDOMNode, $getNodeByKey } from 'lexical';
+import { $getNodeByKey } from 'lexical';
 
 // Only the canonical UUID route is allowed; arbitrary relative paths (including
 // protocol-relative URLs) remain disabled. Both web apps own this route.
@@ -52,10 +52,11 @@ function updateLink(dom: HTMLAnchorElement, href: string) {
 export function ReadOnlyLinkPlugin() {
   const [editor] = useLexicalComposerContext();
 
-  useEffect(() => {
-    const unregister = editor.registerMutationListener(
-      LinkNode,
-      (mutations) => {
+  useEffect(
+    () =>
+      // `skipInitialization` defaults to false, so links that already exist when
+      // this mounts arrive here as 'created' — no separate initial sweep needed.
+      editor.registerMutationListener(LinkNode, (mutations) => {
         editor.read(() => {
           for (const [nodeKey, mutation] of mutations) {
             if (mutation === 'destroyed') continue;
@@ -67,21 +68,9 @@ export function ReadOnlyLinkPlugin() {
             }
           }
         });
-      }
-    );
-
-    editor.read(() => {
-      editor
-        .getRootElement()
-        ?.querySelectorAll('a')
-        .forEach((dom) => {
-          const node = $getNearestNodeFromDOMNode(dom);
-          if ($isLinkNode(node)) updateLink(dom, node.getURL());
-        });
-    });
-
-    return unregister;
-  }, [editor]);
+      }),
+    [editor]
+  );
 
   return null;
 }
