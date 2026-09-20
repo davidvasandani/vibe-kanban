@@ -41,9 +41,9 @@ impl ServerHandler for McpServer {
         } else {
             "In prose that is read inside Vibe Kanban (session messages), link this workspace's \
              own issue using the issue_url returned by 'get_context', copied verbatim, when that \
-             field is present — it is absent for a workspace with no linked issue. This server \
-             exposes no issue lookup, so name every other issue, and this one when the field is \
-             absent, by its issue key instead of linking it."
+             field holds a route — it is null for a workspace with no linked issue, and null is \
+             never a link destination. This server exposes no issue lookup, so name every other \
+             issue, and this one when the field is null, by its issue key instead of linking it."
         };
         let mut instruction = format!(
             "{preamble} Use list/read tools first when you need IDs or current state. \

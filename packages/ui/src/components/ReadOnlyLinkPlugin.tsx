@@ -23,9 +23,11 @@ function updateLink(dom: HTMLAnchorElement, href: string) {
       dom.setAttribute('rel', 'noopener noreferrer');
     } else {
       // Issue routes belong to this app: keep them in the current window.
-      // `_blank` would cold-reload the SPA in a new tab, and in the Tauri
-      // build `on_new_window` denies the window and hands the relative URL to
-      // the system browser, dropping the user out of the desktop app.
+      // `_blank` is wrong for them because in the Tauri build `on_new_window`
+      // denies the window and hands the relative URL to the system browser,
+      // dropping the user out of the desktop app. (Either way this is a full
+      // document navigation, not a client-side route change — see the
+      // knowledge base for why that is accepted for now.)
       dom.removeAttribute('target');
       dom.removeAttribute('rel');
     }

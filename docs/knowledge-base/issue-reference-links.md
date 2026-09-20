@@ -118,3 +118,15 @@ relationship whose related issue lies in another project (creatable, since
 `related_simple_id: ""`, leaving the agent with neither a key to print nor a
 signal to call `get_issue`. Nullability is what makes the documented fallback
 reachable.
+
+`McpContext.issue_url` is serialized even when `None` (its neighbours
+`project_id`/`issue_id` behave the same), so `get_context` emits an explicit
+`"issue_url": null`. Guidance must say "null is never a link destination"
+rather than describing the field as absent, or a literal-minded agent writes
+`[VAS-1](null)`.
+
+CI gap worth closing separately: `.github/workflows/test.yml` runs
+`packages/remote-web && npm run test` but never `packages/web-core && npm run
+test`, even though web-core has a `test` script and a large suite. Frontend
+regressions added there — including this task's link-policy tests — do not gate
+merges today.
