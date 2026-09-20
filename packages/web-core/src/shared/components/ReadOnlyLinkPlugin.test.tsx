@@ -18,6 +18,9 @@ import { ReadOnlyLinkPlugin } from '@vibe/ui/components/ReadOnlyLinkPlugin';
 
 const issueUrl =
   '/projects/11111111-1111-1111-1111-111111111111/issues/22222222-2222-2222-2222-222222222222';
+// Letter-bearing UUIDs, so case handling is actually exercised.
+const hexIssueUrl =
+  '/projects/abcdef01-2345-6789-abcd-ef0123456789/issues/fedcba98-7654-3210-fedc-ba9876543210';
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 let container: HTMLDivElement;
 let root: Root;
@@ -116,7 +119,8 @@ describe('read-only issue references', () => {
 
   it.each([
     'https://example.com/issue/1',
-    issueUrl
+    hexIssueUrl,
+    hexIssueUrl
       .toUpperCase()
       .replace('/PROJECTS/', '/projects/')
       .replace('/ISSUES/', '/issues/'),
@@ -135,10 +139,14 @@ describe('read-only issue references', () => {
     '#fragment',
     '../file',
     'http://example.com',
+    // The app only serves the lowercase route, so a shouted path is a dead link.
+    issueUrl.replace('/projects/', '/Projects/'),
+    issueUrl.replace('/issues/', '/Issues/'),
   ])('disables unsupported destination %s', async (href) => {
     const link = await renderLink(href);
     expect(link.hasAttribute('href')).toBe(false);
     expect(link.getAttribute('aria-disabled')).toBe('true');
+    expect(link.title).toBe(href);
   });
 
   it('restores interactivity after a disabled link changes to an issue', async () => {
@@ -147,6 +155,7 @@ describe('read-only issue references', () => {
     expect(link.getAttribute('href')).toBe(issueUrl);
     expect(link.style.pointerEvents).toBe('');
     expect(link.getAttribute('aria-disabled')).toBeNull();
+    expect(link.hasAttribute('title')).toBe(false);
     const disabled = await changeHref('javascript:alert(1)');
     expect(disabled.hasAttribute('href')).toBe(false);
     expect(disabled.hasAttribute('target')).toBe(false);

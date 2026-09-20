@@ -5,8 +5,10 @@ import { $getNearestNodeFromDOMNode, $getNodeByKey } from 'lexical';
 
 // Only the canonical UUID route is allowed; arbitrary relative paths (including
 // protocol-relative URLs) remain disabled. Both web apps own this route.
-const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
-const issueRoute = new RegExp(`^/projects/${uuid}/issues/${uuid}$`, 'i');
+// Hex digits are case-insensitive, the path segments are not: the app serves
+// only the lowercase route, so `/PROJECTS/...` would be a dead link.
+const uuid = '[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}';
+const issueRoute = new RegExp(`^/projects/${uuid}/issues/${uuid}$`);
 
 function updateLink(dom: HTMLAnchorElement, href: string) {
   const trimmed = href.trim();
@@ -20,6 +22,7 @@ function updateLink(dom: HTMLAnchorElement, href: string) {
     dom.style.removeProperty('pointer-events');
     dom.removeAttribute('role');
     dom.removeAttribute('aria-disabled');
+    dom.removeAttribute('title');
     dom.onclick = (e) => e.stopPropagation();
   } else {
     dom.removeAttribute('href');
@@ -29,6 +32,8 @@ function updateLink(dom: HTMLAnchorElement, href: string) {
     dom.style.pointerEvents = 'none';
     dom.setAttribute('role', 'link');
     dom.setAttribute('aria-disabled', 'true');
+    // Keep the destination discoverable on hover even though it is inert.
+    dom.title = trimmed;
     dom.onclick = null;
   }
 }
