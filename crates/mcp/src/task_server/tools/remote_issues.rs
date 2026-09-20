@@ -172,8 +172,10 @@ struct McpRelationshipSummary {
     id: String,
     #[schemars(description = "The related issue ID")]
     related_issue_id: String,
-    #[schemars(description = "The related issue's simple ID (e.g. 'PROJ-42')")]
-    related_simple_id: String,
+    #[schemars(
+        description = "The related issue's simple ID (e.g. 'PROJ-42'), or null when its record lies outside this issue's project. Call get_issue with related_issue_id to resolve it."
+    )]
+    related_simple_id: Option<String>,
     #[schemars(
         description = "Application-relative related issue URL, or null when its project is unknown. Use get_issue to retrieve missing metadata."
     )]
@@ -311,7 +313,7 @@ struct McpListIssuePrioritiesResponse {
 #[tool_router(router = remote_issues_tools_router, vis = "pub")]
 impl McpServer {
     #[tool(
-        description = "Create a new issue in a project. `project_id` is optional if running inside a workspace linked to a remote project. Returns issue_url: use it as the Markdown link destination for every issue reference."
+        description = "Create a new issue in a project. `project_id` is optional if running inside a workspace linked to a remote project. Returns issue_url: the link destination for this issue in prose read inside Vibe Kanban. It is an app-relative route, so do not write it into fields that sync to an external tracker (title, description)."
     )]
     async fn create_issue(
         &self,
@@ -438,7 +440,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "List all the issues in a project. `project_id` is optional if running inside a workspace linked to a remote project. Returns issue_url: use it as the Markdown link destination for every issue reference."
+        description = "List all the issues in a project. `project_id` is optional if running inside a workspace linked to a remote project. Returns issue_url: the link destination for this issue in prose read inside Vibe Kanban. It is an app-relative route, so do not write it into fields that sync to an external tracker (title, description)."
     )]
     async fn list_issues(
         &self,
@@ -592,7 +594,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Get detailed information about a specific issue. Use the returned issue_url as the Markdown link destination for every issue reference. You can use `list_issues` to find issue IDs. `issue_id` is required and accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
+        description = "Get detailed information about a specific issue. Use the returned issue_url as the link destination when naming this issue in prose read inside Vibe Kanban; it is an app-relative route, so keep it out of fields that sync to an external tracker (title, description). You can use `list_issues` to find issue IDs. `issue_id` is required and accepts the issue UUID or its simple ID (e.g. 'VAS-64')."
     )]
     async fn get_issue(
         &self,
@@ -615,7 +617,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Update an existing issue's title, description, or status. `issue_id` is required and accepts the issue UUID or its simple ID (e.g. 'VAS-64'). `title`, `description`, and `status` are optional. Returns issue_url: use it as the Markdown link destination for every issue reference."
+        description = "Update an existing issue's title, description, or status. `issue_id` is required and accepts the issue UUID or its simple ID (e.g. 'VAS-64'). `title`, `description`, and `status` are optional. Returns issue_url: the link destination for this issue in prose read inside Vibe Kanban. It is an app-relative route, so do not write it into fields that sync to an external tracker (title, description)."
     )]
     async fn update_issue(
         &self,
@@ -940,13 +942,13 @@ impl McpServer {
             .into_iter()
             .map(|r| {
                 let related_issue = issue_map.get(&r.related_issue_id);
-                let related_simple_id = related_issue
-                    .map(|issue| issue.simple_id.clone())
-                    .unwrap_or_default();
                 McpRelationshipSummary {
                     id: r.id.to_string(),
                     related_issue_id: r.related_issue_id.to_string(),
-                    related_simple_id,
+                    // Null rather than "": a related issue can live in another
+                    // project, and an empty key left the agent with neither a
+                    // name to write nor a signal to look one up.
+                    related_simple_id: related_issue.map(|issue| issue.simple_id.clone()),
                     related_issue_url: related_issue
                         .map(|issue| Self::issue_url(issue.project_id, issue.id)),
                     relationship_type: match r.relationship_type {
@@ -1226,7 +1228,11 @@ mod tests {
         );
         assert_eq!(details["sub_issues"][0]["issue_url"], child_url);
         assert_eq!(details["relationships"][0]["related_issue_url"], child_url);
+        assert_eq!(details["relationships"][0]["related_simple_id"], "VAS-646");
+        // An unresolvable relation reports null for both, so the agent knows to
+        // look the issue up rather than printing an empty key.
         assert!(details["relationships"][1]["related_issue_url"].is_null());
+        assert!(details["relationships"][1]["related_simple_id"].is_null());
     }
 
     #[test]

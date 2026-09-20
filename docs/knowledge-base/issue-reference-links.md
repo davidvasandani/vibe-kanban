@@ -105,3 +105,16 @@ interceptor, and the plugin lives in `packages/ui` with no router access, so
 client-side routing would mean threading a navigate callback through
 `WYSIWYGEditor` and its call sites. The link resolves correctly (the server has
 an SPA fallback), so this is a polish item, not a broken destination.
+
+Keep tool descriptions and server instructions saying the same thing. Telling
+`create_issue`/`update_issue` to use `issue_url` "for every issue reference"
+contradicts the instruction that bans the route from outbound-synced fields —
+and those two tools are exactly the ones writing `title` and `description`,
+both of which Jira sync pushes.
+
+When a reference cannot be resolved, report null, not an empty string. A
+relationship whose related issue lies in another project (creatable, since
+`resolve_issue_id` searches every visible project) used to return
+`related_simple_id: ""`, leaving the agent with neither a key to print nor a
+signal to call `get_issue`. Nullability is what makes the documented fallback
+reachable.

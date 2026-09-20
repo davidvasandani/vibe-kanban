@@ -40,9 +40,10 @@ impl ServerHandler for McpServer {
              for the issue you are naming."
         } else {
             "In prose that is read inside Vibe Kanban (session messages), link this workspace's \
-             own issue using the issue_url returned by 'get_context', copied verbatim. This \
-             server exposes no issue lookup, so name any other issue by its issue key instead of \
-             linking it."
+             own issue using the issue_url returned by 'get_context', copied verbatim, when that \
+             field is present — it is absent for a workspace with no linked issue. This server \
+             exposes no issue lookup, so name every other issue, and this one when the field is \
+             absent, by its issue key instead of linking it."
         };
         let mut instruction = format!(
             "{preamble} Use list/read tools first when you need IDs or current state. \
@@ -50,8 +51,8 @@ impl ServerHandler for McpServer {
              or the backend host. A returned issue_url is an application-relative Vibe Kanban \
              route, so it only resolves in the Vibe Kanban UI: do not put one anywhere the text \
              leaves the app, including pull request bodies, commit messages, Slack, email, or \
-             fields mirrored to a linked external tracker (issue descriptions sync outbound to \
-             Jira). Name the issue key there instead. TOOLS: {}.",
+             fields mirrored to a linked external tracker (issue titles and descriptions sync \
+             outbound to Jira). Name the issue key there instead. TOOLS: {}.",
             tool_names.join(", ")
         );
         if self.context.is_some() {
