@@ -29,7 +29,6 @@ function updateLink(dom: HTMLAnchorElement, href: string) {
       dom.removeAttribute('target');
       dom.removeAttribute('rel');
     }
-    dom.style.removeProperty('cursor');
     dom.style.removeProperty('pointer-events');
     dom.removeAttribute('role');
     dom.removeAttribute('aria-disabled');
@@ -38,12 +37,13 @@ function updateLink(dom: HTMLAnchorElement, href: string) {
     dom.removeAttribute('href');
     dom.removeAttribute('target');
     dom.removeAttribute('rel');
-    dom.style.cursor = 'not-allowed';
     dom.style.pointerEvents = 'none';
     dom.setAttribute('role', 'link');
     dom.setAttribute('aria-disabled', 'true');
-    // No `title` hint here: `pointer-events: none` stops the anchor being
-    // hit-tested, so a tooltip on it could never render.
+    // No `title` or `cursor` hint here: `pointer-events: none` stops the anchor
+    // being hit-tested, so neither could ever render. Giving disabled links real
+    // feedback means dropping `pointer-events` and guarding the click instead,
+    // which changes click-through behaviour — out of scope here.
     dom.onclick = null;
   }
 }

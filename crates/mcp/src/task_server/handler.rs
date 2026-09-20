@@ -29,22 +29,29 @@ impl ServerHandler for McpServer {
                 "An orchestrator-scoped Vibe Kanban MCP server with tools limited to the configured workspace and orchestrator session context."
             }
         };
-        let missing_url_lookup = if has_get_issue {
-            "'get_issue'"
+        // Never show a route template here: spelling out the path teaches
+        // agents to assemble one from loose ids, which is the dead-link failure
+        // the omission of a parent issue URL exists to avoid.
+        let issue_link_guidance = if has_get_issue {
+            "In prose that is read inside Vibe Kanban (comments, session messages), write every \
+             issue reference as a Markdown link whose destination is the issue_url or \
+             related_issue_url a tool returned, copied verbatim, e.g. [VAS-646](<the returned \
+             issue_url>) rather than a bare issue key. If a result has no URL, call 'get_issue' \
+             for the issue you are naming."
         } else {
-            "'get_context'"
+            "In prose that is read inside Vibe Kanban (session messages), link this workspace's \
+             own issue using the issue_url returned by 'get_context', copied verbatim. This \
+             server exposes no issue lookup, so name any other issue by its issue key instead of \
+             linking it."
         };
         let mut instruction = format!(
             "{preamble} Use list/read tools first when you need IDs or current state. \
-             In prose that is read inside Vibe Kanban (comments, session messages), write every \
-             issue reference as a Markdown link to the returned issue_url or related_issue_url, \
-             e.g. [VAS-646](/projects/<project_id>/issues/<issue_id>) — not a bare issue key. \
-             If a result has no URL, call {missing_url_lookup}; never build one from an issue key or \
-             the backend host. These are application-relative Vibe Kanban routes, so they only \
-             resolve in the Vibe Kanban UI: do not put them anywhere the text leaves the app, \
-             including pull request bodies, commit messages, Slack, email, or fields mirrored to a \
-             linked external tracker (issue descriptions sync outbound to Jira). Name the issue key \
-             there instead. TOOLS: {}.",
+             {issue_link_guidance} Never assemble an issue URL yourself out of ids, an issue key \
+             or the backend host. A returned issue_url is an application-relative Vibe Kanban \
+             route, so it only resolves in the Vibe Kanban UI: do not put one anywhere the text \
+             leaves the app, including pull request bodies, commit messages, Slack, email, or \
+             fields mirrored to a linked external tracker (issue descriptions sync outbound to \
+             Jira). Name the issue key there instead. TOOLS: {}.",
             tool_names.join(", ")
         );
         if self.context.is_some() {
@@ -75,17 +82,35 @@ mod tests {
     fn issue_link_guidance_points_at_a_lookup_that_mode_actually_registers() {
         crate::task_server::tools::tests::install_rustls_provider();
 
+        // `contains("'get_issue'")` alone would be satisfied by the always
+        // present `TOOLS:` listing, so match the instruction's own phrasing.
         let global = instructions(&McpServer::new_global("http://coordinator:3000"));
-        assert!(global.contains("'get_issue'"), "{global}");
+        assert!(global.contains("call 'get_issue'"), "{global}");
 
-        // Orchestrator mode registers no remote-issue tools, so naming
-        // `get_issue` there would send agents at a tool that does not exist.
+        // Orchestrator mode registers no remote-issue tools, so it must neither
+        // name `get_issue` nor promise links for issues it cannot resolve.
         let orchestrator = instructions(&McpServer::new_orchestrator("http://coordinator:3000"));
         assert!(!orchestrator.contains("call 'get_issue'"), "{orchestrator}");
         assert!(
-            orchestrator.contains("call 'get_context'"),
+            orchestrator.contains("returned by 'get_context'"),
             "{orchestrator}"
         );
+        assert!(orchestrator.contains("no issue lookup"), "{orchestrator}");
+    }
+
+    /// Spelling out the route would teach agents to build one from loose ids.
+    #[test]
+    fn issue_link_guidance_never_shows_a_route_template() {
+        crate::task_server::tools::tests::install_rustls_provider();
+        for server in [
+            McpServer::new_global("http://coordinator:3000"),
+            McpServer::new_orchestrator("http://coordinator:3000"),
+        ] {
+            let text = instructions(&server);
+            assert!(!text.contains("/projects/"), "{text}");
+            assert!(!text.contains("/issues/"), "{text}");
+            assert!(text.contains("Never assemble an issue URL"), "{text}");
+        }
     }
 
     #[test]

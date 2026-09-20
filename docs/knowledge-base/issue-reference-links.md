@@ -36,11 +36,24 @@ inside Vibe Kanban prose and naming the issue key elsewhere. There is no
 authoritative public web origin available to the MCP server, so an absolute URL
 cannot be offered without inventing one.
 
+Do not print the route template in agent-facing guidance. An example like
+`[VAS-646](/projects/<project_id>/issues/<issue_id>)` teaches the very splicing
+that produces dead links; point at the returned `issue_url` value and say to copy
+it verbatim. Assert this: a test that the instruction contains no `/projects/`
+or `/issues/` literal keeps the template from creeping back.
+
+When asserting that guidance names a tool, match the surrounding phrasing
+(`call 'get_issue'`), not the bare name — the instruction always ends with a
+`TOOLS:` listing, so `contains("'get_issue'")` passes no matter what the guidance
+actually says.
+
 Server instructions are assembled per launch mode, and the modes do not expose
 the same tools: orchestrator mode registers no remote-issue tools at all, so
 guidance naming `get_issue` points those agents at something uncallable. Derive
-the named fallback from the registered router (`get_context` carries the active
-issue URL) and assert it per mode.
+the named fallback from the registered router and assert it per mode. Scope what
+the guidance promises, too: `get_context` only knows this workspace's own issue,
+so orchestrator-mode guidance has to ask for the issue key rather than a link for
+any other issue, or it is an instruction that mode cannot satisfy.
 
 ## Preserve the link through read-only rendering
 
@@ -75,7 +88,9 @@ A disabled link carries `role="link"`, `aria-disabled`, and `pointer-events:
 none`. Do not add a `title` hint to that branch: `pointer-events: none` stops the
 anchor being hit-tested, so neither a tooltip nor the `cursor` style can render,
 and a jsdom test asserting the attribute would pass while the affordance never
-appears to a user.
+appears to a user. `cursor: not-allowed` is dead for the same
+reason. Real feedback for disabled links needs `pointer-events` dropped plus a
+click guard, which changes click-through behaviour — a separate decision.
 
 Regression tests should import real Markdown into Lexical and inspect anchors,
 exercise late plugin mounting and URL changes, and retain unsafe-path coverage.
