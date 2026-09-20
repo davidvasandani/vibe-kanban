@@ -28,7 +28,7 @@ impl ServerHandler for McpServer {
             }
         };
         let mut instruction = format!(
-            "{} Use list/read tools first when you need IDs or current state. TOOLS: {}.",
+            "{} Use list/read tools first when you need IDs or current state. Every issue reference in user-facing prose must be a Markdown link using the returned issue_url (or related_issue_url), e.g. [KEY](issue_url). If the URL is missing, call get_issue; never infer a URL from a key or the backend host. These URLs are application-relative routes for the Vibe Kanban UI; external clients must resolve them against their configured web origin. TOOLS: {}.",
             preamble,
             tool_names.join(", ")
         );

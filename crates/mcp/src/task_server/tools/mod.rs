@@ -593,7 +593,7 @@ mod tests {
 
     static RUSTLS_PROVIDER: Once = Once::new();
 
-    fn install_rustls_provider() {
+    pub(super) fn install_rustls_provider() {
         RUSTLS_PROVIDER.call_once(|| {
             rustls::crypto::aws_lc_rs::default_provider()
                 .install_default()
@@ -675,6 +675,7 @@ mod tests {
                 organization_id: None,
                 project_id: None,
                 issue_id: None,
+                issue_url: None,
                 orchestrator_session_id: Some(session_id),
                 workspace_id,
                 workspace_branch: "main".to_string(),
@@ -757,6 +758,7 @@ mod tests {
             organization_id: None,
             project_id: None,
             issue_id: None,
+            issue_url: None,
             orchestrator_session_id: None,
             workspace_id: Uuid::new_v4(),
             workspace_branch: "main".to_string(),
