@@ -98,6 +98,22 @@ point is a parameter rather than a tool name, the rule is placed at the paramete
 complete and is not. A denial that removes a capability names the supported
 replacement, so the agent redirects instead of stalling.
 
+A control removes an *effect*, not a name. Where a capability is denied because
+it can hang a turn, the property being enforced is **boundedness**, and the
+agent will reach for the next mechanism that produces the same effect — a denied
+watch tool becomes a foreground `until`/`while` loop, which no tool-name or
+parameter rule matches. Enumerate the reachable paths to the effect and bound or
+deny each one; a rule that removes the ergonomic path and leaves an equivalent
+unbounded path open has displaced the incident, not fixed it, and the next
+occurrence looks unrelated to the control that shipped.
+
+Waiting inside a turn is therefore bounded by construction. A wait that cannot
+state its own deadline is denied and redirected to the VK-owned mechanism that
+carries one, whose stop rules are mandatory rather than advisory. Bounds are
+enforced where VK can still observe them — inside the command VK compiles, or at
+the admission point VK controls — never left to the vendor's own timeout, which
+VK neither sets nor can prove fired.
+
 Where no identifier can be verified, shipping no rule is the correct outcome. The
 absence is recorded as a decision with its evidence, so a later reader does not
 mistake it for an oversight and does not "fix" it with a guess.
@@ -532,7 +548,13 @@ the live tail and after the reader scrolls away.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.31.0 (adds a single-authority, monotonic-boundary contract for
+**Version**: 0.32.0 (extends IX so a control that removes a hang-capable
+capability bounds the effect rather than a name: enumerate the reachable paths
+to the same effect and bound or deny each, treat an unbounded foreground wait
+loop as one of those paths, require a wait to state its own deadline or be
+redirected to the VK-owned bounded mechanism, and enforce the bound where VK can
+observe it instead of trusting a vendor timeout; 0.31.0 added a single-authority,
+monotonic-boundary contract for
 dynamic viewport scroll correction; 0.30.0 extended IX so controls imposed on a vendor CLI — deny rules,
 permission matchers, capability-disabling config keys — are built from
 identifiers verified against the pinned executing artifact rather than docs or
@@ -638,3 +660,16 @@ Applied `/speckit.constitution`: existing principles II, VI, VIII, and XI cover 
 ## Review: vk/669e-mcp-blocks-progr
 
 Applied `/speckit.constitution`: reaffirm II (regression evidence), VI (reuse existing lifecycle machinery), IX/XI (retain diagnostics without confusing their scope), XVIII/XXX (worker-backed terminal state and explicit indeterminacy), and XXIV (settings own MCP definitions). No new principle is required.
+
+## Review: vk/603d-prevent-stuck-jo
+
+Applied `/speckit.constitution`: this task is the evidence for the 0.32.0
+extension of IX. The shipped `Monitor` denial and the `run_in_background`
+parameter deny were both correct and both held; the agent reached the same
+unbounded-wait effect through a plain foreground `until` loop and hung a turn
+for roughly an hour. Reaffirm II (the contract is what the agent receives, so
+regressions assert the delivered denial, not an internal predicate's variant),
+III/VI (extend the existing `PreToolUse` chokepoint and the existing
+`spawn_poller` replacement rather than adding a supervisor), and IX as extended:
+the predicate must stay conservative — an unrecognised or ambiguous command
+allows — because an over-broad deny breaks every Bash call.

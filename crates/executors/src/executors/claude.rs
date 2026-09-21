@@ -222,6 +222,83 @@ fn base_command(claude_code_router: bool) -> &'static str {
     }
 }
 
+/// Environment variable naming the default per-command `Bash` timeout.
+pub const BASH_DEFAULT_TIMEOUT_MS_VAR: &str = "BASH_DEFAULT_TIMEOUT_MS";
+/// Environment variable naming the maximum per-command `Bash` timeout.
+pub const BASH_MAX_TIMEOUT_MS_VAR: &str = "BASH_MAX_TIMEOUT_MS";
+
+/// How long a single foreground command may block a turn before the CLI stops
+/// waiting on it.
+///
+/// These are the values the pinned CLI already uses; VK states them explicitly
+/// so they become *ours*. `@anthropic-ai/claude-code` is a `needs-review`
+/// Renovate carve-out, and a bump that moved the vendor defaults would
+/// otherwise silently widen the bound with nothing to notice it.
+///
+/// They are deliberately **not** tightened: `cargo test --workspace` and
+/// `pnpm install --frozen-lockfile` on this repository are ordinary foreground
+/// commands that routinely exceed five minutes, so a shorter cap would break
+/// real work. The control against an unbounded *wait* is
+/// [`is_unbounded_wait_command`][client::is_unbounded_wait_command], which
+/// refuses the loop at admission instead of waiting for a deadline.
+///
+/// # Verification source (Constitution IX)
+///
+/// Read from the native binary in `@anthropic-ai/claude-code-linux-x64`, the
+/// platform package behind the `@anthropic-ai/claude-code@2.1.268` pin in
+/// [`base_command`] — not from documentation or a type-definition file:
+///
+/// ```text
+/// zRo = 120000, qRo = 600000;
+/// function pAe(e = process.env) {   // effective default
+///   let n = e.BASH_DEFAULT_TIMEOUT_MS;
+///   if (n) { let r = gl(n); if (!isNaN(r) && r > 0) return r } return zRo }
+/// function qYe(e = process.env) {   // effective maximum
+///   let n = e.BASH_MAX_TIMEOUT_MS;
+///   if (n) { let r = gl(n); if (!isNaN(r) && r > 0) return Math.max(r, pAe(e)) }
+///   return Math.max(qRo, pAe(e)) }
+/// ```
+///
+/// Two consequences encoded here, both silent if got wrong:
+///
+/// - A non-numeric or non-positive value is **ignored** and the built-in
+///   default applies, so these must serialize as plain positive integers.
+/// - The maximum is clamped to `max(requested, effective_default)`. Lowering
+///   [`BASH_MAX_TIMEOUT_MS`] below [`BASH_DEFAULT_TIMEOUT_MS`] therefore does
+///   nothing at all. `bash_timeout_values_are_consistent` pins that ordering.
+///
+/// Re-verify against the binary when the pin moves. See
+/// `specs/vk/603d-prevent-stuck-jo/research.md`.
+pub const BASH_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+/// See [`BASH_DEFAULT_TIMEOUT_MS`]. Must stay `>=` it to have any effect.
+pub const BASH_MAX_TIMEOUT_MS: u64 = 600_000;
+
+// The CLI computes the effective maximum as `max(BASH_MAX_TIMEOUT_MS,
+// effective_default)`, so a maximum below the default is discarded without any
+// error and the control simply would not exist. Enforced at compile time rather
+// than in a test: the failure mode is a silently inert guard, and that deserves
+// to break the build.
+const _: () = assert!(
+    BASH_MAX_TIMEOUT_MS >= BASH_DEFAULT_TIMEOUT_MS,
+    "BASH_MAX_TIMEOUT_MS below BASH_DEFAULT_TIMEOUT_MS is silently ignored by the CLI, \
+     which clamps the maximum to at least the effective default — lower the default too"
+);
+
+/// The per-command timeout variables VK seeds onto the Claude child process.
+///
+/// Split out from `spawn_internal` so the values and spellings are unit
+/// testable; asserting against a constructed `Command` builder chain is not
+/// practical.
+pub fn bash_timeout_env() -> [(&'static str, String); 2] {
+    [
+        (
+            BASH_DEFAULT_TIMEOUT_MS_VAR,
+            BASH_DEFAULT_TIMEOUT_MS.to_string(),
+        ),
+        (BASH_MAX_TIMEOUT_MS_VAR, BASH_MAX_TIMEOUT_MS.to_string()),
+    ]
+}
+
 fn normalize_claude_stderr_logs(
     msg_store: Arc<MsgStore>,
     entry_index_provider: EntryIndexProvider,
@@ -938,6 +1015,15 @@ impl ClaudeCode {
             .current_dir(current_dir)
             .env("NPM_CONFIG_LOGLEVEL", "error")
             .args(&args);
+
+        // Bound how long one foreground command can block the turn. Seeded
+        // *before* `apply_to_command` so these stay defaults: a profile, org or
+        // operator variable of the same name is applied after and wins, which
+        // is the documented escape hatch and the same precedence
+        // `NPM_CONFIG_LOGLEVEL` already has.
+        for (key, value) in bash_timeout_env() {
+            command.env(key, value);
+        }
 
         env.clone()
             .with_profile(&self.cmd)
@@ -3355,7 +3441,10 @@ impl ClaudeToolData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logs::utils::{EntryIndexProvider, patch::extract_normalized_entry_from_patch};
+    use crate::{
+        env::RepoContext,
+        logs::utils::{EntryIndexProvider, patch::extract_normalized_entry_from_patch},
+    };
 
     fn patches_to_entries(patches: &[json_patch::Patch]) -> Vec<NormalizedEntry> {
         patches
@@ -4696,5 +4785,65 @@ mod tests {
         } else {
             panic!("Expected ToolProgress variant");
         }
+    }
+
+    /// The `max >= default` ordering is enforced at compile time next to the
+    /// constants (a `const` assertion), because a maximum below the default is
+    /// discarded by the CLI without any error. What remains to check here is
+    /// how the values *serialize*.
+    #[test]
+    fn bash_timeout_values_are_consistent() {
+        // A non-numeric or non-positive value is ignored by the CLI and the
+        // built-in default applies, so both must be plain positive integers.
+        for (key, value) in bash_timeout_env() {
+            let parsed: u64 = value
+                .parse()
+                .unwrap_or_else(|_| panic!("{key} must serialize as an integer; got {value:?}"));
+            assert!(parsed > 0, "{key} must be positive; got {parsed}");
+        }
+    }
+
+    /// Spelling is pinned: these are read from the pinned CLI binary, and an
+    /// unknown variable name is ignored without any error.
+    #[test]
+    fn bash_timeout_env_uses_the_verified_variable_names() {
+        let env = bash_timeout_env();
+        assert_eq!(env[0].0, "BASH_DEFAULT_TIMEOUT_MS");
+        assert_eq!(env[1].0, "BASH_MAX_TIMEOUT_MS");
+        assert_eq!(env[0].1, BASH_DEFAULT_TIMEOUT_MS.to_string());
+        assert_eq!(env[1].1, BASH_MAX_TIMEOUT_MS.to_string());
+    }
+
+    /// VK's bound is a *default*: it is seeded before the execution environment
+    /// is applied, so an operator- or org-supplied value of the same name wins.
+    /// This is the documented escape hatch, so it is asserted rather than
+    /// assumed from statement order.
+    #[test]
+    fn execution_env_overrides_vk_bash_timeout_defaults() {
+        let mut command = tokio::process::Command::new("true");
+        for (key, value) in bash_timeout_env() {
+            command.env(key, value);
+        }
+
+        let mut env = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        env.insert("BASH_MAX_TIMEOUT_MS", "1800000");
+        env.apply_to_command(&mut command);
+
+        let vars: std::collections::HashMap<_, _> = command
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+
+        assert_eq!(
+            vars.get("BASH_MAX_TIMEOUT_MS").map(String::as_str),
+            Some("1800000"),
+            "an explicitly supplied override must win over VK's default"
+        );
+        // The one it did not override still carries VK's default.
+        assert_eq!(
+            vars.get("BASH_DEFAULT_TIMEOUT_MS").map(String::as_str),
+            Some(BASH_DEFAULT_TIMEOUT_MS.to_string().as_str())
+        );
     }
 }

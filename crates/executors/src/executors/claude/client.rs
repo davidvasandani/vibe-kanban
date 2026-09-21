@@ -90,6 +90,163 @@ pub fn background_bash_deny_response() -> serde_json::Value {
         }
     })
 }
+
+/// Reason surfaced to the agent when it asks to run a foreground wait loop with
+/// no exit guarantee.
+///
+/// Mirrors [`BACKGROUND_BASH_DENY_REASON`]: it names `spawn_poller` and states
+/// what that replacement requires, because a denial that removes a capability
+/// without offering the replacement converts a hang into a stall.
+pub const UNBOUNDED_WAIT_DENY_REASON: &str = "Unbounded waiting is not supported inside a Vibe Kanban turn: this command loops until a condition becomes true, and if that condition never becomes true the turn blocks indefinitely instead of failing (one such loop held a turn for about an hour). Either bound the wait yourself — wrap it in `timeout`, cap the iterations with a counter, or use a `for` loop — or, if the thing you are waiting for may take longer than this turn, use the `spawn_poller` MCP tool, which runs the command in its own process group that survives the turn and is visible in the workspace UI. It requires stop_command (exit zero to stop), a positive timeout_secs, or both. Either way, keep working in this turn instead of blocking on the wait.";
+
+/// Shell keywords that begin a loop with no inherent iteration bound.
+const UNBOUNDED_LOOP_KEYWORDS: &[&str] = &["while", "until"];
+
+/// Tokens that are evidence the author already bounded the loop.
+///
+/// `timeout` wraps the wait in a deadline; `SECONDS` is the bash builtin used
+/// to implement one; the numeric comparison operators are the attempt-counter
+/// retry shape (`n=0; while [ $n -lt 5 ]; ...`), which is bounded and common
+/// enough that refusing it would be a worse regression than the bug.
+///
+/// Because `-` counts as a word character (below), `timeout` matches the
+/// `timeout` *command* but not a `--timeout=5` flag — so a loop whose condition
+/// merely passes a timeout to one attempt, as in
+/// `until curl --timeout 5 "$url"; do sleep 2; done`, is still refused. That is
+/// the intended reading: bounding one attempt does not bound the loop.
+const WAIT_BOUND_MARKERS: &[&str] = &["timeout", "SECONDS", "-lt", "-le", "-gt", "-ge"];
+
+/// Whether `haystack` contains `needle` delimited by non-word characters, so
+/// `sleep` does not match `sleeping` and `while` does not match `awhile`.
+///
+/// `-` is treated as part of a token for two reasons: the `-lt`-style markers
+/// need their leading `-` kept, and it makes a flag such as `--timeout` a
+/// single token that does not match the bare `timeout` command.
+fn contains_token(haystack: &str, needle: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    haystack.match_indices(needle).any(|(start, matched)| {
+        let end = start + matched.len();
+        haystack[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word(c))
+            && haystack[end..].chars().next().is_none_or(|c| !is_word(c))
+    })
+}
+
+/// Whether `needle` appears as a shell *command keyword* — at a token boundary
+/// **and** in command position — rather than inside a string or an argument.
+///
+/// [`contains_token`] alone is not enough for the loop keywords. `until` and
+/// `while` are ordinary English words, so a plain token match refuses commands
+/// that merely mention them:
+/// `echo "retrying until ready"; sleep 2` has both a loop keyword and a sleep
+/// and would be denied, which FR-5/FR-6 forbid. Requiring command position —
+/// start of input, or after a separator or `do`/`then`/`else` — keeps the
+/// keyword's *shell* meaning and drops the prose.
+fn contains_command_keyword(haystack: &str, needle: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    haystack.match_indices(needle).any(|(start, matched)| {
+        let end = start + matched.len();
+        if haystack[end..].chars().next().is_some_and(is_word) {
+            return false;
+        }
+        let before = haystack[..start].trim_end();
+        before.is_empty()
+            || before.ends_with([';', '&', '|', '(', '{', '\n'])
+            || ["do", "then", "else"]
+                .iter()
+                .any(|kw| contains_token(before, kw) && before.ends_with(kw))
+    })
+}
+
+/// True only when a `PreToolUse` hook input is a foreground command whose
+/// recognisable purpose is to wait indefinitely for a condition.
+///
+/// The rule is syntactic and deliberately narrow — deny when the command has an
+/// unbounded loop keyword **and** a `sleep` **and** no bounding marker, or when
+/// it leads with `watch`. `for` loops are never denied; they are bounded by
+/// construction. Requiring `sleep` is what keeps `while read line; do … done`
+/// and ordinary long builds out of scope: the target is the wait-loop *shape*,
+/// not duration.
+///
+/// Conservative in the same way as [`is_background_bash_input`]: an absent,
+/// non-string or otherwise malformed `command` yields `false` (allow). `Bash`
+/// is the workhorse tool and an over-broad deny here would break every Claude
+/// execution, so ambiguity resolves permissively.
+///
+/// # Known limits
+///
+/// - **Writing** a script that contains a wait loop (a heredoc into a file) is
+///   refused as though the loop were being run. Left as-is: agents create files
+///   with the `Write`/`Edit` tools, so the heredoc path is rare, and detecting
+///   redirection reliably would mean parsing the shell.
+/// - A wait loop assembled through a variable or `eval` does not match. The
+///   guard targets an agent that stalls in good faith, not an adversary; the
+///   per-command bound still applies.
+/// - A busy loop with no `sleep` (`while true; do :; done`) is allowed by this
+///   predicate and bounded only by the command timeout.
+///
+/// # Scope (Constitution IX)
+///
+/// This control is **Claude-only, by decision rather than by oversight**.
+///
+/// - *Codex* has no `PreToolUse` equivalent to attach a refusal to — that is
+///   why the background block had to be delivered as prose in
+///   `POLLER_DEVELOPER_INSTRUCTIONS` (`executors::codex`) instead. Whether its
+///   one-shot `shell_command` accepts a VK-settable
+///   deadline was **not** verified against the pinned `@openai/codex` artifact
+///   during this change, and Constitution IX forbids shipping an identifier
+///   that has not been read from the artifact that executes. Deferred, not
+///   declined: the next person to look should read the pinned binary rather
+///   than assume the gap was considered and rejected.
+/// - *Grok* reaches the shell over ACP, whose terminal capability VK never
+///   advertises; that verified absence is already recorded in
+///   `wiki/vk-pollers.md` and is unchanged here.
+pub fn is_unbounded_wait_command(input: &serde_json::Value) -> bool {
+    let Some(command) = input
+        .get("tool_input")
+        .and_then(|tool_input| tool_input.get("command"))
+        .and_then(|value| value.as_str())
+    else {
+        return false;
+    };
+
+    // `watch` repeats forever by definition. Only as the *leading* token:
+    // matching it anywhere would hit `cargo watch` and `--watch` flags, which
+    // are legitimate dev-server shapes VK handles elsewhere.
+    if command
+        .split_whitespace()
+        .next()
+        .is_some_and(|first| first == "watch")
+    {
+        return true;
+    }
+
+    let has_unbounded_loop = UNBOUNDED_LOOP_KEYWORDS
+        .iter()
+        .any(|keyword| contains_command_keyword(command, keyword));
+    let waits = contains_token(command, "sleep");
+    let is_bounded = WAIT_BOUND_MARKERS
+        .iter()
+        .any(|marker| contains_token(command, marker));
+
+    has_unbounded_loop && waits && !is_bounded
+}
+
+/// PreToolUse hook response that denies an unbounded foreground wait with an
+/// actionable reason naming `spawn_poller`. Extracted so it can be unit-tested
+/// directly.
+pub fn unbounded_wait_deny_response() -> serde_json::Value {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": UNBOUNDED_WAIT_DENY_REASON,
+        }
+    })
+}
+
 // Prefix for denial messages from the user, mirrors claude code CLI behavior
 const TOOL_DENY_PREFIX: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said: ";
 
@@ -436,8 +593,21 @@ impl ClaudeAgentClient {
         // (absent, `false`, or malformed `tool_input`) falls through to the
         // normal decision path below. `Bash` is the workhorse tool; an
         // over-broad deny here would break every Claude execution.
-        if callback_id == DENY_BACKGROUND_BASH_CALLBACK_ID && is_background_bash_input(&input) {
-            return Ok(background_bash_deny_response());
+        //
+        // The same callback also carries the unbounded-wait refusal: both are
+        // parameter-level rules on `Bash`, the hook already fires on every
+        // `Bash` call in every mode, and reusing it keeps one chokepoint and
+        // leaves `get_hooks` untouched. Background is tested first so its more
+        // specific message wins when a call is both. Anything that matches
+        // neither must *fall through* to the normal decision path below — this
+        // block deliberately does not return a default.
+        if callback_id == DENY_BACKGROUND_BASH_CALLBACK_ID {
+            if is_background_bash_input(&input) {
+                return Ok(background_bash_deny_response());
+            }
+            if is_unbounded_wait_command(&input) {
+                return Ok(unbounded_wait_deny_response());
+            }
         }
 
         if self.auto_approve {
@@ -725,5 +895,194 @@ mod tests {
             .await
             .expect("callback ok");
         assert_eq!(resp["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+
+    #[test]
+    fn unbounded_wait_deny_response_is_a_deny_naming_spawn_poller() {
+        let resp = unbounded_wait_deny_response();
+        let out = &resp["hookSpecificOutput"];
+        assert_eq!(out["hookEventName"], "PreToolUse");
+        assert_eq!(out["permissionDecision"], "deny");
+        assert_eq!(out["permissionDecisionReason"], UNBOUNDED_WAIT_DENY_REASON);
+        // Constitution IX: a denial must name its replacement, or it converts a
+        // hang into a stall.
+        assert!(
+            UNBOUNDED_WAIT_DENY_REASON.contains("spawn_poller"),
+            "deny reason must name the supported replacement"
+        );
+        assert!(
+            UNBOUNDED_WAIT_DENY_REASON.contains("stop_command")
+                && UNBOUNDED_WAIT_DENY_REASON.contains("timeout_secs"),
+            "deny reason must state what the replacement requires"
+        );
+    }
+
+    #[test]
+    fn unbounded_wait_predicate_denies_only_unguarded_wait_loops() {
+        // Denied: the shape from the incident, plus its obvious relatives.
+        for command in [
+            // The reported command: waited ~1h for a line that never arrived.
+            "until grep -q \"### restored:\" /tmp/out.log; do sleep 5; done",
+            "while true; do sleep 5; done",
+            "while :; do sleep 1; done",
+            "while ! curl -sf http://localhost:3000; do sleep 2; done",
+            "watch -n 5 ls",
+            // Bounding a single attempt does not bound the loop: `--timeout` is
+            // a flag, not the `timeout` command, so it is not a bound marker.
+            r#"until curl --timeout 5 "$url"; do sleep 2; done"#,
+        ] {
+            assert!(
+                is_unbounded_wait_command(&bash_hook_input(
+                    serde_json::json!({ "command": command })
+                )),
+                "expected deny for {command:?}"
+            );
+        }
+
+        // Allowed: bounded waits, and commands that merely take a long time.
+        for command in [
+            // Self-bounded (FR-7) — each carries its own exit guarantee.
+            "n=0; while [ $n -lt 5 ]; do curl -sf \"$url\" && break; sleep 2; n=$((n+1)); done",
+            "timeout 300 bash -c 'until test -f /tmp/ready; do sleep 5; done'",
+            "SECONDS=0; while [ $SECONDS -lt 60 ]; do sleep 1; done",
+            "for i in $(seq 1 60); do test -f /tmp/ready && break; sleep 1; done",
+            // A loop with no wait at all — the `sleep` requirement keeps this out.
+            "while read line; do echo \"$line\"; done < input.txt",
+            // Long, but bounded by its own completion (FR-6).
+            "cargo test --workspace",
+            "pnpm install --frozen-lockfile",
+            "sleep 30",
+            // `watch` only counts as the leading token.
+            "cargo watch -x test",
+            "pnpm run dev --watch",
+            // Loop keywords in *prose*, not command position. Without the
+            // command-position rule these would all be refused.
+            "echo \"retrying until ready\"; sleep 2",
+            "sleep 5 && echo 'waiting until the build settles'",
+            "git log --until=2026-01-01 && sleep 1",
+            // A loop keyword in command position inside a conditional is still
+            // a loop, but this one is bounded by a counter.
+            "if [ -f x ]; then n=0; while [ $n -lt 3 ]; do sleep 1; n=$((n+1)); done; fi",
+        ] {
+            assert!(
+                !is_unbounded_wait_command(&bash_hook_input(
+                    serde_json::json!({ "command": command })
+                )),
+                "expected allow for {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unbounded_wait_predicate_allows_malformed_input() {
+        // Ambiguity resolves permissively: `Bash` is the workhorse tool and an
+        // over-broad deny would break every Claude execution.
+        for malformed in [
+            serde_json::json!({}),
+            serde_json::json!({"tool_input": "not-an-object"}),
+            serde_json::json!({"tool_input": null}),
+            serde_json::json!({"tool_input": {}}),
+            serde_json::json!({"tool_input": {"command": null}}),
+            serde_json::json!({"tool_input": {"command": 42}}),
+            serde_json::json!([]),
+        ] {
+            assert!(
+                !is_unbounded_wait_command(&malformed),
+                "malformed input must allow: {malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn contains_token_respects_word_boundaries() {
+        assert!(contains_token("do sleep 5; done", "sleep"));
+        assert!(!contains_token("echo sleeping", "sleep"));
+        assert!(!contains_token("nosleep", "sleep"));
+        assert!(contains_token("[ $n -lt 5 ]", "-lt"));
+        assert!(contains_token("until x", "until"));
+        assert!(!contains_token("untilx", "until"));
+    }
+
+    #[test]
+    fn command_keyword_matching_requires_command_position() {
+        // Command position: start, after a separator, or after do/then/else.
+        assert!(contains_command_keyword(
+            "until foo; do sleep 1; done",
+            "until"
+        ));
+        assert!(contains_command_keyword(
+            "x=1; until foo; do sleep 1; done",
+            "until"
+        ));
+        assert!(contains_command_keyword(
+            "if y; then while z; do sleep 1; done; fi",
+            "while"
+        ));
+        assert!(contains_command_keyword(
+            "foo && while z; do sleep 1; done",
+            "while"
+        ));
+
+        // Argument or prose position: not a loop.
+        assert!(!contains_command_keyword(
+            "echo \"wait until ready\"",
+            "until"
+        ));
+        assert!(!contains_command_keyword(
+            "git log --until=2026-01-01",
+            "until"
+        ));
+        assert!(!contains_command_keyword("echo awhile", "while"));
+    }
+
+    #[tokio::test]
+    async fn unbounded_wait_is_denied_even_in_auto_approve() {
+        // Same placement rule as the background deny: checked before the
+        // auto-approve short-circuit, so it fires in bypass/yolo — the mode the
+        // incident occurred in.
+        let clients: [(&str, Arc<ClaudeAgentClient>); 2] = [
+            ("bypass", auto_approve_client()),
+            ("plan/approvals", approval_client()),
+        ];
+
+        for (mode, client) in clients {
+            let resp = client
+                .on_hook_callback(
+                    DENY_BACKGROUND_BASH_CALLBACK_ID.to_string(),
+                    bash_hook_input(serde_json::json!({
+                        "command": r#"until grep -q ready /tmp/out.log; do sleep 5; done"#
+                    })),
+                    None,
+                )
+                .await
+                .expect("callback ok");
+            assert_eq!(
+                permission_decision(&resp),
+                Some("deny"),
+                "{mode} mode must deny an unbounded wait; got {resp}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn background_message_wins_when_a_call_is_both() {
+        // A background spawn that is also a wait loop gets the background
+        // message: it is the more specific diagnosis of what went wrong.
+        let client = auto_approve_client();
+        let resp = client
+            .on_hook_callback(
+                DENY_BACKGROUND_BASH_CALLBACK_ID.to_string(),
+                bash_hook_input(serde_json::json!({
+                    "command": "while true; do sleep 5; done",
+                    "run_in_background": true
+                })),
+                None,
+            )
+            .await
+            .expect("callback ok");
+        assert_eq!(
+            resp["hookSpecificOutput"]["permissionDecisionReason"],
+            BACKGROUND_BASH_DENY_REASON
+        );
     }
 }

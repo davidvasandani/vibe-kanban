@@ -270,13 +270,6 @@ and workspace list. Regression tests belong in the existing remote-web DOM
 harness, which renders the same shared sidebar as local-web; backend tests
 exercise the bulk query against migrated SQLite and serialized executor actions.
 
-## Contributed by
-
-- vk/869c-vk-background-po
-- vk/5cd1-debug-this-vk-ba
-
-- vk/dc76-add-polling-to-w
-
 ## Automatic stopping rules
 
 **Task:** `vk/bd71-require-all-poll`  
@@ -330,3 +323,113 @@ predicates, no surviving watchdog on successful completion, and no delayed
 writes from resistant descendants. The fixtures use Bash's kill builtin for
 process-group cleanup rather than assuming the host's external kill utility has
 the same negative-PID behavior.
+
+## Bounding an effect, not a name
+
+**Task:** `vk/603d-prevent-stuck-jo`
+
+The two controls above — the `Monitor`-family tool-name denial and the
+`run_in_background` parameter denial — both worked, and a turn still hung for
+about an hour. The agent asked for `Monitor`, was denied, and fell through to a
+plain **foreground** loop:
+
+```
+until grep -q "### restored:" /tmp/out.log; do sleep 5; done
+```
+
+That matches no tool name and no parameter. The earlier lesson was "the
+chokepoint is a parameter, not a tool name"; this is the next step in the same
+sequence, and the general form is:
+
+> A control removes an **effect**, not a name. Enumerate the reachable paths to
+> the effect and bound each. Removing the ergonomic path while an equivalent one
+> stays open displaces the incident — and the recurrence looks unrelated to the
+> control you shipped, so nobody connects them.
+
+Constitution IX was extended (0.32.0) to require this.
+
+### Two layers, and only one of them is load-bearing
+
+- **Refuse the wait at admission** (load-bearing). Same `^Bash$` matcher, same
+  `DENY_BACKGROUND_BASH_CALLBACK_ID`, second predicate. No new callback id,
+  matcher or hook registration, so it inherits bypass/yolo coverage for free —
+  and bypass is the mode incidents happen in.
+- **A VK-owned command bound** (backstop) for shapes the predicate misses.
+
+### The timeout env vars, and the clamp that makes a tightening inert
+
+Verified in the pinned `@anthropic-ai/claude-code@2.1.268` native binary:
+
+```js
+zRo = 120000, qRo = 600000;
+pAe(env) // effective default: env.BASH_DEFAULT_TIMEOUT_MS or zRo
+qYe(env) // effective max: max(env.BASH_MAX_TIMEOUT_MS, pAe(env)) else max(qRo, pAe(env))
+```
+
+Three things that are silent if got wrong:
+
+- **The maximum is clamped to at least the effective default.** Lowering
+  `BASH_MAX_TIMEOUT_MS` *alone* below the default does **nothing**. VK pins
+  `max >= default` with a `const` assertion, not a test, so an inert control
+  breaks the build.
+- A non-numeric or non-positive value is **ignored**, falling back to the
+  built-in default with no error.
+- At the deadline the CLI may **detach** the command rather than kill it
+  (`canAutoBackground`). So the bound reliably unblocks the *turn*; it is not a
+  kill. Anything left running is reaped by the turn-end group kill.
+
+VK sets both variables to the vendor's *current* values on purpose. The win is
+ownership and bump-resistance — `@anthropic-ai/claude-code` is a `needs-review`
+Renovate carve-out — not tightening. Tightening was rejected on evidence:
+`cargo test --workspace` and `pnpm install` legitimately exceed five minutes, so
+a shorter cap breaks real work while the admission refusal already catches the
+loop far earlier. They are seeded **before** the execution env is applied, so an
+operator/org variable of the same name still wins.
+
+### A deny predicate on the workhorse tool is mostly false-positive engineering
+
+`Bash` runs everything, so an over-broad deny is worse than the bug. The rule is
+three independent conditions — loop keyword **and** `sleep` **and** no bounding
+marker (`timeout`, `SECONDS`, `-lt`/`-le`/`-gt`/`-ge`) — plus `watch` as the
+leading token only. `for` loops are never denied.
+
+Two traps found the hard way:
+
+- **Token matching is not enough for `until`/`while`: they are English words.**
+  `echo "retrying until ready"; sleep 2` has a keyword, a sleep and no marker,
+  and the first implementation refused it. The keyword must be in **command
+  position** (start, or after `;`/`&`/`|`/`(`/`{`/newline, or `do`/`then`/`else`).
+  Caught in review, not by the original tests.
+- **Treat `-` as a word character.** It makes `--timeout=5` a single token that
+  does not match the `timeout` *command* (bounding one attempt does not bound
+  the loop), it keeps `git log --until=…` from reading as a loop, and the
+  `-lt`-style markers need their leading `-`.
+
+Counter markers matter: `n=0; while [ $n -lt 5 ]; do …; sleep 2; n=$((n+1)); done`
+is a bounded retry loop and common. Refusing it would be a worse regression than
+the hang.
+
+Accepted, documented limits: a heredoc that *writes* a wait loop is refused as
+if running it; `eval`/variable-assembled loops do not match; a busy loop with no
+`sleep` is bounded only by the command timeout.
+
+### Scope is per-agent, and an absence must read as a decision
+
+Claude only. Codex has no `PreToolUse` equivalent to attach a refusal to, and
+whether its one-shot `shell_command` takes a VK-settable deadline was **not**
+verified against the pinned artifact — so nothing ships for it, recorded in code
+as deferred-with-evidence rather than left to look like an oversight. Grok's
+existing verified absence is unchanged. This is the same discipline as the
+"block is not a redirect" section above, applied to a control that legitimately
+should *not* ship yet.
+
+## Contributed by
+
+- vk/869c-vk-background-po
+- vk/5cd1-debug-this-vk-ba
+
+- vk/dc76-add-polling-to-w
+
+- vk/bd71-require-all-poll
+
+- vk/603d-prevent-stuck-jo
