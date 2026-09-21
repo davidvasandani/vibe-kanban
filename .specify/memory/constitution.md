@@ -527,6 +527,26 @@ rows cannot oscillate between layout strategies as derived loading markers
 appear and disappear. Regression coverage exercises continuous updates both at
 the live tail and after the reader scrolls away.
 
+### XXXVII. Committing controls stay inside the host's height
+When a surface is rendered into a host that supplies a definite, clipped height,
+the controls that configure and commit the action MUST remain inside that height
+at every supported viewport size. The flexible content yields; the controls do
+not. Declare the whole contract rather than one half of it: the shell owns
+overflow so none escapes unreachably, the heading, header and control rows are
+`shrink-0`, every intermediate flex item on the path carries a zero minimum, and
+exactly one element is the working scroll owner. Owning overflow means scrolling
+it, not discarding it, wherever discarding would put a committing control beyond
+reach; the terminal shrink target keeps a usable floor for the same reason.
+Height that the host already makes definite MUST NOT be duplicated with viewport
+units or JavaScript measurement, and asynchronous state — errors, spinners,
+loading rows — may not change the height budget the controls depend on.
+Sticky/fixed repositioning and page-level scrolling are not substitutes for the
+contract. Height behaviour that only one consumer needs is opt-in at the shared
+component so siblings keep intrinsic sizing. Because JSDOM computes no layout,
+regression coverage asserts the structural relationship — growth, zero minimum,
+overflow ownership, and that the controls are not inside the scrolling region —
+not pixel geometry.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -548,7 +568,13 @@ the live tail and after the reader scrolls away.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.32.0 (extends IX so a control that removes a hang-capable
+**Version**: 0.33.0 (adds XXXVII, requiring configuring/committing controls to
+stay inside a host-supplied definite height via a fully declared shrink and
+overflow-ownership contract — the shell owning overflow by scrolling rather than
+discarding it where discarding would put a control beyond reach, a zero minimum
+on every intermediate item, a usable floor on the terminal shrink target, no
+viewport-unit duplication of an already definite height, and structural rather
+than pixel regression coverage; 0.32.0 extended IX so a control that removes a hang-capable
 capability bounds the effect rather than a name: enumerate the reachable paths
 to the same effect and bound or deny each, treat an unbounded foreground wait
 loop as one of those paths, require a wait to state its own deadline or be
@@ -673,3 +699,20 @@ III/VI (extend the existing `PreToolUse` chokepoint and the existing
 `spawn_poller` replacement rather than adding a supervisor), and IX as extended:
 the predicate must stay conservative — an unrecognised or ambiguous command
 allows — because an over-broad deny breaks every Bash call.
+
+## Review: vk/7b85-new-workspace-co
+
+Applied `/speckit.constitution`: added principle XXXVII. Existing principles
+cover part of this task — II (rendered-DOM regression coverage for a UI
+surface), III/VI (smallest change, reuse the existing composer rather than new
+plumbing), and IV (`packages/ui` owns the chat box's internal layout, so both
+frontends are the blast radius) — but none of them stated the layout obligation
+the report is about: a create-workspace config row that falls below the fold
+inside a host that clips overflow. XXXVI governs which policy corrects scroll
+position in a live view; it does not say the committing controls must be inside
+the viewport at all. XXXVII fills that gap and gives the knowledge base's
+`nested-flex-scroll-containment` and `responsive-flex-toolbars` findings an
+enforceable home. Numeral XXXVII was unused before this change, on this branch and on `main`;
+the pre-existing duplicate `XX` is untouched. At merge time `main` had also
+claimed 0.32.0 for its extension of IX, so this change was restacked as 0.33.0
+above it rather than replacing it.

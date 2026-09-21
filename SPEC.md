@@ -1,50 +1,9 @@
-# Bounded waiting inside an agent turn
+# New workspace config must never fall below the fold
 
-Prevent a Vibe Kanban turn from hanging on a wait that will never finish. An
-agent reached for the `Monitor` watch tool, was denied by an existing VK
-control, fell through to a plain foreground `until grep -q …; do sleep 5; done`
-loop, and blocked the turn for about an hour. Both existing controls worked: the
-`Monitor` tool-name denial fired, and the `run_in_background` parameter denial
-correctly did not, because nothing was backgrounded. The gap is that they bound
-two paths to an unbounded wait while the effect stayed reachable by a third.
+Keep the create-workspace composer's configuration controls — the model/preset selector, the attachment and repository-summary controls, the linked-issue badge and the create action — inside the viewport at every supported viewport size, including narrow mobile ones, without requiring the user to scroll. The create-mode heading and the prompt editor may shrink or scroll internally to make room; the config row may not be pushed out of view or clipped by an ancestor that hides overflow.
 
-Two layers, both in `crates/executors`, Claude executor only.
+Acceptance: at a small mobile viewport with a long prompt, the create-workspace screen renders the config row and the create action fully within the available height; the prompt editor absorbs the remaining space and scrolls its own content instead of growing the page. The guarantee covers the config row and the create action; the heading is preserved in practice because the prompt absorbs the whole deficit, but it is not itself what the requirement protects. Below the supported range — a viewport shorter than the screen's fixed cost — the create action must remain reachable by scrolling rather than be clipped away. The repository-selection step of create mode stays usable under the same constraint. Behaviour at desktop widths, in the project right sidebar, and in the workspaces layout is preserved. Changes are confined to the Vibe Kanban service repository; no deployment or other-service changes.
 
-**Layer 1 — a VK-owned command bound.** VK states `BASH_DEFAULT_TIMEOUT_MS`
-(120000) and `BASH_MAX_TIMEOUT_MS` (600000) explicitly on the Claude child
-process instead of inheriting the CLI's defaults. The values equal the pinned
-CLI's current ones on purpose: the deliverable is ownership and
-bump-resistance, not tightening — `cargo test --workspace` and
-`pnpm install --frozen-lockfile` legitimately exceed five minutes, so a shorter
-cap would break real work. Seeded before the execution environment is applied,
-so an operator or organisation variable of the same name still wins. Reaching
-the bound returns control to the turn; the CLI may detach rather than kill the
-process, and VK's existing turn-end process-group kill reaps anything left.
+Validation: automated coverage for the layout containment contract, repository type checks, lint and formatting, an independent Codex review, a knowledge-base update, and a pull request merged to the base branch.
 
-**Layer 2 — refuse unbounded foreground waits.** The existing `^Bash$`
-`PreToolUse` chokepoint gains a second predicate: deny when a command has a
-`while`/`until` keyword **and** a `sleep` **and** no bounding marker (`timeout`,
-`SECONDS`, `-lt`, `-le`, `-gt`, `-ge`), or leads with `watch`. `for` loops are
-never denied. The refusal names `spawn_poller` and its mandatory stop rules, so
-the agent redirects rather than stalls. No new callback id, matcher, hook
-registration, config surface, or dependency.
-
-The predicate is deliberately conservative: absent, non-string or unrecognised
-commands are allowed. `Bash` is the workhorse tool, so an over-broad deny would
-be a worse regression than the bug it fixes.
-
-Acceptance: the incident's command is refused with a `spawn_poller` redirect
-delivered over the real protocol; ordinary long commands, retry loops with a
-counter, `timeout`-wrapped waits and `while read` loops are not refused; an
-operator override beats VK's default; a maximum below the default fails the
-build rather than becoming silently inert; every pre-existing foreground and
-background `Bash` guard still passes.
-
-Scope: Claude only. Codex has no `PreToolUse` equivalent and its shell-deadline
-identifier was not verified against the pinned artifact, so nothing ships for it
-— recorded as a deferral with evidence, not an oversight. Grok's existing
-verified-absence record is unchanged. No turn-level supervisor, no change to
-`spawn_poller`, no deployment or hosting changes.
-
-Full artifacts: `specs/vk/603d-prevent-stuck-jo/` in the homelab repository
-(`spec.md`, `research.md`, `plan.md`, `tasks.md`, `validation.md`).
+The composer already lives inside ancestors that clip overflow, so the fix belongs in how the create-mode column distributes and constrains height rather than in page-level scrolling. Existing height limits expressed against the viewport rather than the container are the likely cause and should be re-expressed against available space.
