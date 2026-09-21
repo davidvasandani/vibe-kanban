@@ -88,7 +88,12 @@ contributed to it.
   already had; workspace-wide Polling classification through the existing bulk
   summary, approval/run precedence, and why dropped history still counts as live;
   required stopping rules, portable process-group deadlines, and scratch cleanup
-  before forced termination (`vk/bd71-require-all-poll`).
+  before forced termination (`vk/bd71-require-all-poll`); and why a control must
+  bound the *effect* rather than a name — the tool-name and `run_in_background`
+  denials both held while a plain foreground `until … sleep` loop hung a turn for
+  an hour, plus the `BASH_*_TIMEOUT_MS` clamp that makes lowering the maximum
+  alone silently inert, and why a deny predicate on `Bash` is mostly
+  false-positive engineering (`vk/603d-prevent-stuck-jo`).
 - [codex-credential-refresh.md](codex-credential-refresh.md) — Why concurrent
   `codex app-server` processes sharing one ChatGPT `auth.json` hit "refresh token
   already used" (rotating single-use refresh tokens + Codex's guarded reload but

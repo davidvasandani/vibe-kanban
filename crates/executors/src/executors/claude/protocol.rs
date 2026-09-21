@@ -333,6 +333,55 @@ mod tests {
         )
     }
 
+    /// Same callback id, but a foreground command that is an unbounded wait.
+    /// The `command` carries the shape from the incident.
+    const UNBOUNDED_WAIT_HOOK_REQUEST: &[u8] =
+        br#"{"type":"control_request","request_id":"wait-1","request":{"subtype":"hook_callback","callback_id":"DENY_BACKGROUND_BASH_CALLBACK_ID","input":{"tool_input":{"command":"until grep -q ready /tmp/out.log; do sleep 5; done"}}}}"#;
+
+    /// A value test on the deny JSON does not prove the refusal reaches the
+    /// CLI — the contract is what crosses the boundary, so drive it over the
+    /// real duplex protocol and read the matching `control_response`.
+    #[tokio::test]
+    async fn unbounded_wait_hook_is_denied_over_the_protocol() {
+        let (mut cli_stdout, vk_stdout) = duplex(16 * 1024);
+        let (vk_stdin, cli_stdin) = duplex(16 * 1024);
+        let peer = ProtocolPeer::with_writer(vk_stdin);
+        let cancel = CancellationToken::new();
+        let reader =
+            tokio::spawn(async move { peer.read_loop(vk_stdout, test_client(), cancel).await });
+
+        cli_stdout
+            .write_all(UNBOUNDED_WAIT_HOOK_REQUEST)
+            .await
+            .unwrap();
+        cli_stdout.write_all(b"\n").await.unwrap();
+
+        let mut response = String::new();
+        timeout(
+            Duration::from_millis(250),
+            BufReader::new(cli_stdin).read_line(&mut response),
+        )
+        .await
+        .expect("hook response should be prompt")
+        .expect("hook response should be readable");
+        let response: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+        assert_eq!(response["type"], "control_response");
+        assert_eq!(response["response"]["request_id"], "wait-1");
+        assert_eq!(
+            response["response"]["response"]["hookSpecificOutput"]["permissionDecision"],
+            "deny"
+        );
+        assert!(
+            response["response"]["response"]["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("spawn_poller"),
+            "the delivered denial must name the replacement"
+        );
+
+        drop(cli_stdout);
+        reader.await.unwrap().unwrap();
+    }
     const BACKGROUND_BASH_HOOK_REQUEST: &[u8] =
         br#"{"type":"control_request","request_id":"deny-1","request":{"subtype":"hook_callback","callback_id":"DENY_BACKGROUND_BASH_CALLBACK_ID","input":{"tool_input":{"run_in_background":true}}}}"#;
 
