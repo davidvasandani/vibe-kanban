@@ -85,6 +85,27 @@ Two further lessons specific to this shape:
   is what stops a tall child overflowing past both edges of a centred row; it
   resolves as long as the parent's height is definite.
 
+## Apply the contract to every step, not just the loudest one
+
+The reported symptom was the prompt step, and fixing it there is what the change
+was reviewed on. The repository step got a scroller too — but the whole picker
+bar went inside it, including the **Continue** button that commits that step, so
+Continue scrolled out of view exactly like the footer had. Structural tests
+passed, three rounds of code review passed, and the defect survived all of them
+because every reviewer was looking at the step named in the report.
+
+Enumerate the surface's committing controls first, then check each one against
+the contract. Here that is Create on the prompt step and Continue on the
+repository step; wrapping a component that contains its own submit action in a
+scroller silently demotes that action.
+
+The same inconsistency then repeated one level down: fixing the repository step
+re-applied the contract to its list and controls row but initially skipped its
+error row (no `shrink-0`) and its list floor (`min-h-0` with nothing to stop a
+collapse to zero) — both of which the prompt step had already got right. When a
+contract is applied to a second surface, walk the *whole* checklist against it
+rather than porting the parts that fixed the reported symptom.
+
 ## Opt-in height behaviour at a shared boundary
 
 `ChatBoxBase` is shared by the create composer and the session composer, and
@@ -148,6 +169,21 @@ verification when a browser/device runner is available.
   skill was substituted at high effort and run three times until it reported no
   correctness bug in the flex chain. Six findings across the first two rounds
   and four in the third were all addressed.
-- **Browser verification was not possible**: the workspace browser MCP upstream
-  was unavailable for the whole task. JSDOM computes no layout, so the
-  pixel-level outcome on a narrow viewport remains unconfirmed by this task.
+- Browser verification: initially blocked (the workspace browser MCP upstream was
+  down), completed later in headless Chrome. Two techniques worth reusing:
+  - Build the fixture from the components' **verbatim class strings** and compile
+    the repository's own Tailwind config against it, so the test exercises the
+    real utility definitions instead of hand-written CSS approximations. Parsing
+    the class strings back out of the source keeps the fixture from drifting.
+  - When the managed browser is unavailable, Playwright's cached Chromium can be
+    driven directly over CDP. On NixOS its dynamic libraries resolve by
+    iteratively reading each `error while loading shared libraries: X` and
+    appending the matching `/nix/store/*/lib` to `NIX_LD_LIBRARY_PATH`.
+- Measured outcome: footer and create action inside the host with ~9px clearance
+  at 600px and at 380px; prompt slot shrinking to its floor and scrolling; the
+  shell scroll net engaging by exactly the overflow amount at 260px; the
+  short-prompt case unchanged and still centred.
+- **Browser measurement found a defect that JSDOM, three code-review rounds and
+  the structural tests all missed** — the repository step's Continue action,
+  30px below the host. Structural coverage proves the relationships you thought
+  to assert; it cannot tell you which control you forgot.

@@ -363,8 +363,10 @@ export function CreateChatBoxContainer({
               {/*
                 The two steps are mutually exclusive, so the picker owning its
                 own overflow still leaves one scroll owner per rendered screen.
+                The picker scrolls its repository list internally and pins its
+                Continue action, so this only has to let it shrink.
               */}
-              <div className="min-h-0 overflow-y-auto">
+              <div className="flex min-h-0 flex-col">
                 <CreateModeRepoPickerBar
                   onContinueToPrompt={() => setIsSelectingRepos(false)}
                 />

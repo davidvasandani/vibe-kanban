@@ -56,7 +56,9 @@ instead of the controls.
 - FR-5: Transient state — a validation or creation error, and the create button's in-flight
   label — MUST NOT change whether the config row is visible.
 - FR-6: The repository-selection step of create mode MUST remain fully usable under the
-  same height constraint.
+  same height constraint, and its Continue action — the control that commits that step —
+  MUST stay inside the host's height for the same reason the create action does. The
+  repository list yields and scrolls; the controls row does not.
 - FR-7: When the content fits, the screen MUST keep its current appearance, including the
   vertically centred composition.
 - FR-8: Chat surfaces other than create mode MUST keep their present sizing behaviour; the

@@ -34,11 +34,35 @@ changes.
 - [x] T017 Run `pnpm run check` (frontend + all backend Rust workspaces) (depends on T011, T015)
 - [x] T018 Run `pnpm run lint` (serial with T017: both invoke cargo over the same workspaces and contend on the build lock) (depends on T011, T015)
 - [x] T019 Run `pnpm run format`, then `git diff --check` (depends on T016, T017, T018)
-- [!] T020 **NOT DONE — no browser runner available.** Browser verification of the pixel-level outcome — JSDOM proves nothing about layout. Cover, and record evidence for, each case or record explicitly that no browser runner was available (depends on T016):
+- [x] T020 **DONE.** Browser verification of the pixel-level outcome — JSDOM proves nothing about layout. Cover, and record evidence for, each case or record explicitly that no browser runner was available (depends on T016):
   - T020a narrow viewport + long prompt: config row and create action fully visible, prompt scrolls internally (FR-1, FR-2);
   - T020b narrow viewport + short prompt: unchanged from today, still vertically centred (FR-7);
   - T020c the repository-selection step at the same narrow viewport (FR-6);
   - T020d all three hosts — mobile chat tab, desktop workspaces left panel (`h-full overflow-hidden`), project sidebar Create Workspace panel (`flex-1 min-h-0`) — since the two height chains differ (FR-9).
+
+  **Result.** The workspace browser MCP recovered. Verified in headless Chrome 151 against a
+  fixture built from the components' verbatim class strings and the repository's own
+  compiled Tailwind stylesheet (real utility definitions, not hand-written CSS):
+
+  | case | host | outcome |
+  | --- | --- | --- |
+  | long prompt, sidebar chain | 600px | footer + Create inside, 9px clearance; slot 316px scrolling, 2564px hidden; shell not scrollable |
+  | short prompt | 600px | column 326px, still centred, 131px clearance; slot not scrolling |
+  | repository step | 600px | picker 426px scrolling internally |
+  | long prompt, desktop `Panel` chain | 600px | footer + Create inside, 9px clearance; slot 346px scrolling |
+  | advisory + long prompt | 600px | slot 70px (floor not yet reached), footer inside, shell not scrollable |
+  | long prompt | 380px | Create inside, 9px clearance; slot 110px scrolling |
+  | long prompt | 260px | slot exactly at its 48px floor; Create 49px low **and shell scrollable by exactly 49px** — the last-resort net engages as designed |
+
+  T020 also **found a real defect the merged change missed** (T024).
+
+- [x] T024 Pin the repository step's Continue action. Browser measurement showed it 30px
+  below the host at 600px with 14 repositories, because the whole picker bar sat inside the
+  scroller added in T010. Scroll the repository list only and mark the controls row
+  `shrink-0` in `packages/web-core/src/shared/components/CreateModeRepoPickerBar.tsx`;
+  reduce the container wrapper to `flex min-h-0 flex-col`. Re-measured: Continue 8px inside.
+  Covered by `packages/remote-web/src/test/CreateModeRepoPickerBar.test.tsx` (3 tests, all
+  three fail against the pre-fix markup).
 
 ## Phase 6: Close-out
 - [x] T021 Independent review of the task diff; address confirmed findings and re-verify (depends on T019, T020)
