@@ -16,9 +16,11 @@ import {
 export function IssueWorkspaceWarningContainer({
   projectId,
   issueId,
+  className,
 }: {
   projectId: string;
   issueId: string;
+  className?: string;
 }) {
   const params = useMemo(() => ({ project_id: projectId }), [projectId]);
   const { data: workspaces } = useShape(PROJECT_WORKSPACES_SHAPE, params);
@@ -40,6 +42,7 @@ export function IssueWorkspaceWarningContainer({
   return (
     <IssueWorkspaceWarning
       workspaces={siblings}
+      className={className}
       onDismiss={() => setDismissedKey(key)}
       onOpen={(workspaceId) =>
         navigation.goToProjectIssueWorkspace(projectId, issueId, workspaceId)

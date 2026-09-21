@@ -1,4 +1,5 @@
 import { useTranslation } from 'react-i18next';
+import { cn } from '../lib/cn';
 import { PrimaryButton } from './PrimaryButton';
 
 export interface IssueWorkspaceWarningRow {
@@ -15,17 +16,22 @@ export function IssueWorkspaceWarning({
   workspaces,
   onDismiss,
   onOpen,
+  className,
 }: {
   workspaces: IssueWorkspaceWarningRow[];
   onDismiss: () => void;
   onOpen: (localWorkspaceId: string) => void;
+  className?: string;
 }) {
   const { t } = useTranslation('common');
   if (workspaces.length === 0) return null;
   return (
     <aside
       role="status"
-      className="rounded border border-brand bg-secondary p-base text-normal"
+      className={cn(
+        'rounded border border-brand bg-secondary p-base text-normal',
+        className
+      )}
     >
       <div className="flex items-start justify-between gap-base">
         <div>

@@ -331,37 +331,57 @@ export function CreateChatBoxContainer({
   }
 
   return (
-    <div className="relative flex flex-1 flex-col bg-primary h-full">
-      <div className="flex flex-1 items-center justify-center px-base">
-        <div className="flex w-chat max-w-full flex-col gap-base">
+    /*
+      The shell owns overflow rather than letting it escape to the host. It
+      scrolls instead of clipping purely as a last resort: the editor slot
+      absorbs the whole deficit at every supported viewport size, so this only
+      engages on a viewport shorter than the screen's fixed cost (heading,
+      placement row, chat header and config row), where reaching the create
+      action by scrolling beats losing it.
+    */
+    <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto bg-primary h-full">
+      <div className="flex min-h-0 flex-1 items-center justify-center px-base">
+        {/*
+          max-h-full caps the column at the height the host gives us, so a tall
+          column fits exactly instead of overflowing past both edges of the
+          centred row; a short one still centres exactly as before.
+        */}
+        <div className="flex max-h-full min-h-0 w-chat max-w-full flex-col gap-base">
           {linkedIssue && (
             <IssueWorkspaceWarningContainer
               key={`${linkedIssue.remoteProjectId}:${linkedIssue.issueId}`}
+              className="shrink-0"
               projectId={linkedIssue.remoteProjectId}
               issueId={linkedIssue.issueId}
             />
           )}
           {showRepoPickerStep && (
             <>
-              <h2 className="mb-double text-center text-4xl font-medium tracking-tight text-high">
+              <h2 className="mb-double shrink-0 text-center text-4xl font-medium tracking-tight text-high">
                 {t('createMode.headings.repoStep')}
               </h2>
-              <CreateModeRepoPickerBar
-                onContinueToPrompt={() => setIsSelectingRepos(false)}
-              />
+              {/*
+                The two steps are mutually exclusive, so the picker owning its
+                own overflow still leaves one scroll owner per rendered screen.
+              */}
+              <div className="min-h-0 overflow-y-auto">
+                <CreateModeRepoPickerBar
+                  onContinueToPrompt={() => setIsSelectingRepos(false)}
+                />
+              </div>
             </>
           )}
 
           {showChatStep && (
             <>
-              <h2 className="mb-double text-center text-4xl font-medium tracking-tight text-high">
+              <h2 className="mb-double shrink-0 text-center text-4xl font-medium tracking-tight text-high">
                 {t('createMode.headings.chatStep')}
               </h2>
 
-              <div className="flex justify-center @container">
-                <div className="flex w-full flex-col gap-half">
+              <div className="flex min-h-0 justify-center @container">
+                <div className="flex min-h-0 w-full flex-col gap-half">
                   {workerNodes.length > 0 && (
-                    <div className="flex items-center justify-end gap-half text-xs text-low">
+                    <div className="flex shrink-0 items-center justify-end gap-half text-xs text-low">
                       <span>{t('createMode.worker.label')}</span>
                       <Select
                         value={requestedWorkerNodeId}
@@ -415,7 +435,7 @@ export function CreateChatBoxContainer({
                         onChange={onChange}
                         onCmdEnter={onCmdEnter}
                         disabled={disabled}
-                        className="min-h-double max-h-[50vh] overflow-y-auto"
+                        className="min-h-double"
                         repoIds={repoIds}
                         repoId={repoId}
                         executor={executor}
@@ -431,6 +451,7 @@ export function CreateChatBoxContainer({
                         className="size-icon-xl"
                       />
                     }
+                    fillHeight
                     onSend={handleSubmit}
                     isSending={createWorkspace.isPending}
                     disabled={!hasSelectedRepos}

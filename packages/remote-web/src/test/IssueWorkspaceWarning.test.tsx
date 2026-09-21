@@ -5,6 +5,7 @@ import { PROJECT_WORKSPACES_SHAPE } from "shared/remote-types";
 import type { SidebarWorkspace } from "@/shared/hooks/useWorkspaces";
 import { getIssueWorkspaceAdvisory } from "@/shared/lib/issueWorkspaceAdvisory";
 import { IssueWorkspaceWarningContainer } from "@/shared/components/IssueWorkspaceWarningContainer";
+import { IssueWorkspaceWarning } from "@vibe/ui/components/IssueWorkspaceWarning";
 import { IssueWorkspacesSection } from "@vibe/ui/components/IssueWorkspacesSection";
 import type { WorkspaceWithStats } from "@vibe/ui/components/IssueWorkspaceCard";
 import i18n from "@/i18n";
@@ -258,4 +259,46 @@ it("shows a plural active count on a collapsed issue section, excluding archives
     />,
   );
   expect(screen.queryByText("2 active workspaces")).not.toBeInTheDocument();
+});
+
+// Regression: the create-workspace column is a gapped flex column, so the
+// advisory must contribute no flex child at all when it has nothing to say.
+// Wrapping it in a `shrink-0` div instead of passing the class onto its own
+// root left an empty element behind and added a stray gap above the heading.
+describe("IssueWorkspaceWarning – layout classes do not outlive the content", () => {
+  it("renders nothing when there are no sibling workspaces, even with a className", () => {
+    const { container } = render(
+      <IssueWorkspaceWarning
+        workspaces={[]}
+        className="shrink-0"
+        onDismiss={() => {}}
+        onOpen={() => {}}
+      />,
+    );
+
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("applies a caller className to its own root when it does render", () => {
+    const { container } = render(
+      <IssueWorkspaceWarning
+        workspaces={[
+          {
+            id: "w1",
+            name: "existing",
+            branch: "main",
+            localWorkspaceId: "w1",
+            activity: "idle",
+            hasOpenPr: false,
+            hasChanges: false,
+          },
+        ]}
+        className="shrink-0"
+        onDismiss={() => {}}
+        onOpen={() => {}}
+      />,
+    );
+
+    expect(container.firstElementChild).toHaveClass("shrink-0");
+  });
 });

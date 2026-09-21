@@ -77,6 +77,11 @@ interface CreateChatBoxProps<TExecutor extends string = string> {
   repoSummaryLabel: string;
   repoSummaryTitle: string;
   linkedIssue?: LinkedIssueBadgeProps | null;
+  /**
+   * Fill and shrink within a height-constrained parent so the footer controls
+   * stay inside the host's height. Forwarded to ChatBoxBase; off by default.
+   */
+  fillHeight?: boolean;
 }
 
 /**
@@ -112,6 +117,7 @@ export function CreateChatBox<TExecutor extends string = string>({
   repoSummaryLabel,
   repoSummaryTitle,
   linkedIssue,
+  fillHeight = false,
 }: CreateChatBoxProps<TExecutor>) {
   const { t } = useTranslation(['common', 'tasks']);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -155,6 +161,7 @@ export function CreateChatBox<TExecutor extends string = string>({
       })}
       error={error}
       visualVariant={VisualVariant.NORMAL}
+      fillHeight={fillHeight}
       dropzone={dropzone}
       modelSelector={modelSelector}
       headerLeft={
