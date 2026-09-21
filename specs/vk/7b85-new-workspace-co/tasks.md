@@ -48,7 +48,7 @@ changes.
   - Round 2 findings, both fixed: the checked-in contract still specified `flex-1` where the code ships shrink-only sizing (docs corrected, with the reason recorded); the `fillHeight` doc claimed the banner stopped shrinking but `{banner}` was bare (now boxed `shrink-0` in fill mode, with coverage).
   - Round 3 findings: the editor slot could collapse to zero behind a tall advisory (now floored at `3rem`); "the shell clips" wording in the constitution and T007 contradicted the shipped `overflow-y-auto`; `IMPLEMENTATION_PLAN.md` still prescribed `flex-1`; the plan promised a container clipping-class test that was never written. All corrected. Round 3 confirmed no correctness bug in the flex chain itself.
 - [x] T022 Update `docs/knowledge-base/nested-flex-scroll-containment.md` and `docs/knowledge-base/INDEX.md` with this task's tag and the create-composer application (depends on T021)
-- [ ] T023 Open the pull request against the base branch and merge it (depends on T021, T022)
+- [x] T023 Open the pull request against the base branch and merge it (depends on T021, T022) — PR #315, squash-merged into `main` after a rebase that resolved a constitution version-number collision (`main` had also claimed 0.32.0; this change restacked as 0.33.0).
 
 <!--
 Conventions:
