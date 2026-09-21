@@ -175,14 +175,30 @@ verification when a browser/device runner is available.
     the repository's own Tailwind config against it, so the test exercises the
     real utility definitions instead of hand-written CSS approximations. Parsing
     the class strings back out of the source keeps the fixture from drifting.
+  - Better still, mount the **real components**: a throwaway `harness.html` plus
+    entry module in `packages/local-web` gets the app's own Vite config, aliases
+    and virtual modules for free, so the actual Lexical editor renders. This is
+    what proved scroll ownership genuinely left the `ContentEditable`
+    (`max-height: none`, `overflow-y: visible` on it, the slot scrolling
+    instead) and that the placeholder no longer inherits a scroller — neither is
+    observable from a reconstruction. **Import the app's i18n setup**: without
+    it `t()` returns raw keys, and a key like
+    `tasks:conversation.workspace.create` is several times the width of
+    "Create", which wraps the toolbar and silently inflates every height you
+    measure. Reconstruction and real-component runs agreed to within ~7px once
+    i18n was loaded, and disagreed by ~55px without it.
   - When the managed browser is unavailable, Playwright's cached Chromium can be
     driven directly over CDP. On NixOS its dynamic libraries resolve by
     iteratively reading each `error while loading shared libraries: X` and
     appending the matching `/nix/store/*/lib` to `NIX_LD_LIBRARY_PATH`.
-- Measured outcome: footer and create action inside the host with ~9px clearance
-  at 600px and at 380px; prompt slot shrinking to its floor and scrolling; the
-  shell scroll net engaging by exactly the overflow amount at 260px; the
-  short-prompt case unchanged and still centred.
+- Measured outcome against the real component tree: the config row and create
+  action are fully visible down to **316px of host height** — at 320px with the
+  prompt at its 48px floor, and at 310px they sit 6px low while the shell is
+  scrollable by exactly 6px (then 16/21/26/36px at 300/295/290/280px). The
+  prompt is 323px at a 600px host and 103px at 380px; short and empty prompts
+  are unchanged and still centred. Knowing the threshold as a number is worth
+  the effort: it converts "outside the supported range" from an assertion into
+  a figure you can check a host against.
 - **Browser measurement found a defect that JSDOM, three code-review rounds and
   the structural tests all missed** — the repository step's Continue action,
   30px below the host. Structural coverage proves the relationships you thought

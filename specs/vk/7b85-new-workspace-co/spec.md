@@ -114,8 +114,13 @@ recorded here and folded into the requirements above.
   heading is preserved in practice but is not what the requirement protects.
 
 ## Residual notes
-- A viewport shorter than the screen's fixed cost plus the prompt floor is outside the
-  supported sizes. Acceptance does not require the config row to be *visible* there, only
+- The screen's fixed cost plus the prompt floor was measured, against the real component
+  tree in headless Chrome, at **316px of host height**. At 320px the config row and create
+  action are fully visible with the prompt at its 48px floor; at 310px they sit 6px low and
+  the shell is scrollable by exactly 6px. The sidebar host is roughly the viewport height
+  less the navbar and panel header (~80px), so this corresponds to a browser viewport of
+  about 396px — below a small phone in landscape, and far below any portrait phone.
+- Below that threshold acceptance does not require the config row to be *visible*, only
   reachable (FR-12). The duplicate-workspace advisory adds materially to the fixed cost, so
   it is the realistic way to reach that range on a short desktop window.
 - Verification of the pixel-level outcome needs a real browser. Automated coverage asserts
