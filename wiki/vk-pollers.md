@@ -383,35 +383,60 @@ ownership and bump-resistance — `@anthropic-ai/claude-code` is a `needs-review
 Renovate carve-out — not tightening. Tightening was rejected on evidence:
 `cargo test --workspace` and `pnpm install` legitimately exceed five minutes, so
 a shorter cap breaks real work while the admission refusal already catches the
-loop far earlier. They are seeded **before** the execution env is applied, so an
-operator/org variable of the same name still wins.
+loop far earlier.
+
+They are **defaults on both sides**, which takes two separate mechanisms and
+only one of them is obvious. Seeding happens *before* `apply_to_command`, so a
+profile or organisation variable of the same name is applied after and wins —
+but `ExecutionEnv` is built from org variables and VK context, **not** from
+`std::env`, so that alone does not cover a variable an operator exported for the
+VK service itself. A child `Command` inherits the server's environment, and an
+unconditional `.env()` would quietly override it. So seeding also skips any
+variable already set. Getting only the first half right leaves a documented
+escape hatch that does not exist for the case an operator is most likely to use.
 
 ### A deny predicate on the workhorse tool is mostly false-positive engineering
 
 `Bash` runs everything, so an over-broad deny is worse than the bug. The rule is
 three independent conditions — loop keyword **and** `sleep` **and** no bounding
-marker (`timeout`, `SECONDS`, `-lt`/`-le`/`-gt`/`-ge`) — plus `watch` as the
-leading token only. `for` loops are never denied.
+marker — plus `watch` as the leading token only. `for` loops are never denied.
 
-Two traps found the hard way:
+**Every one of these was wrong on the first attempt.** The predicate looks like
+five lines of string matching; it is actually where all the risk lives, and the
+review pass found four separate defects in it after the tests were green. Budget
+for that.
 
 - **Token matching is not enough for `until`/`while`: they are English words.**
   `echo "retrying until ready"; sleep 2` has a keyword, a sleep and no marker,
-  and the first implementation refused it. The keyword must be in **command
-  position** (start, or after `;`/`&`/`|`/`(`/`{`/newline, or `do`/`then`/`else`).
-  Caught in review, not by the original tests.
-- **Treat `-` as a word character.** It makes `--timeout=5` a single token that
-  does not match the `timeout` *command* (bounding one attempt does not bound
-  the loop), it keeps `git log --until=…` from reading as a loop, and the
-  `-lt`-style markers need their leading `-`.
+  and was refused. The keyword must be in **command position**.
+- **`trim_end()` silently deleted the newline separator.** Command position
+  allows "after a newline", but trimming the preceding text with `trim_end()`
+  strips the newline first, so that arm was unreachable. Any multi-line
+  script — the ordinary way to write a wait loop — escaped the guard entirely.
+  The load-bearing layer was off for the shape it exists to catch, and every
+  test still passed because they were all single-line. Trim blanks only.
+- **A comparison is not a counter.** `-lt`/`-gt` were markers, on the theory
+  that they indicate `while [ $n -lt 5 ]`. But they read identically in a
+  *polling condition*: `until [ $(grep -c ready "$f") -gt 0 ]; do sleep 5; done`
+  is semantically the incident command and was allowed. The distinguishing
+  feature is an **increment**, so the marker is `$((` — which also does not
+  collide with the plain `$(` a polling condition uses.
+- **Markers must be matched where they mean something.** Bare-token `timeout`
+  matched the polled path in `until test -f /tmp/timeout.flag; do sleep 5; done`
+  and marked it bounded. It counts only in command position.
+- **`while read` with a `sleep` is bounded.** A rate-limited
+  `cat urls.txt | while read -r u; do curl "$u"; sleep 1; done` terminates when
+  its input does; it was refused. `read` is a marker.
 
-Counter markers matter: `n=0; while [ $n -lt 5 ]; do …; sleep 2; n=$((n+1)); done`
-is a bounded retry loop and common. Refusing it would be a worse regression than
-the hang.
+**Treat `-` as a word character** throughout: it makes `--timeout=5` a single
+token that does not match the `timeout` command (bounding one attempt does not
+bound the loop) and keeps `git log --until=…` from reading as a loop.
 
 Accepted, documented limits: a heredoc that *writes* a wait loop is refused as
 if running it; `eval`/variable-assembled loops do not match; a busy loop with no
-`sleep` is bounded only by the command timeout.
+`sleep` is bounded only by the command timeout; and a marker anywhere shadows
+the whole command, so markers signal *intent* to bound rather than proof of one.
+Ambiguity resolves permissively by design.
 
 ### Scope is per-agent, and an absence must read as a decision
 

@@ -102,26 +102,35 @@ pub const UNBOUNDED_WAIT_DENY_REASON: &str = "Unbounded waiting is not supported
 /// Shell keywords that begin a loop with no inherent iteration bound.
 const UNBOUNDED_LOOP_KEYWORDS: &[&str] = &["while", "until"];
 
-/// Tokens that are evidence the author already bounded the loop.
+/// Bare tokens that are evidence the loop already terminates.
 ///
-/// `timeout` wraps the wait in a deadline; `SECONDS` is the bash builtin used
-/// to implement one; the numeric comparison operators are the attempt-counter
-/// retry shape (`n=0; while [ $n -lt 5 ]; ...`), which is bounded and common
-/// enough that refusing it would be a worse regression than the bug.
+/// - `SECONDS` is the bash builtin used to build a deadline
+///   (`while [ $SECONDS -lt 60 ]`).
+/// - `read` makes the loop consume a finite input stream
+///   (`while read -r line; do …; sleep 1; done`), which ends when the stream
+///   does. Rate-limited `while read` loops are ordinary and were previously
+///   refused whenever they contained a `sleep`.
+const WAIT_BOUND_TOKENS: &[&str] = &["SECONDS", "read"];
+
+/// Arithmetic expansion — the marker for an attempt counter, as in
+/// `n=0; while [ $n -lt 5 ]; do …; n=$((n+1)); done`.
 ///
-/// Because `-` counts as a word character (below), `timeout` matches the
-/// `timeout` *command* but not a `--timeout=5` flag — so a loop whose condition
-/// merely passes a timeout to one attempt, as in
-/// `until curl --timeout 5 "$url"; do sleep 2; done`, is still refused. That is
-/// the intended reading: bounding one attempt does not bound the loop.
-const WAIT_BOUND_MARKERS: &[&str] = &["timeout", "SECONDS", "-lt", "-le", "-gt", "-ge"];
+/// Matched as a **substring**, since `$((` contains no word characters.
+///
+/// This replaced a set of bare comparison operators (`-lt`, `-gt`, …). Those
+/// matched anywhere in the command, including inside the *condition* of a
+/// polling loop — `until [ $(grep -c ready "$f") -gt 0 ]; do sleep 5; done` was
+/// read as "bounded" purely because it compares numbers, even though it is
+/// semantically the incident command. An increment is evidence of a counter in
+/// a way a comparison is not, and `$((` does not collide with the plain `$(`
+/// command substitution a polling condition uses.
+const ARITHMETIC_EXPANSION: &str = "$((";
 
 /// Whether `haystack` contains `needle` delimited by non-word characters, so
 /// `sleep` does not match `sleeping` and `while` does not match `awhile`.
 ///
-/// `-` is treated as part of a token for two reasons: the `-lt`-style markers
-/// need their leading `-` kept, and it makes a flag such as `--timeout` a
-/// single token that does not match the bare `timeout` command.
+/// `-` is treated as part of a token so that a flag such as `--timeout` is a
+/// single token which does not match the bare `timeout` command.
 fn contains_token(haystack: &str, needle: &str) -> bool {
     let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
     haystack.match_indices(needle).any(|(start, matched)| {
@@ -151,7 +160,12 @@ fn contains_command_keyword(haystack: &str, needle: &str) -> bool {
         if haystack[end..].chars().next().is_some_and(is_word) {
             return false;
         }
-        let before = haystack[..start].trim_end();
+        // Trim only blanks, never the newline: `trim_end()` would strip it and
+        // make the `'\n'` separator below unreachable, so a loop keyword
+        // starting a *new line* would not read as command position. A
+        // multi-line script is the ordinary way to write a wait loop, so that
+        // silently disabled the guard for the shape it exists to catch.
+        let before = haystack[..start].trim_end_matches([' ', '\t', '\r']);
         before.is_empty()
             || before.ends_with([';', '&', '|', '(', '{', '\n'])
             || ["do", "then", "else"]
@@ -186,6 +200,10 @@ fn contains_command_keyword(haystack: &str, needle: &str) -> bool {
 ///   per-command bound still applies.
 /// - A busy loop with no `sleep` (`while true; do :; done`) is allowed by this
 ///   predicate and bounded only by the command timeout.
+/// - A bound marker anywhere in the command shadows the whole loop, so an
+///   unbounded wait that happens to contain arithmetic or a `read` elsewhere is
+///   allowed. Markers signal *intent to bound*; they are not proof of one, and
+///   ambiguity resolves permissively by design.
 ///
 /// # Scope (Constitution IX)
 ///
@@ -227,9 +245,15 @@ pub fn is_unbounded_wait_command(input: &serde_json::Value) -> bool {
         .iter()
         .any(|keyword| contains_command_keyword(command, keyword));
     let waits = contains_token(command, "sleep");
-    let is_bounded = WAIT_BOUND_MARKERS
-        .iter()
-        .any(|marker| contains_token(command, marker));
+    // `timeout` counts only in *command position*. Matched as a bare token it
+    // also fired on any path or variable containing the word, so
+    // `until test -f /tmp/timeout.flag; do sleep 5; done` read as bounded
+    // because of the file it was polling for.
+    let is_bounded = contains_command_keyword(command, "timeout")
+        || WAIT_BOUND_TOKENS
+            .iter()
+            .any(|marker| contains_token(command, marker))
+        || command.contains(ARITHMETIC_EXPANSION);
 
     has_unbounded_loop && waits && !is_bounded
 }
@@ -930,6 +954,16 @@ mod tests {
             // Bounding a single attempt does not bound the loop: `--timeout` is
             // a flag, not the `timeout` command, so it is not a bound marker.
             r#"until curl --timeout 5 "$url"; do sleep 2; done"#,
+            // A loop keyword starting a new line is still command position.
+            // `trim_end()` used to eat the newline and let this through.
+            "echo start\nuntil grep -q ready /tmp/out.log; do sleep 5; done",
+            "set -e\nwhile true; do\n  sleep 5\ndone",
+            // A comparison in the *condition* is not a counter bound. The
+            // second of these is semantically the incident command.
+            r#"while [ $(kubectl get po | grep -c Running) -lt 3 ]; do sleep 5; done"#,
+            r#"until [ $(grep -c ready /tmp/out.log) -gt 0 ]; do sleep 5; done"#,
+            // `timeout` in a polled *path* is not a deadline.
+            "until test -f /tmp/timeout.flag; do sleep 5; done",
         ] {
             assert!(
                 is_unbounded_wait_command(&bash_hook_input(
@@ -948,6 +982,10 @@ mod tests {
             "for i in $(seq 1 60); do test -f /tmp/ready && break; sleep 1; done",
             // A loop with no wait at all — the `sleep` requirement keeps this out.
             "while read line; do echo \"$line\"; done < input.txt",
+            // A rate-limited `while read` loop ends when its input does. These
+            // were refused before `read` became a bound marker.
+            "cat urls.txt | while read -r u; do curl \"$u\"; sleep 1; done",
+            "while read -r line; do echo \"$line\"; sleep 0.5; done < urls.txt",
             // Long, but bounded by its own completion (FR-6).
             "cargo test --workspace",
             "pnpm install --frozen-lockfile",
@@ -1033,6 +1071,21 @@ mod tests {
             "until"
         ));
         assert!(!contains_command_keyword("echo awhile", "while"));
+
+        // A newline is a command separator. `trim_end()` here would strip it
+        // and silently disable the guard for every multi-line script.
+        assert!(contains_command_keyword("echo start\nuntil foo", "until"));
+        assert!(contains_command_keyword(
+            "echo start\r\n  while foo",
+            "while"
+        ));
+
+        // `timeout` counts as a bound marker only as a command, not in a path.
+        assert!(contains_command_keyword("timeout 300 bash -c x", "timeout"));
+        assert!(!contains_command_keyword(
+            "test -f /tmp/timeout.flag",
+            "timeout"
+        ));
     }
 
     #[tokio::test]
