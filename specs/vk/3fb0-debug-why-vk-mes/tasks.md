@@ -81,13 +81,33 @@ parallel-safe tasks are marked, everything else is sequential on that file.
 - [x] **T011** `pnpm run format`.
   *Depends on*: T008, T009, T010
 
+## Review outcome (T012)
+
+Codex CLI is installed (0.155.1) but unauthenticated in this environment, so
+the independent review ran through the `code-review` skill instead. It
+confirmed the diagnosis independently and raised three findings, all real and
+all fixed:
+
+1. **The regression test was vacuous.** It wrapped a *synchronous* call in
+   `std::future::ready` inside `tokio::time::timeout`, so the deadline could
+   never fire, and it never exercised the source choice — deleting the fix left
+   it green. Fixed by extracting `normalized_entries_from_sources` and asserting
+   against a never-yielding fallback stream. Verified by sabotage: removing the
+   live-store branch now fails the test with `Elapsed`.
+2. **Eviction collapsed the read to empty.** Strict materialization abandons
+   the whole document when an evicted `add` orphans a `replace`. Added
+   `materialize_entries_lossy` for the live-store path only.
+3. **Per-poll whole-history clone under the lock.** `get_history()` deep-copied
+   all retained history — mostly stdout — blocking `push`. Added
+   `MsgStore::select_history` to clone only the selected variant.
+
 ## Layer 5 — Close-out
 
-- [ ] **T012** Independent Codex review of the diff; address confirmed findings
+- [x] **T012** Independent Codex review of the diff; address confirmed findings
   and re-verify. (pipeline stage 11)
   *Depends on*: T011
 
-- [ ] **T013** Fold the running-execution rule into the knowledge base page that
+- [x] **T013** Fold the running-execution rule into the knowledge base page that
   already owns this area — the "MCP settled-projection reads" section of
   `docs/knowledge-base/lazy-loading-normalized-conversation-history.md` — tag it
   with this task id, and refresh `docs/knowledge-base/INDEX.md`.

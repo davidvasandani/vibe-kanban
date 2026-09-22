@@ -5,7 +5,9 @@ rather than preference.
 
 ## C-1 — Should a byte-capped running history signal its truncation?
 
-**Resolved: no. Return the retained tail silently.**
+**Resolved: no truncation signal — but return the surviving messages, not an
+empty list.** (Second half revised during code review; see the amendment at
+the end of this section.)
 
 Evidence: `crates/utils/src/msg_store.rs:13` caps retained history at
 `HISTORY_BYTES = 100000 * 1024` (100 MB) per execution, evicting from the front
@@ -16,10 +18,18 @@ Consequences if it does happen: eviction can drop an `add /entries/<n>` while a
 later `replace /entries/<n>` survives. `materialize_entries`
 (`crates/services/src/services/normalized_log_cache.rs:91`) applies patches to a
 fresh `{"entries": []}` document and returns `CacheError::Patch` if one does not
-apply. `normalized_entries` maps that to `None`, and the route's
-`unwrap_or_default()` turns it into an empty message list. So the failure mode
-is a prompt empty response, never a hang — acceptable, and strictly better than
-today's behaviour of not returning at all.
+apply.
+
+**Amendment (code review).** The original resolution accepted mapping that to
+`None`, letting the route's `unwrap_or_default()` produce an empty message
+list. Review pointed out this contradicts the principle written for this very
+task: constitution XXXVIII says "a capped answer is still preferable to no
+answer", and losing *every* message because the oldest was evicted is no
+answer. The live-store path now falls back to `materialize_entries_lossy`,
+which skips non-applying patches and logs the skipped count, so the read
+returns the surviving conversation. The stored-sidecar path keeps the strict
+form: there, a patch that does not apply means the artifact is corrupt and
+must be re-derived rather than partially trusted.
 
 Rejected alternative: adding a `truncated` field to `RecentMessagesResponse`.
 That widens a generated TS type and adds a branch for a case this change does

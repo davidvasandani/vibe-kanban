@@ -101,6 +101,33 @@ pub fn materialize_entries(patches: &[Patch]) -> Result<Vec<Value>, CacheError> 
     }
 }
 
+/// [`materialize_entries`], but skipping patches that no longer apply instead
+/// of abandoning the whole document, and reporting how many were skipped.
+///
+/// Only for a live store's retained history, which is byte-capped and evicts
+/// from the front: that can drop an `add /entries/0` while a later
+/// `replace /entries/0` survives, and the survivor then fails against a
+/// shorter array. A partial conversation is a usable answer for a turn that
+/// is still running; discarding every entry because the oldest was evicted is
+/// not. The stored-sidecar path keeps using the strict form, where a patch
+/// that does not apply means the artifact is corrupt and must be re-derived.
+pub fn materialize_entries_lossy(patches: &[Patch]) -> Result<(Vec<Value>, usize), CacheError> {
+    let mut document = json!({ "entries": [] });
+    let mut skipped = 0;
+    for patch in patches {
+        // `json_patch::patch` restores the document on failure, so a skipped
+        // patch leaves the entries applied before it intact.
+        if json_patch::patch(&mut document, patch).is_err() {
+            skipped += 1;
+        }
+    }
+
+    match document.get_mut("entries").map(Value::take) {
+        Some(Value::Array(entries)) => Ok((entries, skipped)),
+        _ => Err(CacheError::MalformedDocument),
+    }
+}
+
 /// Rebuild the patch stream a reader expects from stored entries.
 ///
 /// One `add` per entry, in order: a settled conversation has no history of

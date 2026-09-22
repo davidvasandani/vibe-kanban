@@ -1,6 +1,7 @@
 # Lazy-loading normalized conversation history
 
-Tags: `65ab-lazy-load-vk-wor`, `vk/6df4-loading-chat-pin`, `vk/29d8-vk-list-all-mess`
+Tags: `65ab-lazy-load-vk-wor`, `vk/6df4-loading-chat-pin`, `vk/29d8-vk-list-all-mess`,
+`vk/3fb0-debug-why-vk-mes`
 
 ## Why frontend virtualization is insufficient
 
@@ -143,6 +144,59 @@ legacy cache miss still applies the newest-2,000-normalizable-raw-message bound
 and emits an omission notice. Both MCP reads preserve normalized patch
 materialization, chronological identity, role filtering, per-entry truncation,
 single-flight cache-miss coordination, and owning-workspace authorization.
+
+## "Settled" excludes running turns — the source must terminate
+
+The settled-projection reads above were specified for *completed* executions.
+Applying the same drain to a **running** one hung the `/messages` endpoint and
+both MCP message tools until the turn ended (`vk/3fb0-debug-why-vk-mes`).
+
+`normalized_entries` consumed `stream_normalized_logs` until `LogMsg::Finished`.
+For a live `MsgStore` that stream is `history_plus_stream()`: retained history
+chained onto a broadcast subscription. Two properties combined into the hang.
+
+- The live half ends only when the broadcast **sender drops**, which happens
+  when the turn finishes and the store leaves the container service's map.
+- The `Finished` the store pushes at turn end is **discarded by the
+  `JsonPatch`-only filter** in `stream_normalized_logs`. A sentinel a
+  downstream stage can filter out is not a termination guarantee; only the
+  synthetic chained one is reachable, and only after the live half ends.
+
+The rule: a request-scoped read shares the live subscriber's *normalization*,
+never its *termination condition*. Snapshot the buffered history
+(`MsgStore::select_history`) for a live store; keep draining only the sources
+that are finite by construction — sidecar replay and bounded historical
+re-normalization. Returning a running turn's partial conversation is correct,
+and the response's own `status` is what distinguishes partial from settled.
+Constitution XXXVIII.
+
+### Testing a non-terminating read
+
+A test that calls the snapshot helper directly proves nothing: it stays green
+if the live-store preference is deleted, because the helper is not where the
+choice lives. Make the *source selection* a function that takes the live store
+and a lazily-opened fallback stream, then assert with a never-yielding fallback
+(`futures::stream::pending()`) that the fallback is never opened, under
+`tokio::time::timeout`. A reintroduced wait then fails as a deadline, and the
+sabotage check — delete the branch, watch it fail — is what proves the guard.
+Wrapping a *synchronous* call in `std::future::ready` inside a timeout is a
+false guard: the deadline can never fire.
+
+### Two costs a per-poll snapshot must avoid
+
+- **Whole-history cloning.** `get_history()` deep-copies retained history —
+  mostly raw stdout — while holding the lock `push` needs, charging the log
+  forwarder for every orchestrator poll. Select inside the read guard
+  (`select_history`) so only the wanted variant is cloned.
+- **All-or-nothing materialization.** Retained history is byte-capped
+  (100 MB) and evicts from the front, so an `add /entries/0` can be dropped
+  while a later `replace /entries/0` survives; the survivor then fails against
+  a shorter array and strict materialization yields *no* entries at all. For a
+  live store, fall back to a lossy pass that skips non-applying patches
+  (`materialize_entries_lossy`) and log the skipped count. A capped answer
+  beats an empty one. The stored-sidecar path keeps the strict form, where a
+  patch that does not apply means the artifact is corrupt and must be
+  re-derived.
 
 ## Design gates before product code
 

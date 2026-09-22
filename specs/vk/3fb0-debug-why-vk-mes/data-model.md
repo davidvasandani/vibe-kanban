@@ -46,6 +46,11 @@ finished read would produce.
 ## Failure state
 
 If retained history was evicted such that a surviving `replace` has no
-corresponding `add`, `materialize_entries` returns `CacheError::Patch`. That
-maps to `None`, and the handler's `unwrap_or_default()` yields an empty message
-list. Prompt and lossy, never blocking (FR-8).
+corresponding `add`, strict `materialize_entries` returns `CacheError::Patch`.
+For a live store the read then retries with `materialize_entries_lossy`, which
+applies what still applies and reports how many patches it skipped, so the
+surviving messages are returned rather than none (FR-8). `json_patch::patch`
+keeps an undo stack and restores the document on failure, so a skipped patch
+leaves earlier entries intact. Only if the document itself is malformed does
+the read yield `None`, which the handler's `unwrap_or_default()` turns into an
+empty list. Prompt in every case, never blocking.

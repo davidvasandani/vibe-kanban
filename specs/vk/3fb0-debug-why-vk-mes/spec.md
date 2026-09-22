@@ -42,9 +42,10 @@ return the conversation so far, promptly, whatever state the execution is in.
 - FR-7: The recent/all selection, role filter, and message-identity scheme MUST
   behave identically for running and finished executions.
 - FR-8: When an execution's retained history has been evicted under its size
-  cap, the read MUST still return promptly with whatever remains, degrading to
-  an empty message list if the surviving patches cannot be reassembled. It MUST
-  NOT hang, error, or grow the response shape to report the eviction.
+  cap, the read MUST still return promptly with the messages that survive,
+  skipping only the entries that can no longer be reassembled. It MUST NOT
+  hang, error, collapse to an empty list because the oldest entry was lost, or
+  grow the response shape to report the eviction.
 - FR-9: For a running execution, the reported final message MUST be the latest
   assistant text produced so far, or absent if there is none yet. It is a
   progress signal, never evidence that the turn has ended.
@@ -67,6 +68,9 @@ return the conversation so far, promptly, whatever state the execution is in.
       not a hang — if the unbounded wait is reintroduced.
 - [ ] A running execution that has produced no messages yet returns an empty
       message list promptly, rather than blocking until it produces one.
+- [ ] A running execution whose oldest entries were evicted still returns the
+      messages that survive, rather than an empty list.
+- [ ] A finished execution still reads from its settled stream.
 - [ ] Non-conversation patches (repo diffs) stay excluded from message results
       for running executions, as they already are for finished ones.
 - [ ] Existing finished-execution tests pass unchanged.
