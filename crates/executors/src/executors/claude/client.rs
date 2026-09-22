@@ -211,13 +211,13 @@ fn contains_command_keyword(haystack: &str, needle: &str) -> bool {
 ///
 /// - *Codex* has no `PreToolUse` equivalent to attach a refusal to — that is
 ///   why the background block had to be delivered as prose in
-///   `POLLER_DEVELOPER_INSTRUCTIONS` (`executors::codex`) instead. Whether its
-///   one-shot `shell_command` accepts a VK-settable
-///   deadline was **not** verified against the pinned `@openai/codex` artifact
-///   during this change, and Constitution IX forbids shipping an identifier
-///   that has not been read from the artifact that executes. Deferred, not
-///   declined: the next person to look should read the pinned binary rather
-///   than assume the gap was considered and rejected.
+///   `POLLER_DEVELOPER_INSTRUCTIONS` (`executors::codex`) instead. Its
+///   per-command deadline has since been **verified absent as a VK-settable
+///   identifier**: the default is a hard-coded `const` upstream with no config
+///   key or environment variable, so no equivalent of the Claude environment
+///   bound ships either. The evidence is recorded next to
+///   `features.unified_exec` in `executors::codex`. Codex is also structurally
+///   far less exposed — every exec is bounded, defaulting to ten seconds.
 /// - *Grok* reaches the shell over ACP, whose terminal capability VK never
 ///   advertises; that verified absence is already recorded in
 ///   `wiki/vk-pollers.md` and is unchanged here.
