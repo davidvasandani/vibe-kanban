@@ -557,6 +557,28 @@ explains why the default hides it, and the lookup never mutates the saved
 preference. Regression coverage asserts that the hidden-by-default record is
 absent without the lookup and present with it.
 
+### XXXIX. Request-scoped reads terminate independently of liveness
+A read that must return a value to a waiting caller — an HTTP handler, an MCP
+tool, any request-scoped projection — MUST derive from a source that terminates
+on its own. A live tail is not such a source: a stream that ends only when the
+observed subject ends makes response latency equal to the remaining lifetime of
+that subject, which is unbounded for anything still running.
+
+Where one pipeline serves both a live subscriber and a one-shot reader, the
+shared stage is the normalization, not the termination condition. The one-shot
+reader takes a snapshot of what has settled so far; the subscriber keeps
+following. Reusing the subscriber's stream for the snapshot — and recovering
+termination from a sentinel, a dropped sender, or a timeout — is the defect this
+principle forbids, not an acceptable shortcut. A sentinel that a downstream
+filter can discard is not a termination guarantee at all.
+
+Returning the partial-but-settled state of a running subject is correct, not
+premature; it is distinguished from a completed read by the subject's own
+authoritative status field, which the response already carries. Retained history
+may be capped, and a capped answer is still preferable to no answer. Regression
+coverage exercises the still-running case under an assertable deadline, so a
+reintroduced unbounded wait fails as a timeout rather than hanging the suite.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -578,7 +600,12 @@ absent without the lookup and present with it.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.34.0 (adds XXXVIII, so view-level visibility defaults never
+**Version**: 0.35.0 (adds XXXIX, requiring a request-scoped read to derive
+from a self-terminating source rather than a live tail, to share normalization
+but not the termination condition with a live subscriber, to treat a
+filter-discardable sentinel as no guarantee, to return settled partial state for
+a running subject alongside its authoritative status, and to cover the
+still-running case under an assertable deadline; 0.34.0 added XXXVIII, so view-level visibility defaults never
 silently remove records from an explicit user lookup while deliberate filters
 still apply; 0.33.0 added XXXVII, requiring configuring/committing controls to
 stay inside a host-supplied definite height via a fully declared shrink and
@@ -737,3 +764,30 @@ ran before the text search, so the lookup could never match it. II (test the
 contract) and III (smallest change) apply as written. No existing principle said
 that a view default must yield to an explicit lookup. Numeral XXXVIII was unused
 on this branch and on `main`.
+
+## Review: vk/3fb0-debug-why-vk-mes
+
+Applied `/speckit.constitution`: added principle XXXIX. The task is a hang in
+`GET /api/execution-processes/{id}/messages`, whose handler drains a normalized
+log stream that only terminates when the execution does. Existing principles
+touch the neighbourhood without covering it. XXXI governs reconstruction of
+*immutable completed* history — single-flight, atomically materialized, bounded
+— and explicitly reasons about finished executions; the endpoint hangs precisely
+for running ones, which XXXI never addresses. XII requires one authoritative
+owner for asynchronous handoffs, but this is a synchronous read, not a
+producer/consumer claim. XXX requires execution UI to derive from authoritative
+rehydratable snapshots, and XXXIV requires partial projections to degrade
+deterministically — both describe what a consumer does with data that has
+arrived, not the obligation of the read itself to return. IX's 0.32.0 extension
+is the closest in spirit — it treats an unbounded foreground wait as a
+hang-capable path to be bounded — but it is scoped to controls imposed on vendor
+CLIs, not to this codebase's own request handlers.
+
+XXXIX fills that gap and names the specific mechanism found here: a shared
+pipeline whose live-subscriber stream was reused for a one-shot read, where the
+`Finished` sentinel was discarded by a downstream filter, leaving termination to
+depend on the broadcast sender being dropped at turn end. This principle was drafted as XXXVIII / 0.34.0; before merge `main` claimed
+both for "Explicit lookups are not hidden by view defaults" (#322), so it was
+restacked as XXXIX / 0.35.0 above it rather than replacing it. Numeral XXXIX was
+unused on this branch and on `main` at that point; the pre-existing duplicate
+`XX` is untouched.

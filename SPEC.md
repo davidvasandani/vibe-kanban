@@ -1,29 +1,89 @@
-# Searching the kanban board must find sub-issues
+# Spec: `/messages` API hangs on running executions
 
 ## Problem
 
-SWE-190 ("Add device-status and MX uplink-status collectors…", In progress, Urgent) exists in the Platform Ops project and opens fine in the issue panel, but typing `190` into the board search in the **Team** view returns zero matches in every column.
+`GET /api/execution-processes/{id}/messages` (and the MCP tools
+`list_recent_messages` / `list_all_messages` that wrap it) never returns while
+the target execution is still `Running`. The caller sees a client-side timeout.
 
-SWE-190 is a sub-issue of SWE-176. The Team view hides sub-issues by default (`getDefaultShowSubIssuesForView('team') === false`), and `useKanbanFilters` applies that hide **before** the text search. A sub-issue can therefore never be found by searching the Team board — not by title, simple ID or issue number — even though the search box is the tool a user reaches for when an issue "is missing". Nothing on screen says results were hidden because they are sub-issues.
+## Root cause
 
-## Requirement
+`build_recent_messages_response` (`crates/server/src/routes/execution_processes.rs`)
+calls `ContainerService::normalized_entries`, which drains
+`stream_normalized_logs` until it observes `LogMsg::Finished`:
 
-When the board search query is non-empty, issues that match the query must be shown whether or not they are sub-issues. The "show sub-issues" preference governs only the unfiltered board.
+`crates/services/src/services/container.rs:1827`
 
-- Empty or whitespace-only query: behaviour unchanged — sub-issues are hidden when `showSubIssues` is false.
-- Non-empty query: matching sub-issues are included. Matching is unchanged (case-insensitive substring on title, `simple_id` and `issue_number`).
-- Every other filter still applies to search results: priority, assignee (including Personal-view "self"), tags and "hide blocked". Search widens only the sub-issue exclusion, nothing else.
-- Sub-issue cards found by search keep their existing sub-issue indicator (`isSubIssue`), so the user can see why the card is not normally on the board.
-- The saved `showSubIssues` preference and the "active filters" indicator are not changed by searching.
+```rust
+let mut stream = self.stream_normalized_logs(id).await?;
+while let Some(item) = stream.next().await {
+    match item {
+        Ok(LogMsg::JsonPatch(patch)) => { ... }
+        Ok(LogMsg::Finished) => break,
+        ...
+    }
+}
+```
+
+For an execution with a live in-memory `MsgStore`, `stream_normalized_logs`
+(`container.rs:1475`) returns:
+
+```rust
+store.history_plus_stream()
+    .filter(|msg| future::ready(matches!(msg, Ok(LogMsg::JsonPatch(..)) | Err(_))))
+    .chain(futures::stream::once(async { Ok(LogMsg::Finished) }))
+```
+
+Two properties combine into the hang:
+
+1. `history_plus_stream` (`crates/utils/src/msg_store.rs:111`) is buffered
+   history **chained to a live `BroadcastStream`**. That live half only ends
+   when the broadcast sender is dropped — i.e. when the execution finishes and
+   the container service drops the store from its map.
+2. The `.filter()` discards everything that is not a `JsonPatch`, so the real
+   `LogMsg::Finished` the store pushes at process end is **removed**. The only
+   `Finished` the consumer can ever see is the synthetic chained one, which is
+   reached solely by the live stream terminating.
+
+So `normalized_entries` blocks for the entire remaining duration of the turn.
+This is correct for the websocket consumer (it *wants* a live tail) but wrong
+for the `Vec`-returning snapshot path.
+
+The finished-execution paths (materialized cache replay, historical
+re-normalization) do terminate, which is why the endpoint only hangs for
+running turns — the exact case the MCP tool documents as its purpose
+("Check this before a follow-up `run_session_prompt`").
+
+## Requirements
+
+- R1: `/messages` must return promptly for an execution in any state,
+  including `Running`.
+- R2: For a running execution it must return the messages normalized **so
+  far**, not an error and not an empty list.
+- R3: The websocket log stream must keep its live-tail behaviour unchanged.
+- R4: Finished-execution behaviour (cache replay, historical normalization,
+  `has_more`, role filtering, truncation) must be unchanged.
+
+## Approach
+
+Give `normalized_entries` a terminating source instead of the live tail. When
+an in-memory `MsgStore` exists, read the already-buffered patches via the
+existing synchronous snapshot `MsgStore::get_history()`
+(`crates/utils/src/msg_store.rs:100`) and materialize from those. Fall back to
+the existing `stream_normalized_logs` drain only when there is no live store,
+where the stream is finite by construction.
+
+This keeps one normalization pipeline, touches no websocket behaviour, and
+needs no timeout heuristic.
 
 ## Out of scope
 
-- Changing the Team view's default for `showSubIssues`.
-- Server-side or global search (`wiki/global-search.md` covers that separately; it already searches all issues).
-- Any deployment or homelab changes.
+- Changing the websocket streaming contract.
+- Changing the normalized-log cache/materialization design.
+- Pagination or limit semantics.
 
 ## Acceptance
 
-- Unit tests for `useKanbanFilters` cover: a sub-issue hidden with no query; a sub-issue found by simple ID, issue number and title when `showSubIssues` is false; a search that also has a priority/assignee filter still excluding a non-matching sub-issue; top-level results unchanged.
-- `pnpm run check`, `pnpm run lint` and `pnpm run format` pass; the web-core Vitest suite passes.
-- Independent Codex review with no significant findings; knowledge base updated; PR merged to the base branch.
+- A running execution with buffered patches returns those messages immediately.
+- Regression test that fails (hangs) before the change and passes after.
+- `cargo test --workspace`, `pnpm run check`, `pnpm run lint` pass.

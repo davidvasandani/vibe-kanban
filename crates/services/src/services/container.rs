@@ -136,15 +136,68 @@ async fn materialize_normalized_log(
 /// the store already holds everything needed once the caller has confirmed
 /// the execution left `Running`.
 async fn cache_execution_from_history(cache_path: &std::path::Path, msg_store: &MsgStore) -> bool {
-    let patches: Vec<Patch> = msg_store
+    let patches = indexed_entry_patches_from_history(msg_store);
+    materialize_normalized_log(cache_path, &patches, false).await
+}
+
+/// The conversation-entry patches a store has buffered so far.
+///
+/// This is a snapshot of retained history, not a subscription: it returns
+/// what is there at the moment of the call and does not wait for more. That
+/// is what makes it usable from a request-scoped read of an execution that is
+/// still running — see [`normalized_entries_from_history`].
+fn indexed_entry_patches_from_history(msg_store: &MsgStore) -> Vec<Patch> {
+    msg_store
         .get_history()
         .into_iter()
         .filter_map(|msg| match msg {
             LogMsg::JsonPatch(patch) if is_indexed_entry_patch(&patch) => Some(patch),
             _ => None,
         })
-        .collect();
-    materialize_normalized_log(cache_path, &patches, false).await
+        .collect()
+}
+
+/// Apply `/entries/<index>` patches and deserialize the resulting documents,
+/// shared by both of [`ContainerService::normalized_entries`]' sources so the
+/// live-store and historical paths cannot drift in how an entry is derived.
+fn entries_from_patches(id: &Uuid, patches: &[Patch]) -> Option<Vec<NormalizedEntry>> {
+    match normalized_log_cache::materialize_entries(patches) {
+        Ok(values) => Some(
+            values
+                .iter()
+                .filter_map(normalized_entry_from_patch_value)
+                .collect(),
+        ),
+        Err(e) => {
+            tracing::warn!(
+                execution_id = %id,
+                "Could not materialize normalized entries: {e}"
+            );
+            None
+        }
+    }
+}
+
+/// The settled normalized entries of an execution whose `MsgStore` is still
+/// live, taken from buffered history rather than by following the store.
+///
+/// A live store's log stream is a *tail*: `history_plus_stream` chains
+/// retained history onto a broadcast subscription that ends only when the
+/// sender is dropped, which happens when the turn finishes and the store
+/// leaves [`ContainerService`]'s map. Draining it from a request handler
+/// therefore takes as long as the turn has left to run. Worse, the
+/// `LogMsg::Finished` the store pushes at the end is filtered out downstream
+/// by [`ContainerService::stream_normalized_logs`], so that sentinel is not a
+/// termination guarantee either.
+///
+/// Split out as a free function for the same reason as
+/// [`cache_execution_from_history`]: it makes the running-execution read
+/// testable without a database.
+fn normalized_entries_from_history(
+    id: &Uuid,
+    msg_store: &MsgStore,
+) -> Option<Vec<NormalizedEntry>> {
+    entries_from_patches(id, &indexed_entry_patches_from_history(msg_store))
 }
 
 async fn replay_materialized_log(
@@ -1813,18 +1866,38 @@ pub trait ContainerService {
         }
     }
 
-    /// Returns the settled normalized entries for an execution, for callers
-    /// that want a `Vec` rather than a live stream (e.g. an MCP tool
-    /// answering "what did this turn say").
+    /// Returns the normalized entries settled so far for an execution, for
+    /// callers that want a `Vec` rather than a live stream (e.g. an MCP tool
+    /// answering "what did this turn say"). Returns promptly whatever the
+    /// execution's state: for one still running, that is the conversation up
+    /// to now, and the caller distinguishes it from a finished read by the
+    /// execution's own `status`.
     ///
-    /// Reuses [`Self::stream_normalized_logs`] rather than a second read
-    /// path: the same in-memory store / on-disk materialized cache / bounded
-    /// historical re-normalization decision it makes applies here too. Only
-    /// `/entries/<index>` patches are kept before materializing — repo-diff
-    /// patches (`/entries/<repo>/<file>`) target a nested object, not the
-    /// `{"entries": []}` array `materialize_entries` applies against, and
-    /// they aren't messages anyway.
+    /// Shares [`Self::stream_normalized_logs`]' sources and its
+    /// materialization, but not its termination condition. A live in-memory
+    /// store is snapshotted via [`normalized_entries_from_history`], because
+    /// that stream is a tail which only ends when the turn does. Everything
+    /// else — the on-disk materialized cache, bounded historical
+    /// re-normalization — is finite, so it is drained as before rather than
+    /// given a second read path.
+    ///
+    /// Only `/entries/<index>` patches are kept before materializing —
+    /// repo-diff patches (`/entries/<repo>/<file>`) target a nested object,
+    /// not the `{"entries": []}` array `materialize_entries` applies against,
+    /// and they aren't messages anyway.
     async fn normalized_entries(&self, id: &Uuid) -> Option<Vec<NormalizedEntry>> {
+        // Checked first, matching `stream_normalized_logs`' own ordering, so
+        // both agree on which source is authoritative for this execution.
+        // A live store means the turn may still be running, and its stream
+        // would not end until the turn does — snapshot its buffered history
+        // instead of following it.
+        if let Some(store) = self.get_msg_store_by_id(id).await {
+            return normalized_entries_from_history(id, &store);
+        }
+
+        // No live store: `stream_normalized_logs` is finite by construction
+        // here — either a replay of the materialized sidecar, or a bounded
+        // historical re-normalization — and both end with `Finished`.
         let mut stream = self.stream_normalized_logs(id).await?;
         let mut patches = Vec::new();
         while let Some(item) = stream.next().await {
@@ -1840,21 +1913,7 @@ pub trait ContainerService {
             }
         }
 
-        match normalized_log_cache::materialize_entries(&patches) {
-            Ok(values) => Some(
-                values
-                    .iter()
-                    .filter_map(normalized_entry_from_patch_value)
-                    .collect(),
-            ),
-            Err(e) => {
-                tracing::warn!(
-                    execution_id = %id,
-                    "Could not materialize normalized entries: {e}"
-                );
-                None
-            }
-        }
+        entries_from_patches(id, &patches)
     }
 
     /// Write the normalized-log cache for an execution the moment it leaves
@@ -2433,9 +2492,10 @@ mod tests {
 
     use super::{
         HistoricalNormalizationLifetime, HistoricalNormalizationRegistry, LogMsg,
-        cache_execution_from_history, is_indexed_entry_patch, lock_workspace_execution_starts,
-        replay_materialized_log, reset_would_discard_uncommitted_work,
-        scope_initial_prompt_to_working_dir, workspace_execution_gate,
+        cache_execution_from_history, indexed_entry_patches_from_history, is_indexed_entry_patch,
+        lock_workspace_execution_starts, normalized_entries_from_history, replay_materialized_log,
+        reset_would_discard_uncommitted_work, scope_initial_prompt_to_working_dir,
+        workspace_execution_gate,
     };
 
     #[tokio::test]
@@ -2791,6 +2851,151 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    /// Regression test for the `/messages` timeout: reading an execution that
+    /// is still running must return the conversation so far, not wait for the
+    /// turn to end.
+    ///
+    /// The store is deliberately left in the state a running turn has it:
+    /// `Finished` never pushed, and the store still alive (so its broadcast
+    /// sender is not dropped). Under the old implementation — which drained
+    /// `stream_normalized_logs` until `Finished` — this could not return, so
+    /// the deadline below is what fails if that wait is reintroduced.
+    #[tokio::test]
+    async fn a_running_execution_reads_the_messages_it_has_produced_so_far() {
+        let execution_id = Uuid::new_v4();
+        let store = utils::msg_store::MsgStore::new();
+
+        for (index, (entry_type, content)) in [
+            (super::NormalizedEntryType::UserMessage, "why is it slow?"),
+            (
+                super::NormalizedEntryType::AssistantMessage,
+                "still looking",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            store.push_patch(ConversationPatch::add_normalized_entry(
+                index,
+                super::NormalizedEntry {
+                    timestamp: None,
+                    entry_type,
+                    content: content.to_string(),
+                    metadata: None,
+                },
+            ));
+        }
+
+        let entries = tokio::time::timeout(
+            Duration::from_secs(5),
+            std::future::ready(normalized_entries_from_history(&execution_id, &store)),
+        )
+        .await
+        .expect("a running execution's messages must not wait for the turn to end")
+        .expect("buffered entry patches must materialize");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].content, "why is it slow?");
+        assert_eq!(entries[1].content, "still looking");
+        // The latest assistant text is present while the turn is still
+        // running: it is a progress signal, not evidence the turn ended.
+        assert!(matches!(
+            entries[1].entry_type,
+            super::NormalizedEntryType::AssistantMessage
+        ));
+    }
+
+    /// Documents *why* the deadline in the test above is load-bearing: the
+    /// stream shape `stream_normalized_logs` hands a live subscriber does not
+    /// terminate while the store is alive, because the `Finished` the store
+    /// would push is filtered out and the chained sentinel is only reached
+    /// once the broadcast sender drops.
+    #[tokio::test]
+    async fn a_live_stores_log_stream_does_not_terminate_on_its_own() {
+        let store = utils::msg_store::MsgStore::new();
+        store.push_patch(ConversationPatch::add_normalized_entry(
+            0,
+            super::NormalizedEntry {
+                timestamp: None,
+                entry_type: super::NormalizedEntryType::AssistantMessage,
+                content: "working".to_string(),
+                metadata: None,
+            },
+        ));
+        // A running turn pushes this; the filter below drops it, so it cannot
+        // act as the consumer's termination signal.
+        store.push_finished();
+
+        let mut stream = store
+            .history_plus_stream()
+            .filter(|msg| futures::future::ready(matches!(msg, Ok(LogMsg::JsonPatch(..)) | Err(_))))
+            .chain(futures::stream::once(async {
+                Ok::<_, std::io::Error>(LogMsg::Finished)
+            }))
+            .boxed();
+
+        let drained = tokio::time::timeout(Duration::from_millis(50), async {
+            while let Some(item) = stream.next().await {
+                if matches!(item, Ok(LogMsg::Finished)) {
+                    return;
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            drained.is_err(),
+            "the live tail must be the thing that never ends — if this now \
+             terminates, the snapshot read's deadline no longer proves anything"
+        );
+    }
+
+    /// A running execution's snapshot applies the same patch scoping a
+    /// finished one does: repo-diff patches are not messages, and a turn that
+    /// has produced nothing yet reads as empty rather than blocking.
+    #[tokio::test]
+    async fn a_running_execution_snapshot_keeps_only_conversation_entries() {
+        let execution_id = Uuid::new_v4();
+        let store = utils::msg_store::MsgStore::new();
+
+        let empty = normalized_entries_from_history(&execution_id, &store)
+            .expect("a store with nothing buffered must read as empty, not fail");
+        assert!(empty.is_empty());
+
+        store.push_patch(ConversationPatch::add_normalized_entry(
+            0,
+            super::NormalizedEntry {
+                timestamp: None,
+                entry_type: super::NormalizedEntryType::AssistantMessage,
+                content: "edited a file".to_string(),
+                metadata: None,
+            },
+        ));
+        store.push_patch(ConversationPatch::add_repo_diff(
+            "repo",
+            "src/main.rs",
+            utils::diff::Diff {
+                change: utils::diff::DiffChangeKind::Added,
+                old_path: None,
+                new_path: Some("src/main.rs".to_string()),
+                old_content: None,
+                new_content: None,
+                content_omitted: false,
+                additions: None,
+                deletions: None,
+                repo_id: None,
+            },
+        ));
+        store.push_stdout("raw output that is not a normalized entry");
+
+        assert_eq!(indexed_entry_patches_from_history(&store).len(), 1);
+
+        let entries = normalized_entries_from_history(&execution_id, &store)
+            .expect("conversation entries must materialize alongside a repo diff");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "edited a file");
     }
 
     #[test]
