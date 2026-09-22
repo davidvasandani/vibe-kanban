@@ -440,13 +440,38 @@ Ambiguity resolves permissively by design.
 
 ### Scope is per-agent, and an absence must read as a decision
 
-Claude only. Codex has no `PreToolUse` equivalent to attach a refusal to, and
-whether its one-shot `shell_command` takes a VK-settable deadline was **not**
-verified against the pinned artifact — so nothing ships for it, recorded in code
-as deferred-with-evidence rather than left to look like an oversight. Grok's
-existing verified absence is unchanged. This is the same discipline as the
-"block is not a redirect" section above, applied to a control that legitimately
-should *not* ship yet.
+Claude only, and the Codex half is now **verified**, not merely deferred.
+
+Codex has no `PreToolUse` equivalent to attach a refusal to, so layer 2 has no
+attachment point. For layer 1, the vendored `rust-v0.144.1` source
+(`44918ea…`, the tag Cargo already pins for `codex-app-server-protocol` — the
+authoritative artifact, not the npm tarball) shows:
+
+- `core/src/exec.rs:58` — `DEFAULT_EXEC_COMMAND_TIMEOUT_MS: u64 = 10_000`
+- `core/src/tools/handlers/shell_spec.rs:171` — the `shell` tool's `timeout_ms`
+  parameter, "Maximum command runtime. Defaults to 10000 ms."
+- `core/src/exec.rs:163` — `From<Option<u64>> for ExecExpiration`: absent →
+  `DefaultTimeout`, supplied → `Timeout(..)`
+
+The default is a **hard-coded `const`**. `codex-rs/config.md` documents no
+execution timeout, and the only timeout keys under `codex-rs/config/src` are MCP
+ones (`startup_timeout_sec`, `tool_timeout_sec`). So there is no identifier for
+VK to set and, per Constitution IX, **no rule ships** — with the evidence
+recorded in code next to `features.unified_exec`.
+
+Two things worth carrying forward:
+
+- **Verifying an absence can also lower your estimate of the risk.** Codex turns
+  out to be far less exposed than Claude was: every exec carries an expiration,
+  the default is ten seconds rather than two minutes, and there is no
+  auto-background path that outlives the deadline. The deferral had been written
+  as though Codex were equally exposed and merely unchecked.
+- **Record the residual.** A model-supplied `timeout_ms` is *not* clamped, so
+  Codex can ask for one arbitrarily long command. That is one explicitly bounded
+  call rather than an open-ended block, and closing it would need an upstream
+  change — so it is documented, not patched around.
+
+Grok's existing verified absence is unchanged.
 
 ## Contributed by
 

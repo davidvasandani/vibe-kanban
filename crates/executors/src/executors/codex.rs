@@ -1277,6 +1277,35 @@ impl Codex {
         // `serde(deny_unknown_fields)`, so `app-server --strict-config` is the
         // fail-loud boundary for a misspelling. The exact spelling is also
         // pinned by `unified_exec_feature_key_is_pinned_and_disabled`.
+        //
+        // No per-command *deadline* is set here, unlike the
+        // `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` pair VK sets for
+        // Claude (`vk/603d-prevent-stuck-jo`). That is a **verified absence**,
+        // not an oversight, and it must not be "fixed" with a guessed config
+        // key. From the same vendored `rust-v0.144.1` source
+        // (`44918ea10c0f99151c6710411b4322c2f5c96bea`):
+        //
+        // - `core/src/exec.rs:58` —
+        //   `pub const DEFAULT_EXEC_COMMAND_TIMEOUT_MS: u64 = 10_000;`
+        // - `core/src/tools/handlers/shell_spec.rs:171` — the `shell` tool's
+        //   `timeout_ms` parameter, described to the model as "Maximum command
+        //   runtime. Defaults to 10000 ms."
+        // - `core/src/exec.rs:163` — `impl From<Option<u64>> for ExecExpiration`
+        //   maps absent to `DefaultTimeout` and a supplied value straight to
+        //   `Timeout(..)`.
+        //
+        // The default is a hard-coded `const`: `codex-rs/config.md` documents no
+        // execution timeout and the only timeout keys under `codex-rs/config/src`
+        // are MCP ones (`startup_timeout_sec`, `tool_timeout_sec`). There is no
+        // identifier for VK to set, so per Constitution IX no rule ships.
+        //
+        // Codex is also much less exposed than Claude was: every exec carries an
+        // expiration, the default is ten seconds rather than two minutes, and
+        // there is no auto-background path that outlives the deadline. The
+        // residual risk — a model-supplied `timeout_ms` is **not** clamped — is
+        // one explicitly bounded call, not the open-ended block that caused the
+        // incident. Re-verify when the pin moves; a release that adds a config
+        // key would make a real control possible.
         config
             .get_or_insert_with(HashMap::new)
             .insert("features.unified_exec".to_string(), Value::Bool(false));
