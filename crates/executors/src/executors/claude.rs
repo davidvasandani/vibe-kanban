@@ -284,19 +284,30 @@ const _: () = assert!(
      which clamps the maximum to at least the effective default — lower the default too"
 );
 
-/// The per-command timeout variables VK seeds onto the Claude child process.
+/// The per-command timeout variables VK seeds onto the Claude child process,
+/// minus any the caller has already set.
 ///
-/// Split out from `spawn_internal` so the values and spellings are unit
-/// testable; asserting against a constructed `Command` builder chain is not
-/// practical.
-pub fn bash_timeout_env() -> [(&'static str, String); 2] {
+/// `is_set` reports whether a variable is already present in the environment
+/// the child would otherwise inherit. Seeding is a **default**, so an existing
+/// value always wins: a child `Command` inherits the VK server's own
+/// environment, and an unconditional `.env()` would override a
+/// `BASH_MAX_TIMEOUT_MS` an operator had exported for the service — silently
+/// narrowing a deliberately widened bound. `ExecutionEnv` is built from
+/// organisation variables and VK context, not from `std::env`, so it does not
+/// cover that case on its own.
+///
+/// Split out from `spawn_internal` so the values, spellings and this precedence
+/// rule are unit testable; asserting against a constructed `Command` builder
+/// chain is not practical.
+pub fn bash_timeout_env(is_set: impl Fn(&str) -> bool) -> Vec<(&'static str, String)> {
     [
-        (
-            BASH_DEFAULT_TIMEOUT_MS_VAR,
-            BASH_DEFAULT_TIMEOUT_MS.to_string(),
-        ),
-        (BASH_MAX_TIMEOUT_MS_VAR, BASH_MAX_TIMEOUT_MS.to_string()),
+        (BASH_DEFAULT_TIMEOUT_MS_VAR, BASH_DEFAULT_TIMEOUT_MS),
+        (BASH_MAX_TIMEOUT_MS_VAR, BASH_MAX_TIMEOUT_MS),
     ]
+    .into_iter()
+    .filter(|(key, _)| !is_set(key))
+    .map(|(key, value)| (key, value.to_string()))
+    .collect()
 }
 
 fn normalize_claude_stderr_logs(
@@ -1016,12 +1027,13 @@ impl ClaudeCode {
             .env("NPM_CONFIG_LOGLEVEL", "error")
             .args(&args);
 
-        // Bound how long one foreground command can block the turn. Seeded
-        // *before* `apply_to_command` so these stay defaults: a profile, org or
-        // operator variable of the same name is applied after and wins, which
-        // is the documented escape hatch and the same precedence
-        // `NPM_CONFIG_LOGLEVEL` already has.
-        for (key, value) in bash_timeout_env() {
+        // Bound how long one foreground command can block the turn. These stay
+        // *defaults* on both sides: variables already exported to the VK
+        // service are left alone (the child inherits them), and seeding happens
+        // *before* `apply_to_command` so a profile or org variable of the same
+        // name is applied after and wins. Same precedence `NPM_CONFIG_LOGLEVEL`
+        // already has.
+        for (key, value) in bash_timeout_env(|key| std::env::var_os(key).is_some()) {
             command.env(key, value);
         }
 
@@ -4795,7 +4807,7 @@ mod tests {
     fn bash_timeout_values_are_consistent() {
         // A non-numeric or non-positive value is ignored by the CLI and the
         // built-in default applies, so both must be plain positive integers.
-        for (key, value) in bash_timeout_env() {
+        for (key, value) in bash_timeout_env(|_| false) {
             let parsed: u64 = value
                 .parse()
                 .unwrap_or_else(|_| panic!("{key} must serialize as an integer; got {value:?}"));
@@ -4803,11 +4815,32 @@ mod tests {
         }
     }
 
+    /// A variable already exported to the VK service is inherited by the child,
+    /// so VK must not overwrite it. Without this the documented escape hatch
+    /// covered only `ExecutionEnv` variables, and an operator who had widened
+    /// `BASH_MAX_TIMEOUT_MS` for the service would have found it silently
+    /// narrowed back to VK's default.
+    #[test]
+    fn already_set_bash_timeout_variables_are_left_alone() {
+        let seeded = bash_timeout_env(|key| key == BASH_MAX_TIMEOUT_MS_VAR);
+        assert_eq!(
+            seeded.len(),
+            1,
+            "an already-set variable must not be re-seeded; got {seeded:?}"
+        );
+        assert_eq!(seeded[0].0, BASH_DEFAULT_TIMEOUT_MS_VAR);
+
+        assert!(
+            bash_timeout_env(|_| true).is_empty(),
+            "nothing is seeded when the caller already set both"
+        );
+    }
+
     /// Spelling is pinned: these are read from the pinned CLI binary, and an
     /// unknown variable name is ignored without any error.
     #[test]
     fn bash_timeout_env_uses_the_verified_variable_names() {
-        let env = bash_timeout_env();
+        let env = bash_timeout_env(|_| false);
         assert_eq!(env[0].0, "BASH_DEFAULT_TIMEOUT_MS");
         assert_eq!(env[1].0, "BASH_MAX_TIMEOUT_MS");
         assert_eq!(env[0].1, BASH_DEFAULT_TIMEOUT_MS.to_string());
@@ -4821,7 +4854,7 @@ mod tests {
     #[test]
     fn execution_env_overrides_vk_bash_timeout_defaults() {
         let mut command = tokio::process::Command::new("true");
-        for (key, value) in bash_timeout_env() {
+        for (key, value) in bash_timeout_env(|_| false) {
             command.env(key, value);
         }
 
