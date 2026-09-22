@@ -68,9 +68,10 @@ Also added, outside this file:
 // read guard, instead of deep-copying all retained history.
 pub fn select_history<T>(&self, select: impl FnMut(&LogMsg) -> Option<T>) -> Vec<T>;
 
-// crates/services/src/services/normalized_log_cache.rs — skip non-applying
-// patches instead of abandoning the document; live-store path only.
-pub fn materialize_entries_lossy(patches: &[Patch]) -> Result<(Vec<Value>, usize), CacheError>;
+// crates/services/src/services/normalized_log_cache.rs — re-base surviving
+// entry indices onto a fresh array; live-store path only. Returns the
+// entries and the number of operations that could not be placed.
+pub fn materialize_entries_rebased(patches: &[Patch]) -> (Vec<Value>, usize);
 ```
 
 `ContainerService::normalized_entries` keeps its signature

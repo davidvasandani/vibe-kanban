@@ -101,6 +101,26 @@ all fixed:
    all retained history — mostly stdout — blocking `push`. Added
    `MsgStore::select_history` to clone only the selected variant.
 
+### Second review round
+
+Re-running the review on the fixes found that fix 2 above did not actually
+work, and that its test hid the failure:
+
+4. **The lenient pass recovered nothing in the case it was written for.**
+   Skipping non-applying patches *in place* is useless after front eviction:
+   once `add /entries/0..k` are gone, every surviving `add /entries/N` is
+   itself out of bounds, so all of them are skipped too — the read returned
+   zero entries while logging that it was serving survivors. Replaced with
+   `materialize_entries_rebased`, which appends each surviving `add` and
+   remaps later `replace`/`remove` onto its new position.
+5. **The eviction test used an ordering no normalizer emits.** It put
+   `replace /entries/0` *before* `add /entries/0`; real patch runs have
+   monotonic indices with every replace after its own add. Rewritten as a
+   genuine front-eviction run starting at index 2, plus direct unit tests for
+   the re-basing pass covering replace, remove-with-shift, orphaned
+   operations, and the invariant that an intact history re-bases to exactly
+   what strict application produces.
+
 ## Layer 5 — Close-out
 
 - [x] **T012** Independent Codex review of the diff; address confirmed findings

@@ -25,11 +25,19 @@ apply.
 list. Review pointed out this contradicts the principle written for this very
 task: constitution XXXVIII says "a capped answer is still preferable to no
 answer", and losing *every* message because the oldest was evicted is no
-answer. The live-store path now falls back to `materialize_entries_lossy`,
-which skips non-applying patches and logs the skipped count, so the read
-returns the surviving conversation. The stored-sidecar path keeps the strict
-form: there, a patch that does not apply means the artifact is corrupt and
-must be re-derived rather than partially trusted.
+answer.
+
+A second review round showed the first attempt at this did not work. Skipping
+non-applying patches *in place* recovers nothing in the real case: once the
+leading `add /entries/0..k` are evicted, every surviving `add /entries/N` is
+itself out of bounds against the empty array, so all of them are skipped and
+the read still returns zero entries — while logging that it was serving
+survivors. The live-store path now uses `materialize_entries_rebased`, which
+appends each surviving `add` and remaps later `replace`/`remove` onto its new
+position, so a history that starts mid-conversation materializes correctly.
+The stored-sidecar path keeps the strict form: there, a patch that does not
+apply means the artifact is corrupt and must be re-derived rather than
+partially trusted.
 
 Rejected alternative: adding a `truncated` field to `RecentMessagesResponse`.
 That widens a generated TS type and adds a branch for a case this change does

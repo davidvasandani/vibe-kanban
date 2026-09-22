@@ -189,14 +189,22 @@ false guard: the deadline can never fire.
   forwarder for every orchestrator poll. Select inside the read guard
   (`select_history`) so only the wanted variant is cloned.
 - **All-or-nothing materialization.** Retained history is byte-capped
-  (100 MB) and evicts from the front, so an `add /entries/0` can be dropped
-  while a later `replace /entries/0` survives; the survivor then fails against
-  a shorter array and strict materialization yields *no* entries at all. For a
-  live store, fall back to a lossy pass that skips non-applying patches
-  (`materialize_entries_lossy`) and log the skipped count. A capped answer
-  beats an empty one. The stored-sidecar path keeps the strict form, where a
-  patch that does not apply means the artifact is corrupt and must be
-  re-derived.
+  (100 MB) and evicts from the front, so the retained patch run starts
+  mid-conversation. Its indices no longer line up with a fresh
+  `{"entries": []}` document and strict materialization yields *no* entries.
+
+  Skipping non-applying patches in place does **not** fix this — it looks like
+  it does, and silently returns zero entries. Once `add /entries/0..k` are
+  evicted, every surviving `add /entries/N` is itself out of bounds, so the
+  lenient pass skips all of them too. The mitigation has to re-base: append
+  each surviving `add` and remap later `replace`/`remove` onto its new
+  position (`materialize_entries_rebased`). Verify it against a realistic
+  patch run — monotonic indices, every `replace` after its own `add` — because
+  a test that puts a `replace` before its `add` passes over a mitigation that
+  does not work. Assert too that an intact history re-bases to exactly what
+  strict application gives, so the fallback cannot alter a normal read. The
+  stored-sidecar path keeps the strict form, where a patch that does not apply
+  means a corrupt artifact that must be re-derived.
 
 ## Design gates before product code
 

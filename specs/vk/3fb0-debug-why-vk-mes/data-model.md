@@ -45,12 +45,21 @@ finished read would produce.
 
 ## Failure state
 
-If retained history was evicted such that a surviving `replace` has no
-corresponding `add`, strict `materialize_entries` returns `CacheError::Patch`.
-For a live store the read then retries with `materialize_entries_lossy`, which
-applies what still applies and reports how many patches it skipped, so the
-surviving messages are returned rather than none (FR-8). `json_patch::patch`
-keeps an undo stack and restores the document on failure, so a skipped patch
-leaves earlier entries intact. Only if the document itself is malformed does
-the read yield `None`, which the handler's `unwrap_or_default()` turns into an
-empty list. Prompt in every case, never blocking.
+Front eviction makes the retained patch run start mid-conversation, so its
+indices no longer line up with a fresh `{"entries": []}` document: strict
+`materialize_entries` fails on the very first surviving `add /entries/N`
+(N > 0) as out of bounds.
+
+For a live store the read then re-bases with `materialize_entries_rebased`,
+which walks the operations directly instead of applying them positionally:
+
+| Operation | Behaviour |
+| --- | --- |
+| `add /entries/N` | append to the array; record `N -> position` |
+| `replace /entries/N` | write at the recorded position, else count as dropped |
+| `remove /entries/N` | remove at the recorded position and shift later mappings down, else count as dropped |
+| anything else | count as dropped |
+
+An intact history re-bases to exactly what strict application produces, so the
+fallback cannot change a normal read (asserted by test). Dropped-operation
+count is logged. The read is prompt in every case and never blocking (FR-8).

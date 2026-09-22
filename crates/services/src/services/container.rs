@@ -202,23 +202,16 @@ fn normalized_entries_from_history(
     }
 
     // Retained history is byte-capped and evicts from the front, so a long
-    // turn can lose the `add` a surviving `replace` depends on. Return the
-    // entries that do still apply rather than nothing: the caller asked what
-    // this turn has said, and a partial answer beats an empty one.
-    let (values, skipped) = normalized_log_cache::materialize_entries_lossy(&patches)
-        .inspect_err(|e| {
-            tracing::warn!(
-                execution_id = %id,
-                "Could not materialize a running execution's entries even leniently: {e}"
-            );
-        })
-        .ok()?;
+    // turn can lose the `add`s the surviving patches are indexed against.
+    // Re-base what is left rather than returning nothing: the caller asked
+    // what this turn has said, and a partial answer beats an empty one.
+    let (values, dropped) = normalized_log_cache::materialize_entries_rebased(&patches);
     tracing::warn!(
         execution_id = %id,
-        skipped_patches = skipped,
+        dropped_operations = dropped,
         entry_count = values.len(),
         "Retained log history was evicted under its size cap; \
-         serving the conversation entries that still apply"
+         serving the conversation entries that survive"
     );
     Some(
         values
@@ -3104,34 +3097,51 @@ mod tests {
         let execution_id = Uuid::new_v4();
         let store = utils::msg_store::MsgStore::new();
 
-        // `add /entries/0` is missing, as if already evicted.
-        store.push_patch(ConversationPatch::replace(
-            0,
-            super::NormalizedEntry {
-                timestamp: None,
-                entry_type: super::NormalizedEntryType::AssistantMessage,
-                content: "revised opening turn".to_string(),
-                metadata: None,
-            },
+        // Entries 0 and 1 were evicted from the front, so history now starts
+        // mid-conversation at index 2 — indices stay monotonic, and the
+        // `replace` still follows its own `add`, exactly as a normalizer
+        // emits them.
+        let message = |content: &str| super::NormalizedEntry {
+            timestamp: None,
+            entry_type: super::NormalizedEntryType::AssistantMessage,
+            content: content.to_string(),
+            metadata: None,
+        };
+        store.push_patch(ConversationPatch::add_normalized_entry(
+            2,
+            message("third message, first one retained"),
         ));
         store.push_patch(ConversationPatch::add_normalized_entry(
-            0,
-            super::NormalizedEntry {
-                timestamp: None,
-                entry_type: super::NormalizedEntryType::AssistantMessage,
-                content: "a later message that did survive".to_string(),
-                metadata: None,
-            },
+            3,
+            message("fourth message, still streaming"),
         ));
+        store.push_patch(ConversationPatch::replace(
+            3,
+            message("fourth message, completed"),
+        ));
+        // An orphan: entry 1's `add` is gone, so this revises nothing.
+        store.push_patch(ConversationPatch::replace(1, message("cannot be applied")));
 
-        // Strict materialization cannot apply the orphaned replace.
+        // Strict materialization fails outright — `add /entries/2` is out of
+        // bounds against an empty array — which is why the re-basing pass
+        // exists rather than a lenient in-place one.
         let patches = indexed_entry_patches_from_history(&store);
         assert!(super::normalized_log_cache::materialize_entries(&patches).is_err());
 
         let entries = normalized_entries_from_history(&execution_id, &store)
             .expect("an evicted history must not read as a hard failure");
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].content, "a later message that did survive");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.content.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "third message, first one retained",
+                "fourth message, completed",
+            ],
+            "surviving entries must be re-based, and the replace must land on \
+             the right one"
+        );
     }
 
     #[test]
