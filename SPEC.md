@@ -1,9 +1,29 @@
-# New workspace config must never fall below the fold
+# Searching the kanban board must find sub-issues
 
-Keep the create-workspace composer's configuration controls — the model/preset selector, the attachment and repository-summary controls, the linked-issue badge and the create action — inside the viewport at every supported viewport size, including narrow mobile ones, without requiring the user to scroll. The create-mode heading and the prompt editor may shrink or scroll internally to make room; the config row may not be pushed out of view or clipped by an ancestor that hides overflow.
+## Problem
 
-Acceptance: at a small mobile viewport with a long prompt, the create-workspace screen renders the config row and the create action fully within the available height; the prompt editor absorbs the remaining space and scrolls its own content instead of growing the page. The guarantee covers the config row and the create action; the heading is preserved in practice because the prompt absorbs the whole deficit, but it is not itself what the requirement protects. Below the supported range — a viewport shorter than the screen's fixed cost — the create action must remain reachable by scrolling rather than be clipped away. The repository-selection step of create mode stays usable under the same constraint. Behaviour at desktop widths, in the project right sidebar, and in the workspaces layout is preserved. Changes are confined to the Vibe Kanban service repository; no deployment or other-service changes.
+SWE-190 ("Add device-status and MX uplink-status collectors…", In progress, Urgent) exists in the Platform Ops project and opens fine in the issue panel, but typing `190` into the board search in the **Team** view returns zero matches in every column.
 
-Validation: automated coverage for the layout containment contract, repository type checks, lint and formatting, an independent Codex review, a knowledge-base update, and a pull request merged to the base branch.
+SWE-190 is a sub-issue of SWE-176. The Team view hides sub-issues by default (`getDefaultShowSubIssuesForView('team') === false`), and `useKanbanFilters` applies that hide **before** the text search. A sub-issue can therefore never be found by searching the Team board — not by title, simple ID or issue number — even though the search box is the tool a user reaches for when an issue "is missing". Nothing on screen says results were hidden because they are sub-issues.
 
-The composer already lives inside ancestors that clip overflow, so the fix belongs in how the create-mode column distributes and constrains height rather than in page-level scrolling. Existing height limits expressed against the viewport rather than the container are the likely cause and should be re-expressed against available space.
+## Requirement
+
+When the board search query is non-empty, issues that match the query must be shown whether or not they are sub-issues. The "show sub-issues" preference governs only the unfiltered board.
+
+- Empty or whitespace-only query: behaviour unchanged — sub-issues are hidden when `showSubIssues` is false.
+- Non-empty query: matching sub-issues are included. Matching is unchanged (case-insensitive substring on title, `simple_id` and `issue_number`).
+- Every other filter still applies to search results: priority, assignee (including Personal-view "self"), tags and "hide blocked". Search widens only the sub-issue exclusion, nothing else.
+- Sub-issue cards found by search keep their existing sub-issue indicator (`isSubIssue`), so the user can see why the card is not normally on the board.
+- The saved `showSubIssues` preference and the "active filters" indicator are not changed by searching.
+
+## Out of scope
+
+- Changing the Team view's default for `showSubIssues`.
+- Server-side or global search (`wiki/global-search.md` covers that separately; it already searches all issues).
+- Any deployment or homelab changes.
+
+## Acceptance
+
+- Unit tests for `useKanbanFilters` cover: a sub-issue hidden with no query; a sub-issue found by simple ID, issue number and title when `showSubIssues` is false; a search that also has a priority/assignee filter still excluding a non-matching sub-issue; top-level results unchanged.
+- `pnpm run check`, `pnpm run lint` and `pnpm run format` pass; the web-core Vitest suite passes.
+- Independent Codex review with no significant findings; knowledge base updated; PR merged to the base branch.
