@@ -547,6 +547,16 @@ regression coverage asserts the structural relationship — growth, zero minimum
 overflow ownership, and that the controls are not inside the scrolling region —
 not pixel geometry.
 
+### XXXVIII. Explicit lookups are not hidden by view defaults
+A view-level visibility default (hiding sub-issues, collapsed groups, a
+personal/team scope) curates the unfiltered view. It MUST NOT silently remove
+records from the answer to an explicit lookup the user typed, such as a search
+query or a simple ID. Filters the user chose deliberately (priority, assignee,
+tags, blocked) still apply. A record revealed this way keeps the marker that
+explains why the default hides it, and the lookup never mutates the saved
+preference. Regression coverage asserts that the hidden-by-default record is
+absent without the lookup and present with it.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -568,7 +578,9 @@ not pixel geometry.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.33.0 (adds XXXVII, requiring configuring/committing controls to
+**Version**: 0.34.0 (adds XXXVIII, so view-level visibility defaults never
+silently remove records from an explicit user lookup while deliberate filters
+still apply; 0.33.0 added XXXVII, requiring configuring/committing controls to
 stay inside a host-supplied definite height via a fully declared shrink and
 overflow-ownership contract — the shell owning overflow by scrolling rather than
 discarding it where discarding would put a control beyond reach, a zero minimum
@@ -716,3 +728,12 @@ enforceable home. Numeral XXXVII was unused before this change, on this branch a
 the pre-existing duplicate `XX` is untouched. At merge time `main` had also
 claimed 0.32.0 for its extension of IX, so this change was restacked as 0.33.0
 above it rather than replacing it.
+
+## Review: vk/eaef-missing-issues
+
+Applied `/speckit.constitution` and added principle XXXVIII. SWE-190 could not
+be found from the Team board's search. The default "hide sub-issues" view filter
+ran before the text search, so the lookup could never match it. II (test the
+contract) and III (smallest change) apply as written. No existing principle said
+that a view default must yield to an explicit lookup. Numeral XXXVIII was unused
+on this branch and on `main`.
