@@ -154,6 +154,11 @@ contributed to it.
   `NODE_ENV=production` act() gotcha, and how an external-connector link
   (Jira badge) is surfaced identically on the card and the panel header (one
   `JiraBadge` + `jiraLink` data prop + `getJiraLinkForIssue` lookup).
+- [kanban-board-filtering.md](kanban-board-filtering.md) — The single
+  `filterKanbanIssues` pipeline and its stage order, why view defaults (Team
+  view hides sub-issues) must yield to an explicit search while deliberate
+  filters still apply, and pairing absence assertions with positive cases
+  (`vk/eaef-missing-issues`).
 - [kanban-items-state-and-activity-grouping.md](kanban-items-state-and-activity-grouping.md)
   — The `items` array ↔ drag-and-drop index/sort_order contract, the
   `isSyncingRef` rebuild-swallowing gotcha, the In progress Active/Waiting
