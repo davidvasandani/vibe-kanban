@@ -218,7 +218,7 @@ fn base_command(claude_code_router: bool) -> &'static str {
     if claude_code_router {
         "npx -y @musistudio/claude-code-router@1.0.66 code"
     } else {
-        "npx -y @anthropic-ai/claude-code@2.1.268"
+        "npx -y @anthropic-ai/claude-code@2.1.281"
     }
 }
 
@@ -245,18 +245,18 @@ pub const BASH_MAX_TIMEOUT_MS_VAR: &str = "BASH_MAX_TIMEOUT_MS";
 /// # Verification source (Constitution IX)
 ///
 /// Read from the native binary in `@anthropic-ai/claude-code-linux-x64`, the
-/// platform package behind the `@anthropic-ai/claude-code@2.1.268` pin in
+/// platform package behind the `@anthropic-ai/claude-code@2.1.281` pin in
 /// [`base_command`] — not from documentation or a type-definition file:
 ///
 /// ```text
-/// zRo = 120000, qRo = 600000;
-/// function pAe(e = process.env) {   // effective default
-///   let n = e.BASH_DEFAULT_TIMEOUT_MS;
-///   if (n) { let r = gl(n); if (!isNaN(r) && r > 0) return r } return zRo }
-/// function qYe(e = process.env) {   // effective maximum
-///   let n = e.BASH_MAX_TIMEOUT_MS;
-///   if (n) { let r = gl(n); if (!isNaN(r) && r > 0) return Math.max(r, pAe(e)) }
-///   return Math.max(qRo, pAe(e)) }
+/// var p = 120000, d = 600000;
+/// function Awe(e = process.env) {   // effective default
+///   let t = e.BASH_DEFAULT_TIMEOUT_MS;
+///   if (t) { let o = gc(t); if (!isNaN(o) && o > 0) return o } return p }
+/// function Cwe(e = process.env) {   // effective maximum
+///   let t = e.BASH_MAX_TIMEOUT_MS;
+///   if (t) { let o = gc(t); if (!isNaN(o) && o > 0) return Math.max(o, Awe(e)) }
+///   return Math.max(d, Awe(e)) }
 /// ```
 ///
 /// Two consequences encoded here, both silent if got wrong:
@@ -385,7 +385,7 @@ const SCHEDULE_WAKEUP_MATCHER: &str = "^ScheduleWakeup$";
 ///
 /// These are **wire tool names**, read out of the native binary shipped in
 /// `@anthropic-ai/claude-code-linux-x64@2.1.268` — the platform package behind
-/// the `@anthropic-ai/claude-code@2.1.268` pin in [`base_command`]. The wrapper's
+/// the historical `@anthropic-ai/claude-code@2.1.268` pin. The wrapper's
 /// `sdk-tools.d.ts` lists JSON-Schema *titles* (`FileReadInput`,
 /// `FileEditInput`, …), **not** wire tool names (`Read`, `Edit`, …). A deny list
 /// derived from that file would name tools that do not exist and would silently
@@ -394,7 +394,8 @@ const SCHEDULE_WAKEUP_MATCHER: &str = "^ScheduleWakeup$";
 /// `specs/vk/869c-vk-background-po/research.md`.
 ///
 /// Because `@anthropic-ai/claude-code` is a `needs-review` Renovate carve-out,
-/// re-verify these names against the binary when the pin moves.
+/// re-verify these names against the binary when the pin moves. All names were
+/// rechecked in the 2.1.281 native artifact; see `specs/opus-5-5-verification.md`.
 ///
 /// **This list is not sufficient on its own.** `TaskOutput` is marked
 /// deprecated in-binary in favour of `Read` on the background task's output
@@ -665,6 +666,7 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
             models: [
                 ("opus", "Opus"),
                 ("opus[1m]", "Opus (1M context)"),
+                ("claude-opus-5-5", "Opus 5.5"),
                 ("claude-opus-5", "Opus 5"),
                 ("claude-sonnet-5", "Sonnet 5"),
                 ("claude-fable-5-1", "Fable 5.1"),
@@ -1143,7 +1145,13 @@ const CLAUDE_1M_CONTEXT_WINDOW: u32 = 1_000_000;
 fn context_window_for_model(model: &str) -> u32 {
     if matches!(
         model,
-        "opus" | "sonnet" | "fable" | "claude-opus-5" | "claude-sonnet-5" | "claude-fable-5-1"
+        "opus"
+            | "sonnet"
+            | "fable"
+            | "claude-opus-5-5"
+            | "claude-opus-5"
+            | "claude-sonnet-5"
+            | "claude-fable-5-1"
     ) || model.contains("[1m]")
     {
         CLAUDE_1M_CONTEXT_WINDOW
@@ -3723,11 +3731,10 @@ mod tests {
             ]
         );
         assert_eq!(BACKGROUND_BASH_MATCHER, "^Bash$");
-        // The pin above is only meaningful while the CLI pin it was read from
-        // is in force.
+        // The pin is meaningful only for the last reverified CLI artifact.
         assert!(
-            base_command(false).contains("@anthropic-ai/claude-code@2.1.268"),
-            "tool names were verified against 2.1.268; re-verify against the binary if this pin moves"
+            base_command(false).contains("@anthropic-ai/claude-code@2.1.281"),
+            "tool names were verified against 2.1.281; re-verify against the binary if this pin moves"
         );
     }
 
@@ -4659,6 +4666,27 @@ mod tests {
         assert_eq!(
             processor.main_model_name.as_deref(),
             Some("claude-opus-4-8")
+        );
+    }
+
+    #[test]
+    fn test_claude_opus_5_5_in_discovered_options() {
+        let options = super::default_discovered_options();
+        let model = options
+            .model_selector
+            .models
+            .iter()
+            .find(|m| m.id == "claude-opus-5-5")
+            .expect("Opus 5.5 must be selectable explicitly");
+        assert_eq!(model.name, "Opus 5.5");
+        assert!(!model.reasoning_options.is_empty());
+        assert_eq!(
+            context_window_for_model(&model.id),
+            CLAUDE_1M_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            options.model_selector.default_model.as_deref(),
+            Some("opus")
         );
     }
 

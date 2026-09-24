@@ -31,7 +31,7 @@ contributed to it.
   transport-clean path/query/hash, restore it at iframe lifecycle boundaries,
   scope navigation by workspace, and serialize complete scratch writes against
   acknowledged versions so live navigation never reloads or loops.
-- [executor-model-catalogs.md](executor-model-catalogs.md) — Executor discovery
+- [executor-model-catalogs.md](executor-model-catalogs.md) — Executor discovery Claude upgrades must align the npm launcher, catalog and context mapping; verify native-artifact tool controls (`vk/129c-update-to-opus-5`).
   is the authoritative source for model pickers; verify current IDs and
   reasoning boundaries against provider sources, keep Default implicit, test
   exact ordered catalogs, and keep catalog refreshes separate from managed CLI
