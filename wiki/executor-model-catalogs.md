@@ -24,6 +24,22 @@ Do not bundle a model-menu refresh with a hand-written Codex CLI bump. The CLI
 pin is Renovate-managed, and protocol/dependency upgrades have a much larger
 blast radius than discovery data.
 
+## Claude CLI upgrades
+
+Claude's launch command, picker, and context-window inference are separate
+contracts in `crates/executors/src/executors/claude.rs`. A host Nix package bump
+alone does not affect VK's pinned npm launcher. When an explicitly authorized CLI
+upgrade adds a model, update that launcher, the explicit catalog entry, and the
+context mapping together. Retain earlier explicit models unless removal was
+requested. The `opus` alias moved to Opus 5.5 in Claude Code 2.1.280.
+
+Before moving the pin, inspect the actual npm native artifact's embedded
+JavaScript for timeout environment keys and background-tool wire names. SDK
+schema titles are not wire names. Preserve old evidence as historical; document
+the new artifact checksum and current checks (`specs/opus-5-5-verification.md`).
+
 ## Contributed by
 
 - `vk/094a-update-chatgpt-m`
+
+- `vk/129c-update-to-opus-5`
