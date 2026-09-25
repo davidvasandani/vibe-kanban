@@ -1,6 +1,6 @@
 # Workspace environment inheritance
 
-Tags: `6d24-org-env-vars-are`, `5e29-vk-github-fine-g`, `vk/b0d4-env-vars-value-f`
+Tags: `6d24-org-env-vars-are`, `5e29-vk-github-fine-g`, `vk/b0d4-env-vars-value-f`, `vk/a63c-don-t-obfuscate`
 
 ## One workspace has multiple process boundaries
 
@@ -102,3 +102,16 @@ transport. Do not write resolved values back to settings or secret `.env` files.
 Tests use a fake CLI with synthetic data to check argument/token handling, byte
 preservation, provider failures, limits, bootstrap precedence and cancellation.
 A response-level test protects actionable error propagation through `ApiError`.
+
+## Keep reference drafts readable
+
+`OrganizationEnvVarsCard` derives the add and replacement input types directly
+from each current draft. Exact `op://` prefixes use text inputs; other values
+use password inputs. Match the resolver's case-sensitive, untrimmed rule and
+allow incomplete reference paths while typing. Removing the prefix immediately
+restores masking without transforming the submitted value.
+
+This is draft presentation only: saved rows remain redacted and edit starts with
+an empty replacement value. Do not retrieve stored or resolved secrets to render
+references. Adjacent rendered-DOM tests cover both forms, prefix transitions,
+exact mutation payloads and cancelling/reopening the editor with synthetic data.
