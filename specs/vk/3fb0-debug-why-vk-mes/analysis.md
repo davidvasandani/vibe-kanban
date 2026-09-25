@@ -1,7 +1,7 @@
 # Analysis: vk/3fb0-debug-why-vk-mes
 
 Cross-check of `spec.md`, `plan.md`, `tasks.md` against
-`.specify/memory/constitution.md` v0.34.0. Findings only — spec, plan, and
+`.specify/memory/constitution.md` v0.35.0. Findings only — spec, plan, and
 tasks were not modified by this stage.
 
 ## Errors
@@ -59,7 +59,7 @@ principle is violated by the planned approach.
   Intentional: it is pipeline scope, not feature scope. Noted so the tasks list
   is not read as the complete definition of done.
 
-- **I-3 (constitution) — XXXVIII was added for this task,** so the plan
+- **I-3 (constitution) — XXXIX was added for this task,** so the plan
   satisfying it is not independent evidence of good design. The substantive
   checks are II (the deadline-bounded regression test), III/VI (reuses
   `get_history` and an existing filter; no new read path or dependency), and

@@ -126,9 +126,9 @@ See `./research.md`.
 
 ## Constitution Check
 
-Against `.specify/memory/constitution.md` v0.34.0:
+Against `.specify/memory/constitution.md` v0.35.0:
 
-- **XXXVIII (request-scoped reads terminate independently of liveness)** — the
+- **XXXIX (request-scoped reads terminate independently of liveness)** — the
   principle added for this task, and the direct statement of the fix: share the
   normalization, not the termination condition.
 - **I (clarity over cleverness)** — a source swap plus a comment naming the

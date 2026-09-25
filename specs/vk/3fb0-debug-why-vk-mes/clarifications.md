@@ -23,7 +23,7 @@ apply.
 **Amendment (code review).** The original resolution accepted mapping that to
 `None`, letting the route's `unwrap_or_default()` produce an empty message
 list. Review pointed out this contradicts the principle written for this very
-task: constitution XXXVIII says "a capped answer is still preferable to no
+task: constitution XXXIX says "a capped answer is still preferable to no
 answer", and losing *every* message because the oldest was evicted is no
 answer.
 

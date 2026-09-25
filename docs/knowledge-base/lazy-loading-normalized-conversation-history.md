@@ -168,7 +168,7 @@ never its *termination condition*. Snapshot the buffered history
 that are finite by construction — sidecar replay and bounded historical
 re-normalization. Returning a running turn's partial conversation is correct,
 and the response's own `status` is what distinguishes partial from settled.
-Constitution XXXVIII.
+Constitution XXXIX.
 
 ### Testing a non-terminating read
 

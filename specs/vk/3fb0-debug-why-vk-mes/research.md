@@ -40,7 +40,7 @@ clone of retained history — terminating by construction, no new concept.
 Rejected: `tokio::time::timeout` around the existing drain. It converts a hang
 into a slow, non-deterministic partial read; every running-execution call pays
 the full timeout; and the result depends on scheduling rather than on state.
-Constitution XXXVIII names this explicitly as not an acceptable shortcut.
+Constitution XXXIX names this explicitly as not an acceptable shortcut.
 
 ### D-2: Do not stop filtering `Finished` in `stream_normalized_logs`
 
