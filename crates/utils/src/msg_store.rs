@@ -98,12 +98,24 @@ impl MsgStore {
     }
 
     pub fn get_history(&self) -> Vec<LogMsg> {
+        self.select_history(|msg| Some(msg.clone()))
+    }
+
+    /// Retained history, cloning only what `select` keeps.
+    ///
+    /// Callers that want one variant — normalized patches, say — would
+    /// otherwise pay [`Self::get_history`]'s full deep copy of a history that
+    /// is mostly raw stdout, while holding the same lock `push` needs. That
+    /// cost lands on the log forwarder, so keep the selection inside the
+    /// read guard rather than filtering a complete clone afterwards.
+    pub fn select_history<T>(&self, select: impl FnMut(&LogMsg) -> Option<T>) -> Vec<T> {
+        let mut select = select;
         self.inner
             .read()
             .unwrap()
             .history
             .iter()
-            .map(|s| s.msg.clone())
+            .filter_map(|stored| select(&stored.msg))
             .collect()
     }
 

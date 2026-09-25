@@ -39,9 +39,12 @@
 //! ignored and rewritten, which is what makes a normalizer change safe to ship:
 //! bump the constant and every cache is re-derived on next read.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
-use json_patch::Patch;
+use json_patch::{Patch, PatchOperation};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -99,6 +102,68 @@ pub fn materialize_entries(patches: &[Patch]) -> Result<Vec<Value>, CacheError> 
         Some(Value::Array(entries)) => Ok(entries),
         _ => Err(CacheError::MalformedDocument),
     }
+}
+
+/// [`materialize_entries`] for a patch sequence whose beginning is missing,
+/// re-basing entry indices onto the entries that survive and reporting how
+/// many operations were dropped.
+///
+/// Only for a live store's retained history, which is byte-capped and evicts
+/// from the front. Strict application cannot recover from that at all: once
+/// `add /entries/0..k` are gone, every surviving `add /entries/N` is out of
+/// bounds against the shorter array, so applying leniently in place would
+/// skip *everything* and report an empty conversation — the failure this is
+/// here to avoid. Appending each surviving `add` and remapping later
+/// `replace`/`remove` against its new position keeps the entries that are
+/// still fully described.
+///
+/// The stored-sidecar path deliberately keeps the strict form: there, a patch
+/// that does not apply means a corrupt artifact that must be re-derived, not
+/// a window that slid.
+pub fn materialize_entries_rebased(patches: &[Patch]) -> (Vec<Value>, usize) {
+    let mut entries: Vec<Value> = Vec::new();
+    // Original entry index -> its position in `entries`.
+    let mut positions: HashMap<usize, usize> = HashMap::new();
+    let mut dropped = 0;
+
+    for operation in patches.iter().flat_map(|patch| patch.0.iter()) {
+        let index = entry_index(operation.path());
+        match (operation, index) {
+            (PatchOperation::Add(add), Some(index)) => {
+                positions.insert(index, entries.len());
+                entries.push(add.value.clone());
+            }
+            (PatchOperation::Replace(replace), Some(index)) => {
+                match positions.get(&index) {
+                    Some(&position) => entries[position] = replace.value.clone(),
+                    // Its `add` was evicted, so there is nothing to revise.
+                    None => dropped += 1,
+                }
+            }
+            (PatchOperation::Remove(_), Some(index)) => match positions.remove(&index) {
+                Some(position) => {
+                    entries.remove(position);
+                    for mapped in positions.values_mut() {
+                        if *mapped > position {
+                            *mapped -= 1;
+                        }
+                    }
+                }
+                None => dropped += 1,
+            },
+            _ => dropped += 1,
+        }
+    }
+
+    (entries, dropped)
+}
+
+/// The `<index>` of an `/entries/<index>` pointer, if it is one.
+///
+/// `/entries/<repo>/<file>` is a repo diff, not a conversation entry, and
+/// fails the `parse` because of the remaining segment.
+fn entry_index(path: &str) -> Option<usize> {
+    path.strip_prefix("/entries/")?.parse().ok()
 }
 
 /// Rebuild the patch stream a reader expects from stored entries.
@@ -317,5 +382,88 @@ mod tests {
     async fn a_missing_cache_is_simply_absent() {
         let dir = tempfile::tempdir().unwrap();
         assert!(read(&dir.path().join("absent.jsonl")).await.is_none());
+    }
+    /// The case the re-basing pass exists for: front eviction leaves a
+    /// patch run that starts mid-conversation, which strict application
+    /// cannot apply at all.
+    #[test]
+    fn front_eviction_rebases_surviving_entries_onto_a_fresh_array() {
+        let patches = vec![add(2, json!("third")), add(3, json!("fourth"))];
+
+        assert!(
+            materialize_entries(&patches).is_err(),
+            "strict application must fail, or the fallback would be pointless"
+        );
+
+        let (entries, dropped) = materialize_entries_rebased(&patches);
+        assert_eq!(entries, vec![json!("third"), json!("fourth")]);
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn a_replace_follows_its_entry_to_the_rebased_position() {
+        let patches = vec![
+            add(2, json!("third")),
+            add(3, json!("fourth")),
+            replace(3, json!("fourth, revised")),
+        ];
+
+        let (entries, dropped) = materialize_entries_rebased(&patches);
+        assert_eq!(entries, vec![json!("third"), json!("fourth, revised")]);
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn operations_on_evicted_entries_are_counted_not_applied() {
+        let patches = vec![
+            replace(0, json!("its add was evicted")),
+            remove(1),
+            add(2, json!("third")),
+        ];
+
+        let (entries, dropped) = materialize_entries_rebased(&patches);
+        assert_eq!(entries, vec![json!("third")]);
+        assert_eq!(dropped, 2);
+    }
+
+    /// A remove shifts the entries after it, so later indices must still
+    /// resolve to the right position.
+    #[test]
+    fn a_remove_rebases_the_entries_after_it() {
+        let patches = vec![
+            add(2, json!("third")),
+            add(3, json!("fourth")),
+            add(4, json!("fifth")),
+            remove(3),
+            replace(4, json!("fifth, revised")),
+        ];
+
+        let (entries, dropped) = materialize_entries_rebased(&patches);
+        assert_eq!(entries, vec![json!("third"), json!("fifth, revised")]);
+        assert_eq!(dropped, 0);
+    }
+
+    /// An intact history must materialize identically either way, so the
+    /// fallback cannot change what a normal read returns.
+    #[test]
+    fn an_intact_history_rebases_to_the_same_entries_strict_application_gives() {
+        let patches = vec![
+            add(0, json!("first")),
+            add(1, json!("second")),
+            replace(1, json!("second, revised")),
+        ];
+
+        let (rebased, dropped) = materialize_entries_rebased(&patches);
+        assert_eq!(rebased, materialize_entries(&patches).unwrap());
+        assert_eq!(dropped, 0);
+    }
+
+    /// Repo diffs target `/entries/<repo>/<file>`, not a conversation entry.
+    #[test]
+    fn repo_diff_paths_are_not_mistaken_for_entry_indices() {
+        assert_eq!(entry_index("/entries/3"), Some(3));
+        assert_eq!(entry_index("/entries/repo/src~1main.rs"), None);
+        assert_eq!(entry_index("/entries"), None);
+        assert_eq!(entry_index("/other/3"), None);
     }
 }
