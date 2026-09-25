@@ -121,7 +121,9 @@ export function OrganizationEnvVarsCard({ organizationId }: Props) {
                   {isEditing ? (
                     <Input
                       autoFocus
-                      type="password"
+                      type={
+                        editing.value.startsWith('op://') ? 'text' : 'password'
+                      }
                       placeholder="New value or op://vault/item/field"
                       value={editing.value}
                       onChange={(e) =>
@@ -199,7 +201,7 @@ export function OrganizationEnvVarsCard({ organizationId }: Props) {
               autoComplete="off"
             />
             <Input
-              type="password"
+              type={newValue.startsWith('op://') ? 'text' : 'password'}
               placeholder="value or op://vault/item/field"
               value={newValue}
               onChange={(e) => setNewValue(e.target.value)}
