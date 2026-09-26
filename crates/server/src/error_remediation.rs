@@ -50,12 +50,6 @@ use crate::{
     routes::workspaces::{create::create_and_start_workspace, links},
 };
 
-/// Page size for the similar-issue lookup, newest first.
-const SIMILAR_ISSUE_PAGE_SIZE: i32 = 200;
-/// Pages read before the lookup gives up. Giving up fails closed (nothing is
-/// launched): an unchecked remainder could hold the matching issue.
-const SIMILAR_ISSUE_MAX_PAGES: usize = 10;
-
 /// Shared state of the consumer.
 #[derive(Default)]
 struct Consumer {
@@ -381,48 +375,44 @@ async fn launch(
 }
 
 /// The newest active remediation issue in `project_id` whose recorded errors
-/// match `messages`. Reads every page of candidates; an error, or a remainder
-/// left unread after [`SIMILAR_ISSUE_MAX_PAGES`], is returned as `Err` so
-/// the caller launches nothing rather than risk a duplicate.
+/// match `messages`. All candidates are read in **one** request: offset
+/// pagination is not a consistent snapshot (a status change between pages
+/// shifts later issues past the next offset), and a missed match would
+/// launch a duplicate. An error, or a response that does not contain every
+/// counted candidate, is returned as `Err` so the caller launches nothing.
 async fn find_active_similar_issue(
     client: &RemoteClient,
     project_id: Uuid,
     active_status_ids: Vec<Uuid>,
     messages: &[String],
 ) -> Result<Option<Issue>, String> {
-    let mut offset = 0usize;
-    for _ in 0..SIMILAR_ISSUE_MAX_PAGES {
-        let page = client
-            .search_issues(&SearchIssuesRequest {
-                project_id,
-                status_id: None,
-                status_ids: Some(active_status_ids.clone()),
-                priority: None,
-                parent_issue_id: None,
-                search: Some(REMEDIATION_MARKER_PREFIX.trim().to_string()),
-                simple_id: None,
-                assignee_user_id: None,
-                tag_id: None,
-                tag_ids: None,
-                sort_field: Some(IssueSortField::CreatedAt),
-                sort_direction: Some(SortDirection::Desc),
-                limit: Some(SIMILAR_ISSUE_PAGE_SIZE),
-                offset: Some(offset as i32),
-            })
-            .await
-            .map_err(|e| format!("similar-issue lookup failed, nothing launched: {e}"))?;
-        if let Some(found) = find_similar_issue(&page.issues, messages) {
-            return Ok(Some(found.clone()));
-        }
-        offset += page.issues.len();
-        if page.issues.is_empty() || offset >= page.total_count {
-            return Ok(None);
-        }
+    let response = client
+        .search_issues(&SearchIssuesRequest {
+            project_id,
+            status_id: None,
+            status_ids: Some(active_status_ids),
+            priority: None,
+            parent_issue_id: None,
+            search: Some(REMEDIATION_MARKER_PREFIX.trim().to_string()),
+            simple_id: None,
+            assignee_user_id: None,
+            tag_id: None,
+            tag_ids: None,
+            sort_field: Some(IssueSortField::CreatedAt),
+            sort_direction: Some(SortDirection::Desc),
+            limit: None,
+            offset: None,
+        })
+        .await
+        .map_err(|e| format!("similar-issue lookup failed, nothing launched: {e}"))?;
+    if response.issues.len() < response.total_count {
+        return Err(format!(
+            "similar-issue lookup returned {} of {} candidates; nothing launched",
+            response.issues.len(),
+            response.total_count
+        ));
     }
-    Err(format!(
-        "similar-issue lookup stopped after {offset} active remediation issues without \
-checking them all; nothing launched"
-    ))
+    Ok(find_similar_issue(&response.issues, messages).cloned())
 }
 
 /// Configured repositories (each on the source workspace's target branch for

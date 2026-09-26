@@ -48,9 +48,11 @@ const ERROR_SECTION_HEADING: &str = "### Error messages";
 static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b").unwrap()
 });
-// Applied in order after lowercasing: UUIDs, `0x` literals of any content,
-// decimal-only words (any length, so ids never straddle two placeholders),
-// long digit-bearing hex words (hashes), then any remaining digit run.
+// Applied in order after lowercasing. Every identifier form — UUIDs, `0x`
+// literals, decimal-only words of any length, and digit-bearing hex words of
+// 8+ chars (hashes, short SHAs) — becomes the same `<id>`, so one failure
+// reported with different kinds of ids still matches. Remaining digit runs
+// inside words become `<n>`.
 static PREFIXED_HEX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b0x[0-9a-f]+\b").unwrap());
 static DECIMAL_WORD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[0-9]+\b").unwrap());
 static HEX_WORD_RE: LazyLock<Regex> =
@@ -246,13 +248,13 @@ pub fn remediation_marker(
 /// ids, timestamps, ports or line numbers normalize identically.
 pub fn normalize_error_text(text: &str) -> String {
     let lower = text.to_lowercase();
-    let text = UUID_RE.replace_all(&lower, "<uuid>");
-    let text = PREFIXED_HEX_RE.replace_all(&text, "<hex>");
-    let text = DECIMAL_WORD_RE.replace_all(&text, "<n>");
+    let text = UUID_RE.replace_all(&lower, "<id>");
+    let text = PREFIXED_HEX_RE.replace_all(&text, "<id>");
+    let text = DECIMAL_WORD_RE.replace_all(&text, "<id>");
     let text = HEX_WORD_RE.replace_all(&text, |caps: &regex::Captures| {
         let word = &caps[0];
         if word.len() >= 8 {
-            "<hex>".to_string()
+            "<id>".to_string()
         } else {
             word.to_string()
         }
@@ -807,6 +809,10 @@ mod tests {
         assert_eq!(
             normalize_error_text("commit 3f9a2c7e11 not found"),
             normalize_error_text("commit 0b1c2d3e4f not found")
+        );
+        assert_eq!(
+            normalize_error_text("fatal: bad object 12345678"),
+            normalize_error_text("fatal: bad object a1b2c3d4")
         );
     }
 
