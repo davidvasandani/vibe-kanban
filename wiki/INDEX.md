@@ -234,3 +234,9 @@ contributed to it.
   chat instead of blocking it. Includes a debugging recipe for a chat spinner
   that never clears (direct coordinator access, phone-width iframe
   reproduction, NFS I/O-wait signature) (`vk/5f70-not-loading-chat`).
+- [coordinator-nfs-load.md](coordinator-nfs-load.md) — Diagnosing coordinator
+  load from NFS waits (io PSI and `procs_blocked` miss it, so count D-state
+  threads). Root cause was per-client summaries git sweeps. Bulk worktree scans
+  go through a shared single-flight, tiered-TTL, generation-invalidated cache
+  whose leader task owns the lock and permit past cancellation
+  (`vk/78a5-analyze-and-redu`).
