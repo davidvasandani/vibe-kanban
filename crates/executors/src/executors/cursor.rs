@@ -690,6 +690,7 @@ impl StandardCodingAgentExecutor for CursorAgent {
 
         let options = ExecutorDiscoveredOptions {
             model_selector: ModelSelectorConfig {
+                model_aliases: Default::default(),
                 models,
                 ..Default::default()
             },

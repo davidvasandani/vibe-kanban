@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
   SpinnerIcon,
@@ -22,6 +23,8 @@ import type { BaseCodingAgent, ExecutorConfigs } from 'shared/types';
 import { cn } from '@/shared/lib/utils';
 import { toPrettyCase } from '@/shared/lib/string';
 import {
+  SettingsCard,
+  SettingsCheckbox,
   SettingsSaveBar,
   TwoColumnPicker,
   TwoColumnPickerColumn,
@@ -33,6 +36,15 @@ import { useSettingsDirty } from './SettingsDirtyContext';
 import { useSettingsMachineClient } from './SettingsHostContext';
 import { AgentIcon } from '@/shared/components/AgentIcon';
 import { getExecutorVariantKeys } from '@/shared/lib/executor';
+import { useModelSelectorConfig } from '@/shared/hooks/useExecutorDiscovery';
+import { getModelKey } from '@/shared/lib/recentModels';
+import type { LocalApiWebSocketOptions } from '@/shared/lib/localApiTransport';
+import {
+  getDisabledModelEntries,
+  isModelDisabled,
+  toggleDisabledModel,
+  updateDisabledModels,
+} from '@/shared/lib/disabledModels';
 
 type ExecutorsMap = Record<string, Record<string, Record<string, unknown>>>;
 
@@ -51,6 +63,15 @@ export function AgentsSettingsSection() {
   } = useMachineProfiles(machineClient);
 
   const { config, updateAndSaveConfig, reloadSystem } = useUserSystem();
+  const queryClient = useQueryClient();
+
+  // Chat pickers read profiles through their own route-scoped user-system
+  // query (remote frontends especially). Refresh every copy so a later model
+  // pick does not save stale profiles over what was just saved here.
+  const refreshProfileViews = () => {
+    reloadSystem();
+    void queryClient.invalidateQueries({ queryKey: ['user-system'] });
+  };
 
   // Local editor state
   const [profilesSuccess, setProfilesSuccess] = useState(false);
@@ -218,7 +239,7 @@ export function AgentsSettingsSection() {
 
         setProfilesSuccess(true);
         setTimeout(() => setProfilesSuccess(false), 3000);
-        reloadSystem();
+        refreshProfileViews();
       } catch (error: unknown) {
         console.error('Failed to save deletion to backend:', error);
         setSaveError(t('settings.agents.errors.deleteFailed'));
@@ -267,61 +288,36 @@ export function AgentsSettingsSection() {
     markDirty(updatedProfiles);
   };
 
-  const handleExecutorConfigSave = async (formData: unknown) => {
-    if (
-      !localParsedProfiles ||
-      !localParsedProfiles.executors ||
-      !selectedExecutorType ||
-      !selectedConfiguration
-    )
-      return;
+  const handleDisabledModelsChange = (
+    executorType: BaseCodingAgent,
+    entries: string[]
+  ) => {
+    if (!localParsedProfiles?.executors) return;
+    markDirty({
+      ...localParsedProfiles,
+      executors: updateDisabledModels(
+        localParsedProfiles.executors,
+        executorType,
+        entries
+      ),
+    });
+  };
+
+  // Save handler for agent configuration. Local state already holds every
+  // edit (config forms and model visibility), so save it as a whole.
+  const handleSave = async () => {
+    if (!isDirty || !localParsedProfiles) return;
 
     setSaveError(null);
-
-    const updatedProfiles = {
-      ...localParsedProfiles,
-      executors: {
-        ...localParsedProfiles.executors,
-        [selectedExecutorType]: {
-          ...localParsedProfiles.executors[selectedExecutorType],
-          [selectedConfiguration]: {
-            [selectedExecutorType]: formData,
-          },
-        },
-      },
-    };
-
-    setLocalParsedProfiles(updatedProfiles);
-
     try {
-      await saveProfiles(JSON.stringify(updatedProfiles, null, 2));
+      await saveProfiles(JSON.stringify(localParsedProfiles, null, 2));
       setProfilesSuccess(true);
       setIsDirty(false);
       setTimeout(() => setProfilesSuccess(false), 3000);
-      reloadSystem();
+      refreshProfileViews();
     } catch (err: unknown) {
       console.error('Failed to save profiles:', err);
       setSaveError(t('settings.agents.errors.saveConfigFailed'));
-    }
-  };
-
-  // Save handler for agent configuration
-  const handleSave = async () => {
-    if (
-      isDirty &&
-      localParsedProfiles &&
-      selectedExecutorType &&
-      selectedConfiguration
-    ) {
-      const executorsMap =
-        localParsedProfiles.executors as unknown as ExecutorsMap;
-      const formData =
-        executorsMap[selectedExecutorType]?.[selectedConfiguration]?.[
-          selectedExecutorType
-        ];
-      if (formData) {
-        await handleExecutorConfigSave(formData);
-      }
     }
   };
 
@@ -509,6 +505,25 @@ export function AgentsSettingsSection() {
               />
             </div>
           )}
+
+          {/* Model visibility applies to the agent, not a single config */}
+          {selectedExecutorType && (
+            <div className="bg-secondary/50 border border-border rounded-sm p-4">
+              <AgentModelsCard
+                key={selectedExecutorType}
+                executor={selectedExecutorType}
+                socketOptions={machineClient?.webSocketOptions}
+                disabledModels={getDisabledModelEntries(
+                  localParsedProfiles.executors,
+                  selectedExecutorType
+                )}
+                onChange={(entries) =>
+                  handleDisabledModelsChange(selectedExecutorType, entries)
+                }
+                disabled={profilesSaving}
+              />
+            </div>
+          )}
         </div>
       ) : null}
 
@@ -588,3 +603,69 @@ function ConfigActionsDropdown({
 
 // Alias for backwards compatibility
 export { AgentsSettingsSection as AgentsSettingsSectionContent };
+
+// Per-agent model visibility for the chat model picker
+function AgentModelsCard({
+  executor,
+  socketOptions,
+  disabledModels,
+  onChange,
+  disabled,
+}: {
+  executor: BaseCodingAgent;
+  socketOptions?: LocalApiWebSocketOptions;
+  disabledModels: string[];
+  onChange: (entries: string[]) => void;
+  disabled?: boolean;
+}) {
+  const { t } = useTranslation(['settings']);
+  const { config, loadingModels } = useModelSelectorConfig(executor, {
+    socketOptions,
+  });
+  const models = config?.models ?? [];
+
+  if (!config || loadingModels) {
+    return (
+      <SettingsCard title={t('settings.agents.models.title')}>
+        <p className="text-sm text-low">
+          {t('settings.agents.models.loading')}
+        </p>
+      </SettingsCard>
+    );
+  }
+  if (models.length === 0) return null;
+
+  const enabledCount = models.filter(
+    (model) => !isModelDisabled(disabledModels, model)
+  ).length;
+
+  return (
+    <SettingsCard
+      title={t('settings.agents.models.title')}
+      description={t('settings.agents.models.description')}
+    >
+      <div className="space-y-2">
+        {models.map((model) => {
+          const key = getModelKey(model);
+          const enabled = !isModelDisabled(disabledModels, model);
+          const isLastEnabled = enabled && enabledCount <= 1;
+          return (
+            <SettingsCheckbox
+              key={key}
+              id={`agent-model-${executor}-${key}`}
+              label={model.name}
+              description={
+                isLastEnabled ? t('settings.agents.models.lastEnabled') : key
+              }
+              checked={enabled}
+              disabled={disabled || isLastEnabled}
+              onChange={() =>
+                onChange(toggleDisabledModel(disabledModels, model, models))
+              }
+            />
+          );
+        })}
+      </div>
+    </SettingsCard>
+  );
+}

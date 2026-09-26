@@ -28,12 +28,18 @@ import {
   appendPresetModel,
   resolveDefaultModelId,
   isModelAvailable,
+  resolveModelAlias,
   resolveDefaultReasoningId,
 } from '@/shared/lib/modelSelector';
 import { profilesApi } from '@/shared/lib/api';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { getResolvedTheme, useTheme } from '@/shared/hooks/useTheme';
 import { useModelSelectorConfig } from '@/shared/hooks/useExecutorDiscovery';
+import { useIsMobile, useIsRealMobile } from '@/shared/hooks/useIsMobile';
+import {
+  filterDisabledModels,
+  getDisabledModelEntries,
+} from '@/shared/lib/disabledModels';
 import { ModelSelectorPopover } from '@vibe/ui/components/ModelSelectorPopover';
 import {
   DropdownMenu,
@@ -78,6 +84,8 @@ export function ModelSelectorContainer({
   const { profiles, setProfiles, reloadSystem } = useUserSystem();
   const defaultLabel = t('modelSelector.default');
   const loadingLabel = t('states.loading');
+  const isMobileLayout = useIsMobile();
+  const isRealMobile = useIsRealMobile();
 
   const permissionMetaByPolicy: Record<
     PermissionPolicy,
@@ -117,7 +125,16 @@ export function ModelSelectorContainer({
   }, [streamError]);
 
   const baseConfig = streamConfig;
-  const config = appendPresetModel(baseConfig, presetOptions?.model_id);
+  // Saved aliases (e.g. `opus`) display as the versioned model they run.
+  const presetModelValue = resolveModelAlias(
+    baseConfig,
+    presetOptions?.model_id
+  );
+  const executorModelValue = resolveModelAlias(
+    baseConfig,
+    executorConfig?.model_id
+  );
+  const config = appendPresetModel(baseConfig, presetModelValue);
 
   const availableProviderIds = useMemo(
     () => config?.providers.map((item) => item.id) ?? [],
@@ -132,16 +149,16 @@ export function ModelSelectorContainer({
     value ? (providerIdMap.get(value.toLowerCase()) ?? null) : null;
 
   const { providerId: configProviderId, modelId: configModelId } = useMemo(
-    () => parseModelId(executorConfig?.model_id, hasProviders),
-    [executorConfig?.model_id, hasProviders]
+    () => parseModelId(executorModelValue, hasProviders),
+    [executorModelValue, hasProviders]
   );
 
   const fallbackProviderId = availableProviderIds[0] ?? null;
   const resolvedConfigProviderId = resolveProviderId(configProviderId);
 
   const { providerId: presetProviderId } = useMemo(
-    () => parseModelId(presetOptions?.model_id, hasProviders),
-    [presetOptions?.model_id, hasProviders]
+    () => parseModelId(presetModelValue, hasProviders),
+    [presetModelValue, hasProviders]
   );
   const resolvedPresetProviderId = resolveProviderId(presetProviderId);
 
@@ -161,8 +178,8 @@ export function ModelSelectorContainer({
     : null;
 
   const { modelId: presetModelId } = useMemo(
-    () => parseModelId(presetOptions?.model_id, hasProviders),
-    [presetOptions?.model_id, hasProviders]
+    () => parseModelId(presetModelValue, hasProviders),
+    [presetModelValue, hasProviders]
   );
 
   const presetModelMatchesProvider =
@@ -407,6 +424,12 @@ export function ModelSelectorContainer({
   const displaySelectedModel = showModelSelector
     ? getSelectedModel(config.models, selectedProviderId, selectedModelId)
     : null;
+  // Hidden models stay out of the menu, except the current selection.
+  const pickerConfig = filterDisabledModels(
+    config,
+    getDisabledModelEntries(profiles, agent),
+    displaySelectedModel ? getModelKey(displaySelectedModel) : null
+  );
   const reasoningLabel = displaySelectedModel
     ? getReasoningLabel(
         displaySelectedModel.reasoning_options,
@@ -476,7 +499,7 @@ export function ModelSelectorContainer({
               disabled={loadingModels}
             />
           }
-          config={config}
+          config={pickerConfig}
           error={streamError}
           selectedProviderId={selectedProviderId}
           selectedModelId={selectedModelId}
@@ -492,6 +515,7 @@ export function ModelSelectorContainer({
           expandedProviderId={expandedProviderId}
           onExpandedProviderIdChange={setExpandedProviderId}
           resolvedTheme={resolvedTheme}
+          autoFocusSearch={!isMobileLayout && !isRealMobile}
         />
       )}
 

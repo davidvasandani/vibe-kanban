@@ -1420,7 +1420,11 @@ models?: Array<string>,
  */
 reasoning_by_model?: { [key in string]?: string }, };
 
-export type ExecutorProfile = { recently_used_models?: ExecutorRecentModels | null, } & ({ [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "GROK": Grok } });
+export type ExecutorProfile = { recently_used_models?: ExecutorRecentModels | null, 
+/**
+ * Model keys (`provider/model` or `model`) hidden from the model picker.
+ */
+disabled_models?: Array<string>, } & ({ [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "GROK": Grok } });
 
 export type ExecutorConfigs = { executors: { [key in BaseCodingAgent]?: ExecutorProfile }, };
 
@@ -1610,7 +1614,13 @@ agents: Array<AgentInfo>,
 /**
  * Supported permission policies
  */
-permissions: Array<PermissionPolicy>, };
+permissions: Array<PermissionPolicy>, 
+/**
+ * Model IDs the executor still accepts but does not advertise (e.g. floating
+ * aliases), mapped to the catalog model they currently run. Lets saved
+ * selections resolve to a versioned entry with its reasoning options.
+ */
+model_aliases?: { [key in string]?: string }, };
 
 export type ExecutorDiscoveredOptions = { model_selector: ModelSelectorConfig, slash_commands: Array<SlashCommandDescription>, loading_models: boolean, loading_agents: boolean, loading_slash_commands: boolean, error: string | null, };
 

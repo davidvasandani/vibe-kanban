@@ -937,6 +937,7 @@ fn dispatched_executor_profile(config: &ExecutorConfig) -> Option<ExecutorProfil
     let agent = ExecutorConfigs::get_cached().get_coding_agent(&profile_id)?;
     Some(ExecutorProfile {
         recently_used_models: None,
+        disabled_models: Vec::new(),
         configurations: HashMap::from([(variant, agent)]),
     })
 }

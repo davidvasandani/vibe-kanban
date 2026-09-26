@@ -31,11 +31,18 @@ contributed to it.
   transport-clean path/query/hash, restore it at iframe lifecycle boundaries,
   scope navigation by workspace, and serialize complete scratch writes against
   acknowledged versions so live navigation never reloads or loops.
-- [executor-model-catalogs.md](executor-model-catalogs.md) — Executor discovery Claude upgrades must align the npm launcher, catalog and context mapping; verify native-artifact tool controls (`vk/129c-update-to-opus-5`).
-  is the authoritative source for model pickers; verify current IDs and
-  reasoning boundaries against provider sources, keep Default implicit, test
-  exact ordered catalogs, and keep catalog refreshes separate from managed CLI
-  upgrades.
+- [executor-model-catalogs.md](executor-model-catalogs.md) — Executor
+  discovery is the authoritative source for model pickers. Verify current IDs
+  and reasoning boundaries against provider sources, keep Default implicit,
+  test exact ordered catalogs, and keep catalog refreshes separate from managed
+  CLI upgrades. Claude upgrades must align the npm launcher, catalog and
+  context mapping. Advertise versioned IDs only, and resolve legacy aliases
+  through `model_aliases` read from the pinned binary.
+- [model-picker-preferences.md](model-picker-preferences.md) — Per-agent
+  picker preferences on `ExecutorProfile` (serde, merge, reserved keys).
+  Hiding keeps the selection visible. Invalidate `['user-system']` so stale
+  chat copies cannot overwrite a save. Settings discovery follows the settings
+  host, and touch pickers must not autofocus inputs.
 - [browser-title-selection.md](browser-title-selection.md) — Browser-tab titles
   select one meaningful label from an ordered fallback chain, trim metadata
   whitespace, use product branding only as the empty-state fallback, and remain

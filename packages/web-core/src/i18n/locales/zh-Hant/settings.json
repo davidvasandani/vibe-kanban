@@ -339,6 +339,12 @@
       "description": "使用不同設定自訂編碼代理的行為。",
       "loading": "載入代理設定中...",
       "selectAgent": "選擇代理",
+      "models": {
+        "title": "模型",
+        "description": "取消勾選的模型將從此代理的模型選單中隱藏。",
+        "lastEnabled": "至少需要保留一個已啟用的模型。",
+        "loading": "正在載入模型..."
+      },
       "save": {
         "button": "儲存代理設定",
         "success": "✓ 執行器設定儲存成功！",

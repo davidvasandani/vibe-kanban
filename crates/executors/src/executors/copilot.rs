@@ -196,6 +196,7 @@ impl StandardCodingAgentExecutor for Copilot {
     ) -> Result<futures::stream::BoxStream<'static, json_patch::Patch>, ExecutorError> {
         let options = ExecutorDiscoveredOptions {
             model_selector: ModelSelectorConfig {
+                model_aliases: Default::default(),
                 models: [
                     ("gpt-5.4", "GPT-5.4"),
                     ("claude-opus-5", "Claude Opus 5"),

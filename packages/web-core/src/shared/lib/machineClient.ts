@@ -36,6 +36,7 @@ import {
   makeLocalApiRequest,
   openLocalApiWebSocket,
   type LocalApiRequestOptions,
+  type LocalApiWebSocketOptions,
 } from './localApiTransport';
 
 export type MachineTarget =
@@ -77,6 +78,8 @@ export interface SkillProposalResult {
 export interface MachineClient {
   target: MachineTarget;
   queryScopeKey: readonly ['machine', string];
+  /** Scope for streams that must reach this machine (e.g. discovery). */
+  webSocketOptions: LocalApiWebSocketOptions;
   getConfig: () => Promise<UserSystemInfo>;
   saveConfig: (config: Config) => Promise<Config>;
   listRepos: () => Promise<Repo[]>;
@@ -200,6 +203,7 @@ export function createMachineClient(
   return {
     target,
     queryScopeKey,
+    webSocketOptions: getMachineRequestOptions(runtime, target),
     getConfig: async () =>
       handleApiResponse<UserSystemInfo>(
         await makeMachineRequest(runtime, target, '/api/info', {

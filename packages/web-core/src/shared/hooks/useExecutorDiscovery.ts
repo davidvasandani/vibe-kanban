@@ -2,6 +2,15 @@ import { useCallback, useEffect, useMemo } from 'react';
 import type { BaseCodingAgent, ExecutorDiscoveredOptions } from 'shared/types';
 import { useJsonPatchWsStream } from '@/shared/hooks/useJsonPatchWsStream';
 import { agentsApi } from '@/shared/lib/api';
+import type { LocalApiWebSocketOptions } from '@/shared/lib/localApiTransport';
+
+type ExecutorDiscoveryOptions = {
+  workspaceId?: string;
+  sessionId?: string;
+  repoId?: string;
+  /** Discover on a specific machine instead of the current route's host. */
+  socketOptions?: LocalApiWebSocketOptions;
+};
 
 type ExecutorDiscoveryStreamState = {
   options: ExecutorDiscoveredOptions | null;
@@ -24,9 +33,9 @@ const defaultOptions: ExecutorDiscoveredOptions = {
 
 function useExecutorDiscovery(
   agent: BaseCodingAgent | null | undefined,
-  opts?: { workspaceId?: string; sessionId?: string; repoId?: string }
+  opts?: ExecutorDiscoveryOptions
 ) {
-  const { workspaceId, sessionId, repoId } = opts ?? {};
+  const { workspaceId, sessionId, repoId, socketOptions } = opts ?? {};
   const endpoint = useMemo(() => {
     if (!agent) return undefined;
     return agentsApi.getDiscoveredOptionsStreamUrl(agent, {
@@ -47,7 +56,8 @@ function useExecutorDiscovery(
     useJsonPatchWsStream<ExecutorDiscoveryStreamState>(
       endpoint,
       !!endpoint,
-      initialData
+      initialData,
+      { socketOptions }
     );
 
   // Prefer the backend-reported error from the data payload. Only fall back
@@ -76,7 +86,7 @@ function useExecutorDiscovery(
 
 export function useModelSelectorConfig(
   agent: BaseCodingAgent | null | undefined,
-  opts?: { workspaceId?: string; sessionId?: string; repoId?: string }
+  opts?: ExecutorDiscoveryOptions
 ) {
   const { options, error, isConnected, isInitialized } = useExecutorDiscovery(
     agent,
@@ -95,7 +105,7 @@ export function useModelSelectorConfig(
 
 export function useSlashCommands(
   agent: BaseCodingAgent | null | undefined,
-  opts?: { workspaceId?: string; sessionId?: string; repoId?: string }
+  opts?: ExecutorDiscoveryOptions
 ) {
   const { options, error, isConnected, isInitialized } = useExecutorDiscovery(
     agent,
