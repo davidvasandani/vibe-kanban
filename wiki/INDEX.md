@@ -247,3 +247,8 @@ contributed to it.
   go through a shared single-flight, tiered-TTL, generation-invalidated cache
   whose leader task owns the lock and permit past cancellation
   (`vk/78a5-analyze-and-redu`).
+- [worker-journal-agent-stream-boundary.md](worker-journal-agent-stream-boundary.md)
+  — Worker `Structured` metadata (cancellation phases, worker/stream errors)
+  must never be projected into agent stdout, where vendor parsers render it as
+  "Unrecognized JSON message". Coordinator classifier routing and the rule for
+  new kinds (`vk/5276-debug-unrecogniz`).
