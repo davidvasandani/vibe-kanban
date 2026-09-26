@@ -66,9 +66,13 @@ async fn run(
         ReauthTrigger::Sweep => ReauthTrigger::Agent,
         other => other,
     };
-    // One deadline covers discovery and waiting, so an agent's call returns
-    // inside its tool deadline even when probing is slow.
-    let deadline = tokio::time::Instant::now() + clamp_wait(request.wait_secs);
+    // Discovery may use the whole request budget (a caller that does not
+    // wait still needs to learn which runs started, or it has nothing to
+    // poll); waiting afterwards honours `wait_secs`. Both end by the same
+    // ceiling, so an agent's call stays inside its tool deadline.
+    let started_at = tokio::time::Instant::now();
+    let discovery_deadline = started_at + clamp_wait(MAX_WAIT_SECS);
+    let deadline = started_at + clamp_wait(request.wait_secs);
     let reports = match request.target.as_deref() {
         Some(target) => match target
             .parse::<ReauthTargetId>()
@@ -82,7 +86,7 @@ async fn run(
             // cannot hold the request past its deadline. It keeps going (and
             // starts whatever it finds) if we stop watching.
             let discovery = tokio::spawn(reauth::start_expired(trigger));
-            match tokio::time::timeout_at(deadline, discovery).await {
+            match tokio::time::timeout_at(discovery_deadline, discovery).await {
                 Ok(Ok(reports)) => reports,
                 Ok(Err(e)) => {
                     return ResponseJson(ApiResponse::error(&format!(
