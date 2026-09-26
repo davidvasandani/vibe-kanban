@@ -241,6 +241,13 @@ contributed to it.
   chat instead of blocking it. Includes a debugging recipe for a chat spinner
   that never clears (direct coordinator access, phone-width iframe
   reproduction, NFS I/O-wait signature) (`vk/5f70-not-loading-chat`).
+- [auto-error-remediation.md](auto-error-remediation.md) — Self-spawned
+  agent work: trigger at `finalize_task` and hand off over a broadcast
+  channel. Subscribe before boot resumes agents. Reserve guard slots before
+  I/O. The durable `Auto-fix: ` recursion guard. Fail closed on missing
+  pipelines. Deployed pipelines differ from bundled ones, so a merge stage is
+  guaranteed explicitly. `updateDraft`'s lodash merge cannot shrink arrays
+  (`vk/7e4f-auto-error-remed`).
 - [coordinator-nfs-load.md](coordinator-nfs-load.md) — Diagnosing coordinator
   load from NFS waits (io PSI and `procs_blocked` miss it, so count D-state
   threads). Root cause was per-client summaries git sweeps. Bulk worktree scans

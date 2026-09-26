@@ -307,6 +307,7 @@ fn generate_types_content() -> String {
         services::services::config::UiLanguage::decl(),
         services::services::config::ShowcaseState::decl(),
         services::services::config::SendMessageShortcut::decl(),
+        services::services::config::AutoErrorRemediationConfig::decl(),
         services::services::pipelines::PipelineStep::decl(),
         services::services::pipelines::Pipeline::decl(),
         services::services::pipelines::PipelineParseError::decl(),

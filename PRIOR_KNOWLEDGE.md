@@ -1,31 +1,65 @@
-# Prior knowledge: vk/5276-debug-unrecogniz
+# Prior knowledge: `vk/7e4f-auto-error-remed`
 
-Distilled from the knowledge bases (read-only). Sources: `vibe-kanban/wiki/` (INDEX plus
-pages matching cancel/structured/worker/stdout/unrecognized) and
-`homelab/docs/knowledge-base/vibe-kanban-*`. Neither knowledge base mentions
-`cancellation_phase`, the `Structured` worker payload, or the "Unrecognized JSON
-message" rendering. This defect is new territory.
+This file distills the knowledge-base pages (`wiki/`) that bear on
+auto-remediating failed agent turns. It is read-only input to the spec and
+plan stages.
 
-## Relevant background
-- **`wiki/agent-process-lifecycle.md`**: cluster execution splits authority
-  between the worker's journal and the coordinator's projection of it. Terminal
-  evidence (Completed, Killed, Interrupted, Indeterminate) comes from the worker, and the
-  coordinator must not invent it. *Implication:* cancellation phases are
-  progress bookkeeping, not lifecycle evidence. Dropping them from the chat does
-  not weaken any terminal-state rule, because the `Killed` event still follows.
-- **`wiki/agent-process-lifecycle.md` (output cleanup)**: stdout/stderr draining
-  is bounded and ordered before terminal journal closure. *Implication:* the
-  journal interleaves agent bytes with product events in one ordered stream. The
-  coordinator is the one place that separates them.
-- **`wiki/awaited-stream-settlement.md`** and **`coordinator-nfs-load.md`** cover
-  other coordinator-side stream handling. Neither touches `Structured`
-  payloads.
-- **`homelab/docs/knowledge-base/vibe-kanban-worker-start-recovery.md`**: worker
-  launch failures are the source of `worker_error`. Those reasons are often the only
-  diagnosis of a failed start, so they must stay visible (constitution XI).
+## task-pipeline-block.md
 
-## What this task builds on
-- The existing coordinator convention: coordinator-authored worker diagnostics
-  in the poll loop are pushed as `LogMsg::Stderr`. Examples are the replay-gap line and
-  "Worker reported an indeterminate execution".
-- The existing `worker_event_tests` module next to `push_worker_bytes`.
+- The pipeline block (`<!-- vk:pipeline:start/end -->`) inside
+  `issues.description` is the **only** record of a pipeline selection. No
+  structured copy exists. "Enabling pipelines on an issue" therefore means
+  composing that block into the description.
+- The block has one Rust composer (MCP `compose_pipeline_block`) and one TS
+  composer (`taskPipeline.ts`), and they must stay byte-identical. The edit UI
+  round-trips a block only when it matches the composer exactly. A
+  hand-rolled third composer could produce a block the UI misparses; if the
+  UI under-recognizes a selection, recomposing drops stage lines. The auto
+  path must therefore **reuse** the existing Rust composer, not re-implement
+  it.
+- Display names aren't unique across pipeline TOML files, so select pipelines
+  by **id** (`wikillm`, `speckit`).
+
+## issue-workspace-lifecycle.md
+
+- Remote (Postgres) and local (SQLite) stores sync on a best-effort basis:
+  errors are logged, and there is no distributed transaction or durable retry
+  queue. An auto-launcher that creates a remote issue and then a local
+  workspace inherits that model. It should log partial failure rather than
+  retry blindly.
+- Completion-time code must read **current** workspace metadata, not a
+  snapshot captured earlier.
+
+## workspace-creation-reliability.md
+
+- `create_and_start_workspace` accepts the request and then runs creation in
+  a spawned task (queue → claim → run → finish). The returned workspace is
+  the accepted record, and creation can still fail afterwards. Callers
+  (MCP `start_workspace`, and now the launcher) link the issue after the
+  accepted response, which matches the MCP flow.
+- Never retry the workspace workflow on failure. The same rule applies to
+  remediation: a failed launch is logged, not retried.
+
+## agent-process-lifecycle.md / vk-pollers.md
+
+- One turn is one `ExecutionProcess`. `Indeterminate` means the terminal
+  event was lost and the group was reaped, so it is **not** evidence of an
+  agent error. `Killed` means the user stopped the turn, and `Interrupted`
+  means a server restart stopped it.
+- `CodingAgent` is non-persistent, so every turn goes through finalization.
+  `finalize_task` is the single place where every exit path (local exit
+  monitor, skipped cleanup, worker reconciliation) sends the
+  completion/failure notification. That makes it the natural trigger point.
+
+## Precedent (git history, not wiki)
+
+- `resume_interrupted_on_startup` (#62) is the closest analogue: an opt-in
+  config flag that spawns agents without a human. Three things to copy:
+  - it is off by default, with `#[serde(default)]` on Config v8;
+  - it has a General-settings toggle with i18n in every locale;
+  - it caps itself so a crash loop cannot keep respawning agents.
+
+## Gaps
+
+- The wiki has no page on unattended or auto-spawned workspaces, or on
+  loop-guarding. This task should add one (enrich stage).

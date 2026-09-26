@@ -111,6 +111,37 @@
           "helper": "Envoie automatiquement une relance aux exécutions d'agents interrompues par un redémarrage. Chaque exécution n'est reprise qu'une seule fois. Les agents démarrent sans confirmation et peuvent consommer des tokens."
         }
       },
+      "autoRemediation": {
+        "title": "Correction automatique des erreurs",
+        "description": "Lorsqu'un tour d'agent de code échoue, crée un ticket avec des pipelines et lance un espace de travail qui le corrige sans supervision.",
+        "enabled": {
+          "label": "Corriger automatiquement les exécutions échouées",
+          "helper": "Les agents démarrent sans confirmation, consomment des jetons et peuvent fusionner dans la branche de base. Les espaces de correction ne déclenchent jamais de correction ; chaque espace est corrigé au plus une fois par jour."
+        },
+        "project": {
+          "label": "Projet du ticket",
+          "helper": "Projet qui reçoit les tickets de correction.",
+          "source": "Projet de l'espace en échec"
+        },
+        "repos": {
+          "label": "Dépôts",
+          "helper": "Dépôts de l'espace de correction. Sans sélection, ceux de l'espace en échec sont utilisés."
+        },
+        "executor": {
+          "label": "Agent"
+        },
+        "variant": {
+          "label": "Variante de profil",
+          "helper": "Revient à la variante par défaut si celle-ci n'est pas définie."
+        },
+        "model": {
+          "label": "Modèle"
+        },
+        "maxPerHour": {
+          "label": "Lancements max. par heure",
+          "helper": "0 désactive les lancements."
+        }
+      },
       "editor": {
         "title": "Éditeur",
         "description": "Configurez votre expérience d'édition de code.",

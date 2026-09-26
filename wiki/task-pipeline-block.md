@@ -81,5 +81,19 @@ mirror into local edit state + the ref. Dirty = composed block vs
 `extractPipelineBlock(live description)`, both trimmed; the Update Issue
 button is disabled-when-clean rather than hidden.
 
+## The Rust composer is shared, in `api-types`
+
+The backend's mirror of `composePipelineBlock` lives in
+`crates/api-types/src/pipeline_block.rs` and takes minimal
+`BlockPipeline { name, stages: [BlockStage { id, prompt_fragment }] }` values.
+Before `vk/7e4f-auto-error-remed` it was private to `crates/mcp`. Callers map
+their own pipeline types into it: MCP `McpPipeline` and services
+`pipelines::Pipeline` both have `From` impls. Every backend path that writes
+a block, whether MCP `create_issue` or auto error remediation
+([[auto-error-remediation]]), must go through it. A second Rust composer
+would reopen the round-trip hazards described above. Keep it byte-identical
+to the TS composer.
+
 ## Contributed by
 - vk/77eb-vk-pipeline
+- vk/7e4f-auto-error-remed

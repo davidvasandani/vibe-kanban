@@ -111,6 +111,37 @@
           "helper": "Envía automáticamente un seguimiento a las ejecuciones de agentes interrumpidas por un reinicio. Cada ejecución se reanuda como máximo una vez. Los agentes se inician sin confirmación y pueden consumir tokens."
         }
       },
+      "autoRemediation": {
+        "title": "Corrección automática de errores",
+        "description": "Cuando falla un turno de un agente de código, crea una incidencia con pipelines y inicia un espacio de trabajo que la corrige sin supervisión.",
+        "enabled": {
+          "label": "Corregir automáticamente las ejecuciones fallidas",
+          "helper": "Los agentes se inician sin confirmación, consumen tokens y pueden fusionar en la rama base. Los espacios de corrección nunca activan otra corrección; cada espacio se corrige como máximo una vez al día."
+        },
+        "project": {
+          "label": "Proyecto de la incidencia",
+          "helper": "Proyecto que recibe las incidencias de corrección.",
+          "source": "Proyecto del espacio que falló"
+        },
+        "repos": {
+          "label": "Repositorios",
+          "helper": "Repositorios del espacio de corrección. Sin selección se usan los del espacio que falló."
+        },
+        "executor": {
+          "label": "Agente"
+        },
+        "variant": {
+          "label": "Variante de perfil",
+          "helper": "Si la variante no está definida, se usa la predeterminada."
+        },
+        "model": {
+          "label": "Modelo"
+        },
+        "maxPerHour": {
+          "label": "Máximo de lanzamientos por hora",
+          "helper": "0 desactiva los lanzamientos."
+        }
+      },
       "editor": {
         "title": "Editor",
         "description": "Configura cómo quieres editar tu código.",
