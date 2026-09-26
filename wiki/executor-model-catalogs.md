@@ -38,8 +38,27 @@ JavaScript for timeout environment keys and background-tool wire names. SDK
 schema titles are not wire names. Preserve old evidence as historical; document
 the new artifact checksum and current checks (`specs/opus-5-5-verification.md`).
 
+## Versioned labels and legacy aliases
+
+Advertise explicit, versioned model IDs only (`claude-opus-5-5` → "Opus 5.5"),
+and make the default an explicit ID too. A floating alias such as `opus`
+silently changes meaning when the CLI pin moves, so a label like "Opus" never
+says what runs. `opus[1m]` is redundant for current models, which already have
+1M windows.
+
+Removing aliases from `models` must not strand saved selections. Profiles and
+session overrides may still carry `opus` and similar aliases. If the frontend
+cannot match that ID, `appendPresetModel` synthesizes an entry with no
+reasoning options, and the effort selector disappears. Instead, the executor
+publishes `ModelSelectorConfig.model_aliases` (alias → advertised ID), and the
+picker resolves saved IDs through `resolveModelAlias` before matching.
+Launches still send the alias unchanged. Read the alias map from the pinned
+CLI binary itself: grep the native artifact for `opus:"claude-…"`-style
+entries. Guard the map with a test that fails when the pin moves.
+
 ## Contributed by
 
 - `vk/094a-update-chatgpt-m`
 
 - `vk/129c-update-to-opus-5`
+- `vk/6823-model-menu`
