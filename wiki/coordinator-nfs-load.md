@@ -56,7 +56,7 @@ coordinator scales with open clients.** Look there first.
   being cached for the whole tier. `None` is never cached.
 
 Rejected alternatives: tuning NFS mount options (`nocto` or a long `actimeo`
-breaks cross-host coherency; homelab principle 112), a background refresher
+breaks cross-host coherency; homelab principle 120), a background refresher
 (does work when nobody is looking), and client-side throttling alone (N
 devices still multiply the work).
 
