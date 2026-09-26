@@ -658,8 +658,17 @@ const REFUSALS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The refusal named in `text` (page copy or an OAuth error description).
+fn refusal_in(text: &str) -> Option<&'static str> {
+    let lower = text.to_lowercase();
+    REFUSALS
+        .iter()
+        .find(|(needle, _)| lower.contains(needle))
+        .map(|(_, reason)| *reason)
+}
+
 fn classify(txt: &str, has_email: bool, has_otc: bool) -> Step {
-    if let Some((_, reason)) = REFUSALS.iter().find(|(needle, _)| txt.contains(needle)) {
+    if let Some(reason) = refusal_in(txt) {
         Step::Refused(reason)
     } else if txt.contains("session has timed out") || txt.contains("request is timed out") {
         Step::FlowTimedOut
@@ -751,7 +760,15 @@ pub(crate) async fn drive<T>(
         let probe = Probe::from_json(&session.execute(PROBE_JS).await?);
         match on_page(&probe) {
             PageVerdict::Done(value) => return Ok(value),
-            PageVerdict::Fail(message) => return Err(EntraError::Auth(message)),
+            // A refusal can also arrive as an OAuth error on the redirect
+            // (e.g. AADSTS53003 in error_description); it must stay a
+            // refusal so the gate never retries it.
+            PageVerdict::Fail(message) => {
+                return Err(match refusal_in(&message) {
+                    Some(reason) => EntraError::Refused(format!("{reason}: {message}")),
+                    None => EntraError::Auth(message),
+                });
+            }
             PageVerdict::Run(code) => {
                 // A click usually navigates, which can tear down the execution
                 // context mid-call; the next probe tells us where we landed.
@@ -1801,6 +1818,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(classify_probe(&probe), Step::Unreachable);
+    }
+
+    #[test]
+    fn oauth_error_descriptions_keep_their_refusal() {
+        assert_eq!(
+            refusal_in("AADSTS53003: Access has been blocked by Conditional Access policies."),
+            Some("Conditional Access blocked the sign-in")
+        );
+        assert_eq!(
+            refusal_in("AADSTS50053: account locked"),
+            Some("the Entra account is locked")
+        );
+        assert_eq!(refusal_in("interaction_required"), None);
     }
 
     #[test]

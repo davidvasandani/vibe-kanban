@@ -48,7 +48,9 @@ login --use-device-code`). Azure CLI stores its tokens in the runtime user's
 host-local `~/.azure` cache. Vibe Kanban does not copy that cache between hosts,
 put Azure credentials in agent configuration, or print command output while
 checking authentication. The card's authenticated state comes from `az account
-show --output none`.
+get-access-token --output none`, which proves a token can still be acquired
+(`az account show` reads cached subscriptions and stays green after the
+refresh token expires).
 
 For an exact, read-only Entra device lookup, the signed-in identity needs the
 Microsoft Graph delegated `Device.Read.All` permission and a supported Entra

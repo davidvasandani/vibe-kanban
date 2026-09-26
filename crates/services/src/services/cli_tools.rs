@@ -340,7 +340,12 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
             auth: CliToolAuthStrategy::EntraMint {
                 client_id: crate::services::entra_mint::AZ_CLIENT_ID,
                 scope: crate::services::entra_mint::AZ_SCOPE,
-                probe_args: &["account", "show", "--output", "none"],
+                // Acquire a token, not `account show`: the latter reads
+                // cached subscriptions and stays green after the refresh
+                // token dies, which would hide exactly the expiry that
+                // unattended re-auth exists to repair. `--output none` keeps
+                // the token off stdout.
+                probe_args: &["account", "get-access-token", "--output", "none"],
             },
         },
         CliToolCatalogEntry {
@@ -1781,6 +1786,12 @@ mod tests {
                 CliToolAuthStrategy::Unsupported(_)
             ));
         }
+    }
+
+    #[test]
+    fn az_probe_acquires_a_token_rather_than_reading_the_cache() {
+        let args = probe_args_of(entry(CliToolId::Az)).unwrap();
+        assert_eq!(args, ["account", "get-access-token", "--output", "none"]);
     }
 
     #[test]

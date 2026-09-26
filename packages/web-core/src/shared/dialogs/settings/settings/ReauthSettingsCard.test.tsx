@@ -16,6 +16,8 @@ vi.hoisted(() => {
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
+const selected = vi.hoisted(() => ({ client: null as unknown }));
+
 const mocks = vi.hoisted(() => ({
   listReauthTargets: vi.fn<() => Promise<ReauthOverview>>(),
   listReauthRuns: vi.fn<() => Promise<ReauthRunReport[]>>(),
@@ -27,7 +29,7 @@ vi.mock('react-i18next', () => ({
 }));
 
 vi.mock('./SettingsHostContext', () => ({
-  useSettingsMachineClient: () => mocks,
+  useSettingsMachineClient: () => selected.client,
 }));
 
 vi.mock('@vibe/ui/components/Button', () => ({
@@ -123,6 +125,7 @@ beforeEach(() => {
   mocks.listReauthTargets.mockReset();
   mocks.listReauthRuns.mockReset();
   mocks.runReauth.mockReset();
+  selected.client = mocks;
 });
 
 afterEach(() => {
@@ -246,6 +249,40 @@ describe('ReauthSettingsCard', () => {
     mocks.listReauthTargets.mockRejectedValue(new Error('VK API returned 500'));
     await render();
     expect(container.textContent).toContain('VK API returned 500');
+  });
+});
+
+describe('ReauthSettingsCard host switching', () => {
+  it('drops a late response from the previously selected host', async () => {
+    let resolveOld: (o: ReauthOverview) => void = () => {};
+    const oldHost = {
+      ...mocks,
+      listReauthTargets: vi.fn(
+        () => new Promise<ReauthOverview>((r) => (resolveOld = r))
+      ),
+    };
+    const newHost = {
+      ...mocks,
+      listReauthTargets: vi.fn(async () => ({
+        sweep_interval_secs: null,
+        targets: [target({ id: 'cli-tool:az', label: 'new host az' })],
+      })),
+    };
+    selected.client = oldHost;
+    await render();
+    selected.client = newHost;
+    await render();
+    expect(container.textContent).toContain('new host az');
+
+    await act(async () => {
+      resolveOld({
+        sweep_interval_secs: null,
+        targets: [target({ label: 'old host aws' })],
+      });
+    });
+    await flush();
+    expect(container.textContent).toContain('new host az');
+    expect(container.textContent).not.toContain('old host aws');
   });
 });
 

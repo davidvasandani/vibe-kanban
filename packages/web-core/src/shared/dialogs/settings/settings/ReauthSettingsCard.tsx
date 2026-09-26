@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { SpinnerIcon } from '@phosphor-icons/react';
 import { Button } from '@vibe/ui/components/Button';
@@ -48,14 +48,27 @@ export function ReauthSettingsCard() {
   const [runError, setRunError] = useState<string | null>(null);
   const [starting, setStarting] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Responses are only applied while their host is still selected: a late
+  // answer from the previous host must never repaint this one, or its
+  // buttons would act on the wrong machine's credentials.
+  const clientRef = useRef(machineClient);
+  clientRef.current = machineClient;
+  // Newest refresh wins even on one host (a poll-triggered refresh can
+  // overlap the initial load).
+  const refreshSeq = useRef(0);
 
   const refresh = useCallback(async () => {
     if (!machineClient) return;
+    const seq = ++refreshSeq.current;
+    const current = () =>
+      clientRef.current === machineClient && refreshSeq.current === seq;
     try {
-      setOverview(await machineClient.listReauthTargets());
+      const next = await machineClient.listReauthTargets();
+      if (!current()) return;
+      setOverview(next);
       setLoadError(null);
     } catch (err) {
-      setLoadError(errorText(err));
+      if (current()) setLoadError(errorText(err));
     }
   }, [machineClient]);
 
@@ -63,6 +76,7 @@ export function ReauthSettingsCard() {
     setOverview(null);
     setLoadError(null);
     setRunError(null);
+    setStarting(null);
     void refresh();
   }, [refresh]);
 
@@ -75,28 +89,31 @@ export function ReauthSettingsCard() {
     const handle = setInterval(async () => {
       try {
         const runs = await machineClient.listReauthRuns();
+        if (clientRef.current !== machineClient) return;
         setOverview((current) =>
           current ? mergeRuns(current, runs) : current
         );
         if (!runs.some((r) => r.run.outcome === 'running')) void refresh();
       } catch (err) {
-        setRunError(errorText(err));
+        if (clientRef.current === machineClient) setRunError(errorText(err));
       }
     }, POLL_MS);
     return () => clearInterval(handle);
   }, [anyRunning, machineClient, refresh]);
 
   const run = async (target?: string) => {
-    if (!machineClient) return;
+    const client = machineClient;
+    if (!client) return;
     setStarting(target ?? '*');
     setRunError(null);
     try {
-      const runs = await machineClient.runReauth(target);
+      const runs = await client.runReauth(target);
+      if (clientRef.current !== client) return;
       setOverview((current) => (current ? mergeRuns(current, runs) : current));
     } catch (err) {
-      setRunError(errorText(err));
+      if (clientRef.current === client) setRunError(errorText(err));
     } finally {
-      setStarting(null);
+      if (clientRef.current === client) setStarting(null);
     }
   };
 
