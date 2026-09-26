@@ -527,22 +527,35 @@ fn aggregate_aws(states: &[&aws_sso::AwsAuthStatus]) -> (ReauthAuthState, Option
     (ReauthAuthState::Unknown, message)
 }
 
+/// The one target that stands for `profile`'s shared token: its session, or
+/// for a legacy profile the first profile (in config order) sharing its
+/// start-URL scope. Discovery and starts both resolve through this, so one
+/// credential never has two registry entries (or two refusal gates).
+fn canonical_aws_target(
+    scopes: &[(String, aws_sso::AwsSsoAuthScope)],
+    profile: &str,
+) -> Option<ReauthTargetId> {
+    let (_, scope) = scopes.iter().find(|(name, _)| name == profile)?;
+    if let Some(session) = &scope.session_name {
+        return Some(ReauthTargetId::AwsSession(session.clone()));
+    }
+    let (first, _) = scopes.iter().find(|(_, other)| other.key == scope.key)?;
+    Some(ReauthTargetId::AwsProfile(first.clone()))
+}
+
 async fn discover_aws() -> Vec<Target> {
     let Ok(statuses) = aws_sso::list_profile_statuses().await else {
         return Vec::new();
     };
     let missing = entra_missing();
+    let pairs: Vec<(String, aws_sso::AwsSsoAuthScope)> = statuses
+        .iter()
+        .map(|s| (s.profile.name.clone(), s.auth_scope.clone()))
+        .collect();
     let mut scopes: Vec<(ReauthTargetId, String, Vec<&aws_sso::AwsAuthStatus>)> = Vec::new();
     for status in &statuses {
-        let id = match &status.auth_scope.session_name {
-            Some(session) => ReauthTargetId::AwsSession(session.clone()),
-            None => match scopes
-                .iter()
-                .find(|(_, key, _)| *key == status.auth_scope.key)
-            {
-                Some((id, _, _)) => id.clone(),
-                None => ReauthTargetId::AwsProfile(status.profile.name.clone()),
-            },
+        let Some(id) = canonical_aws_target(&pairs, &status.profile.name) else {
+            continue;
         };
         match scopes.iter_mut().find(|(i, _, _)| *i == id) {
             Some((_, _, members)) => members.push(&status.auth),
@@ -677,26 +690,37 @@ async fn expired_swept_targets(respect_backoff: bool) -> Vec<ReauthTargetId> {
 // Running
 // ---------------------------------------------------------------------------
 
-/// Whether `id` is a target this host actually lists. Only listed targets may
-/// start: a run nobody can see could neither be polled nor, once refused,
-/// reset from Settings.
-fn ensure_listed(id: &ReauthTargetId) -> Result<(), ReauthError> {
-    let listed = match id {
-        ReauthTargetId::CliTool(_) => true,
-        ReauthTargetId::Sgsc(backend) => sgsc_backends().iter().any(|b| b == backend),
-        ReauthTargetId::AwsSession(session) => aws_sso::profile_scopes()?
-            .iter()
-            .any(|(_, scope)| scope.session_name.as_deref() == Some(session)),
-        ReauthTargetId::AwsProfile(profile) => aws_sso::profile_scopes()?
-            .iter()
-            .any(|(name, scope)| name == profile && scope.session_name.is_none()),
-    };
-    if listed {
-        Ok(())
-    } else {
-        Err(ReauthError::InvalidTarget(format!(
+/// The listed target `id` stands for. Only listed targets may start: a run
+/// nobody can see could neither be polled nor, once refused, reset from
+/// Settings. An AWS profile resolves to the scope target discovery lists.
+fn canonicalize(id: ReauthTargetId) -> Result<ReauthTargetId, ReauthError> {
+    let unlisted = |id: &ReauthTargetId| {
+        ReauthError::InvalidTarget(format!(
             "{id} is not a re-auth target on this host (see list_reauth_targets)"
-        )))
+        ))
+    };
+    match &id {
+        ReauthTargetId::CliTool(_) => Ok(id),
+        ReauthTargetId::Sgsc(backend) => {
+            if sgsc_backends().iter().any(|b| b == backend) {
+                Ok(id)
+            } else {
+                Err(unlisted(&id))
+            }
+        }
+        ReauthTargetId::AwsSession(session) => {
+            if aws_sso::profile_scopes()?
+                .iter()
+                .any(|(_, scope)| scope.session_name.as_deref() == Some(session))
+            {
+                Ok(id)
+            } else {
+                Err(unlisted(&id))
+            }
+        }
+        ReauthTargetId::AwsProfile(profile) => {
+            canonical_aws_target(&aws_sso::profile_scopes()?, profile).ok_or_else(|| unlisted(&id))
+        }
     }
 }
 
@@ -706,8 +730,7 @@ pub fn start_listed(
     id: ReauthTargetId,
     trigger: ReauthTrigger,
 ) -> Result<ReauthRunReport, ReauthError> {
-    ensure_listed(&id)?;
-    Ok(start(id, trigger))
+    Ok(start(canonicalize(id)?, trigger))
 }
 
 /// Start (or join) a run of `id`. Returns immediately; the run is owned by a
@@ -1126,6 +1149,40 @@ mod tests {
             ),
             "opened https://device.sso.us-east-1.amazonaws.com/ now"
         );
+    }
+
+    #[test]
+    fn aws_targets_resolve_to_one_canonical_id_per_token() {
+        let scope = |key: &str, session: Option<&str>| aws_sso::AwsSsoAuthScope {
+            key: key.into(),
+            label: key.into(),
+            session_name: session.map(str::to_string),
+        };
+        let scopes = vec![
+            ("sg.Admin".to_string(), scope("session:sg", Some("sg"))),
+            ("legacy.A".to_string(), scope("start-url:https://x", None)),
+            ("legacy.B".to_string(), scope("start-url:https://x", None)),
+            ("other".to_string(), scope("start-url:https://y", None)),
+        ];
+        let canon = |p: &str| canonical_aws_target(&scopes, p);
+        assert_eq!(
+            canon("sg.Admin"),
+            Some(ReauthTargetId::AwsSession("sg".into()))
+        );
+        // Both legacy aliases of one start URL share the first one's id.
+        assert_eq!(
+            canon("legacy.A"),
+            Some(ReauthTargetId::AwsProfile("legacy.A".into()))
+        );
+        assert_eq!(
+            canon("legacy.B"),
+            Some(ReauthTargetId::AwsProfile("legacy.A".into()))
+        );
+        assert_eq!(
+            canon("other"),
+            Some(ReauthTargetId::AwsProfile("other".into()))
+        );
+        assert_eq!(canon("missing"), None);
     }
 
     #[test]

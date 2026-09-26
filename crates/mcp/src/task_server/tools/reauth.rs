@@ -55,7 +55,21 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Re-authenticate an expired credential with no human involved, then retry your command. Call it when a command fails with: AWS `The SSO session associated with this profile has expired` / `Error loading SSO Token` / `Token has expired and refresh failed`; az `InteractionRequired`, `TokenCreatedWithOutdatedPolicies`, `AADSTS50173`; acli `unauthorized: use 'acli confluence auth login'`; or an sgsc-mcp `reauth_required` / `Connect <provider> to continue` result (pass `sgsc:<backend>`, e.g. `sgsc:dp` for Snowflake, `sgsc:sf` for Salesforce). Waits up to 50 s; if a run is still `running`, poll list_reauth_targets instead of calling this again. A `refused` outcome needs the operator: do not retry it."
+        description = "The last re-authentication run of each target, without re-checking any credential. Fast; use it to poll a run that reauthenticate reported as still running."
+    )]
+    async fn list_reauth_runs(&self) -> Result<CallToolResult, ErrorData> {
+        let url = self.url("/api/reauth/runs");
+        match self
+            .send_json::<serde_json::Value>(self.client.get(&url))
+            .await
+        {
+            Ok(runs) => McpServer::success(&runs),
+            Err(e) => Ok(Self::tool_error(e)),
+        }
+    }
+
+    #[tool(
+        description = "Re-authenticate an expired credential with no human involved, then retry your command. Call it when a command fails with: AWS `The SSO session associated with this profile has expired` / `Error loading SSO Token` / `Token has expired and refresh failed`; az `InteractionRequired`, `TokenCreatedWithOutdatedPolicies`, `AADSTS50173`; acli `unauthorized: use 'acli confluence auth login'`; or an sgsc-mcp `reauth_required` / `Connect <provider> to continue` result (pass `sgsc:<backend>`, e.g. `sgsc:dp` for Snowflake, `sgsc:sf` for Salesforce). Waits up to 50 s; if a run is still `running`, poll list_reauth_runs instead of calling this again. A `refused` outcome needs the operator: do not retry it."
     )]
     async fn reauthenticate(
         &self,
@@ -73,7 +87,7 @@ impl McpServer {
             Err(e) => return Ok(Self::tool_error(e)),
         };
         let hint = if any_running(&runs) {
-            Some("Still running: call list_reauth_targets in a minute to see the outcome.")
+            Some("Still running: call list_reauth_runs in a minute to see the outcome.")
         } else if runs.as_array().is_some_and(|r| r.is_empty()) {
             Some("Nothing to repair: no swept target is currently unauthenticated.")
         } else {

@@ -96,7 +96,7 @@ async fn run(
                 Err(_) => {
                     return ResponseJson(ApiResponse::error(
                         "still checking which credentials are expired; any repairs start on \
-                         their own. Check list_reauth_targets in a minute.",
+                         their own. Check list_reauth_runs in a minute.",
                     ));
                 }
             }

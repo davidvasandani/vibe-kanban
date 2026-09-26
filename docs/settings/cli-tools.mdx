@@ -168,12 +168,14 @@ homelab deployment pages ntfy on that line.
 
 ### Agents
 
-Agents get two Vibe Kanban MCP tools:
+Agents get three Vibe Kanban MCP tools:
 
 - `list_reauth_targets` lists the targets with their state and last run.
 - `reauthenticate` repairs one target (or every expired swept target when you
   omit `target`) and waits up to 50 seconds. A run still in progress continues
-  on the server; poll `list_reauth_targets` for its outcome.
+  on the server.
+- `list_reauth_runs` returns each target's last run without re-checking any
+  credential, so it is the fast way to poll a run in progress.
 
 The tool description tells agents when to call it: an expired AWS SSO token,
 an `az` `InteractionRequired` challenge, an acli `unauthorized` error, or an

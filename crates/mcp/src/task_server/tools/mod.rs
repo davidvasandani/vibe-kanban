@@ -637,6 +637,7 @@ pub(crate) mod tests {
             "list_pollers".to_string(),
             "list_preview_leases".to_string(),
             "list_recent_messages".to_string(),
+            "list_reauth_runs".to_string(),
             "list_reauth_targets".to_string(),
             "list_sessions".to_string(),
             "reauthenticate".to_string(),
