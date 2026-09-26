@@ -17,7 +17,23 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Replace each target's last run with a newer one from a cheap poll. */
+/**
+ * Whether `incoming` may replace `current`: a later run, or the same run
+ * moving forward. A slow response must never roll a newer run back (which
+ * would also stop the polling that tracks it).
+ */
+export function isNewerRun(
+  current: ReauthRun | null,
+  incoming: ReauthRun
+): boolean {
+  if (!current) return true;
+  const a = Date.parse(current.started_at);
+  const b = Date.parse(incoming.started_at);
+  if (b !== a) return b > a;
+  return current.outcome === 'running' && incoming.outcome !== 'running';
+}
+
+/** Apply newer runs from a poll or a run request to each target. */
 export function mergeRuns(
   overview: ReauthOverview,
   runs: ReauthRunReport[]
@@ -27,7 +43,9 @@ export function mergeRuns(
     ...overview,
     targets: overview.targets.map((target) => {
       const run = byId.get(target.id);
-      return run ? { ...target, last_run: run } : target;
+      return run && isNewerRun(target.last_run, run)
+        ? { ...target, last_run: run }
+        : target;
     }),
   };
 }

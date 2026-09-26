@@ -8,7 +8,11 @@ import type {
   ReauthRunReport,
   ReauthTargetStatus,
 } from 'shared/types';
-import { ReauthSettingsCard, mergeRuns } from './ReauthSettingsCard';
+import {
+  ReauthSettingsCard,
+  isNewerRun,
+  mergeRuns,
+} from './ReauthSettingsCard';
 
 vi.hoisted(() => {
   process.env.NODE_ENV = 'test';
@@ -287,6 +291,29 @@ describe('ReauthSettingsCard host switching', () => {
 });
 
 describe('mergeRuns', () => {
+  it('never rolls a newer run back to an older or regressed one', () => {
+    const newer = run({ started_at: '2026-09-26T12:05:00Z' });
+    const older = run({
+      started_at: '2026-09-26T12:00:00Z',
+      outcome: 'succeeded',
+    });
+    expect(isNewerRun(newer, older)).toBe(false);
+    expect(isNewerRun(older, newer)).toBe(true);
+    // The same run may only move forward, never back to running.
+    const done = run({ outcome: 'failed' });
+    expect(isNewerRun(run(), done)).toBe(true);
+    expect(isNewerRun(done, run())).toBe(false);
+    expect(isNewerRun(null, run())).toBe(true);
+    const overview = {
+      sweep_interval_secs: null,
+      targets: [target({ last_run: newer })],
+    } as ReauthOverview;
+    const merged = mergeRuns(overview, [
+      { id: 'aws-sso:sweetgreen', run: older },
+    ]);
+    expect(merged.targets[0].last_run).toBe(newer);
+  });
+
   it('replaces only targets with a newer run', () => {
     const overview = {
       sweep_interval_secs: null,

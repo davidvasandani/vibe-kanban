@@ -829,7 +829,35 @@ async fn execute(id: ReauthTargetId) {
         }
     });
     let progress = Progress::new(tx);
-    let result = run_engine(&id, &progress).await;
+    let trigger = with_registry(|states| {
+        states
+            .get(&id)
+            .and_then(|s| s.last_run.as_ref())
+            .map(|r| r.trigger)
+    })
+    .unwrap_or(ReauthTrigger::Manual);
+    let shares_entra = uses_entra(&id);
+    let latched = shares_entra
+        .then(|| entra_gate(trigger, entra_refusal().as_deref()))
+        .flatten();
+    let gated = latched.is_some();
+    let result = match latched {
+        Some(reason) => {
+            progress.say(&reason);
+            Err(ReauthError::Entra(EntraError::Refused(reason)))
+        }
+        None => run_engine(&id, &progress).await,
+    };
+    if shares_entra {
+        match &result {
+            // Only a real attempt latches; a gated one just repeats it.
+            Err(ReauthError::Entra(EntraError::Refused(reason))) if !gated => {
+                set_entra_refusal(Some(reason.clone()));
+            }
+            Ok(_) => set_entra_refusal(None),
+            _ => {}
+        }
+    }
     let (outcome, message) = match result {
         Ok(note) => match verify(&id).await {
             Ok(()) => (ReauthRunOutcome::Succeeded, note),
@@ -862,6 +890,45 @@ async fn execute(id: ReauthTargetId) {
             message.as_deref().unwrap_or("unknown")
         );
     }
+}
+
+/// Every browser-driven target signs in as the same Entra account with the
+/// same 1Password factors; acli uses its own API token.
+fn uses_entra(id: &ReauthTargetId) -> bool {
+    !matches!(id, ReauthTargetId::CliTool(CliToolId::Acli))
+}
+
+/// The last definitive Entra refusal, shared by every Entra-backed target.
+fn entra_refusal_cell() -> &'static Mutex<Option<String>> {
+    static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CELL.get_or_init(Default::default)
+}
+
+fn entra_refusal() -> Option<String> {
+    entra_refusal_cell()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+fn set_entra_refusal(reason: Option<String>) {
+    *entra_refusal_cell()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = reason;
+}
+
+/// Whether a run must settle without signing in because the shared Entra
+/// account was refused. A refusal is about the account, not the target: one
+/// stale password must not be resubmitted once per queued target (that is
+/// the lockout). Only an operator run from Settings tries again.
+fn entra_gate(trigger: ReauthTrigger, refusal: Option<&str>) -> Option<String> {
+    let reason = refusal?;
+    (trigger != ReauthTrigger::Manual).then(|| {
+        format!(
+            "not attempted: the shared Entra sign-in was refused ({reason}). \
+             Fix the credential, then re-run a target from Settings."
+        )
+    })
 }
 
 /// Run the engine for `id`. `Ok(note)` means the flow completed; the caller
@@ -1183,6 +1250,21 @@ mod tests {
             Some(ReauthTargetId::AwsProfile("other".into()))
         );
         assert_eq!(canon("missing"), None);
+    }
+
+    #[test]
+    fn a_shared_entra_refusal_gates_every_non_manual_attempt() {
+        let reason = "Entra rejected the 1Password password";
+        for trigger in [ReauthTrigger::Agent, ReauthTrigger::Sweep] {
+            let gated = entra_gate(trigger, Some(reason)).expect("must be gated");
+            assert!(gated.contains(reason) && gated.starts_with("not attempted"));
+        }
+        assert_eq!(entra_gate(ReauthTrigger::Manual, Some(reason)), None);
+        assert_eq!(entra_gate(ReauthTrigger::Sweep, None), None);
+        assert!(uses_entra(&ReauthTargetId::AwsSession("sg".into())));
+        assert!(uses_entra(&ReauthTargetId::Sgsc("dp".into())));
+        assert!(uses_entra(&ReauthTargetId::CliTool(CliToolId::Az)));
+        assert!(!uses_entra(&ReauthTargetId::CliTool(CliToolId::Acli)));
     }
 
     #[test]
