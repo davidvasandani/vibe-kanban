@@ -102,7 +102,12 @@ contributed to it.
   mutex + `fd-lock`/`flock` on the shared `auth.json` inode (non-blocking
   `try_write` poll), `get_account(refresh_token=true)` to drive Codex's guarded
   refresh once, the shared-inode + lock-order invariants, fail-safe fallbacks,
-  and the rejected alternatives (external-auth bridge, blind retry).
+  and the rejected alternatives (external-auth bridge, blind retry). Plus
+  copy-holders whose refresh token is blank by design: Codex's in-turn 401
+  recovery is the fatal path, the deployment's `CODEX_REFRESH_TOKEN_URL_OVERRIDE`
+  endpoint serves the owner's current token, and VK skips doomed pre-turn
+  refreshes and renders refresh failures as `SetupRequired`
+  (`vk/82c6-vk-error-when-us`, `vk/6c79-codex-auth-error`).
 - [slack-shortcut-ai-summarization.md](slack-shortcut-ai-summarization.md) —
   Optional AI thread summarization for the Slack "Create issue from message"
   shortcut: the ack-fast/enrich-later shape (all slow work in the post-ack

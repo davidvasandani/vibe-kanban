@@ -99,6 +99,46 @@ mid-turn can still race — that refresh is inside the subprocess, outside our
 lock. Rare, and mitigated by the fresh up-front token plus Codex's guarded
 reload.
 
+## Copy-holders: a credential that cannot be refreshed here (vk/6c79-codex-auth-error)
+
+On the think cluster only one node owns the ChatGPT login. Every worker holds a
+copy of its `auth.json` with `tokens.refresh_token` deliberately **blank**
+(homelab `codex-auth-sync`), so no worker can rotate, and thereby wedge, the
+shared token. That makes every refresh on a worker doomed. The dangerous one
+isn't the pre-turn refresh above. It's Codex's in-turn **401 recovery**: on any
+401 from the model endpoint, Codex re-reads `auth.json` and then refreshes over
+the network. OpenAI answers the blank token with
+`400 Invalid 'refresh_token': empty string`, and the turn dies. This happened
+about 50 times across the cluster, including while the access token was still
+valid.
+
+The recovery lives in the deployment, not in VK. The homelab sets Codex's own
+`CODEX_REFRESH_TOKEN_URL_OVERRIDE` on the worker to a node-local endpoint that
+serves the owner's *current* access token and never returns a refresh token.
+Codex persists the served token, keeps the blank refresh token, and retries.
+This isn't the rejected "reimplement OAuth refresh in VK": nothing is exchanged
+or rotated. The worker environment reaches executions unchanged, so VK needs no
+plumbing.
+
+VK's part is to understand that contract:
+
+- **`auth_refresh::refresh_is_possible`**: the pre-turn refresh is skipped, with
+  one warning per process, when the ChatGPT credential's `refresh_token` is
+  present but empty **and** the override is unset, because Codex can't succeed.
+  With the override set it proceeds, and adopts the owner's copy. Missing,
+  unparseable or API-key credentials keep the old behavior.
+- **`normalize_logs::refresh_failure_setup_message`**: Codex errors in the form
+  `Failed to refresh token: …` or `…access token could not be refreshed…` (v2
+  `error` notification and legacy `EventMsg::Error`) render as `SetupRequired`,
+  keeping the original text and adding next steps: the node's refresh endpoint,
+  or `codex login` on the credential's owner.
+- The deployment endpoint refuses with **non-401 status and non-Codex error
+  codes** on purpose. Codex swaps a 401 or a known refresh code for a canned
+  "log out and sign in again", but it shows any other `error.message`
+  verbatim. That's why the endpoint's actionable text ("could not fetch the
+  current Codex credential from think2 …") reaches the VK error entry intact.
+
 ## Contributed by
 
 - vk/82c6-vk-error-when-us
+- vk/6c79-codex-auth-error

@@ -25,7 +25,10 @@ use std::{
     collections::HashMap,
     fs::OpenOptions,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration as StdDuration,
 };
 
@@ -45,6 +48,12 @@ const REFRESH_WINDOW_MINUTES: i64 = 5;
 const LOCK_WAIT_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 const LOCK_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
 
+/// Codex's own knob for replacing OpenAI's token endpoint
+/// (`codex-rs/login`, `REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR`). Deployments that
+/// distribute one login to many nodes set it to a node-local endpoint serving
+/// the owner's current copy.
+const REFRESH_TOKEN_URL_OVERRIDE_ENV: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
+
 /// If the ChatGPT access token in `auth.json` is near expiry, take a
 /// cross-process advisory lock and drive Codex's guarded refresh once, up front.
 ///
@@ -55,6 +64,26 @@ pub(crate) async fn refresh_credentials_if_stale(codex_home: &Path, client: &App
     // Cheap unlocked pre-check: only proceed if a ChatGPT token is present and
     // near expiry. Missing file / API-key auth / healthy token short-circuit.
     if !credential_is_stale(&auth_path, Utc::now()) {
+        return;
+    }
+
+    // A credential copy whose refresh token was deliberately blanked (a
+    // cluster worker holding the owner's login, VAS-490) cannot be refreshed
+    // against OpenAI; asking Codex to try only produces a 400. It can when the
+    // deployment points Codex's refresh at a node-local endpoint that serves
+    // the owner's current copy, so the override re-enables the pre-refresh.
+    if !refresh_is_possible(
+        &auth_path,
+        std::env::var_os(REFRESH_TOKEN_URL_OVERRIDE_ENV).is_some(),
+    ) {
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "codex auth pre-refresh skipped: auth.json has an empty refresh token and \
+                 {REFRESH_TOKEN_URL_OVERRIDE_ENV} is unset, so this credential can only be \
+                 renewed by whoever owns the login"
+            );
+        }
         return;
     }
 
@@ -166,6 +195,30 @@ fn read_access_token(auth_path: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Whether Codex has any way to refresh this credential. False only for a
+/// ChatGPT credential whose `refresh_token` is present but empty, with no
+/// refresh endpoint override configured. Anything unreadable keeps today's
+/// behavior (true).
+fn refresh_is_possible(auth_path: &Path, override_present: bool) -> bool {
+    if override_present {
+        return true;
+    }
+    let Ok(contents) = std::fs::read_to_string(auth_path) else {
+        return true;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return true;
+    };
+    match json
+        .get("tokens")
+        .and_then(|tokens| tokens.get("refresh_token"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(refresh_token) => !refresh_token.is_empty(),
+        None => true,
+    }
+}
+
 /// Whether the JWT `access_token` expires within `window` of `now`. Any
 /// decode/parse failure returns `false` (fail safe: treat as not stale).
 fn access_token_expires_within(access_token: &str, window: Duration, now: DateTime<Utc>) -> bool {
@@ -259,6 +312,47 @@ mod tests {
         std::fs::write(&path, contents).unwrap();
         assert_eq!(read_access_token(&path).as_deref(), Some(token.as_str()));
         assert!(credential_is_stale(&path, Utc::now()));
+    }
+
+    fn write_auth(dir: &tempfile::TempDir, tokens: serde_json::Value) -> PathBuf {
+        let path = dir.path().join("auth.json");
+        let contents = serde_json::json!({ "auth_mode": "chatgpt", "tokens": tokens });
+        std::fs::write(&path, contents.to_string()).unwrap();
+        path
+    }
+
+    #[test]
+    fn blank_refresh_token_without_override_cannot_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth(&dir, serde_json::json!({ "refresh_token": "" }));
+        assert!(!refresh_is_possible(&path, false));
+    }
+
+    #[test]
+    fn override_makes_a_blank_refresh_token_refreshable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth(&dir, serde_json::json!({ "refresh_token": "" }));
+        assert!(refresh_is_possible(&path, true));
+    }
+
+    #[test]
+    fn real_refresh_token_can_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth(&dir, serde_json::json!({ "refresh_token": "rt" }));
+        assert!(refresh_is_possible(&path, false));
+    }
+
+    #[test]
+    fn unknown_shapes_keep_existing_behavior() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        assert!(refresh_is_possible(&path, false), "missing file");
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(refresh_is_possible(&path, false), "unparseable");
+        std::fs::write(&path, r#"{"OPENAI_API_KEY":"sk-test"}"#).unwrap();
+        assert!(refresh_is_possible(&path, false), "api key auth");
+        let path = write_auth(&dir, serde_json::json!({ "access_token": "a" }));
+        assert!(refresh_is_possible(&path, false), "no refresh_token field");
     }
 
     #[test]
