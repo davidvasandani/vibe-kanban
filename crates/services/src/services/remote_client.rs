@@ -4,17 +4,17 @@ use std::time::Duration;
 
 use api_types::{
     AcceptInvitationResponse, AuthMethodsResponse, CreateInvitationRequest,
-    CreateInvitationResponse, CreateIssueAssigneeRequest, CreateIssueRelationshipRequest,
-    CreateIssueRequest, CreateIssueTagRequest, CreateOrganizationRequest,
-    CreateOrganizationResponse, CreateWorkspaceRequest, DeleteResponse, DeleteWorkspaceRequest,
-    GetInvitationResponse, GetOrganizationResponse, HandoffInitRequest, HandoffInitResponse,
-    HandoffRedeemRequest, HandoffRedeemResponse, Issue, IssueAssignee, IssueRelationship, IssueTag,
-    ListAttachmentsResponse, ListInvitationsResponse, ListIssueAssigneesResponse,
-    ListIssueRelationshipsResponse, ListIssueTagsResponse, ListIssuesResponse, ListMembersResponse,
-    ListOrganizationsResponse, ListProjectStatusesResponse, ListProjectsResponse,
-    ListPullRequestsResponse, ListTagsResponse, LocalLoginRequest, LocalLoginResponse,
-    MutationResponse, Organization, ProfileResponse, PullRequest,
-    ResolvedOrganizationEnvVarsResponse, RevokeInvitationRequest, SearchIssuesRequest,
+    CreateInvitationResponse, CreateIssueAssigneeRequest, CreateIssueCommentRequest,
+    CreateIssueRelationshipRequest, CreateIssueRequest, CreateIssueTagRequest,
+    CreateOrganizationRequest, CreateOrganizationResponse, CreateWorkspaceRequest, DeleteResponse,
+    DeleteWorkspaceRequest, GetInvitationResponse, GetOrganizationResponse, HandoffInitRequest,
+    HandoffInitResponse, HandoffRedeemRequest, HandoffRedeemResponse, Issue, IssueAssignee,
+    IssueComment, IssueRelationship, IssueTag, ListAttachmentsResponse, ListInvitationsResponse,
+    ListIssueAssigneesResponse, ListIssueRelationshipsResponse, ListIssueTagsResponse,
+    ListIssuesResponse, ListMembersResponse, ListOrganizationsResponse,
+    ListProjectStatusesResponse, ListProjectsResponse, ListPullRequestsResponse, ListTagsResponse,
+    LocalLoginRequest, LocalLoginResponse, MutationResponse, Organization, ProfileResponse,
+    PullRequest, ResolvedOrganizationEnvVarsResponse, RevokeInvitationRequest, SearchIssuesRequest,
     SingleUserLoginResponse, Tag, TokenRefreshRequest, TokenRefreshResponse, UpdateIssueRequest,
     UpdateMemberRoleRequest, UpdateMemberRoleResponse, UpdateOrganizationRequest,
     UpdatePullRequestApiRequest, UpdateWorkspaceRequest, UpsertPullRequestRequest, Workspace,
@@ -940,6 +940,14 @@ impl RemoteClient {
     pub async fn get_issue_tag(&self, issue_tag_id: Uuid) -> Result<IssueTag, RemoteClientError> {
         self.get_authed(&format!("/v1/issue_tags/{issue_tag_id}"))
             .await
+    }
+
+    /// Adds a comment to an issue.
+    pub async fn create_issue_comment(
+        &self,
+        request: &CreateIssueCommentRequest,
+    ) -> Result<MutationResponse<IssueComment>, RemoteClientError> {
+        self.post_authed("/v1/issue_comments", Some(request)).await
     }
 
     /// Attaches a tag to an issue.

@@ -190,3 +190,67 @@ settings:
 
 Nothing needs to change in `homelab/modules/vibe-kanban-rebuild.nix`, because
 the settings live in the VK config.
+
+---
+
+# Follow-up: reuse active issues with similar errors
+
+Requested after the first merge (#331): "AER should look for active issues
+with similar errors before creating a new one."
+
+## Problem
+
+The source-workspace dedupe only stops *the same workspace* from filing twice.
+When one root cause breaks several workspaces, for example an expired
+credential or a broken upstream API, each of them files its own issue and
+starts its own unattended workspace. That produces parallel agents racing to
+fix and merge the same thing.
+
+## Design
+
+1. **Error fingerprint.** `error_fingerprint(messages)` normalizes the
+   captured error messages. It lowercases them, replaces UUIDs, long hex runs
+   and digit runs with placeholders, and collapses whitespace. It then hashes
+   the result with FNV-1a 64 into 16 hex characters. Messages that differ only
+   in ids, timestamps, ports or line numbers get the same fingerprint. When no
+   error message was captured there is no fingerprint, and the new behavior is
+   skipped. Two empty contexts carry no evidence of the same cause.
+2. **Marker.** The issue marker gains the fingerprint:
+   `<!-- vk:auto-remediation source=… exec=… fingerprint=<fp> -->`. It is
+   omitted when there is no fingerprint.
+3. **Similarity.** Two error texts are *similar* when either of these holds:
+   - Their fingerprints are equal.
+   - The Jaccard similarity of their normalized token sets is at least 0.8.
+
+   The token check catches near-duplicates, such as a changed file name, and
+   issues filed before fingerprints existed. The existing issue's error text
+   is parsed back out of the `### Error messages` fence.
+4. **Lookup, before creating.** Search the target project with
+   `search_issues`, using `search = "vk:auto-remediation"` and `status_ids`
+   set to the project's **active** statuses. Active excludes `done`,
+   `cancelled` and `canceled`, case-insensitively, which is the remote's
+   existing convention. Only issues that carry the marker count.
+5. **On a match.** Post a comment on the existing issue (`POST
+   /v1/issue_comments`). The comment records the new source workspace,
+   execution, exit code and a bounded error excerpt. No issue is created and
+   no workspace is started. On no match, proceed as before.
+6. **Fail closed.** If the lookup itself fails (remote error), skip the
+   launch and log it. That is consistent with XLI: a guard failure never
+   spawns. A comment failure is logged; the occurrence has already been
+   routed to the existing issue, so it is not a reason to launch.
+7. The in-memory guard reservation (dedupe and hourly cap) still happens
+   first. A matched occurrence therefore consumes a slot, which also bounds
+   comment volume.
+
+## Acceptance criteria
+
+- A failure whose errors match an active AER issue in the target project adds
+  a comment to that issue. It creates no issue and starts no workspace.
+- A match against an issue in Done or Cancelled is ignored, and a new issue is
+  filed.
+- Errors that differ only in UUIDs, numbers or hex ids match. Different
+  errors do not match. A failure with no captured error never matches.
+- A failed lookup launches nothing.
+- The new logic has unit tests: fingerprint normalization, similarity
+  threshold, error-text round-trip from the issue body, marker parsing and
+  active-status selection.

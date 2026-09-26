@@ -6,10 +6,18 @@
 //! this module only resolves inputs and reuses the existing issue-creation,
 //! workspace-start and link paths. A launch is attempted once: failures are
 //! logged, never retried (VK constitution XLI).
+//!
+//! Before filing, it looks for an *active* remediation issue in the target
+//! project whose recorded errors match this failure, and records the
+//! occurrence there as a comment instead of starting parallel work on one root
+//! cause. A lookup that cannot answer launches nothing.
 
 use std::{collections::HashSet, sync::Arc, time::Instant};
 
-use api_types::{CreateIssueRequest, IssuePriority, pipeline_block};
+use api_types::{
+    CreateIssueCommentRequest, CreateIssueRequest, IssuePriority, IssueSortField,
+    SearchIssuesRequest, SortDirection, pipeline_block,
+};
 use axum::{Extension, Json, extract::State};
 use db::models::{
     execution_process::ExecutionProcess,
@@ -27,18 +35,38 @@ use services::services::{
     config::AutoErrorRemediationConfig,
     container::ContainerService,
     error_remediation::{
-        ErrorRemediationEvent, ErrorRemediationGuard, GuardDecision, RemediationContext,
-        compose_issue, extract_error_messages, remediation_stage_ids,
+        ErrorRemediationEvent, ErrorRemediationGuard, GuardDecision, REMEDIATION_MARKER_PREFIX,
+        RemediationContext, compose_issue, compose_recurrence_comment, extract_error_messages,
+        find_similar_issue, is_active_status_name, remediation_stage_ids,
     },
     pipelines,
 };
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::{Mutex, broadcast::error::RecvError};
 use uuid::Uuid;
 
 use crate::{
     DeploymentImpl,
     routes::workspaces::{create::create_and_start_workspace, links},
 };
+
+/// Upper bound on active remediation issues compared per lookup (newest
+/// first). The hourly launch cap keeps real projects far below it.
+const SIMILAR_ISSUE_SEARCH_LIMIT: i32 = 200;
+
+/// Shared state of the consumer.
+#[derive(Default)]
+struct Consumer {
+    guard: ErrorRemediationGuard,
+    /// Serializes "look for a similar issue → create one" so two failures
+    /// with the same cause handled concurrently cannot both miss each other
+    /// and file duplicates.
+    lookup_lock: Mutex<()>,
+}
+
+enum LaunchOutcome {
+    Launched { issue_id: Uuid, workspace_id: Uuid },
+    Recurred { issue_id: Uuid },
+}
 
 /// Subscribe to failed-turn events and handle them in the background for the
 /// lifetime of the process.
@@ -48,7 +76,7 @@ pub fn spawn(deployment: &DeploymentImpl) {
     };
     let mut events = sender.subscribe();
     let deployment = deployment.clone();
-    let guard = Arc::new(ErrorRemediationGuard::new());
+    let consumer = Arc::new(Consumer::default());
 
     tokio::spawn(async move {
         loop {
@@ -57,8 +85,8 @@ pub fn spawn(deployment: &DeploymentImpl) {
                     // Each event is handled on its own task so a slow remote
                     // call never delays the next event's guard decision.
                     let deployment = deployment.clone();
-                    let guard = guard.clone();
-                    tokio::spawn(async move { handle(&deployment, &guard, event).await });
+                    let consumer = consumer.clone();
+                    tokio::spawn(async move { handle(&deployment, &consumer, event).await });
                 }
                 Err(RecvError::Lagged(skipped)) => {
                     tracing::warn!(skipped, "Auto error remediation dropped failed-turn events");
@@ -69,11 +97,7 @@ pub fn spawn(deployment: &DeploymentImpl) {
     });
 }
 
-async fn handle(
-    deployment: &DeploymentImpl,
-    guard: &ErrorRemediationGuard,
-    ev: ErrorRemediationEvent,
-) {
+async fn handle(deployment: &DeploymentImpl, consumer: &Consumer, ev: ErrorRemediationEvent) {
     let config = deployment
         .config()
         .read()
@@ -101,7 +125,7 @@ async fn handle(
         }
     };
 
-    match guard.try_reserve(
+    match consumer.guard.try_reserve(
         workspace.id,
         workspace.name.as_deref(),
         Instant::now(),
@@ -119,9 +143,21 @@ async fn handle(
         }
     }
 
-    match launch(deployment, &config, &workspace, &session, &execution).await {
-        Ok((issue_id, launched_workspace_id)) => {
-            guard.record_launched(launched_workspace_id);
+    match launch(
+        deployment,
+        &consumer.lookup_lock,
+        &config,
+        &workspace,
+        &session,
+        &execution,
+    )
+    .await
+    {
+        Ok(LaunchOutcome::Launched {
+            issue_id,
+            workspace_id: launched_workspace_id,
+        }) => {
+            consumer.guard.record_launched(launched_workspace_id);
             tracing::info!(
                 source_workspace_id = %workspace.id,
                 execution_id = %execution.id,
@@ -130,6 +166,12 @@ async fn handle(
                 "Auto error remediation launched"
             );
         }
+        Ok(LaunchOutcome::Recurred { issue_id }) => tracing::info!(
+            source_workspace_id = %workspace.id,
+            execution_id = %execution.id,
+            %issue_id,
+            "Auto error remediation recorded a recurrence on an active similar issue"
+        ),
         Err(error) => tracing::warn!(
             source_workspace_id = %workspace.id,
             execution_id = %execution.id,
@@ -138,15 +180,16 @@ async fn handle(
     }
 }
 
-/// Create the issue, start the workspace and link them. Returns the issue and
-/// launched workspace ids.
+/// Reuse an active similar issue, or create the issue, start the workspace
+/// and link them.
 async fn launch(
     deployment: &DeploymentImpl,
+    lookup_lock: &Mutex<()>,
     config: &AutoErrorRemediationConfig,
     workspace: &Workspace,
     session: &Session,
     execution: &ExecutionProcess,
-) -> Result<(Uuid, Uuid), String> {
+) -> Result<LaunchOutcome, String> {
     let pool = &deployment.db().pool;
 
     let project_id = match config.project_id {
@@ -176,34 +219,92 @@ async fn launch(
         .clone()
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| workspace.branch.clone());
+    let context = RemediationContext {
+        source_workspace_id: workspace.id,
+        source_name,
+        branch: workspace.branch.clone(),
+        execution_process_id: execution.id,
+        executor: session
+            .executor
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        exit_code: execution.exit_code,
+        error_messages,
+        variant_fallback,
+    };
     let draft = compose_issue(
-        &RemediationContext {
-            source_workspace_id: workspace.id,
-            source_name,
-            branch: workspace.branch.clone(),
-            execution_process_id: execution.id,
-            executor: session
-                .executor
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            exit_code: execution.exit_code,
-            error_messages,
-            variant_fallback,
-        },
+        &context,
         &compose_block(&config.pipeline_ids, &config.merge_stage_ids)?,
     );
 
     let client = deployment.remote_client().map_err(|e| e.to_string())?;
-    let status_id = client
+    let statuses = client
         .list_project_statuses(project_id)
         .await
         .map_err(|e| e.to_string())?
-        .project_statuses
-        .into_iter()
+        .project_statuses;
+    let status_id = statuses
+        .iter()
         .filter(|s| !s.hidden)
         .min_by_key(|s| s.sort_order)
         .map(|s| s.id)
         .ok_or("project has no visible statuses")?;
+    let active_status_ids: Vec<Uuid> = statuses
+        .iter()
+        .filter(|s| is_active_status_name(&s.name))
+        .map(|s| s.id)
+        .collect();
+
+    // Held until the new issue exists, so a concurrent failure with the same
+    // cause finds it instead of filing a twin.
+    let lookup = lookup_lock.lock().await;
+
+    // Absent evidence never matches, and a project without active statuses
+    // has no candidates (an empty `status_ids` filter is ambiguous).
+    if !context.error_messages.is_empty() && !active_status_ids.is_empty() {
+        let candidates = client
+            .search_issues(&SearchIssuesRequest {
+                project_id,
+                status_id: None,
+                status_ids: Some(active_status_ids),
+                priority: None,
+                parent_issue_id: None,
+                search: Some(REMEDIATION_MARKER_PREFIX.trim().to_string()),
+                simple_id: None,
+                assignee_user_id: None,
+                tag_id: None,
+                tag_ids: None,
+                sort_field: Some(IssueSortField::CreatedAt),
+                sort_direction: Some(SortDirection::Desc),
+                limit: Some(SIMILAR_ISSUE_SEARCH_LIMIT),
+                offset: None,
+            })
+            .await
+            .map_err(|e| format!("similar-issue lookup failed, nothing launched: {e}"))?
+            .issues;
+
+        if let Some(existing) = find_similar_issue(&candidates, &context.error_messages) {
+            // The occurrence belongs to the existing issue either way; a
+            // failed comment is logged, never a reason to launch.
+            if let Err(error) = client
+                .create_issue_comment(&CreateIssueCommentRequest {
+                    id: None,
+                    issue_id: existing.id,
+                    message: compose_recurrence_comment(&context),
+                    parent_id: None,
+                })
+                .await
+            {
+                tracing::warn!(
+                    issue_id = %existing.id,
+                    "Auto error remediation could not comment on the similar issue: {error}"
+                );
+            }
+            return Ok(LaunchOutcome::Recurred {
+                issue_id: existing.id,
+            });
+        }
+    }
 
     let issue = client
         .create_issue(&CreateIssueRequest {
@@ -224,6 +325,8 @@ async fn launch(
         .await
         .map_err(|e| e.to_string())?
         .data;
+    // The issue is now findable; workspace start needs no serialization.
+    drop(lookup);
 
     let started = create_and_start_workspace(
         State(deployment.clone()),
@@ -282,7 +385,10 @@ async fn launch(
         )
     })?;
 
-    Ok((issue.id, launched_workspace_id))
+    Ok(LaunchOutcome::Launched {
+        issue_id: issue.id,
+        workspace_id: launched_workspace_id,
+    })
 }
 
 /// Configured repositories (each on the source workspace's target branch for

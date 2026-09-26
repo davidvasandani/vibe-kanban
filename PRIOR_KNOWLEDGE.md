@@ -1,65 +1,27 @@
-# Prior knowledge: `vk/7e4f-auto-error-remed`
+# Prior knowledge: `vk/7e4f-auto-error-remed` follow-up (similar-issue reuse)
 
-This file distills the knowledge-base pages (`wiki/`) that bear on
-auto-remediating failed agent turns. It is read-only input to the spec and
-plan stages.
+## auto-error-remediation.md (written by this task's first round)
 
-## task-pipeline-block.md
+- All guards reserve their slot before I/O and fail closed. A lookup that
+  gates spawning must follow the same rule: if it cannot answer, do not
+  launch.
+- The durable recursion guard is the `Auto-fix: ` name prefix. The issue
+  carries a `<!-- vk:auto-remediation … -->` marker. That marker is the
+  natural key for finding earlier remediation issues.
+- The in-memory 24 h dedupe is per *source workspace* only. It cannot see
+  across workspaces or restarts, which is the gap this follow-up closes.
 
-- The pipeline block (`<!-- vk:pipeline:start/end -->`) inside
-  `issues.description` is the **only** record of a pipeline selection. No
-  structured copy exists. "Enabling pipelines on an issue" therefore means
-  composing that block into the description.
-- The block has one Rust composer (MCP `compose_pipeline_block`) and one TS
-  composer (`taskPipeline.ts`), and they must stay byte-identical. The edit UI
-  round-trips a block only when it matches the composer exactly. A
-  hand-rolled third composer could produce a block the UI misparses; if the
-  UI under-recognizes a selection, recomposing drops stage lines. The auto
-  path must therefore **reuse** the existing Rust composer, not re-implement
-  it.
-- Display names aren't unique across pipeline TOML files, so select pipelines
-  by **id** (`wikillm`, `speckit`).
+## issue-workspace-lifecycle.md / remote `db/issues.rs`
 
-## issue-workspace-lifecycle.md
+- "Active" is decided by status name, case-insensitive and project-scoped:
+  `lower(name) NOT IN ('done','cancelled','canceled')`. That exact rule is
+  already used in `crates/remote/src/db/issues.rs`. Reuse it rather than
+  `completed_at`, which not every terminal status sets.
+- The remote `search` is `ILIKE '%…%'` over title and description, with LIKE
+  metacharacters escaped. Searching for the marker text is exact and safe.
 
-- Remote (Postgres) and local (SQLite) stores sync on a best-effort basis:
-  errors are logged, and there is no distributed transaction or durable retry
-  queue. An auto-launcher that creates a remote issue and then a local
-  workspace inherits that model. It should log partial failure rather than
-  retry blindly.
-- Completion-time code must read **current** workspace metadata, not a
-  snapshot captured earlier.
+## issue-workspace-advisory.md
 
-## workspace-creation-reliability.md
-
-- `create_and_start_workspace` accepts the request and then runs creation in
-  a spawned task (queue → claim → run → finish). The returned workspace is
-  the accepted record, and creation can still fail afterwards. Callers
-  (MCP `start_workspace`, and now the launcher) link the issue after the
-  accepted response, which matches the MCP flow.
-- Never retry the workspace workflow on failure. The same rule applies to
-  remediation: a failed launch is logged, not retried.
-
-## agent-process-lifecycle.md / vk-pollers.md
-
-- One turn is one `ExecutionProcess`. `Indeterminate` means the terminal
-  event was lost and the group was reaped, so it is **not** evidence of an
-  agent error. `Killed` means the user stopped the turn, and `Interrupted`
-  means a server restart stopped it.
-- `CodingAgent` is non-persistent, so every turn goes through finalization.
-  `finalize_task` is the single place where every exit path (local exit
-  monitor, skipped cleanup, worker reconciliation) sends the
-  completion/failure notification. That makes it the natural trigger point.
-
-## Precedent (git history, not wiki)
-
-- `resume_interrupted_on_startup` (#62) is the closest analogue: an opt-in
-  config flag that spawns agents without a human. Three things to copy:
-  - it is off by default, with `#[serde(default)]` on Config v8;
-  - it has a General-settings toggle with i18n in every locale;
-  - it caps itself so a crash loop cannot keep respawning agents.
-
-## Gaps
-
-- The wiki has no page on unattended or auto-spawned workspaces, or on
-  loop-guarding. This task should add one (enrich stage).
+- Identity comes from ids and markers, not names. Titles are copied and
+  collide. Match on the marker and on error evidence, never on the
+  `Auto-fix: …` title.

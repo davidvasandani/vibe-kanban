@@ -108,3 +108,38 @@ See `SPEC.md` for the design and `PRIOR_KNOWLEDGE.md` for the constraints.
 - Add a new page, `wiki/auto-error-remediation.md`, and update `INDEX.md`.
 - Update `task-pipeline-block.md` to note that the Rust composer now lives in
   `api-types`.
+
+---
+
+# Follow-up plan: reuse active issues with similar errors
+
+1. **Pure logic** in `crates/services/src/services/error_remediation.rs`:
+   - `normalize_error_text(&str) -> String`, which replaces UUIDs, hex runs of
+     8+ characters and digit runs, lowercases, and collapses whitespace;
+   - `error_fingerprint(&[String]) -> Option<String>`, an FNV-1a 64 hash of
+     the normalized, joined messages (`None` when there are none);
+   - `error_similarity(a, b) -> f64`, the token-set Jaccard similarity of the
+     normalized text;
+   - `RemediationContext::fingerprint()`, included in `remediation_marker`;
+   - `parse_marker(description) -> Option<ParsedMarker{ fingerprint }>` and
+     `issue_error_text(description) -> Option<String>`, which reads the fence
+     under `### Error messages`;
+   - `find_similar_issue(&[Issue], &[String]) -> Option<&Issue>`, which
+     checks the marker and then either an equal fingerprint or similarity of
+     at least 0.8;
+   - `is_active_status_name(&str)`, which follows the remote's
+     done/cancelled/canceled rule;
+   - `compose_recurrence_comment(&RemediationContext) -> String`;
+   - unit tests for all of the above.
+2. **Remote client:** add `create_issue_comment(&CreateIssueCommentRequest)`
+   to `crates/services/src/services/remote_client.rs`, calling `POST
+   /v1/issue_comments`.
+3. **Consumer** in `crates/server/src/error_remediation.rs`: after the
+   statuses are fetched and before `create_issue`, when error messages
+   exist, search the project's active statuses for the marker text. On a
+   match, comment and return an `Outcome::Recurred(issue_id)`. Otherwise
+   create as before. If the search errors, return `Err`, so nothing is
+   launched.
+4. **Wiki:** update `wiki/auto-error-remediation.md`.
+5. **Verify:** run the `cargo test` and clippy suites for services and
+   server.
