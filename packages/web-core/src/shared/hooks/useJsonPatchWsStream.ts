@@ -2,7 +2,10 @@ import { useEffect, useState, useRef } from 'react';
 import { produce } from 'immer';
 import type { Operation } from 'rfc6902';
 import { applyUpsertPatch } from '@/shared/lib/jsonPatch';
-import { openLocalApiWebSocket } from '@/shared/lib/localApiTransport';
+import {
+  openLocalApiWebSocket,
+  type LocalApiWebSocketOptions,
+} from '@/shared/lib/localApiTransport';
 
 type WsJsonPatchMsg = { JsonPatch: Operation[] };
 type WsReadyMsg = { Ready: true };
@@ -34,6 +37,10 @@ interface UseJsonPatchStreamOptions<T> {
    * Filter/deduplicate patches before applying them
    */
   deduplicatePatches?: (patches: Operation[]) => Operation[];
+  /**
+   * Host scope for the socket. Defaults to the current route's host.
+   */
+  socketOptions?: LocalApiWebSocketOptions;
 }
 
 interface UseJsonPatchStreamResult<T> {
@@ -66,6 +73,17 @@ export const useJsonPatchWsStream = <T extends object>(
 
   const injectInitialEntry = options?.injectInitialEntry;
   const deduplicatePatches = options?.deduplicatePatches;
+  // A different host is a different stream even when the path is identical.
+  const socketOptions = options?.socketOptions;
+  const socketScopeKey = socketOptions
+    ? [
+        socketOptions.hostScope ?? '',
+        socketOptions.hostId ?? '',
+        socketOptions.relayHostId ?? '',
+      ].join('|')
+    : '';
+  const socketOptionsRef = useRef(socketOptions);
+  socketOptionsRef.current = socketOptions;
 
   // Endpoint changes are a different execution stream and must reset the
   // snapshot. A reconnect attempt to the *same* endpoint is not: keeping the
@@ -80,7 +98,7 @@ export const useJsonPatchWsStream = <T extends object>(
     setIsConnected(false);
     setIsInitialized(false);
     setError(null);
-  }, [endpoint, enabled]);
+  }, [endpoint, enabled, socketScopeKey]);
 
   function scheduleReconnect() {
     if (retryTimerRef.current) return; // already scheduled
@@ -132,7 +150,10 @@ export const useJsonPatchWsStream = <T extends object>(
 
       void (async () => {
         try {
-          const ws = await openLocalApiWebSocket(endpoint);
+          const scopedOptions = socketOptionsRef.current;
+          const ws = scopedOptions
+            ? await openLocalApiWebSocket(endpoint, scopedOptions)
+            : await openLocalApiWebSocket(endpoint);
 
           if (cancelled) {
             ws.close();
@@ -270,6 +291,7 @@ export const useJsonPatchWsStream = <T extends object>(
   }, [
     endpoint,
     enabled,
+    socketScopeKey,
     initialData,
     injectInitialEntry,
     deduplicatePatches,

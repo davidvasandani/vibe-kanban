@@ -473,6 +473,34 @@ Two things worth carrying forward:
 
 Grok's existing verified absence is unchanged.
 
+### Drive the shipped control from inside a real turn
+
+The cheapest high-value check on an agent-facing control, and the last one this
+task did: once it is deployed, **use it**. A VK agent turn is itself a live
+Claude process behind the deployed hooks, so a handful of ordinary `Bash` calls
+exercise the whole path — server-side predicate, hook transport, and the text
+the agent actually receives — in a way no unit or protocol test reaches.
+
+Two design rules make it safe and worth doing:
+
+- **Write deny probes whose condition is already true.** `until [ -f /etc/hostname ];
+  do sleep 1; done` is refused if the guard is live and *exits immediately* if it
+  is not. A probe that could hang is a probe you cannot run against the failure
+  you are testing for.
+- **Probe both directions.** Denying the bad shape proves the control exists;
+  allowing the retry loop, the `while read … sleep` loop and the prose mention
+  proves it is not over-broad. On the workhorse tool the second half is the one
+  that would hurt.
+
+This found nothing new — but it is what upgraded "the tests pass" to "the
+deployed thing refuses the incident command and allows ordinary work", including
+a live before/after on the two escapes fixed after the first merge. It also
+confirmed layer 1 by reading `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS`
+straight out of the agent's own environment.
+
+What it still is not: independent review. It is the implementer driving their own
+artifact, which raises confidence that the control *works*, not that it is right.
+
 ## Contributed by
 
 - vk/869c-vk-background-po

@@ -663,16 +663,15 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
     ExecutorDiscoveredOptions {
         model_selector: ModelSelectorConfig {
             providers: vec![],
+            // Explicit, versioned IDs only: aliases such as `opus` move with CLI
+            // releases, so the picker would not say which model actually runs.
+            // Saved profiles that still name an alias keep launching with it.
             models: [
-                ("opus", "Opus"),
-                ("opus[1m]", "Opus (1M context)"),
                 ("claude-opus-5-5", "Opus 5.5"),
                 ("claude-opus-5", "Opus 5"),
                 ("claude-sonnet-5", "Sonnet 5"),
                 ("claude-fable-5-1", "Fable 5.1"),
-                ("sonnet", "Sonnet"),
-                ("fable", "Fable"),
-                ("haiku", "Haiku"),
+                ("claude-haiku-4-5", "Haiku 4.5"),
             ]
             .into_iter()
             .map(|(id, name)| ModelInfo {
@@ -686,7 +685,19 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
                 },
             })
             .collect(),
-            default_model: Some("opus".to_string()),
+            default_model: Some("claude-opus-5-5".to_string()),
+            // What each alias resolves to in the pinned CLI (2.1.281). Saved
+            // profiles keep sending the alias; the picker shows the model it runs.
+            model_aliases: [
+                ("opus", "claude-opus-5-5"),
+                ("opus[1m]", "claude-opus-5-5"),
+                ("sonnet", "claude-sonnet-5"),
+                ("fable", "claude-fable-5-1"),
+                ("haiku", "claude-haiku-4-5"),
+            ]
+            .into_iter()
+            .map(|(alias, id)| (alias.to_string(), id.to_string()))
+            .collect(),
             agents: vec![],
             permissions: vec![
                 PermissionPolicy::Auto,
@@ -4670,65 +4681,95 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_opus_5_5_in_discovered_options() {
+    fn test_claude_discovered_catalog_is_versioned_and_defaults_to_opus_5_5() {
         let options = super::default_discovered_options();
-        let model = options
+        let efforts = ["low", "medium", "high", "xhigh", "max"];
+        let expected: [(&str, &str, &[&str]); 5] = [
+            ("claude-opus-5-5", "Opus 5.5", &efforts),
+            ("claude-opus-5", "Opus 5", &efforts),
+            ("claude-sonnet-5", "Sonnet 5", &efforts),
+            ("claude-fable-5-1", "Fable 5.1", &efforts),
+            ("claude-haiku-4-5", "Haiku 4.5", &[]),
+        ];
+
+        let actual = options
             .model_selector
             .models
             .iter()
-            .find(|m| m.id == "claude-opus-5-5")
-            .expect("Opus 5.5 must be selectable explicitly");
-        assert_eq!(model.name, "Opus 5.5");
-        assert!(!model.reasoning_options.is_empty());
+            .map(|model| {
+                (
+                    model.id.as_str(),
+                    model.name.as_str(),
+                    model
+                        .reasoning_options
+                        .iter()
+                        .map(|option| option.id.as_str())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = expected
+            .iter()
+            .map(|(id, name, efforts)| (*id, *name, efforts.to_vec()))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+
         assert_eq!(
-            context_window_for_model(&model.id),
+            options.model_selector.default_model.as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            context_window_for_model("claude-opus-5-5"),
             CLAUDE_1M_CONTEXT_WINDOW
         );
         assert_eq!(
-            options.model_selector.default_model.as_deref(),
-            Some("opus")
+            context_window_for_model("claude-haiku-4-5"),
+            DEFAULT_CLAUDE_CONTEXT_WINDOW
         );
     }
 
     #[test]
-    fn test_claude_opus_5_in_discovered_options() {
+    fn test_claude_legacy_aliases_resolve_to_catalog_models() {
         let options = super::default_discovered_options();
-        let opus5 = options
-            .model_selector
-            .models
+        let selector = &options.model_selector;
+        let mut aliases = selector
+            .model_aliases
             .iter()
-            .find(|m| m.id == "claude-opus-5");
-        assert!(opus5.is_some(), "claude-opus-5 must be in model catalog");
-        let opus5 = opus5.unwrap();
-        assert_eq!(opus5.name, "Opus 5");
+            .map(|(alias, id)| (alias.as_str(), id.as_str()))
+            .collect::<Vec<_>>();
+        aliases.sort();
+        assert_eq!(
+            aliases,
+            [
+                ("fable", "claude-fable-5-1"),
+                ("haiku", "claude-haiku-4-5"),
+                ("opus", "claude-opus-5-5"),
+                ("opus[1m]", "claude-opus-5-5"),
+                ("sonnet", "claude-sonnet-5"),
+            ]
+        );
+        for (alias, id) in &aliases {
+            assert!(
+                selector.models.iter().any(|model| model.id == *id),
+                "alias {alias} must resolve to an advertised model"
+            );
+            assert!(
+                selector.models.iter().all(|model| model.id != *alias),
+                "alias {alias} must not be advertised"
+            );
+        }
         assert!(
-            !opus5.reasoning_options.is_empty(),
-            "claude-opus-5 must have reasoning options (supports_effort coverage)"
+            base_command(false).contains("@anthropic-ai/claude-code@2.1.281"),
+            "aliases were read from the 2.1.281 binary; re-verify if this pin moves"
         );
     }
 
     #[test]
-    fn test_claude_fable_5_1_in_discovered_options() {
-        let options = super::default_discovered_options();
-        let fable = options
-            .model_selector
-            .models
-            .iter()
-            .find(|model| model.id == "claude-fable-5-1")
-            .expect("claude-fable-5-1 must be in model catalog");
-
-        assert_eq!(fable.name, "Fable 5.1");
+    fn test_preset_options_default_to_opus_5_5() {
+        let executor = claude_with(None, None);
         assert_eq!(
-            fable
-                .reasoning_options
-                .iter()
-                .map(|option| option.id.as_str())
-                .collect::<Vec<_>>(),
-            ["low", "medium", "high", "xhigh", "max"]
-        );
-        assert_eq!(
-            options.model_selector.default_model.as_deref(),
-            Some("opus")
+            executor.get_preset_options().model_id.as_deref(),
+            Some("claude-opus-5-5")
         );
     }
 

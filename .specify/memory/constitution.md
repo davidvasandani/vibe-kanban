@@ -75,6 +75,14 @@ session identity, cancellation, failures, and credential redaction must remain
 correct. Extend the shared executor, log-normalization, profile, and MCP
 abstractions before introducing agent-specific parallel machinery.
 
+The agent's output stream carries only what the agent wrote. Vibe Kanban's own
+control and transport metadata — worker lifecycle phases, stream or dispatch
+errors — travels in its own typed channel and is consumed by the code that owns
+it. It is never re-injected as agent stdout, where the vendor parser would
+misclassify it as an unknown agent event. Metadata that a user needs to see is
+rendered as a Vibe Kanban diagnostic naming what happened; bookkeeping that
+carries no user-facing fact is not rendered at all.
+
 Normalized-log compaction must preserve protocol lifecycle identity and patch
 ordering. Repeated events may share a visible entry only when semantic equality,
 adjacency, and completion state are proven; failures stay visible, stale event
@@ -630,9 +638,11 @@ constraint below: configured, or the source workspace's own project, else skip.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.37.0 (adds XLI, making self-spawned agent work opt-in, marked
+**Version**: 0.38.0 (adds XLI, making self-spawned agent work opt-in, marked
 against recursion, deduped per source, globally rate-capped, and triggered only
-by genuine failures; 0.36.0 added XL, requiring every awaited client stream to
+by genuine failures; 0.37.0 extended IX so Vibe Kanban's own worker control and
+transport metadata never enters the agent's output stream, where it would be
+parsed as an unknown agent event; 0.36.0 added XL, requiring every awaited client stream to
 settle exactly once on sentinel, close-without-sentinel, error, or an idle
 deadline for settled-history reads, so a loading state gated on it always ends
 and a failed item degrades the view instead of blocking it; 0.35.0 added XXXIX, requiring a request-scoped read to derive
@@ -839,3 +849,14 @@ side, where a stream that has ended can still leave its waiter pending. XIX's
 "live streams are bounded and self-correcting" governs retention and
 resnapshotting, not settlement of a one-shot awaited read. XL fills that gap.
 Numeral XL was unused on this branch and on `main`.
+
+## Review: vk/5276-debug-unrecogniz
+
+Applied `/speckit.constitution`: extended IX (0.37.0). The chat showed
+`Unrecognized JSON message: {"cancellation_phase":"requested"}` because the
+coordinator wrote worker `Structured` events that are not `LogMsg` values into
+the execution's stdout, where the Claude parser classified them as unknown agent
+events. IX already required unknown vendor events to degrade safely. It did not
+say that the product's own metadata must stay out of the vendor stream. XI
+(diagnostics are evidence) applies to the worker error variants, which must stay
+visible as diagnostics rather than being dropped.

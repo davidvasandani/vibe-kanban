@@ -520,6 +520,7 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
     };
     ExecutorDiscoveredOptions {
         model_selector: ModelSelectorConfig {
+            model_aliases: Default::default(),
             providers: vec![],
             models: vec![],
             default_model: None,
