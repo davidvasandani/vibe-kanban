@@ -74,6 +74,7 @@ use services::services::{
     queued_message::QueuedMessageService,
     remote_client::{RemoteClient, RemoteClientError},
     remote_sync,
+    workspace_diff_stats::WORKSPACE_DIFF_STATS,
 };
 use sha2::{Digest, Sha256};
 use tokio::{sync::RwLock, task::JoinHandle};
@@ -2457,6 +2458,10 @@ impl LocalContainerService {
                     })));
                 }
 
+                // The process may have changed the worktree: drop the workspace's
+                // cached bulk diff stats so the next summaries poll recomputes them.
+                WORKSPACE_DIFF_STATS.invalidate(ctx.workspace.id);
+
                 // Sync workspace to remote after CodingAgent execution
                 if matches!(
                     &ctx.execution_process.run_reason,
@@ -3188,6 +3193,9 @@ impl LocalContainerService {
         if self.should_finalize(&ctx) && !started_queued_follow_up {
             self.finalize_task(&ctx).await;
         }
+        // Remote processes edit the shared worktree from a worker; invalidate
+        // the coordinator's cached bulk diff stats for this workspace.
+        WORKSPACE_DIFF_STATS.invalidate(ctx.workspace.id);
         self.update_after_head_commits(execution_id).await;
     }
 

@@ -322,6 +322,9 @@ mod tests {
                 load_15m: None,
                 frequency_mhz: None,
                 temperature_celsius: None,
+                uninterruptible_tasks: None,
+                io_pressure_some_avg60: None,
+                io_pressure_full_avg60: None,
             },
             memory: MemorySample {
                 total_bytes: Some(1024),

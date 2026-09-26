@@ -13,6 +13,7 @@ use db::models::{
 use deployment::Deployment;
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
+use services::services::workspace_diff_stats::{DiffStatsFreshness, WORKSPACE_DIFF_STATS};
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
@@ -135,6 +136,14 @@ fn last_workspace_activity(
     }
 }
 
+/// Staleness bound for a workspace's bulk diff stats (see `DiffStatsFreshness`).
+fn diff_stats_freshness(archived: bool, latest: Option<&LatestProcessInfo>) -> DiffStatsFreshness {
+    DiffStatsFreshness::for_workspace(
+        archived,
+        latest.is_some_and(|info| info.status == ExecutionProcessStatus::Running),
+    )
+}
+
 fn should_skip_idle_git_status(last_activity: DateTime<Utc>, now: DateTime<Utc>) -> bool {
     now.signed_duration_since(last_activity) > git_status_idle_after()
 }
@@ -204,22 +213,44 @@ pub async fn get_workspace_summaries(
     // 8. Compute diff stats for each workspace (bounded concurrency).
     // Skip workspaces idle > 14 days so the sidebar poll does not `git status`
     // every stale worktree. On-demand single-workspace status is unchanged.
-    // Limit concurrent git operations to avoid I/O-bound host overload.
+    // Stats come from the process-wide single-flight cache, so every client's
+    // poll shares one computation per workspace per freshness window and git
+    // work is bounded across all requests, not per request.
     let now = Utc::now();
     let diff_futures: Vec<_> = workspaces
         .iter()
         .map(|ws| {
             let workspace = ws.clone();
             let deployment = deployment.clone();
+            let latest = latest_processes.get(&ws.id);
             let skip_idle = should_skip_idle_git_status(
-                last_workspace_activity(ws.updated_at, latest_processes.get(&ws.id), now),
+                last_workspace_activity(ws.updated_at, latest, now),
                 now,
             );
+            let max_age = diff_stats_freshness(ws.archived, latest).max_age();
             async move {
                 if workspace.container_ref.is_some() && !skip_idle {
-                    compute_workspace_diff_stats(&deployment, &workspace)
+                    let workspace_id = workspace.id;
+                    let pool = deployment.db().pool.clone();
+                    let git = deployment.git().clone();
+                    WORKSPACE_DIFF_STATS
+                        .get_or_compute(workspace_id, max_age, async move {
+                            services::services::diff_stream::compute_diff_stats_outcome(
+                                &pool, &git, &workspace,
+                            )
+                            .await
+                        })
                         .await
-                        .map(|stats| (workspace.id, stats))
+                        .map(|stats| {
+                            (
+                                workspace_id,
+                                DiffStats {
+                                    files_changed: stats.files_changed,
+                                    lines_added: stats.lines_added,
+                                    lines_removed: stats.lines_removed,
+                                },
+                            )
+                        })
                 } else {
                     None
                 }
@@ -287,17 +318,18 @@ pub async fn get_workspace_summaries(
 }
 
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use db::models::{
         execution_process::{ExecutionProcessStatus, LatestProcessInfo},
         workspace::{WorkspacePlacement, WorkspacePlacementState},
     };
+    use services::services::workspace_diff_stats::DiffStatsFreshness;
     use uuid::Uuid;
 
     use super::{
-        WorkspaceAffinityKind, affinity_kind, last_workspace_activity, should_skip_idle_git_status,
+        WorkspaceAffinityKind, affinity_kind, diff_stats_freshness, last_workspace_activity,
+        should_skip_idle_git_status,
     };
 
     fn placement(
@@ -327,6 +359,26 @@ mod tests {
             status,
             completed_at,
         }
+    }
+
+    #[test]
+    fn diff_stats_freshness_follows_archive_and_running_state() {
+        let running = latest_process(ExecutionProcessStatus::Running, None);
+        let done = latest_process(ExecutionProcessStatus::Completed, Some(Utc::now()));
+
+        assert_eq!(
+            diff_stats_freshness(false, Some(&running)),
+            DiffStatsFreshness::Running
+        );
+        assert_eq!(
+            diff_stats_freshness(false, Some(&done)),
+            DiffStatsFreshness::Idle
+        );
+        assert_eq!(diff_stats_freshness(false, None), DiffStatsFreshness::Idle);
+        assert_eq!(
+            diff_stats_freshness(true, Some(&running)),
+            DiffStatsFreshness::Archived
+        );
     }
 
     #[test]
@@ -405,23 +457,4 @@ mod tests {
             now
         ));
     }
-}
-
-/// Compute diff stats for a workspace.
-pub async fn compute_workspace_diff_stats(
-    deployment: &DeploymentImpl,
-    workspace: &Workspace,
-) -> Option<DiffStats> {
-    let stats = services::services::diff_stream::compute_diff_stats(
-        &deployment.db().pool,
-        deployment.git(),
-        workspace,
-    )
-    .await?;
-
-    Some(DiffStats {
-        files_changed: stats.files_changed,
-        lines_added: stats.lines_added,
-        lines_removed: stats.lines_removed,
-    })
 }

@@ -71,6 +71,8 @@ pub struct ProcessStat {
     pub pid: i32,
     /// Field 2, `comm`, with its surrounding parentheses removed.
     pub name: String,
+    /// Field 3, the scheduler state (`R`, `S`, `D`, …).
+    pub state: char,
     pub utime: u64,
     pub stime: u64,
     /// Field 22. Half of a process's identity, because PIDs are reused.
@@ -100,6 +102,16 @@ pub struct LoadAverage {
     pub one: f32,
     pub five: f32,
     pub fifteen: f32,
+}
+
+/// 60-second averages from a `/proc/pressure/*` file, in percent of wall time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PressureAverages {
+    /// Share of time at least one task was stalled on the resource.
+    pub some_avg60: f32,
+    /// Share of time all non-idle tasks were stalled. `None` for files that
+    /// have no `full` line (`/proc/pressure/cpu` on older kernels).
+    pub full_avg60: Option<f32>,
 }
 
 /// The fields of `/proc/cpuinfo` this crate uses.
@@ -266,6 +278,29 @@ pub fn parse_loadavg(contents: &str) -> Option<LoadAverage> {
         one: columns.next()?.parse().ok()?,
         five: columns.next()?.parse().ok()?,
         fifteen: columns.next()?.parse().ok()?,
+    })
+}
+
+/// Parse a `/proc/pressure/*` file. Requires the `some` line; a file without
+/// it is not a pressure reading.
+pub fn parse_pressure(contents: &str) -> Option<PressureAverages> {
+    fn avg60(line: &str) -> Option<f32> {
+        line.split_whitespace()
+            .find_map(|field| field.strip_prefix("avg60="))
+            .and_then(|value| value.parse().ok())
+    }
+    let mut some = None;
+    let mut full = None;
+    for line in contents.lines() {
+        if let Some(rest) = line.strip_prefix("some ") {
+            some = avg60(rest);
+        } else if let Some(rest) = line.strip_prefix("full ") {
+            full = avg60(rest);
+        }
+    }
+    Some(PressureAverages {
+        some_avg60: some?,
+        full_avg60: full,
     })
 }
 
@@ -441,10 +476,23 @@ pub fn parse_process_stat(contents: &str) -> Option<ProcessStat> {
     Some(ProcessStat {
         pid,
         name,
+        state: parse_stat_state(contents)?,
         utime: field(14)?,
         stime: field(15)?,
         start_ticks: field(22)?,
     })
+}
+
+/// The scheduler state (field 3) of a `/proc/[pid]/stat` or
+/// `/proc/[pid]/task/[tid]/stat` line. Located after the *last* `)`, because
+/// `comm` may itself contain parentheses and spaces.
+pub fn parse_stat_state(contents: &str) -> Option<char> {
+    let close = contents.rfind(')')?;
+    contents[close + 1..]
+        .split_whitespace()
+        .next()?
+        .chars()
+        .next()
 }
 
 /// Parse `/proc/[pid]/status` for owner, resident memory, and thread count.
@@ -531,6 +579,7 @@ mod tests {
     const STAT_NEXT: &str = include_str!("../tests/fixtures/stat_next");
     const MEMINFO: &str = include_str!("../tests/fixtures/meminfo");
     const LOADAVG: &str = include_str!("../tests/fixtures/loadavg");
+    const PRESSURE_IO: &str = include_str!("../tests/fixtures/pressure_io");
     const UPTIME: &str = include_str!("../tests/fixtures/uptime");
     const CPUINFO: &str = include_str!("../tests/fixtures/cpuinfo");
     const NET_DEV: &str = include_str!("../tests/fixtures/net_dev");
@@ -551,6 +600,9 @@ mod tests {
         assert!(parse_loadavg("").is_none());
         assert!(parse_loadavg("0.31 1.60").is_none());
         assert!(parse_uptime("").is_none());
+        assert!(parse_pressure("").is_none());
+        assert!(parse_pressure("full avg10=0.00 avg60=1.00").is_none());
+        assert!(parse_pressure("some avg10=0.00").is_none());
         assert!(parse_uptime("not-a-number").is_none());
         assert!(parse_process_stat("").is_none());
         assert!(parse_process_stat("254347 (cp) R 254334").is_none());
@@ -664,6 +716,18 @@ mod tests {
         assert_eq!(memory.total_bytes, Some(1024 * 1024));
         assert_eq!(memory.used_bytes, Some(512 * 1024));
         assert_eq!(memory.cached_bytes, Some(192 * 1024));
+    }
+
+    #[test]
+    fn pressure_reads_some_and_full_avg60() {
+        let io = parse_pressure(PRESSURE_IO).expect("pressure");
+        assert_eq!(io.some_avg60, 2.17);
+        assert_eq!(io.full_avg60, Some(0.86));
+
+        let some_only = parse_pressure("some avg10=1.00 avg60=4.50 avg300=0.10 total=9\n")
+            .expect("some-only pressure");
+        assert_eq!(some_only.some_avg60, 4.5);
+        assert_eq!(some_only.full_avg60, None);
     }
 
     #[test]
@@ -804,6 +868,10 @@ mod tests {
         let stat = parse_process_stat(PID_STAT).expect("process stat");
         assert_eq!(stat.pid, 254_347);
         assert_eq!(stat.name, "cp");
+        assert_eq!(stat.state, 'R');
+        assert_eq!(parse_stat_state(PID_STAT), Some('R'));
+        assert_eq!(parse_stat_state("4242 (git (x) y) D 1 1 1 0 -1"), Some('D'));
+        assert_eq!(parse_stat_state("4242 (git)"), None);
         assert_eq!(stat.start_ticks, 157_905_759);
         assert_eq!(stat.busy_ticks(), stat.utime + stat.stime);
     }

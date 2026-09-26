@@ -149,6 +149,22 @@ pub struct CpuSample {
     pub load_15m: Option<f32>,
     pub frequency_mhz: Option<u32>,
     pub temperature_celsius: Option<f32>,
+    /// Processes in uninterruptible sleep (state `D`), counted from the
+    /// `/proc/[pid]/stat` walk. `None` when the process table is unreadable.
+    ///
+    /// Counted directly rather than read from `/proc/stat`'s `procs_blocked`,
+    /// which is only `nr_iowait`: NFS RPC waits put tasks in D state and raise
+    /// the load without counting as I/O waiters, and without showing up in
+    /// `/proc/pressure/io` — a host can sit at load 40 with both near zero.
+    /// Defaulted so samples from older workers still deserialize.
+    #[serde(default)]
+    pub uninterruptible_tasks: Option<u32>,
+    /// `/proc/pressure/io` "some" 60-second average, percent of wall time.
+    #[serde(default)]
+    pub io_pressure_some_avg60: Option<f32>,
+    /// `/proc/pressure/io` "full" 60-second average, percent of wall time.
+    #[serde(default)]
+    pub io_pressure_full_avg60: Option<f32>,
 }
 
 /// One core's derived busy percentage, tagged with the index the kernel gave
@@ -324,6 +340,23 @@ pub enum NodeMetricsAvailability {
 mod tests {
     use super::*;
 
+    /// A worker on an older version sends a `cpu` object without the
+    /// pressure fields. It must still deserialize, with those readings absent
+    /// (not zero).
+    #[test]
+    fn cpu_sample_without_pressure_fields_deserializes_as_absent() {
+        let cpu: CpuSample = serde_json::from_str(
+            r#"{"model":null,"core_count":6,"total_busy_percent":12.5,"per_core_busy":null,
+                "load_1m":1.0,"load_5m":1.0,"load_15m":1.0,"frequency_mhz":null,
+                "temperature_celsius":null}"#,
+        )
+        .expect("old cpu sample");
+
+        assert_eq!(cpu.uninterruptible_tasks, None);
+        assert_eq!(cpu.io_pressure_some_avg60, None);
+        assert_eq!(cpu.io_pressure_full_avg60, None);
+    }
+
     fn round_trip(value: &NodeMetricsAvailability) -> NodeMetricsAvailability {
         let encoded = serde_json::to_string(value).expect("serialize");
         serde_json::from_str(&encoded)
@@ -414,11 +447,16 @@ mod tests {
             load_15m: Some(1.02),
             frequency_mhz: Some(900),
             temperature_celsius: Some(41.0),
+            uninterruptible_tasks: Some(9),
+            io_pressure_some_avg60: Some(2.17),
+            io_pressure_full_avg60: Some(0.86),
         };
         let encoded = serde_json::to_string(&sample).unwrap();
         let decoded: CpuSample = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.total_busy_percent, Some(12.5));
         assert_eq!(decoded.load_1m, Some(0.31));
+        assert_eq!(decoded.uninterruptible_tasks, Some(9));
+        assert_eq!(decoded.io_pressure_some_avg60, Some(2.17));
     }
 
     #[test]
