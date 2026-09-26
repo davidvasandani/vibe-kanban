@@ -304,6 +304,11 @@ describe('mergeRuns', () => {
     expect(isNewerRun(run(), done)).toBe(true);
     expect(isNewerRun(done, run())).toBe(false);
     expect(isNewerRun(null, run())).toBe(true);
+    // A running run's transcript grows while it runs; never shrinks.
+    const oneStep = run({ transcript: ['step 1'] });
+    const twoSteps = run({ transcript: ['step 1', 'step 2'] });
+    expect(isNewerRun(oneStep, twoSteps)).toBe(true);
+    expect(isNewerRun(twoSteps, oneStep)).toBe(false);
     const overview = {
       sweep_interval_secs: null,
       targets: [target({ last_run: newer })],

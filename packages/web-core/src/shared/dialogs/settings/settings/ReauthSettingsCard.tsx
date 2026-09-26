@@ -30,7 +30,13 @@ export function isNewerRun(
   const a = Date.parse(current.started_at);
   const b = Date.parse(incoming.started_at);
   if (b !== a) return b > a;
-  return current.outcome === 'running' && incoming.outcome !== 'running';
+  if (current.outcome !== 'running') return false;
+  // Same run: finishing is progress, and so is a longer (append-only)
+  // transcript while it is still running.
+  return (
+    incoming.outcome !== 'running' ||
+    incoming.transcript.length > current.transcript.length
+  );
 }
 
 /** Apply newer runs from a poll or a run request to each target. */

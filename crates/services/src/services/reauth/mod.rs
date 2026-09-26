@@ -837,6 +837,14 @@ async fn execute(id: ReauthTargetId) {
     })
     .unwrap_or(ReauthTrigger::Manual);
     let shares_entra = uses_entra(&id);
+    // Check, attempt and latch as one step across every Entra-backed run:
+    // otherwise two concurrent targets both pass the check, and the second
+    // resubmits a password the first just saw refused.
+    let _entra_turn = if shares_entra {
+        Some(entra_run_lock().lock().await)
+    } else {
+        None
+    };
     let latched = shares_entra
         .then(|| entra_gate(trigger, entra_refusal().as_deref()))
         .flatten();
@@ -896,6 +904,14 @@ async fn execute(id: ReauthTargetId) {
 /// same 1Password factors; acli uses its own API token.
 fn uses_entra(id: &ReauthTargetId) -> bool {
     !matches!(id, ReauthTargetId::CliTool(CliToolId::Acli))
+}
+
+/// One Entra-backed run at a time, held from the refusal check through the
+/// latch update. They already share one browser profile, so this costs no
+/// concurrency that existed.
+fn entra_run_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(Default::default)
 }
 
 /// The last definitive Entra refusal, shared by every Entra-backed target.
