@@ -767,6 +767,38 @@
         "unsupported": "Not installable here"
       }
     },
+    "reauth": {
+      "title": "Unattended re-authentication",
+      "description": "Credentials this host signs back in with no human involved, using the saved Entra browser session and 1Password. A success is only reported after an independent check of the vendor’s own credential store.",
+      "loading": "Checking credentials…",
+      "empty": "No re-authentication targets are configured on this host.",
+      "sweepEvery": "Expired credentials are repaired automatically every {{minutes}} minutes.",
+      "sweepOff": "Automatic repair is off; re-authenticate on demand.",
+      "runAll": "Re-authenticate all expired",
+      "run": "Re-authenticate",
+      "onDemand": "on demand only",
+      "refused": "Refused earlier: agents and the automatic sweep will not retry this until you re-run it here.",
+      "showSteps": "Show steps",
+      "hideSteps": "Hide steps",
+      "state": {
+        "authenticated": "Authenticated",
+        "unauthenticated": "Expired or signed out",
+        "unknown": "Status unknown",
+        "not_configured": "Not configured"
+      },
+      "outcome": {
+        "running": "Running",
+        "succeeded": "Succeeded",
+        "failed": "Failed",
+        "verification_failed": "Finished, but verification failed",
+        "refused": "Refused"
+      },
+      "trigger": {
+        "manual": "from Settings",
+        "agent": "by an agent",
+        "sweep": "by the automatic sweep"
+      }
+    },
     "aws": {
       "title": "AWS",
       "description": "Manage AWS SSO profiles and sign in on the selected host. Status checks verify host authentication only. Agent shells need access to the same AWS configuration and SSO cache; select a profile with AWS_PROFILE. Tokens remain managed by the AWS CLI.",

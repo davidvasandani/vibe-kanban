@@ -24,6 +24,7 @@ pub mod oauth;
 pub mod organizations;
 pub mod pipelines;
 pub mod preview;
+pub mod reauth;
 pub mod relay_auth;
 pub mod releases;
 pub mod remote;
@@ -47,6 +48,7 @@ pub fn router(
         .route("/health", get(health::health_check))
         .merge(aws::router())
         .merge(cli_tools::router())
+        .merge(reauth::router())
         .merge(config::router())
         .merge(mcp_auth::router())
         .merge(mcp_gateway::management_router())

@@ -882,6 +882,38 @@
         "unsupported": "無法在此安裝"
       }
     },
+    "reauth": {
+      "title": "無人值守重新驗證",
+      "description": "此主機使用已儲存的 Entra 瀏覽器工作階段和 1Password，在無人參與的情況下重新登入的憑證。只有在獨立檢查供應商自身的憑證存放區後才會回報成功。",
+      "loading": "正在檢查憑證…",
+      "empty": "此主機上未設定重新驗證目標。",
+      "sweepEvery": "過期的憑證每 {{minutes}} 分鐘自動修復一次。",
+      "sweepOff": "自動修復已關閉；請視需要重新驗證。",
+      "runAll": "重新驗證所有過期項目",
+      "run": "重新驗證",
+      "onDemand": "僅限視需要",
+      "refused": "先前遭拒：在您於此處重新執行之前，代理程式和自動巡檢不會重試。",
+      "showSteps": "顯示步驟",
+      "hideSteps": "隱藏步驟",
+      "state": {
+        "authenticated": "已驗證",
+        "unauthenticated": "已過期或已登出",
+        "unknown": "狀態未知",
+        "not_configured": "未設定"
+      },
+      "outcome": {
+        "running": "執行中",
+        "succeeded": "成功",
+        "failed": "失敗",
+        "verification_failed": "已完成，但驗證失敗",
+        "refused": "已拒絕"
+      },
+      "trigger": {
+        "manual": "來自設定",
+        "agent": "由代理程式",
+        "sweep": "由自動巡檢"
+      }
+    },
     "aws": {
       "title": "AWS",
       "description": "在所選主機上管理 AWS SSO 設定並登入。狀態檢查僅驗證主機身分驗證。代理 shell 需要存取相同的 AWS 設定和 SSO 快取；請使用 AWS_PROFILE 選擇設定。權杖由 AWS CLI 管理。",

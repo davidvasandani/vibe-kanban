@@ -13,9 +13,11 @@ app-installed one. Installs are atomic: an interrupted install leaves either
 the previous version fully working or nothing on PATH.
 
 Each tool card shows the pinned catalogue version, any host-provided copy,
-install/update/remove actions, and its authentication state. Vibe Kanban never
-manages credentials for these tools; each card links to the vendor's own
-authentication guide.
+install/update/remove actions, and its authentication state. Credentials stay
+in each vendor's own store: Vibe Kanban never copies or keeps them. Where a
+host is configured for it, Vibe Kanban can drive a tool's sign-in unattended
+(see [Unattended re-authentication](#unattended-re-authentication)); otherwise
+each card links to the vendor's own authentication guide.
 
 ## Azure CLI and Microsoft Entra device lookup
 
@@ -116,6 +118,82 @@ See Microsoft's
 - A device query succeeds on the coordinator but not in the workspace: inspect
   workspace worker affinity and repeat the checks on that worker. Coordinator
   success is not worker evidence.
+
+## Unattended re-authentication
+
+The **Unattended re-authentication** card on this page lists the credentials
+the selected host can sign back in with no human involved:
+
+| Target id               | What it repairs                                    | How                                                                 |
+| ----------------------- | -------------------------------------------------- | ------------------------------------------------------------------- |
+| `aws-sso:<session>`     | Every AWS profile in one `[sso-session]`           | Completes `aws sso login --use-device-code` in the Entra browser    |
+| `aws-profile:<profile>` | A legacy inline SSO profile and its start-URL peers | Same as above                                                       |
+| `cli-tool:az`, `cli-tool:graph-powershell-1.0`, `cli-tool:mgc-beta` | The Entra CLIs | The existing Entra sign-in used by their **Login** buttons |
+| `cli-tool:acli`         | `acli confluence`                                  | An Atlassian API token from 1Password, piped to acli's own login    |
+| `sgsc:<backend>`        | One sgsc-mcp gateway backend (for example `dp`, `sf`) | Completes the gateway's onboarding page in the Entra browser    |
+
+Browser-driven targets reuse the saved Entra browser profile, so most runs
+complete silently. When Entra asks for a password or one-time code, Vibe
+Kanban reads it from 1Password Connect at that moment. A run is reported as
+succeeded only after an independent check of the vendor's own credential
+store: an STS identity call for AWS, the catalogue's probe for a CLI tool, and
+the gateway's own callback page for an sgsc backend.
+
+### Safety rules
+
+- A definitive refusal (a rejected password, a Conditional Access block or a
+  locked account) is never retried. Agents and the automatic sweep leave a
+  refused target alone until you re-run it from this card after fixing the
+  credential.
+- Only an expired Entra flow or a rotated one-time code is retried, at most
+  three times.
+- Callers name a target id and nothing else; no URL, command or credential
+  reference is accepted from a request.
+- Transcripts and messages contain step names, hosts and paths only — never
+  passwords, codes, tokens or query strings.
+
+### Automatic sweep
+
+When the host sets `VK_AUTO_REAUTH_INTERVAL_SECS` (minimum 300), a background
+sweep checks every swept target on that interval and repairs only those that
+report expired. A target that keeps failing waits exponentially longer between
+attempts, up to six hours. sgsc backends are never swept, because the gateway
+offers no status check that does not itself sign in.
+
+After a refusal, or three consecutive failed automatic attempts, Vibe Kanban
+logs one line containing `vk-reauth: operator action required`. The managed
+homelab deployment pages ntfy on that line.
+
+### Agents
+
+Agents get two Vibe Kanban MCP tools:
+
+- `list_reauth_targets` lists the targets with their state and last run.
+- `reauthenticate` repairs one target (or every expired swept target when you
+  omit `target`) and waits up to 50 seconds. A run still in progress continues
+  on the server; poll `list_reauth_targets` for its outcome.
+
+The tool description tells agents when to call it: an expired AWS SSO token,
+an `az` `InteractionRequired` challenge, an acli `unauthorized` error, or an
+sgsc-mcp `reauth_required` result.
+
+### Configuration
+
+| Variable | Purpose |
+| -------- | ------- |
+| `VK_ENTRA_*`, `OP_CONNECT_HOST`, `OP_CONNECT_TOKEN` | The existing Entra browser and 1Password Connect settings (required for every browser-driven target) |
+| `VK_AUTO_REAUTH_INTERVAL_SECS` | Sweep period; unset or `0` turns the sweep off |
+| `VK_ATLASSIAN_SITE` | Atlassian site host, for example `example.atlassian.net` |
+| `VK_ATLASSIAN_EMAIL_REF`, `VK_ATLASSIAN_TOKEN_REF` | `op://vault/item/field` references to the account email and API token |
+| `VK_ATLASSIAN_VERIFY_PAGE_ID` | A Confluence page id read back to prove the login works |
+| `VK_SGSC_ONBOARD_URL_TEMPLATE` | The gateway onboard URL, containing `{backend}` |
+| `VK_SGSC_BACKENDS` | Comma-separated backends to offer, for example `dp,sf` |
+
+A target whose settings are missing shows **Not configured** and names the
+missing variable. acli keeps its login in the service user's home, so the
+`cli-tool:acli` target repairs it for agents on that host only. AWS state is
+shared with cluster workers through the managed `.aws` directory, and the
+Entra CLIs reach workers through the shared `entra` MCP server.
 
 ## Microsoft Graph PowerShell (v1.0)
 

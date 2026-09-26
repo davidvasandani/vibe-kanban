@@ -51,8 +51,29 @@ pub enum EntraError {
     OnePassword(String),
     #[error("Entra returned {0}")]
     Auth(String),
+    /// The Entra flow token expired mid sign-in. Retryable with a fresh flow.
+    #[error("the Entra sign-in flow timed out")]
+    FlowTimeout,
+    /// Entra rejected the one-time code (usually one that rotated during
+    /// entry). Retryable with a fresh flow.
+    #[error("Entra rejected the one-time code")]
+    BadCode,
+    /// A definitive refusal: wrong password, Conditional Access block, locked
+    /// account. Never retried — retrying turns one stale 1Password item into
+    /// an account lockout.
+    #[error("{0}")]
+    Refused(String),
     #[error("{0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Most attempts any unattended flow makes. Only flow expiry and a rotated
+/// code are worth another try; a refusal never is.
+pub const MAX_ATTEMPTS: u32 = 3;
+
+/// Whether a failed `attempt` (1-based) should be retried with a fresh flow.
+pub fn should_retry(err: &EntraError, attempt: u32) -> bool {
+    matches!(err, EntraError::FlowTimeout | EntraError::BadCode) && attempt < MAX_ATTEMPTS
 }
 
 /// Where the Entra password and TOTP live in 1Password Connect.
@@ -102,9 +123,44 @@ fn env_secret(inline: &str, file: &str, credential: Option<&str>) -> Option<Stri
         .map(|v| v.trim().to_string())
 }
 
+/// 1Password Connect endpoint and bearer token, without any item binding.
+#[derive(Clone, Debug)]
+pub struct OnePasswordConnect {
+    pub host: String,
+    pub token: String,
+}
+
+impl OnePasswordConnect {
+    pub fn from_env() -> Result<Self, EntraError> {
+        let missing = |k: &str| EntraError::Config(format!("{k} is not set"));
+        Ok(Self {
+            host: env_var("OP_CONNECT_HOST")
+                .ok_or_else(|| missing("OP_CONNECT_HOST"))?
+                .trim_end_matches('/')
+                .to_string(),
+            token: env_secret(
+                "OP_CONNECT_TOKEN",
+                "OP_CONNECT_TOKEN_FILE",
+                Some("op-connect-token"),
+            )
+            .ok_or_else(|| missing("OP_CONNECT_TOKEN"))?,
+        })
+    }
+}
+
+impl OnePasswordRef {
+    fn connect(&self) -> OnePasswordConnect {
+        OnePasswordConnect {
+            host: self.host.clone(),
+            token: self.token.clone(),
+        }
+    }
+}
+
 impl EntraConfig {
     pub fn from_env() -> Result<Self, EntraError> {
         let missing = |k: &str| EntraError::Config(format!("{k} is not set"));
+        let connect = OnePasswordConnect::from_env()?;
         Ok(Self {
             cdp_url: env_var("VK_ENTRA_CDP_URL")
                 .ok_or_else(|| missing("VK_ENTRA_CDP_URL"))?
@@ -118,16 +174,8 @@ impl EntraConfig {
             browser_profile: env_var("VK_ENTRA_BROWSER_PROFILE")
                 .unwrap_or_else(|| "vk-entra".to_string()),
             op: OnePasswordRef {
-                host: env_var("OP_CONNECT_HOST")
-                    .ok_or_else(|| missing("OP_CONNECT_HOST"))?
-                    .trim_end_matches('/')
-                    .to_string(),
-                token: env_secret(
-                    "OP_CONNECT_TOKEN",
-                    "OP_CONNECT_TOKEN_FILE",
-                    Some("op-connect-token"),
-                )
-                .ok_or_else(|| missing("OP_CONNECT_TOKEN"))?,
+                host: connect.host,
+                token: connect.token,
                 vault: env_var("VK_ENTRA_OP_VAULT").ok_or_else(|| missing("VK_ENTRA_OP_VAULT"))?,
                 item: env_var("VK_ENTRA_OP_ITEM").ok_or_else(|| missing("VK_ENTRA_OP_ITEM"))?,
                 password_field: env_var("VK_ENTRA_OP_PASSWORD_FIELD")
@@ -195,64 +243,228 @@ async fn op_field(
     op: &OnePasswordRef,
     field_id: &str,
 ) -> Result<String, EntraError> {
-    let url = format!("{}/v1/vaults/{}/items/{}", op.host, op.vault, op.item);
+    let item = connect_get(
+        http,
+        &op.connect(),
+        &format!("/v1/vaults/{}/items/{}", op.vault, op.item),
+    )
+    .await?;
+    select_field(&item, field_id)
+        .ok_or_else(|| EntraError::OnePassword(format!("field {field_id} not found on item")))
+}
+
+async fn connect_get(
+    http: &reqwest::Client,
+    connect: &OnePasswordConnect,
+    path_and_query: &str,
+) -> Result<serde_json::Value, EntraError> {
     let resp = http
-        .get(&url)
-        .bearer_auth(&op.token)
+        .get(format!("{}{path_and_query}", connect.host))
+        .bearer_auth(&connect.token)
         .send()
         .await
         .map_err(|e| EntraError::OnePassword(e.to_string()))?;
     if !resp.status().is_success() {
         return Err(EntraError::OnePassword(format!(
-            "item fetch returned {}",
+            "Connect returned {}",
             resp.status()
         )));
     }
-    let body: serde_json::Value = resp
-        .json()
+    resp.json()
         .await
-        .map_err(|e| EntraError::OnePassword(e.to_string()))?;
-    let fields = body
-        .get("fields")
-        .and_then(|f| f.as_array())
-        .ok_or_else(|| EntraError::OnePassword("item has no fields".into()))?;
-    for f in fields {
-        if f.get("id").and_then(|v| v.as_str()) == Some(field_id) {
-            // Connect returns the current code on `totp` for OTP fields.
-            if let Some(totp) = f.get("totp").and_then(|v| v.as_str())
-                && !totp.is_empty()
-            {
-                return Ok(totp.to_string());
-            }
-            if let Some(value) = f.get("value").and_then(|v| v.as_str()) {
-                return Ok(value.to_string());
-            }
-        }
+        .map_err(|e| EntraError::OnePassword(e.to_string()))
+}
+
+/// The field named `name` on a Connect item: matched by `id` first, then by
+/// case-insensitive `label`. Yields the computed `totp` for OTP fields.
+fn select_field(item: &serde_json::Value, name: &str) -> Option<String> {
+    let fields = item.get("fields")?.as_array()?;
+    let by_id = fields
+        .iter()
+        .find(|f| f.get("id").and_then(|v| v.as_str()) == Some(name));
+    let field = by_id.or_else(|| {
+        fields.iter().find(|f| {
+            f.get("label")
+                .and_then(|v| v.as_str())
+                .is_some_and(|l| l.eq_ignore_ascii_case(name))
+        })
+    })?;
+    if let Some(totp) = field.get("totp").and_then(|v| v.as_str())
+        && !totp.is_empty()
+    {
+        return Some(totp.to_string());
     }
-    Err(EntraError::OnePassword(format!(
-        "field {field_id} not found on item"
-    )))
+    field
+        .get("value")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// A parsed `op://vault/item/field` secret reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpRef {
+    pub vault: String,
+    pub item: String,
+    pub field: String,
+}
+
+impl std::fmt::Display for OpRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "op://{}/{}/{}", self.vault, self.item, self.field)
+    }
+}
+
+pub fn parse_op_ref(reference: &str) -> Result<OpRef, EntraError> {
+    let invalid = || {
+        EntraError::Config(format!(
+            "'{reference}' is not an op://vault/item/field reference"
+        ))
+    };
+    let rest = reference.trim().strip_prefix("op://").ok_or_else(invalid)?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    match parts.as_slice() {
+        [vault, item, field] if [vault, item, field].iter().all(|p| !p.trim().is_empty()) => {
+            Ok(OpRef {
+                vault: vault.to_string(),
+                item: item.to_string(),
+                field: field.to_string(),
+            })
+        }
+        _ => Err(invalid()),
+    }
+}
+
+/// 1Password ids are 26 lowercase alphanumerics; anything else is a name.
+fn is_op_id(s: &str) -> bool {
+    s.len() == 26
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
+/// Connect list query selecting one vault by `name` or one item by `title`.
+fn op_filter_query(key: &str, value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("?filter={}", urlencode(&format!("{key} eq \"{escaped}\"")))
+}
+
+async fn resolve_op_id(
+    http: &reqwest::Client,
+    connect: &OnePasswordConnect,
+    list_path: &str,
+    key: &str,
+    value: &str,
+    what: &str,
+) -> Result<String, EntraError> {
+    if is_op_id(value) {
+        return Ok(value.to_string());
+    }
+    let found = connect_get(
+        http,
+        connect,
+        &format!("{list_path}{}", op_filter_query(key, value)),
+    )
+    .await?;
+    let ids: Vec<&str> = found
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.get("id")?.as_str()).collect())
+        .unwrap_or_default();
+    match ids.as_slice() {
+        [id] => Ok(id.to_string()),
+        [] => Err(EntraError::OnePassword(format!(
+            "{what} '{value}' not found"
+        ))),
+        _ => Err(EntraError::OnePassword(format!(
+            "{what} '{value}' is ambiguous ({} matches)",
+            ids.len()
+        ))),
+    }
+}
+
+/// Resolve an `op://vault/item/field` reference through Connect. Errors name
+/// the reference, never the value.
+pub async fn resolve_op_ref(
+    http: &reqwest::Client,
+    connect: &OnePasswordConnect,
+    reference: &OpRef,
+) -> Result<String, EntraError> {
+    let vault = resolve_op_id(
+        http,
+        connect,
+        "/v1/vaults",
+        "name",
+        &reference.vault,
+        "vault",
+    )
+    .await?;
+    let item = resolve_op_id(
+        http,
+        connect,
+        &format!("/v1/vaults/{vault}/items"),
+        "title",
+        &reference.item,
+        "item",
+    )
+    .await?;
+    let doc = connect_get(http, connect, &format!("/v1/vaults/{vault}/items/{item}")).await?;
+    select_field(&doc, &reference.field)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| EntraError::OnePassword(format!("{reference} has no value")))
+}
+
+/// Strip the query and fragment from a URL so it can be logged: those are
+/// where device codes, authorization codes and state live.
+pub fn redact_url(url: &str) -> String {
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+    url[..end].to_string()
 }
 
 // ---------------------------------------------------------------------------
 // Browser service session
 // ---------------------------------------------------------------------------
 
+/// How long a sign-in waits for another one to release the shared profile.
+const PROFILE_WAIT: Duration = Duration::from_secs(6 * 60);
+
+/// The persistent Entra profile has exactly one writer at a time. Two
+/// `saveChanges` sessions on one profile race their saves (last close wins),
+/// which can drop the very session cookie that keeps sign-ins silent, so every
+/// session — minting, cookie export, and the unattended re-auth engines —
+/// holds this for its lifetime.
+fn profile_lock() -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static LOCK: std::sync::OnceLock<std::sync::Arc<tokio::sync::Mutex<()>>> =
+        std::sync::OnceLock::new();
+    LOCK.get_or_init(Default::default).clone()
+}
+
 /// One browser session on the firecrawl service, bound to the persistent
 /// Entra profile. Dropping it does not close the session — call `close()`,
 /// which is also what persists the profile.
-struct BrowserSession<'a> {
+pub(crate) struct BrowserSession<'a> {
     cfg: &'a EntraConfig,
     http: reqwest::Client,
     id: String,
+    _profile: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl<'a> BrowserSession<'a> {
+    /// Open a session with a fresh HTTP client (for callers outside this module).
+    pub(crate) async fn open_default(cfg: &'a EntraConfig, save: bool) -> Result<Self, EntraError> {
+        Self::open(cfg, http_client()?, save).await
+    }
+
     async fn open(
         cfg: &'a EntraConfig,
         http: reqwest::Client,
         save: bool,
     ) -> Result<Self, EntraError> {
+        let profile = tokio::time::timeout(PROFILE_WAIT, profile_lock().lock_owned())
+            .await
+            .map_err(|_| {
+                EntraError::Browser(format!(
+                    "browser profile '{}' stayed busy with another sign-in",
+                    cfg.browser_profile
+                ))
+            })?;
         let body = serde_json::json!({
             "profile": { "name": cfg.browser_profile, "saveChanges": save },
             "url": "about:blank",
@@ -281,10 +493,15 @@ impl<'a> BrowserSession<'a> {
             .and_then(|i| i.as_str())
             .ok_or_else(|| EntraError::Browser("session create returned no id".into()))?
             .to_string();
-        Ok(Self { cfg, http, id })
+        Ok(Self {
+            cfg,
+            http,
+            id,
+            _profile: profile,
+        })
     }
 
-    async fn navigate(&self, url: &str) -> Result<(), EntraError> {
+    pub(crate) async fn navigate(&self, url: &str) -> Result<(), EntraError> {
         self.http
             .post(format!(
                 "{}/v2/interact/{}/navigate",
@@ -301,7 +518,7 @@ impl<'a> BrowserSession<'a> {
     /// Run JS in the page (Playwright `page`/`context` in scope) and return its
     /// result. Note that anything registered here — route handlers especially —
     /// lives only for the duration of this one call.
-    async fn execute(&self, code: &str) -> Result<serde_json::Value, EntraError> {
+    pub(crate) async fn execute(&self, code: &str) -> Result<serde_json::Value, EntraError> {
         let resp = self
             .http
             .post(format!(
@@ -323,7 +540,7 @@ impl<'a> BrowserSession<'a> {
         Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null))
     }
 
-    async fn url(&self) -> Result<String, EntraError> {
+    pub(crate) async fn url(&self) -> Result<String, EntraError> {
         Ok(self
             .execute("return page.url()")
             .await?
@@ -334,7 +551,7 @@ impl<'a> BrowserSession<'a> {
 
     /// Close the session. For a `saveChanges` session this is what writes the
     /// Entra cookie back to the profile, making later mints silent.
-    async fn close(self) {
+    pub(crate) async fn close(self) {
         let _ = self
             .http
             .delete(format!("{}/v2/interact/{}", self.cfg.cdp_url, self.id))
@@ -356,6 +573,13 @@ impl<'a> BrowserSession<'a> {
 /// forever.
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
+    /// A definitive refusal. Checked first: Entra renders the wrong-password
+    /// error *on* the password screen, which must not be filled again.
+    Refused(&'static str),
+    FlowTimedOut,
+    BadCode,
+    /// The browser could not load the page at all (DNS, connect, egress).
+    Unreachable,
     Password,
     Totp,
     StaySignedIn,
@@ -372,11 +596,79 @@ return {
   txt: txt.slice(0, 900),
   hasEmail: await vis('input[name="loginfmt"]'),
   hasOtc:   await vis('input[name="otc"]'),
+  hasPassword: await vis('input[type="password"]'),
 };
 "#;
 
+/// One observation of the page, as returned by [`PROBE_JS`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Probe {
+    pub url: String,
+    /// Lower-cased, truncated body text.
+    pub txt: String,
+    pub has_email: bool,
+    pub has_otc: bool,
+    /// Any visible password input — Entra's or a provider's native form.
+    pub has_password: bool,
+}
+
+impl Probe {
+    fn from_json(v: &serde_json::Value) -> Self {
+        let s = |k: &str| {
+            v.get(k)
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let b = |k: &str| v.get(k).and_then(|x| x.as_bool()) == Some(true);
+        Self {
+            url: s("url"),
+            txt: s("txt"),
+            has_email: b("hasEmail"),
+            has_otc: b("hasOtc"),
+            has_password: b("hasPassword"),
+        }
+    }
+
+    /// Lower-cased host of the current URL ("" when there is none).
+    pub fn host(&self) -> String {
+        url::Url::parse(&self.url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+            .unwrap_or_default()
+    }
+}
+
+/// Refusal copy, matched against lower-cased page text.
+const REFUSALS: &[(&str, &str)] = &[
+    (
+        "your account or password is incorrect",
+        "Entra rejected the 1Password password",
+    ),
+    (
+        "password is incorrect",
+        "Entra rejected the 1Password password",
+    ),
+    ("aadsts50053", "the Entra account is locked"),
+    ("account has been locked", "the Entra account is locked"),
+    ("aadsts53003", "Conditional Access blocked the sign-in"),
+    (
+        "you can't get there from here",
+        "Conditional Access blocked the sign-in",
+    ),
+];
+
 fn classify(txt: &str, has_email: bool, has_otc: bool) -> Step {
-    if txt.contains("enter password") || txt.contains("enter your password") {
+    if let Some((_, reason)) = REFUSALS.iter().find(|(needle, _)| txt.contains(needle)) {
+        Step::Refused(reason)
+    } else if txt.contains("session has timed out") || txt.contains("request is timed out") {
+        Step::FlowTimedOut
+    } else if txt.contains("code didn't work")
+        || txt.contains("code is incorrect")
+        || txt.contains("verification code is incorrect")
+    {
+        Step::BadCode
+    } else if txt.contains("enter password") || txt.contains("enter your password") {
         Step::Password
     } else if has_otc
         && (txt.contains("enter code")
@@ -395,7 +687,145 @@ fn classify(txt: &str, has_email: bool, has_otc: bool) -> Step {
     }
 }
 
-fn js_string(s: &str) -> String {
+const NETWORK_ERRORS: &[&str] = &[
+    "err_name_not_resolved",
+    "err_connection_",
+    "err_timed_out",
+    "err_socket_not_connected",
+    "err_address_unreachable",
+];
+
+fn classify_probe(p: &Probe) -> Step {
+    if p.url.starts_with("chrome-error://") || NETWORK_ERRORS.iter().any(|e| p.txt.contains(e)) {
+        return Step::Unreachable;
+    }
+    classify(&p.txt, p.has_email, p.has_otc)
+}
+
+/// What a caller of [`drive`] wants done with a page that is not an Entra step.
+pub(crate) enum PageVerdict<T> {
+    /// Not the caller's page (or nothing to do yet): let Entra handling run.
+    Continue,
+    Done(T),
+    Fail(String),
+    /// Run this Playwright JS (typically a click), then probe again.
+    Run(String),
+}
+
+/// Drive the browser until `on_page` reports completion.
+///
+/// Every tick probes the page and offers it to `on_page` first; if that
+/// continues, any Entra sign-in step on screen is completed from 1Password
+/// (fetched just in time). Refusals, flow expiry, rejected codes and network
+/// failures end the drive with a typed error so the caller can decide whether
+/// a fresh flow is worth it (see [`should_retry`]).
+pub(crate) async fn drive<T>(
+    cfg: &EntraConfig,
+    session: &BrowserSession<'_>,
+    progress: &Progress,
+    timeout: Duration,
+    mut on_page: impl FnMut(&Probe) -> PageVerdict<T>,
+) -> Result<T, EntraError> {
+    let http = &session.http;
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last_step: Option<String> = None;
+    while tokio::time::Instant::now() < deadline {
+        let probe = Probe::from_json(&session.execute(PROBE_JS).await?);
+        match on_page(&probe) {
+            PageVerdict::Done(value) => return Ok(value),
+            PageVerdict::Fail(message) => return Err(EntraError::Auth(message)),
+            PageVerdict::Run(code) => {
+                // A click usually navigates, which can tear down the execution
+                // context mid-call; the next probe tells us where we landed.
+                let _ = session.execute(&code).await;
+                tokio::time::sleep(STEP_INTERVAL).await;
+                continue;
+            }
+            PageVerdict::Continue => {}
+        }
+        let step = classify_probe(&probe);
+        let label = format!("{step:?}");
+        if last_step.as_deref() != Some(label.as_str()) {
+            progress.say(format!(
+                "  sign-in step: {label} ({})",
+                redact_url(&probe.url)
+            ));
+            last_step = Some(label);
+        }
+        match step {
+            Step::Refused(reason) => return Err(EntraError::Refused(reason.to_string())),
+            Step::FlowTimedOut => return Err(EntraError::FlowTimeout),
+            Step::BadCode => return Err(EntraError::BadCode),
+            Step::Unreachable => {
+                return Err(EntraError::Browser(format!(
+                    "the browser could not load {}",
+                    redact_url(&probe.url)
+                )));
+            }
+            Step::Password => {
+                let pw = op_field(http, &cfg.op, &cfg.op.password_field).await?;
+                session
+                    .execute(&format!(
+                        "await page.fill('input[name=\"passwd\"]', {}); \
+                         await page.click('#idSIButton9'); return 1",
+                        js_string(&pw)
+                    ))
+                    .await?;
+            }
+            Step::Totp => {
+                // Fetched just in time: the code rotates every 30s.
+                let code = op_field(http, &cfg.op, &cfg.op.totp_field).await?;
+                session
+                    .execute(&format!(
+                        "await page.fill('input[name=\"otc\"]', {}); \
+                         await page.click('#idSubmit_SAOTCC_Continue, #idSIButton9'); return 1",
+                        js_string(&code)
+                    ))
+                    .await?;
+            }
+            Step::StaySignedIn => {
+                // "Yes" here is what makes the profile cookie persistent, and
+                // therefore what makes every later sign-in silent.
+                session
+                    .execute("await page.click('#idSIButton9'); return 1")
+                    .await?;
+            }
+            Step::AccountPicker => {
+                session
+                    .execute(&format!(
+                        "await page.click('text=' + {}).catch(() => {{}}); return 1",
+                        js_string(&cfg.email)
+                    ))
+                    .await?;
+            }
+            Step::Email => {
+                session
+                    .execute(&format!(
+                        "await page.fill('input[name=\"loginfmt\"]', {}); \
+                         await page.click('#idSIButton9'); return 1",
+                        js_string(&cfg.email)
+                    ))
+                    .await?;
+            }
+            Step::Unknown => {}
+        }
+        tokio::time::sleep(STEP_INTERVAL).await;
+    }
+    Err(EntraError::Auth(format!(
+        "sign-in did not finish within {}s",
+        timeout.as_secs()
+    )))
+}
+
+/// HTTP client for the browser service, Connect and the token endpoint.
+pub(crate) fn http_client() -> Result<reqwest::Client, EntraError> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|e| EntraError::Browser(e.to_string()))
+}
+
+pub(crate) fn js_string(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
 }
 
@@ -498,10 +928,7 @@ pub async fn mint(
     scope: &str,
     progress: &Progress,
 ) -> Result<MintedToken, EntraError> {
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(90))
-        .build()
-        .map_err(|e| EntraError::Browser(e.to_string()))?;
+    let http = http_client()?;
 
     let (verifier, challenge) = pkce_pair();
     let session = BrowserSession::open(cfg, http.clone(), true).await?;
@@ -536,7 +963,7 @@ pub async fn mint(
             session
                 .navigate(&authorize_url(cfg, client_id, scope, &challenge, false))
                 .await?;
-            code = Some(interactive_sign_in(cfg, &http, &session, progress).await?);
+            code = Some(interactive_sign_in(cfg, &session, progress).await?);
         }
 
         let code = code.ok_or_else(|| EntraError::Auth("no authorization code".into()))?;
@@ -552,93 +979,25 @@ pub async fn mint(
 
 async fn interactive_sign_in(
     cfg: &EntraConfig,
-    http: &reqwest::Client,
     session: &BrowserSession<'_>,
     progress: &Progress,
 ) -> Result<String, EntraError> {
-    let deadline = tokio::time::Instant::now() + INTERACTIVE_TIMEOUT;
-    let mut last_step: Option<String> = None;
-    while tokio::time::Instant::now() < deadline {
-        let probe = session.execute(PROBE_JS).await?;
-        let url = probe
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if url.starts_with(NATIVE_CLIENT_REDIRECT) {
-            let q = query_params(url);
-            if let Some(code) = q.get("code") {
-                return Ok(code.clone());
-            }
-            let err = q.get("error_description").or_else(|| q.get("error"));
-            return Err(EntraError::Auth(
-                err.cloned().unwrap_or_else(|| "sign-in failed".into()),
-            ));
+    drive(cfg, session, progress, INTERACTIVE_TIMEOUT, |probe| {
+        if !probe.url.starts_with(NATIVE_CLIENT_REDIRECT) {
+            return PageVerdict::Continue;
         }
-        let txt = probe
-            .get("txt")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let step = classify(
-            txt,
-            probe.get("hasEmail").and_then(|v| v.as_bool()) == Some(true),
-            probe.get("hasOtc").and_then(|v| v.as_bool()) == Some(true),
-        );
-        let label = format!("{step:?}");
-        if last_step.as_deref() != Some(label.as_str()) {
-            progress.say(format!("  sign-in step: {label}"));
-            last_step = Some(label);
+        let q = query_params(&probe.url);
+        match q.get("code") {
+            Some(code) => PageVerdict::Done(code.clone()),
+            None => PageVerdict::Fail(
+                q.get("error_description")
+                    .or_else(|| q.get("error"))
+                    .cloned()
+                    .unwrap_or_else(|| "sign-in failed".into()),
+            ),
         }
-        match step {
-            Step::Password => {
-                let pw = op_field(http, &cfg.op, &cfg.op.password_field).await?;
-                session
-                    .execute(&format!(
-                        "await page.fill('input[name=\"passwd\"]', {}); \
-                         await page.click('#idSIButton9'); return 1",
-                        js_string(&pw)
-                    ))
-                    .await?;
-            }
-            Step::Totp => {
-                // Fetched just in time: the code rotates every 30s.
-                let code = op_field(http, &cfg.op, &cfg.op.totp_field).await?;
-                session
-                    .execute(&format!(
-                        "await page.fill('input[name=\"otc\"]', {}); \
-                         await page.click('#idSubmit_SAOTCC_Continue, #idSIButton9'); return 1",
-                        js_string(&code)
-                    ))
-                    .await?;
-            }
-            Step::StaySignedIn => {
-                // "Yes" here is what makes the profile cookie persistent, and
-                // therefore what makes every later mint silent.
-                session
-                    .execute("await page.click('#idSIButton9'); return 1")
-                    .await?;
-            }
-            Step::AccountPicker => {
-                session
-                    .execute(&format!(
-                        "await page.click('text=' + {}).catch(() => {{}}); return 1",
-                        js_string(&cfg.email)
-                    ))
-                    .await?;
-            }
-            Step::Email => {
-                session
-                    .execute(&format!(
-                        "await page.fill('input[name=\"loginfmt\"]', {}); \
-                         await page.click('#idSIButton9'); return 1",
-                        js_string(&cfg.email)
-                    ))
-                    .await?;
-            }
-            Step::Unknown => {}
-        }
-        tokio::time::sleep(STEP_INTERVAL).await;
-    }
-    Err(EntraError::Auth("interactive sign-in timed out".into()))
+    })
+    .await
 }
 
 async fn redeem(
@@ -1054,10 +1413,7 @@ pub async fn native_browser_login(
     args: &[String],
     progress: &Progress,
 ) -> Result<(), EntraError> {
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(90))
-        .build()
-        .map_err(|e| EntraError::Browser(e.to_string()))?;
+    let http = http_client()?;
 
     progress.say("Exporting the Entra session from the shared browser profile…");
     let cookies = export_profile_cookies(cfg, &http).await?;
@@ -1380,6 +1736,134 @@ mod tests {
         );
         assert_eq!(classify("sign in", true, false), Step::Email);
         assert_eq!(classify("", false, false), Step::Unknown);
+    }
+
+    #[test]
+    fn wrong_password_is_a_refusal_even_on_the_password_screen() {
+        // The error renders on the password page itself; filling it again
+        // would spend the stale password once per tick.
+        let step = classify(
+            "enter password your account or password is incorrect.",
+            true,
+            false,
+        );
+        assert_eq!(step, Step::Refused("Entra rejected the 1Password password"));
+        assert!(matches!(
+            classify("aadsts53003: access blocked", false, false),
+            Step::Refused(_)
+        ));
+        assert!(matches!(
+            classify("your account has been locked", false, false),
+            Step::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn flow_expiry_and_bad_codes_are_distinct_from_refusals() {
+        assert_eq!(
+            classify("your session has timed out", false, false),
+            Step::FlowTimedOut
+        );
+        assert_eq!(
+            classify("enter code that code didn't work", true, true),
+            Step::BadCode
+        );
+    }
+
+    #[test]
+    fn network_failures_are_classified_before_entra_steps() {
+        let probe = Probe {
+            url: "chrome-error://chromewebdata/".into(),
+            ..Default::default()
+        };
+        assert_eq!(classify_probe(&probe), Step::Unreachable);
+        let probe = Probe {
+            url: "https://device.sso.us-east-1.amazonaws.com/".into(),
+            txt: "this site can't be reached err_name_not_resolved".into(),
+            ..Default::default()
+        };
+        assert_eq!(classify_probe(&probe), Step::Unreachable);
+    }
+
+    #[test]
+    fn only_flow_expiry_and_rotated_codes_are_retried_and_only_three_times() {
+        assert!(should_retry(&EntraError::FlowTimeout, 1));
+        assert!(should_retry(&EntraError::BadCode, 2));
+        assert!(!should_retry(&EntraError::FlowTimeout, MAX_ATTEMPTS));
+        assert!(!should_retry(&EntraError::Refused("x".into()), 1));
+        assert!(!should_retry(&EntraError::Browser("x".into()), 1));
+        assert!(!should_retry(&EntraError::Auth("x".into()), 1));
+    }
+
+    #[test]
+    fn op_refs_parse_strictly() {
+        assert_eq!(
+            parse_op_ref("op://Homelab/Jira API/api_token").unwrap(),
+            OpRef {
+                vault: "Homelab".into(),
+                item: "Jira API".into(),
+                field: "api_token".into(),
+            }
+        );
+        for bad in [
+            "Homelab/Jira API/api_token",
+            "op://Homelab/Jira API",
+            "op://Homelab//api_token",
+            "op://a/b/c/d",
+            "op:// / /x",
+        ] {
+            assert!(parse_op_ref(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn op_ids_are_used_verbatim_and_names_are_filtered() {
+        assert!(is_op_id("fljshp6fnyosd26rcqgcnjmfe4"));
+        assert!(!is_op_id("Homelab"));
+        assert_eq!(
+            op_filter_query("title", "Jira API"),
+            "?filter=title%20eq%20%22Jira%20API%22"
+        );
+    }
+
+    #[test]
+    fn fields_match_by_id_then_label_and_prefer_totp() {
+        let item = serde_json::json!({ "fields": [
+            { "id": "username", "label": "email", "value": "a@b.com" },
+            { "id": "x1", "label": "api_token", "value": "tok" },
+            { "id": "TOTP_1", "label": "one-time password", "value": "otpauth://…", "totp": "123456" },
+        ]});
+        assert_eq!(select_field(&item, "username").as_deref(), Some("a@b.com"));
+        assert_eq!(select_field(&item, "Email").as_deref(), Some("a@b.com"));
+        assert_eq!(select_field(&item, "api_token").as_deref(), Some("tok"));
+        assert_eq!(select_field(&item, "TOTP_1").as_deref(), Some("123456"));
+        assert_eq!(select_field(&item, "missing"), None);
+    }
+
+    #[test]
+    fn redacted_urls_keep_host_and_path_only() {
+        assert_eq!(
+            redact_url("https://device.sso.us-east-1.amazonaws.com/?user_code=ABCD-EFGH"),
+            "https://device.sso.us-east-1.amazonaws.com/"
+        );
+        assert_eq!(
+            redact_url("https://sweetgreen.awsapps.com/start/#/device?user_code=X"),
+            "https://sweetgreen.awsapps.com/start/"
+        );
+        assert_eq!(redact_url("https://x/y"), "https://x/y");
+    }
+
+    #[test]
+    fn probe_parses_the_probe_script_result() {
+        let p = Probe::from_json(&serde_json::json!({
+            "url": "https://Login.MicrosoftOnline.com/x?y=1",
+            "txt": "enter code",
+            "hasEmail": false,
+            "hasOtc": true,
+            "hasPassword": false,
+        }));
+        assert_eq!(p.host(), "login.microsoftonline.com");
+        assert!(p.has_otc && !p.has_email && !p.has_password);
     }
 
     #[test]

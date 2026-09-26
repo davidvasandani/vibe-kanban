@@ -882,6 +882,38 @@
         "unsupported": "No se puede instalar aquí"
       }
     },
+    "reauth": {
+      "title": "Reautenticación desatendida",
+      "description": "Credenciales que este host vuelve a iniciar sin intervención humana, usando la sesión de navegador de Entra guardada y 1Password. Solo se informa un éxito tras una comprobación independiente del almacén de credenciales del proveedor.",
+      "loading": "Comprobando credenciales…",
+      "empty": "No hay destinos de reautenticación configurados en este host.",
+      "sweepEvery": "Las credenciales caducadas se reparan automáticamente cada {{minutes}} minutos.",
+      "sweepOff": "La reparación automática está desactivada; reautentica bajo demanda.",
+      "runAll": "Reautenticar todas las caducadas",
+      "run": "Reautenticar",
+      "onDemand": "solo bajo demanda",
+      "refused": "Rechazado antes: los agentes y el barrido automático no lo reintentarán hasta que lo vuelvas a ejecutar aquí.",
+      "showSteps": "Mostrar pasos",
+      "hideSteps": "Ocultar pasos",
+      "state": {
+        "authenticated": "Autenticado",
+        "unauthenticated": "Caducado o sin sesión",
+        "unknown": "Estado desconocido",
+        "not_configured": "No configurado"
+      },
+      "outcome": {
+        "running": "En curso",
+        "succeeded": "Correcto",
+        "failed": "Fallido",
+        "verification_failed": "Terminado, pero la verificación falló",
+        "refused": "Rechazado"
+      },
+      "trigger": {
+        "manual": "desde Ajustes",
+        "agent": "por un agente",
+        "sweep": "por el barrido automático"
+      }
+    },
     "aws": {
       "title": "AWS",
       "description": "Gestiona perfiles AWS SSO e inicia sesión en el host seleccionado. El estado solo verifica la autenticación del host. El agente necesita acceso a la misma configuración y caché SSO; selecciona un perfil con AWS_PROFILE. AWS CLI gestiona los tokens.",

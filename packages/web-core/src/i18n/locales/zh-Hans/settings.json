@@ -882,6 +882,38 @@
         "unsupported": "无法在此安装"
       }
     },
+    "reauth": {
+      "title": "无人值守重新认证",
+      "description": "此主机使用已保存的 Entra 浏览器会话和 1Password，在无人参与的情况下重新登录的凭据。只有在独立检查供应商自身的凭据存储后才会报告成功。",
+      "loading": "正在检查凭据…",
+      "empty": "此主机上未配置重新认证目标。",
+      "sweepEvery": "过期的凭据每 {{minutes}} 分钟自动修复一次。",
+      "sweepOff": "自动修复已关闭；请按需重新认证。",
+      "runAll": "重新认证所有过期项",
+      "run": "重新认证",
+      "onDemand": "仅按需",
+      "refused": "之前被拒绝：在您于此处重新运行之前，代理和自动巡检不会重试。",
+      "showSteps": "显示步骤",
+      "hideSteps": "隐藏步骤",
+      "state": {
+        "authenticated": "已认证",
+        "unauthenticated": "已过期或已退出",
+        "unknown": "状态未知",
+        "not_configured": "未配置"
+      },
+      "outcome": {
+        "running": "运行中",
+        "succeeded": "成功",
+        "failed": "失败",
+        "verification_failed": "已完成，但验证失败",
+        "refused": "已拒绝"
+      },
+      "trigger": {
+        "manual": "来自设置",
+        "agent": "由代理",
+        "sweep": "由自动巡检"
+      }
+    },
     "aws": {
       "title": "AWS",
       "description": "在所选主机上管理 AWS SSO 配置并登录。状态检查仅验证主机身份认证。代理 shell 需要访问相同的 AWS 配置和 SSO 缓存；请使用 AWS_PROFILE 选择配置。令牌由 AWS CLI 管理。",
