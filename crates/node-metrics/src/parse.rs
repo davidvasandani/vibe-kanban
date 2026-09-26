@@ -71,6 +71,8 @@ pub struct ProcessStat {
     pub pid: i32,
     /// Field 2, `comm`, with its surrounding parentheses removed.
     pub name: String,
+    /// Field 3, the scheduler state (`R`, `S`, `D`, …).
+    pub state: char,
     pub utime: u64,
     pub stime: u64,
     /// Field 22. Half of a process's identity, because PIDs are reused.
@@ -279,15 +281,6 @@ pub fn parse_loadavg(contents: &str) -> Option<LoadAverage> {
     })
 }
 
-/// Parse the `procs_blocked` line of `/proc/stat`: tasks currently in
-/// uninterruptible sleep (D state), which is where NFS round-trip waits land.
-pub fn parse_procs_blocked(contents: &str) -> Option<u32> {
-    contents
-        .lines()
-        .find_map(|line| line.strip_prefix("procs_blocked "))
-        .and_then(|value| value.trim().parse().ok())
-}
-
 /// Parse a `/proc/pressure/*` file. Requires the `some` line; a file without
 /// it is not a pressure reading.
 pub fn parse_pressure(contents: &str) -> Option<PressureAverages> {
@@ -483,6 +476,7 @@ pub fn parse_process_stat(contents: &str) -> Option<ProcessStat> {
     Some(ProcessStat {
         pid,
         name,
+        state: fields.first()?.chars().next()?,
         utime: field(14)?,
         stime: field(15)?,
         start_ticks: field(22)?,
@@ -594,8 +588,6 @@ mod tests {
         assert!(parse_loadavg("").is_none());
         assert!(parse_loadavg("0.31 1.60").is_none());
         assert!(parse_uptime("").is_none());
-        assert!(parse_procs_blocked("").is_none());
-        assert!(parse_procs_blocked("procs_blocked x").is_none());
         assert!(parse_pressure("").is_none());
         assert!(parse_pressure("full avg10=0.00 avg60=1.00").is_none());
         assert!(parse_pressure("some avg10=0.00").is_none());
@@ -712,15 +704,6 @@ mod tests {
         assert_eq!(memory.total_bytes, Some(1024 * 1024));
         assert_eq!(memory.used_bytes, Some(512 * 1024));
         assert_eq!(memory.cached_bytes, Some(192 * 1024));
-    }
-
-    #[test]
-    fn procs_blocked_reads_the_stat_line() {
-        assert_eq!(parse_procs_blocked(STAT), Some(0));
-        assert_eq!(
-            parse_procs_blocked("cpu  1 2 3 4\nprocs_running 3\nprocs_blocked 12\n"),
-            Some(12)
-        );
     }
 
     #[test]
@@ -873,6 +856,7 @@ mod tests {
         let stat = parse_process_stat(PID_STAT).expect("process stat");
         assert_eq!(stat.pid, 254_347);
         assert_eq!(stat.name, "cp");
+        assert_eq!(stat.state, 'R');
         assert_eq!(stat.start_ticks, 157_905_759);
         assert_eq!(stat.busy_ticks(), stat.utime + stat.stime);
     }

@@ -57,11 +57,12 @@ block (next to the CodingAgent remote-sync `compute_diff_stats`).
 
 ## 4. I/O pressure metrics (node-metrics → UI)
 
-- `parse.rs`: `parse_procs_blocked(&str) -> Option<u32>` (the `procs_blocked N` line
-  of `/proc/stat`) and `parse_pressure(&str) -> Option<Pressure { some_avg60, full_avg60 }>`
+- `parse.rs`/`collect.rs`: parse process `state` and count `D` processes in the
+  `/proc/[pid]` walk (`/proc/stat` `procs_blocked` is only `nr_iowait` and misses
+  NFS waits), and `parse_pressure(&str) -> Option<Pressure { some_avg60, full_avg60 }>`
   (`/proc/pressure/io`). Fixture-based tests, including a missing file and
   garbage input returning `None`.
-- `types.rs` `CpuSample`: add `#[serde(default)] procs_blocked: Option<u32>`,
+- `types.rs` `CpuSample`: add `#[serde(default)] uninterruptible_tasks: Option<u32>`,
   `#[serde(default)] io_pressure_some_avg60: Option<f32>`,
   `#[serde(default)] io_pressure_full_avg60: Option<f32>`.
 - `collect.rs`: populate them. A missing `/proc/pressure/io` (kernel without PSI)
@@ -69,7 +70,7 @@ block (next to the CodingAgent remote-sync `compute_diff_stats`).
 - Fix up every `CpuSample { … }` literal (tests in services/cluster/metrics.rs etc.).
 - `pnpm run generate-types`.
 - `CpuPanel.tsx`: add rows "Blocked tasks (D state)" and "I/O pressure (some / full,
-  60 s)". The blocked row is marked with a warning tone when `procs_blocked >= core_count`.
+  60 s)". The blocked row is marked with a warning tone when `uninterruptible_tasks >= core_count`.
   Add a Vitest test for the formatting/warning helper.
 
 ## 5. Analysis document

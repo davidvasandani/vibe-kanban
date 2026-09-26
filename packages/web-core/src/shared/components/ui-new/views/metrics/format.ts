@@ -115,10 +115,10 @@ export function formatUptime(
  * misses. An absent reading on either side is never a saturation.
  */
 export function isBlockedTaskSaturated(
-  procsBlocked: number | null | undefined,
+  uninterruptibleTasks: number | null | undefined,
   coreCount: number | null | undefined
 ): boolean {
-  const blocked = toNumber(procsBlocked);
+  const blocked = toNumber(uninterruptibleTasks);
   const cores = toNumber(coreCount);
   if (blocked === null || cores === null || cores <= 0) return false;
   return blocked >= cores;

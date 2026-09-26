@@ -115,11 +115,11 @@ setup, cleanup and dev scripts, and it runs before the turn's remote sync.
 
 ### Metrics: I/O pressure
 
-`node_metrics::CpuSample` gains optional `procs_blocked` (from `/proc/stat`)
+`node_metrics::CpuSample` gains optional `uninterruptible_tasks` (D-state processes counted from the `/proc/[pid]` walk; `/proc/stat` `procs_blocked` is only `nr_iowait`)
 and `io_pressure_some_avg60` / `io_pressure_full_avg60` (from
 `/proc/pressure/io`). Both are optional and `#[serde(default)]`, so mixed
 versions still interoperate. The Server Metrics node view shows
-"blocked N · io some X%" next to the load, and warns when `procs_blocked`
+"blocked tasks N · io some/full X%" next to the load, and warns when `uninterruptible_tasks`
 is at or above the core count.
 
 ## Acceptance

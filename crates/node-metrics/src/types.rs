@@ -149,14 +149,16 @@ pub struct CpuSample {
     pub load_15m: Option<f32>,
     pub frequency_mhz: Option<u32>,
     pub temperature_celsius: Option<f32>,
-    /// Tasks in uninterruptible sleep (D state), from `/proc/stat`.
+    /// Processes in uninterruptible sleep (state `D`), counted from the
+    /// `/proc/[pid]/stat` walk. `None` when the process table is unreadable.
     ///
-    /// Carried next to the load averages because NFS round-trip waits land
-    /// here and in the load, but **not** in `/proc/pressure/io`: a host can
-    /// sit at load 40 with io pressure near zero. Defaulted so samples from
-    /// older workers still deserialize.
+    /// Counted directly rather than read from `/proc/stat`'s `procs_blocked`,
+    /// which is only `nr_iowait`: NFS RPC waits put tasks in D state and raise
+    /// the load without counting as I/O waiters, and without showing up in
+    /// `/proc/pressure/io` — a host can sit at load 40 with both near zero.
+    /// Defaulted so samples from older workers still deserialize.
     #[serde(default)]
-    pub procs_blocked: Option<u32>,
+    pub uninterruptible_tasks: Option<u32>,
     /// `/proc/pressure/io` "some" 60-second average, percent of wall time.
     #[serde(default)]
     pub io_pressure_some_avg60: Option<f32>,
@@ -350,7 +352,7 @@ mod tests {
         )
         .expect("old cpu sample");
 
-        assert_eq!(cpu.procs_blocked, None);
+        assert_eq!(cpu.uninterruptible_tasks, None);
         assert_eq!(cpu.io_pressure_some_avg60, None);
         assert_eq!(cpu.io_pressure_full_avg60, None);
     }
@@ -445,7 +447,7 @@ mod tests {
             load_15m: Some(1.02),
             frequency_mhz: Some(900),
             temperature_celsius: Some(41.0),
-            procs_blocked: Some(9),
+            uninterruptible_tasks: Some(9),
             io_pressure_some_avg60: Some(2.17),
             io_pressure_full_avg60: Some(0.86),
         };
@@ -453,7 +455,7 @@ mod tests {
         let decoded: CpuSample = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.total_busy_percent, Some(12.5));
         assert_eq!(decoded.load_1m, Some(0.31));
-        assert_eq!(decoded.procs_blocked, Some(9));
+        assert_eq!(decoded.uninterruptible_tasks, Some(9));
         assert_eq!(decoded.io_pressure_some_avg60, Some(2.17));
     }
 

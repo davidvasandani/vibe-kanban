@@ -111,11 +111,6 @@ mod platform {
                 "load averages",
                 &mut degraded,
             );
-            let procs_blocked = optional(
-                parse::parse_procs_blocked(&stat_raw),
-                "blocked task count",
-                &mut degraded,
-            );
             let io_pressure = optional(
                 read_to_string(&proc_path("pressure/io"))
                     .ok()
@@ -172,7 +167,7 @@ mod platform {
             let core_count = (!cpu_stat.per_core.is_empty())
                 .then(|| u32::try_from(cpu_stat.per_core.len()).unwrap_or(u32::MAX));
 
-            let (processes, process_ticks) =
+            let (processes, process_ticks, uninterruptible_tasks) =
                 self.collect_processes(previous, elapsed_ms, core_count, &mut degraded);
 
             let sample = HostSample {
@@ -194,7 +189,7 @@ mod platform {
                     load_15m: load.map(|l| l.fifteen),
                     frequency_mhz: cpu_info.frequency_mhz,
                     temperature_celsius: temperature_celsius(),
-                    procs_blocked,
+                    uninterruptible_tasks,
                     io_pressure_some_avg60: io_pressure.map(|p| p.some_avg60),
                     io_pressure_full_avg60: io_pressure.and_then(|p| p.full_avg60),
                 },
@@ -228,7 +223,7 @@ mod platform {
             elapsed_ms: Option<u64>,
             core_count: Option<u32>,
             degraded: &mut Vec<String>,
-        ) -> (Vec<ProcessSample>, BTreeMap<ProcessKey, u64>) {
+        ) -> (Vec<ProcessSample>, BTreeMap<ProcessKey, u64>, Option<u32>) {
             let ticks_per_second = clock_ticks_per_second();
             let users = read_to_string(Path::new("/etc/passwd"))
                 .map(|raw| parse::parse_passwd(&raw))
@@ -238,7 +233,7 @@ mod platform {
                 Ok(entries) => entries,
                 Err(error) => {
                     degraded.push(format!("process table unavailable: {error}"));
-                    return (Vec::new(), BTreeMap::new());
+                    return (Vec::new(), BTreeMap::new(), None);
                 }
             };
 
@@ -248,6 +243,8 @@ mod platform {
             // a busy host would otherwise emit hundreds of notes into every
             // sample of a live stream.
             let mut unreadable = 0_usize;
+            // Every process walked, not just the reported top-N.
+            let mut uninterruptible = 0_u32;
 
             for entry in entries {
                 let entry = match entry {
@@ -281,6 +278,9 @@ mod platform {
                     continue;
                 };
 
+                if stat.state == 'D' {
+                    uninterruptible += 1;
+                }
                 let key: ProcessKey = (stat.pid, stat.start_ticks);
                 let busy = stat.busy_ticks();
                 ticks.insert(key, busy);
@@ -334,7 +334,7 @@ mod platform {
             });
             samples.truncate(self.config.max_processes as usize);
 
-            (samples, ticks)
+            (samples, ticks, Some(uninterruptible))
         }
     }
 
@@ -504,8 +504,8 @@ mod tests {
         assert!(!collected.sample.hostname.is_empty());
         assert!(collected.sample.cpu.core_count.unwrap_or(0) >= 1);
         assert!(collected.counters.cpu.is_some());
-        // Every Linux `/proc/stat` carries `procs_blocked`.
-        assert!(collected.sample.cpu.procs_blocked.is_some());
+        // The process table is readable, so the D-state count is a reading.
+        assert!(collected.sample.cpu.uninterruptible_tasks.is_some());
     }
 
     /// FR-7, at the boundary where it is easiest to get wrong: the first sample

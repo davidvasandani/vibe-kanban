@@ -313,14 +313,16 @@ total_busy_percent: number | null,
  */
 per_core_busy: Array<CoreBusy> | null, load_1m: number | null, load_5m: number | null, load_15m: number | null, frequency_mhz: number | null, temperature_celsius: number | null, 
 /**
- * Tasks in uninterruptible sleep (D state), from `/proc/stat`.
+ * Processes in uninterruptible sleep (state `D`), counted from the
+ * `/proc/[pid]/stat` walk. `None` when the process table is unreadable.
  *
- * Carried next to the load averages because NFS round-trip waits land
- * here and in the load, but **not** in `/proc/pressure/io`: a host can
- * sit at load 40 with io pressure near zero. Defaulted so samples from
- * older workers still deserialize.
+ * Counted directly rather than read from `/proc/stat`'s `procs_blocked`,
+ * which is only `nr_iowait`: NFS RPC waits put tasks in D state and raise
+ * the load without counting as I/O waiters, and without showing up in
+ * `/proc/pressure/io` — a host can sit at load 40 with both near zero.
+ * Defaulted so samples from older workers still deserialize.
  */
-procs_blocked: number | null, 
+uninterruptible_tasks: number | null, 
 /**
  * `/proc/pressure/io` "some" 60-second average, percent of wall time.
  */

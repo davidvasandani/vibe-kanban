@@ -60,7 +60,10 @@ history, which is the #326 symptom.
 
 NFS client waits count as D state, so they raise the load average, but they are
 not block-I/O stalls, so `/proc/pressure/io` stayed near zero. Node metrics now
-report `procs_blocked` alongside io PSI. Server Metrics' CPU panel shows both
+count processes in D state directly from the `/proc/[pid]` walk, as
+`uninterruptible_tasks`, and report that alongside io PSI. `/proc/stat`'s
+`procs_blocked` is not used, because it is only `nr_iowait` and misses NFS RPC
+waits for the same reason io PSI does. Server Metrics' CPU panel shows both
 and flags blocked tasks greater than or equal to the core count.
 
 ### Hypotheses checked and rejected
@@ -127,7 +130,7 @@ a recompute of only the workspaces whose window has expired. That is about 137
 active workspaces every 5 min plus running ones every 30 s, and archived ones
 hourly. Summary requests for fresh workspaces return without touching git.
 
-Follow-ups, not done here: an ntfy alert when `procs_blocked ≥ cores` persists;
+Follow-ups, not done here: an ntfy alert when `uninterruptible_tasks ≥ cores` persists;
 fetching archived summaries only when the archived section is open; event-driven
 stats pushes.
 

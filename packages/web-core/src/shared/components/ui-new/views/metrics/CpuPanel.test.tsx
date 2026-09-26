@@ -27,7 +27,7 @@ const cpu = (overrides: Partial<CpuSample> = {}): CpuSample => ({
   load_15m: 20.8,
   frequency_mhz: null,
   temperature_celsius: null,
-  procs_blocked: 2,
+  uninterruptible_tasks: 2,
   io_pressure_some_avg60: 2.17,
   io_pressure_full_avg60: 0.86,
   ...overrides,
@@ -71,7 +71,7 @@ describe('CpuPanel pressure rows', () => {
   });
 
   it('flags blocked tasks at or above the core count', () => {
-    render(cpu({ procs_blocked: 9 }));
+    render(cpu({ uninterruptible_tasks: 9 }));
     expect(
       row('Blocked tasks (D state)')?.querySelector('.text-error')
     ).not.toBeNull();
@@ -80,7 +80,7 @@ describe('CpuPanel pressure rows', () => {
   it('renders absent readings as no reading, not zero', () => {
     render(
       cpu({
-        procs_blocked: null,
+        uninterruptible_tasks: null,
         io_pressure_some_avg60: null,
         io_pressure_full_avg60: null,
       })

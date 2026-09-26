@@ -44,7 +44,7 @@ export function CpuPanel({
   const total = cpu?.total_busy_percent ?? null;
   const perCore = cpu?.per_core_busy ?? null;
   const blockedSaturated = isBlockedTaskSaturated(
-    cpu?.procs_blocked,
+    cpu?.uninterruptible_tasks,
     cpu?.core_count
   );
 
@@ -92,7 +92,7 @@ export function CpuPanel({
         label={t('metrics.cpu.blocked', {
           defaultValue: 'Blocked tasks (D state)',
         })}
-        value={formatCount(cpu?.procs_blocked)}
+        value={formatCount(cpu?.uninterruptible_tasks)}
         valueClassName={blockedSaturated ? 'text-error' : undefined}
       />
       <MetricsRow
