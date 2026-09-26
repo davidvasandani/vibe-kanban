@@ -153,6 +153,11 @@ pub async fn initialize_deployment(
     }
 
     let deployment = DeploymentImpl::new(shutdown).await?;
+    // Subscribe before anything below can start (and fail) a coding-agent
+    // turn — e.g. resuming interrupted runs — since a broadcast sent with no
+    // receiver is lost. The consumer checks the (default-off) setting per
+    // event, so toggling it needs no restart.
+    crate::error_remediation::spawn(&deployment);
     migrate_legacy_attachment_directories(&deployment).await?;
     deployment.update_sentry_scope().await?;
     let interrupted_processes = deployment
@@ -187,9 +192,6 @@ pub async fn initialize_deployment(
             .resume_interrupted_coding_agents(&interrupted_processes)
             .await;
     }
-    // Subscribe before any new turn can fail; the consumer checks the
-    // (default-off) setting per event, so toggling it needs no restart.
-    crate::error_remediation::spawn(&deployment);
     deployment
         .container()
         .backfill_before_head_commits()

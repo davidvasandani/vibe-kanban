@@ -190,7 +190,7 @@ async fn launch(
             error_messages,
             variant_fallback,
         },
-        &compose_block(&config.pipeline_ids, &config.merge_stage_ids),
+        &compose_block(&config.pipeline_ids, &config.merge_stage_ids)?,
     );
 
     let client = deployment.remote_client().map_err(|e| e.to_string())?;
@@ -367,20 +367,82 @@ fn resolve_variant(config: &AutoErrorRemediationConfig) -> (Option<String>, Opti
 /// composer MCP `create_issue` and the New Issue UI use. Stages are each
 /// pipeline's defaults, plus a merge stage when no default merges (see
 /// `remediation_stage_ids`).
-fn compose_block(pipeline_ids: &[String], merge_stage_ids: &[String]) -> String {
+///
+/// Fails closed: a configured pipeline that is missing or does not parse
+/// aborts the launch before any issue or workspace exists, rather than running
+/// an unattended, merging agent without that pipeline's stages (e.g. review).
+fn compose_block(pipeline_ids: &[String], merge_stage_ids: &[String]) -> Result<String, String> {
     let available = pipelines::load_pipelines(&utils::path::pipelines_dir());
-    let selected: Vec<&pipelines::Pipeline> = pipeline_ids
-        .iter()
-        .filter_map(|id| {
-            let found = available.iter().find(|p| &p.id == id);
-            if found.is_none() {
-                tracing::warn!(pipeline_id = %id, "Auto error remediation: unknown pipeline");
-            }
-            found
-        })
-        .collect();
+    let selected = select_pipelines(&available, pipeline_ids)?;
     let enabled = remediation_stage_ids(&selected, merge_stage_ids);
     let block_pipelines: Vec<pipeline_block::BlockPipeline> =
         selected.into_iter().map(Into::into).collect();
-    pipeline_block::compose_pipeline_block(&block_pipelines, &enabled, None)
+    Ok(pipeline_block::compose_pipeline_block(
+        &block_pipelines,
+        &enabled,
+        None,
+    ))
+}
+
+/// The configured pipelines in configured order, or an error naming every id
+/// that is not among the loaded (valid) pipelines.
+fn select_pipelines<'a>(
+    available: &'a [pipelines::Pipeline],
+    pipeline_ids: &[String],
+) -> Result<Vec<&'a pipelines::Pipeline>, String> {
+    let mut selected = Vec::with_capacity(pipeline_ids.len());
+    let mut missing = Vec::new();
+    for id in pipeline_ids {
+        match available.iter().find(|p| &p.id == id) {
+            Some(pipeline) => selected.push(pipeline),
+            None => missing.push(id.as_str()),
+        }
+    }
+    if missing.is_empty() {
+        Ok(selected)
+    } else {
+        Err(format!(
+            "configured pipeline(s) missing or invalid: {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use services::services::pipelines::{Pipeline, PipelineStep};
+
+    use super::*;
+
+    fn pipeline(id: &str) -> Pipeline {
+        Pipeline {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: None,
+            stages: vec![PipelineStep {
+                id: "spec".to_string(),
+                label: "spec".to_string(),
+                prompt_fragment: "Write a spec.".to_string(),
+                default_enabled: true,
+                heavy: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn selects_configured_pipelines_in_configured_order() {
+        let available = vec![pipeline("speckit"), pipeline("wikillm")];
+        let ids = vec!["wikillm".to_string(), "speckit".to_string()];
+        let selected = select_pipelines(&available, &ids).unwrap();
+        let order: Vec<&str> = selected.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(order, vec!["wikillm", "speckit"]);
+    }
+
+    #[test]
+    fn a_missing_pipeline_fails_closed() {
+        let available = vec![pipeline("speckit")];
+        let ids = vec!["wikillm".to_string(), "speckit".to_string()];
+        let error = select_pipelines(&available, &ids).unwrap_err();
+        assert!(error.contains("wikillm"));
+    }
 }
