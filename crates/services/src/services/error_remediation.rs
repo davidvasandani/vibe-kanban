@@ -48,8 +48,13 @@ const ERROR_SECTION_HEADING: &str = "### Error messages";
 static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b").unwrap()
 });
-static HEX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(?:0x)?[0-9a-f]*[0-9][0-9a-f]*\b").unwrap());
+// Applied in order after lowercasing: UUIDs, `0x` literals of any content,
+// decimal-only words (any length, so ids never straddle two placeholders),
+// long digit-bearing hex words (hashes), then any remaining digit run.
+static PREFIXED_HEX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b0x[0-9a-f]+\b").unwrap());
+static DECIMAL_WORD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[0-9]+\b").unwrap());
+static HEX_WORD_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b[0-9a-f]*[0-9][0-9a-f]*\b").unwrap());
 static DIGITS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[0-9]+").unwrap());
 // Two steps on purpose: an optional capture group after a lazy prefix lets
 // the regex succeed without ever capturing the fingerprint.
@@ -242,10 +247,11 @@ pub fn remediation_marker(
 pub fn normalize_error_text(text: &str) -> String {
     let lower = text.to_lowercase();
     let text = UUID_RE.replace_all(&lower, "<uuid>");
-    let text = HEX_RE.replace_all(&text, |caps: &regex::Captures| {
+    let text = PREFIXED_HEX_RE.replace_all(&text, "<hex>");
+    let text = DECIMAL_WORD_RE.replace_all(&text, "<n>");
+    let text = HEX_WORD_RE.replace_all(&text, |caps: &regex::Captures| {
         let word = &caps[0];
-        let hex = word.trim_start_matches("0x");
-        if hex.len() >= 8 {
+        if word.len() >= 8 {
             "<hex>".to_string()
         } else {
             word.to_string()
@@ -785,6 +791,22 @@ mod tests {
         assert_ne!(
             error_fingerprint(&[a.to_string()]),
             error_fingerprint(&["Permission denied writing config".to_string()])
+        );
+    }
+
+    #[test]
+    fn ids_normalize_consistently_across_lengths_and_hex_forms() {
+        assert_eq!(
+            normalize_error_text("Request 9999999 failed"),
+            normalize_error_text("Request 10000000 failed")
+        );
+        assert_eq!(
+            normalize_error_text("Invalid address 0xdeadbeef"),
+            normalize_error_text("Invalid address 0xdeadbee1")
+        );
+        assert_eq!(
+            normalize_error_text("commit 3f9a2c7e11 not found"),
+            normalize_error_text("commit 0b1c2d3e4f not found")
         );
     }
 

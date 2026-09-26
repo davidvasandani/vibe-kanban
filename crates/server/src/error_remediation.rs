@@ -15,7 +15,7 @@
 use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use api_types::{
-    CreateIssueCommentRequest, CreateIssueRequest, IssuePriority, IssueSortField,
+    CreateIssueCommentRequest, CreateIssueRequest, Issue, IssuePriority, IssueSortField,
     SearchIssuesRequest, SortDirection, pipeline_block,
 };
 use axum::{Extension, Json, extract::State};
@@ -40,6 +40,7 @@ use services::services::{
         find_similar_issue, is_active_status_name, remediation_stage_ids,
     },
     pipelines,
+    remote_client::RemoteClient,
 };
 use tokio::sync::{Mutex, broadcast::error::RecvError};
 use uuid::Uuid;
@@ -49,9 +50,11 @@ use crate::{
     routes::workspaces::{create::create_and_start_workspace, links},
 };
 
-/// Upper bound on active remediation issues compared per lookup (newest
-/// first). The hourly launch cap keeps real projects far below it.
-const SIMILAR_ISSUE_SEARCH_LIMIT: i32 = 200;
+/// Page size for the similar-issue lookup, newest first.
+const SIMILAR_ISSUE_PAGE_SIZE: i32 = 200;
+/// Pages read before the lookup gives up. Giving up fails closed (nothing is
+/// launched): an unchecked remainder could hold the matching issue.
+const SIMILAR_ISSUE_MAX_PAGES: usize = 10;
 
 /// Shared state of the consumer.
 #[derive(Default)]
@@ -262,28 +265,14 @@ async fn launch(
     // Absent evidence never matches, and a project without active statuses
     // has no candidates (an empty `status_ids` filter is ambiguous).
     if !context.error_messages.is_empty() && !active_status_ids.is_empty() {
-        let candidates = client
-            .search_issues(&SearchIssuesRequest {
-                project_id,
-                status_id: None,
-                status_ids: Some(active_status_ids),
-                priority: None,
-                parent_issue_id: None,
-                search: Some(REMEDIATION_MARKER_PREFIX.trim().to_string()),
-                simple_id: None,
-                assignee_user_id: None,
-                tag_id: None,
-                tag_ids: None,
-                sort_field: Some(IssueSortField::CreatedAt),
-                sort_direction: Some(SortDirection::Desc),
-                limit: Some(SIMILAR_ISSUE_SEARCH_LIMIT),
-                offset: None,
-            })
-            .await
-            .map_err(|e| format!("similar-issue lookup failed, nothing launched: {e}"))?
-            .issues;
-
-        if let Some(existing) = find_similar_issue(&candidates, &context.error_messages) {
+        let similar = find_active_similar_issue(
+            &client,
+            project_id,
+            active_status_ids,
+            &context.error_messages,
+        )
+        .await?;
+        if let Some(existing) = similar {
             // The occurrence belongs to the existing issue either way; a
             // failed comment is logged, never a reason to launch.
             if let Err(error) = client
@@ -389,6 +378,51 @@ async fn launch(
         issue_id: issue.id,
         workspace_id: launched_workspace_id,
     })
+}
+
+/// The newest active remediation issue in `project_id` whose recorded errors
+/// match `messages`. Reads every page of candidates; an error, or a remainder
+/// left unread after [`SIMILAR_ISSUE_MAX_PAGES`], is returned as `Err` so
+/// the caller launches nothing rather than risk a duplicate.
+async fn find_active_similar_issue(
+    client: &RemoteClient,
+    project_id: Uuid,
+    active_status_ids: Vec<Uuid>,
+    messages: &[String],
+) -> Result<Option<Issue>, String> {
+    let mut offset = 0usize;
+    for _ in 0..SIMILAR_ISSUE_MAX_PAGES {
+        let page = client
+            .search_issues(&SearchIssuesRequest {
+                project_id,
+                status_id: None,
+                status_ids: Some(active_status_ids.clone()),
+                priority: None,
+                parent_issue_id: None,
+                search: Some(REMEDIATION_MARKER_PREFIX.trim().to_string()),
+                simple_id: None,
+                assignee_user_id: None,
+                tag_id: None,
+                tag_ids: None,
+                sort_field: Some(IssueSortField::CreatedAt),
+                sort_direction: Some(SortDirection::Desc),
+                limit: Some(SIMILAR_ISSUE_PAGE_SIZE),
+                offset: Some(offset as i32),
+            })
+            .await
+            .map_err(|e| format!("similar-issue lookup failed, nothing launched: {e}"))?;
+        if let Some(found) = find_similar_issue(&page.issues, messages) {
+            return Ok(Some(found.clone()));
+        }
+        offset += page.issues.len();
+        if page.issues.is_empty() || offset >= page.total_count {
+            return Ok(None);
+        }
+    }
+    Err(format!(
+        "similar-issue lookup stopped after {offset} active remediation issues without \
+checking them all; nothing launched"
+    ))
 }
 
 /// Configured repositories (each on the source workspace's target branch for
