@@ -696,12 +696,40 @@ pub fn start(id: ReauthTargetId, trigger: ReauthTrigger) -> ReauthRunReport {
 }
 
 /// Start every swept target that is currently unauthenticated.
+///
+/// All targets are claimed up front (so each reports `running` at once), but
+/// one task runs them strictly one after another. Every browser engine needs
+/// the single Entra profile, so starting them together would only park later
+/// targets on the profile lock — an AWS device code expiring while it waits —
+/// and turn one fleet-wide expiry into a burst of failures.
 pub async fn start_expired(trigger: ReauthTrigger) -> Vec<ReauthRunReport> {
-    expired_swept_targets(trigger == ReauthTrigger::Sweep)
-        .await
-        .into_iter()
-        .map(|id| start(id, trigger))
-        .collect()
+    let ids = expired_swept_targets(trigger == ReauthTrigger::Sweep).await;
+    let now = Utc::now();
+    let mut reports = Vec::with_capacity(ids.len());
+    let mut owned = Vec::new();
+    with_registry(|states| {
+        for id in ids {
+            let run = match claim(states, &id, trigger, now) {
+                Claim::Joined(run) | Claim::Blocked(run) => run,
+                Claim::Started(run) => {
+                    owned.push(id.clone());
+                    run
+                }
+            };
+            reports.push(ReauthRunReport {
+                id: id.to_string(),
+                run,
+            });
+        }
+    });
+    if !owned.is_empty() {
+        tokio::spawn(async move {
+            for id in owned {
+                execute(id).await;
+            }
+        });
+    }
+    reports
 }
 
 /// Wait up to `max` for the named runs to settle, then report them.

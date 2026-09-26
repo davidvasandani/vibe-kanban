@@ -695,9 +695,27 @@ const NETWORK_ERRORS: &[&str] = &[
     "err_address_unreachable",
 ];
 
+/// Hosts allowed to receive the Entra email, password and one-time code.
+const ENTRA_HOSTS: &[&str] = &["login.microsoftonline.com", "login.microsoft.com"];
+
+/// Whether `url` is an HTTPS Entra sign-in origin.
+fn is_entra_origin(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|u| {
+        u.scheme() == "https"
+            && u.host_str()
+                .is_some_and(|h| ENTRA_HOSTS.iter().any(|e| h.eq_ignore_ascii_case(e)))
+    })
+}
+
 fn classify_probe(p: &Probe) -> Step {
     if p.url.starts_with("chrome-error://") || NETWORK_ERRORS.iter().any(|e| p.txt.contains(e)) {
         return Step::Unreachable;
+    }
+    // Page text alone must never decide where a credential goes: the driver
+    // also visits AWS, gateway and provider pages, and any of them could say
+    // "enter password". Only an Entra origin gets Entra handling.
+    if !is_entra_origin(&p.url) {
+        return Step::Unknown;
     }
     classify(&p.txt, p.has_email, p.has_otc)
 }
@@ -1783,6 +1801,32 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(classify_probe(&probe), Step::Unreachable);
+    }
+
+    #[test]
+    fn credentials_are_only_entered_on_entra_origins() {
+        let entra = Probe {
+            url: "https://login.microsoftonline.com/tid/saml2?x=1".into(),
+            txt: "enter password".into(),
+            has_password: true,
+            ..Default::default()
+        };
+        assert_eq!(classify_probe(&entra), Step::Password);
+        for url in [
+            "https://sg.my.salesforce.com/login",
+            "https://device.sso.us-east-1.amazonaws.com/",
+            "https://login.microsoftonline.com.evil.example/",
+            "http://login.microsoftonline.com/tid/saml2",
+        ] {
+            let lookalike = Probe {
+                url: url.into(),
+                txt: "enter password enter code".into(),
+                has_email: true,
+                has_otc: true,
+                has_password: true,
+            };
+            assert_eq!(classify_probe(&lookalike), Step::Unknown, "{url}");
+        }
     }
 
     #[test]

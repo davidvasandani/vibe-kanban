@@ -93,6 +93,47 @@ if (popup) await popup.close().catch(() => {});
 return popup ? 'popup' : 'same-tab';
 "#;
 
+/// Gateway copy that means the grant was not stored.
+const FAILURE_WORDS: &[&str] = &["not connected", "disconnected", "failed", "denied", "error"];
+
+/// Whether the text affirmatively says "connected" (not "disconnected").
+fn says_connected(txt: &str) -> bool {
+    txt.match_indices("connected").any(|(at, _)| {
+        let before = &txt[..at];
+        !before.ends_with("dis") && !before.trim_end().ends_with("not")
+    })
+}
+
+/// A page on the gateway itself: its own verdict on the onboarding.
+fn gateway_verdict(p: &Probe, callback: &str, backend: &str) -> PageVerdict<Onboard> {
+    let Ok(url) = url::Url::parse(&p.url) else {
+        return PageVerdict::Continue;
+    };
+    let on_callback = url.path().starts_with(callback);
+    let failed = FAILURE_WORDS.iter().any(|w| p.txt.contains(w));
+    // An OAuth callback also carries failures; that is the gateway's verdict,
+    // so surface it rather than waiting out the timeout.
+    if on_callback && let Some((_, error)) = url.query_pairs().find(|(k, _)| k == "error") {
+        let detail = url
+            .query_pairs()
+            .find(|(k, _)| k == "error_description")
+            .map(|(_, v)| format!(": {v}"))
+            .unwrap_or_default();
+        return PageVerdict::Fail(format!("the gateway reported {error}{detail}"));
+    }
+    if on_callback && failed {
+        return PageVerdict::Fail(format!(
+            "the gateway did not connect {backend}: {}",
+            p.txt.trim().chars().take(200).collect::<String>()
+        ));
+    }
+    // Success is the gateway saying so, not merely arriving somewhere.
+    if says_connected(&p.txt) && !failed {
+        return PageVerdict::Done(Onboard::Connected);
+    }
+    PageVerdict::Continue
+}
+
 pub(crate) fn sgsc_page_verdict(
     p: &Probe,
     backend: &str,
@@ -102,13 +143,7 @@ pub(crate) fn sgsc_page_verdict(
     let host = p.host();
     if host == gateway_host {
         let callback = format!("/_sgsc/auth/callback/{backend}");
-        let path = url::Url::parse(&p.url)
-            .map(|u| u.path().to_string())
-            .unwrap_or_default();
-        if path.starts_with(&callback) || p.txt.contains("connected") {
-            return PageVerdict::Done(Onboard::Connected);
-        }
-        return PageVerdict::Continue;
+        return gateway_verdict(p, &callback, backend);
     }
     if host.ends_with(".snowflakecomputing.com")
         && (p.txt.contains("entra_id_sso") || p.txt.contains("sign in using"))
@@ -226,53 +261,88 @@ mod tests {
     }
 
     #[test]
-    fn success_is_the_gateway_callback_or_connected_page() {
-        let v = sgsc_page_verdict(
-            &page(
+    fn success_requires_the_gateway_to_say_connected() {
+        let verdict =
+            |url: &str, txt: &str| sgsc_page_verdict(&page(url, txt, false), "dp", GW, true);
+        assert!(matches!(
+            verdict(
                 "https://claude.example.dev/_sgsc/auth/callback/dp?code=x",
-                "",
-                false,
+                "snowflake connected"
             ),
-            "dp",
-            GW,
-            true,
-        );
-        assert!(matches!(v, PageVerdict::Done(Onboard::Connected)));
-        let v = sgsc_page_verdict(
-            &page(
-                "https://claude.example.dev/_sgsc/x",
-                "snowflake connected",
-                false,
+            PageVerdict::Done(Onboard::Connected)
+        ));
+        assert!(matches!(
+            verdict("https://claude.example.dev/_sgsc/x", "snowflake connected"),
+            PageVerdict::Done(Onboard::Connected)
+        ));
+        // Arriving at the callback is not success until the gateway says so.
+        assert!(matches!(
+            verdict(
+                "https://claude.example.dev/_sgsc/auth/callback/dp?code=x",
+                ""
             ),
-            "dp",
-            GW,
-            true,
-        );
-        assert!(matches!(v, PageVerdict::Done(Onboard::Connected)));
+            PageVerdict::Continue
+        ));
         // The prompt that sent us here is not success.
-        let v = sgsc_page_verdict(
-            &page(
+        assert!(matches!(
+            verdict(
                 "https://claude.example.dev/_sgsc/auth/onboard/dp",
-                "connect snowflake to continue",
-                false,
+                "connect snowflake to continue"
             ),
-            "dp",
-            GW,
-            true,
-        );
-        assert!(matches!(v, PageVerdict::Continue));
+            PageVerdict::Continue
+        ));
         // Another backend's callback does not count.
+        assert!(matches!(
+            verdict("https://claude.example.dev/_sgsc/auth/callback/sf", ""),
+            PageVerdict::Continue
+        ));
+    }
+
+    #[test]
+    fn gateway_failures_are_never_success() {
         let v = sgsc_page_verdict(
             &page(
-                "https://claude.example.dev/_sgsc/auth/callback/sf",
-                "",
+                "https://claude.example.dev/_sgsc/auth/callback/dp?error=access_denied&error_description=user%20cancelled",
+                "connected",
                 false,
             ),
             "dp",
             GW,
             true,
         );
-        assert!(matches!(v, PageVerdict::Continue));
+        match v {
+            PageVerdict::Fail(m) => {
+                assert_eq!(m, "the gateway reported access_denied: user cancelled")
+            }
+            _ => panic!("an error callback must fail"),
+        }
+        let v = sgsc_page_verdict(
+            &page(
+                "https://claude.example.dev/_sgsc/auth/callback/dp",
+                "snowflake not connected",
+                false,
+            ),
+            "dp",
+            GW,
+            true,
+        );
+        assert!(matches!(v, PageVerdict::Fail(_)));
+        for txt in [
+            "snowflake not connected",
+            "disconnected",
+            "connected? no: failed",
+        ] {
+            let v = sgsc_page_verdict(
+                &page("https://claude.example.dev/_sgsc/status", txt, false),
+                "dp",
+                GW,
+                true,
+            );
+            assert!(matches!(v, PageVerdict::Continue), "{txt}");
+        }
+        assert!(says_connected("snowflake connected"));
+        assert!(!says_connected("disconnected"));
+        assert!(!says_connected("not connected"));
     }
 
     #[test]

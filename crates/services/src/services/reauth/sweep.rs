@@ -19,8 +19,8 @@ pub const MAX_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 pub const ESCALATE_AFTER: u32 = 3;
 /// Let the server settle (and the first manual checks run) before sweeping.
 const INITIAL_DELAY: Duration = Duration::from_secs(120);
-/// Longest a sweep waits on one target before moving on; the run itself
-/// continues and is picked up by the registry.
+/// Per-target share of how long a sweep waits for its batch; runs that
+/// outlast it continue and are picked up by the registry.
 const PER_TARGET_WAIT: Duration = Duration::from_secs(6 * 60);
 
 pub fn sweep_interval_from_env() -> Option<Duration> {
@@ -69,13 +69,14 @@ pub fn spawn_sweep(shutdown: CancellationToken) {
             _ = tokio::time::sleep(INITIAL_DELAY) => {}
         }
         loop {
-            // Sequential: every browser engine shares one profile anyway,
-            // and one-at-a-time keeps a bad tick from fanning out.
+            // start_expired runs its targets one at a time in a single task;
+            // wait for the whole batch before scheduling the next tick.
             let started = start_expired(ReauthTrigger::Sweep).await;
-            for report in started {
+            for report in &started {
                 tracing::info!(target = %report.id, "unattended re-auth sweep repairing");
-                let _ = wait(vec![report], PER_TARGET_WAIT).await;
             }
+            let budget = PER_TARGET_WAIT * u32::try_from(started.len()).unwrap_or(u32::MAX);
+            let _ = wait(started, budget).await;
             tokio::select! {
                 _ = shutdown.cancelled() => return,
                 _ = tokio::time::sleep(interval) => {}
