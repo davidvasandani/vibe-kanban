@@ -653,6 +653,42 @@ fn push_worker_bytes(store: &MsgStore, encoded: &str, stderr: bool) {
     }
 }
 
+/// A worker `Structured` event, classified so that product metadata never
+/// reaches the agent's stdout, where executor parsers would render it as an
+/// unrecognized agent message.
+enum WorkerStructuredEvent {
+    Log(LogMsg),
+    CancellationPhase(String),
+    Diagnostic(String),
+}
+
+fn classify_worker_structured(json: &str) -> WorkerStructuredEvent {
+    if let Ok(message) = serde_json::from_str::<LogMsg>(json) {
+        return WorkerStructuredEvent::Log(message);
+    }
+    let parsed = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json).ok();
+    let field = parsed
+        .as_ref()
+        .and_then(|object| match object.iter().next() {
+            Some((key, serde_json::Value::String(value))) if object.len() == 1 => {
+                Some((key.as_str(), value.as_str()))
+            }
+            _ => None,
+        });
+    match field {
+        Some(("cancellation_phase", phase)) => {
+            WorkerStructuredEvent::CancellationPhase(phase.to_string())
+        }
+        Some(("worker_error", reason)) => {
+            WorkerStructuredEvent::Diagnostic(format!("Worker error: {reason}"))
+        }
+        Some(("stream_error", reason)) => {
+            WorkerStructuredEvent::Diagnostic(format!("Worker output stream error: {reason}"))
+        }
+        _ => WorkerStructuredEvent::Diagnostic(format!("Unrecognized worker event: {json}")),
+    }
+}
+
 async fn mark_remote_execution_indeterminate(
     db: &DBService,
     execution_id: Uuid,
@@ -2858,16 +2894,24 @@ impl LocalContainerService {
                             push_worker_bytes(&store, &data_base64, true);
                         }
                         ExecutionEventPayload::Structured { json } => {
-                            if let Ok(message) = serde_json::from_str::<LogMsg>(&json) {
-                                if let Some(is_final) = normalized_final_assistant_state(&message) {
-                                    final_output_deadline = is_final.then(|| {
-                                        tokio::time::Instant::now()
-                                            + FINAL_OUTPUT_RECONCILIATION_TIMEOUT
-                                    });
+                            match classify_worker_structured(&json) {
+                                WorkerStructuredEvent::Log(message) => {
+                                    if let Some(is_final) =
+                                        normalized_final_assistant_state(&message)
+                                    {
+                                        final_output_deadline = is_final.then(|| {
+                                            tokio::time::Instant::now()
+                                                + FINAL_OUTPUT_RECONCILIATION_TIMEOUT
+                                        });
+                                    }
+                                    store.push(message);
                                 }
-                                store.push(message);
-                            } else {
-                                store.push_stdout(format!("{json}\n"));
+                                WorkerStructuredEvent::CancellationPhase(phase) => {
+                                    tracing::debug!(%execution_id, %phase, "Worker cancellation phase");
+                                }
+                                WorkerStructuredEvent::Diagnostic(message) => {
+                                    store.push(LogMsg::Stderr(message));
+                                }
                             }
                         }
                         ExecutionEventPayload::Completed(evidence) => {
@@ -5570,7 +5614,64 @@ mod worker_event_tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
     use utils::{log_msg::LogMsg, msg_store::MsgStore};
 
-    use super::push_worker_bytes;
+    use super::{WorkerStructuredEvent, classify_worker_structured, push_worker_bytes};
+
+    fn diagnostic(json: &str) -> String {
+        match classify_worker_structured(json) {
+            WorkerStructuredEvent::Diagnostic(text) => text,
+            _ => panic!("expected a diagnostic for {json}"),
+        }
+    }
+
+    #[test]
+    fn structured_log_messages_pass_through_unchanged() {
+        let json = serde_json::to_string(&LogMsg::Stderr("boom".into())).unwrap();
+        assert!(matches!(
+            classify_worker_structured(&json),
+            WorkerStructuredEvent::Log(LogMsg::Stderr(message)) if message == "boom"
+        ));
+    }
+
+    #[test]
+    fn cancellation_phases_never_become_agent_output() {
+        for phase in [
+            "requested",
+            "terminating_process_group",
+            "killing_process_group",
+        ] {
+            let json = serde_json::json!({ "cancellation_phase": phase }).to_string();
+            assert!(matches!(
+                classify_worker_structured(&json),
+                WorkerStructuredEvent::CancellationPhase(value) if value == phase
+            ));
+        }
+    }
+
+    #[test]
+    fn worker_failures_become_readable_diagnostics() {
+        assert_eq!(
+            diagnostic(r#"{"worker_error":"spawn failed: No such file"}"#),
+            "Worker error: spawn failed: No such file"
+        );
+        assert_eq!(
+            diagnostic(r#"{"stream_error":"Broken pipe"}"#),
+            "Worker output stream error: Broken pipe"
+        );
+    }
+
+    #[test]
+    fn unrecognized_worker_metadata_is_kept_as_a_diagnostic() {
+        for json in [
+            r#"{"something_new":1}"#,
+            "not json",
+            r#"{"worker_error":7}"#,
+        ] {
+            assert_eq!(
+                diagnostic(json),
+                format!("Unrecognized worker event: {json}")
+            );
+        }
+    }
 
     #[test]
     fn worker_output_is_forwarded_to_msg_store_in_received_order() {
