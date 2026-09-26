@@ -196,6 +196,9 @@ impl std::fmt::Display for ExecutorConfig {
 pub struct ExecutorProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recently_used_models: Option<ExecutorRecentModels>,
+    /// Model keys (`provider/model` or `model`) hidden from the model picker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_models: Vec<String>,
     #[serde(flatten)]
     pub configurations: HashMap<String, CodingAgent>,
 }
@@ -346,6 +349,9 @@ impl ExecutorConfigs {
                         default_profile.recently_used_models =
                             override_profile.recently_used_models;
                     }
+                    if !override_profile.disabled_models.is_empty() {
+                        default_profile.disabled_models = override_profile.disabled_models;
+                    }
                 }
                 None => {
                     // New executor, add completely
@@ -405,6 +411,7 @@ impl ExecutorConfigs {
 
                 let mut override_profile = ExecutorProfile {
                     recently_used_models: None,
+                    disabled_models: Vec::new(),
                     configurations: override_configurations,
                 };
 
@@ -415,8 +422,13 @@ impl ExecutorConfigs {
                         .or_else(|| Some(ExecutorRecentModels::default()));
                 }
 
+                if current_profile.disabled_models != default_profile.disabled_models {
+                    override_profile.disabled_models = current_profile.disabled_models.clone();
+                }
+
                 if !override_profile.configurations.is_empty()
                     || override_profile.recently_used_models.is_some()
+                    || !override_profile.disabled_models.is_empty()
                 {
                     overrides.executors.insert(*executor_key, override_profile);
                 }
@@ -554,5 +566,72 @@ impl ExecutorConfigs {
         let selected = agents_with_info[0].0;
         tracing::info!("Recommended executor: {}", selected);
         Ok(ExecutorProfileId::new(selected))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_models_round_trip_without_becoming_a_variant() {
+        let profile: ExecutorProfile = serde_json::from_value(serde_json::json!({
+            "disabled_models": ["claude-haiku-4-5"],
+            "DEFAULT": { "CLAUDE_CODE": {} }
+        }))
+        .unwrap();
+
+        assert_eq!(profile.disabled_models, ["claude-haiku-4-5"]);
+        assert_eq!(
+            profile.configurations.keys().collect::<Vec<_>>(),
+            ["DEFAULT"]
+        );
+
+        let serialized = serde_json::to_value(&profile).unwrap();
+        assert_eq!(
+            serialized["disabled_models"],
+            serde_json::json!(["claude-haiku-4-5"])
+        );
+    }
+
+    #[test]
+    fn empty_disabled_models_are_omitted() {
+        let profile: ExecutorProfile = serde_json::from_value(serde_json::json!({
+            "DEFAULT": { "CLAUDE_CODE": {} }
+        }))
+        .unwrap();
+
+        assert!(profile.disabled_models.is_empty());
+        let serialized = serde_json::to_value(&profile).unwrap();
+        assert!(serialized.get("disabled_models").is_none());
+    }
+
+    #[test]
+    fn disabled_models_survive_override_computation_and_merge() {
+        let defaults = ExecutorConfigs::from_defaults();
+        let mut current = defaults.clone();
+        current
+            .executors
+            .get_mut(&BaseCodingAgent::ClaudeCode)
+            .unwrap()
+            .disabled_models = vec!["claude-haiku-4-5".to_string()];
+
+        let overrides = ExecutorConfigs::compute_overrides(&defaults, &current).unwrap();
+        let claude_override = &overrides.executors[&BaseCodingAgent::ClaudeCode];
+        assert_eq!(claude_override.disabled_models, ["claude-haiku-4-5"]);
+        assert!(claude_override.configurations.is_empty());
+
+        let merged = ExecutorConfigs::merge_with_defaults(defaults.clone(), overrides);
+        assert_eq!(
+            merged.executors[&BaseCodingAgent::ClaudeCode].disabled_models,
+            ["claude-haiku-4-5"]
+        );
+
+        let unchanged = ExecutorConfigs::compute_overrides(&defaults, &defaults).unwrap();
+        assert!(
+            !unchanged
+                .executors
+                .contains_key(&BaseCodingAgent::ClaudeCode)
+        );
     }
 }

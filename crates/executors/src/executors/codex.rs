@@ -1081,6 +1081,7 @@ impl StandardCodingAgentExecutor for Codex {
 
         let options = ExecutorDiscoveredOptions {
             model_selector: ModelSelectorConfig {
+                model_aliases: Default::default(),
                 models: vec![
                     ModelInfo {
                         id: "gpt-6-astra".to_string(),

@@ -146,3 +146,25 @@ export function resolveDefaultReasoningId(
     options.find((option) => option.is_default)?.id ?? options[0]?.id ?? null
   );
 }
+
+/**
+ * Map a saved model ID the executor accepts but no longer advertises (e.g. a
+ * floating alias such as `opus`) to the catalog model it runs, so the picker
+ * shows that versioned entry and its reasoning options. Other IDs pass
+ * through unchanged.
+ */
+export function resolveModelAlias(
+  config: ModelSelectorConfig | null,
+  value: string | null | undefined
+): string | null | undefined {
+  const aliases = config?.model_aliases;
+  if (!config || !value || !aliases) return value;
+  const lower = value.toLowerCase();
+  if (config.models.some((model) => model.id.toLowerCase() === lower)) {
+    return value;
+  }
+  const match = Object.entries(aliases).find(
+    ([alias, target]) => target && alias.toLowerCase() === lower
+  );
+  return match?.[1] ?? value;
+}

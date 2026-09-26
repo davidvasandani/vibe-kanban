@@ -237,6 +237,7 @@ impl StandardCodingAgentExecutor for Droid {
     ) -> Result<futures::stream::BoxStream<'static, json_patch::Patch>, ExecutorError> {
         let options = ExecutorDiscoveredOptions {
             model_selector: ModelSelectorConfig {
+                model_aliases: Default::default(),
                 models: [
                     ("claude-opus-5", "Claude Opus 5"),
                     ("claude-opus-4-8", "Claude Opus 4.8"),

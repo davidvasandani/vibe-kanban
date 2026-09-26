@@ -360,6 +360,12 @@
       "description": "Customize the behavior of coding agents with different configurations.",
       "loading": "Loading agent configurations...",
       "selectAgent": "Select agent",
+      "models": {
+        "title": "Models",
+        "description": "Unchecked models are hidden from the model menu for this agent.",
+        "lastEnabled": "At least one model must stay enabled.",
+        "loading": "Loading models..."
+      },
       "save": {
         "button": "Save Agent Configurations",
         "success": "✓ Executor configurations saved successfully!",

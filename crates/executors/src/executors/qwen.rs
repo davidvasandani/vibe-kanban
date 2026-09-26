@@ -198,6 +198,7 @@ impl StandardCodingAgentExecutor for QwenCode {
     ) -> Result<futures::stream::BoxStream<'static, json_patch::Patch>, ExecutorError> {
         let options = ExecutorDiscoveredOptions {
             model_selector: ModelSelectorConfig {
+                model_aliases: Default::default(),
                 permissions: vec![PermissionPolicy::Auto, PermissionPolicy::Supervised],
                 ..Default::default()
             },
