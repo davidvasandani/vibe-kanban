@@ -102,6 +102,16 @@ pub struct LoadAverage {
     pub fifteen: f32,
 }
 
+/// 60-second averages from a `/proc/pressure/*` file, in percent of wall time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PressureAverages {
+    /// Share of time at least one task was stalled on the resource.
+    pub some_avg60: f32,
+    /// Share of time all non-idle tasks were stalled. `None` for files that
+    /// have no `full` line (`/proc/pressure/cpu` on older kernels).
+    pub full_avg60: Option<f32>,
+}
+
 /// The fields of `/proc/cpuinfo` this crate uses.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CpuInfo {
@@ -266,6 +276,38 @@ pub fn parse_loadavg(contents: &str) -> Option<LoadAverage> {
         one: columns.next()?.parse().ok()?,
         five: columns.next()?.parse().ok()?,
         fifteen: columns.next()?.parse().ok()?,
+    })
+}
+
+/// Parse the `procs_blocked` line of `/proc/stat`: tasks currently in
+/// uninterruptible sleep (D state), which is where NFS round-trip waits land.
+pub fn parse_procs_blocked(contents: &str) -> Option<u32> {
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix("procs_blocked "))
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// Parse a `/proc/pressure/*` file. Requires the `some` line; a file without
+/// it is not a pressure reading.
+pub fn parse_pressure(contents: &str) -> Option<PressureAverages> {
+    fn avg60(line: &str) -> Option<f32> {
+        line.split_whitespace()
+            .find_map(|field| field.strip_prefix("avg60="))
+            .and_then(|value| value.parse().ok())
+    }
+    let mut some = None;
+    let mut full = None;
+    for line in contents.lines() {
+        if let Some(rest) = line.strip_prefix("some ") {
+            some = avg60(rest);
+        } else if let Some(rest) = line.strip_prefix("full ") {
+            full = avg60(rest);
+        }
+    }
+    Some(PressureAverages {
+        some_avg60: some?,
+        full_avg60: full,
     })
 }
 
@@ -531,6 +573,7 @@ mod tests {
     const STAT_NEXT: &str = include_str!("../tests/fixtures/stat_next");
     const MEMINFO: &str = include_str!("../tests/fixtures/meminfo");
     const LOADAVG: &str = include_str!("../tests/fixtures/loadavg");
+    const PRESSURE_IO: &str = include_str!("../tests/fixtures/pressure_io");
     const UPTIME: &str = include_str!("../tests/fixtures/uptime");
     const CPUINFO: &str = include_str!("../tests/fixtures/cpuinfo");
     const NET_DEV: &str = include_str!("../tests/fixtures/net_dev");
@@ -551,6 +594,11 @@ mod tests {
         assert!(parse_loadavg("").is_none());
         assert!(parse_loadavg("0.31 1.60").is_none());
         assert!(parse_uptime("").is_none());
+        assert!(parse_procs_blocked("").is_none());
+        assert!(parse_procs_blocked("procs_blocked x").is_none());
+        assert!(parse_pressure("").is_none());
+        assert!(parse_pressure("full avg10=0.00 avg60=1.00").is_none());
+        assert!(parse_pressure("some avg10=0.00").is_none());
         assert!(parse_uptime("not-a-number").is_none());
         assert!(parse_process_stat("").is_none());
         assert!(parse_process_stat("254347 (cp) R 254334").is_none());
@@ -664,6 +712,27 @@ mod tests {
         assert_eq!(memory.total_bytes, Some(1024 * 1024));
         assert_eq!(memory.used_bytes, Some(512 * 1024));
         assert_eq!(memory.cached_bytes, Some(192 * 1024));
+    }
+
+    #[test]
+    fn procs_blocked_reads_the_stat_line() {
+        assert_eq!(parse_procs_blocked(STAT), Some(0));
+        assert_eq!(
+            parse_procs_blocked("cpu  1 2 3 4\nprocs_running 3\nprocs_blocked 12\n"),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn pressure_reads_some_and_full_avg60() {
+        let io = parse_pressure(PRESSURE_IO).expect("pressure");
+        assert_eq!(io.some_avg60, 2.17);
+        assert_eq!(io.full_avg60, Some(0.86));
+
+        let some_only = parse_pressure("some avg10=1.00 avg60=4.50 avg300=0.10 total=9\n")
+            .expect("some-only pressure");
+        assert_eq!(some_only.some_avg60, 4.5);
+        assert_eq!(some_only.full_avg60, None);
     }
 
     #[test]

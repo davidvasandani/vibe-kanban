@@ -111,6 +111,19 @@ mod platform {
                 "load averages",
                 &mut degraded,
             );
+            let procs_blocked = optional(
+                parse::parse_procs_blocked(&stat_raw),
+                "blocked task count",
+                &mut degraded,
+            );
+            let io_pressure = optional(
+                read_to_string(&proc_path("pressure/io"))
+                    .ok()
+                    .as_deref()
+                    .and_then(parse::parse_pressure),
+                "io pressure",
+                &mut degraded,
+            );
             let cpu_info = read_to_string(&proc_path("cpuinfo"))
                 .ok()
                 .map(|raw| parse::parse_cpuinfo(&raw))
@@ -181,6 +194,9 @@ mod platform {
                     load_15m: load.map(|l| l.fifteen),
                     frequency_mhz: cpu_info.frequency_mhz,
                     temperature_celsius: temperature_celsius(),
+                    procs_blocked,
+                    io_pressure_some_avg60: io_pressure.map(|p| p.some_avg60),
+                    io_pressure_full_avg60: io_pressure.and_then(|p| p.full_avg60),
                 },
                 memory,
                 filesystems,
@@ -488,6 +504,8 @@ mod tests {
         assert!(!collected.sample.hostname.is_empty());
         assert!(collected.sample.cpu.core_count.unwrap_or(0) >= 1);
         assert!(collected.counters.cpu.is_some());
+        // Every Linux `/proc/stat` carries `procs_blocked`.
+        assert!(collected.sample.cpu.procs_blocked.is_some());
     }
 
     /// FR-7, at the boundary where it is easiest to get wrong: the first sample

@@ -311,7 +311,24 @@ total_busy_percent: number | null,
  * wholesale, never patched per element, so a core count change cannot
  * misalign it.
  */
-per_core_busy: Array<CoreBusy> | null, load_1m: number | null, load_5m: number | null, load_15m: number | null, frequency_mhz: number | null, temperature_celsius: number | null, };
+per_core_busy: Array<CoreBusy> | null, load_1m: number | null, load_5m: number | null, load_15m: number | null, frequency_mhz: number | null, temperature_celsius: number | null, 
+/**
+ * Tasks in uninterruptible sleep (D state), from `/proc/stat`.
+ *
+ * Carried next to the load averages because NFS round-trip waits land
+ * here and in the load, but **not** in `/proc/pressure/io`: a host can
+ * sit at load 40 with io pressure near zero. Defaulted so samples from
+ * older workers still deserialize.
+ */
+procs_blocked: number | null, 
+/**
+ * `/proc/pressure/io` "some" 60-second average, percent of wall time.
+ */
+io_pressure_some_avg60: number | null, 
+/**
+ * `/proc/pressure/io` "full" 60-second average, percent of wall time.
+ */
+io_pressure_full_avg60: number | null, };
 
 export type CoreBusy = { 
 /**

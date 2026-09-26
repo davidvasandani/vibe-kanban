@@ -89,6 +89,9 @@ function cpuSample(overrides: Partial<HostSample['cpu']> = {}) {
     load_15m: 0.3,
     frequency_mhz: 3200,
     temperature_celsius: 44,
+    procs_blocked: 1,
+    io_pressure_some_avg60: 0.5,
+    io_pressure_full_avg60: 0.1,
     ...overrides,
   };
 }

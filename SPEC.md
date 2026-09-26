@@ -1,68 +1,136 @@
-# SPEC: Chat panel never finishes loading (vk/5f70-not-loading-chat)
-
-Vibe Kanban only. No homelab or deployment change.
-
-Feature artifacts: `specs/vk/5f70-not-loading-chat/` (spec, clarifications,
-plan, research, data model, contract, tasks). Constitution principle: XL.
+# SPEC: Reduce NFS I/O pressure on the coordinator (think2)
 
 ## Problem
 
-On an iPhone (version `4df95bb`, through `vibe.vasandani.dev`), two
-workspaces showed the conversation spinner indefinitely at 04:04 UTC on
-2026-09-26. The chat box rendered, but no messages ever appeared.
+The coordinator (think2, 6 cores) runs at a sustained load average of 20–50
+while its CPU is 40–80% idle. The load is tasks blocked on NFS round trips
+against `/srv/vibe-kanban-shared` (`172.16.0.99:/var/nfs/shared/VibeKanban`,
+NFSv3, `fsc`). Users see it as slow sidebars, slow diff and summary
+responses, and log sockets that close without `finished` (the trigger for the
+spinner fixed client-side in #326).
 
-## Root cause
+## Measured attribution (2026-09-26, 05:53–05:58 UTC, think2)
 
-The chat's initial load fetches each recent completed turn over a WebSocket
-(`/api/execution-processes/{id}/normalized-logs/ws`, or `raw-logs/ws` for
-scripts) and waits for `{"finished": true}`:
+| Measure | Value |
+| --- | --- |
+| Load average (1/5/15) | 21.1 / 20.9 / 20.8 (6 cores) |
+| Mean tasks in D state (0.2 s sampling, 60 s) | 8.5 |
+| `/proc/pressure/io` `some avg60` | 0.00–2.17 (NFS RPC waits are **not** accounted as block I/O pressure) |
+| `/proc/pressure/cpu` `some avg60` | 8.9–26.6 |
+| NFS GETATTR from think2 | **24,456 ops/s** (ACCESS 269/s; every other op < 4/s) |
+| git processes spawned by the server (lower bound, 0.2 s sampling) | **775 / min** |
+| git command mix in a 20 s sample (137 processes) | 85 `status --porcelain -z --untracked-files=normal`, 37 `read-tree HEAD`, 9 `diff --cached -M --name-status`, 1 `add -A` — all four steps of `GitCli::diff_status`, across ~70 distinct workspaces |
+| `POST /api/workspaces/summaries {archived:false}` | **43.0 s**, 198 workspaces, 137 with git diff stats computed |
+| `POST /api/workspaces/summaries {archived:true}` | **33.8 s**, 909 workspaces, 484 with git diff stats computed |
 
-- **Server** (`crates/server/src/routes/execution_processes.rs`): on a
-  log-stream error, both handlers `break` and `socket.close()`, which is a clean
-  1000 close **without** `finished`.
-- **Client** (`packages/web-core/src/shared/lib/streamJsonPatchEntries.ts`):
-  the waiter settles only on `finished` or a transport `error` event. `close`
-  was ignored, and nothing timed out a silent socket.
-- `useConversationHistory.loadEntriesForHistoricExecutionProcess` wraps this in
-  a promise. `loadProcessesInOrder` awaits `Promise.all` over a slice, so a
-  single stuck fetch keeps `ConversationList.loading` true forever.
+Attribution: the only caller that runs `diff_status` across many workspaces
+at once is `get_workspace_summaries` → `compute_workspace_diff_stats` →
+`diff_stream::compute_diff_stats` → `GitService::get_diffs`. Every other
+caller of these paths is scoped to one workspace: the open diff stream, the
+branch-status route, turn finalization, and a remote sync after login.
 
-Evidence: at the time, the coordinator (think2) was at load 35–49 with ~56% CPU
-busy, i.e. NFS I/O wait (`xprtiod`/`fscache` kworkers, many `git -C` processes
-on shared workspaces). That is when a raw-log read can fail. Proxies
-(Cloudflare) and iOS dropping the socket produce the same client state. Direct
-LAN tests afterwards loaded fine (all 32 Kindle-workspace log sockets finished
-in < 300 ms), so the trigger is intermittent. The client defect is
-deterministic and is covered by tests.
+Every open client (`useWorkspaces`) polls both the active and the archived
+summaries every 15 s. Each request takes longer than the interval (43 s and
+34 s), so React Query starts the next refetch as soon as the previous one
+settles. **Every open client therefore keeps two full git sweeps running
+continuously**, each at `MAX_CONCURRENT_GIT_STATUS = 4`. The server never
+shares or coalesces the work across clients or across the two scopes.
 
-## Requirements
+Each workspace-repo in a sweep costs, on NFS:
+`git2::Repository::open` + merge-base, `read-tree HEAD` into a temp index,
+`status --porcelain --untracked-files=normal` (lstat of every tracked file →
+one GETATTR each), `add -A` of the changed paths, `diff --cached -M`, then
+in-process blob and file reads for line counts.
 
-- R1: A history fetch ends as success (entries + `finished`) or failure. A
-  close without `finished`, even a clean one, is failure.
-- R2: A history fetch silent for 30 s fails. The timer resets on every
-  message, so slow-but-arriving logs are never cut off.
-- R3: Exactly one outcome per fetch. Signals after settlement are ignored.
-  Closing a fetch deliberately reports nothing.
-- R4: A failed turn is skipped (existing `loadProcessesInOrder` behaviour).
-  The initial load completes, and the turn stays reachable through
-  "load earlier".
-- R5: Live (running) streams have no idle deadline. A close without
-  `finished` now rejects and is retried by the existing
-  `loadRunningAndEmitWithBackoff`.
+Refuted or secondary hypotheses:
+
+- **NFS client settings.** GETATTR volume is proportional to the number of
+  `git status` walks, not a mount-option defect. Raising `actimeo` or adding
+  `nocto` would trade the cross-host freshness that workers rely on (index
+  and lock files written on one host, read on another) for fewer round trips.
+  That is rejected while an app-side fix removes the walks themselves.
+  `fsc` only caches file *data* (READ is 0.5 ops/s), so it neither helps nor
+  thrashes this workload. No mount change is made.
+- **Other coordinator scanners** (`find /srv/src/homelab`, git-projects
+  stamping, the deploy loop). They are not on the shared mount and did not
+  appear in the D-state samples.
+- **Raw-log re-normalization.** Raw logs live under
+  `/srv/vibe-kanban-shared/cluster/execution-logs` (NFS), but history reads
+  are per request and bounded by `HISTORICAL_NORMALIZATION_PERMITS`. They
+  produced no measurable GETATTR/READ volume in the samples (READ 0.5 ops/s).
+
+## Goals
+
+1. Workspace diff stats in bulk summaries are computed at most once per
+   workspace per staleness window, however many clients or requests ask.
+2. Concurrent requests for the same workspace share one computation
+   (single-flight).
+3. Total bulk diff-stat git work is bounded process-wide, not per request.
+4. Staleness is explicit and bounded, and stats are invalidated immediately
+   when a process in the workspace finishes (the moment an agent's edits land).
+5. Node metrics expose NFS-relevant pressure (blocked tasks plus io PSI), so
+   the Server Metrics UI shows this before users see spinners.
 
 ## Non-goals
 
-- Changing server stream termination or the wire protocol (possible
-  follow-up: send an error close code on log-read failure).
-- Workspace-list / execution-process streams (`useJsonPatchWsStream`), which
-  already reconnect on close.
-- Reducing NFS pressure on think2.
+- Changing NFS mount options, fscache, or the NFS export (see above). The
+  analysis records the current options; no host config change is made.
+- Changing the single-workspace paths (diff stream, branch status). They
+  stay live and uncached.
+- Changing how diff stats are computed (their semantics stay identical).
+
+## Design
+
+### Shared diff-stats cache (`services::services::workspace_diff_stats`)
+
+A process-wide `LazyLock` cache keyed by workspace id. Each slot is a
+`tokio::sync::Mutex<Option<Entry { stats, computed_at, generation }>>`:
+
+- `get_or_compute(id, max_age, compute)`: lock the slot. If the entry is
+  younger than `max_age`, return it. Otherwise acquire a permit from a
+  process-wide semaphore (`BULK_DIFF_STATS_CONCURRENCY = 4`), compute,
+  store, and return. Waiters on the same slot get the fresh value
+  (single-flight).
+- `invalidate(id)`: bump a generation counter and drop the entry. A
+  computation that started before the bump does not publish its result (no
+  stale write-back race).
+
+Freshness tiers, chosen by the summaries route:
+
+| Workspace state | `max_age` (staleness bound) |
+| --- | --- |
+| Latest process running | 30 s |
+| Active, idle | 5 min |
+| Archived | 60 min |
+| Idle > 14 days | not computed (unchanged behaviour) |
+
+Any process completion in the workspace invalidates immediately, so an
+agent's finished turn shows up on the next poll.
+
+### Invalidation hook
+
+`LocalContainerService` finalization calls `invalidate(workspace_id)` when any
+execution process in the workspace exits. That covers coding agent turns,
+setup, cleanup and dev scripts, and it runs before the turn's remote sync.
+
+### Metrics: I/O pressure
+
+`node_metrics::CpuSample` gains optional `procs_blocked` (from `/proc/stat`)
+and `io_pressure_some_avg60` / `io_pressure_full_avg60` (from
+`/proc/pressure/io`). Both are optional and `#[serde(default)]`, so mixed
+versions still interoperate. The Server Metrics node view shows
+"blocked N · io some X%" next to the load, and warns when `procs_blocked`
+is at or above the core count.
 
 ## Acceptance
 
-- `packages/web-core/src/shared/lib/streamJsonPatchEntries.test.ts`: 8 cases
-  (finished; clean close without finished; error+close; idle expiry; steady
-  messages; open never completes; caller close; no deadline). Three of them
-  fail on the pre-fix code and all pass with the fix.
-- web-core vitest (539 tests), `tsc` for all frontends, frontend lint, and
-  prettier all pass.
+- Analysis with before/after numbers is recorded in
+  `docs/analysis/coordinator-nfs-io-pressure.md`. The before figures are the
+  table above. The after figures are measured with the same script after
+  deploy.
+- Unit tests: cache hit within `max_age`, recompute after expiry,
+  single-flight (N concurrent callers → one compute), invalidation drops the
+  entry and blocks stale write-back, tier selection, and the `/proc/stat` and
+  `/proc/pressure/io` parsers.
+- Summary fields and diff-stat semantics are unchanged. Only freshness
+  changes, within the stated bounds.

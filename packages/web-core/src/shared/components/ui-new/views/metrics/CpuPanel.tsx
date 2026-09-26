@@ -3,7 +3,14 @@ import type { CpuSample } from 'shared/types';
 import { Meter } from '@vibe/ui/components/Meter';
 import { Sparkline } from '@vibe/ui/components/Sparkline';
 
-import { formatCount, formatLoad, formatPercent, NO_READING } from './format';
+import {
+  formatCount,
+  formatIoPressure,
+  formatLoad,
+  formatPercent,
+  isBlockedTaskSaturated,
+  NO_READING,
+} from './format';
 import { MetricsRow, MetricsSection } from './MetricsSection';
 
 export const CPU_PANEL_ID = 'cpu';
@@ -36,6 +43,10 @@ export function CpuPanel({
   const title = t('metrics.cpu.title', { defaultValue: 'CPU' });
   const total = cpu?.total_busy_percent ?? null;
   const perCore = cpu?.per_core_busy ?? null;
+  const blockedSaturated = isBlockedTaskSaturated(
+    cpu?.procs_blocked,
+    cpu?.core_count
+  );
 
   return (
     <MetricsSection
@@ -72,6 +83,26 @@ export function CpuPanel({
         value={`${formatLoad(cpu?.load_1m)} / ${formatLoad(
           cpu?.load_5m
         )} / ${formatLoad(cpu?.load_15m)}`}
+      />
+      {/*
+        NFS round-trip waits put tasks in D state and raise the load, but do
+        not show up as io pressure — so both readings sit next to the load.
+      */}
+      <MetricsRow
+        label={t('metrics.cpu.blocked', {
+          defaultValue: 'Blocked tasks (D state)',
+        })}
+        value={formatCount(cpu?.procs_blocked)}
+        valueClassName={blockedSaturated ? 'text-error' : undefined}
+      />
+      <MetricsRow
+        label={t('metrics.cpu.ioPressure', {
+          defaultValue: 'I/O pressure 60s (some / full)',
+        })}
+        value={formatIoPressure(
+          cpu?.io_pressure_some_avg60,
+          cpu?.io_pressure_full_avg60
+        )}
       />
       <MetricsRow
         label={t('metrics.cpu.frequency', { defaultValue: 'Frequency' })}
