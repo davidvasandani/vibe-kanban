@@ -12,6 +12,14 @@ export const MIN_INITIAL_ENTRIES = 10;
  * conversation is not the sum of every turn in the window.
  */
 export const HISTORY_FETCH_CONCURRENCY = 5;
+/**
+ * How long a completed process's log stream may stay silent before its fetch
+ * fails. Reset on every message, so a large log arriving slowly is never cut
+ * off. A failed fetch is skipped and stays reachable via "load earlier"; the
+ * bound exists so a dropped socket cannot hold the chat behind its spinner.
+ * Live streams are not bounded — a running agent may be silent for minutes.
+ */
+export const HISTORY_STREAM_IDLE_TIMEOUT_MS = 30_000;
 export const REMAINING_BATCH_SIZE = 50;
 export const MAX_RECENT_HISTORY_PROCESSES = 20;
 

@@ -579,6 +579,23 @@ may be capped, and a capped answer is still preferable to no answer. Regression
 coverage exercises the still-running case under an assertable deadline, so a
 reintroduced unbounded wait fails as a timeout rather than hanging the suite.
 
+### XL. Every awaited client stream settles
+Where client code awaits a stream to complete — a promise that resolves on a
+terminal sentinel such as `finished` — every way that stream can end MUST
+settle the wait exactly once: the sentinel resolves it, and a transport close
+without the sentinel, a transport error, or a silence longer than a stated idle
+deadline rejects it. A close frame is never evidence of completion; the server
+may close cleanly after an internal failure, and proxies and mobile operating
+systems drop sockets without warning. The idle deadline applies only to reads of
+settled history — a live tail of a running subject may be legitimately silent
+and is instead recovered by reconnection.
+
+A loading state gated on such a wait therefore always ends. A settled failure
+degrades the view (the item is skipped, counted, and left retryable) rather than
+holding the whole surface behind a spinner. Regression coverage drives each
+terminal path — sentinel, close without sentinel, error, idle deadline — and
+asserts a single settlement.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -600,7 +617,10 @@ reintroduced unbounded wait fails as a timeout rather than hanging the suite.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.35.0 (adds XXXIX, requiring a request-scoped read to derive
+**Version**: 0.36.0 (adds XL, requiring every awaited client stream to
+settle exactly once on sentinel, close-without-sentinel, error, or an idle
+deadline for settled-history reads, so a loading state gated on it always ends
+and a failed item degrades the view instead of blocking it; 0.35.0 added XXXIX, requiring a request-scoped read to derive
 from a self-terminating source rather than a live tail, to share normalization
 but not the termination condition with a live subscriber, to treat a
 filter-discardable sentinel as no guarantee, to return settled partial state for
@@ -791,3 +811,16 @@ both for "Explicit lookups are not hidden by view defaults" (#322), so it was
 restacked as XXXIX / 0.35.0 above it rather than replacing it. Numeral XXXIX was
 unused on this branch and on `main` at that point; the pre-existing duplicate
 `XX` is untouched.
+
+## Review: vk/5f70-not-loading-chat
+
+Applied `/speckit.constitution`: added principle XL. The chat panel spun forever
+on mobile because `streamJsonPatchEntries` only settles on a `finished`
+sentinel or a transport `error` event. The server closes cleanly (code 1000)
+without `finished` when the log stream errors, and that close was ignored. The
+initial history load awaits that promise, so its loading flag never cleared.
+XXXIX already requires server reads to terminate; it does not cover the client
+side, where a stream that has ended can still leave its waiter pending. XIX's
+"live streams are bounded and self-correcting" governs retention and
+resnapshotting, not settlement of a one-shot awaited read. XL fills that gap.
+Numeral XL was unused on this branch and on `main`.

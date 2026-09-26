@@ -228,3 +228,9 @@ contributed to it.
   conversations: authorization, issue-ID identity/routing, relay targeting,
   deadline isolation, Unicode matching, historical session navigation and
   organization redirect coordination.
+- [awaited-stream-settlement.md](awaited-stream-settlement.md) — An awaited
+  log stream must settle exactly once: a close is never completion, only
+  settled-history reads get an idle deadline, and a failed turn degrades the
+  chat instead of blocking it. Includes a debugging recipe for a chat spinner
+  that never clears (direct coordinator access, phone-width iframe
+  reproduction, NFS I/O-wait signature) (`vk/5f70-not-loading-chat`).

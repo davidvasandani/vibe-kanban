@@ -11,9 +11,18 @@ export interface StreamOptions<E = unknown> {
   /** called after each successful patch application */
   onEntries?: (entries: E[]) => void;
   onConnect?: () => void;
+  /**
+   * called once when the stream ends without "finished": transport error,
+   * close, unparseable message, or idle timeout
+   */
   onError?: (err: unknown) => void;
   /** called once when a "finished" event is received */
   onFinished?: (entries: E[]) => void;
+  /**
+   * Fail the stream if no message arrives for this long. Reset on every
+   * message. Leave unset for live streams, which may be legitimately silent.
+   */
+  idleTimeoutMs?: number;
 }
 
 interface StreamController<E = unknown> {
@@ -36,6 +45,11 @@ interface StreamController<E = unknown> {
  *
  * Maintains an in-memory { entries: [] } snapshot and returns a controller.
  *
+ * Exactly one of onFinished / onError fires per stream unless the caller
+ * closes it first. A close is never treated as completion: the server closes
+ * cleanly after a log read fails, and proxies and mobile OSes drop sockets,
+ * so a waiter keyed only on "finished" would otherwise hang forever.
+ *
  * Messages are batched per animation frame and applied using immer for
  * structural sharing, avoiding a full deep clone on every message.
  */
@@ -45,6 +59,8 @@ export function streamJsonPatchEntries<E = unknown>(
 ): StreamController<E> {
   let connected = false;
   let closed = false;
+  let settled = false;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let ws: WebSocket | null = null;
   let snapshot: PatchContainer<E> = structuredClone(
     opts.initial ?? ({ entries: [] } as PatchContainer<E>)
@@ -80,7 +96,37 @@ export function streamJsonPatchEntries<E = unknown>(
     notify();
   };
 
+  const clearIdleTimer = () => {
+    if (idleTimer !== null) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
+
+  const fail = (err: unknown) => {
+    if (settled || closed) return;
+    settled = true;
+    clearIdleTimer();
+    ws?.close();
+    opts.onError?.(err);
+  };
+
+  const armIdleTimer = () => {
+    if (opts.idleTimeoutMs === undefined || settled || closed) return;
+    clearIdleTimer();
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      fail(
+        new Error(
+          `stream idle for ${opts.idleTimeoutMs}ms before finished: ${url}`
+        )
+      );
+    }, opts.idleTimeoutMs);
+  };
+
   const handleMessage = (event: MessageEvent) => {
+    if (settled || closed) return;
+    armIdleTimer();
     try {
       const msg = JSON.parse(event.data);
 
@@ -99,19 +145,24 @@ export function streamJsonPatchEntries<E = unknown>(
           cancelAnimationFrame(rafId);
         }
         flush();
+        settled = true;
+        clearIdleTimer();
         opts.onFinished?.(snapshot.entries);
         ws?.close();
       }
     } catch (err) {
-      opts.onError?.(err);
+      fail(err);
     }
   };
+
+  armIdleTimer();
 
   void (async () => {
     try {
       const opened = await openLocalApiWebSocket(url);
 
-      if (closed) {
+      // An idle timeout can settle the stream while the socket is opening.
+      if (closed || settled) {
         opened.close();
         return;
       }
@@ -126,20 +177,23 @@ export function streamJsonPatchEntries<E = unknown>(
 
       ws.addEventListener('error', (err) => {
         connected = false;
-        opts.onError?.(err);
+        fail(err);
       });
 
-      ws.addEventListener('close', () => {
+      ws.addEventListener('close', (event) => {
         connected = false;
         if (rafId !== null) {
           cancelAnimationFrame(rafId);
           rafId = null;
         }
+        fail(
+          new Error(
+            `stream closed before finished (code ${event.code}): ${url}`
+          )
+        );
       });
     } catch (error) {
-      if (!closed) {
-        opts.onError?.(error);
-      }
+      fail(error);
     }
   })();
 
@@ -161,6 +215,7 @@ export function streamJsonPatchEntries<E = unknown>(
     },
     close(): void {
       closed = true;
+      clearIdleTimer();
       if (rafId !== null) {
         cancelAnimationFrame(rafId);
         rafId = null;
