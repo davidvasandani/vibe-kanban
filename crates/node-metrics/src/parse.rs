@@ -476,11 +476,23 @@ pub fn parse_process_stat(contents: &str) -> Option<ProcessStat> {
     Some(ProcessStat {
         pid,
         name,
-        state: fields.first()?.chars().next()?,
+        state: parse_stat_state(contents)?,
         utime: field(14)?,
         stime: field(15)?,
         start_ticks: field(22)?,
     })
+}
+
+/// The scheduler state (field 3) of a `/proc/[pid]/stat` or
+/// `/proc/[pid]/task/[tid]/stat` line. Located after the *last* `)`, because
+/// `comm` may itself contain parentheses and spaces.
+pub fn parse_stat_state(contents: &str) -> Option<char> {
+    let close = contents.rfind(')')?;
+    contents[close + 1..]
+        .split_whitespace()
+        .next()?
+        .chars()
+        .next()
 }
 
 /// Parse `/proc/[pid]/status` for owner, resident memory, and thread count.
@@ -857,6 +869,9 @@ mod tests {
         assert_eq!(stat.pid, 254_347);
         assert_eq!(stat.name, "cp");
         assert_eq!(stat.state, 'R');
+        assert_eq!(parse_stat_state(PID_STAT), Some('R'));
+        assert_eq!(parse_stat_state("4242 (git (x) y) D 1 1 1 0 -1"), Some('D'));
+        assert_eq!(parse_stat_state("4242 (git)"), None);
         assert_eq!(stat.start_ticks, 157_905_759);
         assert_eq!(stat.busy_ticks(), stat.utime + stat.stime);
     }

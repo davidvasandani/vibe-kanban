@@ -278,9 +278,6 @@ mod platform {
                     continue;
                 };
 
-                if stat.state == 'D' {
-                    uninterruptible += 1;
-                }
                 let key: ProcessKey = (stat.pid, stat.start_ticks);
                 let busy = stat.busy_ticks();
                 ticks.insert(key, busy);
@@ -288,6 +285,16 @@ mod platform {
                 let status = read_to_string(&dir.join("status"))
                     .map(|raw| parse::parse_process_status(&raw))
                     .unwrap_or_default();
+
+                // Load counts threads, and a multithreaded server blocks its
+                // worker threads (not the leader) on NFS; the process-level
+                // state reflects only the leader. Walk the threads when there
+                // is more than one — `task/` includes the leader once.
+                uninterruptible += if status.thread_count.unwrap_or(1) > 1 {
+                    count_uninterruptible_threads(&dir)
+                } else {
+                    u32::from(stat.state == 'D')
+                };
                 let command = read_to_string(&dir.join("cmdline"))
                     .ok()
                     .as_deref()
@@ -344,6 +351,20 @@ mod platform {
 
     fn read_to_string(path: &Path) -> std::io::Result<String> {
         fs::read_to_string(path)
+    }
+
+    /// Threads of one process in state `D`, from `/proc/[pid]/task/*/stat`.
+    /// A thread that exits mid-walk is simply not counted.
+    fn count_uninterruptible_threads(process_dir: &Path) -> u32 {
+        let Ok(tasks) = fs::read_dir(process_dir.join("task")) else {
+            return 0;
+        };
+        let blocked = tasks
+            .flatten()
+            .filter_map(|task| read_to_string(&task.path().join("stat")).ok())
+            .filter(|raw| parse::parse_stat_state(raw) == Some('D'))
+            .count();
+        u32::try_from(blocked).unwrap_or(u32::MAX)
     }
 
     fn optional<T>(value: Option<T>, what: &str, degraded: &mut Vec<String>) -> Option<T> {
