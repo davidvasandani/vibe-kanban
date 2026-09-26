@@ -110,7 +110,11 @@ diff-stats cache used by the summaries route:
   workspace's entry. A computation that started before the exit never stores
   its result. The bounds above therefore apply only to changes made outside
   Vibe Kanban processes, such as a manual edit or a UI-driven rebase or merge.
-- **Failures are not cached.**
+- **Failures are not cached.** A partial result (some repo’s git step failed) is
+  served but retried after at most 60 s.
+- **Cancellation-safe.** The computation runs in its own task that holds the
+  slot lock and the permit until its blocking git work ends, so an aborted
+  request cannot start duplicates or exceed the bound.
 - The stat semantics are unchanged. The diff view and branch status stay live.
 
 Known gap: the two invalidation call sites in `LocalContainerService`

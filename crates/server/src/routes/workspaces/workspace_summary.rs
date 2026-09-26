@@ -230,20 +230,20 @@ pub async fn get_workspace_summaries(
             let max_age = diff_stats_freshness(ws.archived, latest).max_age();
             async move {
                 if workspace.container_ref.is_some() && !skip_idle {
+                    let workspace_id = workspace.id;
+                    let pool = deployment.db().pool.clone();
+                    let git = deployment.git().clone();
                     WORKSPACE_DIFF_STATS
-                        .get_or_compute(
-                            workspace.id,
-                            max_age,
-                            services::services::diff_stream::compute_diff_stats(
-                                &deployment.db().pool,
-                                deployment.git(),
-                                &workspace,
-                            ),
-                        )
+                        .get_or_compute(workspace_id, max_age, async move {
+                            services::services::diff_stream::compute_diff_stats_outcome(
+                                &pool, &git, &workspace,
+                            )
+                            .await
+                        })
                         .await
                         .map(|stats| {
                             (
-                                workspace.id,
+                                workspace_id,
                                 DiffStats {
                                     files_changed: stats.files_changed,
                                     lines_added: stats.lines_added,

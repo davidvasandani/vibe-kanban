@@ -14,9 +14,14 @@
 //!   ([`DiffStatsFreshness`]); within it no git work runs.
 //! - **Process-wide bound.** At most [`BULK_DIFF_STATS_CONCURRENCY`]
 //!   computations run at once, regardless of how many requests are open.
+//! - **Cancellation-safe.** A computation runs in its own task that owns the
+//!   slot lock and the permit until its (blocking) git work has finished, so
+//!   a dropped request cannot let a duplicate start or exceed the bound.
 //! - **Invalidation wins races.** [`DiffStatsCache::invalidate`] bumps a
 //!   generation; a computation that started before the bump never publishes.
-//! - **Failures are not cached.** A `None` result is returned but not stored.
+//! - **Failures are not cached; partial results are retried soon.** A `None`
+//!   result is returned but not stored. An incomplete result (a repo was
+//!   skipped) is returned and kept for at most [`INCOMPLETE_RETRY_AFTER`].
 
 use std::{
     future::Future,
@@ -34,10 +39,16 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use super::diff_stream::DiffStats;
+use super::diff_stream::{DiffStats, DiffStatsOutcome};
 
 /// Process-wide cap on concurrent bulk diff-stat computations.
 pub const BULK_DIFF_STATS_CONCURRENCY: usize = 4;
+
+/// An incomplete result (some repo's git step failed) is served for at most
+/// this long before being retried, whatever the tier allows. Short enough that
+/// a transient failure clears quickly, long enough that a persistently broken
+/// worktree does not re-run git on every poll of every client.
+pub const INCOMPLETE_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 /// Slots whose entry is older than this (the longest tier) and that nobody is
 /// using are dropped, so retained state tracks recently requested workspaces.
@@ -83,14 +94,25 @@ impl DiffStatsFreshness {
 }
 
 struct Entry {
-    stats: DiffStats,
+    outcome: DiffStatsOutcome,
     computed_at: Instant,
     generation: u64,
 }
 
+impl Entry {
+    fn is_fresh(&self, generation: u64, max_age: Duration) -> bool {
+        let max_age = if self.outcome.complete {
+            max_age
+        } else {
+            max_age.min(INCOMPLETE_RETRY_AFTER)
+        };
+        self.generation == generation && self.computed_at.elapsed() <= max_age
+    }
+}
+
 #[derive(Default)]
 struct Slot {
-    state: Mutex<Option<Entry>>,
+    state: Arc<Mutex<Option<Entry>>>,
     generation: AtomicU64,
 }
 
@@ -117,49 +139,65 @@ impl DiffStatsCache {
         compute: F,
     ) -> Option<DiffStats>
     where
-        F: Future<Output = Option<DiffStats>>,
+        F: Future<Output = Option<DiffStatsOutcome>> + Send + 'static,
     {
         self.maybe_prune();
 
         let slot = self.slots.entry(workspace_id).or_default().clone();
-        let mut state = slot.state.lock().await;
+        let state = slot.state.clone().lock_owned().await;
         let generation = slot.generation.load(Ordering::Acquire);
 
         if let Some(entry) = state.as_ref()
-            && entry.generation == generation
-            && entry.computed_at.elapsed() <= max_age
+            && entry.is_fresh(generation, max_age)
         {
             tracing::trace!(%workspace_id, "diff stats cache hit");
-            return Some(entry.stats.clone());
+            return Some(entry.outcome.stats.clone());
         }
 
-        let result = {
+        // The leader's work outlives this caller: the task owns the slot lock
+        // and the permit until the computation (and its blocking git work)
+        // has finished and been published.
+        let permits = self.permits.clone();
+        let leader = tokio::spawn(async move {
+            let mut state = state;
             // The semaphore is never closed, so acquire cannot fail.
-            let _permit = self.permits.acquire().await.ok()?;
-            compute.await
-        };
+            let _permit = permits.acquire_owned().await.ok()?;
+            let result = compute.await;
 
-        match &result {
-            Some(stats) if slot.generation.load(Ordering::Acquire) == generation => {
-                *state = Some(Entry {
-                    stats: stats.clone(),
-                    computed_at: Instant::now(),
-                    generation,
-                });
-                tracing::debug!(%workspace_id, "diff stats computed and cached");
+            match &result {
+                Some(outcome) if slot.generation.load(Ordering::Acquire) == generation => {
+                    *state = Some(Entry {
+                        outcome: outcome.clone(),
+                        computed_at: Instant::now(),
+                        generation,
+                    });
+                    tracing::debug!(
+                        %workspace_id,
+                        complete = outcome.complete,
+                        "diff stats computed and cached"
+                    );
+                }
+                Some(_) => {
+                    *state = None;
+                    tracing::debug!(
+                        %workspace_id,
+                        "diff stats invalidated during computation; result not cached"
+                    );
+                }
+                None => {
+                    tracing::debug!(%workspace_id, "diff stats computation failed; not cached");
+                }
             }
-            Some(_) => {
-                *state = None;
-                tracing::debug!(
-                    %workspace_id,
-                    "diff stats invalidated during computation; result not cached"
-                );
-            }
-            None => {
-                tracing::debug!(%workspace_id, "diff stats computation failed; not cached");
+            result.map(|outcome| outcome.stats)
+        });
+
+        match leader.await {
+            Ok(stats) => stats,
+            Err(error) => {
+                tracing::warn!(%workspace_id, "diff stats computation panicked: {error}");
+                None
             }
         }
-        result
     }
 
     /// Discard the workspace's cached stats and prevent any in-flight
@@ -182,7 +220,7 @@ impl DiffStatsCache {
             *last = Some(now);
         }
         self.slots.retain(|_, slot| {
-            // In use: a caller holds a clone (or is waiting on the lock).
+            // In use: a caller or leader task holds a clone.
             if Arc::strong_count(slot) > 1 {
                 return true;
             }
@@ -207,29 +245,48 @@ mod tests {
 
     use super::*;
 
-    fn stats(files: usize) -> DiffStats {
-        DiffStats {
-            files_changed: files,
-            lines_added: files * 10,
-            lines_removed: files,
+    fn outcome(files: usize, complete: bool) -> DiffStatsOutcome {
+        DiffStatsOutcome {
+            stats: DiffStats {
+                files_changed: files,
+                lines_added: files * 10,
+                lines_removed: files,
+            },
+            complete,
         }
     }
 
-    async fn counted(counter: &AtomicUsize, files: usize) -> Option<DiffStats> {
-        counter.fetch_add(1, Ordering::SeqCst);
-        Some(stats(files))
+    /// A compute future that counts its runs, optionally takes `delay`, and
+    /// yields a complete outcome with `files` changed files.
+    fn counted(
+        calls: &Arc<AtomicUsize>,
+        files: usize,
+        delay: Duration,
+    ) -> impl Future<Output = Option<DiffStatsOutcome>> + Send + 'static {
+        let calls = calls.clone();
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(delay).await;
+            Some(outcome(files, true))
+        }
     }
+
+    const NOW: Duration = Duration::ZERO;
 
     #[tokio::test(start_paused = true)]
     async fn returns_cached_stats_within_max_age() {
         let cache = DiffStatsCache::new(4);
         let id = Uuid::new_v4();
-        let calls = AtomicUsize::new(0);
+        let calls = Arc::new(AtomicUsize::new(0));
         let max_age = Duration::from_secs(30);
 
-        let first = cache.get_or_compute(id, max_age, counted(&calls, 1)).await;
+        let first = cache
+            .get_or_compute(id, max_age, counted(&calls, 1, NOW))
+            .await;
         tokio::time::advance(Duration::from_secs(29)).await;
-        let second = cache.get_or_compute(id, max_age, counted(&calls, 2)).await;
+        let second = cache
+            .get_or_compute(id, max_age, counted(&calls, 2, NOW))
+            .await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(first.unwrap().files_changed, 1);
@@ -240,12 +297,16 @@ mod tests {
     async fn recomputes_after_max_age() {
         let cache = DiffStatsCache::new(4);
         let id = Uuid::new_v4();
-        let calls = AtomicUsize::new(0);
+        let calls = Arc::new(AtomicUsize::new(0));
         let max_age = Duration::from_secs(30);
 
-        cache.get_or_compute(id, max_age, counted(&calls, 1)).await;
+        cache
+            .get_or_compute(id, max_age, counted(&calls, 1, NOW))
+            .await;
         tokio::time::advance(Duration::from_secs(31)).await;
-        let fresh = cache.get_or_compute(id, max_age, counted(&calls, 2)).await;
+        let fresh = cache
+            .get_or_compute(id, max_age, counted(&calls, 2, NOW))
+            .await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(fresh.unwrap().files_changed, 2);
@@ -255,17 +316,21 @@ mod tests {
     async fn a_shorter_max_age_forces_recompute_of_an_entry_cached_for_longer() {
         let cache = DiffStatsCache::new(4);
         let id = Uuid::new_v4();
-        let calls = AtomicUsize::new(0);
+        let calls = Arc::new(AtomicUsize::new(0));
 
         cache
-            .get_or_compute(id, DiffStatsFreshness::Idle.max_age(), counted(&calls, 1))
+            .get_or_compute(
+                id,
+                DiffStatsFreshness::Idle.max_age(),
+                counted(&calls, 1, NOW),
+            )
             .await;
         tokio::time::advance(Duration::from_secs(45)).await;
         cache
             .get_or_compute(
                 id,
                 DiffStatsFreshness::Running.max_age(),
-                counted(&calls, 2),
+                counted(&calls, 2, NOW),
             )
             .await;
 
@@ -281,14 +346,10 @@ mod tests {
         let handles: Vec<_> = (0..8)
             .map(|_| {
                 let cache = cache.clone();
-                let calls = calls.clone();
+                let compute = counted(&calls, 3, Duration::from_secs(2));
                 tokio::spawn(async move {
                     cache
-                        .get_or_compute(id, Duration::from_secs(30), async {
-                            calls.fetch_add(1, Ordering::SeqCst);
-                            tokio::time::sleep(Duration::from_secs(2)).await;
-                            Some(stats(3))
-                        })
+                        .get_or_compute(id, Duration::from_secs(30), compute)
                         .await
                 })
             })
@@ -301,15 +362,44 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_cancelled_caller_does_not_abandon_the_computation() {
+        let cache = Arc::new(DiffStatsCache::new(1));
+        let id = Uuid::new_v4();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let max_age = Duration::from_secs(30);
+
+        let first = {
+            let cache = cache.clone();
+            let compute = counted(&calls, 5, Duration::from_secs(5));
+            tokio::spawn(async move { cache.get_or_compute(id, max_age, compute).await })
+        };
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        first.abort();
+        let _ = first.await;
+
+        // The leader keeps the slot and the only permit: a second caller for
+        // the same workspace joins it instead of starting a duplicate.
+        let second = cache
+            .get_or_compute(id, max_age, counted(&calls, 6, NOW))
+            .await;
+        assert_eq!(second.unwrap().files_changed, 5);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn invalidate_forces_recompute() {
         let cache = DiffStatsCache::new(4);
         let id = Uuid::new_v4();
-        let calls = AtomicUsize::new(0);
+        let calls = Arc::new(AtomicUsize::new(0));
         let max_age = Duration::from_secs(300);
 
-        cache.get_or_compute(id, max_age, counted(&calls, 1)).await;
+        cache
+            .get_or_compute(id, max_age, counted(&calls, 1, NOW))
+            .await;
         cache.invalidate(id);
-        let fresh = cache.get_or_compute(id, max_age, counted(&calls, 2)).await;
+        let fresh = cache
+            .get_or_compute(id, max_age, counted(&calls, 2, NOW))
+            .await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(fresh.unwrap().files_changed, 2);
@@ -324,16 +414,8 @@ mod tests {
 
         let leader = {
             let cache = cache.clone();
-            let calls = calls.clone();
-            tokio::spawn(async move {
-                cache
-                    .get_or_compute(id, max_age, async {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        Some(stats(1))
-                    })
-                    .await
-            })
+            let compute = counted(&calls, 1, Duration::from_secs(5));
+            tokio::spawn(async move { cache.get_or_compute(id, max_age, compute).await })
         };
         // Let the leader start computing, then invalidate mid-flight.
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -342,7 +424,9 @@ mod tests {
         // The leader's caller still gets its result...
         assert_eq!(leader.await.unwrap().unwrap().files_changed, 1);
         // ...but it was not stored, so the next reader recomputes.
-        let next = cache.get_or_compute(id, max_age, counted(&calls, 2)).await;
+        let next = cache
+            .get_or_compute(id, max_age, counted(&calls, 2, NOW))
+            .await;
         assert_eq!(next.unwrap().files_changed, 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
@@ -351,19 +435,49 @@ mod tests {
     async fn failures_are_not_cached() {
         let cache = DiffStatsCache::new(4);
         let id = Uuid::new_v4();
-        let calls = AtomicUsize::new(0);
+        let calls = Arc::new(AtomicUsize::new(0));
         let max_age = Duration::from_secs(300);
 
-        let failed = cache
-            .get_or_compute(id, max_age, async {
-                calls.fetch_add(1, Ordering::SeqCst);
-                None
-            })
+        let failed = {
+            let calls = calls.clone();
+            cache
+                .get_or_compute(id, max_age, async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    None
+                })
+                .await
+        };
+        let retried = cache
+            .get_or_compute(id, max_age, counted(&calls, 4, NOW))
             .await;
-        let retried = cache.get_or_compute(id, max_age, counted(&calls, 4)).await;
 
         assert!(failed.is_none());
         assert_eq!(retried.unwrap().files_changed, 4);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn incomplete_results_are_served_but_retried_after_a_minute() {
+        let cache = DiffStatsCache::new(4);
+        let id = Uuid::new_v4();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let max_age = DiffStatsFreshness::Archived.max_age();
+        let partial = || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Some(outcome(7, false))
+            }
+        };
+
+        let first = cache.get_or_compute(id, max_age, partial()).await;
+        tokio::time::advance(Duration::from_secs(59)).await;
+        cache.get_or_compute(id, max_age, partial()).await;
+        assert_eq!(first.unwrap().files_changed, 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        cache.get_or_compute(id, max_age, partial()).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
@@ -380,12 +494,12 @@ mod tests {
                 let peak = peak.clone();
                 tokio::spawn(async move {
                     cache
-                        .get_or_compute(Uuid::new_v4(), Duration::from_secs(30), async {
+                        .get_or_compute(Uuid::new_v4(), Duration::from_secs(30), async move {
                             let now = running.fetch_add(1, Ordering::SeqCst) + 1;
                             peak.fetch_max(now, Ordering::SeqCst);
                             tokio::time::sleep(Duration::from_secs(1)).await;
                             running.fetch_sub(1, Ordering::SeqCst);
-                            Some(stats(1))
+                            Some(outcome(1, true))
                         })
                         .await
                 })
@@ -401,15 +515,22 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn idle_expired_slots_are_pruned() {
         let cache = DiffStatsCache::new(4);
-        let old = Uuid::new_v4();
-        let calls = AtomicUsize::new(0);
+        let calls = Arc::new(AtomicUsize::new(0));
 
         cache
-            .get_or_compute(old, Duration::from_secs(30), counted(&calls, 1))
+            .get_or_compute(
+                Uuid::new_v4(),
+                Duration::from_secs(30),
+                counted(&calls, 1, NOW),
+            )
             .await;
         tokio::time::advance(PRUNE_AFTER + PRUNE_EVERY + Duration::from_secs(1)).await;
         cache
-            .get_or_compute(Uuid::new_v4(), Duration::from_secs(30), counted(&calls, 1))
+            .get_or_compute(
+                Uuid::new_v4(),
+                Duration::from_secs(30),
+                counted(&calls, 1, NOW),
+            )
             .await;
 
         assert_eq!(cache.slot_count(), 1);
