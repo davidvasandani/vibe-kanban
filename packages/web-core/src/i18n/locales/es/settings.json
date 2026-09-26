@@ -339,6 +339,12 @@
       "description": "Personaliza el comportamiento de los agentes con diferentes configuraciones.",
       "loading": "Cargando configuraciones de agentes...",
       "selectAgent": "Seleccionar agente",
+      "models": {
+        "title": "Modelos",
+        "description": "Los modelos sin marcar se ocultan del menú de modelos de este agente.",
+        "lastEnabled": "Al menos un modelo debe permanecer habilitado.",
+        "loading": "Cargando modelos..."
+      },
       "save": {
         "button": "Guardar Configuraciones de Agentes",
         "success": "✓ ¡Configuración guardada con éxito!",

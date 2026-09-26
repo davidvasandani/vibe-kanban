@@ -333,6 +333,7 @@ mod tests {
             .expect("the embedded defaults always define DEFAULT");
         ExecutorProfile {
             recently_used_models: None,
+            disabled_models: Vec::new(),
             configurations: HashMap::from([(variant.to_string(), agent)]),
         }
     }

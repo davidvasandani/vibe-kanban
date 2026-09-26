@@ -50,6 +50,8 @@ export interface ModelSelectorPopoverProps {
   expandedProviderId?: string;
   onExpandedProviderIdChange?: (id: string) => void;
   resolvedTheme?: 'light' | 'dark';
+  /** Focus the filter on open. Disable on touch so the keyboard stays down. */
+  autoFocusSearch?: boolean;
 }
 
 const MODEL_LIST_PAGE_SIZE = 8;
@@ -369,6 +371,7 @@ export function ModelSelectorPopover({
   expandedProviderId = '',
   onExpandedProviderIdChange,
   resolvedTheme = 'light',
+  autoFocusSearch = true,
 }: ModelSelectorPopoverProps) {
   const { t } = useTranslation('common');
   const models = config.models;
@@ -462,6 +465,7 @@ export function ModelSelectorPopover({
                   placeholder="Filter by name or ID..."
                   value={searchQuery}
                   onValueChange={onSearchChange}
+                  autoFocus={autoFocusSearch}
                 />
               </div>
             )}
