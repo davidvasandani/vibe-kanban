@@ -33,6 +33,7 @@ export interface UseConversationHistoryResult {
 }
 import {
   HISTORY_FETCH_CONCURRENCY,
+  HISTORY_STREAM_IDLE_TIMEOUT_MS,
   MAX_RECENT_HISTORY_PROCESSES,
   MIN_INITIAL_ENTRIES,
   REMAINING_BATCH_SIZE,
@@ -134,6 +135,7 @@ export const useConversationHistory = ({
 
     return new Promise<PatchType[]>((resolve, reject) => {
       const controller = streamJsonPatchEntries<PatchType>(url, {
+        idleTimeoutMs: HISTORY_STREAM_IDLE_TIMEOUT_MS,
         onFinished: (allEntries) => {
           controller.close();
           resolve(allEntries);

@@ -1,55 +1,47 @@
-# Prior knowledge: vk/6c79-codex-auth-error
+# Prior knowledge: vk/5f70-not-loading-chat
 
-Distilled from the two knowledge bases (read-only):
+Distilled from the knowledge bases (read-only): `vibe-kanban/wiki/` (INDEX
+plus pages matching websocket/stream/history/mobile/loading) and
+`homelab/docs/knowledge-base/` (vibe-kanban-* pages). Nothing in either
+covers the chat conversation-history loader or `streamJsonPatchEntries`
+directly, so this task starts that topic.
 
-- `homelab/docs/knowledge-base/cluster-shared-credential-freshness.md` (vk/2512)
-- `homelab/docs/knowledge-base/vibe-kanban-worker-start-recovery.md` (vk/611f, vk/53c3, vk/2512)
-- `vibe-kanban/wiki/codex-credential-refresh.md` (vk/82c6, VAS-490)
+## Relevant pages
 
-## Credential topology (homelab)
+- `wiki/workspace-carousel-view.md` (carousel task): `WorkspacesMainContainer`
+  and `ConversationList` are mounted per column outside the route, and each
+  opens its own websockets, so the websocket count is bounded by mount
+  windowing. For this task: any per-socket fix in `streamJsonPatchEntries`
+  applies to every chat instance (route and carousel) at once, with no
+  per-caller plumbing.
+- `wiki/agent-process-lifecycle.md` (vk/1a64, vk/826e, vk/9f36): lost terminal
+  events are a known class. The server reconciles them into `indeterminate`
+  so the authoritative process stream clears stale UI. The same principle
+  applies on the client side here: do not wait on a terminal signal that may
+  never arrive.
+- `wiki/mobile-kanban-scrolling.md`: mobile layout is a first-class surface.
+  Reproduce it at phone width. A headless browser at 390 px CSS width renders
+  the mobile tab layout.
+- `homelab/docs/knowledge-base/vibe-kanban-public-mcp-access-routing.md`:
+  `vibe.vasandani.dev` sits behind Cloudflare Access. From a worker, only
+  `/mcp` is proxied with a service token (local Caddy route), so `/api` and
+  websocket behaviour through the public edge cannot be exercised from
+  here. Test against the coordinator at `172.16.100.102:3334` instead. The
+  same page's gateway lesson carries over: status handling alone does not
+  bound a peer that connects and then stalls. You need an explicit timeout,
+  which here is the idle deadline.
 
-- think2 owns the Codex ChatGPT login: the only real, single-use, rotating
-  refresh token. `codex-auth-sync` (every 5 min) copies `auth.json` to other
-  nodes with `tokens.refresh_token = ""`. It has to be blanked rather than
-  deleted, because the field is a required String in Codex's `TokenData`.
-- `codex-auth-freshness` renews on think2 by driving the vendor CLI
-  (`codex exec --ignore-user-config`) when fewer than 2 days of a 10-day life
-  remain. It pages on any node below 1 day. **Renewal goes through the vendor
-  CLI, never a hand-rolled token POST.** A rotating exchange that dies midway
-  loses the credential for every node.
-- `vibe-kanban-worker` has `Requires=codex-auth-sync`. A failed required unit
-  blocks the worker's start job, and systemd doesn't requeue it. **New
-  Codex-only units must have no dependents.** Assert that against the real
-  `nixosConfigurations`, with a positive control.
-- `writeShellApplication` pins PATH to `runtimeInputs` (`cmp` is in
-  `diffutils`). A log line that always prints isn't a signal.
-- Never emit token material. Report only `exp`, durations and field lengths, and
-  suppress decoder stderr.
-- Test against a scratch `CODEX_HOME`. Rewriting the JWT payload locally drives
-  client decisions without the crafted token reaching a server.
-- `codex doctor` permanently reports "stored credentials are incomplete" on
-  workers. That's by design, so it's useless as a health check.
+## Constitution context
 
-## Vibe Kanban executor (vibe-kanban)
+- XXXIX (0.35.0, vk/3fb0): request-scoped server reads must terminate on
+  their own, and a sentinel that a filter can discard is no guarantee. This
+  task adds the client-side counterpart (XL).
+- XIX: live streams are bounded and self-correcting (retention and
+  resnapshot). That is about retention, not settling a one-shot awaited read.
 
-- Each turn runs one `codex app-server` process. On workers, the scoped
-  `CODEX_HOME/auth.json` is a symlink to the shared `~/.codex/auth.json` (one
-  inode).
-- `codex/auth_refresh.rs` does a serialized pre-turn refresh (flock on
-  `auth.json`) when the JWT is within 5 minutes of expiry, using
-  `get_account(refresh=true)`. It fails safe.
-- Previously rejected:
-  - Reimplementing OpenAI OAuth refresh in VK, because of drift and coupling.
-  - A full external-auth bridge (`ChatgptAuthTokensRefresh`, currently answered
-    with `Null`), as too large and risky.
-- Errors: Codex `error` notifications are normalized as `ErrorMessage { Other }`.
-  `SetupRequired` exists and is used for auth-required launch errors.
+## Previous related change
 
-## Implications for this task
-
-- Fix at the distribution layer. Serving think2's already-renewed token to a
-  worker isn't a refresh reimplementation: no token is exchanged or rotated, so
-  it respects both "no hand-rolled refresh" rules.
-- The broker unit must have no dependents, and its env wiring must not be
-  conditioned on it being up.
-- Keep the VK change small and fail-safe. Don't add the external-auth bridge.
+- #323 (`ad96e84`): `/messages` returned only when a running execution ended,
+  because termination depended on a `Finished` that a JsonPatch-only filter
+  dropped. It was the same failure shape (waiting on a sentinel that never
+  arrives), but server-side.
