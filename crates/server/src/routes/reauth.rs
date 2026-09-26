@@ -66,14 +66,40 @@ async fn run(
         ReauthTrigger::Sweep => ReauthTrigger::Agent,
         other => other,
     };
+    // One deadline covers discovery and waiting, so an agent's call returns
+    // inside its tool deadline even when probing is slow.
+    let deadline = tokio::time::Instant::now() + clamp_wait(request.wait_secs);
     let reports = match request.target.as_deref() {
-        Some(target) => match target.parse::<ReauthTargetId>() {
-            Ok(id) => vec![reauth::start(id, trigger)],
+        Some(target) => match target
+            .parse::<ReauthTargetId>()
+            .and_then(|id| reauth::start_listed(id, trigger))
+        {
+            Ok(report) => vec![report],
             Err(e) => return ResponseJson(ApiResponse::error(&e.to_string())),
         },
-        None => reauth::start_expired(trigger).await,
+        None => {
+            // Discovery probes every target; run it detached so a slow probe
+            // cannot hold the request past its deadline. It keeps going (and
+            // starts whatever it finds) if we stop watching.
+            let discovery = tokio::spawn(reauth::start_expired(trigger));
+            match tokio::time::timeout_at(deadline, discovery).await {
+                Ok(Ok(reports)) => reports,
+                Ok(Err(e)) => {
+                    return ResponseJson(ApiResponse::error(&format!(
+                        "re-auth discovery failed: {e}"
+                    )));
+                }
+                Err(_) => {
+                    return ResponseJson(ApiResponse::error(
+                        "still checking which credentials are expired; any repairs start on \
+                         their own. Check list_reauth_targets in a minute.",
+                    ));
+                }
+            }
+        }
     };
-    let reports = reauth::wait(reports, clamp_wait(request.wait_secs)).await;
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let reports = reauth::wait(reports, remaining).await;
     ResponseJson(ApiResponse::success(reports))
 }
 
@@ -113,6 +139,27 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("unknown target kind")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unlisted_target_is_rejected_before_anything_starts() {
+        // A well-formed backend that this host does not list (no
+        // VK_SGSC_BACKENDS in tests) must not start an invisible run.
+        let ResponseJson(resp) = run(axum::Json(RunRequest {
+            target: Some("sgsc:unlisted".into()),
+            wait_secs: 0,
+            trigger: ReauthTrigger::Agent,
+        }))
+        .await;
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["success"], false);
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap()
+                .contains("not a re-auth target on this host"),
+            "{json}"
         );
     }
 }

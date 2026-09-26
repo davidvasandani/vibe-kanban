@@ -677,9 +677,42 @@ async fn expired_swept_targets(respect_backoff: bool) -> Vec<ReauthTargetId> {
 // Running
 // ---------------------------------------------------------------------------
 
+/// Whether `id` is a target this host actually lists. Only listed targets may
+/// start: a run nobody can see could neither be polled nor, once refused,
+/// reset from Settings.
+fn ensure_listed(id: &ReauthTargetId) -> Result<(), ReauthError> {
+    let listed = match id {
+        ReauthTargetId::CliTool(_) => true,
+        ReauthTargetId::Sgsc(backend) => sgsc_backends().iter().any(|b| b == backend),
+        ReauthTargetId::AwsSession(session) => aws_sso::profile_scopes()?
+            .iter()
+            .any(|(_, scope)| scope.session_name.as_deref() == Some(session)),
+        ReauthTargetId::AwsProfile(profile) => aws_sso::profile_scopes()?
+            .iter()
+            .any(|(name, scope)| name == profile && scope.session_name.is_none()),
+    };
+    if listed {
+        Ok(())
+    } else {
+        Err(ReauthError::InvalidTarget(format!(
+            "{id} is not a re-auth target on this host (see list_reauth_targets)"
+        )))
+    }
+}
+
+/// Start (or join) a run of a listed target. Returns immediately; the run is
+/// owned by a detached task and outlives the request.
+pub fn start_listed(
+    id: ReauthTargetId,
+    trigger: ReauthTrigger,
+) -> Result<ReauthRunReport, ReauthError> {
+    ensure_listed(&id)?;
+    Ok(start(id, trigger))
+}
+
 /// Start (or join) a run of `id`. Returns immediately; the run is owned by a
 /// detached task and outlives the request.
-pub fn start(id: ReauthTargetId, trigger: ReauthTrigger) -> ReauthRunReport {
+fn start(id: ReauthTargetId, trigger: ReauthTrigger) -> ReauthRunReport {
     let claim = with_registry(|states| claim(states, &id, trigger, Utc::now()));
     let run = match claim {
         Claim::Joined(run) | Claim::Blocked(run) => run,
