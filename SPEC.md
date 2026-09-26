@@ -1,136 +1,192 @@
-# SPEC: Reduce NFS I/O pressure on the coordinator (think2)
+# SPEC — Auto Error Remediation
+
+Task: `vk/7e4f-auto-error-remed`
 
 ## Problem
 
-The coordinator (think2, 6 cores) runs at a sustained load average of 20–50
-while its CPU is 40–80% idle. The load is tasks blocked on NFS round trips
-against `/srv/vibe-kanban-shared` (`172.16.0.99:/var/nfs/shared/VibeKanban`,
-NFSv3, `fsc`). Users see it as slow sidebars, slow diff and summary
-responses, and log sockets that close without `finished` (the trigger for the
-spinner fixed client-side in #326).
-
-## Measured attribution (2026-09-26, 05:53–05:58 UTC, think2)
-
-| Measure | Value |
-| --- | --- |
-| Load average (1/5/15) | 21.1 / 20.9 / 20.8 (6 cores) |
-| Mean tasks in D state (0.2 s sampling, 60 s) | 8.5 |
-| `/proc/pressure/io` `some avg60` | 0.00–2.17 (NFS RPC waits are **not** accounted as block I/O pressure) |
-| `/proc/pressure/cpu` `some avg60` | 8.9–26.6 |
-| NFS GETATTR from think2 | **24,456 ops/s** (ACCESS 269/s; every other op < 4/s) |
-| git processes spawned by the server (lower bound, 0.2 s sampling) | **775 / min** |
-| git command mix in a 20 s sample (137 processes) | 85 `status --porcelain -z --untracked-files=normal`, 37 `read-tree HEAD`, 9 `diff --cached -M --name-status`, 1 `add -A` — all four steps of `GitCli::diff_status`, across ~70 distinct workspaces |
-| `POST /api/workspaces/summaries {archived:false}` | **43.0 s**, 198 workspaces, 137 with git diff stats computed |
-| `POST /api/workspaces/summaries {archived:true}` | **33.8 s**, 909 workspaces, 484 with git diff stats computed |
-
-Attribution: the only caller that runs `diff_status` across many workspaces
-at once is `get_workspace_summaries` → `compute_workspace_diff_stats` →
-`diff_stream::compute_diff_stats` → `GitService::get_diffs`. Every other
-caller of these paths is scoped to one workspace: the open diff stream, the
-branch-status route, turn finalization, and a remote sync after login.
-
-Every open client (`useWorkspaces`) polls both the active and the archived
-summaries every 15 s. Each request takes longer than the interval (43 s and
-34 s), so React Query starts the next refetch as soon as the previous one
-settles. **Every open client therefore keeps two full git sweeps running
-continuously**, each at `MAX_CONCURRENT_GIT_STATUS = 4`. The server never
-shares or coalesces the work across clients or across the two scopes.
-
-Each workspace-repo in a sweep costs, on NFS:
-`git2::Repository::open` + merge-base, `read-tree HEAD` into a temp index,
-`status --porcelain --untracked-files=normal` (lstat of every tracked file →
-one GETATTR each), `add -A` of the changed paths, `diff --cached -M`, then
-in-process blob and file reads for line counts.
-
-Refuted or secondary hypotheses:
-
-- **NFS client settings.** GETATTR volume is proportional to the number of
-  `git status` walks, not a mount-option defect. Raising `actimeo` or adding
-  `nocto` would trade the cross-host freshness that workers rely on (index
-  and lock files written on one host, read on another) for fewer round trips.
-  That is rejected while an app-side fix removes the walks themselves.
-  `fsc` only caches file *data* (READ is 0.5 ops/s), so it neither helps nor
-  thrashes this workload. No mount change is made.
-- **Other coordinator scanners** (`find /srv/src/homelab`, git-projects
-  stamping, the deploy loop). They are not on the shared mount and did not
-  appear in the D-state samples.
-- **Raw-log re-normalization.** Raw logs live under
-  `/srv/vibe-kanban-shared/cluster/execution-logs` (NFS), but history reads
-  are per request and bounded by `HISTORICAL_NORMALIZATION_PERMITS`. They
-  produced no measurable GETATTR/READ volume in the samples (READ 0.5 ops/s).
+When a coding-agent turn fails, the chat shows an error and nothing else
+happens. The operator has to notice it, write an issue, choose the pipelines,
+choose repositories and an agent, and start a workspace. The request is to do
+all of that automatically. The workspace should then run unattended, testing
+the fix and merging it to `main`.
 
 ## Goals
 
-1. Workspace diff stats in bulk summaries are computed at most once per
-   workspace per staleness window, however many clients or requests ask.
-2. Concurrent requests for the same workspace share one computation
-   (single-flight).
-3. Total bulk diff-stat git work is bounded process-wide, not per request.
-4. Staleness is explicit and bounded, and stats are invalidated immediately
-   when a process in the workspace finishes (the moment an agent's edits land).
-5. Node metrics expose NFS-relevant pressure (blocked tasks plus io PSI), so
-   the Server Metrics UI shows this before users see spinners.
+1. When a chat error occurs, create an issue in a configured VK project. A chat
+   error here means a coding-agent execution process that ends `Failed`.
+2. Attach the **WikiLLM + SpecKit** pipelines to that issue with their default
+   stages. Together those defaults already cover spec → recall → plan → SpecKit
+   (constitution … implement) → Codex review → enrich knowledge → open **and
+   merge** the PR, so no stage needs hand-picking for an unattended run to
+   merge.
+3. Start a workspace linked to that issue on the configured repositories
+   (homelab + vibe-kanban for this deployment), with the configured executor
+   profile and model (Claude Code, `claude-opus-5-5`, variant `PROALIGN`).
+4. Make it safe to leave on: off by default, never remediate a remediation, no
+   duplicates for the same source, and a global rate cap.
 
 ## Non-goals
 
-- Changing NFS mount options, fscache, or the NFS export (see above). The
-  analysis records the current options; no host config change is made.
-- Changing the single-workspace paths (diff stream, branch status). They
-  stay live and uncached.
-- Changing how diff stats are computed (their semantics stay identical).
+- Triggering on turns that *complete* but contain an `error_message` entry.
+  Finalization for a successful turn runs against the cleanup-script process,
+  not the agent turn. Failed turns cover the chat-error case the operator sees.
+  This is a possible follow-up.
+- Persisting guard state across restarts. The guards are in-memory; see Risks.
+- A new "profile" concept. The existing executor **variant** is VK's profile
+  mechanism: `CmdOverrides` can carry env such as a separate
+  `CLAUDE_CONFIG_DIR`.
+
+## Interpretation of ambiguous inputs (no answer received; recorded as assumptions)
+
+| Request wording | Interpretation | Why |
+|---|---|---|
+| "the vk project" | Remote project **Vibe Kanban** (`e4d12693-…`, Vasandani org). It is configured by id in settings; when unset, the failing workspace's own linked project is used. | It is the only project with that name. Configuration keeps it off the hard-coded path. |
+| "proalign profile" | Executor profile variant `PROALIGN` on `CLAUDE_CODE`. If that variant is not defined in the live `profiles.json`, fall back to the executor's default variant, log a warning, and note it in the issue. | The code has no "proalign" executor variant. The ProAlign *organization* has no VK project. The variant is the profile selector in the UI. |
+| "opus 5.5" | `model_id = "claude-opus-5-5"` | This is the catalog id in `crates/executors/src/executors/claude.rs`. |
+| "homelab and VK repos" | Configured `repo_ids`. When empty, use the failing workspace's repos with their target branches. | Repo UUIDs are deployment data, not code. |
+| "error in the chat" | A `CodingAgent` execution process finalized as `Failed`. `Killed`, `Interrupted` and `Indeterminate` are excluded. | These are exactly the turns that render as a failed chat turn. User stops and restarts are not errors. |
 
 ## Design
 
-### Shared diff-stats cache (`services::services::workspace_diff_stats`)
+### Configuration (`Config` v8, additive, `#[serde(default)]`)
 
-A process-wide `LazyLock` cache keyed by workspace id. Each slot is a
-`tokio::sync::Mutex<Option<Entry { stats, computed_at, generation }>>`:
+```rust
+pub struct AutoErrorRemediationConfig {
+    pub enabled: bool,                     // default false
+    pub project_id: Option<Uuid>,          // None → failing workspace's remote project
+    pub repo_ids: Vec<Uuid>,               // empty → failing workspace's repos
+    pub executor: BaseCodingAgent,         // default CLAUDE_CODE
+    pub variant: Option<String>,           // default Some("PROALIGN")
+    pub model_id: Option<String>,          // default Some("claude-opus-5-5")
+    pub pipeline_ids: Vec<String>,         // default ["wikillm", "speckit"]
+    pub merge_stage_ids: Vec<String>,      // default ["pr-and-merge", "merge"]
+    pub max_per_hour: u32,                 // default 3, global cap
+}
+```
 
-- `get_or_compute(id, max_age, compute)`: lock the slot. If the entry is
-  younger than `max_age`, return it. Otherwise acquire a permit from a
-  process-wide semaphore (`BULK_DIFF_STATS_CONCURRENCY = 4`), compute,
-  store, and return. Waiters on the same slot get the fresh value
-  (single-flight).
-- `invalidate(id)`: bump a generation counter and drop the entry. A
-  computation that started before the bump does not publish its result (no
-  stale write-back race).
+The field on `Config` is `auto_error_remediation`. Old config files
+deserialize with defaults. Types are regenerated into `shared/types.ts`.
 
-Freshness tiers, chosen by the summaries route:
+### Trigger (services)
 
-| Workspace state | `max_age` (staleness bound) |
-| --- | --- |
-| Latest process running | 30 s |
-| Active, idle | 5 min |
-| Archived | 60 min |
-| Idle > 14 days | not computed (unchanged behaviour) |
+`ContainerService::finalize_task` already runs once for every finalized
+execution across all local and worker exit paths. It sends notifications, and
+it now also emits an `ErrorRemediationEvent` when:
 
-Any process completion in the workspace invalidates immediately, so an
-agent's finished turn shows up on the next poll.
+- `run_reason == CodingAgent` and `status == Failed`, and
+- the config is enabled (read at emit time).
 
-### Invalidation hook
+The event carries `workspace_id`, `session_id` and `execution_process_id`. It
+travels on a `tokio::sync::broadcast` channel exposed through a new trait
+method `error_remediation_sender()`. The trait default is `None`, and the local
+container owns the sender. If no receiver exists the send is a no-op.
+`finalize_task` must stay fast and infallible, so there is no network I/O on
+this path.
 
-`LocalContainerService` finalization calls `invalidate(workspace_id)` when any
-execution process in the workspace exits. That covers coding agent turns,
-setup, cleanup and dev scripts, and it runs before the turn's remote sync.
+### Launcher (server)
 
-### Metrics: I/O pressure
+A background task subscribes at startup (`startup.rs`). For each event it
+does the following:
 
-`node_metrics::CpuSample` gains optional `uninterruptible_tasks` (D-state processes counted from the `/proc/[pid]` walk; `/proc/stat` `procs_blocked` is only `nr_iowait`)
-and `io_pressure_some_avg60` / `io_pressure_full_avg60` (from
-`/proc/pressure/io`). Both are optional and `#[serde(default)]`, so mixed
-versions still interoperate. The Server Metrics node view shows
-"blocked tasks N · io some/full X%" next to the load, and warns when `uninterruptible_tasks`
-is at or above the core count.
+1. **Guard** (`ErrorRemediationGuard`, pure and unit-tested):
+   - Skip if the source workspace is itself a remediation workspace: its name
+     starts with `AUTO_REMEDIATION_NAME_PREFIX` (`"Auto-fix: "`), or its id is
+     in the in-memory set of launched workspaces.
+   - Skip if that source workspace was already remediated in the last 24 h
+     (dedupe).
+   - Skip if `max_per_hour` launches already happened in the trailing hour.
+2. **Collect context:** the last `error_message` entries from
+   `container.normalized_entries(exec_id)`, capped in count and length. Also
+   the workspace name, branch, executor and exit code.
+3. **Create the issue** through `RemoteClient`:
+   - Title: `Auto-fix: <workspace name> agent run failed`.
+   - Status: the project's first visible status, the same rule as MCP
+     `default_status_id`.
+   - Priority: high.
+   - Description: the error context, an HTML marker
+     `<!-- vk:auto-remediation source=<ws> exec=<exec> -->`, and the pipeline
+     block composed from the configured pipelines' default stages.
+4. **Start the workspace** by calling the existing
+   `create_and_start_workspace` handler directly (not over HTTP). It uses the
+   issue as `linked_issue`, the prompt `title + description` (as MCP
+   `start_workspace` builds it), the name `Auto-fix: …`, and an
+   `ExecutorConfig` built from the config.
+5. **Link** the workspace to the issue through the existing `link_workspace`
+   handler, as the UI and MCP do.
+6. Record the launch in the guard. Failures are logged at `warn` and never
+   retried, to avoid loops.
 
-## Acceptance
+### Shared pipeline-block composer
 
-- Analysis with before/after numbers is recorded in
-  `docs/analysis/coordinator-nfs-io-pressure.md`. The before figures are the
-  table above. The after figures are measured with the same script after
-  deploy.
-- Unit tests: cache hit within `max_age`, recompute after expiry,
-  single-flight (N concurrent callers → one compute), invalidation drops the
-  entry and blocks stale write-back, tier selection, and the `/proc/stat` and
-  `/proc/pressure/io` parsers.
-- Summary fields and diff-stat semantics are unchanged. Only freshness
-  changes, within the stated bounds.
+`compose_pipeline_block`, `canonical_stage_order`, `compose_executor_line` and
+`append_pipeline_block` move out of `crates/mcp` (they were `pub(crate)`) into
+`api-types::pipeline_block`, which operates on a minimal
+`BlockPipeline { name, stages: Vec<BlockStage { id, prompt_fragment } > }`. The
+MCP and the server launcher both map into it. The existing tests move with the
+code and keep byte-identical output, so the format still mirrors
+`taskPipeline.ts`.
+
+### Frontend
+
+The General settings gain an **Auto error remediation** card, following the
+`resume_interrupted_on_startup` precedent:
+
+- An enable toggle, with a warning that it spawns agents unattended and they
+  can merge to main.
+- A project id field.
+- Repositories as a multi-select of repos.
+- An executor profile picker (the existing `ExecutorProfileSelector`).
+- A model id field.
+- A max-per-hour field.
+
+i18n keys are added for all locales, with English copy in all of them as the
+existing precedent does.
+
+## Acceptance criteria
+
+1. With `enabled=false` (the default), a failed agent turn creates no issue and
+   no workspace. The event is still emitted, because `ContainerService` has no
+   config accessor, and the consumer drops it after reading the flag.
+2. With `enabled=true`, a failed `CodingAgent` turn creates exactly one issue in
+   the configured project. The issue's description contains the error context,
+   the remediation marker, and a `## Pipeline: WikiLLM + SpecKit` block. The
+   block comes from the shared composer, using each pipeline's default stages
+   plus a merge stage (`merge_stage_ids`) when no default merges. With this
+   deployment's pipelines, where `pr-and-merge` is already a default, it is
+   byte-identical to MCP `create_issue(pipeline_ids=[wikillm,speckit])`.
+3. A workspace named `Auto-fix: …` starts, linked to the issue, on the
+   configured repos, with executor `CLAUDE_CODE`, variant `PROALIGN` (or the
+   default when that is missing) and model `claude-opus-5-5`.
+4. A failure inside an `Auto-fix:` workspace never triggers another
+   remediation.
+5. A second failure in the same source workspace within 24 h, and any launch
+   beyond `max_per_hour`, is skipped with an `info` log.
+6. `Killed`, `Interrupted` and `Indeterminate` runs, and non-agent processes,
+   never trigger.
+7. Unit tests cover the guard, the trigger predicate, issue-body composition
+   and the moved composer. `cargo test`, `pnpm run check`, `pnpm run lint` and
+   `pnpm run generate-types:check` pass.
+
+## Risks
+
+- **Runaway spend or merges.** Mitigated by opt-in, the loop guard, dedupe and
+  the hourly cap. Because the state is in-memory, a restart resets the counters
+  but not the name-prefix loop guard. The worst case is `max_per_hour` launches
+  per restart.
+- **Missing `PROALIGN` variant.** This degrades to the default variant rather
+  than failing the remediation, and the issue says so.
+- **Remote not configured or logged out.** Issue creation fails and is logged;
+  there is no local-only fallback.
+
+## Deployment note
+
+The feature ships disabled. Enabling it for this deployment needs these
+settings:
+
+- project `e4d12693-c789-4238-a1f3-4ccb998c8279`
+- repos homelab `b2a286a2-1831-47e0-b4b8-b55239b49a2a` and vibe-kanban
+  `cdce12c2-a050-49b1-86c3-3b28ace8ada8`
+- a `CLAUDE_CODE` → `PROALIGN` variant defined in profiles
+
+Nothing needs to change in `homelab/modules/vibe-kanban-rebuild.nix`, because
+the settings live in the VK config.

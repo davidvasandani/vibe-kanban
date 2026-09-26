@@ -68,6 +68,7 @@ use services::services::{
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{ContainerError, ContainerRef, ContainerService},
     diff_stream::{self, DiffStreamHandle},
+    error_remediation::ErrorRemediationEvent,
     file::FileService,
     mcp_refresh::McpRefreshCoordinator,
     notification::NotificationService,
@@ -77,7 +78,10 @@ use services::services::{
     workspace_diff_stats::WORKSPACE_DIFF_STATS,
 };
 use sha2::{Digest, Sha256};
-use tokio::{sync::RwLock, task::JoinHandle};
+use tokio::{
+    sync::{RwLock, broadcast},
+    task::JoinHandle,
+};
 use tokio_util::io::ReaderStream;
 use utils::{
     approvals::{ApprovalOutcome, ApprovalRequest},
@@ -943,6 +947,10 @@ fn dispatched_executor_profile(config: &ExecutorConfig) -> Option<ExecutorProfil
 
 type McpRefreshControls = Arc<RwLock<HashMap<Uuid, (Uuid, DateTime<Utc>, McpRefreshHandle)>>>;
 
+/// Failed-turn events beyond this backlog are dropped (and logged by the
+/// consumer as lag); the remediation rate cap would skip them anyway.
+const ERROR_REMEDIATION_CHANNEL_CAPACITY: usize = 64;
+
 #[derive(Clone)]
 pub struct LocalContainerService {
     db: DBService,
@@ -976,6 +984,7 @@ pub struct LocalContainerService {
     approvals: Approvals,
     queued_message_service: QueuedMessageService,
     notification_service: NotificationService,
+    error_remediation_tx: broadcast::Sender<ErrorRemediationEvent>,
     remote_client: Option<RemoteClient>,
     cluster_config: ClusterConfig,
     repository_admin_locks: RepositoryAdminLockManager,
@@ -1248,6 +1257,7 @@ impl LocalContainerService {
         let mcp_refresh_controls = Arc::new(RwLock::new(HashMap::new()));
         let workspace_touch_times = Arc::new(RwLock::new(HashMap::new()));
         let notification_service = NotificationService::new(config.clone());
+        let (error_remediation_tx, _) = broadcast::channel(ERROR_REMEDIATION_CHANNEL_CAPACITY);
         let repository_admin_locks =
             RepositoryAdminLockManager::new(db.pool.clone(), Duration::from_mins(5))
                 .expect("static repository lock lease must be valid");
@@ -1273,6 +1283,7 @@ impl LocalContainerService {
             approvals,
             queued_message_service,
             notification_service,
+            error_remediation_tx,
             remote_client,
             cluster_config,
             repository_admin_locks,
@@ -3720,6 +3731,10 @@ impl ContainerService for LocalContainerService {
 
     fn notification_service(&self) -> &NotificationService {
         &self.notification_service
+    }
+
+    fn error_remediation_sender(&self) -> Option<&broadcast::Sender<ErrorRemediationEvent>> {
+        Some(&self.error_remediation_tx)
     }
 
     async fn refresh_mcp_tools(

@@ -61,7 +61,7 @@ use json_patch::Patch;
 use sqlx::Error as SqlxError;
 use thiserror::Error;
 use tokio::{
-    sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, RwLock, Semaphore},
+    sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, RwLock, Semaphore, broadcast},
     task::{AbortHandle, JoinHandle},
 };
 use utils::{
@@ -72,7 +72,11 @@ use utils::{
 use uuid::Uuid;
 use worktree_manager::WorktreeError;
 
-use crate::services::{execution_process, normalized_log_cache, notification::NotificationService};
+use crate::services::{
+    error_remediation::{self, ErrorRemediationEvent},
+    execution_process, normalized_log_cache,
+    notification::NotificationService,
+};
 
 static WORKSPACE_EXECUTION_GATES: LazyLock<DashMap<Uuid, Arc<RwLock<()>>>> =
     LazyLock::new(DashMap::new);
@@ -498,6 +502,12 @@ pub trait ContainerService {
 
     fn notification_service(&self) -> &NotificationService;
 
+    /// Channel that failed coding-agent turns are announced on for auto error
+    /// remediation (see [`error_remediation`]). `None` disables emission.
+    fn error_remediation_sender(&self) -> Option<&broadcast::Sender<ErrorRemediationEvent>> {
+        None
+    }
+
     async fn refresh_mcp_tools(
         &self,
         workspace_id: Uuid,
@@ -723,6 +733,21 @@ pub trait ContainerService {
         self.notification_service()
             .notify(&title, &message, Some(ctx.workspace.id))
             .await;
+
+        // Hand failed agent turns to the remediation consumer. Emission is a
+        // non-blocking send whose failure (no subscriber) is irrelevant; the
+        // consumer checks whether the feature is enabled before acting.
+        if error_remediation::is_remediation_trigger(
+            &ctx.execution_process.run_reason,
+            &ctx.execution_process.status,
+        ) && let Some(sender) = self.error_remediation_sender()
+        {
+            let _ = sender.send(ErrorRemediationEvent {
+                workspace_id: ctx.workspace.id,
+                session_id: ctx.session.id,
+                execution_process_id: ctx.execution_process.id,
+            });
+        }
     }
 
     /// Cleanup executions marked as running in the db, call at startup.

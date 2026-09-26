@@ -2,6 +2,7 @@ use anyhow::Error;
 use executors::{executors::BaseCodingAgent, profile::ExecutorProfileId};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+use uuid::Uuid;
 pub use v7::{
     EditorConfig, EditorType, GitHubConfig, NotificationConfig, ShowcaseState, SoundFile,
     ThemeMode, UiLanguage,
@@ -23,6 +24,52 @@ fn default_commit_reminder_enabled() -> bool {
 
 fn default_relay_enabled() -> bool {
     true
+}
+
+/// Opt-in auto error remediation: when a coding-agent turn fails, file an
+/// issue carrying the configured pipelines and start an unattended workspace
+/// on it. Off by default because it spawns agents (which may merge to the base
+/// branch) without a human in the loop; see
+/// `services::services::error_remediation` for the loop and rate guards.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(default)]
+pub struct AutoErrorRemediationConfig {
+    pub enabled: bool,
+    /// Remote project that receives the issue. `None` uses the failing
+    /// workspace's own linked project (and skips when it has none).
+    pub project_id: Option<Uuid>,
+    /// Repositories for the remediation workspace. Empty uses the failing
+    /// workspace's repositories.
+    pub repo_ids: Vec<Uuid>,
+    pub executor: BaseCodingAgent,
+    /// Executor profile variant. Falls back to the default variant when the
+    /// named variant is not defined.
+    pub variant: Option<String>,
+    pub model_id: Option<String>,
+    /// Pipelines attached to the issue, each with its default stages.
+    pub pipeline_ids: Vec<String>,
+    /// Stage ids that make the run merge to the base branch. When none of
+    /// them is already a default stage, the first one present in the selected
+    /// pipelines is enabled, so an unattended run always ends in a merge.
+    pub merge_stage_ids: Vec<String>,
+    /// Global cap on launches per trailing hour; 0 disables launching.
+    pub max_per_hour: u32,
+}
+
+impl Default for AutoErrorRemediationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            project_id: None,
+            repo_ids: Vec::new(),
+            executor: BaseCodingAgent::ClaudeCode,
+            variant: Some("PROALIGN".to_string()),
+            model_id: Some("claude-opus-5-5".to_string()),
+            pipeline_ids: vec!["wikillm".to_string(), "speckit".to_string()],
+            merge_stage_ids: vec!["pr-and-merge".to_string(), "merge".to_string()],
+            max_per_hour: 3,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -73,6 +120,8 @@ pub struct Config {
     /// tokens) at boot without a human in the loop.
     #[serde(default)]
     pub resume_interrupted_on_startup: bool,
+    #[serde(default)]
+    pub auto_error_remediation: AutoErrorRemediationConfig,
 }
 
 impl Config {
@@ -105,6 +154,7 @@ impl Config {
             relay_enabled: true,
             host_nickname: None,
             resume_interrupted_on_startup: false,
+            auto_error_remediation: AutoErrorRemediationConfig::default(),
         }
     }
 
@@ -162,6 +212,7 @@ impl Default for Config {
             relay_enabled: true,
             host_nickname: None,
             resume_interrupted_on_startup: false,
+            auto_error_remediation: AutoErrorRemediationConfig::default(),
         }
     }
 }

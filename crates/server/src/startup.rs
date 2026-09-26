@@ -187,6 +187,9 @@ pub async fn initialize_deployment(
             .resume_interrupted_coding_agents(&interrupted_processes)
             .await;
     }
+    // Subscribe before any new turn can fail; the consumer checks the
+    // (default-off) setting per event, so toggling it needs no restart.
+    crate::error_remediation::spawn(&deployment);
     deployment
         .container()
         .backfill_before_head_commits()

@@ -596,6 +596,19 @@ holding the whole surface behind a spinner. Regression coverage drives each
 terminal path — sentinel, close without sentinel, error, idle deadline — and
 asserts a single settlement.
 
+### XLI. Self-spawned agent work is opt-in, marked, and bounded
+Any path that files an issue or starts a workspace without a human in the loop
+(for example, remediating a failed agent turn) ships disabled behind an explicit
+config flag and reads that flag at the moment it acts. The work it spawns
+carries a durable mark (a name prefix and a description marker), and anything
+so marked never triggers further self-spawned work. Each source is acted on at
+most once per dedupe window, and all launches share a global per-hour cap. Only
+genuine failures trigger it; user stops, restarts and indeterminate exits never
+do. The finalization hot path only emits an event; network I/O happens in a
+background consumer. A failed launch is logged and not retried, and every guard
+fails closed to not spawning. Project selection obeys the diagnostic-issue
+constraint below: configured, or the source workspace's own project, else skip.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -617,7 +630,9 @@ asserts a single settlement.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.36.0 (adds XL, requiring every awaited client stream to
+**Version**: 0.37.0 (adds XLI, making self-spawned agent work opt-in, marked
+against recursion, deduped per source, globally rate-capped, and triggered only
+by genuine failures; 0.36.0 added XL, requiring every awaited client stream to
 settle exactly once on sentinel, close-without-sentinel, error, or an idle
 deadline for settled-history reads, so a loading state gated on it always ends
 and a failed item degrades the view instead of blocking it; 0.35.0 added XXXIX, requiring a request-scoped read to derive

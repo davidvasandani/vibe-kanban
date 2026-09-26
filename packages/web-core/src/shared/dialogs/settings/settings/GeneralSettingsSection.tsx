@@ -8,6 +8,7 @@ import {
 } from '@phosphor-icons/react';
 import { FolderPickerDialog } from '@/shared/dialogs/shared/FolderPickerDialog';
 import {
+  type AutoErrorRemediationConfig,
   type BaseCodingAgent,
   DEFAULT_COMMIT_REMINDER_PROMPT,
   DEFAULT_PR_DESCRIPTION_PROMPT,
@@ -53,6 +54,7 @@ import {
   SettingsTextarea,
 } from './SettingsComponents';
 import { useSettingsDirty } from './SettingsDirtyContext';
+import { AutoErrorRemediationSettingsCard } from './AutoErrorRemediationSettingsCard';
 
 export function GeneralSettingsSection() {
   const { t } = useTranslation(['settings', 'common']);
@@ -153,6 +155,22 @@ export function GeneralSettingsSection() {
           setDirty(true);
         }
         return next;
+      });
+    },
+    [config]
+  );
+
+  // Replaces the whole remediation config: `updateDraft` deep-merges, which
+  // would keep array entries (repo ids) that the user just removed.
+  const updateAutoErrorRemediation = useCallback(
+    (next: AutoErrorRemediationConfig) => {
+      setDraft((prev: typeof config) => {
+        if (!prev) return prev;
+        const updated = { ...prev, auto_error_remediation: next };
+        if (!isEqual(updated, config)) {
+          setDirty(true);
+        }
+        return updated;
       });
     },
     [config]
@@ -534,6 +552,14 @@ export function GeneralSettingsSection() {
           }
         />
       </SettingsCard>
+
+      {draft?.auto_error_remediation && (
+        <AutoErrorRemediationSettingsCard
+          value={draft.auto_error_remediation}
+          executors={executorOptions.map((option) => option.value)}
+          onChange={updateAutoErrorRemediation}
+        />
+      )}
 
       {/* Git */}
       <SettingsCard

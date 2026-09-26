@@ -5,6 +5,7 @@ use api_types::{
     ListIssueRelationshipsResponse, ListIssueTagsResponse, ListIssuesResponse,
     ListPullRequestsResponse, ListTagsResponse, MutationResponse, PullRequestStatus,
     SearchIssuesRequest, SortDirection, UpdateIssueRequest,
+    pipeline_block::{BlockPipeline, append_pipeline_block, compose_pipeline_block},
 };
 use rmcp::{
     ErrorData, handler::server::wrapper::Parameters, model::CallToolResult, schemars, tool,
@@ -13,10 +14,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{
-    McpServer, ToolError,
-    pipelines::{McpPipeline, append_pipeline_block, compose_pipeline_block},
-};
+use super::{McpServer, ToolError, pipelines::McpPipeline};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct McpCreateIssueRequest {
@@ -383,8 +381,10 @@ impl McpServer {
                 .collect(),
         };
 
+        let block_pipelines: Vec<BlockPipeline> =
+            selected_pipelines.iter().map(BlockPipeline::from).collect();
         let pipeline_block =
-            compose_pipeline_block(&selected_pipelines, &enabled_stage_ids, executor.as_deref());
+            compose_pipeline_block(&block_pipelines, &enabled_stage_ids, executor.as_deref());
 
         let expanded_description = match description {
             Some(desc) => Some(self.expand_tags(&desc).await),

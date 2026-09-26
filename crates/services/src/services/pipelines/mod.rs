@@ -146,6 +146,22 @@ pub struct Pipeline {
     pub stages: Vec<PipelineStep>,
 }
 
+impl From<&Pipeline> for api_types::pipeline_block::BlockPipeline {
+    fn from(pipeline: &Pipeline) -> Self {
+        Self {
+            name: pipeline.name.clone(),
+            stages: pipeline
+                .stages
+                .iter()
+                .map(|s| api_types::pipeline_block::BlockStage {
+                    id: s.id.clone(),
+                    prompt_fragment: s.prompt_fragment.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// A structured TOML parse/validation error, suitable for surfacing inline in
 /// the Settings editor (message plus a best-effort 1-based line/column when
 /// the underlying `toml` parser exposes a byte span).

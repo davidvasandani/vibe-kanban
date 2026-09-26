@@ -1065,7 +1065,7 @@ export type Config = { config_version: string, theme: ThemeMode, executor_profil
  * restart. Off by default because it spawns agents (and spends
  * tokens) at boot without a human in the loop.
  */
-resume_interrupted_on_startup: boolean, };
+resume_interrupted_on_startup: boolean, auto_error_remediation: AutoErrorRemediationConfig, };
 
 export type NotificationConfig = { sound_enabled: boolean, push_enabled: boolean, sound_file: SoundFile, };
 
@@ -1086,6 +1086,37 @@ export type UiLanguage = "BROWSER" | "EN" | "FR" | "JA" | "ES" | "KO" | "ZH_HANS
 export type ShowcaseState = { seen_features: Array<string>, };
 
 export type SendMessageShortcut = "ModifierEnter" | "Enter";
+
+export type AutoErrorRemediationConfig = { enabled: boolean, 
+/**
+ * Remote project that receives the issue. `None` uses the failing
+ * workspace's own linked project (and skips when it has none).
+ */
+project_id: string | null, 
+/**
+ * Repositories for the remediation workspace. Empty uses the failing
+ * workspace's repositories.
+ */
+repo_ids: Array<string>, executor: BaseCodingAgent, 
+/**
+ * Executor profile variant. Falls back to the default variant when the
+ * named variant is not defined.
+ */
+variant: string | null, model_id: string | null, 
+/**
+ * Pipelines attached to the issue, each with its default stages.
+ */
+pipeline_ids: Array<string>, 
+/**
+ * Stage ids that make the run merge to the base branch. When none of
+ * them is already a default stage, the first one present in the selected
+ * pipelines is enabled, so an unattended run always ends in a merge.
+ */
+merge_stage_ids: Array<string>, 
+/**
+ * Global cap on launches per trailing hour; 0 disables launching.
+ */
+max_per_hour: number, };
 
 export type PipelineStep = { 
 /**

@@ -132,6 +132,37 @@
           "helper": "Automatically send a follow-up to coding agent runs that were interrupted by a restart. Each run is resumed at most once. Agents start without confirmation and may spend tokens."
         }
       },
+      "autoRemediation": {
+        "title": "Auto error remediation",
+        "description": "When a coding agent's turn fails, file an issue with pipelines attached and start a workspace that fixes it without supervision.",
+        "enabled": {
+          "label": "Remediate failed agent runs automatically",
+          "helper": "Agents start without confirmation, spend tokens, and may merge to the base branch. Remediation workspaces never trigger remediation themselves; each workspace is remediated at most once per day."
+        },
+        "project": {
+          "label": "Issue project",
+          "helper": "Project that receives remediation issues.",
+          "source": "Failing workspace's project"
+        },
+        "repos": {
+          "label": "Repositories",
+          "helper": "Repositories for the remediation workspace. None selected uses the failing workspace's repositories."
+        },
+        "executor": {
+          "label": "Agent"
+        },
+        "variant": {
+          "label": "Profile variant",
+          "helper": "Falls back to the default variant when this variant is not defined."
+        },
+        "model": {
+          "label": "Model"
+        },
+        "maxPerHour": {
+          "label": "Max launches per hour",
+          "helper": "0 disables launching."
+        }
+      },
       "editor": {
         "title": "Editor",
         "description": "Configure your code editing experience.",
