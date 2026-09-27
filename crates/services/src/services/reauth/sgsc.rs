@@ -77,21 +77,32 @@ if (await b.count()) { await b.click(); return 'allow'; }
 return null;
 "#;
 
-/// Opens the Salesforce MyApps tile; IdP-initiated SAML usually opens it in a
-/// new tab, and that tab's load is what sets the Salesforce session cookie.
+/// Opens the Salesforce MyApps tile *in this page* (its link's new-tab
+/// target removed), so the IdP-initiated SAML hop — and any Entra challenge
+/// it raises — runs where the credential-capable driver is watching, rather
+/// than in a popup nobody completes.
 const MYAPPS_TILE_JS: &str = r#"
 const tile = page.getByText(/^\s*salesforce\s*$/i).first();
 if (!(await tile.count())) return 'no-tile';
-const [popup] = await Promise.all([
-  context.waitForEvent('page', { timeout: 20000 }).catch(() => null),
-  tile.click(),
-]);
-const target = popup || page;
-await target.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
-await target.waitForTimeout(5000);
-if (popup) await popup.close().catch(() => {});
-return popup ? 'popup' : 'same-tab';
+await tile.evaluate((el) => { const a = el.closest('a'); if (a) a.removeAttribute('target'); });
+await tile.click();
+return 'opened';
 "#;
+
+/// Done once the MyApps hop has produced a Salesforce session (a Salesforce
+/// page that is not its native login form).
+pub(crate) fn salesforce_session_verdict(p: &Probe) -> PageVerdict<()> {
+    if !is_salesforce(&p.host()) {
+        return PageVerdict::Continue;
+    }
+    if p.has_password {
+        PageVerdict::Fail(
+            "Salesforce still asks for its native login after the MyApps sign-in".into(),
+        )
+    } else {
+        PageVerdict::Done(())
+    }
+}
 
 /// Gateway copy that means the grant was not stored.
 const FAILURE_WORDS: &[&str] = &["not connected", "disconnected", "failed", "denied", "error"];
@@ -207,6 +218,16 @@ async fn attempt(
                     "MyApps shows no Salesforce tile for this account".into(),
                 ));
             }
+            // Complete any Entra challenge the SAML hop raises, and confirm a
+            // Salesforce session exists, before retrying the onboarding.
+            entra_mint::drive(
+                cfg,
+                &session,
+                progress,
+                DRIVE_TIMEOUT,
+                salesforce_session_verdict,
+            )
+            .await?;
             session.navigate(url).await?;
             entra_mint::drive(cfg, &session, progress, DRIVE_TIMEOUT, |p| {
                 sgsc_page_verdict(p, backend, &gateway_host, false)
@@ -399,6 +420,34 @@ mod tests {
         assert!(matches!(
             sgsc_page_verdict(&allow, "sf", GW, true),
             PageVerdict::Run(_)
+        ));
+    }
+
+    #[test]
+    fn the_myapps_hop_is_done_only_with_a_salesforce_session() {
+        assert!(matches!(
+            salesforce_session_verdict(&page(
+                "https://login.microsoftonline.com/t/saml2",
+                "enter code",
+                false
+            )),
+            PageVerdict::Continue
+        ));
+        assert!(matches!(
+            salesforce_session_verdict(&page(
+                "https://sg.lightning.force.com/lightning/page/home",
+                "home",
+                false
+            )),
+            PageVerdict::Done(())
+        ));
+        assert!(matches!(
+            salesforce_session_verdict(&page(
+                "https://sg.my.salesforce.com/",
+                "username password",
+                true
+            )),
+            PageVerdict::Fail(_)
         ));
     }
 
