@@ -11,7 +11,7 @@
 //! so a Codex-sized tool deadline never cancels a sign-in halfway. Success is
 //! only ever claimed after an independent probe of the vendor's own store.
 //!
-//! Safety rails (homelab constitution principle 123): definitive refusals are
+//! Safety rails (homelab constitution principle 127): definitive refusals are
 //! never retried, and once a target is refused only an operator-triggered run
 //! may try it again; the sweep backs off exponentially; an unrepairable
 //! target emits one fixed escalation line that the deployment pages on.
@@ -679,7 +679,7 @@ fn discover_sgsc() -> Vec<Target> {
             kind: ReauthKind::Sgsc,
             // No non-mutating probe exists, so a sweep could not tell a
             // healthy grant from an expired one and would spend factors on
-            // every tick (principle 123). On demand only.
+            // every tick (principle 127). On demand only.
             swept: false,
             auth_state: if gap.is_some() {
                 ReauthAuthState::NotConfigured
