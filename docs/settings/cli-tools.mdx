@@ -162,13 +162,13 @@ report expired. A target that keeps failing waits exponentially longer between
 attempts, up to six hours. sgsc backends are never swept, because the gateway
 offers no status check that does not itself sign in.
 
-A CLI tool's check reports only whether its probe command succeeded, so a
-network outage or a lost permission (for example, no longer being able to
-read the Confluence verification page) also reads as expired. The sweep then
-attempts a repair. That attempt tries the saved session first, so it enters
-no password or one-time code unless Entra asks for one. Backoff bounds how
-often it retries, and repeated failures page you rather than looping
-silently.
+A CLI tool counts as expired only when its check fails with an
+authentication error (for example `az login` or `unauthorized` in its
+output). Any other failure, such as a network outage or a lost permission,
+shows **Status unknown** and is never repaired automatically, because signing
+in again would not fix it. If the AWS status checks take longer than 40
+seconds, the AWS targets are listed with an unknown state rather than holding
+up the whole list.
 
 After a refusal, or three consecutive failed automatic attempts, Vibe Kanban
 logs one line containing `vk-reauth: operator action required`. The managed

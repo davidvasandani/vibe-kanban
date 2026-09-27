@@ -926,15 +926,23 @@ pub async fn run_entra_native_browser_login(
     Ok(entra_mint::native_browser_login(&cfg, &tools, &executable, args, progress).await?)
 }
 
-async fn probe_auth(e: &CliToolCatalogEntry) -> (CliToolAuthState, Option<String>) {
+/// Probe output kept in-process (never returned or logged) so unattended
+/// re-auth can tell an expired credential from an outage; see
+/// [`status_with_probe_output`].
+type ProbeOutput = Option<String>;
+
+async fn probe_auth_with_output(
+    e: &CliToolCatalogEntry,
+) -> (CliToolAuthState, Option<String>, ProbeOutput) {
     let probe_args = match probe_args_of(e) {
         Ok(args) => args,
-        Err(reason) => return (CliToolAuthState::Unsupported, Some(reason)),
+        Err(reason) => return (CliToolAuthState::Unsupported, Some(reason), None),
     };
     let Some(executable) = effective_binary(e).await else {
         return (
             CliToolAuthState::Unknown,
             Some("Tool is not available".to_string()),
+            None,
         );
     };
     let mut command = tokio::process::Command::new(executable);
@@ -975,15 +983,24 @@ async fn probe_auth(e: &CliToolCatalogEntry) -> (CliToolAuthState, Option<String
         }
     }
     match tokio::time::timeout(AUTH_PROBE_TIMEOUT, command.kill_on_drop(true).output()).await {
-        Ok(Ok(output)) if output.status.success() => (CliToolAuthState::Authenticated, None),
-        Ok(Ok(_)) => (CliToolAuthState::Unauthenticated, None),
+        Ok(Ok(output)) if output.status.success() => (CliToolAuthState::Authenticated, None, None),
+        Ok(Ok(output)) => {
+            // Failure output only: a successful probe's stdout is never kept.
+            let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
+            text.push('\n');
+            text.push_str(&String::from_utf8_lossy(&output.stdout));
+            text.truncate(8 * 1024);
+            (CliToolAuthState::Unauthenticated, None, Some(text))
+        }
         Ok(Err(_)) => (
             CliToolAuthState::Unknown,
             Some("Authentication check failed".to_string()),
+            None,
         ),
         Err(_) => (
             CliToolAuthState::Unknown,
             Some("Authentication check timed out".to_string()),
+            None,
         ),
     }
 }
@@ -1027,10 +1044,17 @@ fn detect_app_copy(e: &CliToolCatalogEntry) -> Option<AppCopy> {
 }
 
 pub async fn status(id: CliToolId) -> CliToolStatus {
+    status_with_probe_output(id).await.0
+}
+
+/// [`status`], plus the failed probe's output. The output stays inside the
+/// server: unattended re-auth reads it to tell an expired credential from a
+/// network or permission failure, which a bare exit code cannot.
+pub async fn status_with_probe_output(id: CliToolId) -> (CliToolStatus, ProbeOutput) {
     let e = entry(id);
     let reason = unsupported_reason(e).await;
-    let (auth_state, auth_message) = probe_auth(e).await;
-    CliToolStatus {
+    let (auth_state, auth_message, output) = probe_auth_with_output(e).await;
+    let status = CliToolStatus {
         id: e.id,
         binary_name: e.binary_name.to_string(),
         display_name: e.display_name.to_string(),
@@ -1050,7 +1074,8 @@ pub async fn status(id: CliToolId) -> CliToolStatus {
         },
         auth_state,
         auth_message,
-    }
+    };
+    (status, output)
 }
 
 pub async fn status_all() -> Vec<CliToolStatus> {

@@ -458,15 +458,52 @@ fn sgsc_backends() -> Vec<String> {
         .collect()
 }
 
+/// Whether a failed probe's output shows an authentication failure (as
+/// opposed to a network outage, rate limit or missing permission). The CLI
+/// probes report only an exit code to the card; this is the evidence that
+/// makes a failure safe to act on unattended.
+fn auth_failure_confirmed(id: CliToolId, output: &str) -> bool {
+    let text = output.to_lowercase();
+    let any = |needles: &[&str]| needles.iter().any(|n| text.contains(n));
+    match id {
+        CliToolId::Az => any(&[
+            "az login",
+            "aadsts",
+            "interactionrequired",
+            "interaction_required",
+            "refresh token",
+            "token has expired",
+            "tokencreatedwithoutdatedpolicies",
+        ]),
+        // The probe prints nothing and exits 1 exactly when there is no
+        // Graph context; any output means pwsh itself failed.
+        CliToolId::GraphPowershell10 => text.trim().is_empty(),
+        CliToolId::MgcBeta => any(&[
+            "unauthorized",
+            "401",
+            "authentication",
+            "login required",
+            "no account",
+            "interactive",
+        ]),
+        CliToolId::Acli => any(&["unauthorized", "auth login", "401", "not authenticated"]),
+        _ => false,
+    }
+}
+
 async fn discover_cli_tools() -> Vec<Target> {
     let ids: Vec<CliToolId> = CliToolId::ALL
         .into_iter()
         .filter(|id| cli_tools::unattended_login(*id))
         .collect();
-    let statuses = futures::future::join_all(ids.iter().map(|id| cli_tools::status(*id))).await;
+    let statuses = futures::future::join_all(
+        ids.iter()
+            .map(|id| cli_tools::status_with_probe_output(*id)),
+    )
+    .await;
     ids.into_iter()
         .zip(statuses)
-        .map(|(id, status)| {
+        .map(|(id, (status, probe_output))| {
             let config_gap = if id == CliToolId::Acli {
                 acli::ApiTokenConfig::from_env()
                     .err()
@@ -478,7 +515,22 @@ async fn discover_cli_tools() -> Vec<Target> {
                 (Some(gap), _) => (ReauthAuthState::NotConfigured, Some(gap)),
                 (None, CliToolAuthState::Authenticated) => (ReauthAuthState::Authenticated, None),
                 (None, CliToolAuthState::Unauthenticated) => {
-                    (ReauthAuthState::Unauthenticated, None)
+                    if auth_failure_confirmed(id, probe_output.as_deref().unwrap_or_default()) {
+                        (ReauthAuthState::Unauthenticated, None)
+                    } else {
+                        // A failed probe without an authentication error is
+                        // an outage or a permission problem, not an expiry:
+                        // signing in again would not fix it, so it is never
+                        // repaired automatically.
+                        (
+                            ReauthAuthState::Unknown,
+                            Some(
+                                "the check failed without an authentication error; \
+                                 not repaired automatically"
+                                    .to_string(),
+                            ),
+                        )
+                    }
                 }
                 (None, CliToolAuthState::Unknown) => {
                     (ReauthAuthState::Unknown, status.auth_message.clone())
@@ -613,8 +665,56 @@ fn discover_sgsc() -> Vec<Target> {
         .collect()
 }
 
+/// How long AWS probing may take during discovery. Under a slow network the
+/// shared four-probe budget can take minutes over dozens of profiles; past
+/// this, the AWS targets are still listed, just unprobed.
+const AWS_DISCOVERY_BUDGET: Duration = Duration::from_secs(40);
+
+/// AWS scope targets straight from the config file, without probing.
+fn aws_targets_unprobed(message: &str) -> Vec<Target> {
+    let Ok(scopes) = aws_sso::profile_scopes() else {
+        return Vec::new();
+    };
+    let mut ids: Vec<(ReauthTargetId, usize)> = Vec::new();
+    for (profile, _) in &scopes {
+        let Some(id) = canonical_aws_target(&scopes, profile) else {
+            continue;
+        };
+        match ids.iter_mut().find(|(i, _)| *i == id) {
+            Some((_, n)) => *n += 1,
+            None => ids.push((id, 1)),
+        }
+    }
+    ids.into_iter()
+        .map(|(id, n)| {
+            let name = match &id {
+                ReauthTargetId::AwsSession(n) | ReauthTargetId::AwsProfile(n) => n.clone(),
+                _ => String::new(),
+            };
+            Target {
+                label: format!(
+                    "AWS SSO · {name} ({n} profile{})",
+                    if n == 1 { "" } else { "s" }
+                ),
+                id,
+                kind: ReauthKind::AwsSso,
+                swept: true,
+                auth_state: ReauthAuthState::Unknown,
+                auth_message: Some(message.to_string()),
+            }
+        })
+        .collect()
+}
+
 async fn discover() -> Vec<Target> {
-    let (tools, aws) = tokio::join!(discover_cli_tools(), discover_aws());
+    let aws = async {
+        tokio::time::timeout(AWS_DISCOVERY_BUDGET, discover_aws())
+            .await
+            .unwrap_or_else(|_| {
+                aws_targets_unprobed("the AWS status check did not finish in time; state unknown")
+            })
+    };
+    let (tools, aws) = tokio::join!(discover_cli_tools(), aws);
     let mut all = aws;
     all.extend(tools);
     all.extend(discover_sgsc());
@@ -1306,6 +1406,31 @@ mod tests {
         assert!(!selectable(Some(&backing_off), ReauthTrigger::Sweep, now));
         assert!(selectable(Some(&backing_off), ReauthTrigger::Agent, now));
         assert!(selectable(None, ReauthTrigger::Sweep, now));
+    }
+
+    #[test]
+    fn only_authentication_errors_count_as_expired() {
+        assert!(auth_failure_confirmed(
+            CliToolId::Az,
+            "ERROR: AADSTS700082: The refresh token has expired. Please run 'az login'."
+        ));
+        assert!(!auth_failure_confirmed(
+            CliToolId::Az,
+            "ERROR: HTTPSConnectionPool: Max retries exceeded (Name or service not known)"
+        ));
+        assert!(auth_failure_confirmed(
+            CliToolId::Acli,
+            "✗ Error: unauthorized: use 'acli confluence auth login' to authenticate"
+        ));
+        assert!(!auth_failure_confirmed(
+            CliToolId::Acli,
+            "✗ Error: page 4796448789 not found"
+        ));
+        assert!(auth_failure_confirmed(CliToolId::GraphPowershell10, "\n"));
+        assert!(!auth_failure_confirmed(
+            CliToolId::GraphPowershell10,
+            "pwsh: module import failed"
+        ));
     }
 
     #[test]
