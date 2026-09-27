@@ -665,25 +665,31 @@ pub fn recent_runs() -> Vec<ReauthRunReport> {
 }
 
 /// Targets the sweep (or "re-authenticate everything") would repair now.
-async fn expired_swept_targets(respect_backoff: bool) -> Vec<ReauthTargetId> {
+async fn expired_swept_targets(trigger: ReauthTrigger) -> Vec<ReauthTargetId> {
     let now = Instant::now();
     let targets = discover().await;
     with_registry(|states| {
         targets
             .into_iter()
             .filter(|t| t.swept && t.auth_state == ReauthAuthState::Unauthenticated)
-            .filter(|t| {
-                let state = states.get(&t.id);
-                // Refused targets are skipped silently: they already escalated.
-                !state.is_some_and(|s| s.refused)
-                    && (!respect_backoff
-                        || state
-                            .and_then(|s| s.next_eligible)
-                            .is_none_or(|at| at <= now))
-            })
+            .filter(|t| selectable(states.get(&t.id), trigger, now))
             .map(|t| t.id)
             .collect()
     })
+}
+
+/// Whether an expired target may join a bulk run for `trigger`. Refused
+/// targets already escalated, so agents and the sweep leave them alone; an
+/// operator's manual "re-authenticate all" is exactly the reset that retries
+/// them. Only the sweep honours its own backoff.
+fn selectable(state: Option<&TargetState>, trigger: ReauthTrigger, now: Instant) -> bool {
+    let Some(state) = state else {
+        return true;
+    };
+    if state.refused && trigger != ReauthTrigger::Manual {
+        return false;
+    }
+    trigger != ReauthTrigger::Sweep || state.next_eligible.is_none_or(|at| at <= now)
 }
 
 // ---------------------------------------------------------------------------
@@ -759,7 +765,7 @@ fn start(id: ReauthTargetId, trigger: ReauthTrigger) -> ReauthRunReport {
 /// targets on the profile lock — an AWS device code expiring while it waits —
 /// and turn one fleet-wide expiry into a burst of failures.
 pub async fn start_expired(trigger: ReauthTrigger) -> Vec<ReauthRunReport> {
-    let ids = expired_swept_targets(trigger == ReauthTrigger::Sweep).await;
+    let ids = expired_swept_targets(trigger).await;
     let now = Utc::now();
     let mut reports = Vec::with_capacity(ids.len());
     let mut owned = Vec::new();
@@ -1281,6 +1287,25 @@ mod tests {
         assert!(uses_entra(&ReauthTargetId::Sgsc("dp".into())));
         assert!(uses_entra(&ReauthTargetId::CliTool(CliToolId::Az)));
         assert!(!uses_entra(&ReauthTargetId::CliTool(CliToolId::Acli)));
+    }
+
+    #[test]
+    fn bulk_selection_respects_refusals_and_backoff_by_trigger() {
+        let now = Instant::now();
+        let refused = TargetState {
+            refused: true,
+            ..Default::default()
+        };
+        assert!(!selectable(Some(&refused), ReauthTrigger::Agent, now));
+        assert!(!selectable(Some(&refused), ReauthTrigger::Sweep, now));
+        assert!(selectable(Some(&refused), ReauthTrigger::Manual, now));
+        let backing_off = TargetState {
+            next_eligible: Some(now + Duration::from_secs(600)),
+            ..Default::default()
+        };
+        assert!(!selectable(Some(&backing_off), ReauthTrigger::Sweep, now));
+        assert!(selectable(Some(&backing_off), ReauthTrigger::Agent, now));
+        assert!(selectable(None, ReauthTrigger::Sweep, now));
     }
 
     #[test]

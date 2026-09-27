@@ -162,6 +162,14 @@ report expired. A target that keeps failing waits exponentially longer between
 attempts, up to six hours. sgsc backends are never swept, because the gateway
 offers no status check that does not itself sign in.
 
+A CLI tool's check reports only whether its probe command succeeded, so a
+network outage or a lost permission (for example, no longer being able to
+read the Confluence verification page) also reads as expired. The sweep then
+attempts a repair. That attempt tries the saved session first, so it enters
+no password or one-time code unless Entra asks for one. Backoff bounds how
+often it retries, and repeated failures page you rather than looping
+silently.
+
 After a refusal, or three consecutive failed automatic attempts, Vibe Kanban
 logs one line containing `vk-reauth: operator action required`. The managed
 homelab deployment pages ntfy on that line.
