@@ -127,8 +127,13 @@ fn gateway_verdict(p: &Probe, callback: &str, backend: &str) -> PageVerdict<Onbo
             p.txt.trim().chars().take(200).collect::<String>()
         ));
     }
-    // Success is the gateway saying so, not merely arriving somewhere.
-    if says_connected(&p.txt) && !failed {
+    // A gateway auth page names its backend as the last path segment; a
+    // "connected" page for another backend says nothing about this one.
+    let other_backend = url.path().starts_with("/_sgsc/auth/")
+        && url.path_segments().and_then(|mut s| s.next_back()) != Some(backend);
+    // Success is the gateway saying so, for this backend, not merely
+    // arriving somewhere.
+    if says_connected(&p.txt) && !failed && !other_backend {
         return PageVerdict::Done(Onboard::Connected);
     }
     PageVerdict::Continue
@@ -291,9 +296,24 @@ mod tests {
             ),
             PageVerdict::Continue
         ));
-        // Another backend's callback does not count.
+        // Another backend's callback does not count, even when it says
+        // connected.
         assert!(matches!(
             verdict("https://claude.example.dev/_sgsc/auth/callback/sf", ""),
+            PageVerdict::Continue
+        ));
+        assert!(matches!(
+            verdict(
+                "https://claude.example.dev/_sgsc/auth/callback/sf?code=x",
+                "salesforce connected"
+            ),
+            PageVerdict::Continue
+        ));
+        assert!(matches!(
+            verdict(
+                "https://claude.example.dev/_sgsc/auth/onboard/sf",
+                "salesforce connected"
+            ),
             PageVerdict::Continue
         ));
     }
