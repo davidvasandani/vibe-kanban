@@ -635,39 +635,30 @@ fn aws_target(
     }
 }
 
-/// One probe per scope: its profiles share one SSO token, so probing each of
-/// them (dozens, four at a time) would add time and no evidence.
+/// Every member profile is probed, through the same bounded, lazily
+/// admitted probe stream Settings uses: one successful STS call is not proof
+/// for the scope, because the CLI can answer from cached role credentials
+/// after the shared SSO token has expired.
 async fn discover_aws() -> Vec<Target> {
-    let Ok(scopes) = aws_sso::profile_scopes() else {
+    let Ok(statuses) = aws_sso::list_profile_statuses().await else {
         return Vec::new();
     };
-    let groups = aws_groups(&scopes);
-    if let Some(gap) = entra_missing() {
-        return groups
-            .into_iter()
-            .map(|(id, members)| {
-                aws_target(
-                    id,
-                    members.len(),
-                    ReauthAuthState::NotConfigured,
-                    Some(gap.clone()),
-                )
-            })
-            .collect();
-    }
-    let probes = futures::future::join_all(
-        groups
-            .iter()
-            .map(|(_, members)| aws_sso::profile_status(&members[0])),
-    )
-    .await;
-    groups
+    let scopes: Vec<(String, aws_sso::AwsSsoAuthScope)> = statuses
+        .iter()
+        .map(|s| (s.profile.name.clone(), s.auth_scope.clone()))
+        .collect();
+    let missing = entra_missing();
+    aws_groups(&scopes)
         .into_iter()
-        .zip(probes)
-        .map(|((id, members), probe)| {
-            let (state, message) = match probe {
-                Ok(status) => aggregate_aws(&[&status.auth]),
-                Err(e) => (ReauthAuthState::Unknown, Some(e.to_string())),
+        .map(|(id, members)| {
+            let auths: Vec<&aws_sso::AwsAuthStatus> = statuses
+                .iter()
+                .filter(|s| members.contains(&s.profile.name))
+                .map(|s| &s.auth)
+                .collect();
+            let (state, message) = match &missing {
+                Some(gap) => (ReauthAuthState::NotConfigured, Some(gap.clone())),
+                None => aggregate_aws(&auths),
             };
             aws_target(id, members.len(), state, message)
         })
