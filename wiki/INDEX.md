@@ -20,6 +20,16 @@ contributed to it.
 
 - [aws-sso-agent-state.md](aws-sso-agent-state.md) — Shared AWS state, scoped homes, profile selection, host-versus-agent availability evidence, and bounded authentication probes. Lazy admission prevents same-batch queue expiry; executable discovery is shared per refresh. Final deployed check: 31/31 authenticated, plus successful agent CLI and Node SDK default-provider authentication.
 
+- [unattended-reauth.md](unattended-reauth.md) — Re-authenticating AWS SSO,
+  the Entra CLIs, acli and sgsc backends with no human
+  (`vk/ba8f-auth-auth`). Covers server-defined canonical targets, detached
+  runs with cheap registry polling, and the shared-account refusal latch
+  with its check/attempt/latch lock. Explains why refusals must be
+  normalised from every error path, why credentials go only to Entra
+  origins, and why probes need auth-error evidence rather than exit codes.
+  Also covers the browser session and profile-lock hazards and the
+  stale-response rules for the Settings card.
+
 - [mcp-oauth-connection-identity.md](mcp-oauth-connection-identity.md) — Preserve owner-bound gateway identity across identifier changes and both OAuth completion paths.
 
 - [issue-workspace-lifecycle.md](issue-workspace-lifecycle.md) — Comment-driven activation, transactional Done reopening, queue handoff ordering and local/remote sync boundaries.

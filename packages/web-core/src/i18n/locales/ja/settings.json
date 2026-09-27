@@ -882,6 +882,38 @@
         "unsupported": "ここにはインストールできません"
       }
     },
+    "reauth": {
+      "title": "無人再認証",
+      "description": "保存済みの Entra ブラウザーセッションと 1Password を使い、人の操作なしでこのホストが再サインインする資格情報です。成功は、ベンダー自身の資格情報ストアを独立して確認した後にのみ報告されます。",
+      "loading": "資格情報を確認しています…",
+      "empty": "このホストには再認証の対象が構成されていません。",
+      "sweepEvery": "期限切れの資格情報は {{minutes}} 分ごとに自動で修復されます。",
+      "sweepOff": "自動修復はオフです。必要に応じて再認証してください。",
+      "runAll": "期限切れをすべて再認証",
+      "run": "再認証",
+      "onDemand": "オンデマンドのみ",
+      "refused": "以前に拒否されました。ここで再実行するまで、エージェントと自動スイープは再試行しません。",
+      "showSteps": "手順を表示",
+      "hideSteps": "手順を非表示",
+      "state": {
+        "authenticated": "認証済み",
+        "unauthenticated": "期限切れまたはサインアウト",
+        "unknown": "状態不明",
+        "not_configured": "未構成"
+      },
+      "outcome": {
+        "running": "実行中",
+        "succeeded": "成功",
+        "failed": "失敗",
+        "verification_failed": "完了しましたが検証に失敗しました",
+        "refused": "拒否"
+      },
+      "trigger": {
+        "manual": "設定から",
+        "agent": "エージェントによる",
+        "sweep": "自動スイープによる"
+      }
+    },
     "aws": {
       "title": "AWS",
       "description": "選択したホストで AWS SSO プロファイルを管理し、サインインします。状態確認はホストの認証のみが対象です。エージェントは同じ AWS 設定と SSO キャッシュにアクセスする必要があります。AWS_PROFILE でプロファイルを選択してください。トークンは AWS CLI が管理します。",

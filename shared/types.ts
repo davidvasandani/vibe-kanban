@@ -799,6 +799,47 @@ export type AwsProfileImportRequest = { session_name: string, region: string, ou
 
 export type AwsProfileImportResult = { created: Array<string>, updated: Array<string>, };
 
+export type ReauthKind = "aws_sso" | "cli_tool" | "sgsc";
+
+export type ReauthAuthState = "authenticated" | "unauthenticated" | "unknown" | "not_configured";
+
+export type ReauthRunOutcome = "running" | "succeeded" | "failed" | "verification_failed" | "refused";
+
+export type ReauthTrigger = "manual" | "agent" | "sweep";
+
+export type ReauthRun = { started_at: string, finished_at: string | null, outcome: ReauthRunOutcome, trigger: ReauthTrigger, 
+/**
+ * Named error or verification note, verbatim. Never holds a secret.
+ */
+message: string | null, 
+/**
+ * Redacted step log.
+ */
+transcript: Array<string>, 
+/**
+ * True in a response when the call joined a run already in progress.
+ */
+already_running: boolean, };
+
+export type ReauthTargetStatus = { id: string, kind: ReauthKind, label: string, 
+/**
+ * Whether the automatic sweep repairs this target.
+ */
+swept: boolean, auth_state: ReauthAuthState, auth_message: string | null, 
+/**
+ * Refused earlier: agents and the sweep will not retry until an
+ * operator re-runs it from Settings.
+ */
+refused: boolean, last_run: ReauthRun | null, };
+
+export type ReauthOverview = { 
+/**
+ * Sweep period, or `None` when the sweep is off.
+ */
+sweep_interval_secs: number | null, targets: Array<ReauthTargetStatus>, };
+
+export type ReauthRunReport = { id: string, run: ReauthRun, };
+
 export type CheckEditorAvailabilityQuery = { editor_type: EditorType, };
 
 export type CheckEditorAvailabilityResponse = { available: boolean, };

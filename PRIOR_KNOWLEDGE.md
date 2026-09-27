@@ -1,65 +1,74 @@
-# Prior knowledge: `vk/7e4f-auto-error-remed`
+# Prior knowledge: unattended re-authentication (`vk/ba8f-auth-auth`)
 
-This file distills the knowledge-base pages (`wiki/`) that bear on
-auto-remediating failed agent turns. It is read-only input to the spec and
-plan stages.
+I searched both knowledge bases (`wiki/` and `docs/knowledge-base/`) for Entra,
+1Password, AWS SSO, CLI login, MCP OAuth, browser and deployment topics. The
+matches below are what the spec and plan build on.
 
-## task-pipeline-block.md
+## Reuse, don't rebuild
 
-- The pipeline block (`<!-- vk:pipeline:start/end -->`) inside
-  `issues.description` is the **only** record of a pipeline selection. No
-  structured copy exists. "Enabling pipelines on an issue" therefore means
-  composing that block into the description.
-- The block has one Rust composer (MCP `compose_pipeline_block`) and one TS
-  composer (`taskPipeline.ts`), and they must stay byte-identical. The edit UI
-  round-trips a block only when it matches the composer exactly. A
-  hand-rolled third composer could produce a block the UI misparses; if the
-  UI under-recognizes a selection, recomposing drops stage lines. The auto
-  path must therefore **reuse** the existing Rust composer, not re-implement
-  it.
-- Display names aren't unique across pipeline TOML files, so select pipelines
-  by **id** (`wikillm`, `speckit`).
+- **Entra minting through the firecrawl browser already exists**
+  (`crates/services/src/services/entra_mint.rs`; there is no wiki page yet).
+  - It drives the self-hosted firecrawl `/v2/interact` API. `mint()` runs a
+    silent `prompt=none` attempt against the saved `vk-entra` browser profile,
+    then falls back to an interactive step machine (email, password, TOTP,
+    stay-signed-in, account picker). The password and TOTP come from
+    1Password **Connect**, which computes the TOTP server-side.
+  - Step detection keys on page *text*. Entra keeps both the `loginfmt` and
+    `passwd` inputs visible in the DOM, so checking for elements alone
+    re-submits the email forever.
+  - `native_browser_login` covers tools that run their own loopback OAuth. It
+    installs an `xdg-open` shim to capture the URL and runs a local headless
+    Chromium seeded with the profile's cookies.
+  - The deployment wires every setting through `VK_ENTRA_*` env vars
+    (`homelab/modules/lib/vibe-kanban-entra.nix`). They are enabled on think2
+    (`services.vibe-kanban-dev.entra`).
+- **The managed CLI catalog** (`wiki/managed-cli-tool-catalog.md`,
+  `docs/knowledge-base/cli-tool-oauth-login.md`):
+  - Login strategies are `Command` (PTY), `EntraMint`, `EntraNativeBrowser` and
+    `Unsupported`.
+  - Rules: commands stay compiled into the server; resolve the effective
+    binary the way agents do (host copy first); keep one login per tool; and a
+    zero exit is not authentication, so an independent probe must confirm it.
+  - `acli` is currently `Unsupported`.
+- **AWS SSO** (`docs/knowledge-base/aws-sso-profile-management.md`,
+  `wiki/aws-sso-agent-state.md`):
+  - VK guest-edits `~/.aws/config`; tokens stay in `~/.aws/sso/cache`.
+  - Login is session-first and always uses `--use-device-code`, because VK is
+    headless.
+  - The login lock key is the profile's `sso_session`, so one token serves
+    every profile in that session.
+  - Status probes share a process-wide budget of four concurrent probes, with
+    lazy admission. Completed status checks and successful authentication are
+    different assertions.
+  - `.aws` is shared across the cluster through NFS. A running turn that
+    predates the link may not see it.
 
-## issue-workspace-lifecycle.md
+## Constraints and gotchas to carry forward
 
-- Remote (Postgres) and local (SQLite) stores sync on a best-effort basis:
-  errors are logged, and there is no distributed transaction or durable retry
-  queue. An auto-launcher that creates a remote issue and then a local
-  workspace inherits that model. It should log partial failure rather than
-  retry blindly.
-- Completion-time code must read **current** workspace metadata, not a
-  snapshot captured earlier.
+- **Conditional Access**: Sweetgreen Entra refuses Microsoft's *own*
+  device-code flow (`AADSTS53003`) even from a compliant device
+  (`docs/knowledge-base/powershell-module-cli-tools.md`). AWS SSO's device
+  grant is AWS's, and its Entra hop is a SAML browser sign-in, which the Mac
+  skill completes routinely. Preserve Entra request/correlation IDs in
+  diagnostics when CA denies a flow.
+- **Secrets** (constitution XIII and XVII; `workspace-environment-inheritance`):
+  never put tokens, codes or authenticated URLs in argv, logs or API
+  responses. Pass secrets to child processes over stdin.
+- **MCP OAuth** (`wiki/mcp-oauth-connection-identity.md`, `mcp-oauth-connect`):
+  - The sgsc-mcp gateway connection itself is VK-managed, and it refreshes on
+    a 401/403 in `mcp_gateway`.
+  - Backend onboarding (`/_sgsc/auth/onboard/<backend>`) is a separate
+    per-user grant that VK does not model. VK has no `reauth_required`
+    concept anywhere.
+- **Deployment** (`wiki/self-hosted-deployment.md`): services exec immutable
+  releases. A merge to `main` deploys through the reconciler, so live
+  validation happens after the merge.
+- **Background loops** belong in the deployment setup
+  (`crates/local-deployment/src/lib.rs`, where `start_cleanup_tasks` and
+  `PrMonitorService::spawn` start).
 
-## workspace-creation-reliability.md
+## Knowledge-base gaps this task should fill
 
-- `create_and_start_workspace` accepts the request and then runs creation in
-  a spawned task (queue → claim → run → finish). The returned workspace is
-  the accepted record, and creation can still fail afterwards. Callers
-  (MCP `start_workspace`, and now the launcher) link the issue after the
-  accepted response, which matches the MCP flow.
-- Never retry the workspace workflow on failure. The same rule applies to
-  remediation: a failed launch is logged, not retried.
-
-## agent-process-lifecycle.md / vk-pollers.md
-
-- One turn is one `ExecutionProcess`. `Indeterminate` means the terminal
-  event was lost and the group was reaped, so it is **not** evidence of an
-  agent error. `Killed` means the user stopped the turn, and `Interrupted`
-  means a server restart stopped it.
-- `CodingAgent` is non-persistent, so every turn goes through finalization.
-  `finalize_task` is the single place where every exit path (local exit
-  monitor, skipped cleanup, worker reconciliation) sends the
-  completion/failure notification. That makes it the natural trigger point.
-
-## Precedent (git history, not wiki)
-
-- `resume_interrupted_on_startup` (#62) is the closest analogue: an opt-in
-  config flag that spawns agents without a human. Three things to copy:
-  - it is off by default, with `#[serde(default)]` on Config v8;
-  - it has a General-settings toggle with i18n in every locale;
-  - it caps itself so a crash loop cannot keep respawning agents.
-
-## Gaps
-
-- The wiki has no page on unattended or auto-spawned workspaces, or on
-  loop-guarding. This task should add one (enrich stage).
+- There is no page on the Entra/firecrawl minting architecture. After
+  shipping, record the generalized unattended re-auth design, its engines and
+  their gotchas.

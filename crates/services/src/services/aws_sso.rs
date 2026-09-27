@@ -1502,6 +1502,21 @@ pub async fn list_profile_statuses() -> Result<Vec<AwsSsoProfileStatus>, AwsSsoE
         .collect())
 }
 
+/// Every configured profile name with its auth scope, without probing. Cheap
+/// enough to resolve a re-auth target before any work starts.
+pub fn profile_scopes() -> Result<Vec<(String, AwsSsoAuthScope)>, AwsSsoError> {
+    let content = read_config(&aws_config_path())?;
+    Ok(list_profile_entries_in(&content)?
+        .into_iter()
+        .map(|(profile, _, scope)| (profile.name, scope))
+        .collect())
+}
+
+/// The charset `login_command_for_session` accepts for a session name.
+pub fn validate_session_name(name: &str) -> Result<(), AwsSsoError> {
+    validate_charset("session name", name, 128, "_.@-")
+}
+
 pub fn list_sessions() -> Result<Vec<AwsSsoSession>, AwsSsoError> {
     list_sessions_in(&read_config(&aws_config_path())?)
 }

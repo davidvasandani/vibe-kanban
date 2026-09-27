@@ -83,6 +83,10 @@ pub enum CliToolError {
     Install(String),
     #[error("sign-in failed: {0}")]
     Login(String),
+    /// A failed Entra/1Password flow, kept typed so unattended re-auth can
+    /// tell a refusal (never retried) from a flow timeout (retryable).
+    #[error("sign-in failed: {0}")]
+    Entra(#[from] entra_mint::EntraError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -223,18 +227,64 @@ pub enum CliToolAuthStrategy {
         scope: &'static str,
         probe_args: &'static [&'static str],
     },
+    /// Signed in unattended from an API token held in 1Password (see
+    /// [`crate::services::reauth::acli`]). The probe is built at runtime because
+    /// it names deployment configuration (a readable page), and a site-specific
+    /// read is the only honest proof: acli's own `auth status` is not trusted.
+    ApiToken {
+        probe: fn() -> Result<Vec<String>, String>,
+    },
     Unsupported(&'static str),
 }
 
 /// Args used to check whether a tool is authenticated, or the reason it has no
 /// such check.
-fn probe_args_of(e: &CliToolCatalogEntry) -> Result<&'static [&'static str], &'static str> {
+fn probe_args_of(e: &CliToolCatalogEntry) -> Result<Vec<String>, String> {
+    let owned = |args: &[&str]| args.iter().map(|a| (*a).to_string()).collect();
     match e.auth {
         CliToolAuthStrategy::Command { probe_args, .. }
         | CliToolAuthStrategy::EntraMint { probe_args, .. }
-        | CliToolAuthStrategy::EntraNativeBrowser { probe_args, .. } => Ok(probe_args),
-        CliToolAuthStrategy::Unsupported(reason) => Err(reason),
+        | CliToolAuthStrategy::EntraNativeBrowser { probe_args, .. } => Ok(owned(probe_args)),
+        CliToolAuthStrategy::ApiToken { probe } => probe(),
+        CliToolAuthStrategy::Unsupported(reason) => Err(reason.to_string()),
     }
+}
+
+/// Whether `id` can be signed in with no human at a terminal — the set
+/// unattended re-authentication may drive.
+pub fn unattended_login(id: CliToolId) -> bool {
+    matches!(
+        entry(id).auth,
+        CliToolAuthStrategy::EntraMint { .. }
+            | CliToolAuthStrategy::EntraNativeBrowser { .. }
+            | CliToolAuthStrategy::ApiToken { .. }
+    )
+}
+
+/// Page read that proves `acli confluence` is authorized.
+fn acli_probe_args() -> Result<Vec<String>, String> {
+    acli_probe_args_for(std::env::var("VK_ATLASSIAN_VERIFY_PAGE_ID").ok())
+}
+
+fn acli_probe_args_for(page: Option<String>) -> Result<Vec<String>, String> {
+    let page = page
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            "unattended sign-in is not configured: VK_ATLASSIAN_VERIFY_PAGE_ID is not set"
+                .to_string()
+        })?;
+    if !page.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("VK_ATLASSIAN_VERIFY_PAGE_ID must be a numeric Confluence page id".to_string());
+    }
+    Ok(vec![
+        "confluence".to_string(),
+        "page".to_string(),
+        "view".to_string(),
+        "--id".to_string(),
+        page,
+        "--json".to_string(),
+    ])
 }
 
 pub fn catalog() -> &'static [CliToolCatalogEntry] {
@@ -290,7 +340,12 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
             auth: CliToolAuthStrategy::EntraMint {
                 client_id: crate::services::entra_mint::AZ_CLIENT_ID,
                 scope: crate::services::entra_mint::AZ_SCOPE,
-                probe_args: &["account", "show", "--output", "none"],
+                // Acquire a token, not `account show`: the latter reads
+                // cached subscriptions and stays green after the refresh
+                // token dies, which would hide exactly the expiry that
+                // unattended re-auth exists to repair. `--output none` keeps
+                // the token off stdout.
+                probe_args: &["account", "get-access-token", "--output", "none"],
             },
         },
         CliToolCatalogEntry {
@@ -442,9 +497,11 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
             },
             docs_url: "https://developer.atlassian.com/cloud/acli/guides/install-acli/",
             runtime_wrapper: None,
-            auth: CliToolAuthStrategy::Unsupported(
-                "Atlassian CLI authentication is site and account specific; use the vendor setup guide",
-            ),
+            // Site and account come from deployment configuration, the token
+            // from 1Password; without them the probe reports why.
+            auth: CliToolAuthStrategy::ApiToken {
+                probe: acli_probe_args,
+            },
         },
         CliToolCatalogEntry {
             id: CliToolId::Gws,
@@ -725,6 +782,8 @@ pub enum CliToolLoginPlan {
     },
     /// Run the tool's own browser sign-in, supplying a local browser.
     EntraNativeBrowser { args: Vec<String> },
+    /// Log in from an API token held in 1Password; no browser at all.
+    ApiToken,
 }
 
 pub async fn login_plan(id: CliToolId) -> Result<CliToolLoginPlan, CliToolError> {
@@ -733,6 +792,13 @@ pub async fn login_plan(id: CliToolId) -> Result<CliToolLoginPlan, CliToolError>
         |reason: &str| CliToolError::Unsupported(e.display_name.to_string(), reason.to_string());
     match e.auth {
         CliToolAuthStrategy::Unsupported(reason) => Err(unsupported(reason)),
+        CliToolAuthStrategy::ApiToken { probe } => {
+            probe().map_err(|reason| unsupported(&reason))?;
+            effective_binary(e)
+                .await
+                .ok_or_else(|| unsupported("tool is not available"))?;
+            Ok(CliToolLoginPlan::ApiToken)
+        }
         CliToolAuthStrategy::EntraMint {
             client_id, scope, ..
         } => {
@@ -784,6 +850,21 @@ fn graph_token_path() -> PathBuf {
     tool_dir(CliToolId::GraphPowershell10).join("entra-token.json")
 }
 
+/// Rewrite an older vk-owned Graph block in the PowerShell profile to the
+/// current one (only that block; the rest of the profile is untouched).
+/// Best effort: a profile that cannot be read or written is left alone.
+pub fn migrate_graph_powershell_profile() {
+    let Some(profile) = powershell_profile_path() else {
+        return;
+    };
+    let Ok(existing) = std::fs::read_to_string(&profile) else {
+        return;
+    };
+    if let Some(updated) = entra_mint::migrate_ps_block(&existing, &graph_token_path()) {
+        let _ = std::fs::write(&profile, updated);
+    }
+}
+
 fn powershell_profile_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| {
         PathBuf::from(h)
@@ -803,9 +884,7 @@ pub async fn run_entra_login(
     let e = entry(id);
     let cfg = entra_mint::EntraConfig::from_env()
         .map_err(|err| CliToolError::Unsupported(e.display_name.to_string(), err.to_string()))?;
-    let token = entra_mint::mint(&cfg, client_id, scope, progress)
-        .await
-        .map_err(|err| CliToolError::Login(err.to_string()))?;
+    let token = entra_mint::mint(&cfg, client_id, scope, progress).await?;
 
     match id {
         CliToolId::Az => {
@@ -858,20 +937,27 @@ pub async fn run_entra_native_browser_login(
     let executable = effective_binary(e)
         .await
         .ok_or_else(|| unsupported("tool is not available".to_string()))?;
-    entra_mint::native_browser_login(&cfg, &tools, &executable, args, progress)
-        .await
-        .map_err(|err| CliToolError::Login(err.to_string()))
+    entra_mint::refresh_session(&cfg, progress).await?;
+    Ok(entra_mint::native_browser_login(&cfg, &tools, &executable, args, progress).await?)
 }
 
-async fn probe_auth(e: &CliToolCatalogEntry) -> (CliToolAuthState, Option<String>) {
+/// Probe output kept in-process (never returned or logged) so unattended
+/// re-auth can tell an expired credential from an outage; see
+/// [`status_with_probe_output`].
+type ProbeOutput = Option<String>;
+
+async fn probe_auth_with_output(
+    e: &CliToolCatalogEntry,
+) -> (CliToolAuthState, Option<String>, ProbeOutput) {
     let probe_args = match probe_args_of(e) {
         Ok(args) => args,
-        Err(reason) => return (CliToolAuthState::Unsupported, Some(reason.to_string())),
+        Err(reason) => return (CliToolAuthState::Unsupported, Some(reason), None),
     };
     let Some(executable) = effective_binary(e).await else {
         return (
             CliToolAuthState::Unknown,
             Some("Tool is not available".to_string()),
+            None,
         );
     };
     let mut command = tokio::process::Command::new(executable);
@@ -912,15 +998,28 @@ async fn probe_auth(e: &CliToolCatalogEntry) -> (CliToolAuthState, Option<String
         }
     }
     match tokio::time::timeout(AUTH_PROBE_TIMEOUT, command.kill_on_drop(true).output()).await {
-        Ok(Ok(output)) if output.status.success() => (CliToolAuthState::Authenticated, None),
-        Ok(Ok(_)) => (CliToolAuthState::Unauthenticated, None),
+        Ok(Ok(output)) if output.status.success() => (CliToolAuthState::Authenticated, None, None),
+        Ok(Ok(output)) => {
+            // Failure output only: a successful probe's stdout is never kept.
+            let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
+            text.push('\n');
+            text.push_str(&String::from_utf8_lossy(&output.stdout));
+            let mut end = text.len().min(8 * 1024);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            (CliToolAuthState::Unauthenticated, None, Some(text))
+        }
         Ok(Err(_)) => (
             CliToolAuthState::Unknown,
             Some("Authentication check failed".to_string()),
+            None,
         ),
         Err(_) => (
             CliToolAuthState::Unknown,
             Some("Authentication check timed out".to_string()),
+            None,
         ),
     }
 }
@@ -964,10 +1063,17 @@ fn detect_app_copy(e: &CliToolCatalogEntry) -> Option<AppCopy> {
 }
 
 pub async fn status(id: CliToolId) -> CliToolStatus {
+    status_with_probe_output(id).await.0
+}
+
+/// [`status`], plus the failed probe's output. The output stays inside the
+/// server: unattended re-auth reads it to tell an expired credential from a
+/// network or permission failure, which a bare exit code cannot.
+pub async fn status_with_probe_output(id: CliToolId) -> (CliToolStatus, ProbeOutput) {
     let e = entry(id);
     let reason = unsupported_reason(e).await;
-    let (auth_state, auth_message) = probe_auth(e).await;
-    CliToolStatus {
+    let (auth_state, auth_message, output) = probe_auth_with_output(e).await;
+    let status = CliToolStatus {
         id: e.id,
         binary_name: e.binary_name.to_string(),
         display_name: e.display_name.to_string(),
@@ -978,15 +1084,17 @@ pub async fn status(id: CliToolId) -> CliToolStatus {
         host: detect_host_copy(e).await,
         app: detect_app_copy(e),
         docs_url: e.docs_url.to_string(),
-        login_supported: matches!(
-            e.auth,
+        login_supported: match e.auth {
             CliToolAuthStrategy::Command { .. }
-                | CliToolAuthStrategy::EntraMint { .. }
-                | CliToolAuthStrategy::EntraNativeBrowser { .. }
-        ),
+            | CliToolAuthStrategy::EntraMint { .. }
+            | CliToolAuthStrategy::EntraNativeBrowser { .. } => true,
+            CliToolAuthStrategy::ApiToken { probe } => probe().is_ok(),
+            CliToolAuthStrategy::Unsupported(_) => false,
+        },
         auth_state,
         auth_message,
-    }
+    };
+    (status, output)
 }
 
 pub async fn status_all() -> Vec<CliToolStatus> {
@@ -1712,17 +1820,39 @@ mod tests {
             entry(CliToolId::MgcBeta).runtime_wrapper,
             Some(RuntimeWrapper::GraphCliSecretService),
         );
-        for id in [
-            CliToolId::Aws,
-            CliToolId::Op,
-            CliToolId::Acli,
-            CliToolId::Gws,
-        ] {
+        // acli signs in from a 1Password API token, verified by a page read.
+        assert!(matches!(
+            entry(CliToolId::Acli).auth,
+            CliToolAuthStrategy::ApiToken { .. }
+        ));
+        for id in [CliToolId::Aws, CliToolId::Op, CliToolId::Gws] {
             assert!(matches!(
                 entry(id).auth,
                 CliToolAuthStrategy::Unsupported(_)
             ));
         }
+    }
+
+    #[test]
+    fn az_probe_acquires_a_token_rather_than_reading_the_cache() {
+        let args = probe_args_of(entry(CliToolId::Az)).unwrap();
+        assert_eq!(args, ["account", "get-access-token", "--output", "none"]);
+    }
+
+    #[test]
+    fn acli_probe_reads_the_configured_page_and_names_missing_config() {
+        assert_eq!(
+            acli_probe_args_for(Some(" 4796448789 ".into())).unwrap(),
+            ["confluence", "page", "view", "--id", "4796448789", "--json"]
+        );
+        let missing = acli_probe_args_for(None).unwrap_err();
+        assert!(missing.contains("VK_ATLASSIAN_VERIFY_PAGE_ID"), "{missing}");
+        // Never interpolate anything but a page id into the argv.
+        assert!(acli_probe_args_for(Some("1 --site evil".into())).is_err());
+        assert!(unattended_login(CliToolId::Acli));
+        assert!(unattended_login(CliToolId::Az));
+        assert!(!unattended_login(CliToolId::Gam), "gam needs a terminal");
+        assert!(!unattended_login(CliToolId::Aws), "AWS is a scope target");
     }
 
     #[test]

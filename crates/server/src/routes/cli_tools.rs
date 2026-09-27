@@ -15,7 +15,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use services::services::{
     cli_tools::{self, CliToolId, CliToolStatus},
-    entra_mint,
+    entra_mint, reauth,
 };
 use utils::response::ApiResponse;
 
@@ -98,6 +98,9 @@ async fn login_cli_tool(
             cli_tools::CliToolLoginPlan::EntraNativeBrowser { args } => {
                 handle_entra_login(socket, id, EntraFlow::NativeBrowser { args }).await
             }
+            cli_tools::CliToolLoginPlan::ApiToken => {
+                handle_entra_login(socket, id, EntraFlow::ApiToken).await
+            }
         }
     }))
 }
@@ -115,6 +118,8 @@ enum EntraFlow {
     NativeBrowser {
         args: Vec<String>,
     },
+    /// No browser: an API token from 1Password (acli).
+    ApiToken,
 }
 
 async fn handle_entra_login(mut socket: MaybeSignedWebSocket, id: CliToolId, flow: EntraFlow) {
@@ -141,6 +146,11 @@ async fn handle_entra_login(mut socket: MaybeSignedWebSocket, id: CliToolId, flo
         EntraFlow::NativeBrowser { args } => Box::pin(cli_tools::run_entra_native_browser_login(
             id, args, &progress,
         )),
+        EntraFlow::ApiToken => Box::pin(async {
+            reauth::acli::run(&progress)
+                .await
+                .map_err(|e| cli_tools::CliToolError::Login(e.to_string()))
+        }),
     };
 
     let timeout = tokio::time::sleep(LOGIN_TIMEOUT);

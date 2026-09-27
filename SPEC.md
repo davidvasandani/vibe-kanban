@@ -1,192 +1,194 @@
-# SPEC — Auto Error Remediation
+# SPEC: Unattended re-authentication ("auto auth all the things")
 
-Task: `vk/7e4f-auto-error-remed`
+Task: `vk/ba8f-auth-auth`
 
 ## Problem
 
-When a coding-agent turn fails, the chat shows an error and nothing else
-happens. The operator has to notice it, write an issue, choose the pipelines,
-choose repositories and an agent, and start a workspace. The request is to do
-all of that automatically. The workspace should then run unattended, testing
-the fix and merging it to `main`.
+The operator keeps a macOS skill (`aws-sso-reauth`) that re-authenticates
+every CLI and gateway credential an agent needs with no human in the loop: it
+drives a throwaway Chrome through the Entra sign-in (email → password →
+authenticator TOTP, all read from 1Password), then clicks through each
+provider's approval. It has five engines:
 
-## Goals
+| Engine | What it refreshes | Mechanism on the Mac |
+| --- | --- | --- |
+| `aws` | AWS IAM Identity Center (SSO) token | `aws sso login --no-browser` device code → Chrome → Entra → *Confirm and continue* → *Allow* |
+| `az` | Azure CLI MSAL cache | Tier 1 silent `get-access-token`; Tier 2 device-code + Chrome |
+| `sgsc` | sgsc-mcp gateway per-user backend OAuth (`dp`, `sf`, …) | open `/_sgsc/auth/onboard/<backend>` → Entra → provider hop (Snowflake *ENTRA_ID_SSO* button; Salesforce through the MyApps tile) → "Connected" |
+| `snow` | Snowflake CLI externalbrowser token | `BROWSER` hook captures the SSO URL; local Chrome completes the loopback redirect |
+| `acli` | `acli confluence` | API token from 1Password piped to `acli confluence auth login --token`, verified by a real page read |
 
-1. When a chat error occurs, create an issue in a configured VK project. A chat
-   error here means a coding-agent execution process that ends `Failed`.
-2. Attach the **WikiLLM + SpecKit** pipelines to that issue with their default
-   stages. Together those defaults already cover spec → recall → plan → SpecKit
-   (constitution … implement) → Codex review → enrich knowledge → open **and
-   merge** the PR, so no stage needs hand-picking for an unattended run to
-   merge.
-3. Start a workspace linked to that issue on the configured repositories
-   (homelab + vibe-kanban for this deployment), with the configured executor
-   profile and model (Claude Code, `claude-opus-5-5`, variant `PROALIGN`).
-4. Make it safe to leave on: off by default, never remediate a remediation, no
-   duplicates for the same source, and a global rate cap.
+Vibe Kanban (VK) runs agents on a NixOS cluster (coordinator think2 plus
+workers). VK already has **part** of this:
+
+- `crates/services/src/services/entra_mint.rs` drives the self-hosted
+  firecrawl browser service over its `/v2/interact` API, using a **persistent
+  browser profile** (`vk-entra`) and 1Password **Connect** for the password and
+  TOTP. It mints `az` and Graph PowerShell tokens and supplies a local
+  Chromium for `mgc-beta`'s own loopback login. The deployment
+  (`homelab/modules/lib/vibe-kanban-entra.nix`) wires all of its settings.
+- Settings → AWS manages SSO profiles and signs them in with
+  `aws sso login --use-device-code` in a PTY, but a human must open the URL,
+  sign in to Entra, and click *Allow*.
+- `acli` is a managed CLI tool whose authentication is `Unsupported`.
+- The sgsc-mcp gateway is a settings-owned OAuth MCP. When one of its backends
+  needs onboarding, a tool returns `reauth_required` with an onboard URL that
+  only a human can finish.
+
+Every expiry therefore still stops an agent until the operator signs in by
+hand, and nothing re-authenticates proactively.
+
+## Goal
+
+VK re-authenticates **every credential it can verify** with no human
+interaction, both **on demand** (an agent or the Settings UI asks for it) and
+**automatically** (a background sweep that finds expired credentials and
+repairs them), reusing the Entra/1Password/browser machinery that already
+ships.
+
+## Adaptation decisions (Mac → VK)
+
+1. **Browser**: no throwaway local Chrome. The firecrawl browser service with
+   the persistent `vk-entra` profile is already the deployment's browser.
+   Because the profile keeps the Entra session cookie, most runs are silent
+   and spend no password or TOTP; interactive sign-in is the fallback. The
+   Little Snitch precheck has no equivalent and is dropped. A network-layer
+   failure is still reported as a named error.
+2. **1Password**: no SDK service-account token or Keychain. Use the
+   1Password Connect credentials `entra_mint` already uses. Add `op://`
+   reference resolution through Connect (vault by name, item by title, field
+   by label or id) so non-Entra secrets (the Atlassian token) can be named by
+   reference, as on the Mac.
+3. **Config isolation**: the Mac skill uses private `AWS_CONFIG_FILE` and
+   `SNOWFLAKE_HOME`. VK already owns a managed AWS config (Settings → AWS) and
+   the shared cluster AWS state, so AWS re-auth acts on the profiles/sessions
+   VK manages. It never writes profile config.
+4. **Identity constants** come from the deployment environment
+   (`VK_ENTRA_*`), not from source.
+5. **Scope of engines in VK**:
+   - `aws`: **new**. Automates the existing device-code login. VK runs
+     `aws sso login --sso-session <s> | --profile <p> --use-device-code
+     --no-browser`, scrapes the verification URL, drives it in the firecrawl
+     browser through Entra and the AWS approval pages, and succeeds only if
+     the independent profile probe then reports authenticated.
+   - `az`, `graph-powershell`, `mgc-beta`: **existing** Entra flows, now also
+     reachable through the new unattended entry points and the sweep.
+   - `acli`: **new**. Confluence API-token login from 1Password, verified by
+     a real content read (never `auth status`).
+   - `sgsc`: **new**. Drives the gateway onboard URL for named backends in the
+     firecrawl browser. On demand only: the gateway has no non-mutating
+     status probe, so a sweep could not tell expired from healthy.
+   - `snow`: **out of scope**. The Snowflake CLI is neither installed nor
+     managed by VK. Agents reach Snowflake through the sgsc `dp` backend,
+     which this task covers. `entra_mint::native_browser_login` already has
+     the shape `snow` would need if it is added to the CLI catalog later.
+
+## Functional requirements
+
+- **FR-1 Target registry.** A server-side registry lists re-auth targets with
+  a stable id (`aws-sso:<session>`, `aws-profile:<profile>`,
+  `cli-tool:<id>`, `sgsc:<backend>`), a kind, a display label, whether it is
+  swept automatically, its last run (time, outcome, message), and whether it
+  is configured. The browser/agent never supplies commands, URLs or secrets:
+  only a target id, validated server-side.
+- **FR-2 Unattended AWS SSO.** For a VK-managed SSO session or profile, run
+  the device-code login without a PTY. Capture the verification URL, drive it
+  in the firecrawl browser (Entra email/password/TOTP when needed, *Stay
+  signed in*, AWS *Confirm and continue* / *Allow access*), wait for the CLI
+  to exit, then verify with the existing profile probe. Retry up to three
+  times on an Entra flow timeout or rejected code, with a fresh device code
+  each time. One process per lock key, sharing the existing AWS login lock.
+- **FR-3 Unattended acli Confluence.** Resolve the Atlassian site, email and
+  API token (1Password references from the environment), run
+  `acli confluence auth login --site --email --token` with the token and a
+  trailing newline on stdin, then verify with a Confluence read. The token
+  never appears in argv, logs or responses.
+- **FR-4 sgsc backend onboarding.** For each requested backend, open the
+  configured onboard URL template in the firecrawl browser, complete Entra,
+  perform the provider hop (a Snowflake *ENTRA_ID_SSO* button; for
+  Salesforce, the MyApps tile and then the onboard URL again), and succeed
+  only when the URL reaches `/_sgsc/auth/callback/<backend>` or the page says
+  "Connected". Backend names are validated (`[a-z0-9_-]{1,32}`).
+- **FR-5 Shared Entra driver.** The Entra step machine in `entra_mint`
+  (email, password, TOTP, stay-signed-in, account picker) is generalized to
+  run until a caller-supplied completion predicate holds. The OAuth mint,
+  AWS, and sgsc flows all use it. Wrong-password copy aborts immediately
+  instead of retrying, to protect the account from lockout.
+- **FR-6 On-demand API.** `GET /api/reauth/targets` returns the registry with
+  status. `POST /api/reauth/run` `{target}` runs one target to completion
+  (bounded at 6 minutes) and returns the outcome and a progress transcript.
+  A request for a target that is already running joins that run
+  (`already_running: true`) and does not start a second browser flow.
+  `GET /api/reauth/runs` returns only the last runs, without probing, so a
+  UI can poll it cheaply.
+- **FR-7 Agent tool.** The VK MCP server exposes `reauthenticate` (target id,
+  optional) and `list_reauth_targets`. Agents call these when a command fails
+  with an expired-credential error, the same trigger the Mac skill uses.
+  Without a target, the tool re-authenticates every swept target that is
+  currently unauthenticated.
+- **FR-8 Automatic sweep.** Opt-in with `VK_AUTO_REAUTH_INTERVAL_SECS` (unset
+  or 0 means off; the minimum is 300). Each tick probes the swept targets
+  (AWS sessions that have unauthenticated profiles; CLI tools with Entra or
+  1Password login that report unauthenticated) and re-authenticates them one
+  at a time. A target that fails backs off exponentially (up to 6 hours)
+  before its next automatic attempt, so a broken credential cannot
+  repeatedly spend TOTP codes or lock the account. The first tick is delayed
+  after startup.
+- **FR-8a Refusal gate and escalation.** A definitive refusal marks the
+  target refused.
+  - Agent and sweep runs of a refused target return the recorded refusal
+    without starting a flow. Only a manual run from Settings clears it.
+  - A refusal, or a third consecutive automatic failure, logs one
+    `vk-reauth: operator action required` line. The homelab
+    `vibe-kanban-reauth-alert` unit pages ntfy on that line.
+- **FR-8b One profile writer.** Every firecrawl session on the persistent
+  Entra profile holds a process-wide lock, so concurrent sign-ins queue
+  instead of racing profile saves.
+- **FR-9 Settings UI.** The CLI Tools settings page shows an *Unattended
+  re-authentication* card that lists targets with their last outcome, a
+  per-target *Re-authenticate* button, and *Re-authenticate all*. It uses the
+  existing machine-aware settings client.
+- **FR-10 Not configured is explicit.** Without the Entra/Connect/browser
+  environment, or without the Atlassian or sgsc settings, the affected
+  targets report `not_configured` with the missing variable name. They never
+  fail silently.
+- **FR-11 Secret hygiene.** Passwords, TOTP codes, API tokens, device codes
+  and authenticated URLs (query strings) never appear in logs, API
+  responses, transcripts or process argv. Transcripts may name steps and URL
+  hosts and paths.
 
 ## Non-goals
 
-- Triggering on turns that *complete* but contain an `error_message` entry.
-  Finalization for a successful turn runs against the cleanup-script process,
-  not the agent turn. Failed turns cover the chat-error case the operator sees.
-  This is a possible follow-up.
-- Persisting guard state across restarts. The guards are in-memory; see Risks.
-- A new "profile" concept. The existing executor **variant** is VK's profile
-  mechanism: `CmdOverrides` can carry env such as a separate
-  `CLAUDE_CONFIG_DIR`.
+- Snowflake CLI (`snow`) support (see decision 5).
+- Replacing the interactive PTY sign-ins. They remain, unchanged, as the
+  manual path.
+- Writing AWS profile config, or creating SSO sessions and profiles.
+- Storing any credential in VK. Tokens stay in each vendor's own store.
 
-## Interpretation of ambiguous inputs (no answer received; recorded as assumptions)
+## Deployment (homelab `modules/vibe-kanban-rebuild.nix` and friends)
 
-| Request wording | Interpretation | Why |
-|---|---|---|
-| "the vk project" | Remote project **Vibe Kanban** (`e4d12693-…`, Vasandani org). It is configured by id in settings; when unset, the failing workspace's own linked project is used. | It is the only project with that name. Configuration keeps it off the hard-coded path. |
-| "proalign profile" | Executor profile variant `PROALIGN` on `CLAUDE_CODE`. If that variant is not defined in the live `profiles.json`, fall back to the executor's default variant, log a warning, and note it in the issue. | The code has no "proalign" executor variant. The ProAlign *organization* has no VK project. The variant is the profile selector in the UI. |
-| "opus 5.5" | `model_id = "claude-opus-5-5"` | This is the catalog id in `crates/executors/src/executors/claude.rs`. |
-| "homelab and VK repos" | Configured `repo_ids`. When empty, use the failing workspace's repos with their target branches. | Repo UUIDs are deployment data, not code. |
-| "error in the chat" | A `CodingAgent` execution process finalized as `Failed`. `Killed`, `Interrupted` and `Indeterminate` are excluded. | These are exactly the turns that render as a failed chat turn. User stops and restarts are not errors. |
-
-## Design
-
-### Configuration (`Config` v8, additive, `#[serde(default)]`)
-
-```rust
-pub struct AutoErrorRemediationConfig {
-    pub enabled: bool,                     // default false
-    pub project_id: Option<Uuid>,          // None → failing workspace's remote project
-    pub repo_ids: Vec<Uuid>,               // empty → failing workspace's repos
-    pub executor: BaseCodingAgent,         // default CLAUDE_CODE
-    pub variant: Option<String>,           // default Some("PROALIGN")
-    pub model_id: Option<String>,          // default Some("claude-opus-5-5")
-    pub pipeline_ids: Vec<String>,         // default ["wikillm", "speckit"]
-    pub merge_stage_ids: Vec<String>,      // default ["pr-and-merge", "merge"]
-    pub max_per_hour: u32,                 // default 3, global cap
-}
-```
-
-The field on `Config` is `auto_error_remediation`. Old config files
-deserialize with defaults. Types are regenerated into `shared/types.ts`.
-
-### Trigger (services)
-
-`ContainerService::finalize_task` already runs once for every finalized
-execution across all local and worker exit paths. It sends notifications, and
-it now also emits an `ErrorRemediationEvent` when:
-
-- `run_reason == CodingAgent` and `status == Failed`, and
-- the config is enabled (read at emit time).
-
-The event carries `workspace_id`, `session_id` and `execution_process_id`. It
-travels on a `tokio::sync::broadcast` channel exposed through a new trait
-method `error_remediation_sender()`. The trait default is `None`, and the local
-container owns the sender. If no receiver exists the send is a no-op.
-`finalize_task` must stay fast and infallible, so there is no network I/O on
-this path.
-
-### Launcher (server)
-
-A background task subscribes at startup (`startup.rs`). For each event it
-does the following:
-
-1. **Guard** (`ErrorRemediationGuard`, pure and unit-tested):
-   - Skip if the source workspace is itself a remediation workspace: its name
-     starts with `AUTO_REMEDIATION_NAME_PREFIX` (`"Auto-fix: "`), or its id is
-     in the in-memory set of launched workspaces.
-   - Skip if that source workspace was already remediated in the last 24 h
-     (dedupe).
-   - Skip if `max_per_hour` launches already happened in the trailing hour.
-2. **Collect context:** the last `error_message` entries from
-   `container.normalized_entries(exec_id)`, capped in count and length. Also
-   the workspace name, branch, executor and exit code.
-3. **Create the issue** through `RemoteClient`:
-   - Title: `Auto-fix: <workspace name> agent run failed`.
-   - Status: the project's first visible status, the same rule as MCP
-     `default_status_id`.
-   - Priority: high.
-   - Description: the error context, an HTML marker
-     `<!-- vk:auto-remediation source=<ws> exec=<exec> -->`, and the pipeline
-     block composed from the configured pipelines' default stages.
-4. **Start the workspace** by calling the existing
-   `create_and_start_workspace` handler directly (not over HTTP). It uses the
-   issue as `linked_issue`, the prompt `title + description` (as MCP
-   `start_workspace` builds it), the name `Auto-fix: …`, and an
-   `ExecutorConfig` built from the config.
-5. **Link** the workspace to the issue through the existing `link_workspace`
-   handler, as the UI and MCP do.
-6. Record the launch in the guard. Failures are logged at `warn` and never
-   retried, to avoid loops.
-
-### Shared pipeline-block composer
-
-`compose_pipeline_block`, `canonical_stage_order`, `compose_executor_line` and
-`append_pipeline_block` move out of `crates/mcp` (they were `pub(crate)`) into
-`api-types::pipeline_block`, which operates on a minimal
-`BlockPipeline { name, stages: Vec<BlockStage { id, prompt_fragment } > }`. The
-MCP and the server launcher both map into it. The existing tests move with the
-code and keep byte-identical output, so the format still mirrors
-`taskPipeline.ts`.
-
-### Frontend
-
-The General settings gain an **Auto error remediation** card, following the
-`resume_interrupted_on_startup` precedent:
-
-- An enable toggle, with a warning that it spawns agents unattended and they
-  can merge to main.
-- A project id field.
-- Repositories as a multi-select of repos.
-- An executor profile picker (the existing `ExecutorProfileSelector`).
-- A model id field.
-- A max-per-hour field.
-
-i18n keys are added for all locales, with English copy in all of them as the
-existing precedent does.
+- Coordinator/dev service environment: `VK_AUTO_REAUTH_INTERVAL_SECS`,
+  `VK_ATLASSIAN_SITE`, `VK_ATLASSIAN_EMAIL_REF`, `VK_ATLASSIAN_TOKEN_REF`,
+  `VK_SGSC_ONBOARD_URL_TEMPLATE`, exposed as options beside the existing
+  `entra` options (in `lib/vibe-kanban-entra.nix`) and set for think2.
+- No new secret material in the unit. 1Password references are not secrets,
+  and Connect credentials are already provisioned.
 
 ## Acceptance criteria
 
-1. With `enabled=false` (the default), a failed agent turn creates no issue and
-   no workspace. The event is still emitted, because `ContainerService` has no
-   config accessor, and the consumer drops it after reading the flag.
-2. With `enabled=true`, a failed `CodingAgent` turn creates exactly one issue in
-   the configured project. The issue's description contains the error context,
-   the remediation marker, and a `## Pipeline: WikiLLM + SpecKit` block. The
-   block comes from the shared composer, using each pipeline's default stages
-   plus a merge stage (`merge_stage_ids`) when no default merges. With this
-   deployment's pipelines, where `pr-and-merge` is already a default, it is
-   byte-identical to MCP `create_issue(pipeline_ids=[wikillm,speckit])`.
-3. A workspace named `Auto-fix: …` starts, linked to the issue, on the
-   configured repos, with executor `CLAUDE_CODE`, variant `PROALIGN` (or the
-   default when that is missing) and model `claude-opus-5-5`.
-4. A failure inside an `Auto-fix:` workspace never triggers another
-   remediation.
-5. A second failure in the same source workspace within 24 h, and any launch
-   beyond `max_per_hour`, is skipped with an `info` log.
-6. `Killed`, `Interrupted` and `Indeterminate` runs, and non-agent processes,
-   never trigger.
-7. Unit tests cover the guard, the trigger predicate, issue-body composition
-   and the moved composer. `cargo test`, `pnpm run check`, `pnpm run lint` and
-   `pnpm run generate-types:check` pass.
-
-## Risks
-
-- **Runaway spend or merges.** Mitigated by opt-in, the loop guard, dedupe and
-  the hourly cap. Because the state is in-memory, a restart resets the counters
-  but not the name-prefix loop guard. The worst case is `max_per_hour` launches
-  per restart.
-- **Missing `PROALIGN` variant.** This degrades to the default variant rather
-  than failing the remediation, and the issue says so.
-- **Remote not configured or logged out.** Issue creation fails and is logged;
-  there is no local-only fallback.
-
-## Deployment note
-
-The feature ships disabled. Enabling it for this deployment needs these
-settings:
-
-- project `e4d12693-c789-4238-a1f3-4ccb998c8279`
-- repos homelab `b2a286a2-1831-47e0-b4b8-b55239b49a2a` and vibe-kanban
-  `cdce12c2-a050-49b1-86c3-3b28ace8ada8`
-- a `CLAUDE_CODE` → `PROALIGN` variant defined in profiles
-
-Nothing needs to change in `homelab/modules/vibe-kanban-rebuild.nix`, because
-the settings live in the VK config.
+- [ ] `cargo test -p services reauth entra_mint cli_tools aws_sso` covers:
+      device-URL scraping; the AWS approval-page classifier; the sgsc
+      success detector; `op://` reference parsing and Connect field lookup;
+      target-id parsing and validation; sweep backoff scheduling;
+      transcript redaction (no token, code, or query string); and the
+      conflict guard.
+- [ ] `cargo test -p mcp` confirms the new tools are registered in the
+      correct modes.
+- [ ] Frontend: a component test for the card's list and run states;
+      `pnpm run check` and `pnpm run lint` pass.
+- [ ] `pnpm run generate-types:check` and `pnpm run format` are clean.
+- [ ] The homelab module evaluates (`nix eval` of think2's service
+      environment includes the new variables).
+- [ ] After deployment, `GET /api/reauth/targets` on think2 lists the AWS
+      sessions and the Entra tools with real status. A live run of at least
+      one target returns `succeeded`, verified by its independent probe.
