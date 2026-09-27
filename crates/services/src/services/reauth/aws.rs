@@ -70,8 +70,14 @@ fn scrub(output: &str) -> String {
         .join(" ")
 }
 
+/// AWS hosts the device approval can render on: the legacy SSO portal
+/// (`*.awsapps.com`), the device endpoint (`device.sso.<region>.amazonaws.com`)
+/// and the newer regional sign-in pages (`<region>.signin.aws`).
 fn is_aws_host(host: &str) -> bool {
-    host.ends_with(".amazonaws.com") || host.ends_with(".awsapps.com")
+    host.ends_with(".amazonaws.com")
+        || host.ends_with(".awsapps.com")
+        || host == "signin.aws"
+        || host.ends_with(".signin.aws")
 }
 
 /// Clicks the first visible AWS approval button, in the order AWS shows them.
@@ -383,6 +389,21 @@ mod tests {
         assert!(matches!(
             aws_page_verdict(&page(device, "your request has expired")),
             PageVerdict::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn regional_signin_hosts_are_aws_pages() {
+        assert!(matches!(
+            aws_page_verdict(&page(
+                "https://us-east-1.signin.aws/platform/login",
+                "authorization requested confirm and continue"
+            )),
+            PageVerdict::Run(_)
+        ));
+        assert!(matches!(
+            aws_page_verdict(&page("https://evil.signin.aws.example/", "allow")),
+            PageVerdict::Continue
         ));
     }
 
