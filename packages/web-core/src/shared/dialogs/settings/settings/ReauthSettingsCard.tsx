@@ -12,6 +12,12 @@ import { SettingsCard } from './SettingsComponents';
 import { useSettingsMachineClient } from './SettingsHostContext';
 
 const POLL_MS = 3000;
+/**
+ * How long to keep polling after a bulk request stopped waiting on discovery.
+ * The server keeps discovering and starts repairs on its own, so the card
+ * keeps watching for them instead of treating the error as the end.
+ */
+const DETACHED_WATCH_MS = 5 * 60 * 1000;
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -72,6 +78,7 @@ export function ReauthSettingsCard() {
   const [runError, setRunError] = useState<string | null>(null);
   const [starting, setStarting] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [watchUntil, setWatchUntil] = useState<number | null>(null);
   // Responses are only applied while their host is still selected: a late
   // answer from the previous host must never repaint this one, or its
   // buttons would act on the wrong machine's credentials.
@@ -101,15 +108,18 @@ export function ReauthSettingsCard() {
     setLoadError(null);
     setRunError(null);
     setStarting(null);
+    setWatchUntil(null);
     void refresh();
   }, [refresh]);
 
   const anyRunning = overview?.targets.some(isRunning) ?? false;
 
-  // While a run is active, poll only the run registry (no probing); once
-  // everything settles, one full refresh picks up the re-probed states.
+  // While a run is active (or a detached bulk request may still start some),
+  // poll only the run registry (no probing); once everything settles, one
+  // full refresh picks up the re-probed states.
+  const polling = anyRunning || watchUntil !== null;
   useEffect(() => {
-    if (!anyRunning || !machineClient) return;
+    if (!polling || !machineClient) return;
     const handle = setInterval(async () => {
       try {
         const runs = await machineClient.listReauthRuns();
@@ -117,13 +127,20 @@ export function ReauthSettingsCard() {
         setOverview((current) =>
           current ? mergeRuns(current, runs) : current
         );
-        if (!runs.some((r) => r.run.outcome === 'running')) void refresh();
+        const stillRunning = runs.some((r) => r.run.outcome === 'running');
+        if (stillRunning) {
+          // Runs have appeared; the running state now drives polling.
+          setWatchUntil(null);
+        } else if (watchUntil === null || Date.now() >= watchUntil) {
+          setWatchUntil(null);
+          void refresh();
+        }
       } catch (err) {
         if (clientRef.current === machineClient) setRunError(errorText(err));
       }
     }, POLL_MS);
     return () => clearInterval(handle);
-  }, [anyRunning, machineClient, refresh]);
+  }, [polling, watchUntil, machineClient, refresh]);
 
   const run = async (target?: string) => {
     const client = machineClient;
@@ -135,7 +152,11 @@ export function ReauthSettingsCard() {
       if (clientRef.current !== client) return;
       setOverview((current) => (current ? mergeRuns(current, runs) : current));
     } catch (err) {
-      if (clientRef.current === client) setRunError(errorText(err));
+      if (clientRef.current !== client) return;
+      setRunError(errorText(err));
+      // A bulk request can stop waiting while discovery carries on and
+      // starts repairs; keep watching the registry for them.
+      if (target === undefined) setWatchUntil(Date.now() + DETACHED_WATCH_MS);
     } finally {
       if (clientRef.current === client) setStarting(null);
     }

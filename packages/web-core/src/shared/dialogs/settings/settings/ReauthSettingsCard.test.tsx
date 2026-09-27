@@ -217,6 +217,36 @@ describe('ReauthSettingsCard', () => {
     );
   });
 
+  it('keeps watching after a bulk request stops waiting on discovery', async () => {
+    mocks.listReauthTargets.mockResolvedValue({
+      sweep_interval_secs: null,
+      targets: [target()],
+    } as ReauthOverview);
+    mocks.runReauth.mockRejectedValue(
+      new Error('still checking which credentials are expired')
+    );
+    await render();
+
+    await act(async () => {
+      button('settings.reauth.runAll').click();
+    });
+    await flush();
+    expect(container.textContent).toContain(
+      'still checking which credentials are expired'
+    );
+
+    // Discovery finishes server-side and starts the repair.
+    mocks.listReauthRuns.mockResolvedValue([
+      { id: 'aws-sso:sweetgreen', run: run() },
+    ]);
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+    });
+    await flush();
+    expect(mocks.listReauthRuns).toHaveBeenCalled();
+    expect(container.textContent).toContain('settings.reauth.outcome.running');
+  });
+
   it('shows failure messages verbatim, including line breaks', async () => {
     const message =
       'Entra rejected the 1Password password\ncorrelation: 5f1d-aaaa';
