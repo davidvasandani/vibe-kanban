@@ -62,6 +62,27 @@ export function mergeRuns(
   };
 }
 
+/**
+ * Apply a full refresh without losing a newer run the card already holds (a
+ * run started, or polled, while the refresh was in flight).
+ */
+export function applyRefresh(
+  current: ReauthOverview | null,
+  next: ReauthOverview
+): ReauthOverview {
+  if (!current) return next;
+  const held = new Map(current.targets.map((t) => [t.id, t.last_run]));
+  return {
+    ...next,
+    targets: next.targets.map((target) => {
+      const mine = held.get(target.id);
+      return mine && isNewerRun(target.last_run, mine)
+        ? { ...target, last_run: mine }
+        : target;
+    }),
+  };
+}
+
 function isRunning(target: ReauthTargetStatus): boolean {
   return target.last_run?.outcome === 'running';
 }
@@ -96,7 +117,7 @@ export function ReauthSettingsCard() {
     try {
       const next = await machineClient.listReauthTargets();
       if (!current()) return;
-      setOverview(next);
+      setOverview((held) => applyRefresh(held, next));
       setLoadError(null);
     } catch (err) {
       if (current()) setLoadError(errorText(err));
@@ -151,6 +172,9 @@ export function ReauthSettingsCard() {
       const runs = await client.runReauth(target);
       if (clientRef.current !== client) return;
       setOverview((current) => (current ? mergeRuns(current, runs) : current));
+      // Runs that already finished start no polling, so nothing else would
+      // pick up their re-probed state.
+      if (!runs.some((r) => r.run.outcome === 'running')) void refresh();
     } catch (err) {
       if (clientRef.current !== client) return;
       setRunError(errorText(err));

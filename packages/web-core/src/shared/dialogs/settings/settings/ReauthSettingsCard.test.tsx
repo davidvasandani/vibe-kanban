@@ -10,6 +10,7 @@ import type {
 } from 'shared/types';
 import {
   ReauthSettingsCard,
+  applyRefresh,
   isNewerRun,
   mergeRuns,
 } from './ReauthSettingsCard';
@@ -247,6 +248,26 @@ describe('ReauthSettingsCard', () => {
     expect(container.textContent).toContain('settings.reauth.outcome.running');
   });
 
+  it('refreshes when a run has already finished by the response', async () => {
+    mocks.listReauthTargets.mockResolvedValue({
+      sweep_interval_secs: null,
+      targets: [target()],
+    } as ReauthOverview);
+    mocks.runReauth.mockResolvedValue([
+      {
+        id: 'aws-sso:sweetgreen',
+        run: run({ outcome: 'succeeded', finished_at: '2026-09-26T12:00:05Z' }),
+      },
+    ]);
+    await render();
+    const before = mocks.listReauthTargets.mock.calls.length;
+    await act(async () => {
+      button('settings.reauth.run').click();
+    });
+    await flush();
+    expect(mocks.listReauthTargets.mock.calls.length).toBe(before + 1);
+  });
+
   it('shows failure messages verbatim, including line breaks', async () => {
     const message =
       'Entra rejected the 1Password password\ncorrelation: 5f1d-aaaa';
@@ -317,6 +338,29 @@ describe('ReauthSettingsCard host switching', () => {
     await flush();
     expect(container.textContent).toContain('new host az');
     expect(container.textContent).not.toContain('old host aws');
+  });
+});
+
+describe('applyRefresh', () => {
+  it('keeps a newer run the card already holds', () => {
+    const active = run({ started_at: '2026-09-26T12:10:00Z' });
+    const held = {
+      sweep_interval_secs: null,
+      targets: [target({ last_run: active })],
+    } as ReauthOverview;
+    const stale = {
+      sweep_interval_secs: null,
+      targets: [
+        target({
+          auth_state: 'authenticated',
+          last_run: run({ outcome: 'succeeded' }),
+        }),
+      ],
+    } as ReauthOverview;
+    const applied = applyRefresh(held, stale);
+    expect(applied.targets[0].last_run).toBe(active);
+    // The refreshed state still applies.
+    expect(applied.targets[0].auth_state).toBe('authenticated');
   });
 });
 
