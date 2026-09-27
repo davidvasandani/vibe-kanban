@@ -597,48 +597,79 @@ fn canonical_aws_target(
     Some(ReauthTargetId::AwsProfile(first.clone()))
 }
 
-async fn discover_aws() -> Vec<Target> {
-    let Ok(statuses) = aws_sso::list_profile_statuses().await else {
-        return Vec::new();
-    };
-    let missing = entra_missing();
-    let pairs: Vec<(String, aws_sso::AwsSsoAuthScope)> = statuses
-        .iter()
-        .map(|s| (s.profile.name.clone(), s.auth_scope.clone()))
-        .collect();
-    let mut scopes: Vec<(ReauthTargetId, String, Vec<&aws_sso::AwsAuthStatus>)> = Vec::new();
-    for status in &statuses {
-        let Some(id) = canonical_aws_target(&pairs, &status.profile.name) else {
+/// Scope targets with their member profiles, in config order.
+fn aws_groups(scopes: &[(String, aws_sso::AwsSsoAuthScope)]) -> Vec<(ReauthTargetId, Vec<String>)> {
+    let mut groups: Vec<(ReauthTargetId, Vec<String>)> = Vec::new();
+    for (profile, _) in scopes {
+        let Some(id) = canonical_aws_target(scopes, profile) else {
             continue;
         };
-        match scopes.iter_mut().find(|(i, _, _)| *i == id) {
-            Some((_, _, members)) => members.push(&status.auth),
-            None => scopes.push((id, status.auth_scope.key.clone(), vec![&status.auth])),
+        match groups.iter_mut().find(|(i, _)| *i == id) {
+            Some((_, members)) => members.push(profile.clone()),
+            None => groups.push((id, vec![profile.clone()])),
         }
     }
-    scopes
-        .into_iter()
-        .map(|(id, _, members)| {
-            let (auth_state, auth_message) = match &missing {
-                Some(gap) => (ReauthAuthState::NotConfigured, Some(gap.clone())),
-                None => aggregate_aws(&members),
-            };
-            let name = match &id {
-                ReauthTargetId::AwsSession(n) | ReauthTargetId::AwsProfile(n) => n.clone(),
-                _ => String::new(),
-            };
-            Target {
-                label: format!(
-                    "AWS SSO · {name} ({} profile{})",
+    groups
+}
+
+fn aws_target(
+    id: ReauthTargetId,
+    members: usize,
+    auth_state: ReauthAuthState,
+    auth_message: Option<String>,
+) -> Target {
+    let name = match &id {
+        ReauthTargetId::AwsSession(n) | ReauthTargetId::AwsProfile(n) => n.clone(),
+        _ => String::new(),
+    };
+    Target {
+        label: format!(
+            "AWS SSO · {name} ({members} profile{})",
+            if members == 1 { "" } else { "s" }
+        ),
+        id,
+        kind: ReauthKind::AwsSso,
+        swept: true,
+        auth_state,
+        auth_message,
+    }
+}
+
+/// One probe per scope: its profiles share one SSO token, so probing each of
+/// them (dozens, four at a time) would add time and no evidence.
+async fn discover_aws() -> Vec<Target> {
+    let Ok(scopes) = aws_sso::profile_scopes() else {
+        return Vec::new();
+    };
+    let groups = aws_groups(&scopes);
+    if let Some(gap) = entra_missing() {
+        return groups
+            .into_iter()
+            .map(|(id, members)| {
+                aws_target(
+                    id,
                     members.len(),
-                    if members.len() == 1 { "" } else { "s" }
-                ),
-                id,
-                kind: ReauthKind::AwsSso,
-                swept: true,
-                auth_state,
-                auth_message,
-            }
+                    ReauthAuthState::NotConfigured,
+                    Some(gap.clone()),
+                )
+            })
+            .collect();
+    }
+    let probes = futures::future::join_all(
+        groups
+            .iter()
+            .map(|(_, members)| aws_sso::profile_status(&members[0])),
+    )
+    .await;
+    groups
+        .into_iter()
+        .zip(probes)
+        .map(|((id, members), probe)| {
+            let (state, message) = match probe {
+                Ok(status) => aggregate_aws(&[&status.auth]),
+                Err(e) => (ReauthAuthState::Unknown, Some(e.to_string())),
+            };
+            aws_target(id, members.len(), state, message)
         })
         .collect()
 }
@@ -677,39 +708,27 @@ fn aws_targets_unprobed(message: &str) -> Vec<Target> {
     let Ok(scopes) = aws_sso::profile_scopes() else {
         return Vec::new();
     };
-    let mut ids: Vec<(ReauthTargetId, usize)> = Vec::new();
-    for (profile, _) in &scopes {
-        let Some(id) = canonical_aws_target(&scopes, profile) else {
-            continue;
-        };
-        match ids.iter_mut().find(|(i, _)| *i == id) {
-            Some((_, n)) => *n += 1,
-            None => ids.push((id, 1)),
-        }
-    }
-    ids.into_iter()
-        .map(|(id, n)| {
-            let name = match &id {
-                ReauthTargetId::AwsSession(n) | ReauthTargetId::AwsProfile(n) => n.clone(),
-                _ => String::new(),
-            };
-            Target {
-                label: format!(
-                    "AWS SSO · {name} ({n} profile{})",
-                    if n == 1 { "" } else { "s" }
-                ),
+    aws_groups(&scopes)
+        .into_iter()
+        .map(|(id, members)| {
+            aws_target(
                 id,
-                kind: ReauthKind::AwsSso,
-                swept: true,
-                auth_state: ReauthAuthState::Unknown,
-                auth_message: Some(message.to_string()),
-            }
+                members.len(),
+                ReauthAuthState::Unknown,
+                Some(message.to_string()),
+            )
         })
         .collect()
 }
 
-async fn discover() -> Vec<Target> {
+/// All targets. `listing` bounds AWS probing so an interactive list (an
+/// agent tool, the Settings card) always answers; repair paths wait for real
+/// probe results, so an expired scope is never hidden behind a timeout.
+async fn discover(listing: bool) -> Vec<Target> {
     let aws = async {
+        if !listing {
+            return discover_aws().await;
+        }
         tokio::time::timeout(AWS_DISCOVERY_BUDGET, discover_aws())
             .await
             .unwrap_or_else(|_| {
@@ -739,7 +758,7 @@ fn status_of(target: Target, states: &HashMap<ReauthTargetId, TargetState>) -> R
 
 /// Every target with its current (independently probed) state.
 pub async fn list_targets() -> ReauthOverview {
-    let targets = discover().await;
+    let targets = discover(true).await;
     let targets =
         with_registry(|states| targets.into_iter().map(|t| status_of(t, states)).collect());
     ReauthOverview {
@@ -769,7 +788,7 @@ pub fn recent_runs() -> Vec<ReauthRunReport> {
 /// Targets the sweep (or "re-authenticate everything") would repair now.
 async fn expired_swept_targets(trigger: ReauthTrigger) -> Vec<ReauthTargetId> {
     let now = Instant::now();
-    let targets = discover().await;
+    let targets = discover(false).await;
     with_registry(|states| {
         targets
             .into_iter()
