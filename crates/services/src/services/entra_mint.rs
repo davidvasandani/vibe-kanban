@@ -461,7 +461,10 @@ pub(crate) struct BrowserSession<'a> {
     cfg: &'a EntraConfig,
     http: reqwest::Client,
     id: String,
-    _profile: tokio::sync::OwnedMutexGuard<()>,
+    /// Held until the remote session is closed — by `close()` or, if the
+    /// session is dropped mid-flight (a cancelled or timed-out run), by the
+    /// background close in `Drop`.
+    profile: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 impl<'a> BrowserSession<'a> {
@@ -515,7 +518,7 @@ impl<'a> BrowserSession<'a> {
             cfg,
             http,
             id,
-            _profile: profile,
+            profile: Some(profile),
         })
     }
 
@@ -569,13 +572,35 @@ impl<'a> BrowserSession<'a> {
 
     /// Close the session. For a `saveChanges` session this is what writes the
     /// Entra cookie back to the profile, making later mints silent.
-    pub(crate) async fn close(self) {
+    pub(crate) async fn close(mut self) {
         let _ = self
             .http
             .delete(format!("{}/v2/interact/{}", self.cfg.cdp_url, self.id))
             .bearer_auth(&self.cfg.cdp_token)
             .send()
             .await;
+        self.profile.take();
+    }
+}
+
+impl Drop for BrowserSession<'_> {
+    /// A session dropped without `close()` would stay alive remotely and
+    /// could save the profile after the next writer opened it. Close it in
+    /// the background and keep the profile lock until that has happened.
+    fn drop(&mut self) {
+        let Some(guard) = self.profile.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let http = self.http.clone();
+        let url = format!("{}/v2/interact/{}", self.cfg.cdp_url, self.id);
+        let token = self.cfg.cdp_token.clone();
+        runtime.spawn(async move {
+            let _ = http.delete(url).bearer_auth(token).send().await;
+            drop(guard);
+        });
     }
 }
 
