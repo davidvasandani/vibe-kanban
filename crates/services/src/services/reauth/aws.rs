@@ -118,7 +118,15 @@ struct LoginChild {
     output: Arc<Mutex<String>>,
     exit: Arc<Mutex<Option<bool>>>,
     cancel: CancellationToken,
-    watcher: tokio::task::JoinHandle<()>,
+    watcher: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for LoginChild {
+    /// However the attempt ends (including an engine timeout dropping it),
+    /// the watcher kills and reaps the login child.
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 impl LoginChild {
@@ -182,7 +190,7 @@ impl LoginChild {
             output,
             exit,
             cancel,
-            watcher,
+            watcher: Some(watcher),
         })
     }
 
@@ -208,9 +216,11 @@ impl LoginChild {
         self.exited()
     }
 
-    async fn stop(self) {
+    async fn stop(mut self) {
         self.cancel.cancel();
-        let _ = self.watcher.await;
+        if let Some(watcher) = self.watcher.take() {
+            let _ = watcher.await;
+        }
     }
 
     fn failure(&self) -> ReauthError {

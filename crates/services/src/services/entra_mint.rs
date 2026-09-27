@@ -677,7 +677,7 @@ const REFUSALS: &[(&str, &str)] = &[
 ];
 
 /// The refusal named in `text` (page copy or an OAuth error description).
-fn refusal_in(text: &str) -> Option<&'static str> {
+pub(crate) fn refusal_in(text: &str) -> Option<&'static str> {
     let lower = text.to_lowercase();
     REFUSALS
         .iter()

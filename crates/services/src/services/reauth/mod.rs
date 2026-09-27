@@ -976,7 +976,16 @@ async fn execute(id: ReauthTargetId) {
             progress.say(&reason);
             Err(ReauthError::Entra(EntraError::Refused(reason)))
         }
-        None => run_engine(&id, &progress).await,
+        None => match tokio::time::timeout(ENGINE_TIMEOUT, run_engine(&id, &progress)).await {
+            Ok(result) => result.map_err(normalize_refusal),
+            // Dropping the engine kills its children (kill_on_drop) and
+            // releases the browser profile, so a hung step cannot hold the
+            // Entra run lock — and every later repair — forever.
+            Err(_) => Err(ReauthError::Failed(format!(
+                "the sign-in did not finish within {} minutes",
+                ENGINE_TIMEOUT.as_secs() / 60
+            ))),
+        },
     };
     if shares_entra {
         match &result {
@@ -1019,6 +1028,23 @@ async fn execute(id: ReauthTargetId) {
                 .unwrap_or_default(),
             message.as_deref().unwrap_or("unknown")
         );
+    }
+}
+
+/// Longest one run may take end to end (AWS alone may use three attempts of
+/// a few minutes each).
+const ENGINE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// A definitive refusal is a refusal whichever path reported it — a page, an
+/// OAuth redirect, the token endpoint, or a tool's own output — so the shared
+/// gate and escalation see it every time.
+fn normalize_refusal(err: ReauthError) -> ReauthError {
+    if err.is_refusal() {
+        return err;
+    }
+    match entra_mint::refusal_in(&err.to_string()) {
+        Some(reason) => ReauthError::Entra(EntraError::Refused(format!("{reason}: {err}"))),
+        None => err,
     }
 }
 
@@ -1494,6 +1520,16 @@ mod tests {
             CliToolId::GraphPowershell10,
             "WARNING: vibe-kanban: Graph auto-connect failed: No such host is known."
         ));
+    }
+
+    #[test]
+    fn refusals_are_recognised_from_any_error_path() {
+        let token_endpoint = ReauthError::Entra(EntraError::Auth(
+            "token endpoint 400: {\"error\":\"invalid_grant\",\"error_description\":\"AADSTS53003: blocked by Conditional Access\"}".into(),
+        ));
+        assert!(normalize_refusal(token_endpoint).is_refusal());
+        let plain = ReauthError::Failed("aws sso login failed: timeout".into());
+        assert!(!normalize_refusal(plain).is_refusal());
     }
 
     #[test]
