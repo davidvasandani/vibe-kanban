@@ -4,8 +4,10 @@
 //! provisioning:
 //! - mapping a [`SpecKitStage`] to its slash command
 //! - resolving a workspace's **spec-host repo** (multi-repo aware)
-//! - generating fully-literal `/speckit.*` command files (no "current git
-//!   branch" derivation anywhere — the backend bakes exact paths in)
+//! - generating task-agnostic `/speckit.*` command files that resolve the
+//!   feature dir from an untracked, git-excluded pointer file (no "current git
+//!   branch" derivation anywhere, and no per-task state in files a repo may
+//!   track)
 //! - parsing `tasks.md` into structured tasks + parallel-execution layers
 //! - toggling a task's checkbox in `tasks.md`
 //! - provisioning the `.specify/` scaffold + command files into a worktree
@@ -481,10 +483,22 @@ const TASKS_TEMPLATE: &str =
 
 /// Where the constitution lives relative to the spec-host repo root.
 pub const CONSTITUTION_REL_PATH: &str = ".specify/memory/constitution.md";
+/// Untracked per-task pointer, relative to the spec-host repo root, holding
+/// the feature dir (e.g. `specs/vk/webhook-retries`) that the task-agnostic
+/// command files resolve `<FEATURE_DIR>` from.
+pub const FEATURE_POINTER_REL_PATH: &str = ".specify/feature-dir";
 const FEATURE_OWNER_FILE: &str = ".speckit-owner";
+/// Patterns added to the repo's `info/exclude` so harness-written files never
+/// show up as untracked changes (so the Stop hook never demands a commit for
+/// them). Excludes do not affect files a repo already tracks.
+const GIT_EXCLUDE_HEADER: &str = "# Vibe Kanban SpecKit: per-task harness files, never commit";
+const GIT_EXCLUDE_PATTERNS: &[&str] = &[
+    "**/.specify/feature-dir",
+    "**/.claude/commands/speckit.*.md",
+];
 
-/// Everything [`command_file`] needs to bake fully-literal paths into a
-/// `/speckit.*` command body: paths are written relative to the **agent's
+/// Everything [`command_file`] needs to qualify paths in a `/speckit.*`
+/// command body: paths are written relative to the **agent's
 /// effective cwd** (the host repo root for single-repo workspaces, the
 /// workspace root — with every path prefixed by `host_rel` — for multi-repo
 /// ones).
@@ -543,8 +557,8 @@ fn host_scaffold_files() -> Vec<(PathBuf, String)> {
 }
 
 /// The command files as (path relative to the agent cwd, content) pairs.
-/// These are **overwritten on content mismatch**: they are generated (paths
-/// baked in), so a stale copy from an earlier branch/host must not survive.
+/// These are **overwritten on content mismatch**: a stale copy (e.g. one an
+/// older harness baked a task's path into) must not survive.
 fn command_scaffold_files(ctx: &CommandContext) -> Vec<(PathBuf, String)> {
     SpecKitStage::ALL
         .iter()
@@ -558,12 +572,18 @@ fn command_scaffold_files(ctx: &CommandContext) -> Vec<(PathBuf, String)> {
         .collect()
 }
 
-/// Generate a Claude Code slash-command file for a stage. Every artifact path
-/// is a **literal** (repo-qualified in multi-repo workspaces) — nothing is
-/// derived from the current git branch by the agent.
+/// Generate a Claude Code slash-command file for a stage.
+///
+/// The body is **task-agnostic**: it never names the feature dir, only the
+/// `<FEATURE_DIR>` placeholder the agent resolves from the untracked pointer
+/// ([`FEATURE_POINTER_REL_PATH`]). Repos commit these files, so baking a
+/// task's path in would dirty every other task's worktree and leak the last
+/// merged task's path into the base branch. In single-repo workspaces the
+/// output is byte-identical for every task and every repo. Nothing is derived
+/// from the current git branch.
 pub fn command_file(stage: SpecKitStage, ctx: &CommandContext) -> String {
     let p = ctx.prefix();
-    let key = &ctx.feature_key;
+    let dir = format!("{p}<FEATURE_DIR>");
     let body = match stage {
         SpecKitStage::Constitution => format!(
             "Create or update the project constitution at `{p}.specify/memory/constitution.md`. \
@@ -573,43 +593,57 @@ pub fn command_file(stage: SpecKitStage, ctx: &CommandContext) -> String {
         ),
         SpecKitStage::Specify => format!(
             "Write the feature specification. Read `{p}.specify/templates/spec-template.md` and \
-             `{p}.specify/memory/constitution.md`. Write the spec to `{p}specs/{key}/spec.md`. \
+             `{p}.specify/memory/constitution.md`. Write the spec to `{dir}/spec.md`. \
              Focus on WHAT and WHY (functional requirements, user stories, acceptance criteria) \
              — not the tech stack. Mark anything unclear with `[NEEDS CLARIFICATION: ...]`. The \
              feature description: $ARGUMENTS"
         ),
         SpecKitStage::Clarify => format!(
-            "Review `{p}specs/{key}/spec.md` and resolve underspecified areas. If answers are \
+            "Review `{dir}/spec.md` and resolve underspecified areas. If answers are \
              provided in $ARGUMENTS, fold them in and remove the matching `[NEEDS CLARIFICATION]` \
              markers. List any questions that remain open."
         ),
         SpecKitStage::Plan => format!(
-            "Read `{p}specs/{key}/spec.md`, the constitution at \
+            "Read `{dir}/spec.md`, the constitution at \
              `{p}.specify/memory/constitution.md`, and `{p}.specify/templates/plan-template.md`. \
-             Write the technical plan to `{p}specs/{key}/plan.md`, and, when relevant, \
+             Write the technical plan to `{dir}/plan.md`, and, when relevant, \
              `research.md`, `data-model.md`, and `contracts/` in that same directory. Ground \
              every step in real files. Confirm the approach honors the constitution."
         ),
         SpecKitStage::Tasks => format!(
-            "Read `{p}specs/{key}/plan.md` and `{p}.specify/templates/tasks-template.md`. Write \
-             `{p}specs/{key}/tasks.md`: dependency-ordered tasks with stable `T###` ids, `[P]` on \
+            "Read `{dir}/plan.md` and `{p}.specify/templates/tasks-template.md`. Write \
+             `{dir}/tasks.md`: dependency-ordered tasks with stable `T###` ids, `[P]` on \
              tasks that touch independent files (parallel-safe), and the exact file path(s) each \
              task changes."
         ),
         SpecKitStage::Analyze => format!(
-            "Cross-check `spec.md`, `plan.md`, and `tasks.md` under `{p}specs/{key}/` against \
+            "Cross-check `spec.md`, `plan.md`, and `tasks.md` under `{dir}/` against \
              the constitution at `{p}.specify/memory/constitution.md` for inconsistencies, \
              coverage gaps, and constitution violations. Report findings as a list, each tagged \
              error/warning/info and naming the artifact it concerns. Do not modify files."
         ),
         SpecKitStage::Implement => format!(
-            "Execute `{p}specs/{key}/tasks.md` in dependency order. Tasks marked `[P]` within \
+            "Execute `{dir}/tasks.md` in dependency order. Tasks marked `[P]` within \
              the same group may be done together. As you finish each task, mark its checkbox \
-             `[x]` in `{p}specs/{key}/tasks.md`. Follow the plan and the constitution at \
+             `[x]` in `{dir}/tasks.md`. Follow the plan and the constitution at \
              `{p}.specify/memory/constitution.md`."
         ),
     };
-    format!("# {cmd}\n\n{body}\n", cmd = slash_command(stage))
+    let feature_dir_note = match stage {
+        // The constitution is repo-wide: no feature dir involved.
+        SpecKitStage::Constitution => String::new(),
+        _ => format!(
+            "`<FEATURE_DIR>` is this task's feature directory: the single line in \
+             `{p}{FEATURE_POINTER_REL_PATH}` (a path relative to the directory holding the \
+             .specify folder). Read that file first and use its value verbatim; never derive the \
+             directory from the git branch. The pointer is per-task and untracked: do not commit \
+             it, and do not edit this command file to hard-code a path.\n\n"
+        ),
+    };
+    format!(
+        "# {cmd}\n\n{feature_dir_note}{body}\n",
+        cmd = slash_command(stage)
+    )
 }
 
 fn declared_spec_owner(spec: &str) -> Option<String> {
@@ -677,14 +711,25 @@ fn ensure_feature_dir_owner(host_root: &Path, ctx: &CommandContext) -> io::Resul
     write_with_parents(&owner_path, &format!("{expected}\n"))
 }
 
-/// Ensure the `.specify/` scaffold (under the spec-host repo root) and the
-/// `/speckit.*` command files (under the agent's effective cwd) exist.
+/// Ensure the `.specify/` scaffold (under the spec-host repo root), the
+/// per-task feature-dir pointer, and the `/speckit.*` command files (under the
+/// agent's effective cwd) exist.
 ///
 /// - Constitution + templates are **skip-if-exists** (operator edits survive).
-/// - Command files are generated and **overwritten on content mismatch** so
-///   baked-in paths never go stale.
+/// - The pointer is the only per-task state. It is rewritten on mismatch and
+///   git-excluded, so it never shows up in `git status`.
+/// - Command files are task-agnostic and **overwritten on content mismatch**.
+///   Every task generates the same bytes, so a repo that tracks them stays
+///   clean once its base branch carries this version.
 pub fn ensure_scaffold(host_root: &Path, agent_cwd: &Path, ctx: &CommandContext) -> io::Result<()> {
     ensure_feature_dir_owner(host_root, ctx)?;
+    ensure_git_excludes(host_root);
+    ensure_git_excludes(agent_cwd);
+    let pointer = host_root.join(FEATURE_POINTER_REL_PATH);
+    let pointer_content = format!("{}\n", feature_dir(&ctx.feature_key));
+    if !std::fs::read_to_string(&pointer).is_ok_and(|existing| existing == pointer_content) {
+        write_with_parents(&pointer, &pointer_content)?;
+    }
     for (rel, content) in host_scaffold_files() {
         let path = host_root.join(&rel);
         if path.exists() {
@@ -700,6 +745,57 @@ pub fn ensure_scaffold(host_root: &Path, agent_cwd: &Path, ctx: &CommandContext)
         write_with_parents(&path, &content)?;
     }
     Ok(())
+}
+
+/// Add [`GIT_EXCLUDE_PATTERNS`] to the `info/exclude` of the repo containing
+/// `dir`. Best-effort: a dir outside any repo (the multi-repo workspace root)
+/// is skipped, and a write failure only logs.
+fn ensure_git_excludes(dir: &Path) {
+    if !dir.exists() {
+        return;
+    }
+    let Ok(out) = git::GitCli::new().git(dir, ["rev-parse", "--git-path", "info/exclude"]) else {
+        return;
+    };
+    let rel = out.trim();
+    if rel.is_empty() {
+        return;
+    }
+    // `--git-path` is relative to `dir` in a plain checkout and absolute in a
+    // linked worktree (where it resolves into the shared common dir).
+    let exclude = dir.join(rel);
+    if let Err(e) = append_missing_excludes(&exclude) {
+        tracing::warn!(?e, path = %exclude.display(), "Failed to write SpecKit git excludes");
+    }
+}
+
+fn append_missing_excludes(exclude: &Path) -> io::Result<()> {
+    let existing = match std::fs::read_to_string(exclude) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let missing: Vec<&str> = GIT_EXCLUDE_PATTERNS
+        .iter()
+        .copied()
+        .filter(|pattern| !existing.lines().any(|line| line.trim() == *pattern))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut text = existing;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if !text.lines().any(|line| line == GIT_EXCLUDE_HEADER) {
+        text.push_str(GIT_EXCLUDE_HEADER);
+        text.push('\n');
+    }
+    for pattern in missing {
+        text.push_str(pattern);
+        text.push('\n');
+    }
+    write_with_parents(exclude, &text)
 }
 
 fn write_with_parents(path: &Path, content: &str) -> io::Result<()> {
@@ -980,10 +1076,11 @@ mod tests {
     }
 
     #[test]
-    fn command_files_use_repo_relative_literals_in_single_repo() {
+    fn command_files_resolve_feature_dir_from_pointer_in_single_repo() {
         let ctx = single_ctx();
         let specify = command_file(SpecKitStage::Specify, &ctx);
-        assert!(specify.contains("`specs/vk/feat-1/spec.md`"));
+        assert!(specify.contains("`<FEATURE_DIR>/spec.md`"));
+        assert!(specify.contains("`.specify/feature-dir`"));
         assert!(specify.contains("`.specify/memory/constitution.md`"));
         // No repo qualification, no branch derivation.
         assert!(!specify.contains("myrepo/"));
@@ -991,6 +1088,23 @@ mod tests {
             let body = command_file(stage, &ctx);
             assert!(!body.contains("current git branch"));
             assert!(!body.contains("<current"));
+            // The task's own path never lands in the (possibly tracked) file.
+            assert!(!body.contains("feat-1"));
+        }
+    }
+
+    #[test]
+    fn single_repo_command_files_are_identical_across_tasks_and_repos() {
+        let other = CommandContext {
+            host_rel: "another-repo/sub".to_string(),
+            feature_key: "vk/some-other-task".to_string(),
+            multi_repo: false,
+        };
+        for stage in SpecKitStage::ALL {
+            assert_eq!(
+                command_file(stage, &single_ctx()),
+                command_file(stage, &other)
+            );
         }
     }
 
@@ -998,16 +1112,19 @@ mod tests {
     fn command_files_are_repo_qualified_in_multi_repo() {
         let ctx = multi_ctx();
         let specify = command_file(SpecKitStage::Specify, &ctx);
-        assert!(specify.contains("`backend/specs/vk/feat-1/spec.md`"));
+        assert!(specify.contains("`backend/<FEATURE_DIR>/spec.md`"));
+        assert!(specify.contains("`backend/.specify/feature-dir`"));
         assert!(specify.contains("`backend/.specify/memory/constitution.md`"));
         let plan = command_file(SpecKitStage::Plan, &ctx);
-        assert!(plan.contains("`backend/specs/vk/feat-1/plan.md`"));
+        assert!(plan.contains("`backend/<FEATURE_DIR>/plan.md`"));
         for stage in SpecKitStage::ALL {
             let body = command_file(stage, &ctx);
             assert!(!body.contains("current git branch"));
-            // Every specs/ occurrence must be repo-qualified.
+            assert!(!body.contains("feat-1"));
+            // Every path must be repo-qualified.
             assert!(!body.contains("`specs/"));
             assert!(!body.contains("`.specify/"));
+            assert!(!body.contains("`<FEATURE_DIR>/"));
         }
     }
 
@@ -1059,6 +1176,79 @@ mod tests {
             let name = slash_command(stage).trim_start_matches('/');
             assert!(cwd.join(format!(".claude/commands/{name}.md")).exists());
         }
+        assert_eq!(
+            std::fs::read_to_string(host_root.join(FEATURE_POINTER_REL_PATH)).unwrap(),
+            "specs/vk/feat-1\n"
+        );
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    fn init_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "test@example.com"]);
+        git(dir, &["config", "user.name", "Test"]);
+        git(dir, &["config", "commit.gpgsign", "false"]);
+    }
+
+    fn ctx_for(feature_key: &str) -> CommandContext {
+        CommandContext {
+            host_rel: "repo".to_string(),
+            feature_key: feature_key.to_string(),
+            multi_repo: false,
+        }
+    }
+
+    #[test]
+    fn scaffold_leaves_untracked_repo_status_clean_for_harness_files() {
+        let d = TmpDir::new("scaffold-git-untracked");
+        let repo = d.path().join("repo");
+        init_repo(&repo);
+
+        ensure_scaffold(&repo, &repo, &ctx_for("vk/task-a")).unwrap();
+
+        let status = git(&repo, &["status", "--porcelain", "--untracked-files=all"]);
+        assert!(!status.contains(".claude/commands"), "{status}");
+        assert!(!status.contains("feature-dir"), "{status}");
+
+        // Idempotent: a second run does not duplicate the exclude patterns.
+        ensure_scaffold(&repo, &repo, &ctx_for("vk/task-a")).unwrap();
+        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        for pattern in GIT_EXCLUDE_PATTERNS {
+            assert_eq!(exclude.lines().filter(|l| l == pattern).count(), 1);
+        }
+    }
+
+    #[test]
+    fn scaffold_for_another_task_leaves_tracked_command_files_unchanged() {
+        let d = TmpDir::new("scaffold-git-tracked");
+        let repo = d.path().join("repo");
+        init_repo(&repo);
+
+        // Task A provisions and (as agents used to) commits the command files.
+        ensure_scaffold(&repo, &repo, &ctx_for("vk/task-a")).unwrap();
+        git(&repo, &["add", "-f", ".claude/commands"]);
+        git(&repo, &["commit", "-q", "-m", "commands"]);
+
+        // Task B on the same repo: its pointer differs, the tracked files do not.
+        ensure_scaffold(&repo, &repo, &ctx_for("vk/task-b")).unwrap();
+
+        let status = git(&repo, &["status", "--porcelain"]);
+        assert!(!status.contains(".claude/commands"), "{status}");
+        assert_eq!(
+            std::fs::read_to_string(repo.join(FEATURE_POINTER_REL_PATH)).unwrap(),
+            "specs/vk/task-b\n"
+        );
     }
 
     #[test]
