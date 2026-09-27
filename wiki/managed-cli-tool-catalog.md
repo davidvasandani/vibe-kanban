@@ -87,9 +87,18 @@ also launches machine-scoped managed CLI login flows with a deliberately small
 environment, so local workspace-terminal augmentation belongs in the terminal
 route after the remote-worker branch has been selected.
 
+## Unattended sign-in strategies
+
+`CliToolAuthStrategy` also has `ApiToken` (acli, with its probe built at
+runtime from deployment configuration). `unattended_login(id)` names the
+tools that [unattended re-auth](unattended-reauth.md) may drive. A tool whose
+probe cannot tell an outage from an expiry needs an `auth_failure_confirmed`
+rule there before the sweep acts on it.
+
 ## Contributed by
 
 - vk/fc47-atlassian-cli-to
 - vk/b2a2-add-vk-cli-tools
 
 - vk/c817-aws-sso-sign-in
+- vk/ba8f-auth-auth
