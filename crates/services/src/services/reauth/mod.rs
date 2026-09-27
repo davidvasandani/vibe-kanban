@@ -935,13 +935,13 @@ async fn execute(id: ReauthTargetId) {
         }
     });
     let progress = Progress::new(tx);
-    let trigger = with_registry(|states| {
+    let (trigger, requested_at) = with_registry(|states| {
         states
             .get(&id)
             .and_then(|s| s.last_run.as_ref())
-            .map(|r| r.trigger)
+            .map(|r| (r.trigger, r.started_at))
     })
-    .unwrap_or(ReauthTrigger::Manual);
+    .unwrap_or((ReauthTrigger::Manual, Utc::now()));
     let shares_entra = uses_entra(&id);
     // Check, attempt and latch as one step across every Entra-backed run:
     // otherwise two concurrent targets both pass the check, and the second
@@ -952,7 +952,7 @@ async fn execute(id: ReauthTargetId) {
         None
     };
     let latched = shares_entra
-        .then(|| entra_gate(trigger, entra_refusal().as_deref()))
+        .then(|| entra_gate(trigger, entra_refusal().as_ref(), requested_at))
         .flatten();
     let gated = latched.is_some();
     let result = match latched {
@@ -1020,13 +1020,20 @@ fn entra_run_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(Default::default)
 }
 
-/// The last definitive Entra refusal, shared by every Entra-backed target.
-fn entra_refusal_cell() -> &'static Mutex<Option<String>> {
-    static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+/// The last definitive Entra refusal (with when it was recorded), shared by
+/// every Entra-backed target.
+#[derive(Clone)]
+struct EntraRefusal {
+    reason: String,
+    at: DateTime<Utc>,
+}
+
+fn entra_refusal_cell() -> &'static Mutex<Option<EntraRefusal>> {
+    static CELL: OnceLock<Mutex<Option<EntraRefusal>>> = OnceLock::new();
     CELL.get_or_init(Default::default)
 }
 
-fn entra_refusal() -> Option<String> {
+fn entra_refusal() -> Option<EntraRefusal> {
     entra_refusal_cell()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1036,19 +1043,31 @@ fn entra_refusal() -> Option<String> {
 fn set_entra_refusal(reason: Option<String>) {
     *entra_refusal_cell()
         .lock()
-        .unwrap_or_else(|e| e.into_inner()) = reason;
+        .unwrap_or_else(|e| e.into_inner()) = reason.map(|reason| EntraRefusal {
+        reason,
+        at: Utc::now(),
+    });
 }
 
 /// Whether a run must settle without signing in because the shared Entra
 /// account was refused. A refusal is about the account, not the target: one
 /// stale password must not be resubmitted once per queued target (that is
-/// the lockout). Only an operator run from Settings tries again.
-fn entra_gate(trigger: ReauthTrigger, refusal: Option<&str>) -> Option<String> {
-    let reason = refusal?;
-    (trigger != ReauthTrigger::Manual).then(|| {
+/// the lockout). An operator run from Settings may retry a refusal recorded
+/// *before* it was requested — that is the reset — but a refusal hit after
+/// it was queued (by an earlier target in the same "re-authenticate all")
+/// stops it too.
+fn entra_gate(
+    trigger: ReauthTrigger,
+    refusal: Option<&EntraRefusal>,
+    requested_at: DateTime<Utc>,
+) -> Option<String> {
+    let refusal = refusal?;
+    let operator_reset = trigger == ReauthTrigger::Manual && refusal.at < requested_at;
+    (!operator_reset).then(|| {
         format!(
-            "not attempted: the shared Entra sign-in was refused ({reason}). \
-             Fix the credential, then re-run a target from Settings."
+            "not attempted: the shared Entra sign-in was refused ({}). \
+             Fix the credential, then re-run a target from Settings.",
+            refusal.reason
         )
     })
 }
@@ -1377,12 +1396,25 @@ mod tests {
     #[test]
     fn a_shared_entra_refusal_gates_every_non_manual_attempt() {
         let reason = "Entra rejected the 1Password password";
+        let t = Utc::now();
+        let earlier = EntraRefusal {
+            reason: reason.into(),
+            at: t - chrono::Duration::minutes(5),
+        };
         for trigger in [ReauthTrigger::Agent, ReauthTrigger::Sweep] {
-            let gated = entra_gate(trigger, Some(reason)).expect("must be gated");
+            let gated = entra_gate(trigger, Some(&earlier), t).expect("must be gated");
             assert!(gated.contains(reason) && gated.starts_with("not attempted"));
         }
-        assert_eq!(entra_gate(ReauthTrigger::Manual, Some(reason)), None);
-        assert_eq!(entra_gate(ReauthTrigger::Sweep, None), None);
+        // An operator run requested after the refusal is the reset…
+        assert_eq!(entra_gate(ReauthTrigger::Manual, Some(&earlier), t), None);
+        // …but a refusal hit after it was queued (an earlier target in the
+        // same batch) stops it, or one click could lock the account.
+        let during_batch = EntraRefusal {
+            reason: reason.into(),
+            at: t + chrono::Duration::seconds(30),
+        };
+        assert!(entra_gate(ReauthTrigger::Manual, Some(&during_batch), t).is_some());
+        assert_eq!(entra_gate(ReauthTrigger::Sweep, None, t), None);
         assert!(uses_entra(&ReauthTargetId::AwsSession("sg".into())));
         assert!(uses_entra(&ReauthTargetId::Sgsc("dp".into())));
         assert!(uses_entra(&ReauthTargetId::CliTool(CliToolId::Az)));

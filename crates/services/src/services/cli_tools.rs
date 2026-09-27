@@ -989,7 +989,11 @@ async fn probe_auth_with_output(
             let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
             text.push('\n');
             text.push_str(&String::from_utf8_lossy(&output.stdout));
-            text.truncate(8 * 1024);
+            let mut end = text.len().min(8 * 1024);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
             (CliToolAuthState::Unauthenticated, None, Some(text))
         }
         Ok(Err(_)) => (
