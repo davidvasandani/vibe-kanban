@@ -498,6 +498,10 @@ async fn discover_cli_tools() -> Vec<Target> {
         .into_iter()
         .filter(|id| cli_tools::unattended_login(*id))
         .collect();
+    // Profiles written before refresh failures were made visible would make
+    // an outage look like "never signed in"; bring the vk block up to date
+    // before trusting an empty Graph probe.
+    cli_tools::migrate_graph_powershell_profile();
     let statuses = futures::future::join_all(
         ids.iter()
             .map(|id| cli_tools::status_with_probe_output(*id)),
@@ -1159,6 +1163,9 @@ fn aws_members(id: &ReauthTargetId) -> Result<Vec<String>, ReauthError> {
     Ok(members)
 }
 
+/// Member profiles tried when verifying an AWS scope.
+const VERIFY_PROFILES: usize = 5;
+
 /// The independent check. Command exit is never proof of authentication.
 async fn verify(id: &ReauthTargetId) -> Result<(), String> {
     match id {
@@ -1183,18 +1190,22 @@ async fn verify(id: &ReauthTargetId) -> Result<(), String> {
             if members.is_empty() {
                 return Err("no AWS profiles use this sign-in scope".to_string());
             }
-            // One probe proves the shared token; probing every profile would
-            // fan out dozens of STS calls for no extra evidence.
-            let status = aws_sso::profile_status(&members[0])
-                .await
-                .map_err(|e| e.to_string())?;
-            match status.auth {
-                aws_sso::AwsAuthStatus::Authenticated { .. } => Ok(()),
-                other => Err(format!(
-                    "the sign-in finished but profile '{}' still reports {other:?}",
-                    members[0]
-                )),
+            // Any member authenticating proves the freshly written shared
+            // token (the CLI already exited 0 having stored it, so cached
+            // role credentials cannot mask a failed login here). Trying a few
+            // keeps one profile with a removed role assignment from failing
+            // a repair that worked.
+            let mut last = String::new();
+            for name in members.iter().take(VERIFY_PROFILES) {
+                match aws_sso::profile_status(name).await.map(|s| s.auth) {
+                    Ok(aws_sso::AwsAuthStatus::Authenticated { .. }) => return Ok(()),
+                    Ok(other) => last = format!("profile '{name}' reports {other:?}"),
+                    Err(e) => last = format!("profile '{name}': {e}"),
+                }
             }
+            Err(format!(
+                "the sign-in finished but no profile verified ({last})"
+            ))
         }
         // The gateway's callback page is the only authority; the engine
         // already required it.

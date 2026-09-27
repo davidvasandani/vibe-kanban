@@ -1677,6 +1677,18 @@ pub async fn apply_graph_powershell(
     Ok(())
 }
 
+/// The current block when `existing` holds an older vk block that hid
+/// refresh failures (`Write-Verbose`); `None` when there is nothing to do.
+pub fn migrate_ps_block(existing: &str, token_path: &std::path::Path) -> Option<String> {
+    let start = existing.find(PS_BLOCK_BEGIN)?;
+    let end = existing.find(PS_BLOCK_END)?;
+    let old = "Write-Verbose \"vibe-kanban: Graph auto-connect failed";
+    if end <= start || !existing[start..end].contains(old) {
+        return None;
+    }
+    Some(replace_ps_block(existing, &ps_auth_block(token_path)))
+}
+
 /// Swap vibe-kanban's block into a profile, leaving everything else untouched.
 fn replace_ps_block(existing: &str, block: &str) -> String {
     let stripped = match (existing.find(PS_BLOCK_BEGIN), existing.find(PS_BLOCK_END)) {
@@ -1771,6 +1783,22 @@ mod tests {
             once, twice,
             "rewriting an unchanged block should be a no-op"
         );
+    }
+
+    #[test]
+    fn old_silent_ps_blocks_are_migrated_and_current_ones_left_alone() {
+        let token = std::path::Path::new("/t/tok.json");
+        let current = replace_ps_block("# mine\n", &ps_auth_block(token));
+        assert_eq!(migrate_ps_block(&current, token), None);
+        let old = current.replace(
+            "Write-Warning \"vibe-kanban: Graph auto-connect failed",
+            "Write-Verbose \"vibe-kanban: Graph auto-connect failed",
+        );
+        let migrated = migrate_ps_block(&old, token).expect("old block migrates");
+        assert!(migrated.contains("Write-Warning"));
+        assert!(!migrated.contains("Write-Verbose \"vibe-kanban: Graph auto-connect failed"));
+        assert!(migrated.contains("# mine"));
+        assert_eq!(migrate_ps_block("no vk block here", token), None);
     }
 
     #[test]

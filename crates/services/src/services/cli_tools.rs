@@ -850,6 +850,21 @@ fn graph_token_path() -> PathBuf {
     tool_dir(CliToolId::GraphPowershell10).join("entra-token.json")
 }
 
+/// Rewrite an older vk-owned Graph block in the PowerShell profile to the
+/// current one (only that block; the rest of the profile is untouched).
+/// Best effort: a profile that cannot be read or written is left alone.
+pub fn migrate_graph_powershell_profile() {
+    let Some(profile) = powershell_profile_path() else {
+        return;
+    };
+    let Ok(existing) = std::fs::read_to_string(&profile) else {
+        return;
+    };
+    if let Some(updated) = entra_mint::migrate_ps_block(&existing, &graph_token_path()) {
+        let _ = std::fs::write(&profile, updated);
+    }
+}
+
 fn powershell_profile_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| {
         PathBuf::from(h)
