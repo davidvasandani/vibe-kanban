@@ -140,6 +140,16 @@ non-secret. `vibe-kanban-reauth-alert` follows the journal for the pinned
 `vk-reauth: operator action required` line and pages ntfy. Nothing
 `Requires=` it.
 
+## Live verification
+
+On think2 (2026-09-27), `aws-sso:ai-foundry` was really expired and was
+repaired unattended in one attempt. The flow went from the AWS device page
+to the Entra account picker, then the password and TOTP from 1Password
+Connect, then the AWS approval, and the STS probe confirmed it.
+`cli-tool:graph-powershell-1.0` then repaired silently from the refreshed
+profile session, with no factors spent. Homelab principle 127 (drafted as
+123) is the constitutional rule behind the lockout safety.
+
 ## Review note
 
 It took 23 independent Codex review passes to converge. Nearly every
