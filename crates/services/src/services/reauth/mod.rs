@@ -475,9 +475,11 @@ fn auth_failure_confirmed(id: CliToolId, output: &str) -> bool {
             "token has expired",
             "tokencreatedwithoutdatedpolicies",
         ]),
-        // The probe prints nothing and exits 1 exactly when there is no
-        // Graph context; any output means pwsh itself failed.
-        CliToolId::GraphPowershell10 => text.trim().is_empty(),
+        // The probe prints nothing and exits 1 when there is no Graph
+        // context at all. The profile block warns when its token refresh
+        // fails: a rejected refresh token (invalid_grant / AADSTS) is an
+        // expiry, anything else (an unreachable endpoint) is not.
+        CliToolId::GraphPowershell10 => text.trim().is_empty() || any(&["invalid_grant", "aadsts"]),
         CliToolId::MgcBeta => any(&[
             "unauthorized",
             "401",
@@ -1462,6 +1464,14 @@ mod tests {
         assert!(!auth_failure_confirmed(
             CliToolId::GraphPowershell10,
             "pwsh: module import failed"
+        ));
+        assert!(auth_failure_confirmed(
+            CliToolId::GraphPowershell10,
+            "WARNING: vibe-kanban: Graph auto-connect failed: {\"error\":\"invalid_grant\"}"
+        ));
+        assert!(!auth_failure_confirmed(
+            CliToolId::GraphPowershell10,
+            "WARNING: vibe-kanban: Graph auto-connect failed: No such host is known."
         ));
     }
 

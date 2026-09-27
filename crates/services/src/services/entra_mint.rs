@@ -1719,7 +1719,10 @@ if (Test-Path $VkGraphTokenFile) {{
     }}
     Connect-MgGraph -AccessToken ($vk.access_token | ConvertTo-SecureString -AsPlainText -Force) -NoWelcome
   }} catch {{
-    Write-Verbose "vibe-kanban: Graph auto-connect failed: $_"
+    # A warning, not Write-Verbose: a silent failure is indistinguishable
+    # from "never signed in", and unattended re-auth must not treat a
+    # token-endpoint outage as an expired credential.
+    Write-Warning "vibe-kanban: Graph auto-connect failed: $_"
   }}
 }}
 {PS_BLOCK_END}"#
