@@ -422,6 +422,24 @@ pub fn redact_url(url: &str) -> String {
 // Browser service session
 // ---------------------------------------------------------------------------
 
+/// A page-script failure, without the browser service's response body: that
+/// body can carry Playwright call logs, which echo the value passed to
+/// `fill` — the password or one-time code. Only a coarse, fixed-vocabulary
+/// cause survives, so the message is safe to store, return and log.
+fn script_failure_message(response: &serde_json::Value) -> String {
+    let raw = response.to_string().to_lowercase();
+    let cause = if raw.contains("timeout") || raw.contains("timed out") {
+        "timed out"
+    } else if raw.contains("target closed") || raw.contains("has been closed") {
+        "the page closed"
+    } else if raw.contains("navigat") || raw.contains("context was destroyed") {
+        "the page navigated away"
+    } else {
+        "failed"
+    };
+    format!("a browser page script {cause} (details withheld: they can echo entered values)")
+}
+
 /// How long a sign-in waits for another one to release the shared profile.
 const PROFILE_WAIT: Duration = Duration::from_secs(6 * 60);
 
@@ -535,7 +553,7 @@ impl<'a> BrowserSession<'a> {
             .await
             .map_err(|e| EntraError::Browser(e.to_string()))?;
         if v.get("ok").and_then(|o| o.as_bool()) != Some(true) {
-            return Err(EntraError::Browser(format!("execute failed: {v}")));
+            return Err(EntraError::Browser(script_failure_message(&v)));
         }
         Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null))
     }
@@ -1211,6 +1229,25 @@ impl LocalBrowserTools {
     }
 }
 
+/// Make sure the shared profile holds a live Entra session before its
+/// cookies are exported. A local-browser sign-in can only click through an
+/// existing session (it never enters a password or code), so without this an
+/// expired profile would stall it on the password screen. Minting a
+/// throwaway Graph `User.Read` token goes through the credential-capable
+/// driver: silent when the session is live, interactive only when Entra asks.
+/// The token itself is dropped.
+pub async fn refresh_session(cfg: &EntraConfig, progress: &Progress) -> Result<(), EntraError> {
+    progress.say("Checking the shared Entra session…");
+    mint(
+        cfg,
+        GRAPH_CLIENT_ID,
+        "https://graph.microsoft.com/User.Read",
+        progress,
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Export the Entra cookies held by the shared browser profile.
 ///
 /// This is what lets the local browser skip the sign-in entirely: it inherits
@@ -1831,6 +1868,20 @@ mod tests {
             Some("the Entra account is locked")
         );
         assert_eq!(refusal_in("interaction_required"), None);
+    }
+
+    #[test]
+    fn script_failures_never_echo_filled_values() {
+        let response = serde_json::json!({
+            "ok": false,
+            "error": "page.fill: Timeout 30000ms exceeded.\nCall log:\n  - fill(\"hunter2-secret\")",
+        });
+        let message = script_failure_message(&response);
+        assert!(!message.contains("hunter2"), "{message}");
+        assert!(message.contains("timed out"), "{message}");
+        let other =
+            script_failure_message(&serde_json::json!({ "ok": false, "error": "boom 123456" }));
+        assert!(!other.contains("123456"));
     }
 
     #[test]

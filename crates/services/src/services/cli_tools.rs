@@ -922,6 +922,7 @@ pub async fn run_entra_native_browser_login(
     let executable = effective_binary(e)
         .await
         .ok_or_else(|| unsupported("tool is not available".to_string()))?;
+    entra_mint::refresh_session(&cfg, progress).await?;
     Ok(entra_mint::native_browser_login(&cfg, &tools, &executable, args, progress).await?)
 }
 
