@@ -256,8 +256,9 @@ contributed to it.
   channel. Subscribe before boot resumes agents. Reserve guard slots before
   I/O. The durable `Auto-fix: ` recursion guard. Fail closed on missing
   pipelines. Deployed pipelines differ from bundled ones, so a merge stage is
-  guaranteed explicitly. `updateDraft`'s lodash merge cannot shrink arrays
-  (`vk/7e4f-auto-error-remed`).
+  guaranteed explicitly. `updateDraft`'s lodash merge cannot shrink arrays.
+  Active similar issues are reused through a one-snapshot, fail-closed lookup
+  with every id form normalized to one placeholder (`vk/7e4f-auto-error-remed`).
 - [coordinator-nfs-load.md](coordinator-nfs-load.md) — Diagnosing coordinator
   load from NFS waits (io PSI and `procs_blocked` miss it, so count D-state
   threads). Root cause was per-client summaries git sweeps. Bulk worktree scans

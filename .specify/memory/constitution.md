@@ -614,7 +614,10 @@ most once per dedupe window, and all launches share a global per-hour cap. Only
 genuine failures trigger it; user stops, restarts and indeterminate exits never
 do. The finalization hot path only emits an event; network I/O happens in a
 background consumer. A failed launch is logged and not retried, and every guard
-fails closed to not spawning. Project selection obeys the diagnostic-issue
+fails closed to not spawning. Before filing, it reuses an active item already
+tracking the same failure evidence (a normalized fingerprint or near-identical
+text; no evidence never matches) by recording the occurrence there, and a
+lookup that cannot answer spawns nothing. Project selection obeys the diagnostic-issue
 constraint below: configured, or the source workspace's own project, else skip.
 
 ## Constraints
@@ -638,7 +641,8 @@ constraint below: configured, or the source workspace's own project, else skip.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.38.0 (adds XLI, making self-spawned agent work opt-in, marked
+**Version**: 0.38.1 (refines XLI to reuse active items with matching failure
+evidence before filing new work; 0.38.0 added XLI, making self-spawned agent work opt-in, marked
 against recursion, deduped per source, globally rate-capped, and triggered only
 by genuine failures; 0.37.0 extended IX so Vibe Kanban's own worker control and
 transport metadata never enters the agent's output stream, where it would be

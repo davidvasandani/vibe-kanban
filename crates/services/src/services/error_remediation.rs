@@ -16,13 +16,15 @@
 //!   so a launch that fails half-way still counts and is never retried.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    sync::Mutex,
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    sync::{LazyLock, Mutex},
     time::{Duration, Instant},
 };
 
+use api_types::Issue;
 use db::models::execution_process::{ExecutionProcessRunReason, ExecutionProcessStatus};
 use executors::logs::{NormalizedEntry, NormalizedEntryType};
+use regex::Regex;
 use uuid::Uuid;
 
 use crate::services::pipelines::Pipeline;
@@ -36,6 +38,32 @@ const RATE_WINDOW: Duration = Duration::from_secs(60 * 60);
 const MAX_ERROR_MESSAGES: usize = 5;
 const MAX_ERROR_CHARS: usize = 2000;
 const MAX_NAME_CHARS: usize = 120;
+/// Text searched for (and parsed) to find earlier remediation issues.
+pub const REMEDIATION_MARKER_PREFIX: &str = "<!-- vk:auto-remediation ";
+/// Normalized word-set Jaccard similarity at or above which two error texts
+/// are treated as the same failure (see `find_similar_issue`).
+pub const SIMILARITY_THRESHOLD: f64 = 0.8;
+const ERROR_SECTION_HEADING: &str = "### Error messages";
+
+static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b").unwrap()
+});
+// Applied in order after lowercasing. Every identifier form — UUIDs, `0x`
+// literals, decimal-only words of any length, and hex words of 8+ chars
+// (hashes, short SHAs, even all-letter ones like `deadbeef` — almost no
+// English word is 8+ letters of a–f) — becomes the same `<id>`, so one failure
+// reported with different kinds of ids still matches. Remaining digit runs
+// inside words become `<n>`.
+static PREFIXED_HEX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b0x[0-9a-f]+\b").unwrap());
+static DECIMAL_WORD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[0-9]+\b").unwrap());
+static HEX_WORD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[0-9a-f]{8,}\b").unwrap());
+static DIGITS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[0-9]+").unwrap());
+// Two steps on purpose: an optional capture group after a lazy prefix lets
+// the regex succeed without ever capturing the fingerprint.
+static MARKER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<!-- vk:auto-remediation ([^>]*?)-->").unwrap());
+static FINGERPRINT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bfingerprint=([0-9a-f]{16})\b").unwrap());
 
 /// Emitted by `finalize_task` for a failed coding-agent turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,8 +222,171 @@ pub struct IssueDraft {
     pub description: String,
 }
 
-pub fn remediation_marker(source_workspace_id: Uuid, execution_process_id: Uuid) -> String {
-    format!("<!-- vk:auto-remediation source={source_workspace_id} exec={execution_process_id} -->")
+impl RemediationContext {
+    /// Fingerprint of this failure's error messages; `None` when none were
+    /// captured (absent evidence never matches another failure).
+    pub fn fingerprint(&self) -> Option<String> {
+        error_fingerprint(&self.error_messages)
+    }
+}
+
+pub fn remediation_marker(
+    source_workspace_id: Uuid,
+    execution_process_id: Uuid,
+    fingerprint: Option<&str>,
+) -> String {
+    let fingerprint = fingerprint
+        .map(|fp| format!(" fingerprint={fp}"))
+        .unwrap_or_default();
+    format!(
+        "{REMEDIATION_MARKER_PREFIX}source={source_workspace_id} exec={execution_process_id}{fingerprint} -->"
+    )
+}
+
+/// Lowercase, replace UUIDs / digit-bearing hex words / remaining digit runs
+/// with placeholders, and collapse whitespace — so errors differing only in
+/// ids, timestamps, ports or line numbers normalize identically.
+pub fn normalize_error_text(text: &str) -> String {
+    let lower = text.to_lowercase();
+    let text = UUID_RE.replace_all(&lower, "<id>");
+    let text = PREFIXED_HEX_RE.replace_all(&text, "<id>");
+    let text = DECIMAL_WORD_RE.replace_all(&text, "<id>");
+    let text = HEX_WORD_RE.replace_all(&text, "<id>");
+    let text = DIGITS_RE.replace_all(&text, "<n>");
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A stable 16-hex-char fingerprint (FNV-1a 64) of the normalized messages,
+/// or `None` when there are no non-empty messages.
+pub fn error_fingerprint(messages: &[String]) -> Option<String> {
+    let normalized = messages
+        .iter()
+        .map(|m| normalize_error_text(m))
+        .filter(|m| !m.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in normalized.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Some(format!("{hash:016x}"))
+}
+
+fn word_set(text: &str) -> BTreeSet<String> {
+    normalize_error_text(text)
+        .split(|c: char| !(c.is_alphanumeric() || c == '<' || c == '>' || c == '_'))
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Jaccard similarity of the normalized word sets, in `[0, 1]`. Two empty
+/// texts score 0: absent evidence is never similarity.
+pub fn error_similarity(a: &str, b: &str) -> f64 {
+    let (a, b) = (word_set(a), word_set(b));
+    let union = a.union(&b).count();
+    if union == 0 {
+        return 0.0;
+    }
+    a.intersection(&b).count() as f64 / union as f64
+}
+
+/// The fingerprint recorded in a description's remediation marker. The outer
+/// `Option` is whether a marker exists at all; the inner one is its
+/// fingerprint (absent on issues filed before fingerprints existed).
+pub fn parse_marker(description: &str) -> Option<Option<String>> {
+    let attributes = MARKER_RE.captures(description)?.get(1)?.as_str();
+    Some(
+        FINGERPRINT_RE
+            .captures(attributes)
+            .map(|caps| caps[1].to_string()),
+    )
+}
+
+/// The error text recorded in a remediation issue body: the fenced block
+/// under `### Error messages`. `None` when absent or when no error was
+/// captured.
+pub fn issue_error_text(description: &str) -> Option<String> {
+    let after =
+        &description[description.find(ERROR_SECTION_HEADING)? + ERROR_SECTION_HEADING.len()..];
+    let mut lines = after.lines().skip_while(|line| line.trim().is_empty());
+    let opening = lines.next()?.trim_end();
+    let fence_len = opening.chars().take_while(|c| *c == '`').count();
+    if fence_len < 3 {
+        return None;
+    }
+    let fence = &opening[..fence_len];
+    let body: Vec<&str> = lines.take_while(|line| line.trim_end() != fence).collect();
+    let text = body.join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Mirrors the remote's active-issue rule
+/// (`lower(name) NOT IN ('done', 'cancelled', 'canceled')`).
+pub fn is_active_status_name(name: &str) -> bool {
+    !matches!(
+        name.trim().to_lowercase().as_str(),
+        "done" | "cancelled" | "canceled"
+    )
+}
+
+/// The first remediation issue (by the caller's ordering) whose recorded
+/// errors match `messages`: equal fingerprints, or normalized word-set
+/// similarity of at least [`SIMILARITY_THRESHOLD`]. Issues without the
+/// remediation marker never match, and neither does a failure with no
+/// captured error message.
+pub fn find_similar_issue<'a>(issues: &'a [Issue], messages: &[String]) -> Option<&'a Issue> {
+    let fingerprint = error_fingerprint(messages)?;
+    let joined = messages.join("\n\n");
+    issues.iter().find(|issue| {
+        let Some(description) = issue.description.as_deref() else {
+            return false;
+        };
+        let Some(recorded) = parse_marker(description) else {
+            return false;
+        };
+        if recorded.as_deref() == Some(fingerprint.as_str()) {
+            return true;
+        }
+        issue_error_text(description)
+            .is_some_and(|text| error_similarity(&text, &joined) >= SIMILARITY_THRESHOLD)
+    })
+}
+
+/// Comment recording another occurrence on an existing remediation issue.
+pub fn compose_recurrence_comment(ctx: &RemediationContext) -> String {
+    format!(
+        "Another failed agent run hit a similar error, so it was added here instead of opening \
+a new remediation issue.\n\n\
+- Workspace: **{name}** (`{ws}`, branch `{branch}`)\n\
+- Failed execution: `{exec}` (executor `{executor}`, exit code `{exit_code}`)\n\n{errors}",
+        name = ctx.source_name.trim(),
+        ws = ctx.source_workspace_id,
+        branch = ctx.branch,
+        exec = ctx.execution_process_id,
+        executor = ctx.executor,
+        exit_code = exit_code_label(ctx.exit_code),
+        errors = error_block(&ctx.error_messages),
+    )
+}
+
+fn exit_code_label(exit_code: Option<i64>) -> String {
+    exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn error_block(messages: &[String]) -> String {
+    if messages.is_empty() {
+        return "_No error message was captured in the chat._\n".to_string();
+    }
+    let joined = messages.join("\n\n");
+    let fence = code_fence_for(&joined);
+    format!("{fence}text\n{joined}\n{fence}\n")
 }
 
 /// Compose the remediation issue. `pipeline_block` is the composed
@@ -207,10 +398,7 @@ pub fn compose_issue(ctx: &RemediationContext, pipeline_block: &str) -> IssueDra
         truncate_chars(ctx.source_name.trim(), MAX_NAME_CHARS)
     );
 
-    let exit_code = ctx
-        .exit_code
-        .map(|code| code.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let exit_code = exit_code_label(ctx.exit_code);
 
     let mut body = format!(
         "A coding-agent run failed in workspace **{name}** and was filed automatically for \
@@ -226,13 +414,7 @@ base branch.\n\n\
         executor = ctx.executor,
     );
 
-    if ctx.error_messages.is_empty() {
-        body.push_str("_No error message was captured in the chat._\n");
-    } else {
-        let joined = ctx.error_messages.join("\n\n");
-        let fence = code_fence_for(&joined);
-        body.push_str(&format!("{fence}text\n{joined}\n{fence}\n"));
-    }
+    body.push_str(&error_block(&ctx.error_messages));
 
     if let Some(variant) = &ctx.variant_fallback {
         body.push_str(&format!(
@@ -244,6 +426,7 @@ base branch.\n\n\
     body.push_str(&remediation_marker(
         ctx.source_workspace_id,
         ctx.execution_process_id,
+        ctx.fingerprint().as_deref(),
     ));
 
     let description =
@@ -443,11 +626,11 @@ mod tests {
         assert!(draft.description.contains("branch `vk/1234-fix-login`"));
         assert!(draft.description.contains("exit code `1`"));
         assert!(draft.description.contains("```text\nAPI Error: 500\n```"));
-        assert!(
-            draft
-                .description
-                .contains(&remediation_marker(Uuid::nil(), Uuid::nil()))
-        );
+        assert!(draft.description.contains(&remediation_marker(
+            Uuid::nil(),
+            Uuid::nil(),
+            ctx().fingerprint().as_deref()
+        )));
         assert!(draft.description.ends_with(&format!("\n\n{block}")));
     }
 
@@ -559,5 +742,169 @@ mod tests {
 
     fn parse_bundled(id: &str, raw: &str) -> Pipeline {
         crate::services::pipelines::parse_pipeline(id, raw).unwrap()
+    }
+
+    fn issue(description: &str) -> Issue {
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4(),
+            "project_id": Uuid::nil(),
+            "issue_number": 1,
+            "simple_id": "VAS-1",
+            "status_id": Uuid::nil(),
+            "title": "Auto-fix: x agent run failed",
+            "description": description,
+            "priority": null,
+            "start_date": null,
+            "target_date": null,
+            "completed_at": null,
+            "sort_order": 0.0,
+            "parent_issue_id": null,
+            "parent_issue_sort_order": null,
+            "extension_metadata": {},
+            "creator_user_id": null,
+            "created_at": "2026-09-26T00:00:00Z",
+            "updated_at": "2026-09-26T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    fn with_errors(messages: &[&str]) -> RemediationContext {
+        let mut ctx = ctx();
+        ctx.error_messages = messages.iter().map(|m| m.to_string()).collect();
+        ctx
+    }
+
+    #[test]
+    fn normalization_erases_ids_numbers_and_case() {
+        let a = "Request 7f3c9e2a-1b4d-4c8e-9f00-1234567890ab failed at 12:04:55 (port 8080), sha DEADBEEF1234";
+        let b = "request 00000000-0000-0000-0000-000000000000 FAILED at 09:13:02 (port 3000), sha abcdef987654";
+        assert_eq!(normalize_error_text(a), normalize_error_text(b));
+        assert_eq!(
+            error_fingerprint(&[a.to_string()]),
+            error_fingerprint(&[b.to_string()])
+        );
+        assert_ne!(
+            error_fingerprint(&[a.to_string()]),
+            error_fingerprint(&["Permission denied writing config".to_string()])
+        );
+    }
+
+    #[test]
+    fn ids_normalize_consistently_across_lengths_and_hex_forms() {
+        assert_eq!(
+            normalize_error_text("Request 9999999 failed"),
+            normalize_error_text("Request 10000000 failed")
+        );
+        assert_eq!(
+            normalize_error_text("Invalid address 0xdeadbeef"),
+            normalize_error_text("Invalid address 0xdeadbee1")
+        );
+        assert_eq!(
+            normalize_error_text("commit 3f9a2c7e11 not found"),
+            normalize_error_text("commit 0b1c2d3e4f not found")
+        );
+        assert_eq!(
+            normalize_error_text("fatal: bad object 12345678"),
+            normalize_error_text("fatal: bad object a1b2c3d4")
+        );
+        assert_eq!(
+            normalize_error_text("fatal: bad object deadbeef"),
+            normalize_error_text("fatal: bad object deadbee1")
+        );
+    }
+
+    #[test]
+    fn short_hex_like_words_are_not_erased() {
+        assert!(normalize_error_text("cafe face added").contains("cafe face added"));
+    }
+
+    #[test]
+    fn no_error_messages_have_no_fingerprint() {
+        assert_eq!(error_fingerprint(&[]), None);
+        assert_eq!(error_fingerprint(&["   ".to_string()]), None);
+        assert_eq!(error_similarity("", ""), 0.0);
+    }
+
+    #[test]
+    fn similarity_tolerates_one_changed_word_but_not_different_errors() {
+        let a = "API Error: 529 overloaded_error while calling the model claude-opus-5-5 please retry the request later";
+        let b = "API Error: 529 overloaded_error while calling the model claude-sonnet-5 please retry the request later";
+        assert!(error_similarity(a, b) >= SIMILARITY_THRESHOLD);
+        let c = "Git error: failed to push branch, remote rejected the update";
+        assert!(error_similarity(a, c) < SIMILARITY_THRESHOLD);
+    }
+
+    #[test]
+    fn marker_round_trips_with_and_without_fingerprint() {
+        let draft = compose_issue(&with_errors(&["boom"]), "");
+        let fingerprint = error_fingerprint(&["boom".to_string()]);
+        assert!(fingerprint.is_some());
+        assert_eq!(parse_marker(&draft.description), Some(fingerprint));
+
+        let legacy = "body\n<!-- vk:auto-remediation source=a exec=b -->";
+        assert_eq!(parse_marker(legacy), Some(None));
+        assert_eq!(parse_marker("no marker here"), None);
+    }
+
+    #[test]
+    fn issue_error_text_reads_back_the_recorded_errors() {
+        let draft = compose_issue(&with_errors(&["first ``` error", "second error"]), "");
+        assert_eq!(
+            issue_error_text(&draft.description).as_deref(),
+            Some("first ``` error\n\nsecond error")
+        );
+        let empty = compose_issue(&with_errors(&[]), "");
+        assert_eq!(issue_error_text(&empty.description), None);
+    }
+
+    #[test]
+    fn active_status_names_follow_the_remote_rule() {
+        for name in ["To do", "In progress", "In review", "Backlog"] {
+            assert!(is_active_status_name(name), "{name}");
+        }
+        for name in ["Done", " done ", "CANCELLED", "Canceled"] {
+            assert!(!is_active_status_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn finds_a_similar_issue_by_fingerprint_or_text() {
+        let recorded = "Timeout after 30s calling 10.0.0.4";
+        let recurring = vec!["Timeout after 45s calling 10.0.0.9".to_string()];
+        let original = compose_issue(&with_errors(&[recorded]), "");
+        let unrelated = compose_issue(&with_errors(&["Permission denied"]), "");
+        let issues = vec![issue(&unrelated.description), issue(&original.description)];
+
+        let found = find_similar_issue(&issues, &recurring);
+        assert_eq!(found.map(|i| i.id), Some(issues[1].id));
+
+        // An issue filed before fingerprints existed still matches by text.
+        let fingerprint = with_errors(&[recorded]).fingerprint().unwrap();
+        let legacy = original
+            .description
+            .replace(&format!(" fingerprint={fingerprint}"), "");
+        assert_eq!(parse_marker(&legacy), Some(None));
+        let legacy_issues = vec![issue(&legacy)];
+        assert!(find_similar_issue(&legacy_issues, &recurring).is_some());
+    }
+
+    #[test]
+    fn never_matches_without_evidence_or_marker() {
+        let original = compose_issue(&with_errors(&[]), "");
+        let issues = vec![issue(&original.description)];
+        assert!(find_similar_issue(&issues, &[]).is_none());
+        assert!(find_similar_issue(&issues, &["boom".to_string()]).is_none());
+
+        let unmarked = vec![issue("### Error messages\n\n```text\nboom\n```")];
+        assert!(find_similar_issue(&unmarked, &["boom".to_string()]).is_none());
+    }
+
+    #[test]
+    fn recurrence_comment_names_the_new_occurrence() {
+        let comment = compose_recurrence_comment(&with_errors(&["API Error: 500"]));
+        assert!(comment.contains("**Fix login**"));
+        assert!(comment.contains("branch `vk/1234-fix-login`"));
+        assert!(comment.contains("exit code `1`"));
+        assert!(comment.contains("```text\nAPI Error: 500\n```"));
     }
 }
