@@ -226,9 +226,12 @@ route. The others call `/api/workspaces/{id}/pull-requests/{status,checks,merge,
   unchecked merge. Branch deletion is a remote `DELETE git/refs/heads/…`.
   Never use `gh pr merge --delete-branch`, which switches branches in the
   cwd.
-- **Credentials.** Every `gh` call runs with `cwd = repo.path`, so an
-  owner-routed `gh` wrapper picks the org token (`gh api` takes no
-  `--repo`). A `pr` URL for another owner/repo is refused.
+- **Credentials.** Every `gh` call runs with `cwd = repo.path`, and `gh pr`
+  subcommands pass `--repo`. The deployment's owner-routed `gh` wrapper
+  (homelab `vibe-kanban-rebuild.nix`) routes `gh api` by the
+  `repos/<owner>/<repo>/…` endpoint, since `gh api` has no `--repo`, so a PR
+  on another remote's owner uses that owner's token. A PR URL that none of
+  the checkout's remotes own is refused.
 - **Errors reach the agent.** Every route error uses
   `error_with_data_and_message`. The MCP envelope decoder
   (`decode_envelope`) also reports status, content type and a ≤ 500-char
