@@ -239,21 +239,31 @@ fn project_mcp_suppression_args(
     current_dir: &Path,
     is_routed: impl Fn(&str) -> bool,
 ) -> Option<Vec<String>> {
-    let path = current_dir.join(".mcp.json");
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(error) => {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                tracing::debug!("Could not read {}: {error}", path.display());
+    // Claude Code loads `.mcp.json` from the launch directory *and* every
+    // ancestor, so a workspace launched in a repo subdirectory (a nested
+    // `default_working_dir`) still sees the repository root's entries.
+    let mut names = Vec::new();
+    for dir in current_dir.ancestors() {
+        let path = dir.join(".mcp.json");
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!("Could not read {}: {error}", path.display());
+                }
+                continue;
             }
-            return None;
-        }
-    };
-    let Ok(mcp_json) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        tracing::debug!("Ignoring unparseable {}", path.display());
-        return None;
-    };
-    let names = crate::mcp_config::shadowed_project_mcp_servers(&mcp_json, is_routed);
+        };
+        let Ok(mcp_json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            tracing::debug!("Ignoring unparseable {}", path.display());
+            continue;
+        };
+        names.extend(crate::mcp_config::shadowed_project_mcp_servers(
+            &mcp_json, &is_routed,
+        ));
+    }
+    names.sort();
+    names.dedup();
     if names.is_empty() {
         return None;
     }
@@ -3564,6 +3574,31 @@ mod tests {
         assert_eq!(
             settings,
             serde_json::json!({"disabledMcpjsonServers": ["vibe-kanban"]})
+        );
+    }
+
+    #[test]
+    fn repository_root_mcp_json_applies_to_a_subdirectory_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        write_mcp_json(
+            dir.path(),
+            serde_json::json!({"mcpServers": {
+                "vibe-kanban": {"type": "http", "url": "https://vibe.vasandani.dev/mcp"}
+            }}),
+        );
+        let nested = dir.path().join("apps/service");
+        std::fs::create_dir_all(&nested).unwrap();
+        write_mcp_json(
+            &nested,
+            serde_json::json!({"mcpServers": {
+                "vibe_kanban": {"url": "https://vibe.vasandani.dev/mcp"}
+            }}),
+        );
+        let extra = project_mcp_suppression_args(&[], &nested, routed).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&extra[1]).unwrap();
+        assert_eq!(
+            settings,
+            serde_json::json!({"disabledMcpjsonServers": ["vibe-kanban", "vibe_kanban"]})
         );
     }
 

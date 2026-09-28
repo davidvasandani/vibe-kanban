@@ -1068,36 +1068,65 @@ async fn resolve_pr_target(
             .map(|recorded| recorded.pr_url),
     };
 
-    let number = match reference {
+    // A URL names its repository, which may be any of this checkout's remotes
+    // (a PR opened with an `upstream/main` base lives upstream). Act through
+    // the remote that owns it; refuse repositories the checkout does not have.
+    let (remote_url, git_host, number) = match reference {
         Some(reference) => match parse_pr_reference(&reference) {
             Err(error) => {
                 return Ok(Err(PrToolError::InvalidPrReference {
                     detail: error.to_string(),
                 }));
             }
-            Ok(PrReference::Number(number)) => number,
+            Ok(PrReference::Number(number)) => (remote.url, git_host, number),
             Ok(PrReference::Url {
                 host,
                 owner,
                 repo: name,
                 number,
             }) => {
-                let (remote_host, remote_owner, remote_repo) =
-                    match git_host.repo_identity(&repo.path, &remote.url).await {
-                        Ok(identity) => identity,
-                        Err(error) => return Ok(Err(host_error(error))),
-                    };
-                // A same-named owner/repo on another host is a different
-                // repository: acting on it would hit this host's PR #n.
-                if !host.eq_ignore_ascii_case(&remote_host)
-                    || !same_repo(&owner, &name, &remote_owner, &remote_repo)
-                {
-                    return Ok(Err(PrToolError::PrNotInWorkspaceRepo {
-                        pr_repo: format!("{host}/{owner}/{name}"),
-                        workspace_repo: format!("{remote_host}/{remote_owner}/{remote_repo}"),
-                    }));
+                let mut candidates = vec![remote.url.clone()];
+                if let Ok(remotes) = deployment.git().list_remotes(&repo.path) {
+                    candidates.extend(
+                        remotes
+                            .into_iter()
+                            .map(|remote| remote.url)
+                            .filter(|url| *url != remote.url),
+                    );
                 }
-                number
+                let mut workspace_repos = Vec::new();
+                let mut owner_remote = None;
+                for url in candidates {
+                    let Ok(candidate_host) = GitHostService::from_url(&url) else {
+                        continue;
+                    };
+                    let (remote_host, remote_owner, remote_repo) =
+                        match candidate_host.repo_identity(&repo.path, &url).await {
+                            Ok(identity) => identity,
+                            Err(error) if url == remote.url => {
+                                return Ok(Err(host_error(error)));
+                            }
+                            Err(_) => continue,
+                        };
+                    // A same-named owner/repo on another host is a different
+                    // repository: acting on it would hit this host's PR #n.
+                    if host.eq_ignore_ascii_case(&remote_host)
+                        && same_repo(&owner, &name, &remote_owner, &remote_repo)
+                    {
+                        owner_remote = Some((url, candidate_host));
+                        break;
+                    }
+                    workspace_repos.push(format!("{remote_host}/{remote_owner}/{remote_repo}"));
+                }
+                match owner_remote {
+                    Some((url, candidate_host)) => (url, candidate_host, number),
+                    None => {
+                        return Ok(Err(PrToolError::PrNotInWorkspaceRepo {
+                            pr_repo: format!("{host}/{owner}/{name}"),
+                            workspace_repo: workspace_repos.join(", "),
+                        }));
+                    }
+                }
             }
         },
         None => {
@@ -1113,7 +1142,10 @@ async fn resolve_pr_target(
                 .find(|pr| matches!(pr.status, MergeStatus::Open))
                 .or(prs.first())
             {
-                Some(pr) => pr.number,
+                Some(pr) => {
+                    let number = pr.number;
+                    (remote.url, git_host, number)
+                }
                 None => {
                     return Ok(Err(PrToolError::NoPrForWorkspace {
                         branch: workspace.branch.clone(),
@@ -1125,10 +1157,10 @@ async fn resolve_pr_target(
 
     Ok(Ok(PrTarget {
         repo_path: repo.path.clone(),
-        remote_url: remote.url,
+        remote_url,
         number,
+        provider: git_host.provider_kind(),
         git_host,
-        provider,
     }))
 }
 
