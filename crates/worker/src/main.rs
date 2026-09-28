@@ -66,5 +66,36 @@ async fn main() -> anyhow::Result<()> {
             signal.cancel();
         }
     });
+    // The coordinator's CLI Tools page checks the coordinator; only this host
+    // can say whether its own agents can run the shared managed tools. A
+    // diagnostic only: an unusable optional CLI must never keep the worker out
+    // of scheduling.
+    tokio::spawn(log_agent_tool_readiness());
     run_with_drain(config, shutdown, admission_draining).await
+}
+
+async fn log_agent_tool_readiness() {
+    use utils::agent_tools::{AgentToolState, check_managed_bin};
+
+    let results = check_managed_bin().await;
+    let mut usable = 0;
+    for (tool, check) in &results {
+        if check.state == AgentToolState::Available {
+            usable += 1;
+            continue;
+        }
+        tracing::warn!(
+            tool = %tool,
+            state = ?check.state,
+            path = ?check.path,
+            login_path = ?check.login_path,
+            reason = check.message.as_deref().unwrap_or(""),
+            "managed CLI tool is not usable by agents on this worker"
+        );
+    }
+    tracing::info!(
+        usable,
+        total = results.len(),
+        "checked managed CLI tools in the agent environment"
+    );
 }

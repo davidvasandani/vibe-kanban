@@ -20,6 +20,82 @@ host is configured for it, Vibe Kanban can drive a tool's sign-in unattended
 **Settings → Auth**); otherwise
 each card links to the vendor's own authentication guide.
 
+## Agent environment
+
+A tool that is installed is not necessarily one agents can run. Each card has
+an **Agents** line checked on the selected host, in the environment its agents
+receive. The tool is resolved with `command -v` in both a non-login and a login
+shell, and then started with its version flag. Authentication is reported
+separately, so a tool can be signed in and still unusable, or the reverse.
+
+| Agents line | Meaning | Fix |
+| --- | --- | --- |
+| path shown | Resolves in login and non-login shells and starts. | — |
+| cannot find it | Not on the agent `PATH` of this host. | Install it for this host, or add it to the service's supervised `PATH`. |
+| lost in login shells | Resolves with `sh -c` but not with `bash -lc`. | Restore `VK_AGENT_PATH` in the host login profile (below). |
+| login shells run a different copy | Both shell modes find it, but different executables. | Restore `VK_AGENT_PATH` *first* in the host login profile. |
+| runtime dependency unavailable | A generated wrapper is missing a runtime variable, or the path it names no longer exists. The message names the variable. | Export it from the service environment on this host. |
+| did not start | Resolves, but the version probe failed or timed out. | Run it by hand in a workspace terminal. |
+
+### Login shells and `VK_AGENT_PATH`
+
+Some executors run every command in a login shell (Codex uses `bash -lc`). A
+login profile may replace `PATH` outright: NixOS's `/etc/set-environment` does
+this whenever the environment is not already a login session, which is true of
+every systemd unit. Without a fix, a login shell drops the service's tools and
+the app-managed `bin` directory.
+
+Vibe Kanban exports the `PATH` it gave each agent as `VK_AGENT_PATH`, with an
+identical value, for local executions, cluster worker executions and
+terminals. The host restores it from its login profile, putting it first so
+that login and non-login shells resolve tools in the same order:
+
+```sh
+if [ -n "${VK_AGENT_PATH-}" ]; then
+  case ":$PATH:" in
+    *":$VK_AGENT_PATH:"*) ;;
+    *) PATH="$VK_AGENT_PATH:$PATH"; export PATH ;;
+  esac
+fi
+```
+
+On NixOS, put this in `environment.extraInit`, which runs exactly when
+`set-environment` has just replaced `PATH`. The `VK_` prefix is reserved, so
+organisation environment variables cannot set it.
+
+### Microsoft Graph CLI runtime
+
+The app-managed `mgc-beta` is reached through a generated wrapper. The
+wrapper supplies a D-Bus session and an unlocked keyring for the Graph CLI's
+MSAL cache, and it reads three non-secret variables from the service
+environment:
+
+- `VK_ENTRA_DBUS_RUN_SESSION`: the `dbus-run-session` executable
+- `VK_ENTRA_KEYRING_DAEMON`: the `gnome-keyring-daemon` executable
+- `VK_ENTRA_LIBSECRET_LIB`: libsecret's `lib` directory
+
+Every host that runs agents needs them, including cluster workers that never
+perform a sign-in, because the tools directory can be shared. If one is
+missing, the wrapper exits with status `69` and prints
+`vibe-kanban: runtime dependency unavailable: <VAR> (<reason>)`. The message
+never includes a path or credential, and status reports it as unavailable,
+never as "not authenticated". Running the wrapper with `VK_CLI_TOOL_CHECK=1`
+only validates these dependencies and launches nothing. Cluster workers run
+that check for every managed tool at startup and log any tool their agents
+cannot use.
+
+The wrapper's keyring and token cache stay in its own directory beside the
+tool. Changing these variables does not touch existing sign-ins.
+
+### When changes take effect
+
+An agent's environment is fixed when its process starts. After installing a
+tool or changing the service environment, send the next follow-up or restart
+the session to get a new agent process with the new environment. A shell that
+is already running inside an old turn does not change. For a new deployment
+environment the service itself must restart (on NixOS, activation does this
+when the unit environment changes).
+
 ## Azure CLI and Microsoft Entra device lookup
 
 Vibe Kanban exposes `az` from the selected execution host. The managed homelab

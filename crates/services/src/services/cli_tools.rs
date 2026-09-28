@@ -24,7 +24,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use ts_rs::TS;
-use utils::{assets::cli_tools_dir, shell::resolve_executable_path};
+use utils::{
+    agent_tools::{
+        self, AgentToolCheck, CHECK_MODE_ENV, RUNTIME_DEPENDENCY_MESSAGE_PREFIX,
+        RUNTIME_DEPENDENCY_UNAVAILABLE_EXIT,
+    },
+    assets::cli_tools_dir,
+    shell::resolve_executable_path,
+};
 
 use crate::services::entra_mint;
 
@@ -626,6 +633,10 @@ pub struct CliToolStatus {
     pub login_supported: bool,
     pub auth_state: CliToolAuthState,
     pub auth_message: Option<String>,
+    /// Whether agents on this host can run the tool. Independent of
+    /// `auth_state`: a tool can be signed in yet unreachable from agent
+    /// shells, or reachable but unable to start.
+    pub agent: AgentToolCheck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1000,8 +1011,12 @@ async fn probe_auth_with_output(
     match tokio::time::timeout(AUTH_PROBE_TIMEOUT, command.kill_on_drop(true).output()).await {
         Ok(Ok(output)) if output.status.success() => (CliToolAuthState::Authenticated, None, None),
         Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            // A wrapper whose runtime is missing is "unknown", not signed out,
+            // so re-auth is not attempted for a fault it cannot fix.
+            let (state, message) = classify_auth_probe(false, output.status.code(), &stderr);
             // Failure output only: a successful probe's stdout is never kept.
-            let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
+            let mut text = stderr;
             text.push('\n');
             text.push_str(&String::from_utf8_lossy(&output.stdout));
             let mut end = text.len().min(8 * 1024);
@@ -1009,7 +1024,7 @@ async fn probe_auth_with_output(
                 end -= 1;
             }
             text.truncate(end);
-            (CliToolAuthState::Unauthenticated, None, Some(text))
+            (state, message, Some(text))
         }
         Ok(Err(_)) => (
             CliToolAuthState::Unknown,
@@ -1021,6 +1036,60 @@ async fn probe_auth_with_output(
             Some("Authentication check timed out".to_string()),
             None,
         ),
+    }
+}
+
+/// Map a finished auth probe to a state. A wrapper that could not start
+/// because its runtime is missing says nothing about sign-in, so it is
+/// `Unknown` with the (sanitized) reason, never `Unauthenticated`.
+fn classify_auth_probe(
+    success: bool,
+    code: Option<i32>,
+    stderr: &str,
+) -> (CliToolAuthState, Option<String>) {
+    if success {
+        return (CliToolAuthState::Authenticated, None);
+    }
+    match agent_tools::runtime_dependency_message(code, stderr) {
+        Some(message) => (CliToolAuthState::Unknown, Some(capitalize(&message))),
+        None => (CliToolAuthState::Unauthenticated, None),
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// Whether agents on this host can run the tool, checked the way they reach
+/// it: the agent environment, in login and non-login shells.
+async fn agent_check(e: &CliToolCatalogEntry) -> AgentToolCheck {
+    let wrapper = bin_link_path(e.id);
+    let probe = match e.runtime_wrapper {
+        Some(_) => agent_tools::Probe::Wrapper {
+            wrapper: &wrapper,
+            args: e.version_args,
+        },
+        None => agent_tools::Probe::Version(e.version_args),
+    };
+    agent_tools::check(e.binary_name, probe).await
+}
+
+/// Regenerate an installed tool's runtime wrapper if this build writes a
+/// different one, so existing installs pick up wrapper fixes without a
+/// reinstall. Skipped while an install/remove holds the tool's lock.
+fn refresh_runtime_wrapper(e: &CliToolCatalogEntry) {
+    if e.runtime_wrapper.is_none() || detect_app_copy(e).is_none() {
+        return;
+    }
+    let Ok(_guard) = lock_for(e.id).try_lock() else {
+        return;
+    };
+    if let Err(error) = write_runtime_wrapper(e) {
+        tracing::warn!(tool = e.binary_name, %error, "could not refresh CLI tool wrapper");
     }
 }
 
@@ -1071,8 +1140,10 @@ pub async fn status(id: CliToolId) -> CliToolStatus {
 /// network or permission failure, which a bare exit code cannot.
 pub async fn status_with_probe_output(id: CliToolId) -> (CliToolStatus, ProbeOutput) {
     let e = entry(id);
+    refresh_runtime_wrapper(e);
     let reason = unsupported_reason(e).await;
     let (auth_state, auth_message, output) = probe_auth_with_output(e).await;
+    let agent = agent_check(e).await;
     let status = CliToolStatus {
         id: e.id,
         binary_name: e.binary_name.to_string(),
@@ -1093,6 +1164,7 @@ pub async fn status_with_probe_output(id: CliToolId) -> (CliToolStatus, ProbeOut
         },
         auth_state,
         auth_message,
+        agent,
     };
     (status, output)
 }
@@ -1227,9 +1299,24 @@ fn graph_cli_wrapper_script(binary: &Path, password_file: &Path, state_dir: &Pat
 set -e
 BIN={bin}
 PW={pw}
-: "${{VK_ENTRA_DBUS_RUN_SESSION:?vibe-kanban: VK_ENTRA_DBUS_RUN_SESSION is not set}}"
-: "${{VK_ENTRA_KEYRING_DAEMON:?vibe-kanban: VK_ENTRA_KEYRING_DAEMON is not set}}"
-: "${{VK_ENTRA_LIBSECRET_LIB:?vibe-kanban: VK_ENTRA_LIBSECRET_LIB is not set}}"
+
+# The runtime comes from the service environment of whichever host runs this
+# (every host sharing this directory needs it). A missing piece exits {exit}
+# with a message naming the variable -- never its value -- so status reports
+# "runtime unavailable" rather than "not signed in".
+unavailable() {{
+  echo "{prefix} $1 ($2)" >&2
+  exit {exit}
+}}
+[ -n "${{VK_ENTRA_DBUS_RUN_SESSION:-}}" ] || unavailable VK_ENTRA_DBUS_RUN_SESSION "not set"
+[ -x "$VK_ENTRA_DBUS_RUN_SESSION" ] || unavailable VK_ENTRA_DBUS_RUN_SESSION "not executable"
+[ -n "${{VK_ENTRA_KEYRING_DAEMON:-}}" ] || unavailable VK_ENTRA_KEYRING_DAEMON "not set"
+[ -x "$VK_ENTRA_KEYRING_DAEMON" ] || unavailable VK_ENTRA_KEYRING_DAEMON "not executable"
+[ -n "${{VK_ENTRA_LIBSECRET_LIB:-}}" ] || unavailable VK_ENTRA_LIBSECRET_LIB "not set"
+[ -d "$VK_ENTRA_LIBSECRET_LIB" ] || unavailable VK_ENTRA_LIBSECRET_LIB "not a directory"
+[ -x "$BIN" ] || unavailable "installed binary" "missing"
+# Dependency check only: launch nothing, touch no credential state.
+if [ "${{{check}:-}}" = 1 ]; then exit 0; fi
 
 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
 export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT
@@ -1270,6 +1357,9 @@ exec "$VK_ENTRA_DBUS_RUN_SESSION" -- sh -c '
         bin = q(binary),
         pw = q(password_file),
         state = q(state_dir),
+        exit = RUNTIME_DEPENDENCY_UNAVAILABLE_EXIT,
+        prefix = RUNTIME_DEPENDENCY_MESSAGE_PREFIX,
+        check = CHECK_MODE_ENV,
     )
 }
 
@@ -1292,15 +1382,10 @@ fn write_runtime_wrapper(e: &CliToolCatalogEntry) -> Result<(), CliToolError> {
     let password_file = tool_dir(e.id).join(".keyring-password");
     let state_dir = tool_dir(e.id).join("state");
     std::fs::create_dir_all(&state_dir)?;
-    std::fs::write(
+    write_if_changed(
         &wrapper,
-        graph_cli_wrapper_script(&binary, &password_file, &state_dir),
+        &graph_cli_wrapper_script(&binary, &password_file, &state_dir),
     )?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
-    }
     // Point bin/ at the wrapper; an older install still links the binary.
     #[cfg(unix)]
     {
@@ -1313,6 +1398,40 @@ fn write_runtime_wrapper(e: &CliToolCatalogEntry) -> Result<(), CliToolError> {
         }
     }
     Ok(())
+}
+
+/// Replace an executable script only when its content changed, atomically.
+///
+/// The tools directory is shared by every host in a cluster and agents may be
+/// executing the script right now, so it must never be observed half-written:
+/// write a sibling unique to this process, then rename over the old file.
+/// Comparing first keeps a routine status refresh from rewriting it at all.
+fn write_if_changed(path: &Path, content: &str) -> Result<(), CliToolError> {
+    if std::fs::read_to_string(path).ok().as_deref() == Some(content) {
+        return Ok(());
+    }
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| {
+        std::fs::write(&tmp, content)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        }
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(result?)
 }
 
 /// Per-tool staging root, so concurrent installs of *different* tools never
@@ -1913,6 +2032,239 @@ mod tests {
         // Shell-special characters in the app data path stay inert.
         let hostile = powershell_wrapper_script(Path::new("/data/o'brien $HOME/modules"));
         assert!(hostile.contains(r#"PSModulePath='/data/o'\''brien $HOME/modules'"#));
+    }
+
+    #[cfg(unix)]
+    fn graph_cli_wrapper_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Hostile path: quotes and `$` must stay literal in the script.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("o'brien $HOME");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let exe = |name: &str, body: &str| {
+            let path = root.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        // Stand-ins: dbus-run-session drops its `--` and execs the rest; the
+        // keyring daemon swallows the password; the tool echoes its args and
+        // exits with a distinctive status.
+        exe(
+            "dbus-run-session",
+            "touch \"$(dirname \"$0\")/dbus-ran\"\nshift\nexec \"$@\"",
+        );
+        exe("gnome-keyring-daemon", "cat >/dev/null");
+        let binary = exe("mgc-beta", "printf '%s' \"$*\"\nexit 7");
+        let wrapper = root.join("mgc-beta-wrapper");
+        std::fs::write(
+            &wrapper,
+            graph_cli_wrapper_script(
+                &binary,
+                &root.join(".keyring-password"),
+                &root.join("state"),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, root, binary, wrapper)
+    }
+
+    #[cfg(unix)]
+    fn run_graph_cli_wrapper(
+        wrapper: &Path,
+        vars: &[(&str, &Path)],
+        check_mode: bool,
+    ) -> std::process::Output {
+        let mut command = std::process::Command::new(wrapper);
+        command
+            .args(["users", "list"])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default());
+        for (key, value) in vars {
+            command.env(key, value);
+        }
+        if check_mode {
+            command.env(CHECK_MODE_ENV, "1");
+        }
+        // A fork in a concurrent test can briefly hold the just-written script
+        // open for writing; exec then fails with ETXTBSY. Retry only that.
+        for _ in 0..50 {
+            match command.output() {
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                result => return result.unwrap(),
+            }
+        }
+        panic!("wrapper stayed busy (ETXTBSY)")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_cli_wrapper_names_a_missing_dependency_without_its_value() {
+        let (_dir, root, _, wrapper) = graph_cli_wrapper_fixture();
+
+        let unset = run_graph_cli_wrapper(&wrapper, &[], false);
+        assert_eq!(
+            unset.status.code(),
+            Some(RUNTIME_DEPENDENCY_UNAVAILABLE_EXIT)
+        );
+        let stderr = String::from_utf8_lossy(&unset.stderr);
+        assert!(stderr.contains(&format!(
+            "{RUNTIME_DEPENDENCY_MESSAGE_PREFIX} VK_ENTRA_DBUS_RUN_SESSION (not set)"
+        )));
+
+        // A garbage-collected store path is as unavailable as an unset one,
+        // and the path itself never reaches the message.
+        let stale = Path::new("/nix/store/gone-dbus/bin/dbus-run-session");
+        let collected = run_graph_cli_wrapper(
+            &wrapper,
+            &[
+                ("VK_ENTRA_DBUS_RUN_SESSION", stale),
+                (
+                    "VK_ENTRA_KEYRING_DAEMON",
+                    &root.join("gnome-keyring-daemon"),
+                ),
+                ("VK_ENTRA_LIBSECRET_LIB", &root.join("lib")),
+            ],
+            false,
+        );
+        assert_eq!(
+            collected.status.code(),
+            Some(RUNTIME_DEPENDENCY_UNAVAILABLE_EXIT)
+        );
+        let stderr = String::from_utf8_lossy(&collected.stderr);
+        assert!(stderr.contains("VK_ENTRA_DBUS_RUN_SESSION (not executable)"));
+        assert!(!stderr.contains("gone-dbus"));
+
+        let no_lib = run_graph_cli_wrapper(
+            &wrapper,
+            &[
+                ("VK_ENTRA_DBUS_RUN_SESSION", &root.join("dbus-run-session")),
+                (
+                    "VK_ENTRA_KEYRING_DAEMON",
+                    &root.join("gnome-keyring-daemon"),
+                ),
+                ("VK_ENTRA_LIBSECRET_LIB", &root.join("missing-lib")),
+            ],
+            false,
+        );
+        assert!(
+            String::from_utf8_lossy(&no_lib.stderr)
+                .contains("VK_ENTRA_LIBSECRET_LIB (not a directory)")
+        );
+        // Nothing was launched and no credential state was created.
+        assert!(!root.join("dbus-ran").exists());
+        assert!(!root.join(".keyring-password").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_cli_wrapper_check_mode_validates_without_launching() {
+        let (_dir, root, _, wrapper) = graph_cli_wrapper_fixture();
+        let out = run_graph_cli_wrapper(
+            &wrapper,
+            &[
+                ("VK_ENTRA_DBUS_RUN_SESSION", &root.join("dbus-run-session")),
+                (
+                    "VK_ENTRA_KEYRING_DAEMON",
+                    &root.join("gnome-keyring-daemon"),
+                ),
+                ("VK_ENTRA_LIBSECRET_LIB", &root.join("lib")),
+            ],
+            true,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.stdout.is_empty());
+        assert!(!root.join("dbus-ran").exists());
+        assert!(!root.join(".keyring-password").exists());
+        assert!(!root.join("state").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_cli_wrapper_runs_the_tool_with_its_isolated_credential_store() {
+        let (_dir, root, binary, wrapper) = graph_cli_wrapper_fixture();
+        let out = run_graph_cli_wrapper(
+            &wrapper,
+            &[
+                ("VK_ENTRA_DBUS_RUN_SESSION", &root.join("dbus-run-session")),
+                (
+                    "VK_ENTRA_KEYRING_DAEMON",
+                    &root.join("gnome-keyring-daemon"),
+                ),
+                ("VK_ENTRA_LIBSECRET_LIB", &root.join("lib")),
+            ],
+            false,
+        );
+        // The tool's own status and args come through unchanged.
+        assert_eq!(
+            out.status.code(),
+            Some(7),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "users list");
+        assert!(root.join("dbus-ran").exists());
+        // Credential isolation is part of the contract: the keyring and the
+        // MSAL cache stay in the wrapper-owned paths beside the tool.
+        assert!(root.join(".keyring-password").exists());
+        assert!(root.join("state").is_dir());
+        let script = std::fs::read_to_string(&wrapper).unwrap();
+        let quoted = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', r"'\''"));
+        assert!(script.contains(&format!("BIN={}", quoted(&binary))));
+        assert!(script.contains(&format!("PW={}", quoted(&root.join(".keyring-password")))));
+        assert!(script.contains(&format!("XDG_DATA_HOME={}", quoted(&root.join("state")))));
+    }
+
+    #[test]
+    fn a_missing_runtime_is_never_reported_as_signed_out() {
+        let stderr =
+            format!("{RUNTIME_DEPENDENCY_MESSAGE_PREFIX} VK_ENTRA_LIBSECRET_LIB (not set)");
+        let (state, message) =
+            classify_auth_probe(false, Some(RUNTIME_DEPENDENCY_UNAVAILABLE_EXIT), &stderr);
+        assert_eq!(state, CliToolAuthState::Unknown);
+        assert_eq!(
+            message.as_deref(),
+            Some("Runtime dependency unavailable: VK_ENTRA_LIBSECRET_LIB (not set)")
+        );
+        // An ordinary failed probe is still "not signed in", with no stderr.
+        assert_eq!(
+            classify_auth_probe(false, Some(1), "AADSTS700082: token expired"),
+            (CliToolAuthState::Unauthenticated, None)
+        );
+        assert_eq!(
+            classify_auth_probe(true, Some(0), ""),
+            (CliToolAuthState::Authenticated, None)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_rewrites_are_atomic_and_skip_unchanged_content() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool-wrapper");
+        write_if_changed(&path, "#!/bin/sh\necho one\n").unwrap();
+        let first = std::fs::metadata(&path).unwrap().ino();
+        write_if_changed(&path, "#!/bin/sh\necho one\n").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), first);
+        write_if_changed(&path, "#!/bin/sh\necho two\n").unwrap();
+        // Replaced by rename, never truncated in place under a running reader.
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), first);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "#!/bin/sh\necho two\n"
+        );
+        let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(leftovers, 1);
     }
 
     #[cfg(unix)]
