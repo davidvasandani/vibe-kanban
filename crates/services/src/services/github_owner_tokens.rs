@@ -473,6 +473,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_owner_named_like_the_manifest_keeps_its_token() {
+        let unused =
+            |_request: HashMap<String, String>| async { Err(EnvironmentSecretError::ReadFailed) };
+        let environment = launch_environment_with(
+            vec![("owners".into(), "synthetic-owners".into())],
+            &HashMap::new(),
+            unused,
+        )
+        .await
+        .unwrap();
+        assert_eq!(environment[OWNERS_ENV], "owners");
+        assert_eq!(environment[&token_env_name("owners")], "synthetic-owners");
+    }
+
+    #[tokio::test]
     async fn launch_environment_names_the_failing_owner() {
         let failing =
             |_request: HashMap<String, String>| async { Err(EnvironmentSecretError::ReadFailed) };

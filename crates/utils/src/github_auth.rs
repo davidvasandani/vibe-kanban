@@ -24,7 +24,10 @@ use crate::{assets::github_auth_bin_dir, shell::merge_paths};
 // default shell environment policy) drop variables matching those words
 // from the commands they run, which would silently disable routing there.
 /// Comma-separated list of configured owners, as entered.
-pub const OWNERS_ENV: &str = "VK_GITHUB_PAT_OWNERS";
+/// Deliberately outside the `VK_GITHUB_PAT_` namespace: an owner may be named
+/// anything a login allows (including `owners`), so the manifest must never
+/// share a prefix with per-owner token variables.
+pub const OWNERS_ENV: &str = "VK_GITHUB_ROUTED_OWNERS";
 const TOKEN_ENV_PREFIX: &str = "VK_GITHUB_PAT_";
 const SHIM_TEMPLATE: &str = include_str!("github_auth/gh-shim.sh");
 const SHIM_DIR_PLACEHOLDER: &str = "__VK_SHIM_DIR__";
@@ -345,6 +348,11 @@ mod tests {
             assert!(!is_valid_owner(invalid), "{invalid}");
         }
         assert_eq!(token_env_name("Org-A"), "VK_GITHUB_PAT_ORG_A");
+        // No valid login can map onto the owner manifest.
+        for owner in ["owners", "routed-owners", "OWNERS"] {
+            assert_ne!(token_env_name(owner), OWNERS_ENV);
+        }
+        assert!(!OWNERS_ENV.starts_with(TOKEN_ENV_PREFIX));
         assert_eq!(parse_owners(" a , bad_one ,b"), vec!["a", "b"]);
     }
 
@@ -451,9 +459,62 @@ mod tests {
                 "args pass through: {stdout}"
             );
         }
+        // A URL that is a flag's value (a PR body) is not the target.
+        assert_eq!(
+            token_of(
+                &fx.gh(
+                    &repo_a,
+                    &[
+                        "pr",
+                        "create",
+                        "--title",
+                        "Fix",
+                        "--body",
+                        "https://github.com/org-b/svc"
+                    ],
+                    &[]
+                )
+                .1
+            ),
+            TOKEN_A
+        );
+        // `gh repo SUB` skips flag values before the repository argument.
+        assert_eq!(
+            token_of(
+                &fx.gh(
+                    &repo_a,
+                    &["repo", "view", "--json", "name", "org-b/svc"],
+                    &[]
+                )
+                .1
+            ),
+            TOKEN_B
+        );
+        // GH_REPO replaces the current repository, but explicit targets win.
+        assert_eq!(
+            token_of(
+                &fx.gh(&repo_a, &["pr", "list"], &[("GH_REPO", "org-b/svc")])
+                    .1
+            ),
+            TOKEN_B
+        );
+        assert_eq!(
+            token_of(
+                &fx.gh(
+                    &repo_b,
+                    &["pr", "list", "-R", "Org-A/app"],
+                    &[("GH_REPO", "org-b/svc")]
+                )
+                .1
+            ),
+            TOKEN_A
+        );
         // gh fills `{owner}/{repo}` from the current repository.
         assert_eq!(
-            token_of(&fx.gh(&repo_b, &["api", "repos/{owner}/{repo}/pulls"], &[]).1),
+            token_of(
+                &fx.gh(&repo_b, &["api", "repos/{owner}/{repo}/pulls"], &[])
+                    .1
+            ),
             TOKEN_B
         );
         // A configured owner overrides an ambient token.

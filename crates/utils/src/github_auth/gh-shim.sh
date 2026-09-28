@@ -47,10 +47,14 @@ vk_repo_pos=""
 vk_cmd=""
 vk_state=cmd
 vk_expect=""
+# The previous argument. A URL or OWNER/REPO right after a flag may be that
+# flag's value (`--body https://github.com/...`), so it never selects a target.
+vk_prev=""
 for vk_arg do
   if [ -n "$vk_expect" ]; then
     vk_flag_repo=$vk_arg
     vk_expect=""
+    vk_prev=""
     continue
   fi
   case "$vk_arg" in
@@ -61,9 +65,15 @@ for vk_arg do
       ;;
     --repo=*)
       vk_flag_repo=${vk_arg#--repo=}
+      vk_prev=""
       continue
       ;;
   esac
+  vk_after_flag=""
+  case "$vk_prev" in
+    -*) vk_after_flag=1 ;;
+  esac
+  vk_prev=$vk_arg
   case "$vk_state" in
     cmd)
       case "$vk_arg" in
@@ -76,11 +86,16 @@ for vk_arg do
       ;;
     sub) vk_state=target ;;
     target)
+      # The first positional after `gh repo SUB` names the repository.
       case "$vk_arg" in
         -*) ;;
-        *) vk_repo_pos=$vk_arg ;;
+        *)
+          if [ -z "$vk_after_flag" ]; then
+            vk_repo_pos=$vk_arg
+            vk_state=rest
+          fi
+          ;;
       esac
-      vk_state=rest
       ;;
   esac
   if [ "$vk_cmd" = api ] && [ -z "$vk_api" ]; then
@@ -89,7 +104,7 @@ for vk_arg do
       /repos/*/*) vk_api=${vk_arg#/repos/} ;;
     esac
   fi
-  if [ -z "$vk_url" ]; then
+  if [ -z "$vk_url" ] && [ -z "$vk_after_flag" ]; then
     case "$vk_arg" in
       https://github.com/*/*) vk_url=$vk_arg ;;
     esac
@@ -107,6 +122,9 @@ elif [ -n "$vk_url" ]; then
   vk_target=$vk_url
 elif [ -n "$vk_repo_pos" ]; then
   vk_target=$vk_repo_pos
+elif [ -n "${GH_REPO:-}" ]; then
+  # gh itself uses GH_REPO instead of the current repository.
+  vk_target=$GH_REPO
 elif command -v git >/dev/null 2>&1; then
   vk_remote="$(git config --get remote.pushDefault 2>/dev/null || true)"
   vk_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
@@ -139,7 +157,7 @@ if [ -n "$vk_owner" ]; then
   vk_lower="$(printf '%s' "$vk_owner" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')"
   vk_configured=""
   IFS=,
-  for vk_o in ${VK_GITHUB_PAT_OWNERS:-}; do
+  for vk_o in ${VK_GITHUB_ROUTED_OWNERS:-}; do
     if [ "$(printf '%s' "$vk_o" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')" = "$vk_lower" ]; then
       vk_configured=1
     fi

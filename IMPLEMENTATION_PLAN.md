@@ -33,7 +33,7 @@ Spec: `SPEC.md`. Prior knowledge: `PRIOR_KNOWLEDGE.md`. SpecKit artifacts:
   references for each owner with `environment_secrets::resolve_environment_secrets`
   on `{OP_SERVICE_ACCOUNT_TOKEN: <org literal if present>, KEY: value}`. The
   org's literal token is used first and the service env is the fallback, the
-  same precedence as org Env Vars. It returns `VK_GITHUB_PAT_OWNERS` (owners
+  same precedence as org Env Vars. It returns `VK_GITHUB_ROUTED_OWNERS` (owners
   as entered, comma-joined) plus `VK_GITHUB_PAT_<OWNER_KEY>` per owner. With
   no rows it returns an empty map. A decrypt failure is an error naming the
   owner.
@@ -58,7 +58,7 @@ Spec: `SPEC.md`. Prior knowledge: `PRIOR_KNOWLEDGE.md`. SpecKit artifacts:
   directory.
 - `github_routing_environment(get: impl Fn(&str) -> Option<String>)` returns
   `Option<Vec<(String, String)>>`. It returns `None` unless
-  `VK_GITHUB_PAT_OWNERS` is non-empty. Otherwise it returns:
+  `VK_GITHUB_ROUTED_OWNERS` is non-empty. Otherwise it returns:
   - `PATH` = the shim directory prepended through `merge_paths`;
   - `GIT_CONFIG_COUNT` plus `GIT_CONFIG_KEY_n`/`VALUE_n`, continuing after
     any existing count taken from the env map or the inherited process env. For
@@ -91,7 +91,7 @@ Spec: `SPEC.md`. Prior knowledge: `PRIOR_KNOWLEDGE.md`. SpecKit artifacts:
   `github.com`. Also accepted: `github.com/OWNER/REPO`, the https URL,
   `ssh://git@github.com/`, and `git@github.com:`. Owner `[A-Za-z0-9-]`,
   compared lowercased.
-- Membership comes from the `VK_GITHUB_PAT_OWNERS` list (compared without
+- Membership comes from the `VK_GITHUB_ROUTED_OWNERS` list (compared without
   case). The token is read with `eval` over a validated key.
 - If configured: an empty token exits 78 with the message
   `gh: configured GitHub token for <owner> is unavailable`. Otherwise
