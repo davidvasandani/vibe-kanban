@@ -3148,7 +3148,10 @@ impl LocalContainerService {
                                 earliest_available.saturating_sub(1)
                             )));
                             cursor = earliest_available.saturating_sub(1);
-                            pushed.fetch_max(cursor, std::sync::atomic::Ordering::AcqRel);
+                            pushed.fetch_max(
+                                durable_worker_cursor(cursor, &unresolved.lock().unwrap()),
+                                std::sync::atomic::Ordering::AcqRel,
+                            );
                             continue 'poll;
                         }
                         let (worker_state, process_state, evidence) = match recovered {
@@ -3272,7 +3275,10 @@ impl LocalContainerService {
                     cursor = event.sequence;
                     batch_output_only &= worker_event_is_output(&event.payload);
                     if batch_output_only {
-                        pushed.fetch_max(cursor, std::sync::atomic::Ordering::AcqRel);
+                        pushed.fetch_max(
+                            durable_worker_cursor(cursor, &unresolved.lock().unwrap()),
+                            std::sync::atomic::Ordering::AcqRel,
+                        );
                     }
                     match event.payload {
                         ExecutionEventPayload::Stdout { data_base64 } => {
