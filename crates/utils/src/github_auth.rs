@@ -543,6 +543,14 @@ mod tests {
             ),
             TOKEN_B
         );
+        // Flags before the repository argument, listed or not.
+        for args in [
+            &["repo", "view", "--branch", "main", "org-b/svc"][..],
+            &["repo", "clone", "--no-upstream", "org-b/svc"],
+            &["repo", "fork", "--unknown-flag", "value", "org-b/svc"],
+        ] {
+            assert_eq!(token_of(&fx.gh(&repo_a, args, &[]).1), TOKEN_B, "{args:?}");
+        }
         // `rename` takes a new name, not a repository.
         assert_eq!(
             token_of(

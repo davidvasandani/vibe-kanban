@@ -53,11 +53,14 @@ vk_takes_value() {
       --field | --raw-field | --head | --header | --base | --search | --label | \
       --assignee | --reviewer | --milestone | --source | --remote | --limit | \
       --homepage | --method | --input | --subject | --body-file | --hostname | \
+      --branch | --remote-name | --fork-name | --org | --visibility | --team | \
+      --gitignore | --license | --add-topic | --remove-topic | --default-branch | \
+      --upstream-remote-name | \
       -b | -t | -p | -q | -F | -H | -B | -S | -l | -a | -L)
       return 0
       ;;
     -f | -X) [ "$vk_cmd" = api ] || [ "$vk_cmd" = workflow ] ;;
-    -d) [ "$vk_cmd" = repo ] ;;
+    -d | -u) [ "$vk_cmd" = repo ] ;;
     -n) [ "$vk_cmd" = release ] ;;
     *) return 1 ;;
   esac
@@ -141,7 +144,9 @@ for vk_arg do
       esac
       ;;
     target)
-      if [ -n "$vk_positional" ]; then
+      # The first positional that parses as a GitHub repository, so a value of
+      # an unlisted flag (`--branch main`) cannot stand in for it.
+      if [ -n "$vk_positional" ] && [ -n "$(vk_owner_of "$vk_arg")" ]; then
         vk_repo_pos=$vk_arg
         vk_state=rest
       fi
