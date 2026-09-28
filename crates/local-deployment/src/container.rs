@@ -5828,6 +5828,10 @@ impl ContainerService for LocalContainerService {
                 Ok(job) if should_hand_off_worker_job(job.as_ref()) => {
                     if let Some(handle) = self.take_exit_monitor_handle(&process.id).await {
                         handle.abort();
+                        // `abort` only requests cancellation; wait until the
+                        // tracker has actually stopped, so it cannot push output
+                        // or advance the pushed cursor after the store ends.
+                        let _ = handle.await;
                     }
                     // End the store so its raw-log writer drains everything
                     // already pushed and exits; only then is the pushed cursor
