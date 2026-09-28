@@ -127,6 +127,21 @@ declared a still-running agent finished-with-unknown-outcome just because the
 coordinator had been away long enough for the ring to wrap. Terminal-evidence
 recovery and the unreachable/mismatch → `Indeterminate` rules are unchanged.
 
+## Pending approvals are replayed, not dropped
+
+An approval waiter lives only in memory (`route_worker_interaction`), and the
+worker holds an unanswered interaction for up to **10 hours**, fail-closed.
+If the persisted cursor passed an unanswered `InteractionRequested`, the task
+would stall for hours after a restart, with no prompt shown (Codex round 2).
+So the tracker keeps an `UnresolvedInteractions` set of request sequences.
+The **DB** cursor (`durable_worker_cursor`) and the pushed cursor stay just
+before the earliest one until its response is delivered. The worker ack
+still advances, because it is bookkeeping and does not trim the journal.
+Re-attach therefore replays the request and the approval reappears. Replay
+is safe because the worker answers an already-completed interaction with
+success. The cost is that any output after an unanswered request is written
+again after a restart; an agent blocked on approval rarely emits any.
+
 ## Not covered (by design)
 
 - **Coordinator-local work** (placement `Local`, or no cluster). Claude and
@@ -134,9 +149,6 @@ recovery and the unreachable/mismatch → `Indeterminate` rules are unchanged.
   It is still `Interrupted` + WIP commit + the opt-in
   `resume_interrupted_on_startup` (config-only, default off). Surviving there
   still needs the Tier-3 runner split.
-- **Pending approvals/questions** at the instant of restart are in memory
-  (`route_worker_interaction`). They are resolved by the worker's interaction
-  timeout and fail-closed policy.
 - **Queued follow-ups** (`QueuedMessageService`) are in memory and still lost.
 - **Worker-owned persistent runs** keep no coordinator-side JSONL
   (`writes_own_raw_log` is keyed on `is_persistent()`, not on who runs it). A

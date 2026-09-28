@@ -105,7 +105,7 @@ If the worker discarded some output before the coordinator returned, the chat sa
 
 Work that runs on the coordinator itself (workspaces placed **Local**, or a deployment without workers) still stops. It is marked **Interrupted**, its work in progress is committed, and it is resumed once on startup only when `resume_interrupted_on_startup` is `true` in the coordinator's `config.json` (it is off by default).
 
-An approval or question pending at the moment of the restart is not restored. The worker's interaction timeout resolves it, and the run continues or reports the denial.
+An approval or question that is still waiting when the coordinator restarts is shown again after it comes back.
 
 ## Drain a worker
 
