@@ -92,6 +92,53 @@ repo can never shrink the list. The remediation card therefore replaces the
 whole `auto_error_remediation` object through a dedicated setter. Use the same
 approach for any array-valued config edited through that section.
 
+## Reuse an active similar issue instead of filing a twin
+
+Per-source dedupe cannot see across workspaces. When one root cause breaks
+several workspaces, each would otherwise start its own merging agent. Before
+filing, the consumer looks for an **active** remediation issue in the target
+project whose recorded errors match. If it finds one, it comments the new
+occurrence there and launches nothing.
+
+- **Candidates.** Issues carrying the `<!-- vk:auto-remediation` marker, in
+  a status the remote's own rule treats as active:
+  `lower(name) NOT IN ('done','cancelled','canceled')`. Match on the marker,
+  never on the copied `Auto-fix: …` title ([[issue-workspace-advisory]]).
+- **Match.** Either an equal fingerprint (FNV-1a 64 over normalized text,
+  stored in the marker) or a normalized word-set Jaccard similarity of at
+  least 0.8. The text path also covers issues filed before fingerprints
+  existed, by reading the error fence back out of the body. **No captured
+  error never matches**, because two empty contexts are not evidence of the
+  same cause.
+- **Fail closed and serialize.** A lookup error launches nothing. "Search →
+  create" runs under one async mutex, so two concurrent failures with the same
+  cause cannot both miss and file twins. A failed comment is only logged: the
+  occurrence belongs to the existing issue, so it is never a reason to
+  launch.
+
+## Gotchas from four rounds of Codex review
+
+- **Offset pagination is not a snapshot.** If a candidate moves to Done
+  between pages, later issues shift before the next offset and a match is
+  skipped, so a duplicate launches. A fixed `limit` misses older matches. Read
+  every candidate in **one** request with no limit, and fail closed if
+  `issues.len() < total_count`.
+- **Normalize every id form to one placeholder.** Separate `<n>` and
+  `<hex>` placeholders, or length cut-offs that differ between decimal and
+  hex, split one failure apart. `bad object 12345678` and `bad object
+  a1b2c3d4` must fingerprint the same. So must `0xdeadbeef` and
+  `0xdeadbee1`, and all-letter hashes like `deadbeef`. The order is:
+  UUID, `0x` literal, decimal word, 8+ character hex word, then leftover digit
+  runs as `<n>`. Almost no English word is 8+ letters of a–f.
+- **Regex trap.** A lazy prefix followed by an optional capture group
+  (`[^>]*?(?:fingerprint=(…))?[^>]*?-->`) succeeds *without* capturing,
+  because skipping the optional group is tried first. Match the marker, then
+  search its attributes in a second step.
+- **Wire types.** `api_types::CreateIssueCommentRequest` was
+  deserialize-only, because only the remote server consumed it. A local
+  backend call needs `Serialize`. Add `skip_serializing_if` on the optional
+  client id; ts-rs output is unchanged.
+
 ## Contributed by
 
 - `vk/7e4f-auto-error-remed`

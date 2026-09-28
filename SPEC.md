@@ -209,8 +209,10 @@ fix and merge the same thing.
 ## Design
 
 1. **Error fingerprint.** `error_fingerprint(messages)` normalizes the
-   captured error messages. It lowercases them, replaces UUIDs, long hex runs
-   and digit runs with placeholders, and collapses whitespace. It then hashes
+   captured error messages. It lowercases them, replaces every identifier
+   form with one `<id>` placeholder (UUIDs, `0x` literals, decimal-only
+   words, and hex words of 8+ characters), turns remaining digit runs into
+   `<n>`, and collapses whitespace. It then hashes
    the result with FNV-1a 64 into 16 hex characters. Messages that differ only
    in ids, timestamps, ports or line numbers get the same fingerprint. When no
    error message was captured there is no fingerprint, and the new behavior is
@@ -225,8 +227,9 @@ fix and merge the same thing.
    The token check catches near-duplicates, such as a changed file name, and
    issues filed before fingerprints existed. The existing issue's error text
    is parsed back out of the `### Error messages` fence.
-4. **Lookup, before creating.** Search the target project with
-   `search_issues`, using `search = "vk:auto-remediation"` and `status_ids`
+4. **Lookup, before creating.** Search the target project in a single
+   request (a consistent snapshot, no limit; a short response fails closed)
+   with `search_issues`, using `search = "<!-- vk:auto-remediation"` and `status_ids`
    set to the project's **active** statuses. Active excludes `done`,
    `cancelled` and `canceled`, case-insensitively, which is the remote's
    existing convention. Only issues that carry the marker count.
