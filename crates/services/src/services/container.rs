@@ -664,14 +664,16 @@ pub trait ContainerService {
     /// run writes its own raw log, the raw-log writer.
     ///
     /// Both dispatch and boot re-attachment use this, so they cannot drift.
-    /// `skip_raw_history` is the number of leading raw messages already
-    /// persisted (a re-attached store's seeded history).
+    /// Re-attachment passes `spawn_raw_writer = false`: it must subscribe its
+    /// writer synchronously, before its tracker can push (see
+    /// `execution_process::spawn_resumed_raw_log_writer`), and applies the
+    /// same [`execution_process::writes_own_raw_log`] rule itself.
     async fn start_execution_log_pipeline(
         &self,
         workspace: &Workspace,
         execution_process: &ExecutionProcess,
         executor_action: &ExecutorAction,
-        skip_raw_history: usize,
+        spawn_raw_writer: bool,
     ) {
         let workspace_root = self.workspace_to_current_dir(workspace);
         #[cfg_attr(feature = "qa-mode", allow(unused_variables))]
@@ -712,17 +714,12 @@ pub trait ContainerService {
             }
         }
 
-        // Detached persistent processes (unix) write their own raw log file,
-        // which is the persistent record; mirroring the MsgStore into a JSONL
-        // file would duplicate it on every adoption replay.
-        let writes_own_raw_log = cfg!(unix) && execution_process.run_reason.is_persistent();
-        if !writes_own_raw_log {
+        if spawn_raw_writer && !execution_process::writes_own_raw_log(execution_process) {
             execution_process::spawn_stream_raw_logs_to_storage(
                 self.msg_stores().clone(),
                 self.db().clone(),
                 execution_process.id,
                 execution_process.session_id,
-                skip_raw_history,
             );
         }
     }
@@ -2447,7 +2444,7 @@ pub trait ContainerService {
             return Err(start_error);
         }
 
-        self.start_execution_log_pipeline(workspace, &execution_process, executor_action, 0)
+        self.start_execution_log_pipeline(workspace, &execution_process, executor_action, true)
             .await;
 
         // Reset the reported pipeline stage only when a *new coding-agent*

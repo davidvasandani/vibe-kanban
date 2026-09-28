@@ -232,6 +232,19 @@ fn should_hand_off_worker_job(job: Option<&ExecutionWorkerJob>) -> bool {
     job.is_some()
 }
 
+/// Interaction-request sequences awaiting delivery of their response.
+type UnresolvedInteractions = Arc<std::sync::Mutex<std::collections::BTreeSet<u64>>>;
+
+/// The cursor that may be persisted for re-attachment: never past an
+/// interaction request whose response has not reached the worker, because
+/// its approval waiter lives only in this process and must be re-created by
+/// replaying the request after a restart.
+fn durable_worker_cursor(cursor: u64, unresolved: &std::collections::BTreeSet<u64>) -> u64 {
+    unresolved
+        .first()
+        .map_or(cursor, |earliest| cursor.min(earliest.saturating_sub(1)))
+}
+
 /// Whether a worker event's only coordinator-side effect is MsgStore output,
 /// which the raw-log writer makes durable. Interactions and terminal events
 /// have effects a restart can lose, so they must be replayed after one.
@@ -336,10 +349,10 @@ mod final_output_reconciliation_tests {
     use super::{
         ExecutionEventPayload, ExecutionProcessStatus, ExecutionWorkerDispatchState,
         ExecutionWorkerJob, InteractionRequest, JobState, JobSummary, TerminalEvidence,
-        TerminalState, Utc, history_has_final_assistant_message, normalized_final_assistant_state,
-        replay_gap_job_is_live, replay_gap_terminal_evidence, should_ack_worker_batch,
-        should_hand_off_worker_job, wait_for_unfinalized_output, worker_event_is_output,
-        worker_job_has_positive_liveness, worker_lease_is_turn_evidence,
+        TerminalState, Utc, durable_worker_cursor, history_has_final_assistant_message,
+        normalized_final_assistant_state, replay_gap_job_is_live, replay_gap_terminal_evidence,
+        should_ack_worker_batch, should_hand_off_worker_job, wait_for_unfinalized_output,
+        worker_event_is_output, worker_job_has_positive_liveness, worker_lease_is_turn_evidence,
     };
 
     fn normalized_message(entry_type: NormalizedEntryType, content: &str) -> LogMsg {
@@ -643,6 +656,24 @@ mod final_output_reconciliation_tests {
                 "{state:?} row is worker-owned"
             );
         }
+    }
+
+    #[test]
+    fn persisted_cursor_stays_before_the_earliest_unresolved_interaction() {
+        use std::collections::BTreeSet;
+
+        assert_eq!(durable_worker_cursor(40, &BTreeSet::new()), 40);
+        assert_eq!(
+            durable_worker_cursor(40, &BTreeSet::from([12, 30])),
+            11,
+            "a re-attach must replay the earliest pending request"
+        );
+        assert_eq!(
+            durable_worker_cursor(5, &BTreeSet::from([12])),
+            5,
+            "never ahead of what was actually received"
+        );
+        assert_eq!(durable_worker_cursor(3, &BTreeSet::from([0])), 0);
     }
 
     #[test]
@@ -1230,7 +1261,15 @@ impl LocalContainerService {
         execution_id: Uuid,
         worker_node_id: Uuid,
         interaction: InteractionRequest,
+        unresolved: Option<(UnresolvedInteractions, u64)>,
     ) {
+        // Whatever the outcome, stop holding the persisted cursor back once
+        // this routing task is done with the interaction.
+        let resolve = move || {
+            if let Some((unresolved, sequence)) = &unresolved {
+                unresolved.lock().unwrap().remove(sequence);
+            }
+        };
         let Some(client) = self.worker_client.clone() else {
             tracing::error!(%execution_id, "Cannot route worker interaction without a worker client");
             return;
@@ -1249,6 +1288,7 @@ impl LocalContainerService {
             let is_question = interaction.kind == "question";
             let Ok((_, waiter)) = approvals.create_with_waiter(request, is_question).await else {
                 tracing::error!(%execution_id, interaction_id = %interaction.interaction_id, "Failed to register worker interaction");
+                resolve();
                 return;
             };
             let mut outcome = waiter.await;
@@ -1280,7 +1320,10 @@ impl LocalContainerService {
                         .expect("approval outcome must serialize"),
                 };
                 match client.respond_interaction(worker_node_id, &response).await {
-                    Ok(()) => break,
+                    Ok(()) => {
+                        resolve();
+                        break;
+                    }
                     Err(error) => {
                         tracing::warn!(%execution_id, interaction_id = %interaction.interaction_id, "Worker interaction response failed; retrying: {error}");
                         if matches!(
@@ -2953,15 +2996,18 @@ impl LocalContainerService {
         for msg in history {
             store.push(msg);
         }
-        // Count what the store actually retained, not what was loaded: the
-        // store evicts its oldest history past its size bound, and the writer
-        // skips by count from the retained history. Over-counting would make
-        // it silently drop new output.
-        let seeded_raw = store
-            .get_history()
-            .iter()
-            .filter(|msg| matches!(msg, LogMsg::Stdout(_) | LogMsg::Stderr(_)))
-            .count();
+        // Subscribe the writer now, before the tracker or normalizer can push:
+        // it counts the seeded lines it must skip from the exact snapshot it
+        // replays. Counting from what was loaded (the store evicts past its
+        // size bound) or after later pushes would make it skip new output.
+        if !services::services::execution_process::writes_own_raw_log(process) {
+            services::services::execution_process::spawn_resumed_raw_log_writer(
+                &store,
+                self.db.clone(),
+                process.id,
+                process.session_id,
+            );
+        }
         self.msg_stores.write().await.insert(process.id, store);
 
         let cursor = u64::try_from(job.last_event_sequence).unwrap_or(0);
@@ -2972,7 +3018,7 @@ impl LocalContainerService {
             self.msg_stores.write().await.remove(&process.id);
             return Err(error);
         }
-        self.start_execution_log_pipeline(&ctx.workspace, process, executor_action, seeded_raw)
+        self.start_execution_log_pipeline(&ctx.workspace, process, executor_action, false)
             .await;
         self.spawn_execution_stage_tracker(&ctx.workspace, process)
             .await;
@@ -2980,7 +3026,6 @@ impl LocalContainerService {
             execution_id = %process.id,
             worker_node_id = %job.worker_node_id,
             cursor,
-            seeded_raw,
             "Re-attached worker-owned execution"
         );
         Ok(true)
@@ -3023,6 +3068,9 @@ impl LocalContainerService {
             }
         };
         let pushed = Arc::new(std::sync::atomic::AtomicU64::new(resume_from.unwrap_or(0)));
+        // Sequences of interaction requests whose response has not yet been
+        // delivered to the worker.
+        let unresolved: UnresolvedInteractions = Arc::default();
         self.worker_pushed_sequences
             .write()
             .await
@@ -3316,10 +3364,12 @@ impl LocalContainerService {
                         }
                         ExecutionEventPayload::InteractionRequested(interaction) => {
                             final_output_deadline = None;
+                            unresolved.lock().unwrap().insert(cursor);
                             container.route_worker_interaction(
                                 execution_id,
                                 worker_node_id,
                                 interaction,
+                                Some((unresolved.clone(), cursor)),
                             );
                         }
                         ExecutionEventPayload::Accepted => {}
@@ -3339,11 +3389,17 @@ impl LocalContainerService {
                 // Terminal events are deliberately not acknowledged until the
                 // process-row transition below succeeds; the worker retains
                 // replay authority if this coordinator dies while persisting.
+                // The persisted cursor stays before any interaction still
+                // awaiting a response: its approval waiter is in memory only,
+                // so a re-attach after a restart must replay the request. The
+                // worker ack is bookkeeping (it does not trim the journal) and
+                // keeps the full cursor.
+                let durable = durable_worker_cursor(cursor, &unresolved.lock().unwrap());
                 if should_ack_worker_batch(cursor, terminal.is_some()) {
                     let _ = ExecutionWorkerJob::acknowledge_sequence(
                         &db.pool,
                         execution_id,
-                        cursor as i64,
+                        durable as i64,
                         batch.latest_available as i64,
                     )
                     .await;
@@ -3364,7 +3420,7 @@ impl LocalContainerService {
                     }
                 }
                 if should_ack_worker_batch(cursor, terminal.is_some()) {
-                    pushed.fetch_max(cursor, std::sync::atomic::Ordering::AcqRel);
+                    pushed.fetch_max(durable, std::sync::atomic::Ordering::AcqRel);
                 }
 
                 if let Some((worker_state, process_state, evidence)) = terminal {

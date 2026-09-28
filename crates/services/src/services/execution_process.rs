@@ -297,19 +297,66 @@ impl RawHistorySkip {
     }
 }
 
-/// Persist an execution's raw output from its MsgStore.
-///
-/// `skip_raw_history` is the number of leading `Stdout`/`Stderr` messages that
-/// are already persisted (a re-attached store's seeded history); pass `0` for a
-/// fresh execution. Session and message ids are persisted regardless.
+/// Whether a run writes its own raw log file. Detached persistent processes
+/// (unix) do, and that file is the persistent record; mirroring the MsgStore
+/// into a JSONL file as well would duplicate it on every adoption replay.
+pub fn writes_own_raw_log(process: &ExecutionProcess) -> bool {
+    cfg!(unix) && process.run_reason.is_persistent()
+}
+
+/// Persist an execution's raw output from its registered MsgStore.
 pub fn spawn_stream_raw_logs_to_storage(
     msg_stores: Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>,
     db: DBService,
     execution_id: Uuid,
     session_id: Uuid,
-    skip_raw_history: usize,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let store = {
+            let map = msg_stores.read().await;
+            map.get(&execution_id).cloned()
+        };
+        if let Some(store) = store {
+            write_raw_logs(store.history_plus_stream(), db, execution_id, session_id, 0).await;
+        }
+    })
+}
+
+/// Persist a re-attached execution's raw output, skipping the seeded history
+/// that is already on disk.
+///
+/// Subscribes synchronously and counts the seeded raw lines from the very
+/// snapshot the writer replays, under one lock. Counting separately, or
+/// subscribing later inside the task, would let the tracker or normalizer push
+/// (and evict seeded history) in between, and the writer would then skip new
+/// output instead. Call before anything else can push to `store`.
+pub fn spawn_resumed_raw_log_writer(
+    store: &MsgStore,
+    db: DBService,
+    execution_id: Uuid,
+    session_id: Uuid,
+) -> JoinHandle<()> {
+    let (seeded_raw, stream) = store
+        .history_plus_stream_counting(|msg| matches!(msg, LogMsg::Stdout(_) | LogMsg::Stderr(_)));
+    tokio::spawn(write_raw_logs(
+        stream,
+        db,
+        execution_id,
+        session_id,
+        seeded_raw,
+    ))
+}
+
+/// Append raw output to the execution's JSONL log and persist session and
+/// message ids. The first `skip_raw_history` raw messages are already on disk.
+async fn write_raw_logs(
+    stream: futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>,
+    db: DBService,
+    execution_id: Uuid,
+    session_id: Uuid,
+    skip_raw_history: usize,
+) {
+    {
         let mut log_writer =
             match ExecutionLogWriter::new_for_execution(session_id, execution_id).await {
                 Ok(w) => w,
@@ -323,13 +370,8 @@ pub fn spawn_stream_raw_logs_to_storage(
                 }
             };
 
-        let store = {
-            let map = msg_stores.read().await;
-            map.get(&execution_id).cloned()
-        };
-
-        if let Some(store) = store {
-            let mut stream = store.history_plus_stream();
+        {
+            let mut stream = stream;
             let mut skip = RawHistorySkip::new(skip_raw_history);
 
             while let Some(Ok(msg)) = stream.next().await {
@@ -397,7 +439,7 @@ pub fn spawn_stream_raw_logs_to_storage(
                 }
             }
         }
-    })
+    }
 }
 
 async fn read_execution_logs_for_execution(
