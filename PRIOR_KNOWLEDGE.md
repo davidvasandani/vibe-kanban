@@ -1,84 +1,70 @@
-# Prior knowledge — vk/0f52-manage-gh-token
+# PRIOR KNOWLEDGE — vk/975e-migrate-personal
 
-Read-only search of `vibe-kanban/wiki`, `vibe-kanban/docs/knowledge-base`,
-`homelab/docs`, `homelab/docs/knowledge-base`, and the earlier SpecKit
-artifacts. Search terms: `GH_TOKEN`, `fine-grained`, `PAT`, `github`, `env
-vars`, `1Password`, `PATH`, `cluster worker`.
+Distilled from the two project knowledge bases (homelab `knowledge-base/`,
+`docs/knowledge/`, and the runbooks under `docs/`; vibe-kanban
+`docs/knowledge-base/` and `wiki/`). This pass was read-only.
 
-## Directly relevant
+## The hosted service already exists (homelab)
 
-- **`specs/vk/5e29-vk-github-fine-g/` + `homelab/docs/vibe-kanban-github-auth.md`**:
-  a per-owner `gh` router already ships in
-  `homelab/modules/vibe-kanban-rebuild.nix`
-  (`services.vibe-kanban-rebuild.githubAuth.orgTokenRefs`). No host sets
-  `orgTokenRefs`, so the router is not installed anywhere. It is Nix-only:
-  every change needs a rebuild and restart, and it has no UI and no Git
-  routing. The parts worth reusing are its routing rules:
-  - an explicit `-R/--repo/--repo=` wins; argument scanning stops at `--`;
-  - otherwise the remote order is `remote.pushDefault` → branch
-    `pushRemote` → branch `remote` → `origin` → the only remote;
-  - strict GitHub.com HTTPS, `ssh://`, and scp forms only; owner
-    `[A-Za-z0-9-]`, matched without regard to case;
-  - a configured owner overrides ambient `GH_TOKEN`; an unconfigured owner
-    keeps ambient behavior; a configured-but-empty token fails with exit 78
-    and names the owner only;
-  - the real `gh` is called by absolute path, so it cannot recurse.
-- **`docs/knowledge-base/workspace-environment-inheritance.md`**: a workspace
-  has several process boundaries. Local execution, cluster dispatch, local
-  terminal, and worker terminal must all be audited. Resolve in one place,
-  inject explicitly, and filter reserved names (`VK_*` is reserved, so org
-  Env Vars cannot set it). Managed CLI login PTYs must keep their minimal
-  environment. Its rule that *PATs never cross coordinator actions* came from
-  the Nix design. Later, `b0d4` deliberately sends resolved org Env Var values
-  through the authenticated worker environment transport. A UI-managed,
-  coordinator-scoped setting has to use that same transport, and the plan
-  must record this as a deliberate exception.
-- **The same page, 1Password section**: use `services::environment_secrets`
-  (`OP_SERVICE_ACCOUNT_TOKEN` from org Env Vars, or the service env; host-first
-  `op` discovery; 30 s bound; secret-safe typed errors). Use
-  `api_types::normalize_secret_reference` and web-core `secretReference.ts` as
-  the single reference rule (strip copied quotes; case-sensitive `op://`). Show
-  references and never return literals. Normalize drafts only by removing a
-  quote pair while the user types, and fully at submit.
-- **`wiki/managed-cli-tool-catalog.md`, "Workspace PATH propagation"**: derive
-  app-owned directories on the host that spawns, **immediately before spawn**.
-  Never send the coordinator's absolute app-data path to a worker. Keep
-  workspace-only policy out of the generic PTY service; the terminal route
-  applies it after it has chosen the remote-worker branch.
-  `append_cli_tools_to_path` *appends* so that host tools win. A routing shim
-  has to be *prepended* instead, or the real `gh` shadows it.
+- `docs/personal-servicenow-mcp-deployment.md`: think1 runs Supergateway 3.4.3
+  (stdio → stateful Streamable HTTP) on `127.0.0.1:8790`. Caddy on
+  `172.16.100.101:8191` enforces the origin bearer and proxies only `/mcp`.
+  The public URL is `https://snow.vasandani.dev/mcp`. There is no SSE endpoint.
+- Cloudflare Access SSO gates the hostname. `/mcp` bypasses SSO only for the
+  reviewed Claude/Scott/Camero CIDRs, the same list as lmi/cdp. The origin
+  bearer is still mandatory. The bearer is generated at
+  `/var/lib/personal-servicenow-mcp/http-token`.
+- The runbook defers the VK switch explicitly: migrate the bundled entry only
+  after public initialize, tools/list, a bounded read and negative-auth proof.
+  Header values go through the owning runtime secret boundary, **not catalog
+  JSON**. Test in *new* sessions, because existing sessions keep the inventory
+  they started with.
+- The fleet-local stdio path (`personalServiceNowMcp` in
+  `modules/vibe-kanban-rebuild.nix`, enabled on think1–5) is the rollback path
+  and is independent of the hosted service.
 
-## Supporting
+## HTTP MCP exposure pattern (homelab `docs/knowledge/mcp-over-http-public-exposure.md`)
 
-- **`homelab/docs/knowledge-base/vibe-kanban-executor-secret-environment.md`**:
-  anything a worker needs must reach every eligible execution host. A change
-  wired only on the coordinator passes local tests and then fails when a
-  workspace is placed on a worker. New sessions pick up environment changes;
-  running processes keep the environment they started with.
-- **`docs/knowledge-base/clustered-workspace-execution.md`**: worker requests
-  are signed over method, path, query, and body digest. The coordinator stays
-  authoritative for configuration, and workers own spawning.
-- **`crates/services/src/services/mcp_gateway_secrets.rs`**: host-bound
-  AES-256-GCM envelope store (`load_or_generate(key_path)`, `encrypt/decrypt`
-  with an AAD binding). The key file is under `utils::assets::asset_dir()`. It
-  can be reused for encrypting local values at rest with its own key file.
-- **Constitution**: principles 13 (actionable, secret-safe errors), 17
-  (app-owned payloads, no silent provisioning), 25 (options must be honored at
-  runtime), 45 (runtime-only credential values), 102 (capabilities proved at
-  the execution boundary, with fresh-session proof distinct from static
-  proof), and the `vk/b0d4` applicability note (encrypted at rest, fail closed
-  on reference errors, reuse the resolver).
+- Use Streamable HTTP, not SSE. Supergateway has no inbound auth, so Caddy
+  enforces the bearer. The edge rule is IP allowlist **and** origin bearer.
+- LAN hairpin: on-LAN clients reach `/mcp` through Cloudflare. That works only
+  when their egress IP is allowlisted. Cluster workers egress via Scott's
+  residential IP, which is listed. Verified this task: no-bearer `/mcp` gets
+  an origin 403, and `/healthz` gets an Access 302.
 
-## Empirical check done for this task
+## VK catalog and settings (vibe-kanban `shared-mcp-configuration.md`, homelab `vk-bundled-mcp-catalog.md`)
 
-With Git 2.54, owner-scoped credential contexts behave as follows when set
-through `GIT_CONFIG_COUNT`:
-`credential.https://github.com/<owner>.helper=` (reset) followed by an inline
-`!f(){ … }` helper.
+- `crates/executors/default_mcp.json` is the catalog: a server map plus
+  `meta`. An HTTP entry with a placeholder header already exists (`context7`).
+  No test enumerates the catalog. `personal_servicenow` has one pinning test in
+  `mcp_config.rs`.
+- **Catalog changes do not rewrite native files saved from an older template.**
+  Settings are derived from native agent files. A historical-template
+  migration (the Slack precedent) is only safe when the replacement needs no
+  new secret. A stdio → HTTP migration here would need the bearer, so it must
+  be an explicit settings save, not an automatic read-time rewrite.
+- `POST /api/mcp-config/shared` takes the *complete* logical server list and
+  writes each assigned native profile atomically, keeping a `.bak`. Codex
+  accepts Streamable HTTP (`url`/`http_headers`).
+- Placeholders are not validated. Document that `YOUR_TOKEN` has to be
+  replaced. Never commit real-looking credentials.
+- Static-bearer HTTP MCPs (LogMeIn, Firecrawl-browser, Windows MCP) are already
+  stored in settings as `type: http` with an `Authorization` header. That is
+  the established boundary for an operator-held static bearer.
 
-- They route only `https://github.com/<owner>/…`, including
-  `user@github.com/<owner>/…` URLs.
-- They leave `<owner>-other/…`, other owners, and host-only lookups on the
-  existing helper.
-- Path matching is **case-sensitive**: a `Sweetgreen/…` URL does not match a
-  `sweetgreen` context.
+## Cluster runtime (vibe-kanban `cluster-mcp-runtime-connectivity.md`)
+
+- Persistence, runtime adoption and worker connectivity are separate
+  boundaries. A coordinator Test passing does not prove a worker can connect.
+  Direct public MCP URLs pass through to workers unchanged.
+
+## Governing principle (homelab constitution 64)
+
+Deployment-supplied machine credentials for a settings-managed public MCP
+endpoint are attached only at the final outbound hop. They are never
+serialized into settings or native client config. The existing mechanism is
+`services.vibeKanban.protectedMcpRoutes`: a per-host Caddy loopback gateway,
+`vibe-kanban-mcp-access`, that resolves 1Password refs at start. Today it only
+injects Cloudflare Access service-token headers, for `vibe.vasandani.dev` on
+port 18901. The lmi/cdp/windows entries that keep a bearer in settings predate
+this principle and are not a precedent to copy.

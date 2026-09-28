@@ -305,6 +305,43 @@ so `npx` must be able to resolve `brink-pos-mcp-server` on the agent host —
 publish it to the npm registry your deployment uses (public npm or a configured
 private registry) before adding the server.
 
+### Personal ServiceNow connector
+
+The Personal ServiceNow template connects to a hosted Streamable HTTP server.
+Use it to query ServiceNow incidents, requests, changes, knowledge, CMDB and
+catalog records, and to run the connector's explicit private-task, catalog and
+access-request tools:
+
+```json
+{
+  "type": "http",
+  "url": "https://snow.vasandani.dev/mcp"
+}
+```
+
+The entry deliberately has no credential. The endpoint needs an origin bearer
+token. A Vibe Kanban deployment supplies it through a host-local runtime route:
+when Vibe Kanban writes the agent's config it rewrites this URL to a loopback
+address, and the route attaches the bearer on the way out. The token therefore
+never enters your settings, the agent's native config file or any backup of it.
+Settings keep showing the public URL.
+
+<Warning>
+On a host without that runtime route the endpoint rejects the request. You can
+add an `Authorization: Bearer …` header yourself on such a host, but keep the
+value in your own secret manager and never commit it. The endpoint also accepts
+requests only from reviewed source networks, so a header alone does not grant
+access from elsewhere.
+</Warning>
+
+<Note>
+Existing sessions keep the MCP server list they started with. Start a new
+session after adding or changing this server. Earlier versions of this template
+launched a local `personal-servicenow-mcp` stdio command. A saved entry of that
+form keeps working wherever the command is installed, and you switch it by
+editing its transport to HTTP.
+</Note>
+
 ## Adding Custom MCP Servers
 
 You can also add your own MCP servers by configuring them manually:
