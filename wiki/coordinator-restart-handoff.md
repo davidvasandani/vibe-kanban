@@ -43,7 +43,12 @@ because reconcile now defers running rows. For each such row, shutdown:
 - ends the store, waits (bounded by `WORKER_HANDOFF_FLUSH_TIMEOUT`, 5 s total)
   for its raw-log writer to drain, and only then persists the tracker's
   **pushed** sequence as the cursor. If the writer does not finish in time,
-  the cursor is left alone, so lines can repeat but never vanish.
+  the cursor is left alone. Residual (Codex round 6): the tracker's own
+  per-batch acknowledgements already ran ahead of the writer, so a writer
+  stalled past the timeout by storage can still lose the lines it never
+  wrote. Closing that means gating acknowledgement on writer progress, which
+  was deferred as a redesign. Under normal storage the writer drains in
+  milliseconds.
 
 The acknowledged cursor alone is wrong in **both** directions, which Codex
 found in round 1. The tracker pushes a whole batch into the MsgStore and only
