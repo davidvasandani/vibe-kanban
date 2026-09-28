@@ -29,21 +29,32 @@ only when idle" needed no change.
 
 ## Handoff: what shutdown must not do
 
-`should_hand_off_worker_job` is true for any non-terminal dispatch state,
-including `Pending` and `Cancelling`. For those rows shutdown:
+`should_hand_off_worker_job` is true for **every** `Running` row that has a
+worker job, whatever its dispatch state. Terminal states are included: a
+crash between the tracker's job update and its row update leaves a terminal
+job under a `Running` row. Terminal events are never acknowledged before the
+row persists, so a re-attached tracker replays the event and finalizes.
+Excluding those rows (Codex review, round 1) left them `Running` forever,
+because reconcile now defers running rows. For each such row, shutdown:
 
 - aborts only the tracker (the exit-monitor handle); the row stays `Running`;
 - sends **no** cancellation;
 - does **not** commit WIP, because the worker still owns the worktree;
-- waits `WORKER_HANDOFF_FLUSH_GRACE` (250 ms) once, if anything was handed
-  off.
+- persists the tracker's **pushed** sequence as the cursor, then waits
+  `WORKER_HANDOFF_FLUSH_GRACE` (250 ms) once.
 
-Why the grace: the tracker pushes a batch into the MsgStore and then
-**acknowledges** it. The JSONL writer is a separate task reading the
-broadcast. Without a pause, lines pushed and acknowledged just before exit
-could be missing from the file, and re-attach starts after the acknowledged
-cursor. A crash skips the grace, so it can lose a few lines, but it can never
-duplicate them.
+The acknowledged cursor alone is wrong in **both** directions, which Codex
+found in round 1. The tracker pushes a whole batch into the MsgStore and only
+then acknowledges. The JSONL writer is a separate task reading the broadcast.
+If the tracker is aborted between push and acknowledgement, the pushed lines
+still reach disk, and re-attach from the older cursor writes them twice. So
+each tracker publishes a `worker_pushed_sequences` atomic. It advances only
+across pure-output events (`worker_event_is_output`) and stops before an
+interaction or terminal event, whose coordinator-side effects a restart can
+lose and which must be replayed. Handoff writes that value through the
+monotonic `acknowledge_sequence`, and the grace lets the writer reach it. A
+hard crash skips all of this, so up to one batch may be lost or repeated.
+That residual is accepted.
 
 A failed ownership lookup falls through to the old local rules. That is
 conservative: it still routes a worker row through `stop_execution`.
@@ -62,7 +73,9 @@ each row it:
 2. **Tells the raw-log writer how many seeded lines to skip**
    (`spawn_stream_raw_logs_to_storage(.., skip_raw_history)`). The writer reads
    `history_plus_stream`, so without the skip it rewrites the seeded history
-   into the same file. The skip counts messages instead of relying on
+   into the same file. The skip counts messages *retained by the store* (it evicts
+   its oldest history past about 100 MB; counting what was loaded instead
+   silently dropped new output, Codex round 1) instead of relying on
    subscription timing, because seeded messages are always first. That keeps
    it race-free however soon the tracker pushes.
 3. **Starts the tracker at `last_event_sequence`** (`resume_from`), reusing

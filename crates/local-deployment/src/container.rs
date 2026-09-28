@@ -219,12 +219,33 @@ fn replay_gap_job_is_live(
         && !summary.state.is_terminal()
 }
 
-/// Whether coordinator shutdown should hand a running execution off to its
-/// worker rather than stop it. A worker that still owns the job keeps running
-/// it across the coordinator restart; boot re-attaches from the persisted
-/// cursor (see `reattach_worker_executions`).
+/// Whether a running execution row is worker-owned, and so is handed off at
+/// coordinator shutdown and re-attached at boot rather than stopped.
+///
+/// Any worker job counts, terminal dispatch state included: a crash between
+/// the tracker's job update and its process-row update leaves a terminal job
+/// under a `Running` row. Terminal events are never acknowledged before the
+/// row persists, so a re-attached tracker replays that event and finalizes;
+/// excluding it would leave the row `Running` forever, because boot
+/// reconciliation defers running rows to the tracker.
 fn should_hand_off_worker_job(job: Option<&ExecutionWorkerJob>) -> bool {
-    job.is_some_and(|job| !job.dispatch_state.is_terminal())
+    job.is_some()
+}
+
+/// Whether a worker event's only coordinator-side effect is MsgStore output,
+/// which the raw-log writer makes durable. Interactions and terminal events
+/// have effects a restart can lose, so they must be replayed after one.
+fn worker_event_is_output(payload: &ExecutionEventPayload) -> bool {
+    matches!(
+        payload,
+        ExecutionEventPayload::Stdout { .. }
+            | ExecutionEventPayload::Stderr { .. }
+            | ExecutionEventPayload::Structured { .. }
+            | ExecutionEventPayload::Accepted
+            | ExecutionEventPayload::Starting
+            | ExecutionEventPayload::InteractionAcknowledged { .. }
+            | ExecutionEventPayload::Preview(_)
+    )
 }
 
 /// Grace after handing worker executions off at shutdown, so the raw-log
@@ -313,10 +334,11 @@ mod final_output_reconciliation_tests {
     use uuid::Uuid;
 
     use super::{
-        ExecutionProcessStatus, ExecutionWorkerDispatchState, ExecutionWorkerJob, JobState,
-        JobSummary, TerminalEvidence, TerminalState, Utc, history_has_final_assistant_message,
-        normalized_final_assistant_state, replay_gap_job_is_live, replay_gap_terminal_evidence,
-        should_ack_worker_batch, should_hand_off_worker_job, wait_for_unfinalized_output,
+        ExecutionEventPayload, ExecutionProcessStatus, ExecutionWorkerDispatchState,
+        ExecutionWorkerJob, InteractionRequest, JobState, JobSummary, TerminalEvidence,
+        TerminalState, Utc, history_has_final_assistant_message, normalized_final_assistant_state,
+        replay_gap_job_is_live, replay_gap_terminal_evidence, should_ack_worker_batch,
+        should_hand_off_worker_job, wait_for_unfinalized_output, worker_event_is_output,
         worker_job_has_positive_liveness, worker_lease_is_turn_evidence,
     };
 
@@ -595,24 +617,20 @@ mod final_output_reconciliation_tests {
     }
 
     #[test]
-    fn shutdown_hands_off_only_jobs_a_worker_still_owns() {
+    fn shutdown_hands_off_every_worker_owned_running_row() {
         assert!(
             !should_hand_off_worker_job(None),
             "a coordinator-local execution keeps interruption semantics"
         );
+        // Terminal dispatch states are included on purpose: a running row
+        // over a terminal job means the terminal event is still unacknowledged
+        // and must be replayed by a re-attached tracker to finalize.
         for state in [
             ExecutionWorkerDispatchState::Pending,
             ExecutionWorkerDispatchState::Accepted,
             ExecutionWorkerDispatchState::Starting,
             ExecutionWorkerDispatchState::Running,
             ExecutionWorkerDispatchState::Cancelling,
-        ] {
-            assert!(
-                should_hand_off_worker_job(Some(&known_worker_job(state))),
-                "{state:?} is owned by the worker"
-            );
-        }
-        for state in [
             ExecutionWorkerDispatchState::Completed,
             ExecutionWorkerDispatchState::Failed,
             ExecutionWorkerDispatchState::Killed,
@@ -621,8 +639,54 @@ mod final_output_reconciliation_tests {
             ExecutionWorkerDispatchState::Quarantined,
         ] {
             assert!(
-                !should_hand_off_worker_job(Some(&known_worker_job(state))),
-                "{state:?} is not live worker work"
+                should_hand_off_worker_job(Some(&known_worker_job(state))),
+                "{state:?} row is worker-owned"
+            );
+        }
+    }
+
+    #[test]
+    fn only_pure_output_events_advance_the_pushed_cursor() {
+        use cluster_protocol::DisconnectPolicy;
+
+        let evidence = TerminalEvidence {
+            state: TerminalState::Completed,
+            exit_code: Some(0),
+            signal: None,
+            observed_at: Utc::now(),
+        };
+        for payload in [
+            ExecutionEventPayload::Stdout {
+                data_base64: String::new(),
+            },
+            ExecutionEventPayload::Stderr {
+                data_base64: String::new(),
+            },
+            ExecutionEventPayload::Structured { json: "{}".into() },
+            ExecutionEventPayload::Accepted,
+            ExecutionEventPayload::Starting,
+        ] {
+            assert!(worker_event_is_output(&payload), "{payload:?}");
+        }
+        for payload in [
+            ExecutionEventPayload::Completed(evidence.clone()),
+            ExecutionEventPayload::Failed(evidence.clone()),
+            ExecutionEventPayload::Killed(evidence.clone()),
+            ExecutionEventPayload::Interrupted(evidence),
+            ExecutionEventPayload::Indeterminate {
+                reason: "lost".into(),
+            },
+            ExecutionEventPayload::InteractionRequested(InteractionRequest {
+                interaction_id: Uuid::new_v4(),
+                kind: "approval".into(),
+                prompt: "ok?".into(),
+                expires_at: None,
+                disconnect_policy: DisconnectPolicy::FailClosed,
+            }),
+        ] {
+            assert!(
+                !worker_event_is_output(&payload),
+                "{payload:?} must be replayed after a restart"
             );
         }
     }
@@ -1131,6 +1195,12 @@ pub struct LocalContainerService {
     /// Process group ids of dev servers adopted from a previous server
     /// instance. These have no child handle; they are managed by pgid.
     adopted_pgids: Arc<RwLock<HashMap<Uuid, i32>>>,
+    /// Highest worker event sequence each tracker has pushed into its MsgStore.
+    /// Acknowledgement lags pushes by up to one batch, so shutdown persists
+    /// this (not the acknowledged cursor) after aborting a handed-off tracker:
+    /// lines already pushed reach the raw log during the flush grace, and
+    /// re-attachment must not replay them.
+    worker_pushed_sequences: Arc<RwLock<HashMap<Uuid, Arc<std::sync::atomic::AtomicU64>>>>,
     /// Warm app-servers kept alive between turns, keyed by **session id** (one
     /// active agent session per attempt). This registry is the single owner of a
     /// warm process's lifetime — it reaps at teardown/stop/idle/death, closing
@@ -1416,6 +1486,7 @@ impl LocalContainerService {
         let exit_monitor_handles = Arc::new(RwLock::new(HashMap::new()));
         let raw_log_tailers = Arc::new(RwLock::new(HashMap::new()));
         let adopted_pgids = Arc::new(RwLock::new(HashMap::new()));
+        let worker_pushed_sequences = Arc::new(RwLock::new(HashMap::new()));
         let warm_app_servers = Arc::new(RwLock::new(HashMap::new()));
         let mcp_refresh_controls = Arc::new(RwLock::new(HashMap::new()));
         let workspace_touch_times = Arc::new(RwLock::new(HashMap::new()));
@@ -1435,6 +1506,7 @@ impl LocalContainerService {
             exit_monitor_handles,
             raw_log_tailers,
             adopted_pgids,
+            worker_pushed_sequences,
             warm_app_servers,
             mcp_refresh_controls,
             mcp_refresh_coordinator: McpRefreshCoordinator::default(),
@@ -1758,6 +1830,7 @@ impl LocalContainerService {
     /// is the one place guaranteed to hold the complete history without
     /// requiring a reader to ask for it before the store is gone.
     async fn finish_msg_store(&self, id: &Uuid) {
+        self.worker_pushed_sequences.write().await.remove(id);
         let Some(store) = self.msg_stores.write().await.remove(id) else {
             return;
         };
@@ -2876,14 +2949,19 @@ impl LocalContainerService {
             services::services::execution_process::load_raw_log_messages(pool, process.id)
                 .await
                 .unwrap_or_default();
-        let seeded_raw = history
-            .iter()
-            .filter(|msg| matches!(msg, LogMsg::Stdout(_) | LogMsg::Stderr(_)))
-            .count();
         let store = Arc::new(MsgStore::new());
         for msg in history {
             store.push(msg);
         }
+        // Count what the store actually retained, not what was loaded: the
+        // store evicts its oldest history past its size bound, and the writer
+        // skips by count from the retained history. Over-counting would make
+        // it silently drop new output.
+        let seeded_raw = store
+            .get_history()
+            .iter()
+            .filter(|msg| matches!(msg, LogMsg::Stdout(_) | LogMsg::Stderr(_)))
+            .count();
         self.msg_stores.write().await.insert(process.id, store);
 
         let cursor = u64::try_from(job.last_event_sequence).unwrap_or(0);
@@ -2944,6 +3022,11 @@ impl LocalContainerService {
                 }
             }
         };
+        let pushed = Arc::new(std::sync::atomic::AtomicU64::new(resume_from.unwrap_or(0)));
+        self.worker_pushed_sequences
+            .write()
+            .await
+            .insert(execution_id, pushed.clone());
         let db = self.db.clone();
         let container = self.clone();
         let handle = tokio::spawn(async move {
@@ -3017,6 +3100,7 @@ impl LocalContainerService {
                                 earliest_available.saturating_sub(1)
                             )));
                             cursor = earliest_available.saturating_sub(1);
+                            pushed.fetch_max(cursor, std::sync::atomic::Ordering::AcqRel);
                             continue 'poll;
                         }
                         let (worker_state, process_state, evidence) = match recovered {
@@ -3131,8 +3215,17 @@ impl LocalContainerService {
 
                 let mut terminal = None;
                 let had_events = !batch.events.is_empty();
+                // Output effects are durable once pushed (the raw-log writer
+                // follows the store). An interaction or terminal event has
+                // effects a restart can lose, so the pushed sequence stops
+                // before it and only the acknowledgement below moves past it.
+                let mut batch_output_only = true;
                 for event in batch.events {
                     cursor = event.sequence;
+                    batch_output_only &= worker_event_is_output(&event.payload);
+                    if batch_output_only {
+                        pushed.fetch_max(cursor, std::sync::atomic::Ordering::AcqRel);
+                    }
                     match event.payload {
                         ExecutionEventPayload::Stdout { data_base64 } => {
                             push_worker_bytes(&store, &data_base64, false);
@@ -3269,6 +3362,9 @@ impl LocalContainerService {
                     if let Err(error) = client.acknowledge(worker_node_id, &acknowledgement).await {
                         tracing::warn!(%execution_id, "Worker event acknowledgement failed: {error}");
                     }
+                }
+                if should_ack_worker_batch(cursor, terminal.is_some()) {
+                    pushed.fetch_max(cursor, std::sync::atomic::Ordering::AcqRel);
                 }
 
                 if let Some((worker_state, process_state, evidence)) = terminal {
@@ -5644,6 +5740,33 @@ impl ContainerService for LocalContainerService {
                 Ok(job) if should_hand_off_worker_job(job.as_ref()) => {
                     if let Some(handle) = self.take_exit_monitor_handle(&process.id).await {
                         handle.abort();
+                    }
+                    // The acknowledged cursor lags pushes by up to one batch.
+                    // Those pushed lines reach the raw log during the flush
+                    // grace below, so re-attachment must resume after them or
+                    // it would write them twice. The update is monotonic: it
+                    // never moves the cursor backwards.
+                    let pushed = self
+                        .worker_pushed_sequences
+                        .write()
+                        .await
+                        .remove(&process.id);
+                    if let Some(pushed) = pushed {
+                        let pushed = pushed.load(std::sync::atomic::Ordering::Acquire) as i64;
+                        if let Err(error) = ExecutionWorkerJob::acknowledge_sequence(
+                            &self.db.pool,
+                            process.id,
+                            pushed,
+                            pushed,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                execution_id = %process.id,
+                                %error,
+                                "Failed to persist pushed worker cursor at handoff; output may repeat after restart"
+                            );
+                        }
                     }
                     handed_off += 1;
                     tracing::info!(
