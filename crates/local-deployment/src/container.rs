@@ -202,6 +202,35 @@ fn should_ack_worker_batch(cursor: u64, has_terminal: bool) -> bool {
 /// Output retention and terminal truth have separate lifetimes. Only accept
 /// independently retained evidence for this exact dispatch, at or beyond the
 /// gap boundary; an active or contradictory summary cannot resolve a gap.
+/// Whether a replay gap hit a job the worker still reports as live. The
+/// identity must match exactly — worker, execution, job id and request digest
+/// — before an inventory entry counts as positive liveness evidence.
+fn replay_gap_job_is_live(
+    known: &ExecutionWorkerJob,
+    worker_node_id: Uuid,
+    execution_id: Uuid,
+    summary: &JobSummary,
+) -> bool {
+    known.worker_node_id == worker_node_id
+        && known.execution_process_id == execution_id
+        && summary.execution_id == execution_id
+        && summary.worker_job_id == known.worker_job_id
+        && summary.request_digest == known.request_digest
+        && !summary.state.is_terminal()
+}
+
+/// Whether coordinator shutdown should hand a running execution off to its
+/// worker rather than stop it. A worker that still owns the job keeps running
+/// it across the coordinator restart; boot re-attaches from the persisted
+/// cursor (see `reattach_worker_executions`).
+fn should_hand_off_worker_job(job: Option<&ExecutionWorkerJob>) -> bool {
+    job.is_some_and(|job| !job.dispatch_state.is_terminal())
+}
+
+/// Grace after handing worker executions off at shutdown, so the raw-log
+/// writer can flush lines the tracker already pushed and acknowledged.
+const WORKER_HANDOFF_FLUSH_GRACE: Duration = Duration::from_millis(250);
+
 fn replay_gap_terminal_evidence(
     known: &ExecutionWorkerJob,
     worker_node_id: Uuid,
@@ -499,6 +528,108 @@ mod final_output_reconciliation_tests {
             )
             .is_none()
         );
+    }
+
+    fn known_worker_job(state: ExecutionWorkerDispatchState) -> ExecutionWorkerJob {
+        let now = Utc::now();
+        ExecutionWorkerJob {
+            execution_process_id: Uuid::new_v4(),
+            worker_node_id: Uuid::new_v4(),
+            worker_job_id: Uuid::new_v4(),
+            request_digest: "digest".into(),
+            dispatch_state: state,
+            last_event_sequence: 2,
+            worker_last_sequence: 5,
+            lease_expires_at: None,
+            output_complete: true,
+            terminal_evidence: None,
+            dispatched_at: now,
+            accepted_at: Some(now),
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn replay_gap_continues_only_for_a_matching_live_job() {
+        let known = known_worker_job(ExecutionWorkerDispatchState::Running);
+        let summary = JobSummary {
+            execution_id: known.execution_process_id,
+            worker_job_id: known.worker_job_id,
+            workspace_id: Uuid::new_v4(),
+            request_digest: known.request_digest.clone(),
+            state: JobState::Running,
+            last_sequence: 9000,
+            terminal: None,
+        };
+        let live = |summary: &JobSummary| {
+            replay_gap_job_is_live(
+                &known,
+                known.worker_node_id,
+                known.execution_process_id,
+                summary,
+            )
+        };
+        assert!(live(&summary));
+        for state in [JobState::Accepted, JobState::Starting, JobState::Cancelling] {
+            let mut candidate = summary.clone();
+            candidate.state = state;
+            assert!(live(&candidate), "non-terminal job is live");
+        }
+        for change in 0..5 {
+            let mut candidate = summary.clone();
+            match change {
+                0 => candidate.execution_id = Uuid::new_v4(),
+                1 => candidate.worker_job_id = Uuid::new_v4(),
+                2 => candidate.request_digest = "different".into(),
+                3 => candidate.state = JobState::Completed,
+                _ => candidate.state = JobState::Quarantined,
+            }
+            assert!(!live(&candidate), "not positive liveness, case {change}");
+        }
+        assert!(
+            !replay_gap_job_is_live(
+                &known,
+                Uuid::new_v4(),
+                known.execution_process_id,
+                &summary
+            ),
+            "another worker's inventory is not evidence"
+        );
+    }
+
+    #[test]
+    fn shutdown_hands_off_only_jobs_a_worker_still_owns() {
+        assert!(
+            !should_hand_off_worker_job(None),
+            "a coordinator-local execution keeps interruption semantics"
+        );
+        for state in [
+            ExecutionWorkerDispatchState::Pending,
+            ExecutionWorkerDispatchState::Accepted,
+            ExecutionWorkerDispatchState::Starting,
+            ExecutionWorkerDispatchState::Running,
+            ExecutionWorkerDispatchState::Cancelling,
+        ] {
+            assert!(
+                should_hand_off_worker_job(Some(&known_worker_job(state))),
+                "{state:?} is owned by the worker"
+            );
+        }
+        for state in [
+            ExecutionWorkerDispatchState::Completed,
+            ExecutionWorkerDispatchState::Failed,
+            ExecutionWorkerDispatchState::Killed,
+            ExecutionWorkerDispatchState::Interrupted,
+            ExecutionWorkerDispatchState::Indeterminate,
+            ExecutionWorkerDispatchState::Quarantined,
+        ] {
+            assert!(
+                !should_hand_off_worker_job(Some(&known_worker_job(state))),
+                "{state:?} is not live worker work"
+            );
+        }
     }
 
     #[test]
@@ -2721,10 +2852,79 @@ impl LocalContainerService {
         map.insert(id, store);
     }
 
+    /// Resume following one worker-owned execution left running by a previous
+    /// server instance. Returns `Ok(false)` when the row is not live worker
+    /// work (or is already tracked).
+    ///
+    /// The store is seeded with the persisted raw history so the normalizer
+    /// rebuilds one continuous conversation, the tracker continues from the
+    /// acknowledged cursor (never from zero, never backwards), and the raw-log
+    /// writer skips the seeded lines so nothing is written twice.
+    async fn reattach_worker_execution(
+        &self,
+        process: &ExecutionProcess,
+    ) -> Result<bool, ContainerError> {
+        let pool = &self.db.pool;
+        let Some(job) = ExecutionWorkerJob::find_by_execution_id(pool, process.id).await? else {
+            return Ok(false);
+        };
+        if !should_hand_off_worker_job(Some(&job)) {
+            return Ok(false);
+        }
+        if self.msg_stores.read().await.contains_key(&process.id) {
+            return Ok(false);
+        }
+        let ctx = ExecutionProcess::load_context(pool, process.id).await?;
+        let executor_action = process.executor_action().map_err(ContainerError::Other)?;
+
+        let history =
+            services::services::execution_process::load_raw_log_messages(pool, process.id)
+                .await
+                .unwrap_or_default();
+        let seeded_raw = history
+            .iter()
+            .filter(|msg| matches!(msg, LogMsg::Stdout(_) | LogMsg::Stderr(_)))
+            .count();
+        let store = Arc::new(MsgStore::new());
+        for msg in history {
+            store.push(msg);
+        }
+        self.msg_stores.write().await.insert(process.id, store);
+
+        let cursor = u64::try_from(job.last_event_sequence).unwrap_or(0);
+        if let Err(error) = self
+            .track_worker_msgs_in_store(process, job.worker_node_id, Some(cursor))
+            .await
+        {
+            self.msg_stores.write().await.remove(&process.id);
+            return Err(error);
+        }
+        self.start_execution_log_pipeline(&ctx.workspace, process, executor_action, seeded_raw)
+            .await;
+        self.spawn_execution_stage_tracker(&ctx.workspace, process)
+            .await;
+        tracing::info!(
+            execution_id = %process.id,
+            worker_node_id = %job.worker_node_id,
+            cursor,
+            seeded_raw,
+            "Re-attached worker-owned execution"
+        );
+        Ok(true)
+    }
+
+    /// Follow a worker execution's event journal into its MsgStore.
+    ///
+    /// `resume_from` is `None` for a fresh dispatch (poll from the start, with
+    /// a new store). A boot re-attachment passes the persisted acknowledged
+    /// cursor; the caller has already registered a store seeded with the
+    /// persisted history, which is reused so the normalizer sees one
+    /// continuous stream.
     async fn track_worker_msgs_in_store(
         &self,
         execution_process: &ExecutionProcess,
         worker_node_id: Uuid,
+        resume_from: Option<u64>,
     ) -> Result<(), ContainerError> {
         let client = self.worker_client.clone().ok_or_else(|| {
             ContainerError::Other(anyhow!("Cluster worker client is not configured"))
@@ -2738,15 +2938,21 @@ impl LocalContainerService {
             ExecutorActionField::Other(_) => None,
         };
         let live_worker_lease_is_turn_evidence = worker_lease_is_turn_evidence(base_executor);
-        let store = Arc::new(MsgStore::new());
-        self.msg_stores
-            .write()
-            .await
-            .insert(execution_id, store.clone());
+        let store = {
+            let mut stores = self.msg_stores.write().await;
+            match (resume_from, stores.get(&execution_id)) {
+                (Some(_), Some(seeded)) => seeded.clone(),
+                _ => {
+                    let store = Arc::new(MsgStore::new());
+                    stores.insert(execution_id, store.clone());
+                    store
+                }
+            }
+        };
         let db = self.db.clone();
         let container = self.clone();
         let handle = tokio::spawn(async move {
-            let mut cursor = 0_u64;
+            let mut cursor = resume_from.unwrap_or(0);
             let mut retry_delay = Duration::from_millis(100);
             let mut final_output_deadline: Option<tokio::time::Instant> = None;
             'poll: loop {
@@ -2761,12 +2967,12 @@ impl LocalContainerService {
                     }) => {
                         tracing::warn!(%execution_id, %worker_node_id, requested_after,
                             earliest_available, "Worker output replay gap; checking retained terminal evidence");
-                        let recovered = match (
+                        let (recovered, job_is_live) = match (
                             ExecutionWorkerJob::find_by_execution_id(&db.pool, execution_id).await,
                             client.inventory(worker_node_id).await,
                         ) {
                             (Ok(Some(known)), Ok(inventory)) => {
-                                inventory.iter().find_map(|summary| {
+                                let recovered = inventory.iter().find_map(|summary| {
                                     replay_gap_terminal_evidence(
                                         &known,
                                         worker_node_id,
@@ -2774,15 +2980,53 @@ impl LocalContainerService {
                                         earliest_available.max(cursor),
                                         summary,
                                     )
-                                })
+                                });
+                                let live = inventory.iter().any(|summary| {
+                                    replay_gap_job_is_live(
+                                        &known,
+                                        worker_node_id,
+                                        execution_id,
+                                        summary,
+                                    )
+                                });
+                                (recovered, live)
                             }
                             (known, inventory) => {
                                 tracing::warn!(%execution_id, database_error = ?known.err(),
                                     inventory_error = ?inventory.err(),
                                     "Unable to verify terminal evidence after replay gap");
-                                None
+                                (None, false)
                             }
                         };
+                        if recovered.is_none() && job_is_live {
+                            // Output was trimmed from the worker's journal
+                            // (typically while this coordinator was restarting),
+                            // but the worker still reports the job live. Lost
+                            // output is not evidence that the execution ended:
+                            // record it as incomplete, say so in the chat, and
+                            // keep following from the earliest retained event.
+                            match ExecutionWorkerJob::mark_output_incomplete(
+                                &db.pool,
+                                execution_id,
+                            )
+                            .await
+                            {
+                                Ok(true) => {}
+                                Ok(false) => tracing::warn!(%execution_id,
+                                    "Worker job row missing while recording incomplete output"),
+                                Err(error) => tracing::error!(%execution_id, %error,
+                                    "Failed to record incomplete worker output"),
+                            }
+                            tracing::warn!(%execution_id, %worker_node_id, requested_after,
+                                earliest_available, "Worker output replay gap on a live job; continuing");
+                            store.push(LogMsg::Stderr(format!(
+                                "Output events {} to {} were lost while Vibe Kanban was unavailable; the execution is still running on its worker and output continues below",
+                                requested_after.saturating_add(1),
+                                earliest_available.saturating_sub(1)
+                            )));
+                            cursor = earliest_available.saturating_sub(1);
+                            continue 'poll;
+                        }
                         let (worker_state, process_state, evidence) = match recovered {
                             Some((worker_state, process_state, evidence)) => {
                                 (worker_state, process_state, Some(evidence))
@@ -4646,7 +4890,7 @@ impl ContainerService for LocalContainerService {
                 }
             });
         }
-        self.track_worker_msgs_in_store(execution_process, worker_node_id)
+        self.track_worker_msgs_in_store(execution_process, worker_node_id, None)
             .await?;
         Ok(())
     }
@@ -5303,6 +5547,39 @@ impl ContainerService for LocalContainerService {
         .map_err(|e| ContainerError::Other(anyhow!("Copy files task failed: {e}")))?
     }
 
+    async fn reattach_worker_executions(&self) {
+        if self.worker_client.is_none() {
+            return;
+        }
+        let running = match ExecutionProcess::find_running(&self.db.pool).await {
+            Ok(running) => running,
+            Err(error) => {
+                tracing::error!(%error, "Failed to list running executions for worker re-attachment");
+                return;
+            }
+        };
+        let mut reattached = 0_usize;
+        for process in running {
+            match self.reattach_worker_execution(&process).await {
+                Ok(true) => reattached += 1,
+                Ok(false) => {}
+                // One unrecoverable row must not stop the others; it stays
+                // Running (never inferred terminal) and is named in the log.
+                Err(error) => tracing::warn!(
+                    execution_id = %process.id,
+                    %error,
+                    "Failed to re-attach worker-owned execution after restart"
+                ),
+            }
+        }
+        if reattached > 0 {
+            tracing::info!(
+                reattached,
+                "Re-attached worker-owned executions that ran across the restart"
+            );
+        }
+    }
+
     async fn try_adopt_execution(&self, process: &ExecutionProcess) -> bool {
         #[cfg(not(unix))]
         {
@@ -5364,7 +5641,39 @@ impl ContainerService for LocalContainerService {
             running_processes.len()
         );
 
+        let mut handed_off = 0_usize;
         for process in running_processes {
+            // A worker-owned execution keeps running on its worker across this
+            // restart. Cancelling it here would undo the whole point of
+            // delegating it, and committing WIP would race the agent still
+            // writing that worktree. Stop only this process's tracker; the row
+            // stays Running and boot re-attaches from the acknowledged cursor.
+            match ExecutionWorkerJob::find_by_execution_id(&self.db.pool, process.id).await {
+                Ok(job) if should_hand_off_worker_job(job.as_ref()) => {
+                    if let Some(handle) = self.take_exit_monitor_handle(&process.id).await {
+                        handle.abort();
+                    }
+                    handed_off += 1;
+                    tracing::info!(
+                        execution_id = %process.id,
+                        run_reason = ?process.run_reason,
+                        "Leaving worker-owned execution running across coordinator restart"
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    // Without the worker record we cannot prove the work is
+                    // remote; fall through to the local shutdown rules, which
+                    // for a worker row still route through stop_execution.
+                    tracing::error!(
+                        execution_id = %process.id,
+                        %error,
+                        "Failed to look up worker ownership during shutdown"
+                    );
+                }
+            }
+
             // On unix, persistent processes (dev servers, background helpers)
             // are detached (their output goes to a raw log file) and are left
             // running across the restart; the next boot re-adopts them via
@@ -5412,6 +5721,14 @@ impl ContainerService for LocalContainerService {
                     error
                 );
             }
+        }
+
+        if handed_off > 0 {
+            tracing::info!(
+                handed_off,
+                "Handed worker-owned executions off; flushing buffered output before exit"
+            );
+            tokio::time::sleep(WORKER_HANDOFF_FLUSH_GRACE).await;
         }
 
         Ok(())

@@ -323,6 +323,7 @@ impl Deployment for LocalDeployment {
                 jobs_missing = report.jobs_missing,
                 jobs_quarantined = report.jobs_quarantined,
                 conflicts = report.conflicts,
+                jobs_deferred = report.jobs_deferred,
                 "Cluster execution reconciliation completed before cleanup"
             );
         }

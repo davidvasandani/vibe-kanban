@@ -654,6 +654,97 @@ pub trait ContainerService {
         false
     }
 
+    /// Resume following worker-owned executions that were still running when
+    /// a previous server instance stopped. Call at startup, after
+    /// [`Self::cleanup_orphan_executions`]. The default (no cluster) has none.
+    async fn reattach_worker_executions(&self) {}
+
+    /// Start the log pipeline for an execution whose MsgStore is registered:
+    /// the executor's normalizer (agent and review actions) and, unless the
+    /// run writes its own raw log, the raw-log writer.
+    ///
+    /// Both dispatch and boot re-attachment use this, so they cannot drift.
+    /// `skip_raw_history` is the number of leading raw messages already
+    /// persisted (a re-attached store's seeded history).
+    async fn start_execution_log_pipeline(
+        &self,
+        workspace: &Workspace,
+        execution_process: &ExecutionProcess,
+        executor_action: &ExecutorAction,
+        skip_raw_history: usize,
+    ) {
+        let workspace_root = self.workspace_to_current_dir(workspace);
+        #[cfg_attr(feature = "qa-mode", allow(unused_variables))]
+        if let Some(msg_store) = self.get_msg_store_by_id(&execution_process.id).await
+            && let Some((executor_profile_id, working_dir)) = match executor_action.typ() {
+                ExecutorActionType::CodingAgentInitialRequest(request) => Some((
+                    request.executor_config.profile_id(),
+                    request.effective_dir(&workspace_root),
+                )),
+                ExecutorActionType::CodingAgentFollowUpRequest(request) => Some((
+                    request.executor_config.profile_id(),
+                    request.effective_dir(&workspace_root),
+                )),
+                ExecutorActionType::ReviewRequest(request) => Some((
+                    request.executor_config.profile_id(),
+                    request.effective_dir(&workspace_root),
+                )),
+                _ => None,
+            }
+        {
+            #[cfg(feature = "qa-mode")]
+            {
+                let executor = QaMockExecutor;
+                let _ = executor.normalize_logs(msg_store, &working_dir);
+            }
+            #[cfg(not(feature = "qa-mode"))]
+            {
+                if let Some(executor) =
+                    ExecutorConfigs::get_cached().get_coding_agent(&executor_profile_id)
+                {
+                    let _ = executor.normalize_logs(msg_store, &working_dir);
+                } else {
+                    tracing::error!(
+                        "Failed to resolve profile '{:?}' for normalization",
+                        executor_profile_id
+                    );
+                }
+            }
+        }
+
+        // Detached persistent processes (unix) write their own raw log file,
+        // which is the persistent record; mirroring the MsgStore into a JSONL
+        // file would duplicate it on every adoption replay.
+        let writes_own_raw_log = cfg!(unix) && execution_process.run_reason.is_persistent();
+        if !writes_own_raw_log {
+            execution_process::spawn_stream_raw_logs_to_storage(
+                self.msg_stores().clone(),
+                self.db().clone(),
+                execution_process.id,
+                execution_process.session_id,
+                skip_raw_history,
+            );
+        }
+    }
+
+    /// Track pipeline-stage markers for a coding-agent execution.
+    async fn spawn_execution_stage_tracker(
+        &self,
+        workspace: &Workspace,
+        execution_process: &ExecutionProcess,
+    ) {
+        if execution_process.run_reason == ExecutionProcessRunReason::CodingAgent
+            && let Some(store) = self.get_msg_store_by_id(&execution_process.id).await
+        {
+            crate::services::pipeline_stage::spawn_pipeline_stage_tracker(
+                store,
+                workspace.id,
+                execution_process.id,
+                self.db().clone(),
+            );
+        }
+    }
+
     async fn delete(&self, workspace: &Workspace) -> Result<(), ContainerError>;
 
     /// A context is finalized when
@@ -2356,58 +2447,8 @@ pub trait ContainerService {
             return Err(start_error);
         }
 
-        // Start processing normalised logs for executor requests and follow ups
-        let workspace_root = self.workspace_to_current_dir(workspace);
-        #[cfg_attr(feature = "qa-mode", allow(unused_variables))]
-        if let Some(msg_store) = self.get_msg_store_by_id(&execution_process.id).await
-            && let Some((executor_profile_id, working_dir)) = match executor_action.typ() {
-                ExecutorActionType::CodingAgentInitialRequest(request) => Some((
-                    request.executor_config.profile_id(),
-                    request.effective_dir(&workspace_root),
-                )),
-                ExecutorActionType::CodingAgentFollowUpRequest(request) => Some((
-                    request.executor_config.profile_id(),
-                    request.effective_dir(&workspace_root),
-                )),
-                ExecutorActionType::ReviewRequest(request) => Some((
-                    request.executor_config.profile_id(),
-                    request.effective_dir(&workspace_root),
-                )),
-                _ => None,
-            }
-        {
-            #[cfg(feature = "qa-mode")]
-            {
-                let executor = QaMockExecutor;
-                let _ = executor.normalize_logs(msg_store, &working_dir);
-            }
-            #[cfg(not(feature = "qa-mode"))]
-            {
-                if let Some(executor) =
-                    ExecutorConfigs::get_cached().get_coding_agent(&executor_profile_id)
-                {
-                    let _ = executor.normalize_logs(msg_store, &working_dir);
-                } else {
-                    tracing::error!(
-                        "Failed to resolve profile '{:?}' for normalization",
-                        executor_profile_id
-                    );
-                }
-            }
-        }
-
-        // Detached persistent processes (unix) write their own raw log file,
-        // which is the persistent record; mirroring the MsgStore into a JSONL
-        // file would duplicate it on every adoption replay.
-        let writes_own_raw_log = cfg!(unix) && run_reason.is_persistent();
-        if !writes_own_raw_log {
-            execution_process::spawn_stream_raw_logs_to_storage(
-                self.msg_stores().clone(),
-                self.db().clone(),
-                execution_process.id,
-                session.id,
-            );
-        }
+        self.start_execution_log_pipeline(workspace, &execution_process, executor_action, 0)
+            .await;
 
         // Reset the reported pipeline stage only when a *new coding-agent*
         // execution begins (not for setup/cleanup/archive/dev-server runs,
@@ -2454,16 +2495,8 @@ pub trait ContainerService {
             }
         }
 
-        if *run_reason == ExecutionProcessRunReason::CodingAgent
-            && let Some(store) = self.get_msg_store_by_id(&execution_process.id).await
-        {
-            crate::services::pipeline_stage::spawn_pipeline_stage_tracker(
-                store,
-                workspace.id,
-                execution_process.id,
-                self.db().clone(),
-            );
-        }
+        self.spawn_execution_stage_tracker(workspace, &execution_process)
+            .await;
 
         Ok(execution_process)
     }
