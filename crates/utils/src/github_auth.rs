@@ -43,14 +43,17 @@ pub fn is_valid_owner(owner: &str) -> bool {
         && !owner.ends_with('-')
 }
 
-/// Environment variable carrying `owner`'s resolved token. GitHub logins
-/// cannot contain `_`, so mapping `-` to `_` is injective (case aside, which
-/// GitHub also ignores).
+/// Environment variable carrying `owner`'s resolved token: the prefix plus the
+/// upper-case hex of the lower-cased login (GitHub ignores case). Hex is
+/// injective and uses only `0-9A-F`, so no owner (e.g. `monkey`) can produce a
+/// name containing KEY, TOKEN or SECRET, which agent secret filters drop.
 pub fn token_env_name(owner: &str) -> String {
-    format!(
-        "{TOKEN_ENV_PREFIX}{}",
-        owner.to_ascii_uppercase().replace('-', "_")
-    )
+    let hex: String = owner
+        .to_ascii_lowercase()
+        .bytes()
+        .map(|b| format!("{b:02X}"))
+        .collect();
+    format!("{TOKEN_ENV_PREFIX}{hex}")
 }
 
 /// Owners named by an [`OWNERS_ENV`] value, skipping invalid entries.
@@ -353,7 +356,8 @@ mod tests {
         for invalid in ["", "-a", "a-", "a_b", "a.b", "a/b", &"x".repeat(40)] {
             assert!(!is_valid_owner(invalid), "{invalid}");
         }
-        assert_eq!(token_env_name("Org-A"), "VK_GITHUB_PAT_ORG_A");
+        assert_eq!(token_env_name("Org-A"), "VK_GITHUB_PAT_6F72672D61");
+        assert_eq!(token_env_name("ORG-A"), token_env_name("org-a"));
         // No valid login can map onto the owner manifest.
         for owner in ["owners", "routed-owners", "OWNERS"] {
             assert_ne!(token_env_name(owner), OWNERS_ENV);
@@ -395,7 +399,7 @@ mod tests {
             assert_eq!(parameters.matches(&format!("'{key}=")).count(), 2, "{key}");
             assert!(parameters.contains(&format!("'{key}=' ")), "{key} reset");
         }
-        assert!(parameters.contains("$VK_GITHUB_PAT_ORG_A"));
+        assert!(parameters.contains("$VK_GITHUB_PAT_6F72672D61"));
         // The helper's own single quotes are sq-escaped.
         assert!(parameters.contains(r"printf '\''username=x-access-token"));
         for value in additions.values() {
@@ -412,7 +416,9 @@ mod tests {
             .map(|(name, _)| name)
             .collect();
         names.push(OWNERS_ENV.to_owned());
-        names.push(token_env_name("some-org"));
+        for owner in ["some-org", "monkey", "tokenizer", "secret-ops", "KEYS"] {
+            names.push(token_env_name(owner));
+        }
         for name in names {
             let upper = name.to_ascii_uppercase();
             for word in ["KEY", "SECRET", "TOKEN"] {
@@ -534,6 +540,30 @@ mod tests {
             ),
             TOKEN_B
         );
+        // An --input file path is a flag value, not the API endpoint.
+        assert_eq!(
+            token_of(
+                &fx.gh(
+                    &repo_b,
+                    &[
+                        "api",
+                        "--input",
+                        "repos/org-b/payload.json",
+                        "repos/Org-A/app/issues"
+                    ],
+                    &[]
+                )
+                .1
+            ),
+            TOKEN_A
+        );
+        // Positionals after `--` still name the target.
+        for args in [
+            &["repo", "view", "--", "org-b/svc"][..],
+            &["pr", "view", "--", "https://github.com/org-b/svc/pull/1"],
+        ] {
+            assert_eq!(token_of(&fx.gh(&repo_a, args, &[]).1), TOKEN_B, "{args:?}");
+        }
         // Attached short flag value.
         assert_eq!(
             token_of(&fx.gh(&repo_a, &["pr", "view", "-Rorg-b/svc", "1"], &[]).1),

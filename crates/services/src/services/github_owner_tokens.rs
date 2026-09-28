@@ -464,8 +464,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(environment[OWNERS_ENV], "Org-A,org-b");
-        assert_eq!(environment["VK_GITHUB_PAT_ORG_A"], "synthetic-literal");
-        assert_eq!(environment["VK_GITHUB_PAT_ORG_B"], "synthetic-resolved");
+        assert_eq!(environment[&token_env_name("Org-A")], "synthetic-literal");
+        assert_eq!(environment[&token_env_name("org-b")], "synthetic-resolved");
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "literals never reach the resolver");
         assert_eq!(seen[0][OP_TOKEN], "synthetic-op");

@@ -67,6 +67,9 @@ vk_sub=""
 vk_state=cmd
 vk_expect=""
 vk_prev=""
+# After `--` nothing is an option, but positionals still name targets
+# (`gh repo view -- OWNER/REPO`).
+vk_dashdash=""
 for vk_arg do
   if [ -n "$vk_expect" ]; then
     vk_flag_repo=$vk_arg
@@ -74,35 +77,40 @@ for vk_arg do
     vk_prev=""
     continue
   fi
-  case "$vk_arg" in
-    --) break ;;
-    -R | --repo)
-      vk_expect=1
-      continue
-      ;;
-    --repo=*)
-      vk_flag_repo=${vk_arg#--repo=}
-      vk_prev=""
-      continue
-      ;;
-    -R?*)
-      vk_flag_repo=${vk_arg#-R}
-      vk_prev=""
-      continue
-      ;;
-  esac
-  vk_is_value=""
-  if vk_takes_value "$vk_prev"; then vk_is_value=1; fi
+  vk_positional=1
+  if [ -z "$vk_dashdash" ]; then
+    case "$vk_arg" in
+      --)
+        vk_dashdash=1
+        vk_prev=""
+        continue
+        ;;
+      -R | --repo)
+        vk_expect=1
+        continue
+        ;;
+      --repo=*)
+        vk_flag_repo=${vk_arg#--repo=}
+        vk_prev=""
+        continue
+        ;;
+      -R?*)
+        vk_flag_repo=${vk_arg#-R}
+        vk_prev=""
+        continue
+        ;;
+      -*) vk_positional="" ;;
+    esac
+    # A value of a value-taking flag is not a positional argument.
+    if vk_takes_value "$vk_prev"; then vk_positional=""; fi
+  fi
   vk_prev=$vk_arg
   case "$vk_state" in
     cmd)
-      case "$vk_arg" in
-        -*) ;;
-        *)
-          vk_cmd=$vk_arg
-          if [ "$vk_cmd" = repo ]; then vk_state=sub; else vk_state=rest; fi
-          ;;
-      esac
+      if [ -n "$vk_positional" ]; then
+        vk_cmd=$vk_arg
+        if [ "$vk_cmd" = repo ]; then vk_state=sub; else vk_state=rest; fi
+      fi
       ;;
     sub)
       vk_sub=$vk_arg
@@ -116,17 +124,13 @@ for vk_arg do
       esac
       ;;
     target)
-      case "$vk_arg" in
-        -*) ;;
-        *)
-          if [ -z "$vk_is_value" ]; then
-            vk_repo_pos=$vk_arg
-            vk_state=rest
-          fi
-          ;;
-      esac
+      if [ -n "$vk_positional" ]; then
+        vk_repo_pos=$vk_arg
+        vk_state=rest
+      fi
       ;;
   esac
+  [ -n "$vk_positional" ] || continue
   if [ "$vk_cmd" = api ] && [ -z "$vk_api" ]; then
     case "$vk_arg" in
       repos/*/*) vk_api=${vk_arg#repos/} ;;
@@ -134,7 +138,7 @@ for vk_arg do
       https://api.github.com/repos/*/*) vk_api=${vk_arg#https://api.github.com/repos/} ;;
     esac
   fi
-  if [ -z "$vk_url" ] && [ -z "$vk_is_value" ]; then
+  if [ -z "$vk_url" ]; then
     case "$vk_arg" in
       https://github.com/*/*) vk_url=$vk_arg ;;
     esac
@@ -194,8 +198,10 @@ if [ -n "$vk_owner" ]; then
   done
   IFS=$vk_ifs
   if [ -n "$vk_configured" ]; then
-    # The owner is validated as [A-Za-z0-9-], so the variable name is safe.
-    vk_key="$(printf '%s' "$vk_owner" | tr 'abcdefghijklmnopqrstuvwxyz-' 'ABCDEFGHIJKLMNOPQRSTUVWXYZ_')"
+    # Upper-case hex of the lower-cased owner, matching `token_env_name`: only
+    # 0-9A-F, so the name is a safe variable name and cannot spell KEY, TOKEN
+    # or SECRET (which some agent CLIs filter out).
+    vk_key="$(printf '%s' "$vk_lower" | od -An -v -tx1 | tr -d ' \n' | tr 'abcdef' 'ABCDEF')"
     eval "vk_token=\${VK_GITHUB_PAT_$vk_key:-}"
     if [ -z "$vk_token" ]; then
       echo "gh: configured GitHub token for $vk_lower is unavailable; re-save it in Settings -> Repositories" >&2

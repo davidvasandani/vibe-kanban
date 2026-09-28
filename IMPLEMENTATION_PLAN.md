@@ -34,7 +34,7 @@ Spec: `SPEC.md`. Prior knowledge: `PRIOR_KNOWLEDGE.md`. SpecKit artifacts:
   on `{OP_SERVICE_ACCOUNT_TOKEN: <org literal if present>, KEY: value}`. The
   org's literal token is used first and the service env is the fallback, the
   same precedence as org Env Vars. It returns `VK_GITHUB_ROUTED_OWNERS` (owners
-  as entered, comma-joined) plus `VK_GITHUB_PAT_<OWNER_KEY>` per owner. With
+  as entered, comma-joined) plus `VK_GITHUB_PAT_<HEX>` per owner (upper-case hex of the lower-cased login). With
   no rows it returns an empty map. A decrypt failure is an error naming the
   owner.
 
