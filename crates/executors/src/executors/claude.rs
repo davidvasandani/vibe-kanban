@@ -287,6 +287,25 @@ fn project_mcp_suppression_args(
     ])
 }
 
+/// Route keys of the deployment-routed servers present in the launched
+/// agent's user-scope config (`$HOME/.claude.json`, with the execution's
+/// scoped `HOME` when it has one).
+fn managed_routed_servers(
+    env: &ExecutionEnv,
+    route_key: impl Fn(&str) -> Option<String>,
+) -> std::collections::BTreeSet<String> {
+    let config = env
+        .get("HOME")
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .map(|home| home.join(".claude.json"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    config
+        .map(|config| crate::mcp_config::routed_mcp_server_keys(&config, route_key))
+        .unwrap_or_default()
+}
+
 /// Environment variable naming the default per-command `Bash` timeout.
 pub const BASH_DEFAULT_TIMEOUT_MS_VAR: &str = "BASH_DEFAULT_TIMEOUT_MS";
 /// Environment variable naming the maximum per-command `Bash` timeout.
@@ -1093,11 +1112,17 @@ impl ClaudeCode {
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
         let (program_path, mut args) = command_parts.into_resolved().await?;
-        if let Some(extra) = project_mcp_suppression_args(
-            &args,
-            current_dir,
-            crate::mcp_config::is_runtime_routed_mcp_url,
-        ) {
+        // Only suppress a project entry when the launched agent's own user
+        // config has a managed replacement on the same route; otherwise the
+        // project entry may be the session's only connection to it.
+        let managed_routes = managed_routed_servers(
+            &env.clone().with_profile(&self.cmd),
+            crate::mcp_config::runtime_route_key,
+        );
+        if let Some(extra) = project_mcp_suppression_args(&args, current_dir, |url| {
+            crate::mcp_config::runtime_route_key(url)
+                .is_some_and(|key| managed_routes.contains(&key))
+        }) {
             args.extend(extra);
         }
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
@@ -3575,6 +3600,37 @@ mod tests {
             settings,
             serde_json::json!({"disabledMcpjsonServers": ["vibe-kanban"]})
         );
+    }
+
+    #[test]
+    fn managed_routes_are_read_from_the_executions_scoped_home() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            serde_json::json!({"mcpServers": {
+                "vibe_kanban": {"type": "http", "url": "http://127.0.0.1:18901/mcp"}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let mut env = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        env.insert("HOME", home.path().to_string_lossy());
+        let route_key = |url: &str| {
+            (url == "http://127.0.0.1:18901/mcp" || url == "https://vibe.vasandani.dev/mcp")
+                .then(|| "https://vibe.vasandani.dev/mcp".to_string())
+        };
+        assert_eq!(
+            managed_routed_servers(&env, route_key)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["https://vibe.vasandani.dev/mcp".to_string()]
+        );
+
+        // An unreadable scoped home yields no managed routes, so nothing is
+        // suppressed.
+        let mut missing = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        missing.insert("HOME", home.path().join("absent").to_string_lossy());
+        assert!(managed_routed_servers(&missing, route_key).is_empty());
     }
 
     #[test]

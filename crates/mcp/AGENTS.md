@@ -183,11 +183,20 @@ works fine. If the project entry uses the *same* name, it replaces the
 managed entry and the session gets zero VK tools.
 
 `ClaudeCode::spawn_internal` therefore appends
-`--settings {"disabledMcpjsonServers":[…]}` for the project entries whose
-`url`/`httpUrl` is either side of a runtime route
-(`crates/executors/src/mcp_config.rs::shadowed_project_mcp_servers`). A
-profile that already passes `--settings` is left alone, with a warning. The
-repository file itself is never edited.
+`--settings {"disabledMcpjsonServers":[…]}` for project entries that meet
+two conditions:
+
+- the entry's `url`/`httpUrl` is either side of a runtime route;
+- the launched agent's own `$HOME/.claude.json` (the execution's scoped
+  home) already has a user-scope entry on the **same** route.
+
+Without that replacement the project entry may be the session's only
+connection, and it is kept. Claude Code reads `.mcp.json` from the launch
+directory and every ancestor, so all of them are scanned, which covers a
+nested `default_working_dir`. A profile that already passes `--settings` is
+left alone, with a warning. The repository file itself is never edited. See
+`shadowed_project_mcp_servers` and `routed_mcp_server_keys` in
+`crates/executors/src/mcp_config.rs`.
 
 ## Pull request tools
 

@@ -40,16 +40,40 @@ pub fn has_runtime_route_for_public_url(url: &str) -> bool {
     runtime_routes().contains_key(url)
 }
 
-/// Whether `url` is either side of a deployment runtime route: the public
-/// logical URL settings keep, or the loopback URL the host serves it on.
-pub fn is_runtime_routed_mcp_url(url: &str) -> bool {
-    url_has_runtime_route(url, &runtime_routes())
+/// The runtime route `url` belongs to, identified by its public URL, when
+/// `url` is either side of one: the public logical URL settings keep, or the
+/// loopback URL the host serves it on.
+pub fn runtime_route_key(url: &str) -> Option<String> {
+    url_route_key(url, &runtime_routes())
 }
 
-fn url_has_runtime_route(url: &str, routes: &BTreeMap<String, String>) -> bool {
+fn url_route_key(url: &str, routes: &BTreeMap<String, String>) -> Option<String> {
     routes
         .iter()
-        .any(|(public, local)| public == url || local == url)
+        .find(|(public, local)| *public == url || *local == url)
+        .map(|(public, _)| public.clone())
+}
+
+/// Route keys of the servers in an MCP config object (`{"mcpServers": …}`)
+/// that point at a runtime route — the managed entries a shadowing project
+/// entry would otherwise displace.
+pub fn routed_mcp_server_keys(
+    config: &Value,
+    route_key: impl Fn(&str) -> Option<String>,
+) -> std::collections::BTreeSet<String> {
+    config
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|servers| servers.values())
+        .flat_map(|entry| {
+            ["url", "httpUrl"]
+                .into_iter()
+                .filter_map(|key| entry.get(key).and_then(Value::as_str))
+                .filter_map(&route_key)
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Names of project-scope (`.mcp.json`) servers that duplicate a server this
@@ -1511,24 +1535,43 @@ mod tests {
     }
 
     #[test]
-    fn runtime_route_matches_either_side_exactly() {
+    fn runtime_route_key_matches_either_side_exactly() {
         let routes = BTreeMap::from([(
             "https://vibe.vasandani.dev/mcp".to_string(),
             "http://127.0.0.1:18901/mcp".to_string(),
         )]);
-        assert!(url_has_runtime_route(
-            "https://vibe.vasandani.dev/mcp",
-            &routes
-        ));
-        assert!(url_has_runtime_route("http://127.0.0.1:18901/mcp", &routes));
-        assert!(!url_has_runtime_route(
-            "https://vibe.vasandani.dev/mcp/other",
-            &routes
-        ));
-        assert!(!url_has_runtime_route(
-            "https://vibe.vasandani.dev/mcp",
-            &BTreeMap::new()
-        ));
+        let key = Some("https://vibe.vasandani.dev/mcp".to_string());
+        assert_eq!(
+            url_route_key("https://vibe.vasandani.dev/mcp", &routes),
+            key
+        );
+        assert_eq!(url_route_key("http://127.0.0.1:18901/mcp", &routes), key);
+        assert_eq!(
+            url_route_key("https://vibe.vasandani.dev/mcp/other", &routes),
+            None
+        );
+        assert_eq!(
+            url_route_key("https://vibe.vasandani.dev/mcp", &BTreeMap::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn routed_server_keys_read_managed_entries() {
+        let routes = BTreeMap::from([(
+            "https://vibe.vasandani.dev/mcp".to_string(),
+            "http://127.0.0.1:18901/mcp".to_string(),
+        )]);
+        let user_config = serde_json::json!({"mcpServers": {
+            "vibe_kanban": {"type": "http", "url": "http://127.0.0.1:18901/mcp"},
+            "slack": {"command": "slack-mcp"}
+        }});
+        let keys = routed_mcp_server_keys(&user_config, |url| url_route_key(url, &routes));
+        assert_eq!(
+            keys.into_iter().collect::<Vec<_>>(),
+            vec!["https://vibe.vasandani.dev/mcp".to_string()]
+        );
+        assert!(routed_mcp_server_keys(&serde_json::json!({}), |_| None).is_empty());
     }
 
     #[test]
