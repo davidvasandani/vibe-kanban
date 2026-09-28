@@ -1239,6 +1239,72 @@ pub async fn update_pr(
     Ok(ResponseJson(ApiResponse::success(pr)))
 }
 
+#[cfg(test)]
+mod pr_tool_error_tests {
+    use super::*;
+
+    /// What crosses the boundary is the envelope `message`, so assert that.
+    #[test]
+    fn every_pr_tool_error_reaches_callers_with_a_message() {
+        let errors = [
+            PrToolError::NoPrForWorkspace {
+                branch: "vk/x".into(),
+            },
+            PrToolError::PrNotInWorkspaceRepo {
+                pr_repo: "a/b".into(),
+                workspace_repo: "c/d".into(),
+            },
+            PrToolError::InvalidPrReference {
+                detail: "bad".into(),
+            },
+            PrToolError::UnsupportedProvider,
+            PrToolError::CliNotInstalled {
+                provider: ProviderKind::GitHub,
+            },
+            PrToolError::CliNotLoggedIn {
+                provider: ProviderKind::GitHub,
+            },
+            PrToolError::MergeRefused {
+                reason: "checks are failing: lint".into(),
+                retryable: false,
+            },
+            PrToolError::NothingToUpdate,
+            PrToolError::GithubError {
+                detail: "HTTP 409: Head branch was modified".into(),
+            },
+        ];
+        for error in errors {
+            let response = pr_tool_error::<()>(error).unwrap().0;
+            let json = serde_json::to_value(&response).unwrap();
+            assert_eq!(json["success"], false);
+            let message = json["message"].as_str().unwrap();
+            assert!(!message.is_empty(), "{json}");
+            assert!(json["error_data"]["type"].is_string(), "{json}");
+        }
+    }
+
+    #[test]
+    fn create_pr_errors_carry_messages() {
+        let response = pr_error::<String>(PrError::TargetBranchNotFound {
+            branch: "main".into(),
+        });
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            json["message"],
+            "Target branch 'main' does not exist on the remote"
+        );
+    }
+
+    #[test]
+    fn merge_request_defaults_are_squash_no_delete_no_force() {
+        let request: MergePrApiRequest =
+            serde_json::from_value(serde_json::json!({"repo_id": Uuid::nil()})).unwrap();
+        assert_eq!(request.method, MergeMethod::Squash);
+        assert!(!request.delete_branch);
+        assert!(!request.force);
+    }
+}
+
 pub fn router() -> Router<DeploymentImpl> {
     Router::new()
         .route("/", post(create_pr))
