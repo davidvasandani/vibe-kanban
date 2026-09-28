@@ -124,6 +124,21 @@ pub fn apply_github_routing<M: EnvMap>(env: &mut M) {
     }
 }
 
+/// Keep the routing shim ahead of `path` when `runtime_path` contained it.
+/// Executor profiles may prepend their own PATH entries (possibly with a real
+/// `gh`); without this, a profile would silently bypass owner routing.
+pub fn preserve_shim_precedence(
+    path: std::ffi::OsString,
+    runtime_path: &std::ffi::OsStr,
+) -> std::ffi::OsString {
+    let shim_dir = github_auth_bin_dir();
+    if std::env::split_paths(runtime_path).any(|entry| entry == shim_dir) {
+        merge_paths(shim_dir.as_os_str(), &path)
+    } else {
+        path
+    }
+}
+
 /// The variables to add for `owners`. `lookup` returns the value the child
 /// would otherwise see for a variable.
 pub fn routing_environment(
@@ -636,6 +651,19 @@ mod tests {
             assert_eq!(
                 token_of(&fx.gh(&repo_a, args, &[("GH_TOKEN", "ambient")]).1),
                 "ambient",
+                "{args:?}"
+            );
+        }
+        // `gh api --hostname github.com` overrides an Enterprise GH_HOST, and an
+        // absolute api.github.com endpoint names GitHub.com by itself.
+        for args in [
+            &["api", "--hostname", "github.com", "repos/org-b/svc"][..],
+            &["api", "--hostname=github.com", "repos/org-b/svc"],
+            &["api", "https://api.github.com/repos/org-b/svc"],
+        ] {
+            assert_eq!(
+                token_of(&fx.gh(&fx.work, args, &[("GH_HOST", "ghe.example.com")]).1),
+                TOKEN_B,
                 "{args:?}"
             );
         }

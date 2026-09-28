@@ -21,7 +21,8 @@ vk_owner_of() {
     github.com/*) vk_p=${vk_t#github.com/} ;;
     *://* | *@*:*) return 0 ;;
     */*)
-      case "${GH_HOST:-}" in
+      # A bare OWNER/REPO is on GH_HOST, or on `gh api --hostname` for an API path.
+      case "${vk_target_host:-${GH_HOST:-}}" in
         "" | github.com) vk_p=$vk_t ;;
         *) return 0 ;;
       esac
@@ -51,7 +52,7 @@ vk_takes_value() {
     --body | --title | --notes | --description | --template | --json | --jq | \
       --field | --raw-field | --head | --header | --base | --search | --label | \
       --assignee | --reviewer | --milestone | --source | --remote | --limit | \
-      --homepage | --method | --input | --subject | --body-file | \
+      --homepage | --method | --input | --subject | --body-file | --hostname | \
       -b | -t | -p | -q | -F | -H | -B | -S | -l | -a | -L)
       return 0
       ;;
@@ -63,6 +64,8 @@ vk_takes_value() {
 }
 
 vk_flag_repo=""
+vk_api_host=""
+vk_target_host=""
 vk_api=""
 vk_url=""
 vk_repo_pos=""
@@ -86,6 +89,7 @@ for vk_arg do
     # The value of a value-taking flag is consumed first, even if it looks
     # like an option (`--body '--repo=OWNER/REPO'`).
     if vk_takes_value "$vk_prev"; then
+      [ "$vk_prev" = --hostname ] && vk_api_host=$vk_arg
       vk_prev=""
       continue
     fi
@@ -106,6 +110,11 @@ for vk_arg do
         ;;
       -R?*)
         vk_flag_repo=${vk_arg#-R}
+        vk_prev=""
+        continue
+        ;;
+      --hostname=*)
+        vk_api_host=${vk_arg#--hostname=}
         vk_prev=""
         continue
         ;;
@@ -143,7 +152,7 @@ for vk_arg do
     case "$vk_arg" in
       repos/*/*) vk_api=${vk_arg#repos/} ;;
       /repos/*/*) vk_api=${vk_arg#/repos/} ;;
-      https://api.github.com/repos/*/*) vk_api=${vk_arg#https://api.github.com/repos/} ;;
+      https://api.github.com/repos/*/*) vk_api=github.com/${vk_arg#https://api.github.com/repos/} ;;
     esac
   fi
   if [ -z "$vk_url" ]; then
@@ -153,13 +162,21 @@ for vk_arg do
   fi
 done
 
+vk_api_owner=""
+if [ -n "$vk_api" ]; then
+  vk_target_host=$vk_api_host
+  vk_api_owner="$(vk_owner_of "$vk_api")"
+  vk_target_host=""
+fi
+
 vk_target=""
 if [ -n "$vk_flag_repo" ]; then
   vk_target=$vk_flag_repo
-elif [ -n "$vk_api" ] && [ -n "$(vk_owner_of "$vk_api")" ]; then
+elif [ -n "$vk_api_owner" ]; then
   # `repos/{owner}/{repo}` placeholders are filled by gh from the current
   # repository, so an API path without a literal owner falls through to it.
   vk_target=$vk_api
+  vk_target_host=$vk_api_host
 elif [ -n "$vk_url" ]; then
   vk_target=$vk_url
 elif [ -n "$vk_repo_pos" ]; then
