@@ -144,6 +144,7 @@ async fn terminal_ws(
     if let Some(path) = utils::shell::append_cli_tools_to_path(&inherited_path) {
         environment.insert("PATH".into(), path.to_string_lossy().into_owned());
     }
+    utils::github_auth::apply_github_routing(&mut environment);
 
     Ok(ws
         .on_upgrade(move |socket| {

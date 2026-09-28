@@ -455,6 +455,8 @@ pub enum ContainerError {
     #[error(transparent)]
     EnvironmentSecret(#[from] super::environment_secrets::EnvironmentSecretError),
     #[error(transparent)]
+    GitHubOwnerToken(#[from] super::github_owner_tokens::GitHubOwnerTokenError),
+    #[error(transparent)]
     GitServiceError(#[from] GitServiceError),
     #[error(transparent)]
     Sqlx(#[from] SqlxError),

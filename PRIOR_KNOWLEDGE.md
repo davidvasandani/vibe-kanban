@@ -1,76 +1,84 @@
-# PRIOR_KNOWLEDGE — vk/53bc-agents-fall-back
+# Prior knowledge — vk/0f52-manage-gh-token
 
-Sources searched: `vibe-kanban/wiki/` (the VK project knowledge base,
-`INDEX.md` + 38 pages), `homelab/knowledge-base/` (index + MCP/Cloudflare
-pages), prior spec folders `homelab/specs/vk/{733b-vk-mcp-error,ffeb-debug-vk-mcp-err}`,
-and `vibe-kanban/crates/mcp/AGENTS.md`. The knowledge base was read only.
+Read-only search of `vibe-kanban/wiki`, `vibe-kanban/docs/knowledge-base`,
+`homelab/docs`, `homelab/docs/knowledge-base`, and the earlier SpecKit
+artifacts. Search terms: `GH_TOKEN`, `fine-grained`, `PAT`, `github`, `env
+vars`, `1Password`, `PATH`, `cluster worker`.
 
-## Directly applicable
+## Directly relevant
 
-1. **Every route an MCP tool can reach must use `error_with_data_and_message`**
-   (`wiki/vk-pollers.md`, "Assert what the caller receives"). `ApiResponse::error_with_data`
-   sets `message: None`. The MCP envelope only reads `message`, so agents
-   see `{"error":"VK API returned error","details":"Unknown error"}`. The
-   existing Create PR route (`routes/workspaces/pr.rs::create_pr`) still uses
-   the message-less form for every `PrError`. That is a trap for a new
-   `create_pr` MCP tool, and the lesson is to test what crosses the boundary,
-   not the enum variant.
-2. **MCP self-healing that already exists** (`crates/mcp/AGENTS.md`,
-   "Resilience"): atomic port-file writes, a retrying port-file read, and
-   `send_with_reconnect` (re-resolve the backend URL and retry once on
-   connect/timeout errors). That covers VK's stdio→backend hop only. It does
-   nothing for the harness→HTTP-gateway hop, where the reported banner came
-   from.
-3. **Recovery tools** (`crates/mcp/AGENTS.md`, "Recovering a wedged MCP
-   session"): `restart_session` is cheap; `restart_workspace` stops workspace
-   processes and cold-starts the session but preserves the worktree, Git state,
-   sessions and conversations. `refresh_mcp_tools` works for Codex; for Claude
-   Code it returns `unsupported` with `restart_session` as remediation.
-   `ClaudeMcpInventory` already reads `system/init.mcp_servers` statuses. The
-   ladder must therefore allow "refresh returned unsupported → go to the next
-   rung".
-4. **Deployment routing of the VK MCP URL** (`crates/executors/src/mcp_config.rs`,
-   homelab `modules/vibe-kanban-rebuild.nix`): settings keep the *public*
-   URL `https://vibe.vasandani.dev/mcp`. `VIBE_MCP_RUNTIME_ROUTES` maps it to a
-   per-host loopback Caddy (`127.0.0.1:18901/mcp`) that injects the Cloudflare
-   Access service token and converts Access redirects/HTML to JSON-RPC errors.
-   `has_runtime_route_for_public_url` already exists. The variable is present
-   in the agent environment.
-5. **Cloudflare Access returns HTML to unauthenticated clients** (homelab
-   `knowledge-base/cloudflare-access-service-token-live-enablement.md`,
-   `edge-safe-error-statuses.md`): without a service token the edge answers
-   `302` → login page (`text/html`). That is why the loopback gateway exists
-   and why a direct public-URL entry fails with
-   `CLIENT_HTTP_UNEXPECTED_CONTENT`.
-6. **Owner-routed `gh`** (homelab `vibe-kanban-rebuild.nix`, `githubGhRouter`):
-   the deployment's `gh` wrapper picks an org token from `--repo`/`-R` or,
-   failing that, from the cwd's git remote. `gh api` has no `--repo` flag, so
-   new `gh api` calls must run with `cwd` = the repo checkout or they fall back
-   to the default token. The existing `get_pr_review_comments` runs with no
-   cwd, which is a latent gap and is not changed here.
+- **`specs/vk/5e29-vk-github-fine-g/` + `homelab/docs/vibe-kanban-github-auth.md`**:
+  a per-owner `gh` router already ships in
+  `homelab/modules/vibe-kanban-rebuild.nix`
+  (`services.vibe-kanban-rebuild.githubAuth.orgTokenRefs`). No host sets
+  `orgTokenRefs`, so the router is not installed anywhere. It is Nix-only:
+  every change needs a rebuild and restart, and it has no UI and no Git
+  routing. The parts worth reusing are its routing rules:
+  - an explicit `-R/--repo/--repo=` wins; argument scanning stops at `--`;
+  - otherwise the remote order is `remote.pushDefault` → branch
+    `pushRemote` → branch `remote` → `origin` → the only remote;
+  - strict GitHub.com HTTPS, `ssh://`, and scp forms only; owner
+    `[A-Za-z0-9-]`, matched without regard to case;
+  - a configured owner overrides ambient `GH_TOKEN`; an unconfigured owner
+    keeps ambient behavior; a configured-but-empty token fails with exit 78
+    and names the owner only;
+  - the real `gh` is called by absolute path, so it cannot recurse.
+- **`docs/knowledge-base/workspace-environment-inheritance.md`**: a workspace
+  has several process boundaries. Local execution, cluster dispatch, local
+  terminal, and worker terminal must all be audited. Resolve in one place,
+  inject explicitly, and filter reserved names (`VK_*` is reserved, so org
+  Env Vars cannot set it). Managed CLI login PTYs must keep their minimal
+  environment. Its rule that *PATs never cross coordinator actions* came from
+  the Nix design. Later, `b0d4` deliberately sends resolved org Env Var values
+  through the authenticated worker environment transport. A UI-managed,
+  coordinator-scoped setting has to use that same transport, and the plan
+  must record this as a deliberate exception.
+- **The same page, 1Password section**: use `services::environment_secrets`
+  (`OP_SERVICE_ACCOUNT_TOKEN` from org Env Vars, or the service env; host-first
+  `op` discovery; 30 s bound; secret-safe typed errors). Use
+  `api_types::normalize_secret_reference` and web-core `secretReference.ts` as
+  the single reference rule (strip copied quotes; case-sensitive `op://`). Show
+  references and never return literals. Normalize drafts only by removing a
+  quote pair while the user types, and fully at submit.
+- **`wiki/managed-cli-tool-catalog.md`, "Workspace PATH propagation"**: derive
+  app-owned directories on the host that spawns, **immediately before spawn**.
+  Never send the coordinator's absolute app-data path to a worker. Keep
+  workspace-only policy out of the generic PTY service; the terminal route
+  applies it after it has chosen the remote-worker branch.
+  `append_cli_tools_to_path` *appends* so that host tools win. A routing shim
+  has to be *prepended* instead, or the real `gh` shadows it.
 
-## Verified in this task (new evidence, not yet in the KB)
+## Supporting
 
-- The banner's server `vibe-kanban` (hyphen) comes from homelab's `.mcp.json`
-  (project scope, `${VIBE_KANBAN_*}` headers that are unset in sandboxes). It
-  is a different server from the VK-managed `vibe_kanban`.
-- Claude Code 2.1.281: a project `.mcp.json` entry with the **same name** as a
-  user entry replaces it. That can silently remove every VK tool.
-  `--settings '{"disabledMcpjsonServers":[name]}'` drops the project entry and
-  lets the user entry connect.
-- Fine-grained PAT capability, probed on homelab: `commits/{sha}/check-runs`
-  → 403, `commits/{sha}/status` → 403, `actions/runs?head_sha=` + `/jobs` → OK,
-  `pulls/{n}` → OK, with `mergeable_state` (e.g. `blocked`) present.
-  `gh pr view --json statusCheckRollup` fails the whole query, so never
-  request it.
+- **`homelab/docs/knowledge-base/vibe-kanban-executor-secret-environment.md`**:
+  anything a worker needs must reach every eligible execution host. A change
+  wired only on the coordinator passes local tests and then fails when a
+  workspace is placed on a worker. New sessions pick up environment changes;
+  running processes keep the environment they started with.
+- **`docs/knowledge-base/clustered-workspace-execution.md`**: worker requests
+  are signed over method, path, query, and body digest. The coordinator stays
+  authoritative for configuration, and workers own spawning.
+- **`crates/services/src/services/mcp_gateway_secrets.rs`**: host-bound
+  AES-256-GCM envelope store (`load_or_generate(key_path)`, `encrypt/decrypt`
+  with an AAD binding). The key file is under `utils::assets::asset_dir()`. It
+  can be reused for encrypting local values at rest with its own key file.
+- **Constitution**: principles 13 (actionable, secret-safe errors), 17
+  (app-owned payloads, no silent provisioning), 25 (options must be honored at
+  runtime), 45 (runtime-only credential values), 102 (capabilities proved at
+  the execution boundary, with fresh-session proof distinct from static
+  proof), and the `vk/b0d4` applicability note (encrypted at rest, fail closed
+  on reference errors, reuse the resolver).
 
-## Constraints carried forward
+## Empirical check done for this task
 
-- Do not hand-edit `shared/types.ts`. The new server-only/MCP types do not
-  need ts-rs export.
-- Tool registration is pinned by `orchestrator_mode_exposes_only_scoped_workflow_tools`.
-  Adding tools to orchestrator mode means updating that expected set.
-- `stop_*` tools skip workspace scope checks on purpose. The new PR tools are
-  workspace-scoped and must call `scope_allows_workspace`.
-- Wiki conventions: one topic per page, a `## Contributed by` footer with task
-  ids, and a one-line entry in `wiki/INDEX.md`.
+With Git 2.54, owner-scoped credential contexts behave as follows when set
+through `GIT_CONFIG_COUNT`:
+`credential.https://github.com/<owner>.helper=` (reset) followed by an inline
+`!f(){ … }` helper.
+
+- They route only `https://github.com/<owner>/…`, including
+  `user@github.com/<owner>/…` URLs.
+- They leave `<owner>-other/…`, other owners, and host-only lookups on the
+  existing helper.
+- Path matching is **case-sensitive**: a `Sweetgreen/…` URL does not match a
+  `sweetgreen` context.

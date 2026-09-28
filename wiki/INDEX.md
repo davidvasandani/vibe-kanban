@@ -278,6 +278,16 @@ contributed to it.
   must never be projected into agent stdout, where vendor parsers render it as
   "Unrecognized JSON message". Coordinator classifier routing and the rule for
   new kinds (`vk/5276-debug-unrecogniz`).
+- [github-owner-token-routing.md](github-owner-token-routing.md) — One PAT per
+  GitHub owner, chosen per `gh` invocation and per Git URL
+  (`vk/0f52-manage-gh-token`). Covers: machine secrets kept out of `Config` in
+  a host-key-encrypted table; environment names that survive Codex's
+  KEY/SECRET/TOKEN filter (hex owner encoding, `GIT_CONFIG_PARAMETERS` instead
+  of `GIT_CONFIG_KEY_n`, a manifest name disjoint from per-owner names);
+  owner-scoped Git credential contexts; a prepended `gh` shim that survives
+  profile PATH merging; and the gh argument-parsing traps (value flags consumed
+  first, short letters reused per subcommand, `--`, `GH_REPO`, `gh-resolved`,
+  API placeholders).
 - [coordinator-restart-handoff.md](coordinator-restart-handoff.md) — Why a VK
   deploy no longer stops worker-owned tasks (parents, sub-tasks, pollers).
   Shutdown hands them off with no cancel and no WIP commit. Boot re-attaches

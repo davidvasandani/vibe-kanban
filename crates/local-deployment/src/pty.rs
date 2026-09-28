@@ -26,6 +26,34 @@ pub enum PtyError {
     SessionClosed,
 }
 
+/// Host variables a non-interactive (CLI login) session keeps after
+/// `env_clear`. Workspace credentials such as GitHub owner tokens are
+/// deliberately absent: login flows run outside any workspace.
+const LOGIN_ENV_ALLOWLIST: &[&str] = &[
+    "HOME",
+    "USER",
+    "PATH",
+    "TMPDIR",
+    "TEMP",
+    "LANG",
+    "LC_ALL",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "XDG_CONFIG_HOME",
+    "AZURE_CONFIG_DIR",
+    "GAMCFGDIR",
+];
+
 struct PtySession {
     writer: Box<dyn Write + Send>,
     master: Box<dyn portable_pty::MasterPty + Send>,
@@ -116,30 +144,7 @@ impl PtyService {
 
             if !interactive_shell {
                 cmd.env_clear();
-                for key in [
-                    "HOME",
-                    "USER",
-                    "PATH",
-                    "TMPDIR",
-                    "TEMP",
-                    "LANG",
-                    "LC_ALL",
-                    "SSL_CERT_FILE",
-                    "SSL_CERT_DIR",
-                    "HTTP_PROXY",
-                    "HTTPS_PROXY",
-                    "ALL_PROXY",
-                    "NO_PROXY",
-                    "http_proxy",
-                    "https_proxy",
-                    "all_proxy",
-                    "no_proxy",
-                    "REQUESTS_CA_BUNDLE",
-                    "CURL_CA_BUNDLE",
-                    "XDG_CONFIG_HOME",
-                    "AZURE_CONFIG_DIR",
-                    "GAMCFGDIR",
-                ] {
+                for key in LOGIN_ENV_ALLOWLIST {
                     if let Some(value) = std::env::var_os(key) {
                         cmd.env(key, value);
                     }
@@ -356,6 +361,16 @@ mod tests {
         assert_eq!(status.code, 0);
         assert!(String::from_utf8_lossy(&bytes).contains("login-ok"));
         service.close_session(id).await.unwrap();
+    }
+
+    #[test]
+    fn login_sessions_never_keep_github_routing_state() {
+        for key in super::LOGIN_ENV_ALLOWLIST {
+            assert!(
+                !key.starts_with("VK_") && !key.starts_with("GH_") && !key.starts_with("GIT_"),
+                "{key} would leak workspace GitHub routing into a login PTY"
+            );
+        }
     }
 
     #[tokio::test]

@@ -4468,7 +4468,16 @@ impl ContainerService for LocalContainerService {
         workspace: &Workspace,
     ) -> Result<HashMap<String, String>, ContainerError> {
         let values = self.resolve_org_env_vars_inner(workspace).await;
-        Ok(services::services::environment_secrets::resolve_environment_secrets(values).await?)
+        // Machine-scoped GitHub owner tokens apply to every workspace, linked or
+        // not. They read the org map before resolution so its literal
+        // 1Password token keeps the same precedence it has for Env Vars.
+        let github =
+            services::services::github_owner_tokens::launch_environment(&self.db.pool, &values)
+                .await?;
+        let mut resolved =
+            services::services::environment_secrets::resolve_environment_secrets(values).await?;
+        resolved.extend(github);
+        Ok(resolved)
     }
 
     async fn touch(&self, workspace: &Workspace) -> Result<(), ContainerError> {
@@ -5137,6 +5146,10 @@ impl ContainerService for LocalContainerService {
         if let Some(merged) = utils::shell::append_cli_tools_to_path(&inherited) {
             env.insert("PATH", merged.to_string_lossy().into_owned());
         }
+        // Route `gh` and GitHub HTTPS Git to per-owner tokens (no-op when none
+        // are configured). Prepends a host-local shim, so it runs after the
+        // CLI tools step above.
+        utils::github_auth::apply_github_routing(&mut env.vars);
 
         // Persistent processes (dev servers, background helpers) write their
         // output straight to a raw log file (instead of pipes) so they can
@@ -6344,6 +6357,10 @@ mod warm_tests {
             "LD_PRELOAD",
             "LD_LIBRARY_PATH",
             "OPENCODE_SERVER_PASSWORD",
+            // GitHub owner routing: an org Env Var must not spoof a token or
+            // the owner manifest the shim trusts.
+            utils::github_auth::OWNERS_ENV,
+            &utils::github_auth::token_env_name("some-org"),
         ] {
             assert!(is_reserved_env_name(name), "{name} must stay reserved");
         }

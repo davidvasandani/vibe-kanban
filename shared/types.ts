@@ -1165,6 +1165,12 @@ merge_stage_ids: Array<string>,
  */
 max_per_hour: number, };
 
+export type GitHubOwnerToken = { id: string, owner: string, reference?: string, created_at: string, updated_at: string, };
+
+export type CreateGitHubOwnerTokenRequest = { owner: string, value: string, };
+
+export type UpdateGitHubOwnerTokenRequest = { value: string, };
+
 export type PipelineStep = { 
 /**
  * Stable slug, e.g. "spec".
