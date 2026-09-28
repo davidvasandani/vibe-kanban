@@ -136,8 +136,18 @@ Click **Manage Billing** to open the billing portal in a new tab where you can:
 ## Environment variables
 
 You can enter a literal value or a complete 1Password reference in the existing
-value field, such as `op://Homelab/item-id/credential`. Values remain masked and
-encrypted at rest; Vibe Kanban stores the reference, not the resolved secret.
+value field, such as `op://Homelab/item-id/credential`. Values are encrypted at
+rest; Vibe Kanban stores the reference, not the resolved secret. Literal values
+stay masked. A saved reference is a pointer rather than a secret, so the list
+shows it in plain text, and editing it starts from the saved reference.
+
+You can paste a reference straight from 1Password's **Copy Secret Reference**.
+The surrounding quotes (and any surrounding whitespace) are removed, so
+`"op://Homelab/item-id/credential"` is saved as
+`op://Homelab/item-id/credential`. This applies only when the whole value is a
+reference. Quotes in a literal value are kept, because they may be part of the
+secret. References saved with quotes before this change still resolve and are
+shown without the quotes.
 
 1. Install **1Password CLI** through **Settings → CLI Tools** on the Vibe Kanban
    machine, or provide `op` on the service's PATH. For clustered workspaces, this
