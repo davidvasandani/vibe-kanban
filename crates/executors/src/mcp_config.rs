@@ -1030,16 +1030,22 @@ mod tests {
     }
 
     #[test]
-    fn personal_servicenow_catalog_uses_the_fleet_installed_stdio_wrapper() {
+    fn personal_servicenow_catalog_uses_the_hosted_https_endpoint() {
         let value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
         let server = &value["personal_servicenow"];
+        // URL-only on purpose: the deployment's runtime route attaches the
+        // origin bearer, so no credential or placeholder header belongs here,
+        // and a stdio launcher must not creep back in.
         assert_eq!(
             server,
             &serde_json::json!({
-                "command": "personal-servicenow-mcp",
-                "args": []
+                "type": "http",
+                "url": "https://snow.vasandani.dev/mcp"
             })
         );
+        for field in ["command", "args", "env", "headers"] {
+            assert!(server.get(field).is_none(), "unexpected `{field}`");
+        }
         assert_eq!(
             value["meta"]["personal_servicenow"]["name"],
             serde_json::json!("Personal ServiceNow")
