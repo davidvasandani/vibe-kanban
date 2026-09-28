@@ -276,4 +276,6 @@ contributed to it.
   each tracker from the acknowledged cursor, with a seeded MsgStore and a
   count-based writer skip. Reconcile defers a `Running` row to that tracker
   so finalization still runs. A replay gap on a live job is reported, not
-  treated as an ending (`vk/80c1-tasks-should-sur`).
+  treated as an ending. Unanswered approvals are replayed. The handoff
+  cursor is persisted only after the log writer has drained. Six Codex
+  rounds of cursor and log-writer traps (`vk/80c1-tasks-should-sur`).

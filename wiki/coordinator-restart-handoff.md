@@ -72,35 +72,37 @@ conservative: it still routes a worker row through `stop_execution`.
 ## Re-attach: three things must line up
 
 `reattach_worker_executions` runs level-triggered at boot, over **every**
-`Running` row with a non-terminal worker job, not over a list saved at
-shutdown. So it also covers a crash where the shutdown hook never ran. For
-each row it:
+`Running` row that has a worker job, not over a list saved at shutdown. So it
+also covers a crash where the shutdown hook never ran. For each row it:
 
 1. **Seeds a fresh MsgStore** with `load_raw_log_messages`. Executor
    normalizers are stateful, and entry indexes come from the whole stream, so
    the store must hold the whole history before new output. Otherwise the chat
    restarts at entry 0 and patches collide.
-2. **Tells the raw-log writer how many seeded lines to skip**
-   (`spawn_stream_raw_logs_to_storage(.., skip_raw_history)`). The writer reads
-   `history_plus_stream`, so without the skip it rewrites the seeded history
-   into the same file. The skip counts messages *retained by the store* (it evicts
-   its oldest history past about 100 MB; counting what was loaded instead
-   silently dropped new output, Codex round 1) instead of relying on
-   subscription timing, because seeded messages are always first. That keeps
-   it race-free however soon the tracker pushes.
+2. **Subscribes the raw-log writer before anything else can push**
+   (`spawn_resumed_raw_log_writer`). The writer replays history and then goes
+   live, so it must skip the seeded lines already on disk. The skip count and
+   the replayed snapshot come from one lock
+   (`MsgStore::history_plus_stream_counting`). Two earlier versions were
+   wrong. Counting what was *loaded* ignored the store's eviction past about
+   100 MB (Codex round 1). Counting *retained* history before a later
+   subscription let the tracker and normalizer push and evict in between
+   (round 2). Either way the writer silently skipped new output.
 3. **Starts the tracker at `last_event_sequence`** (`resume_from`), reusing
    the seeded store. Never start from 0: the journal is a 4096-event ring, so
    its head may already be gone, which would turn a healthy re-attach into a
    replay gap.
 
-Dispatch and re-attach share `start_execution_log_pipeline` (normalizer and
-writer) and `spawn_execution_stage_tracker`. That is deliberate. A second copy
-of "which actions get normalized, which runs write their own raw log" is the
-kind of second resolution rule that drifts.
+Dispatch and re-attach share `start_execution_log_pipeline` (the normalizer,
+plus the writer when `spawn_raw_writer` is set) and
+`spawn_execution_stage_tracker`. They also share one
+`execution_process::writes_own_raw_log` rule. Re-attach passes
+`spawn_raw_writer = false` only because it has already started its writer.
+A second copy of "which actions get normalized, which runs write their own
+raw log" is the kind of second resolution rule that drifts.
 
 The pipeline-stage reset and SpecKit provisioning stay in `start_execution`
 only. They belong to a *new* turn, not a resumed one.
-
 ## Boot reconcile must not finalize a running row
 
 `ExecutionReconciler` runs before re-attach. It used to copy terminal
