@@ -664,6 +664,12 @@ struct RestWorkflowRuns {
 struct RestWorkflowRun {
     id: i64,
     #[serde(default)]
+    workflow_id: Option<i64>,
+    #[serde(default)]
+    event: Option<String>,
+    #[serde(default)]
+    run_number: i64,
+    #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     status: Option<String>,
@@ -715,6 +721,23 @@ fn encode_ref_path(name: &str) -> String {
         }
     }
     encoded
+}
+
+/// Keep only the newest run of each workflow per triggering event. A workflow
+/// re-dispatched on the same commit leaves its earlier run in the list; that
+/// superseded failure must not decide today's verdict.
+fn latest_runs(mut runs: Vec<RestWorkflowRun>) -> Vec<RestWorkflowRun> {
+    runs.sort_by(|a, b| b.run_number.cmp(&a.run_number).then(b.id.cmp(&a.id)));
+    let mut seen = std::collections::HashSet::new();
+    runs.retain(|run| {
+        // Without a workflow id a run cannot be matched to its successors, so
+        // it is kept rather than guessed away.
+        match run.workflow_id {
+            Some(workflow_id) => seen.insert((workflow_id, run.event.clone())),
+            None => true,
+        }
+    });
+    runs
 }
 
 fn lower(value: &str) -> String {
@@ -829,7 +852,7 @@ impl GhCli {
         let runs: RestWorkflowRuns = parse_json(&raw, "workflow runs")?;
         let mut truncated = runs.total_count > runs.workflow_runs.len();
         let mut checks = Vec::new();
-        for run in runs.workflow_runs {
+        for run in latest_runs(runs.workflow_runs) {
             let raw_jobs = self.run(
                 Self::api_args(
                     repo_info,
@@ -1108,6 +1131,9 @@ mod pr_management_parser_tests {
     fn jobs_are_named_by_workflow_and_empty_runs_stand_in_as_pending() {
         let run = RestWorkflowRun {
             id: 9,
+            workflow_id: Some(1),
+            event: Some("pull_request".into()),
+            run_number: 3,
             name: Some("deploy-invariants".into()),
             status: Some("queued".into()),
             conclusion: None,
@@ -1139,6 +1165,23 @@ mod pr_management_parser_tests {
         assert_eq!(encode_ref_path("feature#123"), "feature%23123");
         assert_eq!(encode_ref_path("a%b?c d"), "a%25b%3Fc%20d");
         assert_eq!(encode_ref_path("ünï"), "%C3%BCn%C3%AF");
+    }
+
+    #[test]
+    fn superseded_runs_of_the_same_workflow_and_event_are_dropped() {
+        let runs: RestWorkflowRuns = serde_json::from_str(
+            r#"{"total_count":4,"workflow_runs":[
+            {"id":10,"workflow_id":1,"event":"pull_request","run_number":5,"name":"ci","status":"completed","conclusion":"failure"},
+            {"id":11,"workflow_id":1,"event":"pull_request","run_number":6,"name":"ci","status":"completed","conclusion":"success"},
+            {"id":12,"workflow_id":1,"event":"push","run_number":7,"name":"ci","status":"completed","conclusion":"success"},
+            {"id":13,"workflow_id":2,"event":"pull_request","run_number":2,"name":"lint","status":"in_progress"}]}"#,
+        )
+        .unwrap();
+        let kept: Vec<i64> = latest_runs(runs.workflow_runs)
+            .into_iter()
+            .map(|run| run.id)
+            .collect();
+        assert_eq!(kept, vec![12, 11, 13]);
     }
 
     #[test]
