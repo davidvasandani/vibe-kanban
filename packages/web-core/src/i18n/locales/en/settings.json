@@ -33,8 +33,8 @@
         "mcpDesc": "Model Context Protocol servers",
         "cli-tools": "CLI Tools",
         "cli-toolsDesc": "App-managed command line tools for agents",
-        "aws": "AWS",
-        "awsDesc": "AWS SSO profiles and sign-in",
+        "auth": "Auth",
+        "authDesc": "Auto-auth dashboard and AWS SSO profiles",
         "pipelines": "Pipelines",
         "pipelinesDesc": "Pipeline TOML files and defaults",
         "workers": "Cluster Workers",
@@ -768,7 +768,7 @@
       }
     },
     "reauth": {
-      "title": "Unattended re-authentication",
+      "title": "Auto-auth",
       "description": "Credentials this host signs back in with no human involved, using the saved Entra browser session and 1Password. A success is only reported after an independent check of the vendor’s own credential store.",
       "loading": "Checking credentials…",
       "empty": "No re-authentication targets are configured on this host.",
@@ -797,6 +797,17 @@
         "manual": "from Settings",
         "agent": "by an agent",
         "sweep": "by the automatic sweep"
+      },
+      "summary": {
+        "healthy": "Signed in",
+        "attention": "Needs attention",
+        "unknown": "Unknown",
+        "notConfigured": "Not configured"
+      },
+      "kind": {
+        "aws_sso": "AWS SSO",
+        "cli_tool": "CLI tools",
+        "sgsc": "sgsc-mcp gateway"
       }
     },
     "aws": {

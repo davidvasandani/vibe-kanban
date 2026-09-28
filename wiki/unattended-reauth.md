@@ -122,6 +122,7 @@ browser-driven target. So:
 
 ## Settings card
 
+- It lives at the top of **Settings → Auth** (section id `auth`, formerly `aws`), above AWS SSO profile management. Summary tiles count each target in exactly one bucket: not configured, then needs attention (expired, refused or last run failed), then signed in, then unknown. Targets are grouped by system in a fixed order.
 - Apply a response only while its host is still selected. A late answer
   from the previous host would repaint the card, and its buttons would then
   act on the wrong machine.

@@ -319,7 +319,7 @@ pub fn catalog() -> &'static [CliToolCatalogEntry] {
             docs_url: "https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html",
             runtime_wrapper: None,
             auth: CliToolAuthStrategy::Unsupported(
-                "AWS SSO login is profile-specific; manage SSO profiles and sign in from the AWS section in Settings",
+                "AWS SSO login is profile-specific; manage SSO profiles and sign in from the Auth section in Settings",
             ),
         },
         CliToolCatalogEntry {

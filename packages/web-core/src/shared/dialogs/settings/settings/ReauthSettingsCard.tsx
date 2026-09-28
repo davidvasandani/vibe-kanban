@@ -83,6 +83,56 @@ export function applyRefresh(
   };
 }
 
+export type ReauthSummary = {
+  healthy: number;
+  attention: number;
+  notConfigured: number;
+  unknown: number;
+};
+
+/** Whether a target needs the operator's eye: expired, refused, or failing. */
+function needsAttention(target: ReauthTargetStatus): boolean {
+  const outcome = target.last_run?.outcome;
+  return (
+    target.refused ||
+    target.auth_state === 'unauthenticated' ||
+    outcome === 'failed' ||
+    outcome === 'refused' ||
+    outcome === 'verification_failed'
+  );
+}
+
+/** Dashboard counts. Each target lands in exactly one bucket. */
+export function summarizeTargets(targets: ReauthTargetStatus[]): ReauthSummary {
+  const summary = { healthy: 0, attention: 0, notConfigured: 0, unknown: 0 };
+  for (const target of targets) {
+    if (target.auth_state === 'not_configured') summary.notConfigured += 1;
+    else if (needsAttention(target)) summary.attention += 1;
+    else if (target.auth_state === 'authenticated') summary.healthy += 1;
+    else summary.unknown += 1;
+  }
+  return summary;
+}
+
+const KIND_ORDER: ReauthTargetStatus['kind'][] = [
+  'aws_sso',
+  'cli_tool',
+  'sgsc',
+];
+
+/** Targets grouped by system, in a fixed order, empty groups dropped. */
+export function groupTargetsByKind(
+  targets: ReauthTargetStatus[]
+): [ReauthTargetStatus['kind'], ReauthTargetStatus[]][] {
+  return KIND_ORDER.map(
+    (kind) =>
+      [kind, targets.filter((t) => t.kind === kind)] as [
+        ReauthTargetStatus['kind'],
+        ReauthTargetStatus[],
+      ]
+  ).filter(([, group]) => group.length > 0);
+}
+
 function isRunning(target: ReauthTargetStatus): boolean {
   return target.last_run?.outcome === 'running';
 }
@@ -187,6 +237,7 @@ export function ReauthSettingsCard() {
   };
 
   const sweep = overview?.sweep_interval_secs;
+  const summary = overview ? summarizeTargets(overview.targets) : null;
 
   return (
     <SettingsCard
@@ -203,6 +254,35 @@ export function ReauthSettingsCard() {
         <p className="text-sm text-error whitespace-pre-wrap break-words">
           {loadError}
         </p>
+      )}
+      {summary && (
+        <div
+          className="grid grid-cols-2 sm:grid-cols-4 gap-2"
+          data-testid="reauth-summary"
+        >
+          <SummaryTile
+            label={t('settings.reauth.summary.healthy', { ns: 'settings' })}
+            value={summary.healthy}
+            tone="success"
+          />
+          <SummaryTile
+            label={t('settings.reauth.summary.attention', { ns: 'settings' })}
+            value={summary.attention}
+            tone={summary.attention > 0 ? 'error' : 'low'}
+          />
+          <SummaryTile
+            label={t('settings.reauth.summary.unknown', { ns: 'settings' })}
+            value={summary.unknown}
+            tone="low"
+          />
+          <SummaryTile
+            label={t('settings.reauth.summary.notConfigured', {
+              ns: 'settings',
+            })}
+            value={summary.notConfigured}
+            tone="low"
+          />
+        </div>
       )}
       {overview && (
         <div className="flex items-center justify-between gap-2">
@@ -234,19 +314,52 @@ export function ReauthSettingsCard() {
           {t('settings.reauth.empty', { ns: 'settings' })}
         </p>
       )}
-      {overview?.targets.map((target) => (
-        <ReauthTargetRow
-          key={target.id}
-          target={target}
-          disabled={starting !== null || isRunning(target)}
-          expanded={expanded === target.id}
-          onToggle={() =>
-            setExpanded((current) => (current === target.id ? null : target.id))
-          }
-          onRun={() => void run(target.id)}
-        />
-      ))}
+      {overview &&
+        groupTargetsByKind(overview.targets).map(([kind, group]) => (
+          <div key={kind} className="space-y-2">
+            <h4 className="text-xs font-medium uppercase tracking-wide text-low">
+              {t(`settings.reauth.kind.${kind}`, { ns: 'settings' })}
+            </h4>
+            {group.map((target) => (
+              <ReauthTargetRow
+                key={target.id}
+                target={target}
+                disabled={starting !== null || isRunning(target)}
+                expanded={expanded === target.id}
+                onToggle={() =>
+                  setExpanded((current) =>
+                    current === target.id ? null : target.id
+                  )
+                }
+                onRun={() => void run(target.id)}
+              />
+            ))}
+          </div>
+        ))}
     </SettingsCard>
+  );
+}
+
+function SummaryTile({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: 'success' | 'error' | 'low';
+}) {
+  const color =
+    tone === 'success'
+      ? 'text-success'
+      : tone === 'error'
+        ? 'text-error'
+        : 'text-normal';
+  return (
+    <div className="rounded-sm border border-border p-3">
+      <div className={`text-xl font-semibold ${color}`}>{value}</div>
+      <div className="text-xs text-low">{label}</div>
+    </div>
   );
 }
 

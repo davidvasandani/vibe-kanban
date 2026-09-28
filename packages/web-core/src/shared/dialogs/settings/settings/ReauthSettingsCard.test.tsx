@@ -11,8 +11,10 @@ import type {
 import {
   ReauthSettingsCard,
   applyRefresh,
+  groupTargetsByKind,
   isNewerRun,
   mergeRuns,
+  summarizeTargets,
 } from './ReauthSettingsCard';
 
 vi.hoisted(() => {
@@ -163,6 +165,10 @@ describe('ReauthSettingsCard', () => {
       'settings.reauth.state.unauthenticated'
     );
     expect(container.textContent).toContain('settings.reauth.sweepEvery');
+    const summary = container.querySelector('[data-testid="reauth-summary"]');
+    expect(summary?.textContent).toContain('settings.reauth.summary.attention');
+    expect(container.textContent).toContain('settings.reauth.kind.aws_sso');
+    expect(container.textContent).toContain('settings.reauth.kind.sgsc');
     const sgsc = container.querySelector(
       '[data-testid="reauth-target-sgsc:dp"]'
     )!;
@@ -338,6 +344,55 @@ describe('ReauthSettingsCard host switching', () => {
     await flush();
     expect(container.textContent).toContain('new host az');
     expect(container.textContent).not.toContain('old host aws');
+  });
+});
+
+describe('dashboard summary', () => {
+  it('puts each target in exactly one bucket', () => {
+    const targets = [
+      target({ id: 'aws-sso:a', auth_state: 'authenticated' }),
+      target({ id: 'aws-sso:b', auth_state: 'unauthenticated' }),
+      target({
+        id: 'cli-tool:az',
+        kind: 'cli_tool',
+        auth_state: 'authenticated',
+        last_run: run({ outcome: 'failed' }),
+      }),
+      target({
+        id: 'cli-tool:acli',
+        kind: 'cli_tool',
+        auth_state: 'not_configured',
+      }),
+      target({ id: 'sgsc:dp', kind: 'sgsc', auth_state: 'unknown' }),
+      target({
+        id: 'cli-tool:mgc-beta',
+        kind: 'cli_tool',
+        auth_state: 'authenticated',
+        refused: true,
+      }),
+    ];
+    expect(summarizeTargets(targets)).toEqual({
+      healthy: 1,
+      attention: 3,
+      notConfigured: 1,
+      unknown: 1,
+    });
+  });
+
+  it('groups targets by system in a fixed order', () => {
+    const groups = groupTargetsByKind([
+      target({ id: 'sgsc:dp', kind: 'sgsc' }),
+      target({ id: 'cli-tool:az', kind: 'cli_tool' }),
+      target({ id: 'aws-sso:a' }),
+    ]);
+    expect(groups.map(([kind]) => kind)).toEqual([
+      'aws_sso',
+      'cli_tool',
+      'sgsc',
+    ]);
+    expect(groupTargetsByKind([target()]).map(([kind]) => kind)).toEqual([
+      'aws_sso',
+    ]);
   });
 });
 

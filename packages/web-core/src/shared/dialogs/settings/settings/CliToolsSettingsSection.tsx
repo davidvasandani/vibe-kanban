@@ -9,7 +9,6 @@ import {
 import { Button } from '@vibe/ui/components/Button';
 import type { CliToolId, CliToolStatus } from 'shared/types';
 import { SettingsCard } from './SettingsComponents';
-import { ReauthSettingsCard } from './ReauthSettingsCard';
 import { useSettingsMachineClient } from './SettingsHostContext';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -73,42 +72,39 @@ export function CliToolsSettingsSection() {
   };
 
   return (
-    <>
-      <SettingsCard
-        title={t('settings.cliTools.title', { ns: 'settings' })}
-        description={t('settings.cliTools.description', { ns: 'settings' })}
-      >
-        {tools === null && !loadError && (
-          <div className="flex items-center gap-2 text-sm text-low">
-            <SpinnerIcon className="size-icon-sm animate-spin" />
-            {t('settings.cliTools.loading', { ns: 'settings' })}
-          </div>
-        )}
-        {loadError && <p className="text-sm text-error">{loadError}</p>}
-        {tools?.map((tool) => (
-          <CliToolRow
-            key={tool.id}
-            tool={tool}
-            busy={busy}
-            error={toolErrors[tool.id]}
-            onAction={runAction}
-            loginOpen={loginTool === tool.id}
-            onLogin={() =>
-              setLoginTool((current) => (current === tool.id ? null : tool.id))
-            }
-            onStatus={(updated) =>
-              setTools(
-                (current) =>
-                  current?.map((item) =>
-                    item.id === updated.id ? updated : item
-                  ) ?? current
-              )
-            }
-          />
-        ))}
-      </SettingsCard>
-      <ReauthSettingsCard />
-    </>
+    <SettingsCard
+      title={t('settings.cliTools.title', { ns: 'settings' })}
+      description={t('settings.cliTools.description', { ns: 'settings' })}
+    >
+      {tools === null && !loadError && (
+        <div className="flex items-center gap-2 text-sm text-low">
+          <SpinnerIcon className="size-icon-sm animate-spin" />
+          {t('settings.cliTools.loading', { ns: 'settings' })}
+        </div>
+      )}
+      {loadError && <p className="text-sm text-error">{loadError}</p>}
+      {tools?.map((tool) => (
+        <CliToolRow
+          key={tool.id}
+          tool={tool}
+          busy={busy}
+          error={toolErrors[tool.id]}
+          onAction={runAction}
+          loginOpen={loginTool === tool.id}
+          onLogin={() =>
+            setLoginTool((current) => (current === tool.id ? null : tool.id))
+          }
+          onStatus={(updated) =>
+            setTools(
+              (current) =>
+                current?.map((item) =>
+                  item.id === updated.id ? updated : item
+                ) ?? current
+            )
+          }
+        />
+      ))}
+    </SettingsCard>
   );
 }
 
