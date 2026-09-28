@@ -24,8 +24,9 @@ use executors::actions::{
 };
 use git::{GitCliError, GitRemote, GitServiceError};
 use git_host::{
-    CreatePrRequest, GitHostError, GitHostProvider, GitHostService, ProviderKind, UnifiedPrComment,
-    github::GhCli,
+    CreatePrRequest, GitHostError, GitHostProvider, GitHostService, MergeMethod, MergeOutcome,
+    PrChecks, PrReference, PrState, ProviderKind, UnifiedPrComment, UpdatePrFields, github::GhCli,
+    merge_gate, parse_pr_reference, same_repo,
 };
 use serde::{Deserialize, Serialize};
 use services::services::{
@@ -59,6 +60,37 @@ pub enum PrError {
     GitCliNotInstalled,
     TargetBranchNotFound { branch: String },
     UnsupportedProvider,
+}
+
+impl PrError {
+    /// Human-readable reason. MCP callers only see `message`, never the typed
+    /// `error_data`, so every PR route error must carry one.
+    pub fn message(&self) -> String {
+        match self {
+            PrError::CliNotInstalled { provider } => {
+                format!("{provider} CLI is not installed on the Vibe Kanban host")
+            }
+            PrError::CliNotLoggedIn { provider } => {
+                format!("{provider} CLI is not authenticated on the Vibe Kanban host")
+            }
+            PrError::GitCliNotLoggedIn => {
+                "git push failed: the Vibe Kanban host is not authenticated to the remote"
+                    .to_string()
+            }
+            PrError::GitCliNotInstalled => "git is not installed on the Vibe Kanban host".into(),
+            PrError::TargetBranchNotFound { branch } => {
+                format!("Target branch '{branch}' does not exist on the remote")
+            }
+            PrError::UnsupportedProvider => {
+                "The repository's hosting provider is not supported for pull requests".into()
+            }
+        }
+    }
+}
+
+fn pr_error<T>(error: PrError) -> ApiResponse<T, PrError> {
+    let message = error.message();
+    ApiResponse::error_with_data_and_message(error, &message)
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -233,21 +265,15 @@ pub async fn create_pr(
 
     match git.check_remote_branch_exists(&repo_path, &target_remote.url, &base_branch) {
         Ok(false) => {
-            return Ok(ResponseJson(ApiResponse::error_with_data(
-                PrError::TargetBranchNotFound {
-                    branch: target_branch.clone(),
-                },
-            )));
+            return Ok(ResponseJson(pr_error(PrError::TargetBranchNotFound {
+                branch: target_branch.clone(),
+            })));
         }
         Err(GitServiceError::GitCLI(GitCliError::AuthFailed(_))) => {
-            return Ok(ResponseJson(ApiResponse::error_with_data(
-                PrError::GitCliNotLoggedIn,
-            )));
+            return Ok(ResponseJson(pr_error(PrError::GitCliNotLoggedIn)));
         }
         Err(GitServiceError::GitCLI(GitCliError::NotAvailable)) => {
-            return Ok(ResponseJson(ApiResponse::error_with_data(
-                PrError::GitCliNotInstalled,
-            )));
+            return Ok(ResponseJson(pr_error(PrError::GitCliNotInstalled)));
         }
         Err(e) => return Err(ApiError::GitService(e)),
         Ok(true) => {}
@@ -257,14 +283,10 @@ pub async fn create_pr(
         tracing::error!("Failed to push branch to remote: {}", e);
         match e {
             GitServiceError::GitCLI(GitCliError::AuthFailed(_)) => {
-                return Ok(ResponseJson(ApiResponse::error_with_data(
-                    PrError::GitCliNotLoggedIn,
-                )));
+                return Ok(ResponseJson(pr_error(PrError::GitCliNotLoggedIn)));
             }
             GitServiceError::GitCLI(GitCliError::NotAvailable) => {
-                return Ok(ResponseJson(ApiResponse::error_with_data(
-                    PrError::GitCliNotInstalled,
-                )));
+                return Ok(ResponseJson(pr_error(PrError::GitCliNotInstalled)));
             }
             _ => return Err(ApiError::GitService(e)),
         }
@@ -273,14 +295,12 @@ pub async fn create_pr(
     let git_host = match GitHostService::from_url(&target_remote.url) {
         Ok(host) => host,
         Err(GitHostError::UnsupportedProvider) => {
-            return Ok(ResponseJson(ApiResponse::error_with_data(
-                PrError::UnsupportedProvider,
-            )));
+            return Ok(ResponseJson(pr_error(PrError::UnsupportedProvider)));
         }
         Err(GitHostError::CliNotInstalled { provider }) => {
-            return Ok(ResponseJson(ApiResponse::error_with_data(
-                PrError::CliNotInstalled { provider },
-            )));
+            return Ok(ResponseJson(pr_error(PrError::CliNotInstalled {
+                provider,
+            })));
         }
         Err(e) => return Err(ApiError::GitHost(e)),
     };
@@ -373,13 +393,23 @@ pub async fn create_pr(
                 e
             );
             match &e {
-                GitHostError::CliNotInstalled { provider } => Ok(ResponseJson(
-                    ApiResponse::error_with_data(PrError::CliNotInstalled {
+                GitHostError::CliNotInstalled { provider } => {
+                    Ok(ResponseJson(pr_error(PrError::CliNotInstalled {
                         provider: *provider,
-                    }),
-                )),
-                GitHostError::AuthFailed(_) => Ok(ResponseJson(ApiResponse::error_with_data(
-                    PrError::CliNotLoggedIn { provider },
+                    })))
+                }
+                GitHostError::AuthFailed(_) => {
+                    Ok(ResponseJson(pr_error(PrError::CliNotLoggedIn { provider })))
+                }
+                // Provider refusals ("a pull request for branch … already
+                // exists", validation errors) are the caller's to act on; an
+                // opaque internal error would send an agent to `gh` instead.
+                // The CLI's stderr never carries credentials.
+                GitHostError::PullRequest(_)
+                | GitHostError::InsufficientPermissions(_)
+                | GitHostError::RepoNotFoundOrNoAccess(_)
+                | GitHostError::UnexpectedOutput(_) => Ok(ResponseJson(ApiResponse::error(
+                    &format!("Failed to create the pull request: {e}"),
                 ))),
                 _ => Err(ApiError::GitHost(e)),
             }
@@ -420,14 +450,12 @@ pub async fn attach_existing_pr(
     let git_host = match GitHostService::from_url(&remote.url) {
         Ok(host) => host,
         Err(GitHostError::UnsupportedProvider) => {
-            return Ok(ResponseJson(ApiResponse::error_with_data(
-                PrError::UnsupportedProvider,
-            )));
+            return Ok(ResponseJson(pr_error(PrError::UnsupportedProvider)));
         }
         Err(GitHostError::CliNotInstalled { provider }) => {
-            return Ok(ResponseJson(ApiResponse::error_with_data(
-                PrError::CliNotInstalled { provider },
-            )));
+            return Ok(ResponseJson(pr_error(PrError::CliNotInstalled {
+                provider,
+            })));
         }
         Err(e) => return Err(ApiError::GitHost(e)),
     };
@@ -441,14 +469,12 @@ pub async fn attach_existing_pr(
     {
         Ok(prs) => prs,
         Err(GitHostError::CliNotInstalled { provider }) => {
-            return Ok(ResponseJson(ApiResponse::error_with_data(
-                PrError::CliNotInstalled { provider },
-            )));
+            return Ok(ResponseJson(pr_error(PrError::CliNotInstalled {
+                provider,
+            })));
         }
         Err(GitHostError::AuthFailed(_)) => {
-            return Ok(ResponseJson(ApiResponse::error_with_data(
-                PrError::CliNotLoggedIn { provider },
-            )));
+            return Ok(ResponseJson(pr_error(PrError::CliNotLoggedIn { provider })));
         }
         Err(e) => return Err(ApiError::GitHost(e)),
     };
@@ -853,9 +879,500 @@ pub async fn create_workspace_from_pr(
     )))
 }
 
+// ---------------------------------------------------------------------------
+// PR management routes behind the VK MCP `get_pr` / `list_pr_checks` /
+// `merge_pr` / `update_pr` tools. Every error carries a message (MCP callers
+// never see `error_data` alone).
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PrToolError {
+    NoPrForWorkspace {
+        branch: String,
+    },
+    PrNotInWorkspaceRepo {
+        pr_repo: String,
+        workspace_repo: String,
+    },
+    InvalidPrReference {
+        detail: String,
+    },
+    UnsupportedProvider,
+    CliNotInstalled {
+        provider: ProviderKind,
+    },
+    CliNotLoggedIn {
+        provider: ProviderKind,
+    },
+    MergeRefused {
+        reason: String,
+        retryable: bool,
+    },
+    NothingToUpdate,
+    GithubError {
+        detail: String,
+    },
+}
+
+impl PrToolError {
+    pub fn message(&self) -> String {
+        match self {
+            PrToolError::NoPrForWorkspace { branch } => format!(
+                "No pull request is recorded for this workspace repo and none exists for branch \
+                 '{branch}'; create one with create_pr or pass pr"
+            ),
+            PrToolError::PrNotInWorkspaceRepo {
+                pr_repo,
+                workspace_repo,
+            } => format!(
+                "PR belongs to {pr_repo}, not this workspace repo ({workspace_repo}); PR tools \
+                 only act on the workspace's own repository"
+            ),
+            PrToolError::InvalidPrReference { detail } => detail.clone(),
+            PrToolError::UnsupportedProvider => {
+                "The repository's hosting provider does not support PR management tools".into()
+            }
+            PrToolError::CliNotInstalled { provider } => {
+                format!("{provider} CLI is not installed on the Vibe Kanban host")
+            }
+            PrToolError::CliNotLoggedIn { provider } => {
+                format!("{provider} CLI is not authenticated on the Vibe Kanban host")
+            }
+            PrToolError::MergeRefused { reason, retryable } => {
+                if *retryable {
+                    format!("Merge refused (retry later): {reason}")
+                } else {
+                    format!("Merge refused: {reason}")
+                }
+            }
+            PrToolError::NothingToUpdate => {
+                "Nothing to update: pass title, body or ready_for_review".into()
+            }
+            PrToolError::GithubError { detail } => detail.clone(),
+        }
+    }
+
+    fn from_git_host(error: GitHostError, provider: ProviderKind) -> Self {
+        match error {
+            GitHostError::UnsupportedProvider => PrToolError::UnsupportedProvider,
+            GitHostError::CliNotInstalled { provider } => PrToolError::CliNotInstalled { provider },
+            GitHostError::AuthFailed(_) => PrToolError::CliNotLoggedIn { provider },
+            other => PrToolError::GithubError {
+                detail: other.to_string(),
+            },
+        }
+    }
+}
+
+type PrToolResponse<T> = Result<ResponseJson<ApiResponse<T, PrToolError>>, ApiError>;
+
+fn pr_tool_error<T>(error: PrToolError) -> ResponseJson<ApiResponse<T, PrToolError>> {
+    let message = error.message();
+    ResponseJson(ApiResponse::error_with_data_and_message(error, &message))
+}
+
+/// Unwrap a `Result<_, PrToolError>` inside a `PrToolResponse` handler.
+macro_rules! tool_try {
+    ($expr:expr) => {
+        match $expr {
+            Ok(value) => value,
+            Err(error) => return Ok(pr_tool_error(error)),
+        }
+    };
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrTargetQuery {
+    pub repo_id: Uuid,
+    /// PR number, `#n`, or PR URL. Absent: the workspace's PR for this repo.
+    pub pr: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MergePrApiRequest {
+    pub repo_id: Uuid,
+    pub pr: Option<String>,
+    #[serde(default)]
+    pub method: MergeMethod,
+    #[serde(default)]
+    pub delete_branch: bool,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdatePrApiRequest {
+    pub repo_id: Uuid,
+    pub pr: Option<String>,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub ready_for_review: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PrStatusResponse {
+    pub pr: PrState,
+    pub checks: PrChecks,
+}
+
+struct PrTarget {
+    repo_path: PathBuf,
+    remote_url: String,
+    number: i64,
+    git_host: GitHostService,
+    provider: ProviderKind,
+}
+
+/// Pick the PR a tool call acts on: an explicit reference (which must belong
+/// to the workspace repo's remote), else the PR VK recorded for this
+/// workspace + repo, else the PR for the workspace branch (open first).
+async fn resolve_pr_target(
+    deployment: &DeploymentImpl,
+    workspace: &Workspace,
+    repo_id: Uuid,
+    pr: Option<&str>,
+) -> Result<Result<PrTarget, PrToolError>, ApiError> {
+    let pool = &deployment.db().pool;
+    let workspace_repo = WorkspaceRepo::find_by_workspace_and_repo_id(pool, workspace.id, repo_id)
+        .await?
+        .ok_or(RepoError::NotFound)?;
+    let repo = Repo::find_by_id(pool, workspace_repo.repo_id)
+        .await?
+        .ok_or(RepoError::NotFound)?;
+    let remote = deployment
+        .git()
+        .resolve_remote_for_branch(&repo.path, &workspace_repo.target_branch)?;
+    let git_host = match GitHostService::from_url(&remote.url) {
+        Ok(host) => host,
+        Err(GitHostError::UnsupportedProvider) => return Ok(Err(PrToolError::UnsupportedProvider)),
+        Err(GitHostError::CliNotInstalled { provider }) => {
+            return Ok(Err(PrToolError::CliNotInstalled { provider }));
+        }
+        Err(e) => return Err(ApiError::GitHost(e)),
+    };
+    let provider = git_host.provider_kind();
+    let host_error = |error| PrToolError::from_git_host(error, provider);
+
+    // An explicit reference wins; otherwise the PR VK recorded for this
+    // workspace + repo, by its URL so its repository is checked too — a PR
+    // opened against another remote (e.g. an `upstream/main` base) must not
+    // resolve to a same-numbered PR on this one.
+    let explicit = pr.map(str::trim).filter(|pr| !pr.is_empty());
+    let reference = match explicit {
+        Some(reference) => Some(reference.to_string()),
+        None => PullRequest::find_by_workspace_and_repo_id(pool, workspace.id, repo_id)
+            .await?
+            .into_iter()
+            .next()
+            .map(|recorded| recorded.pr_url),
+    };
+
+    // A URL names its repository, which may be any of this checkout's remotes
+    // (a PR opened with an `upstream/main` base lives upstream). Act through
+    // the remote that owns it; refuse repositories the checkout does not have.
+    let (remote_url, git_host, number) = match reference {
+        Some(reference) => match parse_pr_reference(&reference) {
+            Err(error) => {
+                return Ok(Err(PrToolError::InvalidPrReference {
+                    detail: error.to_string(),
+                }));
+            }
+            Ok(PrReference::Number(number)) => (remote.url, git_host, number),
+            Ok(PrReference::Url {
+                host,
+                owner,
+                repo: name,
+                number,
+            }) => {
+                let mut candidates = vec![remote.url.clone()];
+                if let Ok(remotes) = deployment.git().list_remotes(&repo.path) {
+                    candidates.extend(
+                        remotes
+                            .into_iter()
+                            .map(|remote| remote.url)
+                            .filter(|url| *url != remote.url),
+                    );
+                }
+                let mut workspace_repos = Vec::new();
+                let mut owner_remote = None;
+                for url in candidates {
+                    let Ok(candidate_host) = GitHostService::from_url(&url) else {
+                        continue;
+                    };
+                    let (remote_host, remote_owner, remote_repo) =
+                        match candidate_host.repo_identity(&repo.path, &url).await {
+                            Ok(identity) => identity,
+                            Err(error) if url == remote.url => {
+                                return Ok(Err(host_error(error)));
+                            }
+                            Err(_) => continue,
+                        };
+                    // A same-named owner/repo on another host is a different
+                    // repository: acting on it would hit this host's PR #n.
+                    if host.eq_ignore_ascii_case(&remote_host)
+                        && same_repo(&owner, &name, &remote_owner, &remote_repo)
+                    {
+                        owner_remote = Some((url, candidate_host));
+                        break;
+                    }
+                    workspace_repos.push(format!("{remote_host}/{remote_owner}/{remote_repo}"));
+                }
+                match owner_remote {
+                    Some((url, candidate_host)) => (url, candidate_host, number),
+                    None => {
+                        return Ok(Err(PrToolError::PrNotInWorkspaceRepo {
+                            pr_repo: format!("{host}/{owner}/{name}"),
+                            workspace_repo: workspace_repos.join(", "),
+                        }));
+                    }
+                }
+            }
+        },
+        None => {
+            let prs = match git_host
+                .list_prs_for_branch(&repo.path, &remote.url, &workspace.branch)
+                .await
+            {
+                Ok(prs) => prs,
+                Err(error) => return Ok(Err(host_error(error))),
+            };
+            match prs
+                .iter()
+                .find(|pr| matches!(pr.status, MergeStatus::Open))
+                .or(prs.first())
+            {
+                Some(pr) => {
+                    let number = pr.number;
+                    (remote.url, git_host, number)
+                }
+                None => {
+                    return Ok(Err(PrToolError::NoPrForWorkspace {
+                        branch: workspace.branch.clone(),
+                    }));
+                }
+            }
+        }
+    };
+
+    Ok(Ok(PrTarget {
+        repo_path: repo.path.clone(),
+        remote_url,
+        number,
+        provider: git_host.provider_kind(),
+        git_host,
+    }))
+}
+
+impl PrTarget {
+    async fn state(&self) -> Result<PrState, PrToolError> {
+        self.git_host
+            .get_pr_state(&self.repo_path, &self.remote_url, self.number)
+            .await
+            .map_err(|error| PrToolError::from_git_host(error, self.provider))
+    }
+
+    async fn checks(&self, head_sha: &str) -> Result<PrChecks, PrToolError> {
+        self.git_host
+            .list_pr_checks(&self.repo_path, &self.remote_url, head_sha)
+            .await
+            .map_err(|error| PrToolError::from_git_host(error, self.provider))
+    }
+}
+
+pub async fn get_pr_status(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    Query(query): Query<PrTargetQuery>,
+) -> PrToolResponse<PrStatusResponse> {
+    let target = tool_try!(
+        resolve_pr_target(&deployment, &workspace, query.repo_id, query.pr.as_deref()).await?
+    );
+    let pr = tool_try!(target.state().await);
+    let checks = tool_try!(target.checks(&pr.head_sha).await);
+    Ok(ResponseJson(ApiResponse::success(PrStatusResponse {
+        pr,
+        checks,
+    })))
+}
+
+pub async fn get_pr_checks(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    Query(query): Query<PrTargetQuery>,
+) -> PrToolResponse<PrChecks> {
+    let target = tool_try!(
+        resolve_pr_target(&deployment, &workspace, query.repo_id, query.pr.as_deref()).await?
+    );
+    let pr = tool_try!(target.state().await);
+    let checks = tool_try!(target.checks(&pr.head_sha).await);
+    Ok(ResponseJson(ApiResponse::success(checks)))
+}
+
+pub async fn merge_pr(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    Json(request): Json<MergePrApiRequest>,
+) -> PrToolResponse<MergeOutcome> {
+    let target = tool_try!(
+        resolve_pr_target(
+            &deployment,
+            &workspace,
+            request.repo_id,
+            request.pr.as_deref()
+        )
+        .await?
+    );
+    let pr = tool_try!(target.state().await);
+    let checks = tool_try!(target.checks(&pr.head_sha).await);
+    if let Err(refusal) = merge_gate(&pr, &checks, request.force) {
+        return Ok(pr_tool_error(PrToolError::MergeRefused {
+            reason: refusal.reason,
+            retryable: refusal.retryable,
+        }));
+    }
+    // A fork PR's head branch lives in the fork: deleting `head_branch` in the
+    // base repository would remove an unrelated same-named branch there.
+    let delete_branch = request.delete_branch && pr.head_in_base_repo();
+    let mut outcome = tool_try!(
+        target
+            .git_host
+            .merge_pr(
+                &target.repo_path,
+                &target.remote_url,
+                target.number,
+                request.method,
+                &pr.head_sha,
+                delete_branch.then_some(pr.head_branch.as_str()),
+            )
+            .await
+            .map_err(|error| PrToolError::from_git_host(error, target.provider))
+    );
+    if request.delete_branch && !delete_branch && outcome.merged {
+        outcome.branch_deleted = Some(false);
+        outcome.branch_delete_error = Some(format!(
+            "not deleted: head branch '{}' lives in {}, not the base repository",
+            pr.head_branch,
+            pr.head_repo.as_deref().unwrap_or("a deleted fork")
+        ));
+    }
+    // The local PR record is deliberately left for the PR monitor: it records
+    // the merge *and* runs the post-merge handling (workspace archival), which
+    // it skips for rows that are no longer open.
+    Ok(ResponseJson(ApiResponse::success(outcome)))
+}
+
+pub async fn update_pr(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    Json(request): Json<UpdatePrApiRequest>,
+) -> PrToolResponse<PrState> {
+    let fields = UpdatePrFields {
+        title: request.title,
+        body: request.body,
+        ready_for_review: request.ready_for_review,
+    };
+    if fields.is_empty() {
+        return Ok(pr_tool_error(PrToolError::NothingToUpdate));
+    }
+    let target = tool_try!(
+        resolve_pr_target(
+            &deployment,
+            &workspace,
+            request.repo_id,
+            request.pr.as_deref()
+        )
+        .await?
+    );
+    tool_try!(
+        target
+            .git_host
+            .update_pr(
+                &target.repo_path,
+                &target.remote_url,
+                target.number,
+                &fields
+            )
+            .await
+            .map_err(|error| PrToolError::from_git_host(error, target.provider))
+    );
+    let pr = tool_try!(target.state().await);
+    Ok(ResponseJson(ApiResponse::success(pr)))
+}
+
 pub fn router() -> Router<DeploymentImpl> {
     Router::new()
         .route("/", post(create_pr))
         .route("/attach", post(attach_existing_pr))
         .route("/comments", get(get_pr_comments))
+        .route("/status", get(get_pr_status))
+        .route("/checks", get(get_pr_checks))
+        .route("/merge", post(merge_pr))
+        .route("/update", post(update_pr))
+}
+
+#[cfg(test)]
+mod pr_tool_error_tests {
+    use super::*;
+
+    /// What crosses the boundary is the envelope `message`, so assert that.
+    #[test]
+    fn every_pr_tool_error_reaches_callers_with_a_message() {
+        let errors = [
+            PrToolError::NoPrForWorkspace {
+                branch: "vk/x".into(),
+            },
+            PrToolError::PrNotInWorkspaceRepo {
+                pr_repo: "a/b".into(),
+                workspace_repo: "c/d".into(),
+            },
+            PrToolError::InvalidPrReference {
+                detail: "bad".into(),
+            },
+            PrToolError::UnsupportedProvider,
+            PrToolError::CliNotInstalled {
+                provider: ProviderKind::GitHub,
+            },
+            PrToolError::CliNotLoggedIn {
+                provider: ProviderKind::GitHub,
+            },
+            PrToolError::MergeRefused {
+                reason: "checks are failing: lint".into(),
+                retryable: false,
+            },
+            PrToolError::NothingToUpdate,
+            PrToolError::GithubError {
+                detail: "HTTP 409: Head branch was modified".into(),
+            },
+        ];
+        for error in errors {
+            let response = pr_tool_error::<()>(error).0;
+            let json = serde_json::to_value(&response).unwrap();
+            assert_eq!(json["success"], false);
+            let message = json["message"].as_str().unwrap();
+            assert!(!message.is_empty(), "{json}");
+            assert!(json["error_data"]["type"].is_string(), "{json}");
+        }
+    }
+
+    #[test]
+    fn create_pr_errors_carry_messages() {
+        let response = pr_error::<String>(PrError::TargetBranchNotFound {
+            branch: "main".into(),
+        });
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            json["message"],
+            "Target branch 'main' does not exist on the remote"
+        );
+    }
+
+    #[test]
+    fn merge_request_defaults_are_squash_no_delete_no_force() {
+        let request: MergePrApiRequest =
+            serde_json::from_value(serde_json::json!({"repo_id": Uuid::nil()})).unwrap();
+        assert_eq!(request.method, MergeMethod::Squash);
+        assert!(!request.delete_branch);
+        assert!(!request.force);
+    }
 }
