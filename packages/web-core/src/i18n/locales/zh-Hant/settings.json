@@ -13,6 +13,7 @@
       "hostSwitchMessage": "You have unsaved changes for the current host. Switching hosts will discard those drafts."
     },
     "layout": {
+      "resizeDrawer": "調整設定寬度",
       "nav": {
         "title": "設定",
         "general": "一般",
@@ -29,8 +30,8 @@
         "mcpDesc": "模型上下文協議伺服器",
         "cli-tools": "CLI 工具",
         "cli-toolsDesc": "由應用程式管理的代理命令列工具",
-        "aws": "AWS",
-        "awsDesc": "AWS SSO 設定檔與登入",
+        "auth": "驗證",
+        "authDesc": "自動驗證儀表板與 AWS SSO 設定檔",
         "organizations": "組織設定",
         "organizationsDesc": "管理組織成員與權限",
         "remote-projects": "專案",
@@ -883,7 +884,7 @@
       }
     },
     "reauth": {
-      "title": "無人值守重新驗證",
+      "title": "自動驗證",
       "description": "此主機使用已儲存的 Entra 瀏覽器工作階段和 1Password，在無人參與的情況下重新登入的憑證。只有在獨立檢查供應商自身的憑證存放區後才會回報成功。",
       "loading": "正在檢查憑證…",
       "empty": "此主機上未設定重新驗證目標。",
@@ -912,6 +913,17 @@
         "manual": "來自設定",
         "agent": "由代理程式",
         "sweep": "由自動巡檢"
+      },
+      "summary": {
+        "healthy": "已登入",
+        "attention": "需要處理",
+        "unknown": "未知",
+        "notConfigured": "未設定"
+      },
+      "kind": {
+        "aws_sso": "AWS SSO",
+        "cli_tool": "CLI 工具",
+        "sgsc": "sgsc-mcp 閘道"
       }
     },
     "aws": {

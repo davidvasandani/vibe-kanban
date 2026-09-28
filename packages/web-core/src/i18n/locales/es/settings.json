@@ -13,6 +13,7 @@
       "hostSwitchMessage": "You have unsaved changes for the current host. Switching hosts will discard those drafts."
     },
     "layout": {
+      "resizeDrawer": "Cambiar tamaño de la configuración",
       "nav": {
         "title": "Configuración",
         "general": "General",
@@ -29,8 +30,8 @@
         "mcpDesc": "Servidores de Protocolo de Contexto de Modelo (MCP)",
         "cli-tools": "Herramientas de CLI",
         "cli-toolsDesc": "Herramientas de línea de comandos administradas por la aplicación para agentes",
-        "aws": "AWS",
-        "awsDesc": "Perfiles SSO de AWS e inicio de sesión",
+        "auth": "Autenticación",
+        "authDesc": "Panel de autenticación automática y perfiles de AWS SSO",
         "organizations": "Organization Settings",
         "organizationsDesc": "Manage organization members and permissions",
         "remote-projects": "Proyectos",
@@ -883,7 +884,7 @@
       }
     },
     "reauth": {
-      "title": "Reautenticación desatendida",
+      "title": "Autenticación automática",
       "description": "Credenciales que este host vuelve a iniciar sin intervención humana, usando la sesión de navegador de Entra guardada y 1Password. Solo se informa un éxito tras una comprobación independiente del almacén de credenciales del proveedor.",
       "loading": "Comprobando credenciales…",
       "empty": "No hay destinos de reautenticación configurados en este host.",
@@ -912,6 +913,17 @@
         "manual": "desde Ajustes",
         "agent": "por un agente",
         "sweep": "por el barrido automático"
+      },
+      "summary": {
+        "healthy": "Con sesión",
+        "attention": "Requiere atención",
+        "unknown": "Desconocido",
+        "notConfigured": "No configurado"
+      },
+      "kind": {
+        "aws_sso": "AWS SSO",
+        "cli_tool": "Herramientas CLI",
+        "sgsc": "Pasarela sgsc-mcp"
       }
     },
     "aws": {

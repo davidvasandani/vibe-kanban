@@ -235,6 +235,11 @@ contributed to it.
   desktop-only fixed chrome in a drawer component also reused on mobile; plus
   discoverable mobile access, stable persisted tab identifiers, truthful button
   semantics, and route-owned availability during async workspace loading.
+- [settings-drawer.md](settings-drawer.md) — Settings as a docked non-modal
+  right drawer: keep the nice-modal API, app shells reserve the width, a sheet
+  fallback below 1240px, the workspace right sidebar hides, toggle and close
+  routing through the unsaved-changes guard, requestId-stamped deep links, and
+  the z-index and Escape rules (`vk/4643-move-settings-to`).
 - [workspace-creation-reliability.md](workspace-creation-reliability.md) —
   Repository-ID admin queue identity, bounded pre-operation lease contention
   waits, cancellation and fencing limits, original-code regression proof, and
@@ -270,3 +275,12 @@ contributed to it.
   must never be projected into agent stdout, where vendor parsers render it as
   "Unrecognized JSON message". Coordinator classifier routing and the rule for
   new kinds (`vk/5276-debug-unrecogniz`).
+- [coordinator-restart-handoff.md](coordinator-restart-handoff.md) — Why a VK
+  deploy no longer stops worker-owned tasks (parents, sub-tasks, pollers).
+  Shutdown hands them off with no cancel and no WIP commit. Boot re-attaches
+  each tracker from the acknowledged cursor, with a seeded MsgStore and a
+  count-based writer skip. Reconcile defers a `Running` row to that tracker
+  so finalization still runs. A replay gap on a live job is reported, not
+  treated as an ending. Unanswered approvals are replayed. The handoff
+  cursor is persisted only after the log writer has drained. Six Codex
+  rounds of cursor and log-writer traps (`vk/80c1-tasks-should-sur`).

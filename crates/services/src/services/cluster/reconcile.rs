@@ -25,6 +25,9 @@ pub struct ReconciliationReport {
     pub jobs_missing: usize,
     pub jobs_quarantined: usize,
     pub conflicts: usize,
+    /// Terminal worker jobs whose process row is still running. Their
+    /// evidence is left for the re-attached tracker to finalize.
+    pub jobs_deferred: usize,
 }
 
 #[derive(Debug, Error)]
@@ -169,9 +172,21 @@ impl ExecutionReconciler {
                 return Ok(());
             };
             let process_state = process_state(&evidence.state);
-            if let Some(process) =
-                ExecutionProcess::find_by_id(&self.db.pool, summary.execution_id).await?
-                && process.status != ExecutionProcessStatus::Running
+            let process = ExecutionProcess::find_by_id(&self.db.pool, summary.execution_id).await?;
+            if let Some(process) = &process
+                && process.status == ExecutionProcessStatus::Running
+            {
+                // The job finished while this coordinator was down, and its
+                // row was handed off still running. Writing the evidence here
+                // would skip finalization (commit, next action, queued
+                // follow-up, notification) and drop the unacknowledged final
+                // output. The re-attached tracker replays the terminal event
+                // from the persisted cursor and finalizes through the normal
+                // path instead.
+                report.jobs_deferred += 1;
+                return Ok(());
+            }
+            if let Some(process) = &process
                 && process.status != process_state
             {
                 self.mark_indeterminate(summary.execution_id).await?;
@@ -356,5 +371,162 @@ mod tests {
                 .status,
             ExecutionProcessStatus::Indeterminate
         );
+    }
+
+    struct Fixture {
+        pool: sqlx::SqlitePool,
+        reconciler: ExecutionReconciler,
+        worker: WorkerNode,
+        execution_id: Uuid,
+        worker_job_id: Uuid,
+    }
+
+    async fn accepted_job_fixture(process_status: &str) -> Fixture {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../db/migrations").run(&pool).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let execution_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO execution_processes
+               (id, session_id, run_reason, executor_action, status,
+                started_at, created_at, updated_at)
+               VALUES (?, ?, 'codingagent', '{}', ?,
+                       datetime('now'), datetime('now'), datetime('now'))"#,
+        )
+        .bind(execution_id)
+        .bind(Uuid::new_v4())
+        .bind(process_status)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let worker_id = Uuid::new_v4();
+        let worker_job_id = Uuid::new_v4();
+        ExecutionWorkerJob::create_pending(&pool, execution_id, worker_id, "digest")
+            .await
+            .unwrap();
+        assert!(
+            ExecutionWorkerJob::record_acceptance(&pool, execution_id, worker_job_id, 0)
+                .await
+                .unwrap()
+        );
+        let config = ClusterConfig {
+            coordinator_id: Some(Uuid::new_v4()),
+            ..Default::default()
+        };
+        let reconciler = ExecutionReconciler::new(
+            DBService { pool: pool.clone() },
+            WorkerClient::new(vec![], SigningKey::from_bytes(&[9; 32])).unwrap(),
+            &config,
+        )
+        .unwrap();
+        let worker = WorkerNode {
+            id: worker_id,
+            hostname: "think3".into(),
+            status: WorkerNodeStatus::Online,
+            worker_version: "1".into(),
+            vibe_version: "1".into(),
+            capabilities: Json(json!({})),
+            resource_snapshot: Json(json!({})),
+            labels: Json(json!({})),
+            mount_status: db::models::worker_node::WorkerMountStatus::Healthy,
+            mount_message: None,
+            last_heartbeat_at: Some(Utc::now()),
+            lease_expires_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        Fixture {
+            pool,
+            reconciler,
+            worker,
+            execution_id,
+            worker_job_id,
+        }
+    }
+
+    fn completed_summary(fixture: &Fixture, last_sequence: u64) -> JobSummary {
+        JobSummary {
+            execution_id: fixture.execution_id,
+            worker_job_id: fixture.worker_job_id,
+            workspace_id: Uuid::new_v4(),
+            request_digest: "digest".into(),
+            state: JobState::Completed,
+            last_sequence,
+            terminal: Some(cluster_protocol::TerminalEvidence {
+                state: TerminalState::Completed,
+                exit_code: Some(0),
+                signal: None,
+                observed_at: Utc::now(),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_job_with_running_row_is_left_for_the_reattached_tracker() {
+        let fixture = accepted_job_fixture("running").await;
+        let mut report = ReconciliationReport::default();
+        fixture
+            .reconciler
+            .reconcile_worker(
+                &fixture.worker,
+                vec![completed_summary(&fixture, 42)],
+                &mut report,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.jobs_deferred, 1);
+        assert_eq!(report.conflicts, 0);
+        let process = ExecutionProcess::find_by_id(&fixture.pool, fixture.execution_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            process.status,
+            ExecutionProcessStatus::Running,
+            "finalization belongs to the tracker, not to boot reconciliation"
+        );
+        let job = ExecutionWorkerJob::find_by_execution_id(&fixture.pool, fixture.execution_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !job.dispatch_state.is_terminal(),
+            "a non-terminal dispatch state is what makes the row re-attachable"
+        );
+        assert_eq!(
+            job.worker_last_sequence, 42,
+            "the observed worker sequence is still recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_job_with_matching_terminal_row_is_still_applied() {
+        let fixture = accepted_job_fixture("completed").await;
+        let mut report = ReconciliationReport::default();
+        fixture
+            .reconciler
+            .reconcile_worker(
+                &fixture.worker,
+                vec![completed_summary(&fixture, 7)],
+                &mut report,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.jobs_deferred, 0);
+        assert_eq!(report.conflicts, 0);
+        let job = ExecutionWorkerJob::find_by_execution_id(&fixture.pool, fixture.execution_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.dispatch_state, ExecutionWorkerDispatchState::Completed);
     }
 }

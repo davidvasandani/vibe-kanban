@@ -65,11 +65,14 @@ import { useRemoteCloudHostsAppBarModel } from '@/shared/hooks/useRemoteCloudHos
 import { CloudShutdownExportBanner } from '@/shared/components/CloudShutdownExportBanner';
 import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { shouldShowRestartBanner } from './restartVisibility';
+import { useSettingsDrawerInset } from '@/shared/stores/useSettingsDrawerStore';
 
 export function SharedAppLayout() {
   const appNavigation = useAppNavigation();
   const currentDestination = useCurrentAppDestination();
   const isMobile = useIsMobile();
+  // Reserve room for the docked Settings drawer so it sits beside the app.
+  const settingsDrawerInset = useSettingsDrawerInset(isMobile);
   const mobileFontScale = useUiPreferencesStore((s) => s.mobileFontScale);
   const isLeftSidebarVisible = useUiPreferencesStore(
     (s) => s.isLeftSidebarVisible
@@ -345,6 +348,9 @@ export function SharedAppLayout() {
                   : 'grid-rows-[auto_1fr]'
               )
         )}
+        style={
+          settingsDrawerInset ? { marginRight: settingsDrawerInset } : undefined
+        }
       >
         {showRestartBanner && (
           <div

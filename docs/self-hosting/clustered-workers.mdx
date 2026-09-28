@@ -78,12 +78,34 @@ Confirm the worker hostname, version, mount health, resource snapshot, executor 
 <Step title="Exercise disconnect recovery">
   During a disposable execution, interrupt coordinator-to-worker connectivity without unmounting storage. Restore connectivity and confirm ordered log replay resumes without duplicate execution.
 
-Restart the coordinator and confirm it reconciles the worker inventory. Then restart the worker during another disposable run and confirm the UI reports **Interrupted** or **Indeterminate**, never **Completed** without terminal evidence.
+Restart the coordinator during a disposable run. The run should keep going on its worker. When the coordinator comes back, confirm that:
+
+- the run is still **Running**;
+- its chat shows the earlier output followed by new output; and
+- when the run finishes, it is finalised as usual, with the commit, next action and notification.
+
+Then restart the worker during another disposable run and confirm the UI reports **Interrupted** or **Indeterminate**, never **Completed** without terminal evidence.
 
 </Step>
 </Steps>
 
 Do not add more workers until output replay, cancellation, restart reconciliation, and shared Git worktree operations all pass.
+
+## Coordinator restarts and running work
+
+A coordinator restart does not stop work that runs on a worker. This covers agent turns, scripts, background helpers, pollers and dev servers, so parent tasks, their sub-task workspaces and their pollers all keep running through a deploy.
+
+- **On shutdown**, the coordinator leaves each worker-owned execution running. It sends no cancellation and does not commit work in progress.
+- **On startup**, the coordinator re-attaches to each one. It continues from the last output it had acknowledged, and rebuilds the chat from the saved history.
+- **If the run finished while the coordinator was down**, its outcome is finalised through the normal path.
+
+If the worker discarded some output before the coordinator returned, the chat says which events were lost and the run keeps going.
+
+`systemctl stop` and `systemctl restart` both reach the process as the same signal, so a coordinator *stop* for maintenance also leaves remote work running. To stop that work, use **Stop** in the UI, or stop the worker service as described in [Drain a worker](#drain-a-worker).
+
+Work that runs on the coordinator itself (workspaces placed **Local**, or a deployment without workers) still stops. It is marked **Interrupted**, its work in progress is committed, and it is resumed once on startup only when `resume_interrupted_on_startup` is `true` in the coordinator's `config.json` (it is off by default).
+
+An approval or question that is still waiting when the coordinator restarts is shown again after it comes back.
 
 ## Drain a worker
 

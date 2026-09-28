@@ -13,6 +13,7 @@
       "hostSwitchMessage": "You have unsaved changes for the current host. Switching hosts will discard those drafts."
     },
     "layout": {
+      "resizeDrawer": "调整设置宽度",
       "nav": {
         "title": "设置",
         "general": "常规",
@@ -29,8 +30,8 @@
         "mcpDesc": "模型上下文协议服务器",
         "cli-tools": "CLI 工具",
         "cli-toolsDesc": "由应用管理的代理命令行工具",
-        "aws": "AWS",
-        "awsDesc": "AWS SSO 配置文件与登录",
+        "auth": "认证",
+        "authDesc": "自动认证仪表板和 AWS SSO 配置文件",
         "organizations": "组织设置",
         "organizationsDesc": "管理组织成员和权限",
         "remote-projects": "项目",
@@ -883,7 +884,7 @@
       }
     },
     "reauth": {
-      "title": "无人值守重新认证",
+      "title": "自动认证",
       "description": "此主机使用已保存的 Entra 浏览器会话和 1Password，在无人参与的情况下重新登录的凭据。只有在独立检查供应商自身的凭据存储后才会报告成功。",
       "loading": "正在检查凭据…",
       "empty": "此主机上未配置重新认证目标。",
@@ -912,6 +913,17 @@
         "manual": "来自设置",
         "agent": "由代理",
         "sweep": "由自动巡检"
+      },
+      "summary": {
+        "healthy": "已登录",
+        "attention": "需要处理",
+        "unknown": "未知",
+        "notConfigured": "未配置"
+      },
+      "kind": {
+        "aws_sso": "AWS SSO",
+        "cli_tool": "CLI 工具",
+        "sgsc": "sgsc-mcp 网关"
       }
     },
     "aws": {

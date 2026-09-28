@@ -13,6 +13,7 @@
       "hostSwitchMessage": "You have unsaved changes for the current host. Switching hosts will discard those drafts."
     },
     "layout": {
+      "resizeDrawer": "Redimensionner les paramètres",
       "nav": {
         "title": "Paramètres",
         "general": "Général",
@@ -29,8 +30,8 @@
         "mcpDesc": "Serveurs Model Context Protocol",
         "cli-tools": "Outils CLI",
         "cli-toolsDesc": "Outils en ligne de commande gérés par l’application pour les agents",
-        "aws": "AWS",
-        "awsDesc": "Profils SSO AWS et connexion",
+        "auth": "Authentification",
+        "authDesc": "Tableau de bord d’authentification automatique et profils AWS SSO",
         "organizations": "Paramètres de l'organisation",
         "organizationsDesc": "Gérer les membres et les permissions de l'organisation",
         "remote-projects": "Projets",
@@ -883,7 +884,7 @@
       }
     },
     "reauth": {
-      "title": "Réauthentification sans surveillance",
+      "title": "Authentification automatique",
       "description": "Identifiants que cet hôte reconnecte sans intervention humaine, grâce à la session de navigateur Entra enregistrée et à 1Password. Un succès n’est signalé qu’après une vérification indépendante du magasin d’identifiants du fournisseur.",
       "loading": "Vérification des identifiants…",
       "empty": "Aucune cible de réauthentification n’est configurée sur cet hôte.",
@@ -912,6 +913,17 @@
         "manual": "depuis les paramètres",
         "agent": "par un agent",
         "sweep": "par le balayage automatique"
+      },
+      "summary": {
+        "healthy": "Connecté",
+        "attention": "À vérifier",
+        "unknown": "Inconnu",
+        "notConfigured": "Non configuré"
+      },
+      "kind": {
+        "aws_sso": "AWS SSO",
+        "cli_tool": "Outils CLI",
+        "sgsc": "Passerelle sgsc-mcp"
       }
     },
     "aws": {
