@@ -252,7 +252,8 @@ Worker-owned executions survive a coordinator restart without any of this:
 shutdown hands them off (no cancel, no WIP commit) and boot re-attaches the
 event tracker from the acknowledged cursor with a seeded MsgStore — see
 [[coordinator-restart-handoff]]. Only coordinator-local agents still need the
-Tier-3 designs.
+Tier-3 designs. Work that merely has to run on the coordinator *host* can
+use the colocated worker there instead (homelab `colocatedWorker`).
 
 ## Enablement order (why OpenCode first)
 

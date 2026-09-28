@@ -284,3 +284,5 @@ contributed to it.
   treated as an ending. Unanswered approvals are replayed. The handoff
   cursor is persisted only after the log writer has drained. Six Codex
   rounds of cursor and log-writer traps (`vk/80c1-tasks-should-sur`).
+  Coordinator-host work can use think2's colocated worker. Existing `Local`
+  workspaces cannot be moved to a worker (`vk/ec43-run-a-vibe-kanba`).
