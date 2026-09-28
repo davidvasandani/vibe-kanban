@@ -178,6 +178,7 @@ contributed to it.
   `NODE_ENV=production` act() gotcha, and how an external-connector link
   (Jira badge) is surfaced identically on the card and the panel header (one
   `JiraBadge` + `jiraLink` data prop + `getJiraLinkForIssue` lookup).
+- [workspace-sidebar-filtering.md](workspace-sidebar-filtering.md) — The one pure `filterSidebarWorkspaces` pipeline for the active and archived lists. Joining local workspaces to remote issue status through `local_workspace_id`. Need-gated per-project shape subscriptions, fail-open hiding and the `__no_issue__` sentinel. Global name-keyed hide lists. The typed Rust scratch silently drops frontend-only preference fields. web-core is not covered by repo lint, and the i18n duplicate check fails spuriously without `diff`.
 - [kanban-board-filtering.md](kanban-board-filtering.md) — The single
   `filterKanbanIssues` pipeline and its stage order, why view defaults (Team
   view hides sub-issues) must yield to an explicit search while deliberate

@@ -79,6 +79,7 @@ function storeToScratchData(state: {
     workspace_filters: {
       project_ids: state.workspaceFilters.projectIds,
       pr_filter: state.workspaceFilters.prFilter,
+      hidden_issue_status_names: state.workspaceFilters.hiddenIssueStatusNames,
     },
     workspace_sort: {
       sort_by: state.workspaceSort.sortBy,
@@ -167,6 +168,8 @@ function scratchDataToStore(data: UiPreferencesData): {
       projectIds: data.workspace_filters?.project_ids ?? [],
       prFilter:
         (data.workspace_filters?.pr_filter as WorkspacePrFilter) ?? 'all',
+      hiddenIssueStatusNames:
+        data.workspace_filters?.hidden_issue_status_names ?? [],
     },
     workspaceSort: {
       sortBy: (data.workspace_sort?.sort_by as WorkspaceSortBy) ?? 'updated_at',
