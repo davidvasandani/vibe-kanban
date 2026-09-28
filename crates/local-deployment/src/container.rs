@@ -5130,13 +5130,18 @@ impl ContainerService for LocalContainerService {
         // same tool always wins over an app-installed one. PATH is a reserved
         // env name (org vars can't set it), but base the merge on any PATH
         // already in the env so this stays correct if that ever changes.
+        // VK_AGENT_PATH carries the same value so a login shell (Codex runs
+        // `bash -lc`) can restore it after the host profile replaces PATH;
+        // the VK_ prefix is reserved, so org vars cannot spoof it either.
         let inherited = env
             .get("PATH")
             .map(std::ffi::OsString::from)
             .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
-        if let Some(merged) = utils::shell::append_cli_tools_to_path(&inherited) {
-            env.insert("PATH", merged.to_string_lossy().into_owned());
-        }
+        let agent_path = utils::shell::agent_path(&inherited)
+            .to_string_lossy()
+            .into_owned();
+        env.insert(utils::shell::AGENT_PATH_ENV, agent_path.clone());
+        env.insert("PATH", agent_path);
 
         // Persistent processes (dev servers, background helpers) write their
         // output straight to a raw log file (instead of pipes) so they can

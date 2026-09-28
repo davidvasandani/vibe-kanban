@@ -200,6 +200,8 @@ fn generate_types_content() -> String {
         services::services::cli_tools::CliToolAuthState::decl(),
         services::services::cli_tools::HostCopy::decl(),
         services::services::cli_tools::AppCopy::decl(),
+        utils::agent_tools::AgentToolState::decl(),
+        utils::agent_tools::AgentToolCheck::decl(),
         services::services::cli_tools::CliToolStatus::decl(),
         services::services::aws_sso::AwsSsoProfile::decl(),
         services::services::aws_sso::AwsAuthStatus::decl(),

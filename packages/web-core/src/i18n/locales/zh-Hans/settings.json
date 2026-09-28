@@ -851,7 +851,7 @@
     },
     "cliTools": {
       "title": "CLI 工具",
-      "description": "在所选主机上安装 CLI 工具。以下检查仅验证该主机，不验证代理 shell 中的可用性。凭据由各 CLI 管理。",
+      "description": "在所选主机上安装 CLI 工具。以下检查在该主机上、以其代理获得的环境（登录与非登录 shell）运行。凭据由各 CLI 管理。",
       "loading": "正在检查工具可用性…",
       "docs": "供应商文档",
       "actions": {
@@ -874,9 +874,17 @@
         "cancel": "取消",
         "retry": "重试"
       },
+      "agent": {
+        "available": "此主机上的代理：{{path}}",
+        "missing": "此主机上的代理找不到它",
+        "login_shell_missing": "代理：位于 {{path}}，但在登录 shell 中丢失",
+        "login_shell_mismatch": "代理：{{path}}，但登录 shell 运行的是另一个副本",
+        "runtime_unavailable": "代理：{{path}} 无法启动（运行时依赖不可用）",
+        "failed": "代理：{{path}} 未能启动"
+      },
       "status": {
-        "host": "仅主机（代理未验证）：{{path}}",
-        "app": "由 Vibe Kanban 安装在主机上（{{version}}；代理未验证）",
+        "host": "本机副本：{{path}}",
+        "app": "由 Vibe Kanban 安装在主机上（{{version}}）",
         "outdated": "目录当前固定为 {{version}}",
         "shadowed": "本机副本在 PATH 中优先",
         "notAvailable": "未安装。目录版本：{{version}}",

@@ -851,7 +851,7 @@
     },
     "cliTools": {
       "title": "Herramientas de CLI",
-      "description": "Instala herramientas CLI en el host seleccionado. Las comprobaciones solo verifican ese host; no verifican la disponibilidad en el agente. Cada CLI gestiona sus credenciales.",
+      "description": "Instala herramientas CLI en el host seleccionado. Las comprobaciones se ejecutan en ese host, en el entorno que reciben sus agentes (shells con y sin inicio de sesión). Cada CLI gestiona sus credenciales.",
       "loading": "Comprobando disponibilidad de herramientas…",
       "docs": "Documentación del proveedor",
       "actions": {
@@ -874,9 +874,17 @@
         "cancel": "Cancelar",
         "retry": "Reintentar"
       },
+      "agent": {
+        "available": "Agentes en este host: {{path}}",
+        "missing": "Los agentes de este host no lo encuentran",
+        "login_shell_missing": "Agentes: encontrado en {{path}}, pero se pierde en shells de inicio de sesión",
+        "login_shell_mismatch": "Agentes: {{path}}, pero los shells de inicio de sesión ejecutan otra copia",
+        "runtime_unavailable": "Agentes: {{path}} no puede iniciarse (dependencia de ejecución no disponible)",
+        "failed": "Agentes: {{path}} no se inició"
+      },
       "status": {
-        "host": "Solo host (agente sin verificar): {{path}}",
-        "app": "Instalado en el host por Vibe Kanban ({{version}}; agente sin verificar)",
+        "host": "Copia de la máquina: {{path}}",
+        "app": "Instalado en el host por Vibe Kanban ({{version}})",
         "outdated": "el catálogo ahora fija {{version}}",
         "shadowed": "la copia de la máquina tiene prioridad en PATH",
         "notAvailable": "No instalada. Versión del catálogo: {{version}}",
