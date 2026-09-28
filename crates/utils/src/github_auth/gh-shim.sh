@@ -43,19 +43,23 @@ vk_owner_of() {
 # Flags whose separate value can look like a repository or URL (PR bodies,
 # titles, templates, JSON fields, ...). An argument right after one of these is
 # that flag's value, never a target. Boolean flags are not listed, so
-# `gh repo create --private OWNER/REPO` still selects OWNER.
+# `gh repo create --private OWNER/REPO` still selects OWNER. Short flags that
+# are boolean in some commands (`pr merge -d/-m/-r`, `pr checkout -f`) only
+# take a value in the commands listed for them.
 vk_takes_value() {
   case "$1" in
-    -b | --body | -t | --title | -m | --message | -n | --notes | \
-      -d | --description | -p | --template | --json | -q | --jq | \
-      -F | --field | -f | --raw-field | -H | --head | --header | -B | --base | \
-      -S | --search | -l | --label | -a | --assignee | -r | --reviewer | \
-      --milestone | --source | --remote | -L | --limit | --homepage | \
-      -X | --method | --input)
+    --body | --title | --notes | --description | --template | --json | --jq | \
+      --field | --raw-field | --head | --header | --base | --search | --label | \
+      --assignee | --reviewer | --milestone | --source | --remote | --limit | \
+      --homepage | --method | --input | --subject | --body-file | \
+      -b | -t | -p | -q | -F | -H | -B | -S | -l | -a | -L)
       return 0
       ;;
+    -f | -X) [ "$vk_cmd" = api ] || [ "$vk_cmd" = workflow ] ;;
+    -d) [ "$vk_cmd" = repo ] ;;
+    -n) [ "$vk_cmd" = release ] ;;
+    *) return 1 ;;
   esac
-  return 1
 }
 
 vk_flag_repo=""
@@ -164,18 +168,36 @@ elif [ -n "${GH_REPO:-}" ]; then
   # gh itself uses GH_REPO instead of the current repository.
   vk_target=$GH_REPO
 elif command -v git >/dev/null 2>&1; then
-  vk_remote="$(git config --get remote.pushDefault 2>/dev/null || true)"
+  # `gh repo set-default` records its choice as remote.<name>.gh-resolved:
+  # "base" selects that remote, anything else is an explicit OWNER/REPO. gh
+  # prefers it over push configuration, so it is checked first.
+  vk_remote=""
+  vk_resolved="$(git config --get-regexp '^remote\..*\.gh-resolved$' 2>/dev/null | head -n 1 || true)"
+  if [ -n "$vk_resolved" ]; then
+    vk_resolved_name=${vk_resolved%% *}
+    vk_resolved_name=${vk_resolved_name#remote.}
+    vk_resolved_name=${vk_resolved_name%.gh-resolved}
+    vk_resolved_value=${vk_resolved#* }
+    if [ "$vk_resolved_value" = base ]; then
+      vk_remote=$vk_resolved_name
+    else
+      vk_target=$vk_resolved_value
+    fi
+  fi
+  if [ -z "$vk_remote" ] && [ -z "$vk_target" ]; then
+    vk_remote="$(git config --get remote.pushDefault 2>/dev/null || true)"
+  fi
   vk_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
-  if [ -z "$vk_remote" ] && [ -n "$vk_branch" ]; then
+  if [ -z "$vk_remote" ] && [ -z "$vk_target" ] && [ -n "$vk_branch" ]; then
     vk_remote="$(git config --get "branch.$vk_branch.pushRemote" 2>/dev/null || true)"
   fi
-  if [ -z "$vk_remote" ] && [ -n "$vk_branch" ]; then
+  if [ -z "$vk_remote" ] && [ -z "$vk_target" ] && [ -n "$vk_branch" ]; then
     vk_remote="$(git config --get "branch.$vk_branch.remote" 2>/dev/null || true)"
   fi
-  if [ -z "$vk_remote" ] && git remote get-url origin >/dev/null 2>&1; then
+  if [ -z "$vk_remote" ] && [ -z "$vk_target" ] && git remote get-url origin >/dev/null 2>&1; then
     vk_remote=origin
   fi
-  if [ -z "$vk_remote" ]; then
+  if [ -z "$vk_remote" ] && [ -z "$vk_target" ]; then
     vk_remotes="$(git remote 2>/dev/null || true)"
     if [ -n "$vk_remotes" ] && [ "$(printf '%s\n' "$vk_remotes" | wc -l | tr -d ' ')" = 1 ]; then
       vk_remote=$vk_remotes

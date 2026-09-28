@@ -659,6 +659,60 @@ mod tests {
     }
 
     #[test]
+    fn shim_follows_gh_default_repository_and_command_specific_flags() {
+        let fx = fixture();
+        let fork = fx.repo("fork", "https://github.com/Org-A/app.git");
+        let git = |args: &[&str]| {
+            let output = fx
+                .command("git", &fork)
+                .env("PATH", system_path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}");
+        };
+        git(&[
+            "remote",
+            "add",
+            "upstream",
+            "https://github.com/org-b/svc.git",
+        ]);
+        // Without a gh default, origin is used.
+        assert_eq!(token_of(&fx.gh(&fork, &["pr", "list"], &[]).1), TOKEN_A);
+        // `gh repo set-default` (base remote) wins over push configuration.
+        git(&["config", "remote.upstream.gh-resolved", "base"]);
+        assert_eq!(token_of(&fx.gh(&fork, &["pr", "list"], &[]).1), TOKEN_B);
+        // An explicit OWNER/REPO default is honoured too.
+        git(&["config", "remote.upstream.gh-resolved", "Org-A/app"]);
+        assert_eq!(token_of(&fx.gh(&fork, &["pr", "list"], &[]).1), TOKEN_A);
+
+        // `-d` is boolean for `pr merge`, so the URL after it is the target.
+        assert_eq!(
+            token_of(
+                &fx.gh(
+                    &fx.work,
+                    &["pr", "merge", "-d", "https://github.com/org-b/svc/pull/1"],
+                    &[]
+                )
+                .1
+            ),
+            TOKEN_B
+        );
+        // ...but it takes a value for `repo create --description`.
+        assert_eq!(
+            token_of(
+                &fx.gh(
+                    &fork,
+                    &["repo", "create", "-d", "see Org-A/app", "org-b/new"],
+                    &[]
+                )
+                .1
+            ),
+            TOKEN_B
+        );
+    }
+
+    #[test]
     fn shim_fails_closed_for_configured_owner_without_token() {
         let fx = fixture();
         let repo_a = fx.repo("a", "https://github.com/org-a/app");
