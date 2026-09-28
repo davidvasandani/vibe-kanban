@@ -620,6 +620,17 @@ text; no evidence never matches) by recording the occurrence there, and a
 lookup that cannot answer spawns nothing. Project selection obeys the diagnostic-issue
 constraint below: configured, or the source workspace's own project, else skip.
 
+### XLII. Auxiliary surfaces do not block primary work
+A configuration or inspection surface that users keep open while they work
+(Settings, for example) is non-modal. It docks beside the app shell, and the
+shell gives up space to it, so it never overlays or dims the chat. It opens and
+closes from the same control, which shows its open state. Every close path goes
+through the same unsaved-changes guard. Keyboard dismissal applies only while
+focus is inside the surface. It stacks below modal dialogs and popovers, so
+anything it opens still appears on top. Deep links that arrive while it is
+already open retarget it rather than being dropped. Existing imperative entry
+points keep their signatures.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -641,7 +652,10 @@ constraint below: configured, or the source workspace's own project, else skip.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.38.1 (refines XLI to reuse active items with matching failure
+**Version**: 0.39.0 (adds XLII, making auxiliary surfaces such as Settings
+non-modal docked drawers that toggle, guard unsaved changes on every close path,
+scope Escape to focus, stack below dialogs, and retarget on deep links;
+0.38.1 refines XLI to reuse active items with matching failure
 evidence before filing new work; 0.38.0 added XLI, making self-spawned agent work opt-in, marked
 against recursion, deduped per source, globally rate-capped, and triggered only
 by genuine failures; 0.37.0 extended IX so Vibe Kanban's own worker control and
@@ -864,3 +878,27 @@ events. IX already required unknown vendor events to degrade safely. It did not
 say that the product's own metadata must stay out of the vendor stream. XI
 (diagnostics are evidence) applies to the worker error variants, which must stay
 visible as diagnostics rather than being dropped.
+
+## Review: vk/4643-move-settings-to
+
+Applied `/speckit.constitution`: added principle XLII (0.39.0). Settings was a
+centered modal with a full-screen overlay that blocked the chat. No existing
+principle covered whether an auxiliary surface may be modal. XXXVI and XXXVII
+govern scroll and height inside a host, not whether a surface may cover its
+neighbours. Numeral XLII was unused on this branch.
+
+## Review: vk/4dac-filter-workspace
+
+Applied `/speckit.constitution`: no amendment (version stays 0.39.0). The task
+adds a user-set sidebar filter that hides workspaces by their linked issue's
+status. The existing principles cover it:
+- XXXIV: a workspace whose issue or status hasn't loaded stays visible. Hiding
+  requires positive evidence.
+- XXXV: status comes only from the workspace's own `issue_id`, joined via
+  `local_workspace_id`.
+- XXXVIII: this is a deliberate filter, so it still applies during search.
+- III: it reuses the existing filter dialog, preference scratch and cached
+  Electric shapes.
+Status names rather than ids key the global preference, following the existing
+`list_view_status_filter_name` convention. That is an established repository
+pattern, not a new principle.

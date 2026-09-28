@@ -1,4 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { CaretLeftIcon, PlusIcon, XIcon } from '@phosphor-icons/react';
@@ -6,6 +10,13 @@ import { create, useModal } from '@ebay/nice-modal-react';
 import { defineModal } from '@/shared/lib/modals';
 
 import { cn } from '@/shared/lib/utils';
+import { useIsMobile } from '@/shared/hooks/useIsMobile';
+import {
+  clampSettingsDrawerWidth,
+  toggleSettingsDrawerWith,
+  useSettingsDrawerStore,
+  useSettingsDrawerLayout,
+} from '@/shared/stores/useSettingsDrawerStore';
 import { SettingsSection } from './settings/SettingsSection';
 import { SettingsSelect } from './settings/SettingsComponents';
 import type {
@@ -33,11 +44,14 @@ export interface SettingsDialogProps {
   initialSection?: SettingsSectionType;
   initialState?: SettingsSectionInitialState[SettingsSectionType];
   initialHostId?: string | 'local';
+  /** Internal: stamped per show() so a repeated deep link re-targets. */
+  requestId?: number;
 }
 
 interface SettingsDialogContentProps {
   initialSection?: SettingsSectionType;
   initialState?: SettingsSectionInitialState[SettingsSectionType];
+  requestId?: number;
   onClose: () => void;
 }
 
@@ -154,6 +168,7 @@ function SettingsDialogNavigation({
 function SettingsDialogContent({
   initialSection,
   initialState,
+  requestId,
   onClose,
 }: SettingsDialogContentProps) {
   const { t } = useTranslation('settings');
@@ -191,30 +206,42 @@ function SettingsDialogContent({
     initialSection === resolvedInitialSection
   );
   const isConfirmingRef = useRef(false);
+  // Bumped to remount the active section when a deep link re-targets it.
+  const [sectionKey, setSectionKey] = useState(0);
+  const drawerRef = useRef<HTMLDivElement>(null);
+  const isMobile = useIsMobile();
+  const { docked, width: drawerWidth } = useSettingsDrawerLayout(isMobile);
+  const setDrawerOpen = useSettingsDrawerStore((s) => s.setOpen);
+  const setDrawerWidth = useSettingsDrawerStore((s) => s.setWidth);
+  const registerCloseRequest = useSettingsDrawerStore(
+    (s) => s.registerCloseRequest
+  );
+
+  // Resolves true when there is nothing to lose or the user chose to discard.
+  const confirmDiscardIfDirty = useCallback(async (): Promise<boolean> => {
+    if (!isDirty) return true;
+    const result = await ConfirmDialog.show({
+      title: t('settings.unsavedChanges.title'),
+      message: t('settings.unsavedChanges.message'),
+      confirmText: t('settings.unsavedChanges.discard'),
+      cancelText: t('settings.unsavedChanges.cancel'),
+      variant: 'destructive',
+    });
+    return result === 'confirmed';
+  }, [isDirty, t]);
 
   const handleCloseWithConfirmation = useCallback(async () => {
     if (isConfirmingRef.current) return;
 
-    if (isDirty) {
-      isConfirmingRef.current = true;
-      try {
-        const result = await ConfirmDialog.show({
-          title: t('settings.unsavedChanges.title'),
-          message: t('settings.unsavedChanges.message'),
-          confirmText: t('settings.unsavedChanges.discard'),
-          cancelText: t('settings.unsavedChanges.cancel'),
-          variant: 'destructive',
-        });
-        if (result === 'confirmed') {
-          onClose();
-        }
-      } finally {
-        isConfirmingRef.current = false;
+    isConfirmingRef.current = true;
+    try {
+      if (await confirmDiscardIfDirty()) {
+        onClose();
       }
-    } else {
-      onClose();
+    } finally {
+      isConfirmingRef.current = false;
     }
-  }, [isDirty, onClose, t]);
+  }, [confirmDiscardIfDirty, onClose]);
 
   const handleSectionSelect = (sectionId: SettingsSectionType) => {
     setActiveSection(sectionId);
@@ -257,146 +284,233 @@ function SettingsDialogContent({
     setMobileShowContent(false);
   };
 
-  // Handle ESC key
+  // The drawer is the close/toggle target for the gear and `G S`.
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        handleCloseWithConfirmation();
-      }
+    registerCloseRequest(handleCloseWithConfirmation);
+  }, [handleCloseWithConfirmation, registerCloseRequest]);
+
+  useEffect(() => {
+    setDrawerOpen(true);
+    // Focus the drawer so Escape works right after opening; clicking back into
+    // the app moves focus out and Escape no longer applies.
+    drawerRef.current?.focus({ preventScroll: true });
+    return () => {
+      setDrawerOpen(false);
+      registerCloseRequest(null);
     };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleCloseWithConfirmation]);
+  }, [registerCloseRequest, setDrawerOpen]);
+
+  // A show() while already open re-targets the drawer instead of being lost.
+  // Each show() carries a fresh requestId, so repeating the same deep link
+  // after navigating inside Settings still re-targets. Leaving a section with
+  // unsaved edits goes through the same discard guard as closing.
+  const retargetRef = useRef({
+    activeSection,
+    confirmDiscardIfDirty,
+    initialSection,
+  });
+  retargetRef.current = {
+    activeSection,
+    confirmDiscardIfDirty,
+    initialSection,
+  };
+  const lastRequestIdRef = useRef(requestId);
+  useEffect(() => {
+    if (requestId === lastRequestIdRef.current) return;
+    lastRequestIdRef.current = requestId;
+
+    const { initialSection: target } = retargetRef.current;
+    if (
+      !target ||
+      !SETTINGS_SECTION_DEFINITIONS.some((section) => section.id === target) ||
+      isConfirmingRef.current
+    ) {
+      drawerRef.current?.focus({ preventScroll: true });
+      return;
+    }
+
+    void (async () => {
+      isConfirmingRef.current = true;
+      try {
+        if (!(await retargetRef.current.confirmDiscardIfDirty())) return;
+        if (retargetRef.current.activeSection === target) {
+          // Same section: remount so it picks up the new initial state.
+          setSectionKey((key) => key + 1);
+        } else {
+          setActiveSection(target);
+        }
+        setMobileShowContent(true);
+        drawerRef.current?.focus({ preventScroll: true });
+      } finally {
+        isConfirmingRef.current = false;
+      }
+    })();
+  }, [requestId]);
+
+  // Escape closes only while focus is inside the drawer itself, so Escape in
+  // the chat (or in a menu portaled out of the drawer) leaves Settings open.
+  const handleKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (
+      e.key !== 'Escape' ||
+      e.defaultPrevented ||
+      !(e.target instanceof Node) ||
+      !drawerRef.current?.contains(e.target)
+    ) {
+      return;
+    }
+    void handleCloseWithConfirmation();
+  };
+
+  const handleResizeStart = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const handle = e.currentTarget;
+    handle.setPointerCapture(e.pointerId);
+    const handleMove = (event: PointerEvent) => {
+      setDrawerWidth(
+        clampSettingsDrawerWidth(
+          window.innerWidth - event.clientX,
+          window.innerWidth
+        )
+      );
+    };
+    const handleEnd = () => {
+      handle.removeEventListener('pointermove', handleMove);
+      handle.removeEventListener('pointerup', handleEnd);
+      handle.removeEventListener('pointercancel', handleEnd);
+    };
+    handle.addEventListener('pointermove', handleMove);
+    handle.addEventListener('pointerup', handleEnd);
+    handle.addEventListener('pointercancel', handleEnd);
+  };
 
   return (
-    <>
-      {/* Overlay */}
-      <div
-        data-tauri-drag-region
-        className="fixed inset-0 z-[9998] bg-black/50 animate-in fade-in-0 duration-200"
-        onClick={handleCloseWithConfirmation}
-      />
-      {/* Dialog wrapper - handles positioning */}
+    <div
+      ref={drawerRef}
+      role="dialog"
+      aria-modal={false}
+      aria-label={t('settings.layout.nav.title')}
+      tabIndex={-1}
+      onKeyDown={handleKeyDown}
+      className={cn(
+        'fixed flex overflow-hidden bg-panel outline-none',
+        !docked
+          ? // Full-screen sheet: mobile, or a desktop too narrow to dock
+            'inset-0 z-[9999] animate-in fade-in-0 slide-in-from-bottom-4 duration-200'
+          : // Desktop: docked right drawer. The app shells reserve its width
+            // (useSettingsDrawerInset); z sits below dialogs and dropdowns.
+            'inset-y-0 right-0 z-[90] border-l border-border shadow-lg animate-in slide-in-from-right-8 duration-200'
+      )}
+      style={docked ? { width: drawerWidth } : undefined}
+    >
+      {docked && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t('settings.layout.resizeDrawer')}
+          onPointerDown={handleResizeStart}
+          className="absolute inset-y-0 left-0 z-10 w-1.5 cursor-col-resize touch-none transition-colors hover:bg-brand/30 active:bg-brand/40"
+        />
+      )}
+      {/* Sidebar - hidden on mobile when showing content */}
       <div
         className={cn(
-          'fixed z-[9999]',
-          // Mobile: full screen
-          'inset-0',
-          // Desktop: centered with fixed size
-          'md:inset-auto md:left-1/2 md:top-1/2 md:-translate-x-1/2 md:-translate-y-1/2'
+          'bg-secondary/80 border-r border-border flex flex-col',
+          // Mobile: full width, hidden when showing content
+          'w-full',
+          mobileShowContent && 'hidden',
+          // Desktop: fixed width sidebar, always visible
+          'md:w-48 md:shrink-0 md:flex'
         )}
       >
-        {/* Dialog content - handles animation */}
-        <div
-          className={cn(
-            'h-full w-full flex overflow-hidden',
-            'bg-panel/95 backdrop-blur-sm shadow-lg',
-            'animate-in fade-in-0 slide-in-from-bottom-4 duration-200',
-            // Mobile: full screen, no rounded corners
-            'rounded-none border-0',
-            // Desktop: fixed size with rounded corners
-            'md:w-[900px] md:h-[700px] md:rounded-sm md:border md:border-border/50'
-          )}
-        >
-          {/* Sidebar - hidden on mobile when showing content */}
-          <div
-            className={cn(
-              'bg-secondary/80 border-r border-border flex flex-col',
-              // Mobile: full width, hidden when showing content
-              'w-full',
-              mobileShowContent && 'hidden',
-              // Desktop: fixed width sidebar, always visible
-              'md:w-56 md:block'
-            )}
+        {/* Header */}
+        <div className="p-4 border-b border-border flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-high">
+            {t('settings.layout.nav.title')}
+          </h2>
+          {/* Close button - mobile only */}
+          <button
+            onClick={handleCloseWithConfirmation}
+            className="p-1 rounded-sm hover:bg-secondary text-low hover:text-normal md:hidden"
           >
-            {/* Header */}
-            <div className="p-4 border-b border-border flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-high">
-                {t('settings.layout.nav.title')}
-              </h2>
-              {/* Close button - mobile only */}
-              <button
-                onClick={handleCloseWithConfirmation}
-                className="p-1 rounded-sm hover:bg-secondary text-low hover:text-normal md:hidden"
-              >
-                <XIcon className="size-icon-sm" weight="bold" />
-              </button>
-            </div>
-            <SettingsDialogNavigation
-              activeSection={activeSection}
-              onSectionSelect={handleSectionSelect}
-              onHostSelect={handleHostSelect}
-            />
-          </div>
-          {/* Content - hidden on mobile when showing nav */}
-          <div
-            className={cn(
-              'min-w-0 w-full flex-1 flex flex-col relative overflow-hidden',
-              // Mobile: full width, hidden when showing nav
-              !mobileShowContent && 'hidden',
-              // Desktop: always visible
-              'md:flex'
-            )}
+            <XIcon className="size-icon-sm" weight="bold" />
+          </button>
+        </div>
+        <SettingsDialogNavigation
+          activeSection={activeSection}
+          onSectionSelect={handleSectionSelect}
+          onHostSelect={handleHostSelect}
+        />
+      </div>
+      {/* Content - hidden on mobile when showing nav */}
+      <div
+        className={cn(
+          'min-w-0 w-full flex-1 flex flex-col relative overflow-hidden',
+          // Mobile: full width, hidden when showing nav
+          !mobileShowContent && 'hidden',
+          // Desktop: always visible
+          'md:flex'
+        )}
+      >
+        {/* Mobile header with back button */}
+        <div className="flex items-center gap-2 p-3 border-b border-border md:hidden">
+          <button
+            onClick={handleMobileBack}
+            className="p-1 rounded-sm hover:bg-secondary text-low hover:text-normal"
           >
-            {/* Mobile header with back button */}
-            <div className="flex items-center gap-2 p-3 border-b border-border md:hidden">
-              <button
-                onClick={handleMobileBack}
-                className="p-1 rounded-sm hover:bg-secondary text-low hover:text-normal"
-              >
-                <CaretLeftIcon className="size-icon-sm" weight="bold" />
-              </button>
-              <span className="text-sm font-medium text-high">
-                {t(`settings.layout.nav.${activeSection}`)}
-              </span>
-              <button
-                onClick={handleCloseWithConfirmation}
-                className="ml-auto p-1 rounded-sm hover:bg-secondary text-low hover:text-normal"
-              >
-                <XIcon className="size-icon-sm" weight="bold" />
-              </button>
-            </div>
-            {/* Section content */}
-            <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
-              {isHostSpecificSettingsSection(activeSection) ? (
-                selectedHost ? (
-                  <SettingsMachineUserSystemProvider key={selectedHostId}>
-                    <SettingsSection
-                      type={activeSection}
-                      onClose={handleCloseWithConfirmation}
-                      initialState={initialState}
-                    />
-                  </SettingsMachineUserSystemProvider>
-                ) : !hostsResolved ? (
-                  <div className="px-6 py-8 text-sm text-low">
-                    {t('settings.general.loading')}
-                  </div>
-                ) : availableHosts.length > 0 ? (
-                  <div className="px-6 py-8 text-sm text-low">
-                    {t('settings.hostPicker.selectMachineHint')}
-                  </div>
-                ) : (
-                  <div className="px-6 py-8 text-sm text-low">
-                    {t('settings.hostPicker.noHostAvailable')}
-                  </div>
-                )
-              ) : (
+            <CaretLeftIcon className="size-icon-sm" weight="bold" />
+          </button>
+          <span className="text-sm font-medium text-high">
+            {t(`settings.layout.nav.${activeSection}`)}
+          </span>
+          <button
+            onClick={handleCloseWithConfirmation}
+            className="ml-auto p-1 rounded-sm hover:bg-secondary text-low hover:text-normal"
+          >
+            <XIcon className="size-icon-sm" weight="bold" />
+          </button>
+        </div>
+        {/* Section content */}
+        <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+          {isHostSpecificSettingsSection(activeSection) ? (
+            selectedHost ? (
+              <SettingsMachineUserSystemProvider key={selectedHostId}>
                 <SettingsSection
+                  key={sectionKey}
                   type={activeSection}
                   onClose={handleCloseWithConfirmation}
                   initialState={initialState}
                 />
-              )}
-            </div>
-          </div>
+              </SettingsMachineUserSystemProvider>
+            ) : !hostsResolved ? (
+              <div className="px-6 py-8 text-sm text-low">
+                {t('settings.general.loading')}
+              </div>
+            ) : availableHosts.length > 0 ? (
+              <div className="px-6 py-8 text-sm text-low">
+                {t('settings.hostPicker.selectMachineHint')}
+              </div>
+            ) : (
+              <div className="px-6 py-8 text-sm text-low">
+                {t('settings.hostPicker.noHostAvailable')}
+              </div>
+            )
+          ) : (
+            <SettingsSection
+              key={sectionKey}
+              type={activeSection}
+              onClose={handleCloseWithConfirmation}
+              initialState={initialState}
+            />
+          )}
         </div>
       </div>
-    </>
+    </div>
   );
 }
 
 const SettingsDialogImpl = create<SettingsDialogProps>(
-  ({ initialSection, initialState, initialHostId }) => {
+  ({ initialSection, initialState, initialHostId, requestId }) => {
     const modal = useModal();
     const handleClose = useCallback(() => {
       modal.hide();
@@ -414,6 +528,7 @@ const SettingsDialogImpl = create<SettingsDialogProps>(
           <SettingsDialogContent
             initialSection={initialSection}
             initialState={initialState}
+            requestId={requestId}
             onClose={handleClose}
           />
         </SettingsHostProvider>
@@ -426,3 +541,24 @@ const SettingsDialogImpl = create<SettingsDialogProps>(
 export const SettingsDialog = defineModal<SettingsDialogProps | void, void>(
   SettingsDialogImpl
 );
+
+// Stamp every show() so an open drawer can tell a repeated deep link (same
+// section and state) from a re-render, and re-target on it.
+let settingsShowRequestSeq = 0;
+const showSettingsDialog = SettingsDialog.show;
+SettingsDialog.show = (props) =>
+  showSettingsDialog({
+    ...(props as SettingsDialogProps | undefined),
+    requestId: ++settingsShowRequestSeq,
+  });
+
+/**
+ * Open the Settings drawer, or close it (through the unsaved-changes guard)
+ * when it is already open. Used by the gear and the `G S` shortcut; deep links
+ * keep calling `SettingsDialog.show(...)`, which re-targets an open drawer.
+ */
+export async function toggleSettingsDrawer(
+  props?: SettingsDialogProps
+): Promise<void> {
+  await toggleSettingsDrawerWith(() => SettingsDialog.show(props));
+}

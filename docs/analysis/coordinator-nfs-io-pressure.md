@@ -134,15 +134,43 @@ Follow-ups, not done here: an ntfy alert when `uninterruptible_tasks ≥ cores` 
 fetching archived summaries only when the archived section is open; event-driven
 stats pushes.
 
-## After
+## After (2026-09-28 07:33–07:36 UTC, version `ee1bc7d`)
 
-To be recorded after deploy, using the same commands, with one or two clients
-open and agents running:
+Measured from a cluster worker, not on think2. There was no shell on think2,
+so `scripts/nfs-io-baseline.sh` could not be run.
+
+- The load, CPU and D-state rows come from the coordinator's own node metrics
+  (`GET /api/cluster/metrics`, 12 samples 5 s apart, plus 6 more 8 s apart).
+- The D-state count there is `cpu.uninterruptible_tasks`, which counts
+  *threads* in a 2 s snapshot. The baseline script's mean polls tasks every
+  0.2 s. The two are similar in scale but are not the same measure.
+- The summaries rows use the same request as
+  `scripts/time-workspace-summaries.mjs`, against the coordinator's direct
+  address.
+- This was normal use. The number of open clients was not controlled.
 
 | Measure | Before | After |
 | --- | --- | --- |
-| Load 1/5/15 | 21.1 / 20.9 / 20.8 | _pending deploy_ |
-| Mean D-state tasks | 8.5 | _pending_ |
-| NFS GETATTR ops/s | 24,456 | _pending_ |
-| git spawns / min (lower bound) | 775 | _pending_ |
-| summaries active / archived (warm) | 43.0 s / 33.8 s | _pending_ |
+| Load 1/5/15 | 21.1 / 20.9 / 20.8 | 7.6–13.8 / 5.0–7.0 / 6.2–6.8 (1-min peak 17.7 a minute later) |
+| CPU busy | ~20% | 15–67%, mean 44% |
+| Mean D-state (see note) | 8.5 tasks | 10.1 threads; samples 0–31, mostly 0–8 |
+| io PSI `some avg60` | 0.00–2.17 | 0.00–0.01 |
+| NFS GETATTR ops/s | 24,456 | _not measured (needs think2 shell)_ |
+| git spawns / min (lower bound) | 775 | _not measured_; `git` appeared in the metrics process list in 3 of 12 samples |
+| summaries active / archived (warm) | 43.0 s / 33.8 s | **0.26 s / 0.32 s** (206 / 937 rows) |
+| summaries active / archived (first call) | — | 16.0 s / 0.34 s (one cache refill) |
+
+What this shows:
+
+- **The attributed cause is gone.** Summary requests return from the cache in
+  about 0.3 s instead of 34–43 s. `git` has gone from a constant presence in the
+  process list to an occasional one. The 15-minute load fell from about 21 to
+  about 7.
+- **Load is not yet at or below the core count (6).** The remaining bursts
+  come from two sources, and neither is the summaries sweep:
+  - a `ducklake` Postgres `COPY` from 172.16.100.101, at up to about 75% CPU.
+    This is not a Vibe Kanban workload.
+  - the `vibe-kanban` server's own CPU, which reached 209% in one sample. That
+    is compute, not NFS wait, and was not investigated here.
+- To finish the comparison, run `scripts/nfs-io-baseline.sh 60` on think2 and
+  fill in the GETATTR and git-spawn rows.

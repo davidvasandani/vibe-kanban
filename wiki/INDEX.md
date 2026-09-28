@@ -176,6 +176,7 @@ contributed to it.
   `NODE_ENV=production` act() gotcha, and how an external-connector link
   (Jira badge) is surfaced identically on the card and the panel header (one
   `JiraBadge` + `jiraLink` data prop + `getJiraLinkForIssue` lookup).
+- [workspace-sidebar-filtering.md](workspace-sidebar-filtering.md) — The one pure `filterSidebarWorkspaces` pipeline for the active and archived lists. Joining local workspaces to remote issue status through `local_workspace_id`. Need-gated per-project shape subscriptions, fail-open hiding and the `__no_issue__` sentinel. Global name-keyed hide lists. The typed Rust scratch silently drops frontend-only preference fields. web-core is not covered by repo lint, and the i18n duplicate check fails spuriously without `diff`.
 - [kanban-board-filtering.md](kanban-board-filtering.md) — The single
   `filterKanbanIssues` pipeline and its stage order, why view defaults (Team
   view hides sub-issues) must yield to an explicit search while deliberate
@@ -235,6 +236,11 @@ contributed to it.
   desktop-only fixed chrome in a drawer component also reused on mobile; plus
   discoverable mobile access, stable persisted tab identifiers, truthful button
   semantics, and route-owned availability during async workspace loading.
+- [settings-drawer.md](settings-drawer.md) — Settings as a docked non-modal
+  right drawer: keep the nice-modal API, app shells reserve the width, a sheet
+  fallback below 1240px, the workspace right sidebar hides, toggle and close
+  routing through the unsaved-changes guard, requestId-stamped deep links, and
+  the z-index and Escape rules (`vk/4643-move-settings-to`).
 - [workspace-creation-reliability.md](workspace-creation-reliability.md) —
   Repository-ID admin queue identity, bounded pre-operation lease contention
   waits, cancellation and fencing limits, original-code regression proof, and
@@ -280,3 +286,12 @@ contributed to it.
   profile PATH merging; and the gh argument-parsing traps (value flags consumed
   first, short letters reused per subcommand, `--`, `GH_REPO`, `gh-resolved`,
   API placeholders).
+- [coordinator-restart-handoff.md](coordinator-restart-handoff.md) — Why a VK
+  deploy no longer stops worker-owned tasks (parents, sub-tasks, pollers).
+  Shutdown hands them off with no cancel and no WIP commit. Boot re-attaches
+  each tracker from the acknowledged cursor, with a seeded MsgStore and a
+  count-based writer skip. Reconcile defers a `Running` row to that tracker
+  so finalization still runs. A replay gap on a live job is reported, not
+  treated as an ending. Unanswered approvals are replayed. The handoff
+  cursor is persisted only after the log writer has drained. Six Codex
+  rounds of cursor and log-writer traps (`vk/80c1-tasks-should-sur`).

@@ -76,6 +76,10 @@ async fn main() -> Result<(), VibeKanbanError> {
         .cleanup_orphan_executions()
         .await
         .map_err(DeploymentError::from)?;
+    // Worker-owned executions were handed off, not stopped, by the previous
+    // instance (or it crashed). Resume following them before anything can
+    // start new work in their sessions.
+    deployment.container().reattach_worker_executions().await;
     let interrupted_creations =
         db::models::workspace::Workspace::fail_unfinished_creations(&deployment.db().pool).await?;
     if interrupted_creations > 0 {
