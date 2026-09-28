@@ -882,6 +882,38 @@
         "unsupported": "Installation impossible ici"
       }
     },
+    "reauth": {
+      "title": "Réauthentification sans surveillance",
+      "description": "Identifiants que cet hôte reconnecte sans intervention humaine, grâce à la session de navigateur Entra enregistrée et à 1Password. Un succès n’est signalé qu’après une vérification indépendante du magasin d’identifiants du fournisseur.",
+      "loading": "Vérification des identifiants…",
+      "empty": "Aucune cible de réauthentification n’est configurée sur cet hôte.",
+      "sweepEvery": "Les identifiants expirés sont réparés automatiquement toutes les {{minutes}} minutes.",
+      "sweepOff": "La réparation automatique est désactivée ; réauthentifiez à la demande.",
+      "runAll": "Réauthentifier tous les expirés",
+      "run": "Réauthentifier",
+      "onDemand": "à la demande uniquement",
+      "refused": "Refusé précédemment : les agents et le balayage automatique ne réessaieront pas tant que vous ne l’aurez pas relancé ici.",
+      "showSteps": "Afficher les étapes",
+      "hideSteps": "Masquer les étapes",
+      "state": {
+        "authenticated": "Authentifié",
+        "unauthenticated": "Expiré ou déconnecté",
+        "unknown": "État inconnu",
+        "not_configured": "Non configuré"
+      },
+      "outcome": {
+        "running": "En cours",
+        "succeeded": "Réussi",
+        "failed": "Échec",
+        "verification_failed": "Terminé, mais la vérification a échoué",
+        "refused": "Refusé"
+      },
+      "trigger": {
+        "manual": "depuis les paramètres",
+        "agent": "par un agent",
+        "sweep": "par le balayage automatique"
+      }
+    },
     "aws": {
       "title": "AWS",
       "description": "Gérez les profils AWS SSO et connectez-vous sur l’hôte sélectionné. Le statut vérifie uniquement l’authentification de l’hôte. L’agent doit accéder à la même configuration et au même cache SSO ; sélectionnez un profil avec AWS_PROFILE. AWS CLI gère les jetons.",

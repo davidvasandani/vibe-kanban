@@ -78,6 +78,7 @@ mod organizations;
 mod pipelines;
 mod pollers;
 mod preview_leases;
+mod reauth;
 mod remote_issues;
 mod remote_projects;
 mod repos;
@@ -103,6 +104,7 @@ impl McpServer {
             + Self::task_attempts_tools_router()
             + Self::session_tools_router()
             + Self::browser_tools_router()
+            + Self::reauth_tools_router()
     }
 
     pub fn orchestrator_mode_router() -> rmcp::handler::server::tool::ToolRouter<Self> {
@@ -112,7 +114,8 @@ impl McpServer {
             + Self::pollers_tools_router()
             + Self::preview_leases_tools_router()
             + Self::session_tools_router()
-            + Self::browser_tools_router();
+            + Self::browser_tools_router()
+            + Self::reauth_tools_router();
         router.remove_route("list_workspaces");
         router.remove_route("delete_workspace");
         router
@@ -634,7 +637,10 @@ pub(crate) mod tests {
             "list_pollers".to_string(),
             "list_preview_leases".to_string(),
             "list_recent_messages".to_string(),
+            "list_reauth_runs".to_string(),
+            "list_reauth_targets".to_string(),
             "list_sessions".to_string(),
+            "reauthenticate".to_string(),
             "refresh_mcp_tools".to_string(),
             "restart_session".to_string(),
             "restart_workspace".to_string(),

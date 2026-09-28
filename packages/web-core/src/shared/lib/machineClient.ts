@@ -7,6 +7,8 @@ import type {
   AwsSsoSession,
   CliToolId,
   CliToolStatus,
+  ReauthOverview,
+  ReauthRunReport,
   Config,
   GetMcpServerResponse,
   GitBranch,
@@ -127,6 +129,11 @@ export interface MachineClient {
   updateCliTool: (id: CliToolId) => Promise<CliToolStatus>;
   removeCliTool: (id: CliToolId) => Promise<CliToolStatus>;
   openCliToolLogin: (id: CliToolId) => Promise<WebSocket>;
+  listReauthTargets: () => Promise<ReauthOverview>;
+  /** Last runs only (no probing); cheap enough to poll. */
+  listReauthRuns: () => Promise<ReauthRunReport[]>;
+  /** Omit `target` to repair every expired swept target. */
+  runReauth: (target?: string) => Promise<ReauthRunReport[]>;
   listAwsProfiles: () => Promise<AwsSsoProfileStatus[]>;
   saveAwsProfile: (profile: AwsSsoProfile) => Promise<AwsSsoProfile>;
   deleteAwsProfile: (name: string) => Promise<void>;
@@ -414,6 +421,23 @@ export function createMachineClient(
           `/api/cli-tools/${encodeURIComponent(id)}`,
           { method: 'DELETE' }
         )
+      ),
+    listReauthTargets: async () =>
+      handleApiResponse<ReauthOverview>(
+        await makeMachineRequest(runtime, target, '/api/reauth/targets')
+      ),
+    listReauthRuns: async () =>
+      handleApiResponse<ReauthRunReport[]>(
+        await makeMachineRequest(runtime, target, '/api/reauth/runs')
+      ),
+    runReauth: async (reauthTarget) =>
+      handleApiResponse<ReauthRunReport[]>(
+        await makeMachineRequest(runtime, target, '/api/reauth/run', {
+          method: 'POST',
+          // Settings is the operator: only a manual run may retry a target
+          // that was refused earlier.
+          body: JSON.stringify({ target: reauthTarget, trigger: 'manual' }),
+        })
       ),
     openCliToolLogin: async (id) =>
       openLocalApiWebSocket(

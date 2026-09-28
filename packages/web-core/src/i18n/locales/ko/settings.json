@@ -882,6 +882,38 @@
         "unsupported": "여기에는 설치할 수 없음"
       }
     },
+    "reauth": {
+      "title": "무인 재인증",
+      "description": "저장된 Entra 브라우저 세션과 1Password를 사용해 사람의 개입 없이 이 호스트가 다시 로그인하는 자격 증명입니다. 공급업체 자체 자격 증명 저장소를 독립적으로 확인한 후에만 성공으로 보고됩니다.",
+      "loading": "자격 증명을 확인하는 중…",
+      "empty": "이 호스트에 구성된 재인증 대상이 없습니다.",
+      "sweepEvery": "만료된 자격 증명은 {{minutes}}분마다 자동으로 복구됩니다.",
+      "sweepOff": "자동 복구가 꺼져 있습니다. 필요할 때 재인증하세요.",
+      "runAll": "만료된 항목 모두 재인증",
+      "run": "재인증",
+      "onDemand": "요청 시에만",
+      "refused": "이전에 거부되었습니다. 여기서 다시 실행할 때까지 에이전트와 자동 스윕은 재시도하지 않습니다.",
+      "showSteps": "단계 보기",
+      "hideSteps": "단계 숨기기",
+      "state": {
+        "authenticated": "인증됨",
+        "unauthenticated": "만료되었거나 로그아웃됨",
+        "unknown": "상태 알 수 없음",
+        "not_configured": "구성되지 않음"
+      },
+      "outcome": {
+        "running": "실행 중",
+        "succeeded": "성공",
+        "failed": "실패",
+        "verification_failed": "완료되었지만 검증에 실패함",
+        "refused": "거부됨"
+      },
+      "trigger": {
+        "manual": "설정에서",
+        "agent": "에이전트가",
+        "sweep": "자동 스윕이"
+      }
+    },
     "aws": {
       "title": "AWS",
       "description": "선택한 호스트에서 AWS SSO 프로필을 관리하고 로그인합니다. 상태 검사는 호스트 인증만 확인합니다. 에이전트 셸은 동일한 AWS 설정과 SSO 캐시에 접근해야 합니다. AWS_PROFILE로 프로필을 선택하세요. 토큰은 AWS CLI가 관리합니다.",
