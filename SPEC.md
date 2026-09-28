@@ -1,107 +1,73 @@
-# SPEC — Move Settings to a right drawer
+# SPEC — Filter sidebar workspaces by linked issue status
 
-Task: `vk/4643-move-settings-to`
+Task: `vk/4dac-filter-workspace`
 
 ## Problem
 
-Settings opens as a centered 900×700 modal with a dimmed full-screen overlay
-(`packages/web-core/src/shared/dialogs/settings/SettingsDialog.tsx`). While it is
-open the chat, the workspace sidebar and the right sidebar are covered and
-unclickable. Clicking outside closes it, and so does Escape pressed anywhere.
-The operator cannot keep Settings open while reading or typing in the chat.
+The workspaces sidebar lists every active workspace. Many are linked to an
+issue that has moved to a state where the operator does not need to see the
+workspace any more, for example **In review**. The sidebar filter dialog
+(funnel icon next to the sort icon) can narrow by **Project** and **PR**
+only, so the operator has no way to hide those workspaces.
 
 ## Goal
 
-Settings becomes a right-side drawer. You toggle it open and closed, and it sits
-next to the app instead of on top of it:
+Add an **Issue status** control to the sidebar filter dialog. The operator
+toggles issue statuses off, and workspaces whose linked issue is in a hidden
+status disappear from the sidebar list.
 
-1. **No overlay.** Nothing dims or blocks the rest of the app. Clicking outside
-   the drawer does not close it.
-2. **Docked, not floating (desktop, ≥ md).** The drawer covers the full height at
-   the right edge. The app shell (navbar + content) shrinks by the drawer's
-   width, so the chat and panels reflow and stay fully visible and usable.
-3. **Toggle.** The navbar gear (`Actions.Settings`, shortcut `G S`) opens the
-   drawer when it is closed and closes it when it is open. The gear shows as
-   active (filled) while the drawer is open. The drawer's own X also closes it.
-4. **Resizable.** Dragging the drawer's left edge sets its width, clamped to
-   [520px, viewport − 720px, max 1200px]. The default is 720px. The width is
-   kept in `localStorage` (`vibe.ui.settingsDrawerWidth`).
-5. **Unsaved changes are still protected.** Every close path (X, gear toggle,
-   `G S`, Escape) goes through the existing dirty-state confirmation.
-6. **Escape is scoped.** Escape closes the drawer only when focus is inside the
-   drawer, so pressing Escape in the chat does not close Settings.
-7. **Deep links while open.** A `SettingsDialog.show({ initialSection, ... })`
-   call made while the drawer is already open (for example the agent
-   "Customise" link, a repo setup-script hint, or the relay pairing link) goes
-   to the requested section instead of being ignored.
-8. **Mobile (< md) is unchanged.** It stays a full-screen sheet with the
-   nav/content toggle and a back button. The layout is not pushed.
+## Behaviour
+
+1. **Hide list, not allow list.** The preference stores the statuses to
+   *hide*. A status that appears later (a new column, a new project) shows by
+   default, so a new status can never silently hide work.
+2. **By status name, case-insensitive.** Status ids are per project, and this
+   preference is global. So it stores names, the same approach as the existing
+   `list_view_status_filter_name`. Hiding "In review" hides it in every
+   project that has a status with that name. Names are compared trimmed and
+   lower-cased, and the dedupe for the options list uses the same rule.
+3. **Options.** The dropdown lists every status name from the projects that
+   have linked workspaces (hidden board columns too), deduped by name and
+   ordered by lowest `sort_order`. It also lists every name already hidden in
+   the preference, even when no loaded project has it, so the operator can
+   always un-hide it. A **No issue** option (sentinel `__no_issue__`) hides
+   workspaces that have no linked issue.
+4. **Fail open.** A workspace stays visible unless its issue's status is
+   known and hidden. This covers a workspace with no remote record, an issue
+   or status that hasn't loaded, or an issue deleted remotely. The one
+   exception is **No issue**: a workspace with no linked issue (no remote
+   record, or a remote record with `issue_id = null`) is hidden only when
+   **No issue** is selected.
+5. **Scope.** The filter applies to both the active and the archived list,
+   and combines with the project filter, the PR filter and search (AND), the
+   same as the existing filters. The funnel icon turns brand-coloured when
+   any status is hidden, and **Clear filters** resets it.
+6. **Persistence.** It is stored with the other sidebar filters in the
+   UI-preferences scratch, as `workspace_filters.hidden_issue_status_names`
+   (`#[serde(default)]`, so older payloads still load). The Rust scratch
+   model is typed, so the field has to be added there. Otherwise the server
+   would drop it on a round trip.
+7. **Data cost.** Issue and status data is synced per linked project through
+   the existing cached Electric shapes (`PROJECT_ISSUES_SHAPE`,
+   `PROJECT_PROJECT_STATUSES_SHAPE`). The subscriptions are enabled only while
+   the filter dialog is open or while at least one status is hidden. The
+   default sidebar therefore opens no new shapes.
 
 ## Non-goals
 
-- Changing any settings section's content, saving behavior, or the machine
-  (host) picker.
-- Converting Settings into URL routes.
-- Moving Settings into the workspace `RightSidebar` section stack. That sidebar
-  is 300px, workspace-only, and also used as the mobile tab. Settings has to
-  work from every route (kanban, remote home), so it is an app-shell drawer.
+- Filtering the carousel view or the kanban board.
+- Per-project status selection.
+- A status badge on each sidebar row.
 
-## Design
+## Acceptance
 
-- **Keep the public API.** `SettingsDialog.show(props)` / `.hide()` stay
-  nice-modal based, so all ~20 call sites keep working. The promise still
-  resolves when the drawer closes.
-- **New store** `packages/web-core/src/shared/stores/useSettingsDrawerStore.ts`
-  (zustand):
-  - `isOpen: boolean`
-  - `width: number` (persisted)
-  - `setWidth(px)`
-  - `requestClose: (() => void) | null`, registered by the open drawer so a
-    toggle can route through the dirty-check
-  - `setOpen`, `registerCloseRequest`
-  - Pure helper `clampSettingsDrawerWidth(width, viewportWidth)`
-- **Toggle** helper `toggleSettingsDrawer()` in `SettingsDialog.tsx`: if open,
-  call `requestClose()`. Otherwise call `SettingsDialog.show()`.
-  `Actions.Settings.execute` uses it. `Actions.Settings.isActive` reads the
-  store's `isOpen`. This needs `isSettingsOpen` in the action visibility
-  context.
-- **Layout inset** hook `useSettingsDrawerInset()`: returns the drawer width
-  when open on desktop, otherwise 0. `SharedAppLayout` (local) and
-  `RemoteAppShell` (remote) apply it as `marginRight` on their desktop root.
-  The fixed drawer fills exactly that gutter.
-- **Rendering.** The drawer is portaled to `document.body` and positioned
-  `fixed inset-y-0 right-0` at `z-[90]`. That is below Dialogs (9998/9999) and
-  dropdowns (10000), so confirm dialogs and selects opened from Settings still
-  appear on top. It has a `border-l` and `bg-panel`. Inside, the settings nav
-  column is narrower (`md:w-48`).
-- **Re-show while open.** Watch the `initialSection`/`initialState` props. When
-  they change, select the requested section. If it is the same section with
-  new state and no unsaved edits, remount the section (key bump) so the new
-  state applies.
-
-## Acceptance criteria
-
-- With Settings open on desktop, the chat input can be focused, typed in, and
-  sent. The workspace sidebar, right sidebar and navbar all respond to clicks.
-- The gear and `G S` toggle the drawer. The gear is filled while it is open.
-- Dirty sections still prompt before closing, whatever the close path.
-- The width can be dragged, is clamped, and is still set after a reload.
-- Mobile behaves as before.
-- `pnpm run check`, `pnpm run lint` and web-core vitest pass. There are unit
-  tests for the width clamp and the store's toggle/close logic.
-
-## Review follow-ups (Codex)
-
-- **Deep-link guard:** a deep link that would leave a section with unsaved
-  edits now goes through the same discard confirmation as closing.
-- **Repeated deep links:** each `SettingsDialog.show()` is stamped with a
-  `requestId`, so repeating the same link after moving around inside Settings
-  still re-targets the drawer.
-- **Narrow desktops:** the workspace's own 300px right sidebar is hidden while
-  Settings is open, because Settings takes the right-drawer slot. The saved
-  preference is not changed. The app reserve is raised to 720px (the rail,
-  the 300px workspaces sidebar and a chat column), so the chat keeps a usable
-  width at about 1280px.
-- **Too narrow to dock:** below 1240px (520px minimum drawer plus 720px app
-  reserve), Settings falls back to a full-screen sheet with no layout push, as
-  on mobile. It docks only when both columns fit.
+- Hiding "In review" removes workspaces whose linked issue is In review, in
+  every project, from the sidebar. Un-hiding brings them back.
+- Workspaces without a linked issue stay visible unless **No issue** is
+  selected.
+- The preference survives a reload (scratch round trip through the Rust
+  type).
+- Unit tests cover the pure filter and the options builder, including the
+  fail-open cases and case-insensitive matching.
+- `pnpm run check`, `pnpm run lint`, the web-core tests, the i18n check,
+  `generate-types:check` and `cargo test -p db` pass.
