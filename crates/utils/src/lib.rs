@@ -2,6 +2,7 @@ use std::{env, sync::OnceLock};
 
 use directories::ProjectDirs;
 
+pub mod agent_tools;
 pub mod approvals;
 pub mod assets;
 pub mod browser;

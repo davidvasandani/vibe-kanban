@@ -101,6 +101,29 @@ pub fn append_cli_tools_to_path(primary: impl AsRef<OsStr>) -> Option<OsString> 
     append_existing_dir_to_path(primary, &crate::assets::cli_tools_dir().join("bin"))
 }
 
+/// Environment variable carrying the PATH an agent was given, so that a login
+/// shell can put it back.
+///
+/// Login shells re-read system profiles, and some of those replace `PATH`
+/// outright: NixOS's `/etc/set-environment` does, and Codex runs every command
+/// through `bash -lc`. Without a copy of the original, a login shell drops
+/// every supervised-unit tool and the app-managed `cli-tools/bin`. The host's
+/// login profile restores it by prepending this value (see
+/// `docs/settings/cli-tools.mdx`). Set alongside `PATH` at every agent
+/// environment boundary, always to the same value.
+pub const AGENT_PATH_ENV: &str = "VK_AGENT_PATH";
+
+/// The PATH an agent process receives: the inherited PATH with the app-managed
+/// CLI tools directory appended when it exists.
+pub fn agent_path(inherited: impl AsRef<OsStr>) -> OsString {
+    agent_path_with(inherited, &crate::assets::cli_tools_dir().join("bin"))
+}
+
+fn agent_path_with(inherited: impl AsRef<OsStr>, managed_bin: &Path) -> OsString {
+    append_existing_dir_to_path(inherited.as_ref(), managed_bin)
+        .unwrap_or_else(|| inherited.as_ref().to_os_string())
+}
+
 fn append_existing_dir_to_path(primary: impl AsRef<OsStr>, directory: &Path) -> Option<OsString> {
     directory
         .is_dir()
@@ -330,6 +353,28 @@ mod tests {
         let inherited = join_paths([temp.path().join("host")]).unwrap();
 
         assert!(append_existing_dir_to_path(&inherited, &temp.path().join("missing")).is_none());
+    }
+
+    #[test]
+    fn agent_path_keeps_inherited_path_when_no_tools_are_installed() {
+        let temp = TempDir::new().unwrap();
+        let inherited = join_paths([temp.path().join("host")]).unwrap();
+        let path = agent_path_with(&inherited, &temp.path().join("no-tools/bin"));
+        assert_eq!(path, inherited);
+    }
+
+    #[test]
+    fn agent_path_appends_the_managed_bin_last() {
+        let temp = TempDir::new().unwrap();
+        let managed = temp.path().join("tools/bin");
+        fs::create_dir_all(&managed).unwrap();
+        let host = temp.path().join("host");
+        let inherited = join_paths([&host]).unwrap();
+        let path = agent_path_with(&inherited, &managed);
+        assert_eq!(
+            std::env::split_paths(&path).collect::<Vec<_>>(),
+            vec![host, managed]
+        );
     }
 }
 

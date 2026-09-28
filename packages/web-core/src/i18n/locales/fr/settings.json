@@ -851,7 +851,7 @@
     },
     "cliTools": {
       "title": "Outils CLI",
-      "description": "Installez les outils CLI sur l’hôte sélectionné. Les vérifications concernent uniquement cet hôte ; la disponibilité dans l’agent n’est pas vérifiée. Chaque CLI gère ses identifiants.",
+      "description": "Installez les outils CLI sur l’hôte sélectionné. Les vérifications s’exécutent sur cet hôte, dans l’environnement que reçoivent ses agents (shells de connexion ou non). Chaque CLI gère ses identifiants.",
       "loading": "Vérification de la disponibilité des outils…",
       "docs": "Documentation du fournisseur",
       "actions": {
@@ -874,9 +874,17 @@
         "cancel": "Annuler",
         "retry": "Réessayer"
       },
+      "agent": {
+        "available": "Agents sur cet hôte : {{path}}",
+        "missing": "Les agents de cet hôte ne le trouvent pas",
+        "login_shell_missing": "Agents : trouvé à {{path}}, mais perdu dans les shells de connexion",
+        "login_shell_mismatch": "Agents : {{path}}, mais les shells de connexion exécutent une autre copie",
+        "runtime_unavailable": "Agents : {{path}} ne peut pas démarrer (dépendance d’exécution indisponible)",
+        "failed": "Agents : {{path}} n’a pas démarré"
+      },
       "status": {
-        "host": "Hôte uniquement (agent non vérifié) : {{path}}",
-        "app": "Installé sur l’hôte par Vibe Kanban ({{version}} ; agent non vérifié)",
+        "host": "Copie de la machine : {{path}}",
+        "app": "Installé sur l’hôte par Vibe Kanban ({{version}})",
         "outdated": "le catalogue épingle désormais {{version}}",
         "shadowed": "la copie de la machine est prioritaire dans le PATH",
         "notAvailable": "Non installé. Version du catalogue : {{version}}",

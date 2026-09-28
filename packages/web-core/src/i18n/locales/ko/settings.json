@@ -851,7 +851,7 @@
     },
     "cliTools": {
       "title": "CLI 도구",
-      "description": "선택한 호스트에 CLI 도구를 설치합니다. 아래 검사는 해당 호스트만 확인하며 에이전트 셸의 사용 가능 여부는 확인하지 않습니다. 자격 증명은 각 CLI가 관리합니다.",
+      "description": "선택한 호스트에 CLI 도구를 설치합니다. 아래 검사는 해당 호스트에서 에이전트가 받는 환경(로그인 및 비로그인 셸)으로 실행됩니다. 자격 증명은 각 CLI가 관리합니다.",
       "loading": "도구 사용 가능 여부 확인 중…",
       "docs": "공급업체 문서",
       "actions": {
@@ -874,9 +874,17 @@
         "cancel": "취소",
         "retry": "다시 시도"
       },
+      "agent": {
+        "available": "이 호스트의 에이전트: {{path}}",
+        "missing": "이 호스트의 에이전트가 찾을 수 없음",
+        "login_shell_missing": "에이전트: {{path}}에 있지만 로그인 셸에서는 사라짐",
+        "login_shell_mismatch": "에이전트: {{path}}, 하지만 로그인 셸은 다른 복사본을 실행함",
+        "runtime_unavailable": "에이전트: {{path}}을(를) 시작할 수 없음 (런타임 종속성 사용 불가)",
+        "failed": "에이전트: {{path}}이(가) 시작되지 않음"
+      },
       "status": {
-        "host": "호스트 전용 (에이전트 미확인): {{path}}",
-        "app": "Vibe Kanban이 호스트에 설치 ({{version}}; 에이전트 미확인)",
+        "host": "머신 복사본: {{path}}",
+        "app": "Vibe Kanban이 호스트에 설치 ({{version}})",
         "outdated": "카탈로그 고정 버전: {{version}}",
         "shadowed": "머신의 복사본이 PATH에서 우선합니다",
         "notAvailable": "설치되지 않음. 카탈로그 버전: {{version}}",

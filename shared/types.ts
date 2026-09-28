@@ -765,7 +765,33 @@ export type HostCopy = { path: string, version: string | null, };
 
 export type AppCopy = { version: string, outdated: boolean, installed_at: string, };
 
-export type CliToolStatus = { id: CliToolId, binary_name: string, display_name: string, description: string, catalog_version: string, supported: boolean, unsupported_reason: string | null, host: HostCopy | null, app: AppCopy | null, docs_url: string, login_supported: boolean, auth_state: CliToolAuthState, auth_message: string | null, };
+export type AgentToolState = "available" | "missing" | "login_shell_missing" | "login_shell_mismatch" | "runtime_unavailable" | "failed";
+
+export type AgentToolCheck = { state: AgentToolState, 
+/**
+ * `command -v` in a non-login agent shell.
+ */
+path: string | null, 
+/**
+ * `command -v` in a login agent shell.
+ */
+login_path: string | null, 
+/**
+ * First line of the version probe, when it ran and succeeded.
+ */
+version: string | null, 
+/**
+ * Actionable, sanitized reason when `state` is not `available`.
+ */
+message: string | null, };
+
+export type CliToolStatus = { id: CliToolId, binary_name: string, display_name: string, description: string, catalog_version: string, supported: boolean, unsupported_reason: string | null, host: HostCopy | null, app: AppCopy | null, docs_url: string, login_supported: boolean, auth_state: CliToolAuthState, auth_message: string | null, 
+/**
+ * Whether agents on this host can run the tool. Independent of
+ * `auth_state`: a tool can be signed in yet unreachable from agent
+ * shells, or reachable but unable to start.
+ */
+agent: AgentToolCheck, };
 
 export type AwsSsoProfile = { name: string, sso_start_url: string, sso_region: string, sso_account_id: string, sso_role_name: string, region: string | null, output: string | null, };
 

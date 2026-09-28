@@ -736,7 +736,7 @@
     },
     "cliTools": {
       "title": "CLI Tools",
-      "description": "Install pinned vendor CLI tools on the selected host. Checks below verify that host only; agent shell availability is not verified. Credentials remain managed by each vendor CLI.",
+      "description": "Install pinned vendor CLI tools on the selected host. Checks below run on that host, in the environment its agents receive (login and non-login shells). Credentials remain managed by each vendor CLI.",
       "loading": "Checking tool availability…",
       "docs": "Vendor documentation",
       "actions": {
@@ -759,9 +759,17 @@
         "cancel": "Cancel",
         "retry": "Retry"
       },
+      "agent": {
+        "available": "Agents on this host: {{path}}",
+        "missing": "Agents on this host cannot find it",
+        "login_shell_missing": "Agents: found at {{path}}, but lost in login shells",
+        "login_shell_mismatch": "Agents: {{path}}, but login shells run a different copy",
+        "runtime_unavailable": "Agents: {{path}} cannot start (runtime dependency unavailable)",
+        "failed": "Agents: {{path}} did not start"
+      },
       "status": {
-        "host": "Host only (agent not verified): {{path}}",
-        "app": "Installed on host by Vibe Kanban ({{version}}; agent not verified)",
+        "host": "Machine copy: {{path}}",
+        "app": "Installed on host by Vibe Kanban ({{version}})",
         "outdated": "catalog now pins {{version}}",
         "shadowed": "the machine's copy takes precedence on PATH",
         "notAvailable": "Not installed. Catalog version: {{version}}",

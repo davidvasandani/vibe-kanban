@@ -64,11 +64,13 @@ impl TerminalService {
             .get("PATH")
             .map(std::ffi::OsString::from)
             .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
-        if let Some(path) = utils::shell::append_cli_tools_to_path(&inherited_path) {
-            request
-                .environment
-                .insert("PATH".into(), path.to_string_lossy().into_owned());
-        }
+        let path = utils::shell::agent_path(&inherited_path)
+            .to_string_lossy()
+            .into_owned();
+        request
+            .environment
+            .insert(utils::shell::AGENT_PATH_ENV.into(), path.clone());
+        request.environment.insert("PATH".into(), path);
         let terminal_id = Uuid::new_v4();
         let (tx, rx) = mpsc::channel(OUTPUT_QUEUE_CAPACITY);
         let session = tokio::task::spawn_blocking(move || {

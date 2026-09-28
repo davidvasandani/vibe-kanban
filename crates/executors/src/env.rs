@@ -211,6 +211,16 @@ impl ExecutionEnv {
                 };
                 self.insert("PATH", effective_path.to_string_lossy().into_owned());
             }
+
+            // A login shell restores VK_AGENT_PATH in place of PATH, so it must
+            // describe the PATH the agent actually got -- after the profile's
+            // entries -- and a profile cannot point it anywhere else.
+            let agent_path = workspace_utils::shell::AGENT_PATH_ENV;
+            if self.vars.contains_key(agent_path)
+                && let Some(path) = env_path(&self.vars).cloned()
+            {
+                self.insert(agent_path, path);
+            }
         }
 
         self
@@ -303,6 +313,27 @@ mod tests {
         let speckit = ctx.check_uncommitted_changes().await;
         assert!(speckit.contains(".claude/commands/speckit.plan.md"));
         assert!(speckit.ends_with(SPECKIT_COMMAND_RESTORE_NOTE));
+    }
+
+    #[test]
+    fn agent_path_tracks_the_profile_merged_path() {
+        let agent_path = workspace_utils::shell::AGENT_PATH_ENV;
+        let mut base = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        let runtime_path = std::env::join_paths(["/runtime/bin"]).unwrap();
+        base.insert("PATH", runtime_path.to_string_lossy());
+        base.insert(agent_path, runtime_path.to_string_lossy());
+
+        let mut profile = HashMap::new();
+        profile.insert("PATH".to_string(), "/profile/bin".to_string());
+        // A profile cannot redirect what login shells restore.
+        profile.insert(agent_path.to_string(), "/elsewhere/bin".to_string());
+        let merged = base.with_profile(&CmdOverrides {
+            env: Some(profile),
+            ..Default::default()
+        });
+
+        assert_eq!(merged.vars.get(agent_path), merged.vars.get("PATH"));
+        assert!(merged.vars.get("PATH").unwrap().starts_with("/profile/bin"));
     }
 
     #[test]

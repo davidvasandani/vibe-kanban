@@ -851,7 +851,7 @@
     },
     "cliTools": {
       "title": "CLI 工具",
-      "description": "在所選主機上安裝 CLI 工具。以下檢查僅驗證該主機，不驗證代理 shell 中的可用性。憑證由各 CLI 管理。",
+      "description": "在所選主機上安裝 CLI 工具。以下檢查在該主機上、以其代理取得的環境（登入與非登入 shell）執行。憑證由各 CLI 管理。",
       "loading": "正在檢查工具可用性…",
       "docs": "供應商文件",
       "actions": {
@@ -874,9 +874,17 @@
         "cancel": "取消",
         "retry": "重試"
       },
+      "agent": {
+        "available": "此主機上的代理：{{path}}",
+        "missing": "此主機上的代理找不到它",
+        "login_shell_missing": "代理：位於 {{path}}，但在登入 shell 中遺失",
+        "login_shell_mismatch": "代理：{{path}}，但登入 shell 執行的是另一個副本",
+        "runtime_unavailable": "代理：{{path}} 無法啟動（執行階段相依項目無法使用）",
+        "failed": "代理：{{path}} 未能啟動"
+      },
       "status": {
-        "host": "僅主機（代理未驗證）：{{path}}",
-        "app": "由 Vibe Kanban 安裝在主機上（{{version}}；代理未驗證）",
+        "host": "本機副本：{{path}}",
+        "app": "由 Vibe Kanban 安裝在主機上（{{version}}）",
         "outdated": "目錄目前固定為 {{version}}",
         "shadowed": "本機副本在 PATH 中優先",
         "notAvailable": "未安裝。目錄版本：{{version}}",
