@@ -222,6 +222,61 @@ fn base_command(claude_code_router: bool) -> &'static str {
     }
 }
 
+/// Extra CLI arguments that stop a project `.mcp.json` from shadowing a
+/// deployment-routed MCP server VK already provides.
+///
+/// A project entry pointing at the routed public URL calls it without the
+/// credentials the loopback route injects, so Claude Code reports it as failed
+/// (the misleading `vibe-kanban (CLIENT_HTTP_UNEXPECTED_CONTENT)` notice); one
+/// sharing the managed entry's name replaces the working entry entirely.
+/// `disabledMcpjsonServers` drops exactly those project entries and leaves the
+/// user-scope entry VK materialized in charge.
+///
+/// A profile that already passes `--settings` keeps its own settings: Claude
+/// Code honours one, and VK does not second-guess an explicit override.
+fn project_mcp_suppression_args(
+    args: &[String],
+    current_dir: &Path,
+    is_routed: impl Fn(&str) -> bool,
+) -> Option<Vec<String>> {
+    let path = current_dir.join(".mcp.json");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!("Could not read {}: {error}", path.display());
+            }
+            return None;
+        }
+    };
+    let Ok(mcp_json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        tracing::debug!("Ignoring unparseable {}", path.display());
+        return None;
+    };
+    let names = crate::mcp_config::shadowed_project_mcp_servers(&mcp_json, is_routed);
+    if names.is_empty() {
+        return None;
+    }
+    if args
+        .iter()
+        .any(|arg| arg == "--settings" || arg.starts_with("--settings="))
+    {
+        tracing::warn!(
+            "Project .mcp.json entries {names:?} duplicate a deployment-routed MCP server, but \
+             the Claude profile already passes --settings; leaving them enabled"
+        );
+        return None;
+    }
+    tracing::info!(
+        "Disabling project .mcp.json entries {names:?}: they duplicate a deployment-routed MCP \
+         server VK already provides"
+    );
+    Some(vec![
+        "--settings".to_string(),
+        serde_json::json!({ "disabledMcpjsonServers": names }).to_string(),
+    ])
+}
+
 /// Environment variable naming the default per-command `Bash` timeout.
 pub const BASH_DEFAULT_TIMEOUT_MS_VAR: &str = "BASH_DEFAULT_TIMEOUT_MS";
 /// Environment variable naming the maximum per-command `Bash` timeout.
@@ -1027,7 +1082,14 @@ impl ClaudeCode {
         command_parts: CommandParts,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let (program_path, args) = command_parts.into_resolved().await?;
+        let (program_path, mut args) = command_parts.into_resolved().await?;
+        if let Some(extra) = project_mcp_suppression_args(
+            &args,
+            current_dir,
+            crate::mcp_config::is_runtime_routed_mcp_url,
+        ) {
+            args.extend(extra);
+        }
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
 
         let mut command = Command::new(program_path);
@@ -3476,6 +3538,68 @@ mod tests {
         env::RepoContext,
         logs::utils::{EntryIndexProvider, patch::extract_normalized_entry_from_patch},
     };
+
+    fn write_mcp_json(dir: &Path, value: serde_json::Value) {
+        std::fs::write(dir.join(".mcp.json"), value.to_string()).unwrap();
+    }
+
+    fn routed(url: &str) -> bool {
+        url == "https://vibe.vasandani.dev/mcp"
+    }
+
+    #[test]
+    fn project_duplicate_of_routed_server_is_disabled_via_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        write_mcp_json(
+            dir.path(),
+            serde_json::json!({"mcpServers": {
+                "vibe-kanban": {"type": "http", "url": "https://vibe.vasandani.dev/mcp"},
+                "fetch": {"command": "uvx"}
+            }}),
+        );
+        let args = vec!["-p".to_string(), "--verbose".to_string()];
+        let extra = project_mcp_suppression_args(&args, dir.path(), routed).unwrap();
+        assert_eq!(extra[0], "--settings");
+        let settings: serde_json::Value = serde_json::from_str(&extra[1]).unwrap();
+        assert_eq!(
+            settings,
+            serde_json::json!({"disabledMcpjsonServers": ["vibe-kanban"]})
+        );
+    }
+
+    #[test]
+    fn existing_settings_override_is_respected() {
+        let dir = tempfile::tempdir().unwrap();
+        write_mcp_json(
+            dir.path(),
+            serde_json::json!({"mcpServers": {
+                "vibe_kanban": {"url": "https://vibe.vasandani.dev/mcp"}
+            }}),
+        );
+        for args in [
+            vec!["--settings".to_string(), "{}".to_string()],
+            vec!["--settings=/tmp/s.json".to_string()],
+        ] {
+            assert!(project_mcp_suppression_args(&args, dir.path(), routed).is_none());
+        }
+    }
+
+    #[test]
+    fn missing_invalid_or_unrelated_mcp_json_adds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(project_mcp_suppression_args(&[], dir.path(), routed).is_none());
+
+        std::fs::write(dir.path().join(".mcp.json"), "{ not json").unwrap();
+        assert!(project_mcp_suppression_args(&[], dir.path(), routed).is_none());
+
+        write_mcp_json(
+            dir.path(),
+            serde_json::json!({"mcpServers": {
+                "tldraw": {"type": "http", "url": "https://draw.vasandani.dev/mcp"}
+            }}),
+        );
+        assert!(project_mcp_suppression_args(&[], dir.path(), routed).is_none());
+    }
 
     fn patches_to_entries(patches: &[json_patch::Patch]) -> Vec<NormalizedEntry> {
         patches

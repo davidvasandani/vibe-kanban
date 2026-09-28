@@ -40,6 +40,50 @@ pub fn has_runtime_route_for_public_url(url: &str) -> bool {
     runtime_routes().contains_key(url)
 }
 
+/// Whether `url` is either side of a deployment runtime route: the public
+/// logical URL settings keep, or the loopback URL the host serves it on.
+pub fn is_runtime_routed_mcp_url(url: &str) -> bool {
+    url_has_runtime_route(url, &runtime_routes())
+}
+
+fn url_has_runtime_route(url: &str, routes: &BTreeMap<String, String>) -> bool {
+    routes
+        .iter()
+        .any(|(public, local)| public == url || local == url)
+}
+
+/// Names of project-scope (`.mcp.json`) servers that duplicate a server this
+/// deployment already provides through a runtime route.
+///
+/// Such an entry reaches the public URL directly, without the credentials the
+/// loopback route injects, so it fails — and when it shares the managed
+/// entry's name, Claude Code lets the project entry *replace* the working one.
+/// Callers disable exactly these names; every other project server is left
+/// alone.
+pub fn shadowed_project_mcp_servers(
+    mcp_json: &Value,
+    is_routed: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let Some(servers) = mcp_json.get("mcpServers").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = servers
+        .iter()
+        .filter(|(_, entry)| {
+            ["url", "httpUrl"].iter().any(|key| {
+                entry
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(&is_routed)
+            })
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn route_mcp_url(url: &str, routes: &BTreeMap<String, String>) -> String {
     routes.get(url).cloned().unwrap_or_else(|| url.to_string())
 }
@@ -1464,6 +1508,66 @@ mod tests {
             servers["other"]["url"],
             serde_json::json!("https://example.test/mcp")
         );
+    }
+
+    #[test]
+    fn runtime_route_matches_either_side_exactly() {
+        let routes = BTreeMap::from([(
+            "https://vibe.vasandani.dev/mcp".to_string(),
+            "http://127.0.0.1:18901/mcp".to_string(),
+        )]);
+        assert!(url_has_runtime_route(
+            "https://vibe.vasandani.dev/mcp",
+            &routes
+        ));
+        assert!(url_has_runtime_route("http://127.0.0.1:18901/mcp", &routes));
+        assert!(!url_has_runtime_route(
+            "https://vibe.vasandani.dev/mcp/other",
+            &routes
+        ));
+        assert!(!url_has_runtime_route(
+            "https://vibe.vasandani.dev/mcp",
+            &BTreeMap::new()
+        ));
+    }
+
+    #[test]
+    fn shadowed_project_servers_are_only_runtime_routed_duplicates() {
+        let routed = |url: &str| {
+            url == "https://vibe.vasandani.dev/mcp" || url == "http://127.0.0.1:18901/mcp"
+        };
+        // The homelab repository's `.mcp.json` shape that produced the
+        // "vibe-kanban (CLIENT_HTTP_UNEXPECTED_CONTENT)" notice.
+        let mcp_json = serde_json::json!({
+            "mcpServers": {
+                "vibe-kanban": {
+                    "type": "http",
+                    "url": "https://vibe.vasandani.dev/mcp",
+                    "headers": {"Authorization": "Bearer ${VIBE_KANBAN_MCP_TOKEN}"}
+                },
+                "vibe_kanban": {"httpUrl": "http://127.0.0.1:18901/mcp"},
+                "tldraw": {"type": "http", "url": "https://draw.vasandani.dev/mcp"},
+                "fetch": {"command": "uvx", "args": ["mcp-server-fetch"]},
+                "not-an-object": "https://vibe.vasandani.dev/mcp"
+            }
+        });
+        assert_eq!(
+            shadowed_project_mcp_servers(&mcp_json, routed),
+            vec!["vibe-kanban".to_string(), "vibe_kanban".to_string()]
+        );
+    }
+
+    #[test]
+    fn shadowed_project_servers_tolerate_unexpected_shapes() {
+        let routed = |_: &str| true;
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"mcpServers": []}),
+            serde_json::json!({"mcpServers": {"x": {"url": 7}}}),
+            serde_json::json!([1, 2]),
+        ] {
+            assert!(shadowed_project_mcp_servers(&value, routed).is_empty());
+        }
     }
 
     #[tokio::test]
