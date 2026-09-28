@@ -1,6 +1,6 @@
 # Workspace environment inheritance
 
-Tags: `6d24-org-env-vars-are`, `5e29-vk-github-fine-g`, `vk/b0d4-env-vars-value-f`, `vk/a63c-don-t-obfuscate`, `vk/2eb6-keep-env-vars-un`
+Tags: `6d24-org-env-vars-are`, `5e29-vk-github-fine-g`, `vk/b0d4-env-vars-value-f`, `vk/a63c-don-t-obfuscate`, `vk/2eb6-keep-env-vars-un`, `vk/0f52-manage-gh-token`
 
 ## One workspace has multiple process boundaries
 
@@ -70,6 +70,15 @@ worker systemd `path` covers agents, scripts, dev servers, and workspace PTYs
 without duplicating spawn logic. A credential-preparation oneshot that owns a
 `RuntimeDirectory` must remain active (`RemainAfterExit=true`), or systemd
 removes the directory as soon as preparation finishes.
+
+**Superseded in practice by the app-owned router (`vk/0f52-manage-gh-token`).**
+Per-owner PATs are now configured in Settings → Repositories and routed by an
+app-written shim plus `GIT_CONFIG_PARAMETERS`, prepared on each executing host.
+The coordinator resolves the values and sends them through the authenticated
+dispatch environment, the same path resolved org Env Vars already take. That
+is a deliberate exception to the "no PATs in dispatch" rule above, because a
+UI-managed machine setting has no per-worker copy. The Nix router still
+exists, but no host configures it. See `wiki/github-owner-token-routing.md`.
 
 ## Resolve 1Password references at environment preparation
 
