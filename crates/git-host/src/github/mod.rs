@@ -405,9 +405,13 @@ impl GitHostProvider for GitHubProvider {
         &self,
         repo_path: &Path,
         remote_url: &str,
-    ) -> Result<(String, String), GitHostError> {
+    ) -> Result<(String, String, String), GitHostError> {
         let info = self.get_repo_info(remote_url, repo_path).await?;
-        Ok((info.owner, info.repo_name))
+        let host = info
+            .hostname
+            .clone()
+            .unwrap_or_else(|| "github.com".to_string());
+        Ok((host, info.owner, info.repo_name))
     }
 
     async fn get_pr_state(

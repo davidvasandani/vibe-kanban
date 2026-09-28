@@ -1063,20 +1063,24 @@ async fn resolve_pr_target(
             }
             Ok(PrReference::Number(number)) => number,
             Ok(PrReference::Url {
+                host,
                 owner,
                 repo: name,
                 number,
-                ..
             }) => {
-                let (remote_owner, remote_repo) =
+                let (remote_host, remote_owner, remote_repo) =
                     match git_host.repo_identity(&repo.path, &remote.url).await {
                         Ok(identity) => identity,
                         Err(error) => return Ok(Err(host_error(error))),
                     };
-                if !same_repo(&owner, &name, &remote_owner, &remote_repo) {
+                // A same-named owner/repo on another host is a different
+                // repository: acting on it would hit this host's PR #n.
+                if !host.eq_ignore_ascii_case(&remote_host)
+                    || !same_repo(&owner, &name, &remote_owner, &remote_repo)
+                {
                     return Ok(Err(PrToolError::PrNotInWorkspaceRepo {
-                        pr_repo: format!("{owner}/{name}"),
-                        workspace_repo: format!("{remote_owner}/{remote_repo}"),
+                        pr_repo: format!("{host}/{owner}/{name}"),
+                        workspace_repo: format!("{remote_host}/{remote_owner}/{remote_repo}"),
                     }));
                 }
                 number
@@ -1190,7 +1194,10 @@ pub async fn merge_pr(
             retryable: refusal.retryable,
         }));
     }
-    let outcome = tool_try!(
+    // A fork PR's head branch lives in the fork: deleting `head_branch` in the
+    // base repository would remove an unrelated same-named branch there.
+    let delete_branch = request.delete_branch && pr.head_in_base_repo();
+    let mut outcome = tool_try!(
         target
             .git_host
             .merge_pr(
@@ -1199,28 +1206,22 @@ pub async fn merge_pr(
                 target.number,
                 request.method,
                 &pr.head_sha,
-                request.delete_branch.then_some(pr.head_branch.as_str()),
+                delete_branch.then_some(pr.head_branch.as_str()),
             )
             .await
             .map_err(|error| PrToolError::from_git_host(error, target.provider))
     );
-    if outcome.merged {
-        // Best effort: the PR monitor would converge this later anyway.
-        if let Err(error) = PullRequest::update_status(
-            &deployment.db().pool,
-            &pr.url,
-            &MergeStatus::Merged,
-            Some(chrono::Utc::now()),
-            outcome.sha.clone(),
-        )
-        .await
-        {
-            tracing::warn!(
-                "Merged PR {} but failed to record it locally: {error}",
-                pr.url
-            );
-        }
+    if request.delete_branch && !delete_branch && outcome.merged {
+        outcome.branch_deleted = Some(false);
+        outcome.branch_delete_error = Some(format!(
+            "not deleted: head branch '{}' lives in {}, not the base repository",
+            pr.head_branch,
+            pr.head_repo.as_deref().unwrap_or("a deleted fork")
+        ));
     }
+    // The local PR record is deliberately left for the PR monitor: it records
+    // the merge *and* runs the post-merge handling (workspace archival), which
+    // it skips for rows that are no longer open.
     Ok(ResponseJson(ApiResponse::success(outcome)))
 }
 

@@ -188,8 +188,24 @@ pub struct PrState {
     pub head_sha: String,
     pub head_branch: String,
     pub base_branch: String,
+    /// `owner/repo` holding the head branch; differs from `base_repo` for a
+    /// PR opened from a fork. `None` when the fork was deleted.
+    pub head_repo: Option<String>,
+    pub base_repo: Option<String>,
     pub merged_at: Option<DateTime<Utc>>,
     pub merge_commit_sha: Option<String>,
+}
+
+impl PrState {
+    /// Whether the head branch lives in the base repository, i.e. deleting
+    /// `head_branch` there deletes *this* PR's branch and not a same-named
+    /// branch belonging to someone else.
+    pub fn head_in_base_repo(&self) -> bool {
+        match (&self.head_repo, &self.base_repo) {
+            (Some(head), Some(base)) => head.eq_ignore_ascii_case(base),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -609,6 +625,8 @@ mod pr_management_tests {
             head_sha: "abc".into(),
             head_branch: "vk/x".into(),
             base_branch: "main".into(),
+            head_repo: Some("o/r".into()),
+            base_repo: Some("O/R".into()),
             merged_at: None,
             merge_commit_sha: None,
         }
@@ -833,6 +851,16 @@ mod pr_management_tests {
         merged.state = MergeStatus::Merged;
         merged.merged = true;
         assert!(merge_gate(&merged, &failing, true).is_err());
+    }
+
+    #[test]
+    fn head_branch_is_only_deletable_from_the_repo_that_holds_it() {
+        assert!(pr("clean").head_in_base_repo());
+        let mut fork = pr("clean");
+        fork.head_repo = Some("someone/r".into());
+        assert!(!fork.head_in_base_repo());
+        fork.head_repo = None;
+        assert!(!fork.head_in_base_repo());
     }
 
     #[test]

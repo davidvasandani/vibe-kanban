@@ -56,13 +56,13 @@ pub trait GitHostProvider: Send + Sync {
     // PR management. Providers without an implementation report
     // `UnsupportedProvider` rather than failing in a provider-specific way.
 
-    /// Canonical `(owner, repo)` of `remote_url`, used to refuse PR URLs that
-    /// belong to another repository.
+    /// Canonical `(host, owner, repo)` of `remote_url`, used to refuse PR URLs
+    /// that belong to another repository or host.
     async fn repo_identity(
         &self,
         _repo_path: &Path,
         _remote_url: &str,
-    ) -> Result<(String, String), GitHostError> {
+    ) -> Result<(String, String, String), GitHostError> {
         Err(GitHostError::UnsupportedProvider)
     }
 

@@ -587,6 +587,12 @@ struct RestRef {
     sha: String,
     #[serde(rename = "ref", default)]
     ref_name: String,
+    repo: Option<RestRepoName>,
+}
+
+#[derive(Deserialize)]
+struct RestRepoName {
+    full_name: String,
 }
 
 #[derive(Deserialize)]
@@ -932,6 +938,8 @@ impl GhCli {
             head_sha: pr.head.sha,
             head_branch: pr.head.ref_name,
             base_branch: pr.base.ref_name,
+            head_repo: pr.head.repo.map(|repo| repo.full_name),
+            base_repo: pr.base.repo.map(|repo| repo.full_name),
             merged_at: pr.merged_at,
             // GitHub fills this with a test-merge commit for open PRs.
             merge_commit_sha: if pr.merged { pr.merge_commit_sha } else { None },
@@ -1034,7 +1042,8 @@ mod pr_management_parser_tests {
     fn pr_state_reads_rest_fields_and_hides_test_merge_sha() {
         let raw = r#"{"number":1387,"html_url":"https://github.com/o/r/pull/1387","title":"t",
             "state":"open","draft":false,"merged":false,"mergeable":true,"mergeable_state":"blocked",
-            "head":{"sha":"1b1e","ref":"vk/x"},"base":{"sha":"aaaa","ref":"main"},
+            "head":{"sha":"1b1e","ref":"vk/x","repo":{"full_name":"o/r"}},
+            "base":{"sha":"aaaa","ref":"main","repo":{"full_name":"o/r"}},
             "merged_at":null,"merge_commit_sha":"testmerge"}"#;
         let pr = GhCli::parse_pr_state(raw).unwrap();
         assert!(matches!(pr.state, MergeStatus::Open));
@@ -1044,6 +1053,7 @@ mod pr_management_parser_tests {
         assert_eq!(pr.base_branch, "main");
         assert_eq!(pr.mergeable, Some(true));
         assert_eq!(pr.merge_commit_sha, None);
+        assert!(pr.head_in_base_repo());
 
         let merged = r#"{"number":1,"state":"closed","merged":true,"mergeable":null,
             "mergeable_state":"unknown","head":{"sha":"h","ref":"b"},"base":{"ref":"main"},
