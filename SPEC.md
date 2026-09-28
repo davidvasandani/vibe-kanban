@@ -59,8 +59,8 @@ Different owners never share a PAT, and nothing collides in `GH_TOKEN`.
   `OP_SERVICE_ACCOUNT_TOKEN` source and the same errors apply. If a configured
   reference cannot be resolved, the launch fails with a secret-safe error, the
   same as an Env Var reference.
-- Resolved tokens are passed as internal `VK_GITHUB_TOKEN_<OWNER>` variables,
-  plus a `VK_GITHUB_TOKEN_OWNERS` manifest. The `VK_` prefix is reserved, so
+- Resolved tokens are passed as internal `VK_GITHUB_PAT_<OWNER>` variables,
+  plus a `VK_GITHUB_PAT_OWNERS` manifest. The `VK_` prefix is reserved, so
   organization Env Vars cannot spoof them. They reach a cluster worker in the
   same dispatched environment that already carries organization Env Vars. No
   new transport is added.

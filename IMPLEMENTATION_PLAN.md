@@ -20,7 +20,7 @@ Spec: `SPEC.md`. Prior knowledge: `PRIOR_KNOWLEDGE.md`. SpecKit artifacts:
   literal. Reject empty values, NUL, and values over 4 KiB.
 - The envelope encryption reuses `McpGatewaySecretStore` with its own key file,
   `utils::assets::github_owner_tokens_key_path()`. The AAD binding is
-  `github-owner-token|<id>`.
+  `vk-github-owner-token|<id>`.
 - TS types: `GitHubOwnerToken { id, owner, reference?, created_at, updated_at }`,
   `CreateGitHubOwnerTokenRequest { owner, value }`, and
   `UpdateGitHubOwnerTokenRequest { value }`. The list decrypts rows and exposes
@@ -33,8 +33,8 @@ Spec: `SPEC.md`. Prior knowledge: `PRIOR_KNOWLEDGE.md`. SpecKit artifacts:
   references for each owner with `environment_secrets::resolve_environment_secrets`
   on `{OP_SERVICE_ACCOUNT_TOKEN: <org literal if present>, KEY: value}`. The
   org's literal token is used first and the service env is the fallback, the
-  same precedence as org Env Vars. It returns `VK_GITHUB_TOKEN_OWNERS` (owners
-  as entered, comma-joined) plus `VK_GITHUB_TOKEN_<OWNER_KEY>` per owner. With
+  same precedence as org Env Vars. It returns `VK_GITHUB_PAT_OWNERS` (owners
+  as entered, comma-joined) plus `VK_GITHUB_PAT_<OWNER_KEY>` per owner. With
   no rows it returns an empty map. A decrypt failure is an error naming the
   owner.
 
@@ -58,14 +58,14 @@ Spec: `SPEC.md`. Prior knowledge: `PRIOR_KNOWLEDGE.md`. SpecKit artifacts:
   directory.
 - `github_routing_environment(get: impl Fn(&str) -> Option<String>)` returns
   `Option<Vec<(String, String)>>`. It returns `None` unless
-  `VK_GITHUB_TOKEN_OWNERS` is non-empty. Otherwise it returns:
+  `VK_GITHUB_PAT_OWNERS` is non-empty. Otherwise it returns:
   - `PATH` = the shim directory prepended through `merge_paths`;
   - `GIT_CONFIG_COUNT` plus `GIT_CONFIG_KEY_n`/`VALUE_n`, continuing after
     any existing count taken from the env map or the inherited process env. For
     each owner variant (as entered, lowercased, deduped) this is a reset
     followed by an inline helper `!f(){ test "$1" = get || return 0; test -n
-    "$VK_GITHUB_TOKEN_X" || return 0; printf 'username=x-access-token\n
-    password=%s\n' "$VK_GITHUB_TOKEN_X"; }; f`. An invalid existing count means
+    "$VK_GITHUB_PAT_X" || return 0; printf 'username=x-access-token\n
+    password=%s\n' "$VK_GITHUB_PAT_X"; }; f`. An invalid existing count means
     no git routing and a warning; the shim still applies.
 - `apply_github_routing(env: &mut HashMap/BTreeMap)` is a thin wrapper used by
   all four spawn sites, each after its CLI-tools PATH step:
@@ -91,7 +91,7 @@ Spec: `SPEC.md`. Prior knowledge: `PRIOR_KNOWLEDGE.md`. SpecKit artifacts:
   `github.com`. Also accepted: `github.com/OWNER/REPO`, the https URL,
   `ssh://git@github.com/`, and `git@github.com:`. Owner `[A-Za-z0-9-]`,
   compared lowercased.
-- Membership comes from the `VK_GITHUB_TOKEN_OWNERS` list (compared without
+- Membership comes from the `VK_GITHUB_PAT_OWNERS` list (compared without
   case). The token is read with `eval` over a validated key.
 - If configured: an empty token exits 78 with the message
   `gh: configured GitHub token for <owner> is unavailable`. Otherwise

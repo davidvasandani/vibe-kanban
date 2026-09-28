@@ -40,6 +40,7 @@ import {
   SettingsSaveBar,
 } from './SettingsComponents';
 import { useSettingsMachineClient } from './SettingsHostContext';
+import { GitHubOwnerTokensCard } from './GitHubOwnerTokensCard';
 
 interface RepoScriptsFormState {
   display_name: string;
@@ -708,6 +709,8 @@ export function ReposSettingsSection({
           />
         </>
       )}
+
+      <GitHubOwnerTokensCard />
     </>
   );
 }

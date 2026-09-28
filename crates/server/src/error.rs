@@ -97,6 +97,8 @@ pub enum ApiError {
     Pty(#[from] PtyError),
     #[error(transparent)]
     WebRtc(#[from] WebRtcError),
+    #[error(transparent)]
+    GitHubOwnerToken(#[from] services::services::github_owner_tokens::GitHubOwnerTokenError),
 }
 
 impl From<&'static str> for ApiError {
@@ -177,6 +179,7 @@ impl From<ContainerError> for ApiError {
             ContainerError::SharedStore(msg) => ApiError::ClusterProvisioning(msg),
             // This typed error contains only curated, secret-free diagnostics.
             ContainerError::EnvironmentSecret(error) => ApiError::BadRequest(error.to_string()),
+            ContainerError::GitHubOwnerToken(error) => ApiError::GitHubOwnerToken(error),
             other => ApiError::Container(other),
         }
     }
@@ -502,6 +505,8 @@ impl IntoResponse for ApiError {
             }
             ApiError::Pty(_) => ErrorInfo::internal("PtyError"),
 
+            ApiError::GitHubOwnerToken(error) => github_owner_token_error(error),
+
             ApiError::Unauthorized => ErrorInfo::with_status(
                 StatusCode::UNAUTHORIZED,
                 "Unauthorized",
@@ -673,6 +678,25 @@ impl From<RelayPairingClientError> for ApiError {
                 ApiError::BadGateway(err.to_string())
             }
         }
+    }
+}
+
+fn github_owner_token_error(
+    error: &services::services::github_owner_tokens::GitHubOwnerTokenError,
+) -> ErrorInfo {
+    use services::services::github_owner_tokens::GitHubOwnerTokenError as E;
+    const TYPE: &str = "GitHubOwnerTokenError";
+    // Every variant's message is curated and never contains a token value.
+    match error {
+        E::NotFound => ErrorInfo::not_found(TYPE, error.to_string()),
+        E::DuplicateOwner(_) => ErrorInfo::conflict(TYPE, error.to_string()),
+        E::InvalidOwner | E::InvalidValue | E::Undecryptable(_) | E::Resolve { .. } => {
+            ErrorInfo::bad_request(TYPE, error.to_string())
+        }
+        E::KeyUnavailable => {
+            ErrorInfo::with_status(StatusCode::INTERNAL_SERVER_ERROR, TYPE, error.to_string())
+        }
+        E::Database(_) => ErrorInfo::internal(TYPE),
     }
 }
 

@@ -1206,6 +1206,9 @@ async fn run_job(
     if let Some(path) = utils::shell::append_cli_tools_to_path(&inherited_path) {
         environment.insert("PATH".into(), path.to_string_lossy().into_owned());
     }
+    // GitHub owner routing uses this worker's own shim directory; the
+    // coordinator sends only the resolved tokens and owner manifest.
+    utils::github_auth::apply_github_routing(&mut environment);
     if let Some(prepared) = &prepared_mcp {
         environment.extend(prepared.environment.clone());
     }
@@ -2715,6 +2718,49 @@ mod tests {
             .flatten()
             .collect::<Vec<_>>();
         assert!(String::from_utf8_lossy(&output).starts_with("/fixture/bin"));
+    }
+
+    #[tokio::test]
+    async fn dispatched_github_tokens_get_worker_local_routing() {
+        let (_temp, supervisor, workspace) = fixture();
+        let mut request = dispatch(
+            &workspace,
+            "github",
+            "printf '%s|%s|%s' \"$GIT_CONFIG_COUNT\" \"$GIT_CONFIG_KEY_0\" \"${PATH%%:*}\"",
+        );
+        request
+            .environment
+            .insert(utils::github_auth::OWNERS_ENV.into(), "org-a".into());
+        request.environment.insert(
+            utils::github_auth::token_env_name("org-a"),
+            "synthetic-token".into(),
+        );
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        assert_eq!(summary.state, JobState::Completed);
+
+        let batch = supervisor.events(execution_id, 0).await.unwrap();
+        let output = batch
+            .events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                ExecutionEventPayload::Stdout { data_base64 } => {
+                    BASE64_STANDARD.decode(data_base64).ok()
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        let output = String::from_utf8_lossy(&output);
+        let fields: Vec<_> = output.split('|').collect();
+        assert_eq!(fields[0], "2", "{output}");
+        assert_eq!(fields[1], "credential.https://github.com/org-a.helper");
+        assert_eq!(
+            std::path::Path::new(fields[2]),
+            utils::assets::github_auth_bin_dir()
+        );
+        assert!(!output.contains("synthetic-token"));
     }
 
     #[tokio::test]

@@ -152,6 +152,61 @@ rm -rf .cache/ || true
 Cleanup scripts should be idempotent—safe to run even if the resources don't exist. Use `|| true` to prevent failures when there's nothing to clean up.
 </Warning>
 
+## GitHub organisation tokens
+
+A fine-grained personal access token (PAT) is scoped to one GitHub owner. That
+owner can be an organisation or a user. One `GH_TOKEN` cannot cover a workspace
+that contains repositories from several owners. The **GitHub organization
+tokens** card at the bottom of the Repositories tab holds one PAT per owner.
+Every workspace session on that machine then uses the right PAT automatically.
+
+To add a token:
+
+1. Enter the GitHub owner, for example `my-org`. Owners are matched without
+   regard to case, and each owner can have only one token.
+2. Enter the PAT itself, or a 1Password reference such as
+   `op://Vault/GitHub PAT/credential`. If you paste a reference with the quotes
+   1Password adds, the quotes are removed.
+3. Select **Add**.
+
+Values are encrypted at rest on the machine. After you save a PAT, it is never
+shown again. A 1Password reference is a pointer rather than a secret, so it
+stays visible. References are resolved when a process starts, in the same way
+as organisation [environment variables](/settings/organization-settings#environment-variables).
+They need `OP_SERVICE_ACCOUNT_TOKEN` and the 1Password CLI. If a reference
+cannot be resolved, the process does not start, and the error names the owner.
+
+### How a token is chosen
+
+The PATs apply to agents, setup and cleanup scripts, dev servers, and workspace
+terminals, whether they run on the coordinator or on a cluster worker.
+
+For `gh`, the first of these that names a repository decides the owner:
+
+1. `--repo` or `-R`, for example `gh pr view 12 --repo my-org/app`.
+2. A repository named in the command itself: a `gh api repos/OWNER/REPO/…`
+   path, a `https://github.com/OWNER/REPO/…` URL argument, or
+   `gh repo view OWNER/REPO`.
+3. The Git remote of the current directory. Vibe Kanban checks
+   `remote.pushDefault` first, then the branch's push remote, then the branch's
+   remote, then `origin`, and finally the only remote if there is just one.
+
+For Git, HTTPS operations such as `git push` to
+`https://github.com/<owner>/…` use that owner's PAT. The owner spelling in the
+remote URL is compared as you entered it, or in lowercase.
+
+A configured owner's PAT replaces any ambient `GH_TOKEN` or `GITHUB_TOKEN`, but
+only for that `gh` or Git operation. Anything that doesn't match a configured
+owner keeps its existing authentication. That includes other owners, other
+hosts, SSH remotes, and commands run outside a repository.
+
+<Note>
+Changes apply to processes started after you save. A running agent keeps the
+environment it started with, so start a new session to pick up a new or
+rotated token. Operations that Vibe Kanban performs itself are not affected.
+One example is creating a pull request from the UI.
+</Note>
+
 ## Best Practices
 
 <AccordionGroup>

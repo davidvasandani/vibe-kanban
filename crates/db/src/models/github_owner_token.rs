@@ -48,12 +48,14 @@ impl GitHubOwnerTokenRow {
         owner: &str,
         encrypted_value: &str,
     ) -> Result<Self, sqlx::Error> {
-        sqlx::query("INSERT INTO github_owner_tokens (id, owner, encrypted_value) VALUES (?, ?, ?)")
-            .bind(id)
-            .bind(owner)
-            .bind(encrypted_value)
-            .execute(pool)
-            .await?;
+        sqlx::query(
+            "INSERT INTO github_owner_tokens (id, owner, encrypted_value) VALUES (?, ?, ?)",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(encrypted_value)
+        .execute(pool)
+        .await?;
         Self::find_by_id(pool, id)
             .await?
             .ok_or(sqlx::Error::RowNotFound)
