@@ -418,7 +418,10 @@ impl GitHostProvider for GitHubProvider {
     ) -> Result<PrState, GitHostError> {
         let info = self.get_repo_info(remote_url, repo_path).await?;
         let (cli, path) = (self.gh_cli.clone(), repo_path.to_path_buf());
-        blocking("reading the PR", move || cli.get_pr_state(&info, number, &path)).await
+        blocking("reading the PR", move || {
+            cli.get_pr_state(&info, number, &path)
+        })
+        .await
     }
 
     async fn list_pr_checks(
@@ -428,19 +431,20 @@ impl GitHostProvider for GitHubProvider {
         head_sha: &str,
     ) -> Result<PrChecks, GitHostError> {
         let info = self.get_repo_info(remote_url, repo_path).await?;
-        let read = |fetch: fn(&GhCli, &GitHubRepoInfo, &str, &Path) -> Result<CheckPage, GhCliError>| {
-            let (cli, info, sha, path) = (
-                self.gh_cli.clone(),
-                info.clone(),
-                head_sha.to_string(),
-                repo_path.to_path_buf(),
-            );
-            async move {
-                source_read(
-                    blocking("reading checks", move || fetch(&cli, &info, &sha, &path)).await,
-                )
-            }
-        };
+        let read =
+            |fetch: fn(&GhCli, &GitHubRepoInfo, &str, &Path) -> Result<CheckPage, GhCliError>| {
+                let (cli, info, sha, path) = (
+                    self.gh_cli.clone(),
+                    info.clone(),
+                    head_sha.to_string(),
+                    repo_path.to_path_buf(),
+                );
+                async move {
+                    source_read(
+                        blocking("reading checks", move || fetch(&cli, &info, &sha, &path)).await,
+                    )
+                }
+            };
         let check_runs = read(GhCli::list_check_runs).await;
         let statuses = read(GhCli::get_combined_status).await;
         // Actions jobs only matter when check runs are unreadable (they are a
@@ -450,7 +454,12 @@ impl GitHostProvider for GitHubProvider {
         } else {
             read(GhCli::list_actions_jobs).await
         };
-        Ok(aggregate_checks(head_sha, check_runs, statuses, actions_jobs))
+        Ok(aggregate_checks(
+            head_sha,
+            check_runs,
+            statuses,
+            actions_jobs,
+        ))
     }
 
     async fn merge_pr(

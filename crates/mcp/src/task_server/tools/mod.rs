@@ -78,6 +78,7 @@ mod organizations;
 mod pipelines;
 mod pollers;
 mod preview_leases;
+mod pull_requests;
 mod reauth;
 mod remote_issues;
 mod remote_projects;
@@ -116,7 +117,10 @@ fn response_detail(content_type: Option<&str>, bytes: &[u8]) -> String {
 
 /// What an unsuccessful envelope should tell the agent: the route's message,
 /// else its typed `error_data`, and only as a last resort "Unknown error".
-fn envelope_failure_detail(message: Option<&str>, error_data: Option<&serde_json::Value>) -> String {
+fn envelope_failure_detail(
+    message: Option<&str>,
+    error_data: Option<&serde_json::Value>,
+) -> String {
     if let Some(message) = message.filter(|message| !message.trim().is_empty()) {
         return message.to_string();
     }
@@ -136,7 +140,8 @@ fn decode_envelope<T: DeserializeOwned>(
 ) -> Result<ApiResponseEnvelope<T>, ToolError> {
     if !status.is_success() {
         // A JSON error envelope still carries the most precise reason.
-        if let Ok(envelope) = serde_json::from_slice::<ApiResponseEnvelope<serde::de::IgnoredAny>>(bytes)
+        if let Ok(envelope) =
+            serde_json::from_slice::<ApiResponseEnvelope<serde::de::IgnoredAny>>(bytes)
             && (envelope.message.is_some() || envelope.error_data.is_some())
         {
             return Err(ToolError::new(
@@ -197,6 +202,7 @@ impl McpServer {
             + Self::session_tools_router()
             + Self::browser_tools_router()
             + Self::reauth_tools_router()
+            + Self::pull_requests_tools_router()
     }
 
     pub fn orchestrator_mode_router() -> rmcp::handler::server::tool::ToolRouter<Self> {
@@ -207,7 +213,8 @@ impl McpServer {
             + Self::preview_leases_tools_router()
             + Self::session_tools_router()
             + Self::browser_tools_router()
-            + Self::reauth_tools_router();
+            + Self::reauth_tools_router()
+            + Self::pull_requests_tools_router();
         router.remove_route("list_workspaces");
         router.remove_route("delete_workspace");
         router
@@ -694,18 +701,22 @@ pub(crate) mod tests {
             "browser_release_control".to_string(),
             "browser_screenshot".to_string(),
             "browser_type".to_string(),
+            "create_pr".to_string(),
             "create_session".to_string(),
             "create_preview_lease".to_string(),
             "get_context".to_string(),
             "get_execution".to_string(),
+            "get_pr".to_string(),
             "list_background_helpers".to_string(),
             "list_all_messages".to_string(),
             "list_pollers".to_string(),
+            "list_pr_checks".to_string(),
             "list_preview_leases".to_string(),
             "list_recent_messages".to_string(),
             "list_reauth_runs".to_string(),
             "list_reauth_targets".to_string(),
             "list_sessions".to_string(),
+            "merge_pr".to_string(),
             "reauthenticate".to_string(),
             "refresh_mcp_tools".to_string(),
             "restart_session".to_string(),
@@ -716,6 +727,7 @@ pub(crate) mod tests {
             "stop_background_helper".to_string(),
             "stop_poller".to_string(),
             "stop_preview_lease".to_string(),
+            "update_pr".to_string(),
             "update_session".to_string(),
             "update_workspace".to_string(),
         ]);
@@ -729,6 +741,15 @@ pub(crate) mod tests {
 
         assert!(actual.contains("list_workspaces"));
         assert!(actual.contains("delete_workspace"));
+        for tool in [
+            "create_pr",
+            "get_pr",
+            "list_pr_checks",
+            "merge_pr",
+            "update_pr",
+        ] {
+            assert!(actual.contains(tool), "{tool}");
+        }
         assert!(!actual.contains("output_markdown"));
     }
 
@@ -821,7 +842,10 @@ pub(crate) mod tests {
             Some("text/html; charset=UTF-8"),
             "<html>\n  <head><title>502 Bad Gateway</title></head>\n</html>",
         );
-        assert_eq!(error.message, "VK API returned error status: 502 Bad Gateway");
+        assert_eq!(
+            error.message,
+            "VK API returned error status: 502 Bad Gateway"
+        );
         let details = error.details.unwrap();
         assert!(details.contains("content-type: text/html"), "{details}");
         assert!(
@@ -833,7 +857,11 @@ pub(crate) mod tests {
     #[test]
     fn success_status_with_html_body_is_named_non_json() {
         let error = decode_err(200, Some("text/html"), "<html>login</html>");
-        assert!(error.message.contains("expected JSON, got text/html"), "{}", error.message);
+        assert!(
+            error.message.contains("expected JSON, got text/html"),
+            "{}",
+            error.message
+        );
         assert!(error.details.unwrap().contains("<html>login</html>"));
     }
 

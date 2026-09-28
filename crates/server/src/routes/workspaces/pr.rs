@@ -25,8 +25,8 @@ use executors::actions::{
 use git::{GitCliError, GitRemote, GitServiceError};
 use git_host::{
     CreatePrRequest, GitHostError, GitHostProvider, GitHostService, MergeMethod, MergeOutcome,
-    PrChecks, PrReference, PrState, ProviderKind, UnifiedPrComment, UpdatePrFields,
-    github::GhCli, merge_gate, parse_pr_reference, same_repo,
+    PrChecks, PrReference, PrState, ProviderKind, UnifiedPrComment, UpdatePrFields, github::GhCli,
+    merge_gate, parse_pr_reference, same_repo,
 };
 use serde::{Deserialize, Serialize};
 use services::services::{
@@ -265,21 +265,15 @@ pub async fn create_pr(
 
     match git.check_remote_branch_exists(&repo_path, &target_remote.url, &base_branch) {
         Ok(false) => {
-            return Ok(ResponseJson(pr_error(
-                PrError::TargetBranchNotFound {
-                    branch: target_branch.clone(),
-                },
-            )));
+            return Ok(ResponseJson(pr_error(PrError::TargetBranchNotFound {
+                branch: target_branch.clone(),
+            })));
         }
         Err(GitServiceError::GitCLI(GitCliError::AuthFailed(_))) => {
-            return Ok(ResponseJson(pr_error(
-                PrError::GitCliNotLoggedIn,
-            )));
+            return Ok(ResponseJson(pr_error(PrError::GitCliNotLoggedIn)));
         }
         Err(GitServiceError::GitCLI(GitCliError::NotAvailable)) => {
-            return Ok(ResponseJson(pr_error(
-                PrError::GitCliNotInstalled,
-            )));
+            return Ok(ResponseJson(pr_error(PrError::GitCliNotInstalled)));
         }
         Err(e) => return Err(ApiError::GitService(e)),
         Ok(true) => {}
@@ -289,14 +283,10 @@ pub async fn create_pr(
         tracing::error!("Failed to push branch to remote: {}", e);
         match e {
             GitServiceError::GitCLI(GitCliError::AuthFailed(_)) => {
-                return Ok(ResponseJson(pr_error(
-                    PrError::GitCliNotLoggedIn,
-                )));
+                return Ok(ResponseJson(pr_error(PrError::GitCliNotLoggedIn)));
             }
             GitServiceError::GitCLI(GitCliError::NotAvailable) => {
-                return Ok(ResponseJson(pr_error(
-                    PrError::GitCliNotInstalled,
-                )));
+                return Ok(ResponseJson(pr_error(PrError::GitCliNotInstalled)));
             }
             _ => return Err(ApiError::GitService(e)),
         }
@@ -305,14 +295,12 @@ pub async fn create_pr(
     let git_host = match GitHostService::from_url(&target_remote.url) {
         Ok(host) => host,
         Err(GitHostError::UnsupportedProvider) => {
-            return Ok(ResponseJson(pr_error(
-                PrError::UnsupportedProvider,
-            )));
+            return Ok(ResponseJson(pr_error(PrError::UnsupportedProvider)));
         }
         Err(GitHostError::CliNotInstalled { provider }) => {
-            return Ok(ResponseJson(pr_error(
-                PrError::CliNotInstalled { provider },
-            )));
+            return Ok(ResponseJson(pr_error(PrError::CliNotInstalled {
+                provider,
+            })));
         }
         Err(e) => return Err(ApiError::GitHost(e)),
     };
@@ -405,14 +393,14 @@ pub async fn create_pr(
                 e
             );
             match &e {
-                GitHostError::CliNotInstalled { provider } => Ok(ResponseJson(
-                    pr_error(PrError::CliNotInstalled {
+                GitHostError::CliNotInstalled { provider } => {
+                    Ok(ResponseJson(pr_error(PrError::CliNotInstalled {
                         provider: *provider,
-                    }),
-                )),
-                GitHostError::AuthFailed(_) => Ok(ResponseJson(pr_error(
-                    PrError::CliNotLoggedIn { provider },
-                ))),
+                    })))
+                }
+                GitHostError::AuthFailed(_) => {
+                    Ok(ResponseJson(pr_error(PrError::CliNotLoggedIn { provider })))
+                }
                 // Provider refusals ("a pull request for branch … already
                 // exists", validation errors) are the caller's to act on; an
                 // opaque internal error would send an agent to `gh` instead.
@@ -462,14 +450,12 @@ pub async fn attach_existing_pr(
     let git_host = match GitHostService::from_url(&remote.url) {
         Ok(host) => host,
         Err(GitHostError::UnsupportedProvider) => {
-            return Ok(ResponseJson(pr_error(
-                PrError::UnsupportedProvider,
-            )));
+            return Ok(ResponseJson(pr_error(PrError::UnsupportedProvider)));
         }
         Err(GitHostError::CliNotInstalled { provider }) => {
-            return Ok(ResponseJson(pr_error(
-                PrError::CliNotInstalled { provider },
-            )));
+            return Ok(ResponseJson(pr_error(PrError::CliNotInstalled {
+                provider,
+            })));
         }
         Err(e) => return Err(ApiError::GitHost(e)),
     };
@@ -483,14 +469,12 @@ pub async fn attach_existing_pr(
     {
         Ok(prs) => prs,
         Err(GitHostError::CliNotInstalled { provider }) => {
-            return Ok(ResponseJson(pr_error(
-                PrError::CliNotInstalled { provider },
-            )));
+            return Ok(ResponseJson(pr_error(PrError::CliNotInstalled {
+                provider,
+            })));
         }
         Err(GitHostError::AuthFailed(_)) => {
-            return Ok(ResponseJson(pr_error(
-                PrError::CliNotLoggedIn { provider },
-            )));
+            return Ok(ResponseJson(pr_error(PrError::CliNotLoggedIn { provider })));
         }
         Err(e) => return Err(ApiError::GitHost(e)),
     };
@@ -904,15 +888,31 @@ pub async fn create_workspace_from_pr(
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PrToolError {
-    NoPrForWorkspace { branch: String },
-    PrNotInWorkspaceRepo { pr_repo: String, workspace_repo: String },
-    InvalidPrReference { detail: String },
+    NoPrForWorkspace {
+        branch: String,
+    },
+    PrNotInWorkspaceRepo {
+        pr_repo: String,
+        workspace_repo: String,
+    },
+    InvalidPrReference {
+        detail: String,
+    },
     UnsupportedProvider,
-    CliNotInstalled { provider: ProviderKind },
-    CliNotLoggedIn { provider: ProviderKind },
-    MergeRefused { reason: String, retryable: bool },
+    CliNotInstalled {
+        provider: ProviderKind,
+    },
+    CliNotLoggedIn {
+        provider: ProviderKind,
+    },
+    MergeRefused {
+        reason: String,
+        retryable: bool,
+    },
     NothingToUpdate,
-    GithubError { detail: String },
+    GithubError {
+        detail: String,
+    },
 }
 
 impl PrToolError {
@@ -967,11 +967,9 @@ impl PrToolError {
 
 type PrToolResponse<T> = Result<ResponseJson<ApiResponse<T, PrToolError>>, ApiError>;
 
-fn pr_tool_error<T>(error: PrToolError) -> PrToolResponse<T> {
+fn pr_tool_error<T>(error: PrToolError) -> ResponseJson<ApiResponse<T, PrToolError>> {
     let message = error.message();
-    Ok(ResponseJson(ApiResponse::error_with_data_and_message(
-        error, &message,
-    )))
+    ResponseJson(ApiResponse::error_with_data_and_message(error, &message))
 }
 
 /// Unwrap a `Result<_, PrToolError>` inside a `PrToolResponse` handler.
@@ -979,7 +977,7 @@ macro_rules! tool_try {
     ($expr:expr) => {
         match $expr {
             Ok(value) => value,
-            Err(error) => return pr_tool_error(error),
+            Err(error) => return Ok(pr_tool_error(error)),
         }
     };
 }
@@ -1146,11 +1144,15 @@ pub async fn get_pr_status(
     State(deployment): State<DeploymentImpl>,
     Query(query): Query<PrTargetQuery>,
 ) -> PrToolResponse<PrStatusResponse> {
-    let target =
-        tool_try!(resolve_pr_target(&deployment, &workspace, query.repo_id, query.pr.as_deref()).await?);
+    let target = tool_try!(
+        resolve_pr_target(&deployment, &workspace, query.repo_id, query.pr.as_deref()).await?
+    );
     let pr = tool_try!(target.state().await);
     let checks = tool_try!(target.checks(&pr.head_sha).await);
-    Ok(ResponseJson(ApiResponse::success(PrStatusResponse { pr, checks })))
+    Ok(ResponseJson(ApiResponse::success(PrStatusResponse {
+        pr,
+        checks,
+    })))
 }
 
 pub async fn get_pr_checks(
@@ -1158,8 +1160,9 @@ pub async fn get_pr_checks(
     State(deployment): State<DeploymentImpl>,
     Query(query): Query<PrTargetQuery>,
 ) -> PrToolResponse<PrChecks> {
-    let target =
-        tool_try!(resolve_pr_target(&deployment, &workspace, query.repo_id, query.pr.as_deref()).await?);
+    let target = tool_try!(
+        resolve_pr_target(&deployment, &workspace, query.repo_id, query.pr.as_deref()).await?
+    );
     let pr = tool_try!(target.state().await);
     let checks = tool_try!(target.checks(&pr.head_sha).await);
     Ok(ResponseJson(ApiResponse::success(checks)))
@@ -1171,15 +1174,21 @@ pub async fn merge_pr(
     Json(request): Json<MergePrApiRequest>,
 ) -> PrToolResponse<MergeOutcome> {
     let target = tool_try!(
-        resolve_pr_target(&deployment, &workspace, request.repo_id, request.pr.as_deref()).await?
+        resolve_pr_target(
+            &deployment,
+            &workspace,
+            request.repo_id,
+            request.pr.as_deref()
+        )
+        .await?
     );
     let pr = tool_try!(target.state().await);
     let checks = tool_try!(target.checks(&pr.head_sha).await);
     if let Err(refusal) = merge_gate(&pr, &checks, request.force) {
-        return pr_tool_error(PrToolError::MergeRefused {
+        return Ok(pr_tool_error(PrToolError::MergeRefused {
             reason: refusal.reason,
             retryable: refusal.retryable,
-        });
+        }));
     }
     let outcome = tool_try!(
         target
@@ -1206,7 +1215,10 @@ pub async fn merge_pr(
         )
         .await
         {
-            tracing::warn!("Merged PR {} but failed to record it locally: {error}", pr.url);
+            tracing::warn!(
+                "Merged PR {} but failed to record it locally: {error}",
+                pr.url
+            );
         }
     }
     Ok(ResponseJson(ApiResponse::success(outcome)))
@@ -1223,20 +1235,42 @@ pub async fn update_pr(
         ready_for_review: request.ready_for_review,
     };
     if fields.is_empty() {
-        return pr_tool_error(PrToolError::NothingToUpdate);
+        return Ok(pr_tool_error(PrToolError::NothingToUpdate));
     }
     let target = tool_try!(
-        resolve_pr_target(&deployment, &workspace, request.repo_id, request.pr.as_deref()).await?
+        resolve_pr_target(
+            &deployment,
+            &workspace,
+            request.repo_id,
+            request.pr.as_deref()
+        )
+        .await?
     );
     tool_try!(
         target
             .git_host
-            .update_pr(&target.repo_path, &target.remote_url, target.number, &fields)
+            .update_pr(
+                &target.repo_path,
+                &target.remote_url,
+                target.number,
+                &fields
+            )
             .await
             .map_err(|error| PrToolError::from_git_host(error, target.provider))
     );
     let pr = tool_try!(target.state().await);
     Ok(ResponseJson(ApiResponse::success(pr)))
+}
+
+pub fn router() -> Router<DeploymentImpl> {
+    Router::new()
+        .route("/", post(create_pr))
+        .route("/attach", post(attach_existing_pr))
+        .route("/comments", get(get_pr_comments))
+        .route("/status", get(get_pr_status))
+        .route("/checks", get(get_pr_checks))
+        .route("/merge", post(merge_pr))
+        .route("/update", post(update_pr))
 }
 
 #[cfg(test)]
@@ -1274,7 +1308,7 @@ mod pr_tool_error_tests {
             },
         ];
         for error in errors {
-            let response = pr_tool_error::<()>(error).unwrap().0;
+            let response = pr_tool_error::<()>(error).0;
             let json = serde_json::to_value(&response).unwrap();
             assert_eq!(json["success"], false);
             let message = json["message"].as_str().unwrap();
@@ -1303,15 +1337,4 @@ mod pr_tool_error_tests {
         assert!(!request.delete_branch);
         assert!(!request.force);
     }
-}
-
-pub fn router() -> Router<DeploymentImpl> {
-    Router::new()
-        .route("/", post(create_pr))
-        .route("/attach", post(attach_existing_pr))
-        .route("/comments", get(get_pr_comments))
-        .route("/status", get(get_pr_status))
-        .route("/checks", get(get_pr_checks))
-        .route("/merge", post(merge_pr))
-        .route("/update", post(update_pr))
 }

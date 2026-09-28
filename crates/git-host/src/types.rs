@@ -478,7 +478,10 @@ pub fn merge_gate(pr: &PrState, checks: &PrChecks, force: bool) -> Result<(), Me
     match checks.overall {
         ChecksOverall::Failing => {
             return refuse(
-                format!("checks are failing: {}", check_names(checks, PrCheck::is_failed)),
+                format!(
+                    "checks are failing: {}",
+                    check_names(checks, PrCheck::is_failed)
+                ),
                 false,
             );
         }
@@ -625,7 +628,9 @@ mod pr_management_tests {
         // The workspace PAT's real shape: no Checks or Commit statuses read.
         let result = aggregate_checks(
             "abc",
-            SourceRead::Forbidden("HTTP 403: Resource not accessible by personal access token".into()),
+            SourceRead::Forbidden(
+                "HTTP 403: Resource not accessible by personal access token".into(),
+            ),
             SourceRead::Forbidden("HTTP 403".into()),
             ok(vec![check(
                 "ci / test",
@@ -646,21 +651,33 @@ mod pr_management_tests {
     fn readable_check_runs_are_not_double_counted_with_actions_jobs() {
         let result = aggregate_checks(
             "abc",
-            ok(vec![check("test", CheckSource::CheckRuns, "completed", Some("success"))]),
+            ok(vec![check(
+                "test",
+                CheckSource::CheckRuns,
+                "completed",
+                Some("success"),
+            )]),
             ok(vec![check(
                 "ci/legacy",
                 CheckSource::CommitStatuses,
                 "success",
                 Some("success"),
             )]),
-            ok(vec![check("test", CheckSource::ActionsJobs, "completed", Some("success"))]),
+            ok(vec![check(
+                "test",
+                CheckSource::ActionsJobs,
+                "completed",
+                Some("success"),
+            )]),
         );
         assert!(result.complete);
         assert_eq!(result.checks.len(), 2);
-        assert!(result
-            .checks
-            .iter()
-            .all(|check| check.source != CheckSource::ActionsJobs));
+        assert!(
+            result
+                .checks
+                .iter()
+                .all(|check| check.source != CheckSource::ActionsJobs)
+        );
     }
 
     #[test]
@@ -668,17 +685,24 @@ mod pr_management_tests {
         let result = aggregate_checks(
             "abc",
             SourceRead::Ok {
-                checks: vec![check("a", CheckSource::CheckRuns, "completed", Some("success"))],
+                checks: vec![check(
+                    "a",
+                    CheckSource::CheckRuns,
+                    "completed",
+                    Some("success"),
+                )],
                 truncated: true,
             },
             ok(vec![]),
             ok(vec![]),
         );
         assert!(!result.complete);
-        assert!(result.sources[0]
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.starts_with("truncated")));
+        assert!(
+            result.sources[0]
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.starts_with("truncated"))
+        );
     }
 
     #[test]
@@ -706,14 +730,24 @@ mod pr_management_tests {
         let status_error = aggregate_checks(
             "abc",
             ok(vec![]),
-            ok(vec![check("ci", CheckSource::CommitStatuses, "error", Some("error"))]),
+            ok(vec![check(
+                "ci",
+                CheckSource::CommitStatuses,
+                "error",
+                Some("error"),
+            )]),
             ok(vec![]),
         );
         assert_eq!(status_error.overall, ChecksOverall::Failing);
         let status_pending = aggregate_checks(
             "abc",
             ok(vec![]),
-            ok(vec![check("ci", CheckSource::CommitStatuses, "pending", None)]),
+            ok(vec![check(
+                "ci",
+                CheckSource::CommitStatuses,
+                "pending",
+                None,
+            )]),
             ok(vec![]),
         );
         assert_eq!(status_pending.overall, ChecksOverall::Pending);
@@ -721,20 +755,38 @@ mod pr_management_tests {
 
     #[test]
     fn gate_allows_clean_passing_and_clean_without_ci() {
-        let passing = checks_with(vec![check("a", CheckSource::CheckRuns, "completed", Some("success"))]);
+        let passing = checks_with(vec![check(
+            "a",
+            CheckSource::CheckRuns,
+            "completed",
+            Some("success"),
+        )]);
         assert_eq!(merge_gate(&pr("clean"), &passing, false), Ok(()));
         assert_eq!(merge_gate(&pr("has_hooks"), &passing, false), Ok(()));
-        assert_eq!(merge_gate(&pr("clean"), &checks_with(vec![]), false), Ok(()));
+        assert_eq!(
+            merge_gate(&pr("clean"), &checks_with(vec![]), false),
+            Ok(())
+        );
     }
 
     #[test]
     fn gate_refuses_failing_and_pending_naming_the_checks() {
-        let failing = checks_with(vec![check("lint", CheckSource::CheckRuns, "completed", Some("failure"))]);
+        let failing = checks_with(vec![check(
+            "lint",
+            CheckSource::CheckRuns,
+            "completed",
+            Some("failure"),
+        )]);
         let refusal = merge_gate(&pr("unstable"), &failing, false).unwrap_err();
         assert!(refusal.reason.contains("lint"), "{refusal:?}");
         assert!(!refusal.retryable);
 
-        let pending = checks_with(vec![check("test", CheckSource::CheckRuns, "in_progress", None)]);
+        let pending = checks_with(vec![check(
+            "test",
+            CheckSource::CheckRuns,
+            "in_progress",
+            None,
+        )]);
         let refusal = merge_gate(&pr("blocked"), &pending, false).unwrap_err();
         assert!(refusal.reason.contains("test"), "{refusal:?}");
         assert!(refusal.retryable);
@@ -748,7 +800,12 @@ mod pr_management_tests {
             "abc",
             SourceRead::Forbidden("403".into()),
             SourceRead::Forbidden("403".into()),
-            ok(vec![check("ci", CheckSource::ActionsJobs, "completed", Some("success"))]),
+            ok(vec![check(
+                "ci",
+                CheckSource::ActionsJobs,
+                "completed",
+                Some("success"),
+            )]),
         );
         let refusal = merge_gate(&pr("blocked"), &partial, false).unwrap_err();
         assert!(refusal.reason.contains("blocked"), "{refusal:?}");
@@ -758,7 +815,12 @@ mod pr_management_tests {
 
     #[test]
     fn force_skips_vk_gate_but_never_draft_conflict_or_closed() {
-        let failing = checks_with(vec![check("lint", CheckSource::CheckRuns, "completed", Some("failure"))]);
+        let failing = checks_with(vec![check(
+            "lint",
+            CheckSource::CheckRuns,
+            "completed",
+            Some("failure"),
+        )]);
         assert_eq!(merge_gate(&pr("blocked"), &failing, true), Ok(()));
 
         let mut draft = pr("clean");
@@ -776,7 +838,10 @@ mod pr_management_tests {
     #[test]
     fn pr_references_parse_numbers_and_urls() {
         assert_eq!(parse_pr_reference("42").unwrap(), PrReference::Number(42));
-        assert_eq!(parse_pr_reference(" #42 ").unwrap(), PrReference::Number(42));
+        assert_eq!(
+            parse_pr_reference(" #42 ").unwrap(),
+            PrReference::Number(42)
+        );
         assert_eq!(
             parse_pr_reference("https://github.com/davidvasandani/homelab/pull/1267/checks")
                 .unwrap(),
@@ -802,8 +867,23 @@ mod pr_management_tests {
 
     #[test]
     fn same_repo_is_case_insensitive_and_ignores_git_suffix() {
-        assert!(same_repo("DavidVasandani", "Homelab", "davidvasandani", "homelab.git"));
-        assert!(!same_repo("davidvasandani", "homelab", "someone", "homelab"));
-        assert!(!same_repo("davidvasandani", "homelab", "davidvasandani", "vibe-kanban"));
+        assert!(same_repo(
+            "DavidVasandani",
+            "Homelab",
+            "davidvasandani",
+            "homelab.git"
+        ));
+        assert!(!same_repo(
+            "davidvasandani",
+            "homelab",
+            "someone",
+            "homelab"
+        ));
+        assert!(!same_repo(
+            "davidvasandani",
+            "homelab",
+            "davidvasandani",
+            "vibe-kanban"
+        ));
     }
 }

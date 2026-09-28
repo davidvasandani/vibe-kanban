@@ -6,6 +6,20 @@ use rmcp::{
 
 use super::{McpMode, McpServer};
 
+/// What an agent does before abandoning a Vibe Kanban tool for an
+/// out-of-band fallback (homelab principle 130). Both `refresh_mcp_tools` and
+/// `restart_workspace` are registered in every mode, so each rung is callable.
+pub(crate) const RECOVERY_LADDER: &str = "If a Vibe Kanban tool call fails, or the harness says \
+     a Vibe Kanban MCP server failed to connect, climb this ladder before using any fallback: \
+     (1) retry the call; (2) call 'refresh_mcp_tools' (an 'unsupported' result, as for Claude \
+     Code, counts as done); (3) call 'restart_workspace', which keeps the worktree, Git state, \
+     sessions and conversations; (4) only then fall back (for example `gh` instead of \
+     'create_pr'/'get_pr'/'merge_pr'), and say so in your final report, naming the rung you \
+     reached. A connection notice about a differently named entry (such as 'vibe-kanban' from a \
+     repository .mcp.json) is not evidence that this server is down: a real tool call is the \
+     test. Open, poll and merge pull requests with 'create_pr', 'get_pr'/'list_pr_checks' and \
+     'merge_pr' rather than `gh`.";
+
 // rmcp 1.8 defaults the router expression to `Self::tool_router()`; ours is a
 // per-instance field selected by mode (global vs orchestrator).
 #[tool_handler(router = self.tool_router)]
@@ -52,7 +66,7 @@ impl ServerHandler for McpServer {
              route, so it only resolves in the Vibe Kanban UI: do not put one anywhere the text \
              leaves the app, including pull request bodies, commit messages, Slack, email, or \
              fields mirrored to a linked external tracker (issue titles and descriptions sync \
-             outbound to Jira). Name the issue key there instead. TOOLS: {}.",
+             outbound to Jira). Name the issue key there instead. {RECOVERY_LADDER} TOOLS: {}.",
             tool_names.join(", ")
         );
         if self.context.is_some() {
@@ -111,6 +125,43 @@ mod tests {
             assert!(!text.contains("/projects/"), "{text}");
             assert!(!text.contains("/issues/"), "{text}");
             assert!(text.contains("Never assemble an issue URL"), "{text}");
+        }
+    }
+
+    #[test]
+    fn recovery_ladder_is_given_in_order_in_every_mode() {
+        crate::task_server::tools::tests::install_rustls_provider();
+        for server in [
+            McpServer::new_global("http://coordinator:3000"),
+            McpServer::new_orchestrator("http://coordinator:3000"),
+        ] {
+            let text = instructions(&server);
+            let rungs = [
+                "(1) retry the call",
+                "(2) call 'refresh_mcp_tools'",
+                "(3) call 'restart_workspace'",
+                "(4) only then fall back",
+            ];
+            let positions: Vec<usize> = rungs
+                .iter()
+                .map(|rung| text.find(rung).unwrap_or_else(|| panic!("{rung}: {text}")))
+                .collect();
+            assert!(positions.windows(2).all(|w| w[0] < w[1]), "{text}");
+            assert!(text.contains("keeps the worktree, Git state"), "{text}");
+            assert!(text.contains("naming the rung you reached"), "{text}");
+            assert!(
+                text.contains("not evidence that this server is down"),
+                "{text}"
+            );
+            // Every tool the ladder names is actually registered in this mode.
+            for tool in [
+                "'refresh_mcp_tools'",
+                "'restart_workspace'",
+                "'create_pr'",
+                "'merge_pr'",
+            ] {
+                assert!(text.matches(tool).count() >= 2, "{tool} not listed: {text}");
+            }
         }
     }
 

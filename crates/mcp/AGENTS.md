@@ -152,6 +152,80 @@ registered tool names in `system/init.tools`; VK captures that executor-owned
 inventory so configured-but-absent servers end in `not_registered` instead of
 “still connecting” indefinitely.
 
+### The recovery ladder (in the server instructions)
+
+`RECOVERY_LADDER` (`src/task_server/handler.rs`) is appended to the
+instructions in every mode. Before an agent abandons a VK tool for an
+out-of-band fallback, it must:
+
+1. retry the call;
+2. call `refresh_mcp_tools` (an `unsupported` result counts as done);
+3. call `restart_workspace`;
+4. only then fall back, and say so in the final report, naming the rung
+   reached.
+
+It also says that a harness "failed to connect" notice for a *differently
+named* entry is not evidence that this server is down. That is exactly how
+`vk/91d8` ended up on `gh`. Keep the rungs pointing at tools that both
+routers register. `recovery_ladder_is_given_in_order_in_every_mode` pins
+this.
+
+### Shadowed project `.mcp.json` entries
+
+A repository `.mcp.json` can define its own entry for a URL VK already
+provides through a deployment runtime route (`VIBE_MCP_RUNTIME_ROUTES`,
+public URL → loopback Caddy that adds the Cloudflare Access token).
+homelab's `vibe-kanban → https://vibe.vasandani.dev/mcp` is one. In a
+sandbox its `${VIBE_KANBAN_*}` header variables are unset, so Cloudflare
+answers `302 text/html`. Claude Code then reports
+`CLIENT_HTTP_UNEXPECTED_CONTENT`, while the managed `vibe_kanban` entry
+works fine. If the project entry uses the *same* name, it replaces the
+managed entry and the session gets zero VK tools.
+
+`ClaudeCode::spawn_internal` therefore appends
+`--settings {"disabledMcpjsonServers":[…]}` for the project entries whose
+`url`/`httpUrl` is either side of a runtime route
+(`crates/executors/src/mcp_config.rs::shadowed_project_mcp_servers`). A
+profile that already passes `--settings` is left alone, with a warning. The
+repository file itself is never edited.
+
+## Pull request tools
+
+`create_pr`, `get_pr`, `list_pr_checks`, `merge_pr` and `update_pr`
+(`src/task_server/tools/pull_requests.rs`) are registered in both modes.
+They are workspace-scoped and pass `scope_allows_workspace`. `repo_id`
+defaults to the workspace's only repo. `create_pr` reuses the Create PR
+route. The others call `/api/workspaces/{id}/pull-requests/{status,checks,merge,update}`
+(`crates/server/src/routes/workspaces/pr.rs`), backed by the default-unsupported
+`GitHostProvider` PR methods, which only GitHub implements
+(`crates/git-host`). Things to know before changing them:
+
+- **Check coverage is explicit.** Check runs, commit statuses and Actions
+  jobs are read independently. Actions jobs stand in *only* when check runs
+  are unreadable. `complete` is true only when check runs and statuses were
+  both read in full, and a source that reports more entries than were
+  fetched is marked `truncated`. Fine-grained PATs commonly get 403 on check
+  runs and statuses but can read Actions. Never request GraphQL
+  `statusCheckRollup`: without the Checks permission the whole query fails.
+- **The merge gate needs two witnesses.** `merge_gate` wants VK's own
+  reading of the checks to be passing or none, *and* GitHub's
+  `mergeable_state` to be `clean` or `has_hooks`. That way a partially
+  readable check list is never enough by itself. `force` skips only this
+  gate. Drafts, conflicts (`dirty`) and non-open PRs are always refused.
+- **The merge is SHA-guarded.** `PUT pulls/{n}/merge` sends the evaluated
+  `head_sha`, so a push that lands in between gets a 409 rather than an
+  unchecked merge. Branch deletion is a remote `DELETE git/refs/heads/…`.
+  Never use `gh pr merge --delete-branch`, which switches branches in the
+  cwd.
+- **Credentials.** Every `gh` call runs with `cwd = repo.path`, so an
+  owner-routed `gh` wrapper picks the org token (`gh api` takes no
+  `--repo`). A `pr` URL for another owner/repo is refused.
+- **Errors reach the agent.** Every route error uses
+  `error_with_data_and_message`. The MCP envelope decoder
+  (`decode_envelope`) also reports status, content type and a ≤ 500-char
+  body excerpt for non-2xx or non-JSON responses, and uses `error_data` when
+  a route sent no message.
+
 ## Backend resolution (important)
 
 `resolve_base_url` (`src/bin/vibe_kanban_mcp.rs:100-134`) decides which backend the

@@ -977,7 +977,10 @@ impl GhCli {
 
     fn parse_run_jobs(run: &RestWorkflowRun, raw: &str) -> Result<CheckPage, GhCliError> {
         let page: RestJobs = parse_json(raw, "workflow jobs")?;
-        let run_name = run.name.clone().unwrap_or_else(|| format!("run {}", run.id));
+        let run_name = run
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("run {}", run.id));
         if page.jobs.is_empty() {
             // Jobs are not materialised yet: the run itself stands in, so a
             // queued workflow still reads as pending rather than absent.
@@ -1125,7 +1128,14 @@ mod pr_management_parser_tests {
             .collect();
         assert_eq!(
             args,
-            ["api", "--method", "PUT", "repos/o/r/pulls/3/merge", "--hostname", "ghe.example"]
+            [
+                "api",
+                "--method",
+                "PUT",
+                "repos/o/r/pulls/3/merge",
+                "--hostname",
+                "ghe.example"
+            ]
         );
     }
 }
