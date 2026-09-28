@@ -261,9 +261,9 @@ fn worker_event_is_output(payload: &ExecutionEventPayload) -> bool {
     )
 }
 
-/// Grace after handing worker executions off at shutdown, so the raw-log
-/// writer can flush lines the tracker already pushed and acknowledged.
-const WORKER_HANDOFF_FLUSH_GRACE: Duration = Duration::from_millis(250);
+/// Upper bound on waiting, at shutdown, for handed-off executions' raw-log
+/// writers to flush what their trackers already pushed.
+const WORKER_HANDOFF_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn replay_gap_terminal_evidence(
     known: &ExecutionWorkerJob,
@@ -1232,6 +1232,8 @@ pub struct LocalContainerService {
     /// lines already pushed reach the raw log during the flush grace, and
     /// re-attachment must not replay them.
     worker_pushed_sequences: Arc<RwLock<HashMap<Uuid, Arc<std::sync::atomic::AtomicU64>>>>,
+    /// Raw-log writer tasks of worker-tracked executions, awaited at handoff.
+    worker_log_writers: Arc<RwLock<HashMap<Uuid, JoinHandle<()>>>>,
     /// Warm app-servers kept alive between turns, keyed by **session id** (one
     /// active agent session per attempt). This registry is the single owner of a
     /// warm process's lifetime — it reaps at teardown/stop/idle/death, closing
@@ -1530,6 +1532,7 @@ impl LocalContainerService {
         let raw_log_tailers = Arc::new(RwLock::new(HashMap::new()));
         let adopted_pgids = Arc::new(RwLock::new(HashMap::new()));
         let worker_pushed_sequences = Arc::new(RwLock::new(HashMap::new()));
+        let worker_log_writers = Arc::new(RwLock::new(HashMap::new()));
         let warm_app_servers = Arc::new(RwLock::new(HashMap::new()));
         let mcp_refresh_controls = Arc::new(RwLock::new(HashMap::new()));
         let workspace_touch_times = Arc::new(RwLock::new(HashMap::new()));
@@ -1550,6 +1553,7 @@ impl LocalContainerService {
             raw_log_tailers,
             adopted_pgids,
             worker_pushed_sequences,
+            worker_log_writers,
             warm_app_servers,
             mcp_refresh_controls,
             mcp_refresh_coordinator: McpRefreshCoordinator::default(),
@@ -1874,6 +1878,7 @@ impl LocalContainerService {
     /// requiring a reader to ask for it before the store is gone.
     async fn finish_msg_store(&self, id: &Uuid) {
         self.worker_pushed_sequences.write().await.remove(id);
+        self.worker_log_writers.write().await.remove(id);
         let Some(store) = self.msg_stores.write().await.remove(id) else {
             return;
         };
@@ -3001,12 +3006,16 @@ impl LocalContainerService {
         // replays. Counting from what was loaded (the store evicts past its
         // size bound) or after later pushes would make it skip new output.
         if !services::services::execution_process::writes_own_raw_log(process) {
-            services::services::execution_process::spawn_resumed_raw_log_writer(
+            let writer = services::services::execution_process::spawn_resumed_raw_log_writer(
                 &store,
                 self.db.clone(),
                 process.id,
                 process.session_id,
             );
+            self.worker_log_writers
+                .write()
+                .await
+                .insert(process.id, writer);
         }
         self.msg_stores.write().await.insert(process.id, store);
 
@@ -5697,6 +5706,23 @@ impl ContainerService for LocalContainerService {
         .map_err(|e| ContainerError::Other(anyhow!("Copy files task failed: {e}")))?
     }
 
+    async fn register_raw_log_writer(&self, execution_id: Uuid, writer: JoinHandle<()>) {
+        // Keep only writers of worker-tracked executions (their tracker has
+        // already registered a pushed sequence); a local writer is detached,
+        // as before.
+        if self
+            .worker_pushed_sequences
+            .read()
+            .await
+            .contains_key(&execution_id)
+        {
+            self.worker_log_writers
+                .write()
+                .await
+                .insert(execution_id, writer);
+        }
+    }
+
     async fn reattach_worker_executions(&self) {
         if self.worker_client.is_none() {
             return;
@@ -5791,7 +5817,7 @@ impl ContainerService for LocalContainerService {
             running_processes.len()
         );
 
-        let mut handed_off = 0_usize;
+        let mut handed_off = Vec::new();
         for process in running_processes {
             // A worker-owned execution keeps running on its worker across this
             // restart. Cancelling it here would undo the whole point of
@@ -5803,34 +5829,20 @@ impl ContainerService for LocalContainerService {
                     if let Some(handle) = self.take_exit_monitor_handle(&process.id).await {
                         handle.abort();
                     }
-                    // The acknowledged cursor lags pushes by up to one batch.
-                    // Those pushed lines reach the raw log during the flush
-                    // grace below, so re-attachment must resume after them or
-                    // it would write them twice. The update is monotonic: it
-                    // never moves the cursor backwards.
+                    // End the store so its raw-log writer drains everything
+                    // already pushed and exits; only then is the pushed cursor
+                    // an honest statement of what is on disk (below).
+                    if let Some(store) = self.msg_stores.write().await.remove(&process.id) {
+                        store.push_finished();
+                    }
                     let pushed = self
                         .worker_pushed_sequences
                         .write()
                         .await
-                        .remove(&process.id);
-                    if let Some(pushed) = pushed {
-                        let pushed = pushed.load(std::sync::atomic::Ordering::Acquire) as i64;
-                        if let Err(error) = ExecutionWorkerJob::acknowledge_sequence(
-                            &self.db.pool,
-                            process.id,
-                            pushed,
-                            pushed,
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                execution_id = %process.id,
-                                %error,
-                                "Failed to persist pushed worker cursor at handoff; output may repeat after restart"
-                            );
-                        }
-                    }
-                    handed_off += 1;
+                        .remove(&process.id)
+                        .map(|pushed| pushed.load(std::sync::atomic::Ordering::Acquire) as i64);
+                    let writer = self.worker_log_writers.write().await.remove(&process.id);
+                    handed_off.push((process.id, pushed, writer));
                     tracing::info!(
                         execution_id = %process.id,
                         run_reason = ?process.run_reason,
@@ -5900,12 +5912,47 @@ impl ContainerService for LocalContainerService {
             }
         }
 
-        if handed_off > 0 {
+        if !handed_off.is_empty() {
             tracing::info!(
-                handed_off,
-                "Handed worker-owned executions off; flushing buffered output before exit"
+                handed_off = handed_off.len(),
+                "Handed worker-owned executions off; flushing their output before exit"
             );
-            tokio::time::sleep(WORKER_HANDOFF_FLUSH_GRACE).await;
+            let deadline = tokio::time::Instant::now() + WORKER_HANDOFF_FLUSH_TIMEOUT;
+            for (execution_id, pushed, writer) in handed_off {
+                // The acknowledged cursor lags pushes by up to one batch, and
+                // re-attachment resumes after the persisted cursor. Advance it
+                // to the pushed sequence only once the writer has provably
+                // written those lines; otherwise they would be skipped for
+                // good. A writer that cannot flush in time leaves the cursor
+                // where it was (lines may then repeat, never vanish).
+                let flushed = match writer {
+                    Some(writer) => tokio::time::timeout_at(deadline, writer).await.is_ok(),
+                    // A persistent run writes its own raw log; nothing to wait for.
+                    None => true,
+                };
+                let Some(pushed) = pushed else { continue };
+                if !flushed {
+                    tracing::warn!(
+                        %execution_id,
+                        "Raw-log writer did not flush before shutdown; keeping the acknowledged cursor"
+                    );
+                    continue;
+                }
+                if let Err(error) = ExecutionWorkerJob::acknowledge_sequence(
+                    &self.db.pool,
+                    execution_id,
+                    pushed,
+                    pushed,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        %execution_id,
+                        %error,
+                        "Failed to persist flushed worker cursor at handoff; output may repeat after restart"
+                    );
+                }
+            }
         }
 
         Ok(())

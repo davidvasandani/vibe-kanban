@@ -40,8 +40,10 @@ because reconcile now defers running rows. For each such row, shutdown:
 - aborts only the tracker (the exit-monitor handle); the row stays `Running`;
 - sends **no** cancellation;
 - does **not** commit WIP, because the worker still owns the worktree;
-- persists the tracker's **pushed** sequence as the cursor, then waits
-  `WORKER_HANDOFF_FLUSH_GRACE` (250 ms) once.
+- ends the store, waits (bounded by `WORKER_HANDOFF_FLUSH_TIMEOUT`, 5 s total)
+  for its raw-log writer to drain, and only then persists the tracker's
+  **pushed** sequence as the cursor. If the writer does not finish in time,
+  the cursor is left alone, so lines can repeat but never vanish.
 
 The acknowledged cursor alone is wrong in **both** directions, which Codex
 found in round 1. The tracker pushes a whole batch into the MsgStore and only
@@ -52,7 +54,10 @@ each tracker publishes a `worker_pushed_sequences` atomic. It advances only
 across pure-output events (`worker_event_is_output`) and stops before an
 interaction or terminal event, whose coordinator-side effects a restart can
 lose and which must be replayed. Handoff writes that value through the
-monotonic `acknowledge_sequence`, and the grace lets the writer reach it. A
+monotonic `acknowledge_sequence`, after awaiting the writer. A fixed sleep
+was the first attempt; Codex round 4 pointed out it proves nothing under slow
+storage, so the writer task handle is now kept (`register_raw_log_writer`,
+`worker_log_writers`) and awaited. A
 hard crash skips all of this, so up to one batch may be lost or repeated.
 That residual is accepted.
 
@@ -149,6 +154,11 @@ again after a restart; an agent blocked on approval rarely emits any.
   It is still `Interrupted` + WIP commit + the opt-in
   `resume_interrupted_on_startup` (config-only, default off). Surviving there
   still needs the Tier-3 runner split.
+- **An unanswered interaction lost in a replay gap.** If the worker's journal
+  wraps past a pending `InteractionRequested` while the coordinator is away,
+  the request itself is gone, and no coordinator-side state can recreate its
+  waiter. The same was already true of any runtime gap. Recovering it needs a
+  worker API that lists pending interactions.
 - **Queued follow-ups** (`QueuedMessageService`) are in memory and still lost.
 - **Worker-owned persistent runs** keep no coordinator-side JSONL
   (`writes_own_raw_log` is keyed on `is_persistent()`, not on who runs it). A

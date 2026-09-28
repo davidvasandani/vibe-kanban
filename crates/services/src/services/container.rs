@@ -659,6 +659,12 @@ pub trait ContainerService {
     /// [`Self::cleanup_orphan_executions`]. The default (no cluster) has none.
     async fn reattach_worker_executions(&self) {}
 
+    /// Offered the raw-log writer task of each execution. The default detaches
+    /// it. A container that hands executions off across a restart keeps it,
+    /// so shutdown can wait until the writer has flushed before persisting
+    /// how far output is durable.
+    async fn register_raw_log_writer(&self, _execution_id: Uuid, _writer: JoinHandle<()>) {}
+
     /// Start the log pipeline for an execution whose MsgStore is registered:
     /// the executor's normalizer (agent and review actions) and, unless the
     /// run writes its own raw log, the raw-log writer.
@@ -715,12 +721,14 @@ pub trait ContainerService {
         }
 
         if spawn_raw_writer && !execution_process::writes_own_raw_log(execution_process) {
-            execution_process::spawn_stream_raw_logs_to_storage(
+            let writer = execution_process::spawn_stream_raw_logs_to_storage(
                 self.msg_stores().clone(),
                 self.db().clone(),
                 execution_process.id,
                 execution_process.session_id,
             );
+            self.register_raw_log_writer(execution_process.id, writer)
+                .await;
         }
     }
 
