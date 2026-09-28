@@ -235,6 +235,11 @@ contributed to it.
   desktop-only fixed chrome in a drawer component also reused on mobile; plus
   discoverable mobile access, stable persisted tab identifiers, truthful button
   semantics, and route-owned availability during async workspace loading.
+- [settings-drawer.md](settings-drawer.md) — Settings as a docked non-modal
+  right drawer: keep the nice-modal API, app shells reserve the width, a sheet
+  fallback below 1240px, the workspace right sidebar hides, toggle and close
+  routing through the unsaved-changes guard, requestId-stamped deep links, and
+  the z-index and Escape rules (`vk/4643-move-settings-to`).
 - [workspace-creation-reliability.md](workspace-creation-reliability.md) —
   Repository-ID admin queue identity, bounded pre-operation lease contention
   waits, cancellation and fencing limits, original-code regression proof, and

@@ -50,6 +50,7 @@ import {
   RIGHT_MAIN_PANEL_MODES,
 } from '@/shared/stores/useUiPreferencesStore';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
+import { useSettingsDrawerStore } from '@/shared/stores/useSettingsDrawerStore';
 import { getWorkspaceMobileTabFallback } from '@/shared/components/ui-new/containers/workspaceMobileTabs';
 
 const WORKSPACES_GUIDE_ID = 'workspaces-guide';
@@ -238,6 +239,9 @@ export function WorkspacesLayout() {
     setLeftSidebarVisible,
     setLeftMainPanelVisible,
   } = useWorkspacePanelState(isCreateMode ? undefined : workspaceId);
+  // The Settings drawer takes the right-drawer slot while it is open, so the
+  // chat keeps its width; the saved sidebar preference is left untouched.
+  const isSettingsDrawerOpen = useSettingsDrawerStore((s) => s.isOpen);
 
   const {
     config,
@@ -541,7 +545,7 @@ export function WorkspacesLayout() {
             )}
           </Group>
 
-          {isRightSidebarVisible && !isCreateMode && (
+          {isRightSidebarVisible && !isCreateMode && !isSettingsDrawerOpen && (
             <div className="w-[300px] shrink-0 h-full overflow-hidden">
               <LinkedIssueProvider
                 issueId={linkedIssueForWorkspace?.issueId ?? undefined}

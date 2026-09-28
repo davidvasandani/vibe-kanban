@@ -13,6 +13,7 @@
       "cancel": "Keep Editing"
     },
     "layout": {
+      "resizeDrawer": "Resize settings",
       "nav": {
         "title": "Settings",
         "machineSettings": "Machine Settings",

@@ -13,6 +13,7 @@
       "hostSwitchMessage": "You have unsaved changes for the current host. Switching hosts will discard those drafts."
     },
     "layout": {
+      "resizeDrawer": "設定の幅を変更",
       "nav": {
         "title": "設定",
         "general": "一般",

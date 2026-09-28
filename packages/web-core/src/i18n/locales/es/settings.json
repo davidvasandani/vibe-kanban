@@ -13,6 +13,7 @@
       "hostSwitchMessage": "You have unsaved changes for the current host. Switching hosts will discard those drafts."
     },
     "layout": {
+      "resizeDrawer": "Cambiar tamaño de la configuración",
       "nav": {
         "title": "Configuración",
         "general": "General",
