@@ -722,8 +722,34 @@ mod tests {
         git(&["config", "remote.upstream.gh-resolved", "Org-A/app"]);
         assert_eq!(token_of(&fx.gh(&fork, &["pr", "list"], &[]).1), TOKEN_A);
 
-        // `-a` approves in `pr review`; short letters outside repo/api never
-        // consume the next argument.
+        // Short value flags of pr/issue commands consume their value ...
+        for args in [
+            &[
+                "pr",
+                "create",
+                "-t",
+                "Fix",
+                "-b",
+                "https://github.com/org-b/app",
+            ][..],
+            &[
+                "issue",
+                "close",
+                "7",
+                "-c",
+                "https://github.com/org-b/app/pull/1",
+            ],
+        ] {
+            assert_eq!(token_of(&fx.gh(&fork, args, &[]).1), TOKEN_A, "{args:?}");
+        }
+        // ... while booleans of the same letters do not.
+        for args in [
+            &["pr", "merge", "-s", "https://github.com/org-b/svc/pull/1"][..],
+            &["pr", "view", "-c", "https://github.com/org-b/svc/pull/1"],
+        ] {
+            assert_eq!(token_of(&fx.gh(&fx.work, args, &[]).1), TOKEN_B, "{args:?}");
+        }
+        // `-a` approves in `pr review`.
         assert_eq!(
             token_of(
                 &fx.gh(

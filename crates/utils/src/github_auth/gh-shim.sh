@@ -47,9 +47,8 @@ vk_owner_of() {
 # `gh repo create --private OWNER/REPO` still selects OWNER.
 #
 # Long flag names mean the same thing everywhere. Short letters do not: gh
-# reuses them (`pr review -a` approves, `pr merge -d` deletes the branch), so a
-# short flag only consumes a value in `gh repo` and `gh api`/`gh workflow`,
-# where each listed letter always takes one.
+# reuses them (`pr review -a` approves, `pr merge -d` deletes the branch), so
+# short flags are looked up per command and subcommand.
 vk_takes_value() {
   case "$1" in
     --body | --title | --notes | --description | --template | --json | --jq | \
@@ -58,14 +57,51 @@ vk_takes_value() {
       --homepage | --method | --input | --subject | --body-file | --hostname | \
       --branch | --remote-name | --fork-name | --org | --visibility | --team | \
       --gitignore | --license | --add-topic | --remove-topic | --default-branch | \
-      --upstream-remote-name)
+      --upstream-remote-name | --author | --state | --project | --comment | \
+      --reason | --notes-file | --author-email)
       return 0
       ;;
-    -b | -d | -u | -l) [ "$vk_cmd" = repo ] ;;
-    -t | -p) [ "$vk_cmd" = repo ] || [ "$vk_cmd" = api ] ;;
-    -f | -F | -H | -X | -q) [ "$vk_cmd" = api ] || [ "$vk_cmd" = workflow ] ;;
+    -?) vk_short_takes_value "$1" ;;
     *) return 1 ;;
   esac
+}
+
+vk_short_takes_value() {
+  case "$vk_cmd" in
+    repo)
+      case "$1" in -b | -d | -u | -l | -t | -p) return 0 ;; esac
+      ;;
+    api | workflow)
+      case "$1" in -t | -p | -f | -F | -H | -X | -q) return 0 ;; esac
+      ;;
+    release)
+      case "$1" in -n | -F | -t) return 0 ;; esac
+      ;;
+    pr | issue)
+      case "$1" in
+        -b | -F | -t | -T | -l | -L | -S | -A | -B | -H | -p | -q) return 0 ;;
+        # Booleans in some subcommands: `pr review -a` (approve), `pr merge
+        # -m/-s` (merge/squash), `pr view -c` (comments), `pr review -r`.
+        -a)
+          [ "$vk_sub" != review ]
+          return
+          ;;
+        -m | -s)
+          [ "$vk_sub" != merge ]
+          return
+          ;;
+        -c)
+          [ "$vk_sub" = close ]
+          return
+          ;;
+        -r)
+          [ "$vk_cmd $vk_sub" = "pr create" ] || [ "$vk_cmd $vk_sub" = "issue close" ]
+          return
+          ;;
+      esac
+      ;;
+  esac
+  return 1
 }
 
 vk_flag_repo=""
@@ -131,19 +167,24 @@ for vk_arg do
     cmd)
       if [ -n "$vk_positional" ]; then
         vk_cmd=$vk_arg
-        if [ "$vk_cmd" = repo ]; then vk_state=sub; else vk_state=rest; fi
+        vk_state=sub
       fi
       ;;
     sub)
-      vk_sub=$vk_arg
-      # Only these take a repository as their first positional; others (for
-      # example `rename NEW-NAME`) keep GH_REPO / current-repository routing.
-      case "$vk_sub" in
-        view | clone | fork | delete | archive | unarchive | edit | sync | create | set-default)
-          vk_state=target
-          ;;
-        *) vk_state=rest ;;
-      esac
+      # The subcommand selects the short-flag table (`vk_short_takes_value`).
+      if [ -n "$vk_positional" ]; then
+        vk_sub=$vk_arg
+        vk_state=rest
+        # Only these `gh repo` subcommands take a repository as their first
+        # positional; others (`rename NEW-NAME`) keep GH_REPO / cwd routing.
+        if [ "$vk_cmd" = repo ]; then
+          case "$vk_sub" in
+            view | clone | fork | delete | archive | unarchive | edit | sync | create | set-default)
+              vk_state=target
+              ;;
+          esac
+        fi
+      fi
       ;;
     target)
       # The first positional that parses as a GitHub repository, so a value of
