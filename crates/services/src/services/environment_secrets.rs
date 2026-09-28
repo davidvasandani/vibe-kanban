@@ -3,6 +3,7 @@
 
 use std::{collections::HashMap, path::Path, process::Stdio, time::Duration};
 
+use api_types::normalize_secret_reference;
 use thiserror::Error;
 use tokio::{io::AsyncReadExt, process::Command};
 
@@ -65,7 +66,9 @@ async fn resolve_with_provider(
 }
 
 fn has_references(values: &HashMap<String, String>) -> bool {
-    values.values().any(|value| value.starts_with("op://"))
+    values
+        .values()
+        .any(|value| normalize_secret_reference(value).is_some())
 }
 
 fn select_token<'a>(
@@ -77,7 +80,9 @@ fn select_token<'a>(
         .map(String::as_str)
         .or(fallback)
         .filter(|token| {
-            !token.trim().is_empty() && !token.starts_with("op://") && !token.contains('\0')
+            !token.trim().is_empty()
+                && normalize_secret_reference(token).is_none()
+                && !token.contains('\0')
         })
         .ok_or(EnvironmentSecretError::MissingToken)
 }
@@ -88,8 +93,10 @@ async fn resolve_with_binary(
     binary: &Path,
 ) -> Result<HashMap<String, String>, EnvironmentSecretError> {
     for value in values.values_mut() {
-        if value.starts_with("op://") {
-            *value = read_reference(binary, token, value).await?;
+        // Values saved before quote normalization may still carry the quotes
+        // 1Password adds when copying a reference; read the bare reference.
+        if let Some(reference) = normalize_secret_reference(value) {
+            *value = read_reference(binary, token, &reference).await?;
         }
     }
     Ok(values)
@@ -178,7 +185,13 @@ mod tests {
         assert_eq!(select_token(&input, Some("host")).unwrap(), "configured");
         assert_eq!(select_token(&HashMap::new(), Some("host")).unwrap(), "host");
         assert!(select_token(&HashMap::new(), None).is_err());
-        for invalid in ["", "  ", "op://vault/item/token", "bad\0token"] {
+        for invalid in [
+            "",
+            "  ",
+            "op://vault/item/token",
+            "\"op://vault/item/token\"",
+            "bad\0token",
+        ] {
             assert!(select_token(&values(&[(TOKEN, invalid)]), Some("host")).is_err());
         }
     }
@@ -256,6 +269,8 @@ esac
             ("A", "op://vault/item/field with spaces"),
             ("B", "op://vault/item/other"),
             ("C", "literal"),
+            ("D", "\"op://vault/item/other\""),
+            ("E", "\"quoted literal\""),
             (TOKEN, "configured"),
         ]);
         let result = resolve_with_binary(original.clone(), "configured", &binary)
@@ -264,6 +279,8 @@ esac
         assert_eq!(result["A"], "  secret\n\n");
         assert_eq!(result["B"], "op://returned/literal/value");
         assert_eq!(result["C"], "literal");
+        assert_eq!(result["D"], "op://returned/literal/value");
+        assert_eq!(result["E"], "\"quoted literal\"");
         assert_eq!(result[TOKEN], "configured");
         assert_eq!(original["A"], "op://vault/item/field with spaces");
     }

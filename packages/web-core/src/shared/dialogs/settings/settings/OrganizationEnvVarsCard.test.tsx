@@ -12,7 +12,14 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const mutations = vi.hoisted(() => ({ create: vi.fn(), update: vi.fn() }));
 vi.mock('@/shared/hooks/useOrganizationEnvVars', () => ({
   useOrganizationEnvVars: () => ({
-    data: [{ id: 'existing', name: 'API_TOKEN' }],
+    data: [
+      { id: 'existing', name: 'API_TOKEN' },
+      {
+        id: 'reference',
+        name: 'GH_TOKEN',
+        reference: 'op://Homelab/alderbridge nix PAT/credential',
+      },
+    ],
     isLoading: false,
   }),
   useOrganizationEnvVarMutations: () => ({
@@ -79,7 +86,12 @@ describe.each(['add', 'edit'] as const)('%s environment variable', (mode) => {
       change(input, value);
       expect(input.type).toBe('password');
     }
-    for (const value of ['op://', 'op://Team Vault/Test Item/password']) {
+    for (const value of [
+      'op://',
+      'op://Team Vault/Test Item/password',
+      ' op://vault/item/field',
+      'op://Team Vault/Test ',
+    ]) {
       change(input, value);
       expect(input.type).toBe('text');
       expect(input.value).toBe(value);
@@ -88,7 +100,8 @@ describe.each(['add', 'edit'] as const)('%s environment variable', (mode) => {
       'Team Vault/Test Item/password',
       'synthetic-secret',
       'OP://vault/item/field',
-      ' op://vault/item/field',
+      '"quoted literal"',
+      '"op://vault/item/field',
       'prefix-op://vault/item/field',
       '',
     ]) {
@@ -99,33 +112,54 @@ describe.each(['add', 'edit'] as const)('%s environment variable', (mode) => {
     }
   });
 
-  it.each(['op://Team Vault/Test Item/password', ' synthetic-secret '])(
-    'submits the original value without transformation: %s',
-    (value) => {
-      const input = valueInput();
-      change(input, value);
-      if (mode === 'add') {
-        change(
-          container.querySelector<HTMLInputElement>('[placeholder="NAME"]')!,
-          'NEW_TOKEN'
-        );
-        click('Add');
-        expect(mutations.create).toHaveBeenCalledWith(
-          { name: 'NEW_TOKEN', value },
-          expect.objectContaining({ onSuccess: expect.any(Function) })
-        );
-      } else {
-        click('Save');
-        expect(mutations.update).toHaveBeenCalledWith(
-          { id: 'existing', value },
-          expect.objectContaining({ onSuccess: expect.any(Function) })
-        );
-      }
+  it('shows a reference pasted from 1Password without its quotes', () => {
+    const input = valueInput();
+    change(input, '"op://Homelab/alderbridge nix PAT/credential"');
+    expect(input.type).toBe('text');
+    expect(input.value).toBe('op://Homelab/alderbridge nix PAT/credential');
+    change(input, '\u201Cop://vault/item/field\u201D');
+    expect(input.value).toBe('op://vault/item/field');
+  });
+
+  it.each([
+    [
+      'op://Team Vault/Test Item/password',
+      'op://Team Vault/Test Item/password',
+    ],
+    [
+      ' op://Team Vault/Test Item/password ',
+      'op://Team Vault/Test Item/password',
+    ],
+    [
+      '"op://Homelab/alderbridge nix PAT/credential"',
+      'op://Homelab/alderbridge nix PAT/credential',
+    ],
+    [' synthetic-secret ', ' synthetic-secret '],
+    ['"quoted literal"', '"quoted literal"'],
+  ])('submits references bare and literals unchanged: %j', (typed, value) => {
+    const input = valueInput();
+    change(input, typed);
+    if (mode === 'add') {
+      change(
+        container.querySelector<HTMLInputElement>('[placeholder="NAME"]')!,
+        'NEW_TOKEN'
+      );
+      click('Add');
+      expect(mutations.create).toHaveBeenCalledWith(
+        { name: 'NEW_TOKEN', value },
+        expect.objectContaining({ onSuccess: expect.any(Function) })
+      );
+    } else {
+      click('Save');
+      expect(mutations.update).toHaveBeenCalledWith(
+        { id: 'existing', value },
+        expect.objectContaining({ onSuccess: expect.any(Function) })
+      );
     }
-  );
+  });
 });
 
-it('keeps saved rows redacted and discards the reference draft on cancel', () => {
+it('keeps literal rows redacted and discards the reference draft on cancel', () => {
   expect(container.textContent).toContain('••••••••');
   act(() =>
     container
@@ -154,4 +188,34 @@ it('keeps saved rows redacted and discards the reference draft on cancel', () =>
   expect(reopened.value).toBe('');
   expect(reopened.type).toBe('password');
   expect(mutations.update).not.toHaveBeenCalled();
+});
+
+it('shows saved references in plain text and masks only literals', () => {
+  const rows = Array.from(container.querySelectorAll('.border.rounded-sm'));
+  const row = (name: string) =>
+    rows.find((element) => element.textContent?.includes(name))!;
+  expect(row('GH_TOKEN').textContent).toContain(
+    'op://Homelab/alderbridge nix PAT/credential'
+  );
+  expect(row('GH_TOKEN').textContent).not.toContain('••••••••');
+  expect(row('API_TOKEN').textContent).toContain('••••••••');
+});
+
+it('starts editing a reference from its saved value', () => {
+  act(() =>
+    container
+      .querySelector<HTMLButtonElement>('[aria-label="Edit GH_TOKEN"]')!
+      .click()
+  );
+  const input = container.querySelector<HTMLInputElement>(
+    '[placeholder="New value or op://vault/item/field"]'
+  )!;
+  expect(input.type).toBe('text');
+  expect(input.value).toBe('op://Homelab/alderbridge nix PAT/credential');
+  change(input, 'op://Homelab/alderbridge nix PAT/token');
+  click('Save');
+  expect(mutations.update).toHaveBeenCalledWith(
+    { id: 'reference', value: 'op://Homelab/alderbridge nix PAT/token' },
+    expect.objectContaining({ onSuccess: expect.any(Function) })
+  );
 });

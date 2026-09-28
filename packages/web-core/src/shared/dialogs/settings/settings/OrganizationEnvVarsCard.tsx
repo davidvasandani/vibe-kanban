@@ -15,8 +15,24 @@ import {
 import type { OrganizationEnvVar } from 'shared/types';
 import { cn } from '@/shared/lib/utils';
 import { SettingsCard, SettingsField } from './SettingsComponents';
+import { normalizeSecretReference } from './secretReference';
 
 const NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// A reference pasted from 1Password arrives wrapped in quotes. Drop them from
+// the draft so it reads as the bare reference. Surrounding whitespace is only
+// trimmed on submit, so a space typed mid-path is not lost. Literal values are
+// always kept exactly as typed.
+const unquoteDraft = (value: string) => {
+  const reference = normalizeSecretReference(value);
+  return reference !== null && reference !== value.trim() ? reference : value;
+};
+
+const submittedValue = (value: string) =>
+  normalizeSecretReference(value) ?? value;
+
+const draftInputType = (value: string) =>
+  normalizeSecretReference(value) === null ? 'password' : 'text';
 
 interface Props {
   organizationId: string;
@@ -57,12 +73,15 @@ export function OrganizationEnvVarsCard({ organizationId }: Props) {
       setError('An env var with this name already exists');
       return;
     }
-    createEnvVar.mutate({ name, value: newValue }, { onSuccess: resetAddForm });
+    createEnvVar.mutate(
+      { name, value: submittedValue(newValue) },
+      { onSuccess: resetAddForm }
+    );
   };
 
   const handleStartEdit = (envVar: OrganizationEnvVar) => {
     setError(null);
-    setEditing({ id: envVar.id, value: '' });
+    setEditing({ id: envVar.id, value: envVar.reference ?? '' });
   };
 
   const handleCancelEdit = () => {
@@ -73,7 +92,7 @@ export function OrganizationEnvVarsCard({ organizationId }: Props) {
     if (!editing) return;
     setError(null);
     updateEnvVar.mutate(
-      { id: editing.id, value: editing.value },
+      { id: editing.id, value: submittedValue(editing.value) },
       { onSuccess: () => setEditing(null) }
     );
   };
@@ -90,7 +109,7 @@ export function OrganizationEnvVarsCard({ organizationId }: Props) {
   return (
     <SettingsCard
       title="Environment variables"
-      description="Variables stored encrypted at rest and scoped to this organization. Enter a literal value or an op://vault/item/field reference. 1Password references require OP_SERVICE_ACCOUNT_TOKEN and the 1Password CLI on the Vibe Kanban service."
+      description="Variables stored encrypted at rest and scoped to this organization. Enter a literal value or an op://vault/item/field reference; quotes copied from 1Password are removed and saved references stay visible. 1Password references require OP_SERVICE_ACCOUNT_TOKEN and the 1Password CLI on the Vibe Kanban service."
     >
       {error && (
         <div className="bg-error/10 border border-error/50 rounded-sm p-3 text-error text-sm">
@@ -121,16 +140,24 @@ export function OrganizationEnvVarsCard({ organizationId }: Props) {
                   {isEditing ? (
                     <Input
                       autoFocus
-                      type={
-                        editing.value.startsWith('op://') ? 'text' : 'password'
-                      }
+                      type={draftInputType(editing.value)}
                       placeholder="New value or op://vault/item/field"
                       value={editing.value}
                       onChange={(e) =>
-                        setEditing({ id: envVar.id, value: e.target.value })
+                        setEditing({
+                          id: envVar.id,
+                          value: unquoteDraft(e.target.value),
+                        })
                       }
                       className="mt-2"
                     />
+                  ) : envVar.reference ? (
+                    <div
+                      className="text-xs text-normal font-mono mt-1 truncate"
+                      title={envVar.reference}
+                    >
+                      {envVar.reference}
+                    </div>
                   ) : (
                     <div className="text-xs text-low font-mono mt-1">
                       ••••••••
@@ -201,10 +228,10 @@ export function OrganizationEnvVarsCard({ organizationId }: Props) {
               autoComplete="off"
             />
             <Input
-              type={newValue.startsWith('op://') ? 'text' : 'password'}
+              type={draftInputType(newValue)}
               placeholder="value or op://vault/item/field"
               value={newValue}
-              onChange={(e) => setNewValue(e.target.value)}
+              onChange={(e) => setNewValue(unquoteDraft(e.target.value))}
               className="flex-1"
               autoComplete="off"
             />

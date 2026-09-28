@@ -595,7 +595,7 @@ export type UpdateMemberRoleRequest = { role: MemberRole, };
 
 export type UpdateMemberRoleResponse = { user_id: string, role: MemberRole, };
 
-export type OrganizationEnvVar = { id: string, organization_id: string, name: string, created_at: string, updated_at: string, };
+export type OrganizationEnvVar = { id: string, organization_id: string, name: string, created_at: string, updated_at: string, reference?: string, };
 
 export type ListOrganizationEnvVarsResponse = { env_vars: Array<OrganizationEnvVar>, };
 

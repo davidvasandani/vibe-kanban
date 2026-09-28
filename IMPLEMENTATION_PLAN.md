@@ -1,145 +1,35 @@
-# Implementation Plan — Auto Error Remediation (`vk/7e4f-auto-error-remed`)
+# Implementation plan — vk/2eb6-keep-env-vars-un
 
-See `SPEC.md` for the design and `PRIOR_KNOWLEDGE.md` for the constraints.
+See `SPEC.md` and `PRIOR_KNOWLEDGE.md`.
 
-## Step 1: Shared pipeline-block composer (`crates/api-types`)
-
-1. Add `src/pipeline_block.rs`, exported from `lib.rs`. It contains:
-   - `BlockStage { id, prompt_fragment }` and `BlockPipeline { name, stages }`;
-   - `canonical_stage_order`, `compose_executor_line`,
-     `compose_pipeline_block` and `append_pipeline_block`, moved verbatim
-     from `crates/mcp/src/task_server/tools/pipelines.rs` and re-typed onto
-     the new structs.
-2. Move the composer unit tests along with the code.
-3. In `crates/mcp`, keep `McpPipeline`/`McpPipelineStep` for the tool
-   schema. Add `impl From<&McpPipeline> for BlockPipeline`, delete the moved
-   functions, and point `remote_issues.rs` at `api_types::pipeline_block`.
-4. Add `impl From<&Pipeline> for BlockPipeline` in `services::pipelines`.
-
-## Step 2: Config (`crates/services/src/services/config/versions/v8.rs`)
-
-1. Add the `AutoErrorRemediationConfig` struct with `Default` using the SPEC
-   defaults (`CLAUDE_CODE`, `Some("PROALIGN")`, `Some("claude-opus-5-5")`,
-   `["wikillm","speckit"]`, 3/h, disabled). Derive the TS type.
-2. Add `#[serde(default)] pub auto_error_remediation` to `Config`, and set it
-   to its default in both the `from_v7_config` and `Default` constructors.
-3. Add the new type to `crates/server/src/bin/generate_types.rs` and run
-   `pnpm run generate-types`.
-
-## Step 3: Trigger (`crates/services`)
-
-1. Add a new module `services/error_remediation.rs` containing:
-   - `ErrorRemediationEvent { workspace_id, session_id, execution_process_id }`;
-   - `fn is_remediation_trigger(run_reason, status) -> bool`, which is pure;
-   - `AUTO_REMEDIATION_NAME_PREFIX = "Auto-fix: "`;
-   - `ErrorRemediationGuard`: an in-memory, `Mutex`-wrapped guard with
-     `check(workspace_name, workspace_id, now, max_per_hour) -> Decision` and
-     `record(source_ws, launched_ws, now)`;
-   - `fn compose_issue(ctx) -> (title, description)`, a pure body builder
-     that uses the marker plus `pipeline_block`;
-   - unit tests for all of the above.
-2. Add a trait method on `ContainerService`:
-   `fn error_remediation_sender(&self) -> Option<&broadcast::Sender<ErrorRemediationEvent>> { None }`.
-3. In `finalize_task`, after the notification, when
-   `is_remediation_trigger(..)` holds and
-   `self.config().read().await.auto_error_remediation.enabled`, call
-   `sender.send(ev)` and ignore any error. Check whether the trait exposes
-   `config()`; if it doesn't, read the config in the local impl.
-4. In `crates/local-deployment`, give `LocalContainerService` a
-   `broadcast::Sender` field (capacity 64), created in `new()`, and override
-   the trait method.
-
-## Step 4: Launcher (`crates/server/src/error_remediation.rs`)
-
-1. `pub fn spawn(deployment)` subscribes to the sender and spawns a loop.
-   On `Lagged` it logs and continues; on `Closed` it exits.
-2. `handle(deployment, guard, ev)` does the following, in order:
-   1. Load the workspace, session and execution; skip if any is missing.
-   2. Read the config snapshot and return if it is disabled.
-   3. Run `guard.check`.
-   4. Resolve the project: the configured `project_id`, else
-      `Workspace::get_remote_project_id`, else skip with `info`.
-   5. Resolve repos: configured `repo_ids` mapped to
-      `Repo.default_target_branch`, falling back to the source workspace's
-      target branch for that repo and then to `main`. If none are
-      configured, use the source `WorkspaceRepo`s.
-   6. Collect error entries with `container.normalized_entries`: keep the
-      last 5 `ErrorMessage` entries, each capped at 2 000 chars.
-   7. Load the pipelines with `services::pipelines::load_pipelines(dir)`,
-      using the same dir the `/api/pipelines` route uses, and select them by
-      id. Compose the block from the default-enabled stages.
-   8. Resolve the variant with `ExecutorConfigs::get_cached().get_coding_agent(..)`.
-      If it is missing, fall back to `None` and add a note to the issue.
-   9. Pick the status: the first visible entry from
-      `remote_client.list_project_statuses`, ordered by `sort_order`.
-   10. Create the issue with `remote_client.create_issue(CreateIssueRequest{..priority: High..})`.
-   11. Start the workspace by calling
-       `routes::workspaces::create::create_and_start_workspace(State, Json(req))`.
-   12. Link it by calling `routes::workspaces::links::link_workspace(Extension(ws), State, Json(..))`.
-   13. Run `guard.record`.
-3. Call `error_remediation::spawn` from `startup.rs` after the container is
-   ready.
-
-## Step 5: Frontend
-
-1. Add `AutoErrorRemediationSettingsCard.tsx` in the settings folder and
-   render it in `GeneralSettingsSection` after Task Execution. It contains:
-   - an enable checkbox with a warning;
-   - a project-id input;
-   - repo checkboxes (from the existing repos query);
-   - an executor select;
-   - a variant input;
-   - a model input;
-   - a max-per-hour input.
-2. Add i18n keys under `settings.general.autoRemediation.*` for all 7
-   locales, with English copy in each as the precedent does.
-3. Add a lightweight Vitest test for the card: the toggle updates the draft.
-
-## Step 6: Verify
-
-- `cargo test -p api-types -p services -p mcp -p server`
-- `pnpm run generate-types:check`
-- `pnpm run check`
-- `pnpm run lint`
-- `pnpm run format`
-
-## Step 7: Wiki
-
-- Add a new page, `wiki/auto-error-remediation.md`, and update `INDEX.md`.
-- Update `task-pipeline-block.md` to note that the Rust composer now lives in
-  `api-types`.
-
----
-
-# Follow-up plan: reuse active issues with similar errors
-
-1. **Pure logic** in `crates/services/src/services/error_remediation.rs`:
-   - `normalize_error_text(&str) -> String`, which replaces UUIDs, hex runs of
-     8+ characters and digit runs, lowercases, and collapses whitespace;
-   - `error_fingerprint(&[String]) -> Option<String>`, an FNV-1a 64 hash of
-     the normalized, joined messages (`None` when there are none);
-   - `error_similarity(a, b) -> f64`, the token-set Jaccard similarity of the
-     normalized text;
-   - `RemediationContext::fingerprint()`, included in `remediation_marker`;
-   - `parse_marker(description) -> Option<ParsedMarker{ fingerprint }>` and
-     `issue_error_text(description) -> Option<String>`, which reads the fence
-     under `### Error messages`;
-   - `find_similar_issue(&[Issue], &[String]) -> Option<&Issue>`, which
-     checks the marker and then either an equal fingerprint or similarity of
-     at least 0.8;
-   - `is_active_status_name(&str)`, which follows the remote's
-     done/cancelled/canceled rule;
-   - `compose_recurrence_comment(&RemediationContext) -> String`;
-   - unit tests for all of the above.
-2. **Remote client:** add `create_issue_comment(&CreateIssueCommentRequest)`
-   to `crates/services/src/services/remote_client.rs`, calling `POST
-   /v1/issue_comments`.
-3. **Consumer** in `crates/server/src/error_remediation.rs`: after the
-   statuses are fetched and before `create_issue`, when error messages
-   exist, search the project's active statuses for the marker text. On a
-   match, comment and return an `Outcome::Recurred(issue_id)`. Otherwise
-   create as before. If the search errors, return `Err`, so nothing is
-   launched.
-4. **Wiki:** update `wiki/auto-error-remediation.md`.
-5. **Verify:** run the `cargo test` and clippy suites for services and
-   server.
+1. **Shared rule (Rust).** Add `normalize_secret_reference(&str) -> Option<String>`
+   to `crates/api-types/src/organization_env_var.rs`, with unit tests: bare,
+   whitespace, each quote style, mismatched quotes, quoted literal, empty
+   quotes, and case sensitivity.
+2. **API type.** Add `reference: Option<String>` (`#[serde(default)]`,
+   `#[ts(optional)]`) to `OrganizationEnvVar` and drop its `sqlx::FromRow`
+   derive if nothing needs it.
+3. **Remote repository.** Add a private `OrganizationEnvVarRow` and point every
+   `query_as!` at it, with the SQL unchanged. Map rows to `OrganizationEnvVar`
+   with `reference: None`. In the list handler, reuse the existing
+   `list_with_encrypted_values` (keyed by name, which is unique per org) rather
+   than adding a new query.
+4. **Remote routes.** Normalize on create/update before validation and
+   encryption. Fill `reference` in the list (decrypt and normalize) and in the
+   create/update responses (from the normalized value).
+5. **Resolver.** Use the shared rule in `environment_secrets` for
+   `has_references`, `select_token`, and `resolve_with_binary`. Add tests for
+   a quoted legacy value and for rejecting a quoted token.
+6. **Types.** Run `pnpm run generate-types` to regenerate `shared/types.ts`.
+7. **UI helper.** Add `secretReference.ts` (`normalizeSecretReference`) and a
+   Vitest spec.
+8. **Card.** Show the reference in rows, prefill edit, normalize the draft on
+   change, pick the input type from the normalized draft, and update the
+   description. Extend `OrganizationEnvVarsCard.test.tsx` with the pasted
+   quoted reference, the displayed saved reference, a literal that stays masked,
+   and the prefilled edit.
+9. **Docs.** Update `docs/settings/organization-settings.mdx` if it describes
+   masking.
+10. **Verify.** Run `cargo test -p api-types -p services`, `cargo check -p remote`
+    (via `pnpm run backend:check`), `pnpm run check`, the web-core vitest suite,
+    `generate-types:check`, and `pnpm run format`.
