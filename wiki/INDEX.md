@@ -30,6 +30,8 @@ contributed to it.
   Also covers the browser session and profile-lock hazards and the
   stale-response rules for the Settings card.
 
+- [mcp-pr-tools-and-connection-notices.md](mcp-pr-tools-and-connection-notices.md) — Why a Claude "failed to connect" notice can name a shadowing project `.mcp.json` duplicate rather than the working VK server (same-name replacement, ancestor loading, `disabledMcpjsonServers`); reading CI without the Checks permission (per-source coverage, truncation, superseded runs, pass-by-allowlist, two-witness merge gate); safe SHA-guarded merge, fork-aware encoded branch deletion, remote-aware PR resolution and endpoint-routed `gh api` credentials (`vk/53bc-agents-fall-back`).
+
 - [mcp-oauth-connection-identity.md](mcp-oauth-connection-identity.md) — Preserve owner-bound gateway identity across identifier changes and both OAuth completion paths.
 
 - [issue-workspace-lifecycle.md](issue-workspace-lifecycle.md) — Comment-driven activation, transactional Done reopening, queue handoff ordering and local/remote sync boundaries.

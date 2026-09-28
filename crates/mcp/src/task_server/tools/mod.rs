@@ -11,7 +11,7 @@ use rmcp::{
     ErrorData,
     model::{CallToolResult, Content},
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -78,6 +78,7 @@ mod organizations;
 mod pipelines;
 mod pollers;
 mod preview_leases;
+mod pull_requests;
 mod reauth;
 mod remote_issues;
 mod remote_projects;
@@ -85,6 +86,102 @@ mod repos;
 mod sessions;
 mod task_attempts;
 mod workspaces;
+
+/// Longest body excerpt an error carries. Enough to recognise a proxy error
+/// page or a backend message, small enough to keep tool results readable.
+const BODY_EXCERPT_LIMIT: usize = 500;
+
+/// A bounded, whitespace-collapsed excerpt of a response body.
+fn body_excerpt(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= BODY_EXCERPT_LIMIT {
+        return collapsed;
+    }
+    let mut excerpt: String = collapsed.chars().take(BODY_EXCERPT_LIMIT).collect();
+    excerpt.push('…');
+    excerpt
+}
+
+fn response_detail(content_type: Option<&str>, bytes: &[u8]) -> String {
+    format!(
+        "content-type: {}; body: {}",
+        content_type.unwrap_or("<none>"),
+        if bytes.is_empty() {
+            "<empty>".to_string()
+        } else {
+            body_excerpt(bytes)
+        }
+    )
+}
+
+/// What an unsuccessful envelope should tell the agent: the route's message,
+/// else its typed `error_data`, and only as a last resort "Unknown error".
+fn envelope_failure_detail(
+    message: Option<&str>,
+    error_data: Option<&serde_json::Value>,
+) -> String {
+    if let Some(message) = message.filter(|message| !message.trim().is_empty()) {
+        return message.to_string();
+    }
+    match error_data {
+        Some(data) if !data.is_null() => data.to_string(),
+        _ => "Unknown error".to_string(),
+    }
+}
+
+/// Decode a VK API response. Non-2xx statuses and non-JSON bodies (an HTML
+/// page from a proxy, say) are reported with status, content type and a body
+/// excerpt instead of a bare status code or a serde error.
+fn decode_envelope<T: DeserializeOwned>(
+    status: reqwest::StatusCode,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> Result<ApiResponseEnvelope<T>, ToolError> {
+    if !status.is_success() {
+        // A JSON error envelope still carries the most precise reason.
+        if let Ok(envelope) =
+            serde_json::from_slice::<ApiResponseEnvelope<serde::de::IgnoredAny>>(bytes)
+            && (envelope.message.is_some() || envelope.error_data.is_some())
+        {
+            return Err(ToolError::new(
+                format!("VK API returned error status: {status}"),
+                Some(envelope_failure_detail(
+                    envelope.message.as_deref(),
+                    envelope.error_data.as_ref(),
+                )),
+            ));
+        }
+        return Err(ToolError::new(
+            format!("VK API returned error status: {status}"),
+            Some(response_detail(content_type, bytes)),
+        ));
+    }
+    if let Some(content_type) = content_type
+        && !content_type.to_ascii_lowercase().contains("json")
+    {
+        return Err(ToolError::new(
+            format!("VK API returned a non-JSON response (expected JSON, got {content_type})"),
+            Some(response_detail(Some(content_type), bytes)),
+        ));
+    }
+    let envelope: ApiResponseEnvelope<T> = serde_json::from_slice(bytes).map_err(|error| {
+        ToolError::new(
+            "Failed to parse VK API response",
+            Some(format!("{error}; {}", response_detail(content_type, bytes))),
+        )
+    })?;
+    if !envelope.success {
+        return Err(ToolError::new(
+            "VK API returned error",
+            Some(envelope_failure_detail(
+                envelope.message.as_deref(),
+                envelope.error_data.as_ref(),
+            )),
+        ));
+    }
+    Ok(envelope)
+}
 
 impl McpServer {
     pub fn global_mode_router() -> rmcp::handler::server::tool::ToolRouter<Self> {
@@ -105,6 +202,7 @@ impl McpServer {
             + Self::session_tools_router()
             + Self::browser_tools_router()
             + Self::reauth_tools_router()
+            + Self::pull_requests_tools_router()
     }
 
     pub fn orchestrator_mode_router() -> rmcp::handler::server::tool::ToolRouter<Self> {
@@ -115,7 +213,8 @@ impl McpServer {
             + Self::preview_leases_tools_router()
             + Self::session_tools_router()
             + Self::browser_tools_router()
-            + Self::reauth_tools_router();
+            + Self::reauth_tools_router()
+            + Self::pull_requests_tools_router();
         router.remove_route("list_workspaces");
         router.remove_route("delete_workspace");
         router
@@ -225,60 +324,34 @@ impl McpServer {
         &self,
         rb: reqwest::RequestBuilder,
     ) -> Result<T, ToolError> {
-        let resp = self.send_with_reconnect(rb).await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            return Err(ToolError::message(format!(
-                "VK API returned error status: {}",
-                status
-            )));
-        }
-
-        let api_response = resp
-            .json::<ApiResponseEnvelope<T>>()
-            .await
-            .map_err(|error| {
-                ToolError::new("Failed to parse VK API response", Some(error.to_string()))
-            })?;
-
-        if !api_response.success {
-            let msg = api_response.message.as_deref().unwrap_or("Unknown error");
-            return Err(ToolError::new("VK API returned error", Some(msg)));
-        }
-
-        api_response
+        let envelope: ApiResponseEnvelope<T> = self.send_envelope(rb).await?;
+        envelope
             .data
             .ok_or_else(|| ToolError::message("VK API response missing data field"))
     }
 
     async fn send_empty_json(&self, rb: reqwest::RequestBuilder) -> Result<(), ToolError> {
-        let resp = self.send_with_reconnect(rb).await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            return Err(ToolError::message(format!(
-                "VK API returned error status: {}",
-                status
-            )));
-        }
-
-        #[derive(Deserialize)]
-        struct EmptyApiResponse {
-            success: bool,
-            message: Option<String>,
-        }
-
-        let api_response = resp.json::<EmptyApiResponse>().await.map_err(|error| {
-            ToolError::new("Failed to parse VK API response", Some(error.to_string()))
-        })?;
-
-        if !api_response.success {
-            let msg = api_response.message.as_deref().unwrap_or("Unknown error");
-            return Err(ToolError::new("VK API returned error", Some(msg)));
-        }
-
+        self.send_envelope::<serde::de::IgnoredAny>(rb).await?;
         Ok(())
+    }
+
+    /// Send a request and decode the `ApiResponse` envelope, turning every
+    /// failure into an error that says what actually came back.
+    async fn send_envelope<T: DeserializeOwned>(
+        &self,
+        rb: reqwest::RequestBuilder,
+    ) -> Result<ApiResponseEnvelope<T>, ToolError> {
+        let resp = self.send_with_reconnect(rb).await?;
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = resp.bytes().await.map_err(|error| {
+            ToolError::new("Failed to read VK API response", Some(error.to_string()))
+        })?;
+        decode_envelope(status, content_type.as_deref(), &bytes)
     }
 
     fn resolve_workspace_id(&self, explicit: Option<Uuid>) -> Result<Uuid, ToolError> {
@@ -628,18 +701,22 @@ pub(crate) mod tests {
             "browser_release_control".to_string(),
             "browser_screenshot".to_string(),
             "browser_type".to_string(),
+            "create_pr".to_string(),
             "create_session".to_string(),
             "create_preview_lease".to_string(),
             "get_context".to_string(),
             "get_execution".to_string(),
+            "get_pr".to_string(),
             "list_background_helpers".to_string(),
             "list_all_messages".to_string(),
             "list_pollers".to_string(),
+            "list_pr_checks".to_string(),
             "list_preview_leases".to_string(),
             "list_recent_messages".to_string(),
             "list_reauth_runs".to_string(),
             "list_reauth_targets".to_string(),
             "list_sessions".to_string(),
+            "merge_pr".to_string(),
             "reauthenticate".to_string(),
             "refresh_mcp_tools".to_string(),
             "restart_session".to_string(),
@@ -650,6 +727,7 @@ pub(crate) mod tests {
             "stop_background_helper".to_string(),
             "stop_poller".to_string(),
             "stop_preview_lease".to_string(),
+            "update_pr".to_string(),
             "update_session".to_string(),
             "update_workspace".to_string(),
         ]);
@@ -663,6 +741,15 @@ pub(crate) mod tests {
 
         assert!(actual.contains("list_workspaces"));
         assert!(actual.contains("delete_workspace"));
+        for tool in [
+            "create_pr",
+            "get_pr",
+            "list_pr_checks",
+            "merge_pr",
+            "update_pr",
+        ] {
+            assert!(actual.contains(tool), "{tool}");
+        }
         assert!(!actual.contains("output_markdown"));
     }
 
@@ -737,6 +824,83 @@ pub(crate) mod tests {
             McpServer::select_unique_issue_match(&[Uuid::new_v4(), Uuid::new_v4()], "VAS-64")
                 .unwrap_err();
         assert!(error.to_string().contains("multiple projects"));
+    }
+
+    fn decode_err(status: u16, content_type: Option<&str>, body: &str) -> super::ToolError {
+        super::decode_envelope::<serde_json::Value>(
+            reqwest::StatusCode::from_u16(status).unwrap(),
+            content_type,
+            body.as_bytes(),
+        )
+        .unwrap_err()
+    }
+
+    #[test]
+    fn proxy_html_error_reaches_the_agent_with_status_type_and_excerpt() {
+        let error = decode_err(
+            502,
+            Some("text/html; charset=UTF-8"),
+            "<html>\n  <head><title>502 Bad Gateway</title></head>\n</html>",
+        );
+        assert_eq!(
+            error.message,
+            "VK API returned error status: 502 Bad Gateway"
+        );
+        let details = error.details.unwrap();
+        assert!(details.contains("content-type: text/html"), "{details}");
+        assert!(
+            details.contains("<html> <head><title>502 Bad Gateway</title></head> </html>"),
+            "{details}"
+        );
+    }
+
+    #[test]
+    fn success_status_with_html_body_is_named_non_json() {
+        let error = decode_err(200, Some("text/html"), "<html>login</html>");
+        assert!(
+            error.message.contains("expected JSON, got text/html"),
+            "{}",
+            error.message
+        );
+        assert!(error.details.unwrap().contains("<html>login</html>"));
+    }
+
+    #[test]
+    fn typed_error_without_message_is_not_unknown_error() {
+        let error = decode_err(
+            200,
+            Some("application/json"),
+            r#"{"success":false,"data":null,"message":null,"error_data":{"type":"target_branch_not_found","branch":"main"}}"#,
+        );
+        assert_eq!(error.message, "VK API returned error");
+        let details = error.details.unwrap();
+        assert!(details.contains("target_branch_not_found"), "{details}");
+        assert_ne!(details, "Unknown error");
+
+        let with_message = decode_err(
+            400,
+            Some("application/json"),
+            r#"{"success":false,"message":"checks are failing: lint","error_data":{"type":"merge_refused"}}"#,
+        );
+        assert_eq!(with_message.details.unwrap(), "checks are failing: lint");
+    }
+
+    #[test]
+    fn body_excerpt_is_bounded() {
+        let long = "x ".repeat(2_000);
+        let excerpt = super::body_excerpt(long.as_bytes());
+        assert_eq!(excerpt.chars().count(), super::BODY_EXCERPT_LIMIT + 1);
+        assert!(excerpt.ends_with('…'));
+        assert_eq!(super::body_excerpt(b"  a \n\t b "), "a b");
+    }
+
+    #[test]
+    fn empty_error_body_says_so() {
+        let error = decode_err(503, None, "");
+        assert_eq!(
+            error.details.unwrap(),
+            "content-type: <none>; body: <empty>"
+        );
     }
 
     #[test]

@@ -10,8 +10,11 @@ use async_trait::async_trait;
 use detection::detect_provider_from_url;
 use enum_dispatch::enum_dispatch;
 pub use types::{
-    CreatePrRequest, GitHostError, PrComment, PrCommentAuthor, PrReviewComment, ProviderKind,
-    PullRequestDetail, ReviewCommentUser, UnifiedPrComment,
+    CheckSource, ChecksOverall, CreatePrRequest, GitHostError, MergeMethod, MergeOutcome,
+    MergeRefusal, PrCheck, PrChecks, PrComment, PrCommentAuthor, PrReference, PrReviewComment,
+    PrState, ProviderKind, PullRequestDetail, ReviewCommentUser, SourceCoverage, SourceRead,
+    SourceState, UnifiedPrComment, UpdatePrFields, aggregate_checks, merge_gate,
+    parse_pr_reference, same_repo,
 };
 
 use self::{azure::AzureDevOpsProvider, github::GitHubProvider};
@@ -49,6 +52,62 @@ pub trait GitHostProvider: Send + Sync {
     ) -> Result<Vec<PullRequestDetail>, GitHostError>;
 
     fn provider_kind(&self) -> ProviderKind;
+
+    // PR management. Providers without an implementation report
+    // `UnsupportedProvider` rather than failing in a provider-specific way.
+
+    /// Canonical `(host, owner, repo)` of `remote_url`, used to refuse PR URLs
+    /// that belong to another repository or host.
+    async fn repo_identity(
+        &self,
+        _repo_path: &Path,
+        _remote_url: &str,
+    ) -> Result<(String, String, String), GitHostError> {
+        Err(GitHostError::UnsupportedProvider)
+    }
+
+    async fn get_pr_state(
+        &self,
+        _repo_path: &Path,
+        _remote_url: &str,
+        _number: i64,
+    ) -> Result<PrState, GitHostError> {
+        Err(GitHostError::UnsupportedProvider)
+    }
+
+    /// Checks for `head_sha`, reporting per-source coverage.
+    async fn list_pr_checks(
+        &self,
+        _repo_path: &Path,
+        _remote_url: &str,
+        _head_sha: &str,
+    ) -> Result<PrChecks, GitHostError> {
+        Err(GitHostError::UnsupportedProvider)
+    }
+
+    /// Merge exactly `head_sha`. `delete_branch` names the remote head branch
+    /// to delete afterwards (best effort, reported in the outcome).
+    async fn merge_pr(
+        &self,
+        _repo_path: &Path,
+        _remote_url: &str,
+        _number: i64,
+        _method: MergeMethod,
+        _head_sha: &str,
+        _delete_branch: Option<&str>,
+    ) -> Result<MergeOutcome, GitHostError> {
+        Err(GitHostError::UnsupportedProvider)
+    }
+
+    async fn update_pr(
+        &self,
+        _repo_path: &Path,
+        _remote_url: &str,
+        _number: i64,
+        _fields: &UpdatePrFields,
+    ) -> Result<(), GitHostError> {
+        Err(GitHostError::UnsupportedProvider)
+    }
 }
 
 #[enum_dispatch]
