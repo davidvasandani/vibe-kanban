@@ -239,6 +239,8 @@ export type WorkspaceSortOrder = 'asc' | 'desc';
 export type WorkspaceFilterState = {
   projectIds: string[]; // remote project IDs
   prFilter: WorkspacePrFilter;
+  // Normalized issue status names to hide (may include the no-issue sentinel)
+  hiddenIssueStatusNames: string[];
 };
 
 export type WorkspaceSortState = {
@@ -249,6 +251,7 @@ export type WorkspaceSortState = {
 const DEFAULT_WORKSPACE_FILTER_STATE: WorkspaceFilterState = {
   projectIds: [],
   prFilter: 'all',
+  hiddenIssueStatusNames: [],
 };
 
 const DEFAULT_WORKSPACE_SORT_STATE: WorkspaceSortState = {
@@ -473,6 +476,7 @@ type State = {
   // Workspace sidebar filter actions
   setWorkspaceProjectFilter: (projectIds: string[]) => void;
   setWorkspacePrFilter: (prFilter: WorkspacePrFilter) => void;
+  setWorkspaceHiddenIssueStatusFilter: (names: string[]) => void;
   clearWorkspaceFilters: () => void;
   setWorkspaceSortBy: (sortBy: WorkspaceSortBy) => void;
   setWorkspaceSortOrder: (sortOrder: WorkspaceSortOrder) => void;
@@ -853,6 +857,11 @@ export const useUiPreferencesStore = create<State>()((set, get) => ({
   setWorkspacePrFilter: (prFilter) =>
     set((s) => ({
       workspaceFilters: { ...s.workspaceFilters, prFilter },
+    })),
+
+  setWorkspaceHiddenIssueStatusFilter: (hiddenIssueStatusNames) =>
+    set((s) => ({
+      workspaceFilters: { ...s.workspaceFilters, hiddenIssueStatusNames },
     })),
 
   clearWorkspaceFilters: () =>

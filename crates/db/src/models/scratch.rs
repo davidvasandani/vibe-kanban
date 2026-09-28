@@ -118,6 +118,43 @@ pub struct WorkspaceFilterStateData {
     pub project_ids: Vec<String>,
     #[serde(default)]
     pub pr_filter: WorkspacePrFilterData,
+    /// Issue statuses whose workspaces are hidden, stored by normalized
+    /// (trimmed, lower-cased) name since status ids are per-project and this
+    /// preference is global. May include the `__no_issue__` sentinel.
+    #[serde(default)]
+    pub hidden_issue_status_names: Vec<String>,
+}
+
+#[cfg(test)]
+mod workspace_filter_state_tests {
+    use super::WorkspaceFilterStateData;
+
+    #[test]
+    fn deserializes_legacy_filters_without_hidden_issue_statuses() {
+        let filters: WorkspaceFilterStateData =
+            serde_json::from_str(r#"{"project_ids":["p1"],"pr_filter":"has_pr"}"#)
+                .expect("legacy workspace filters should remain valid");
+
+        assert_eq!(filters.project_ids, vec!["p1".to_string()]);
+        assert!(filters.hidden_issue_status_names.is_empty());
+    }
+
+    #[test]
+    fn preserves_hidden_issue_status_names() {
+        let filters: WorkspaceFilterStateData = serde_json::from_str(
+            r#"{"project_ids":[],"pr_filter":"all","hidden_issue_status_names":["in review","__no_issue__"]}"#,
+        )
+        .expect("filters should deserialize");
+
+        let json = serde_json::to_string(&filters).expect("filters should serialize");
+        let restored: WorkspaceFilterStateData =
+            serde_json::from_str(&json).expect("filters should deserialize");
+
+        assert_eq!(
+            restored.hidden_issue_status_names,
+            vec!["in review".to_string(), "__no_issue__".to_string()]
+        );
+    }
 }
 
 /// Workspace sidebar sort state

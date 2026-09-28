@@ -1,39 +1,80 @@
-# Implementation plan — vk/4643-move-settings-to
+# Implementation plan — vk/4dac-filter-workspace
 
-See `SPEC.md` and `PRIOR_KNOWLEDGE.md`.
+Spec: `SPEC.md`. Prior knowledge: `PRIOR_KNOWLEDGE.md`.
 
-1. **Store.** Add `packages/web-core/src/shared/stores/useSettingsDrawerStore.ts`
-   (zustand). It holds:
-   - `isOpen`, `width`, `requestClose`
-   - `setOpen`, `setWidth` (clamped, persisted to
-     `localStorage['vibe.ui.settingsDrawerWidth']`), `registerCloseRequest`
-   - `clampSettingsDrawerWidth(width, viewport)`, exported
-   - `useSettingsDrawerInset(isMobile)`
-   - Vitest: `useSettingsDrawerStore.test.ts`
-2. **Drawer rendering.** Rewrite the chrome of `SettingsDialogContent` in
-   `SettingsDialog.tsx`:
-   - Remove the overlay.
-   - On desktop, render a fixed right drawer at `z-[90]` with a left-edge
-     resize handle (pointer drag) and `border-l`. On mobile, keep the
-     full-screen sheet.
-   - Narrow the nav column to `md:w-48`.
-   - Scope Escape to the drawer (`onKeyDown` on the drawer, skipping
-     `defaultPrevented`).
-   - Register `handleCloseWithConfirmation` as the store's `requestClose`.
-     Set `isOpen` on mount and clear it on unmount.
-   - React to changes in the `initialSection`/`initialState` props (re-show
-     while open).
-3. **Toggle.** Export `toggleSettingsDrawer()` from `SettingsDialog.tsx`.
-   `Actions.Settings.execute` calls it, and `isActive` reads
-   `ctx.isSettingsOpen`. Add `isSettingsOpen` to `ActionVisibilityContext` and
-   its type. Point the remote gear handlers (`RemoteAppShell`,
-   `RemoteNavbarContainer`) and the no-arg remote action override at the
-   toggle.
-4. **Layout inset.** Apply `marginRight: useSettingsDrawerInset()` (with a
-   width transition) to the desktop root of `SharedAppLayout.tsx` and
-   `RemoteAppShell.tsx`.
-5. **Verify.** Run web-core vitest, `pnpm run check`, `pnpm run lint` and
-   `pnpm run format`. Then do a manual browser check with the local dev server
-   if one is available.
-6. **Review, knowledge base, PR.** Get a Codex review, update the wiki page,
-   then open the PR and merge it.
+## 1. Persisted preference (Rust + generated types)
+
+- `crates/db/src/models/scratch.rs`: add
+  `#[serde(default)] pub hidden_issue_status_names: Vec<String>` to
+  `WorkspaceFilterStateData`.
+- Add a unit test: an older payload without the field deserializes with an
+  empty vec, and a payload with the field round-trips.
+- `pnpm run generate-types` to update `shared/types.ts`. Never hand-edit it.
+
+## 2. Store + scratch sync (web-core)
+
+- `useUiPreferencesStore.ts`: add `hiddenIssueStatusNames: string[]` to
+  `WorkspaceFilterState` and its default, plus the
+  `setWorkspaceHiddenIssueStatusFilter(names)` action. `clearWorkspaceFilters`
+  already resets to the default.
+- `useUiPreferencesScratch.ts`: map `hidden_issue_status_names` in
+  `storeToScratchData` and `scratchDataToStore`, with a `?? []` fallback.
+
+## 3. Pure logic (new `pages/workspaces/workspaceSidebarFilters.ts`)
+
+- `normalizeStatusName(name)`: trims and lower-cases.
+- `NO_ISSUE_STATUS_FILTER = '__no_issue__'`.
+- `buildIssueStatusFilterOptions(statuses, hiddenNames)`: dedupes by
+  normalized name, keeps the first-seen display label, orders by lowest
+  `sort_order` then label, and appends hidden names that are missing from the
+  data. The UI prepends a **No issue** option.
+- `filterSidebarWorkspaces(workspaces, criteria)`: one function for both the
+  active and the archived list. It applies project, PR, issue status and
+  search, and replaces the two duplicated `useMemo` blocks in
+  `WorkspacesSidebarContainer`. The criteria come in as plain lookups:
+  `remoteByLocalId: Map<localId, {projectId, issueId}>` and
+  `issueStatusNameById: Map<issueId, normalizedName>`.
+- Tests in `workspaceSidebarFilters.test.ts`: hide by name across projects,
+  case-insensitivity, fail open (no remote record, issue not loaded, status
+  unknown), **No issue** (both `issue_id = null` and no remote record), AND
+  composition with the project, PR and search filters, and options
+  dedupe / order / stale hidden names. Pair each absence assertion with a
+  positive case.
+
+## 4. Data hook (new `pages/workspaces/useProjectsIssueStatuses.ts`)
+
+- Input: `projectIds: string[]` and `enabled`. For each project it subscribes
+  to `PROJECT_ISSUES_SHAPE` and `PROJECT_PROJECT_STATUSES_SHAPE` through
+  `createShapeCollection` + `subscribeChanges`, the same way
+  `useAllOrganizationProjects` does.
+- Output: `statuses: ProjectStatus[]` and
+  `issueStatusNameById: Map<issueId, normalizedName>`.
+- Keys the effect by a sorted, joined project-id string, so identity churn
+  doesn't resubscribe.
+
+## 5. UI (`WorkspacesSidebarContainer.tsx`)
+
+- Build `remoteByLocalId` from `useUserContext().workspaces`, replacing
+  `remoteProjectByLocalId`. The project-group computation still derives
+  project ids from it.
+- `statusDataEnabled = isFilterDialogOpen || hiddenIssueStatusNames.length > 0`.
+- Linked project ids come from the remote workspaces.
+- `WorkspacesFilterDialog`: add a `MultiSelectDropdown` (label "Hide issue
+  status", menu label "Hide workspaces whose issue is…", `EyeSlashIcon`). The
+  selected values are the normalized names being hidden.
+- `hasActiveFilters` includes `hiddenIssueStatusNames.length > 0`.
+- Update the dialog description.
+
+## 6. i18n
+
+- New keys under `kanban.workspaceSidebar`: `issueStatusFilterLabel`,
+  `issueStatusFilterMenuLabel`, `noIssue`. Update `filterDialogDescription`.
+  Add them to all 7 locales.
+
+## 7. Verify
+
+- `pnpm install --frozen-lockfile`, `pnpm run generate-types:check`,
+  `cargo test -p db`, the web-core vitest for the new test,
+  `pnpm run check`, `pnpm run lint`, `scripts/check-i18n.sh`,
+  `pnpm run format`.
+- Runtime check: run the app if feasible and confirm the dialog renders.
