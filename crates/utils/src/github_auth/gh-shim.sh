@@ -99,7 +99,9 @@ done
 vk_target=""
 if [ -n "$vk_flag_repo" ]; then
   vk_target=$vk_flag_repo
-elif [ -n "$vk_api" ]; then
+elif [ -n "$vk_api" ] && [ -n "$(vk_owner_of "$vk_api")" ]; then
+  # `repos/{owner}/{repo}` placeholders are filled by gh from the current
+  # repository, so an API path without a literal owner falls through to it.
   vk_target=$vk_api
 elif [ -n "$vk_url" ]; then
   vk_target=$vk_url

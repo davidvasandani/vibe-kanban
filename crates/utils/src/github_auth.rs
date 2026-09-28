@@ -451,6 +451,11 @@ mod tests {
                 "args pass through: {stdout}"
             );
         }
+        // gh fills `{owner}/{repo}` from the current repository.
+        assert_eq!(
+            token_of(&fx.gh(&repo_b, &["api", "repos/{owner}/{repo}/pulls"], &[]).1),
+            TOKEN_B
+        );
         // A configured owner overrides an ambient token.
         assert_eq!(
             token_of(
