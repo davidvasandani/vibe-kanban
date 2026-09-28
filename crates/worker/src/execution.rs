@@ -2726,7 +2726,7 @@ mod tests {
         let mut request = dispatch(
             &workspace,
             "github",
-            "printf '%s|%s|%s' \"$GIT_CONFIG_COUNT\" \"$GIT_CONFIG_KEY_0\" \"${PATH%%:*}\"",
+            "printf '%s|%s' \"${PATH%%:*}\" \"$GIT_CONFIG_PARAMETERS\"",
         );
         request
             .environment
@@ -2754,10 +2754,12 @@ mod tests {
             .collect::<Vec<_>>();
         let output = String::from_utf8_lossy(&output);
         let fields: Vec<_> = output.split('|').collect();
-        assert_eq!(fields[0], "2", "{output}");
-        assert_eq!(fields[1], "credential.https://github.com/org-a.helper");
+        assert!(
+            fields[1].contains("'credential.https://github.com/org-a.helper="),
+            "{output}"
+        );
         assert_eq!(
-            std::path::Path::new(fields[2]),
+            std::path::Path::new(fields[0]),
             utils::assets::github_auth_bin_dir()
         );
         assert!(!output.contains("synthetic-token"));

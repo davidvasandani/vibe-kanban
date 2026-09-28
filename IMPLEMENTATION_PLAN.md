@@ -60,13 +60,13 @@ Spec: `SPEC.md`. Prior knowledge: `PRIOR_KNOWLEDGE.md`. SpecKit artifacts:
   `Option<Vec<(String, String)>>`. It returns `None` unless
   `VK_GITHUB_ROUTED_OWNERS` is non-empty. Otherwise it returns:
   - `PATH` = the shim directory prepended through `merge_paths`;
-  - `GIT_CONFIG_COUNT` plus `GIT_CONFIG_KEY_n`/`VALUE_n`, continuing after
-    any existing count taken from the env map or the inherited process env. For
+  - `GIT_CONFIG_PARAMETERS` (sq-quoted `'key=value'` entries, appended after
+    any existing value from the env map or the inherited process env). For
     each owner variant (as entered, lowercased, deduped) this is a reset
     followed by an inline helper `!f(){ test "$1" = get || return 0; test -n
     "$VK_GITHUB_PAT_X" || return 0; printf 'username=x-access-token\n
-    password=%s\n' "$VK_GITHUB_PAT_X"; }; f`. An invalid existing count means
-    no git routing and a warning; the shim still applies.
+    password=%s\n' "$VK_GITHUB_PAT_X"; }; f`. Every variable name avoids
+    KEY/SECRET/TOKEN so agent-side secret-name filters keep it.
 - `apply_github_routing(env: &mut HashMap/BTreeMap)` is a thin wrapper used by
   all four spawn sites, each after its CLI-tools PATH step:
   1. `local-deployment/src/container.rs`, local execution (`env.vars`);
@@ -133,7 +133,7 @@ Spec: `SPEC.md`. Prior knowledge: `PRIOR_KNOWLEDGE.md`. SpecKit artifacts:
 - `cargo test -p utils github_auth`: shim tests with a fake `gh` that prints
   `GH_TOKEN`, covering every precedence form, an unconfigured owner, an empty
   token (78), a missing real `gh` (127), and no recursion. Git tests run
-  `git credential fill` with the generated `GIT_CONFIG_*` and a temporary HOME.
+  `git credential fill` with the generated `GIT_CONFIG_PARAMETERS` and a temporary HOME.
 - `cargo test -p services github_owner_tokens`: validation, normalization, the
   encrypted round trip, list redaction, and launch env with a fake `op`.
 - `cargo test -p db`, `-p worker`, `-p local-deployment`, and `-p server` for

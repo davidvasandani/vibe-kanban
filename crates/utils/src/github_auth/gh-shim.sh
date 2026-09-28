@@ -131,6 +131,7 @@ for vk_arg do
     case "$vk_arg" in
       repos/*/*) vk_api=${vk_arg#repos/} ;;
       /repos/*/*) vk_api=${vk_arg#/repos/} ;;
+      https://api.github.com/repos/*/*) vk_api=${vk_arg#https://api.github.com/repos/} ;;
     esac
   fi
   if [ -z "$vk_url" ] && [ -z "$vk_is_value" ]; then

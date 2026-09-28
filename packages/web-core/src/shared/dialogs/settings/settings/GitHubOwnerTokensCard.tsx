@@ -51,7 +51,11 @@ export function GitHubOwnerTokensCard() {
     return machineClient;
   };
 
-  const { data: tokens = [], isLoading } = useQuery({
+  const {
+    data: tokens = [],
+    isLoading,
+    error: loadError,
+  } = useQuery({
     queryKey,
     queryFn: () => client().listGitHubOwnerTokens(),
     enabled: machineClient != null,
@@ -138,6 +142,13 @@ export function GitHubOwnerTokensCard() {
         <div className="flex items-center justify-center py-4 gap-2">
           <SpinnerIcon className="size-icon-sm animate-spin" />
           <span className="text-sm text-low">Loading…</span>
+        </div>
+      ) : loadError ? (
+        // Never show a failed load as "no tokens": configured owners may be
+        // blocking launches while the list cannot be read.
+        <div className="bg-error/10 border border-error/50 rounded-sm p-3 text-error text-sm">
+          Could not load GitHub organization tokens:{' '}
+          {loadError instanceof Error ? loadError.message : 'Request failed'}
         </div>
       ) : tokens.length === 0 ? (
         <div className="text-sm text-low">No GitHub organization tokens.</div>

@@ -68,11 +68,11 @@ Different owners never share a PAT, and nothing collides in `GH_TOKEN`.
   environment just before spawn:
   - it prepends a node-local, app-owned shim directory containing `gh` to
     `PATH`;
-  - it appends owner-scoped Git config through `GIT_CONFIG_COUNT`/`KEY_n`/
-    `VALUE_n`. For each owner this is
+  - it appends owner-scoped Git config to `GIT_CONFIG_PARAMETERS`, after any
+    existing entries. For each owner this is
     `credential.https://github.com/<owner>.helper` = reset, then an inline
-    helper that prints that owner's token variable. It continues after any
-    `GIT_CONFIG_*` entries that already exist.
+    helper that prints that owner's token variable. `GIT_CONFIG_COUNT` is not
+    used, because Codex drops `*KEY*` variable names and git then fails.
 - With nothing configured, launches are unchanged: no shim on `PATH`, no extra
   variables.
 

@@ -157,6 +157,36 @@ describe('GitHubOwnerTokensCard', () => {
     );
   });
 
+  it('reports a failed load instead of an empty list', async () => {
+    act(() => root.unmount());
+    client.listGitHubOwnerTokens.mockRejectedValue(
+      new Error('The GitHub token encryption key is unavailable')
+    );
+    root = createRoot(container);
+    act(() =>
+      root.render(
+        <QueryClientProvider
+          client={
+            new QueryClient({ defaultOptions: { queries: { retry: false } } })
+          }
+        >
+          <GitHubOwnerTokensCard />
+        </QueryClientProvider>
+      )
+    );
+    for (
+      let i = 0;
+      i < 50 && !container.textContent?.includes('Could not load');
+      i++
+    ) {
+      await flush();
+    }
+    expect(container.textContent).toContain('encryption key is unavailable');
+    expect(container.textContent).not.toContain(
+      'No GitHub organization tokens'
+    );
+  });
+
   it('owner pattern matches GitHub login rules', () => {
     for (const valid of ['a', 'Org-A', 'x'.repeat(39)]) {
       expect(GITHUB_OWNER_PATTERN.test(valid)).toBe(true);

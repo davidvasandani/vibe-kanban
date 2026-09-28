@@ -7,7 +7,7 @@
 //!
 //! - prepends a host-local `gh` shim directory to `PATH`, so each `gh`
 //!   invocation gets the PAT of the owner it targets; and
-//! - appends owner-scoped Git credential helpers through `GIT_CONFIG_*`, so
+//! - appends owner-scoped Git credential helpers through `GIT_CONFIG_PARAMETERS`, so
 //!   HTTPS Git operations under `https://github.com/<owner>/` use that PAT.
 //!
 //! With no owners configured this is a no-op. Values are read by name at
@@ -87,7 +87,7 @@ impl EnvMap for BTreeMap<String, String> {
 }
 
 /// Add GitHub owner routing to `env` when owners are configured. Values the
-/// child would inherit from this process (`PATH`, `GIT_CONFIG_COUNT`) are read
+/// child would inherit from this process (`PATH`, `GIT_CONFIG_PARAMETERS`) are read
 /// from the map first and then from this process's environment.
 pub fn apply_github_routing<M: EnvMap>(env: &mut M) {
     let Some(owners) = env.env_get(OWNERS_ENV).map(str::to_owned) else {
@@ -138,16 +138,11 @@ pub fn routing_environment(
         let path = merge_paths(shim_dir.as_os_str(), &inherited);
         additions.push(("PATH".to_owned(), path.to_string_lossy().into_owned()));
     }
-    let start = match lookup("GIT_CONFIG_COUNT") {
-        None => Some(0),
-        Some(count) if count.trim().is_empty() => Some(0),
-        Some(count) => count.trim().parse::<usize>().ok(),
-    };
-    let Some(start) = start else {
-        tracing::warn!("GIT_CONFIG_COUNT is not a number; skipping GitHub owner routing for Git");
-        return additions;
-    };
-    let mut index = start;
+    // `GIT_CONFIG_PARAMETERS` is how git itself passes `-c` settings to child
+    // processes. It is used instead of `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`:
+    // agent CLIs that drop `*KEY*` variables (Codex's default shell policy)
+    // would keep the count but lose the keys, and git then refuses to run.
+    let mut parameters = Vec::new();
     for owner in owners {
         let helper = credential_helper(&token_env_name(owner));
         let mut spellings = vec![owner.to_owned()];
@@ -159,15 +154,26 @@ pub fn routing_environment(
             let key = format!("credential.https://github.com/{spelling}.helper");
             // An empty value resets helpers inherited from system/global
             // config for this URL prefix only; the next entry adds ours.
-            for value in [String::new(), helper.clone()] {
-                additions.push((format!("GIT_CONFIG_KEY_{index}"), key.clone()));
-                additions.push((format!("GIT_CONFIG_VALUE_{index}"), value));
-                index += 1;
+            for value in ["", helper.as_str()] {
+                parameters.push(sq_quote(&format!("{key}={value}")));
             }
         }
     }
-    additions.push(("GIT_CONFIG_COUNT".to_owned(), index.to_string()));
+    let ours = parameters.join(" ");
+    // Existing `-c` settings stay; ours come later, so they win for our keys.
+    let value = match lookup(GIT_CONFIG_PARAMETERS) {
+        Some(existing) if !existing.trim().is_empty() => format!("{existing} {ours}"),
+        _ => ours,
+    };
+    additions.push((GIT_CONFIG_PARAMETERS.to_owned(), value));
     additions
+}
+
+const GIT_CONFIG_PARAMETERS: &str = "GIT_CONFIG_PARAMETERS";
+
+/// Quote `value` the way git's `sq_quote` does, for `GIT_CONFIG_PARAMETERS`.
+fn sq_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 /// Inline Git credential helper printing the token held in `variable`. Only
@@ -367,47 +373,53 @@ mod tests {
     }
 
     #[test]
-    fn routing_environment_prepends_shim_and_continues_git_config() {
+    fn routing_environment_prepends_shim_and_appends_git_parameters() {
         let dir = Path::new("/opt/shim");
         let additions: HashMap<_, _> = routing_environment("Org-A,b", Some(dir), |key| match key {
             "PATH" => Some("/usr/bin:/opt/shim".into()),
-            "GIT_CONFIG_COUNT" => Some("2".into()),
+            "GIT_CONFIG_PARAMETERS" => Some("'core.pager=less'".into()),
             _ => None,
         })
         .into_iter()
         .collect();
         assert_eq!(additions["PATH"], "/opt/shim:/usr/bin");
-        // Org-A: two spellings × (reset + helper); b: one spelling.
-        assert_eq!(additions["GIT_CONFIG_COUNT"], "8");
-        assert_eq!(
-            additions["GIT_CONFIG_KEY_2"],
-            "credential.https://github.com/Org-A.helper"
-        );
-        assert_eq!(additions["GIT_CONFIG_VALUE_2"], "");
-        assert!(additions["GIT_CONFIG_VALUE_3"].contains("$VK_GITHUB_PAT_ORG_A"));
-        assert_eq!(
-            additions["GIT_CONFIG_KEY_4"],
-            "credential.https://github.com/org-a.helper"
-        );
-        assert_eq!(
-            additions["GIT_CONFIG_KEY_6"],
-            "credential.https://github.com/b.helper"
-        );
-        assert!(!additions.contains_key("GIT_CONFIG_KEY_0"));
+        let parameters = &additions["GIT_CONFIG_PARAMETERS"];
+        // Existing settings are kept first so ours win.
+        assert!(parameters.starts_with("'core.pager=less' "), "{parameters}");
+        for key in [
+            "credential.https://github.com/Org-A.helper",
+            "credential.https://github.com/org-a.helper",
+            "credential.https://github.com/b.helper",
+        ] {
+            // Each spelling gets a reset followed by the helper.
+            assert_eq!(parameters.matches(&format!("'{key}=")).count(), 2, "{key}");
+            assert!(parameters.contains(&format!("'{key}=' ")), "{key} reset");
+        }
+        assert!(parameters.contains("$VK_GITHUB_PAT_ORG_A"));
+        // The helper's own single quotes are sq-escaped.
+        assert!(parameters.contains(r"printf '\''username=x-access-token"));
         for value in additions.values() {
             assert!(!value.contains("synthetic"));
         }
     }
 
     #[test]
-    fn invalid_existing_count_skips_git_but_keeps_shim() {
-        let additions = routing_environment("a", Some(Path::new("/s")), |key| {
-            (key == "GIT_CONFIG_COUNT").then(|| "nope".into())
-        });
-        assert_eq!(additions.len(), 1);
-        assert_eq!(additions[0].0, "PATH");
+    fn routing_names_survive_secret_name_filters() {
+        // Codex's default shell environment policy drops names containing
+        // KEY, SECRET or TOKEN. None of the routing variables may match.
+        let mut names: Vec<String> = routing_environment("a", Some(Path::new("/s")), |_| None)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        names.push(OWNERS_ENV.to_owned());
+        names.push(token_env_name("some-org"));
+        for name in names {
+            let upper = name.to_ascii_uppercase();
+            for word in ["KEY", "SECRET", "TOKEN"] {
+                assert!(!upper.contains(word), "{name} would be filtered");
+            }
+        }
     }
-
     #[test]
     fn shim_write_is_idempotent_and_quotes_directory() {
         let root = tempfile::tempdir().unwrap();
@@ -448,6 +460,7 @@ mod tests {
             &["pr", "view", "1", "--repo=https://github.com/org-b/svc"],
             &["api", "repos/org-b/svc/pulls"],
             &["api", "-X", "GET", "/repos/org-b/svc"],
+            &["api", "https://api.github.com/repos/org-b/svc/pulls"],
             &["pr", "view", "https://github.com/org-b/svc/pull/7"],
             &["repo", "view", "org-b/svc"],
         ] {
