@@ -479,6 +479,11 @@ pub enum ContainerError {
     /// API instead of being rendered as a generic internal error.
     #[error("{0}")]
     SharedStore(String),
+    /// The workspace's sticky worker is not live in the registry. Distinct
+    /// from `Other` so the actionable message reaches the API instead of a
+    /// generic internal error.
+    #[error(transparent)]
+    WorkerUnavailable(#[from] super::cluster::WorkerUnavailable),
     #[error(transparent)]
     Other(#[from] AnyhowError), // Catches any unclassified errors
 }
