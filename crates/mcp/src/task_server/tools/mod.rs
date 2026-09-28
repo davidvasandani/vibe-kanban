@@ -11,7 +11,7 @@ use rmcp::{
     ErrorData,
     model::{CallToolResult, Content},
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use uuid::Uuid;
 

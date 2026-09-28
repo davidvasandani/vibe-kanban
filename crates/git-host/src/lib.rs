@@ -52,6 +52,62 @@ pub trait GitHostProvider: Send + Sync {
     ) -> Result<Vec<PullRequestDetail>, GitHostError>;
 
     fn provider_kind(&self) -> ProviderKind;
+
+    // PR management. Providers without an implementation report
+    // `UnsupportedProvider` rather than failing in a provider-specific way.
+
+    /// Canonical `(owner, repo)` of `remote_url`, used to refuse PR URLs that
+    /// belong to another repository.
+    async fn repo_identity(
+        &self,
+        _repo_path: &Path,
+        _remote_url: &str,
+    ) -> Result<(String, String), GitHostError> {
+        Err(GitHostError::UnsupportedProvider)
+    }
+
+    async fn get_pr_state(
+        &self,
+        _repo_path: &Path,
+        _remote_url: &str,
+        _number: i64,
+    ) -> Result<PrState, GitHostError> {
+        Err(GitHostError::UnsupportedProvider)
+    }
+
+    /// Checks for `head_sha`, reporting per-source coverage.
+    async fn list_pr_checks(
+        &self,
+        _repo_path: &Path,
+        _remote_url: &str,
+        _head_sha: &str,
+    ) -> Result<PrChecks, GitHostError> {
+        Err(GitHostError::UnsupportedProvider)
+    }
+
+    /// Merge exactly `head_sha`. `delete_branch` names the remote head branch
+    /// to delete afterwards (best effort, reported in the outcome).
+    async fn merge_pr(
+        &self,
+        _repo_path: &Path,
+        _remote_url: &str,
+        _number: i64,
+        _method: MergeMethod,
+        _head_sha: &str,
+        _delete_branch: Option<&str>,
+    ) -> Result<MergeOutcome, GitHostError> {
+        Err(GitHostError::UnsupportedProvider)
+    }
+
+    async fn update_pr(
+        &self,
+        _repo_path: &Path,
+        _remote_url: &str,
+        _number: i64,
+        _fields: &UpdatePrFields,
+    ) -> Result<(), GitHostError> {
+        Err(GitHostError::UnsupportedProvider)
+    }
 }
 
 #[enum_dispatch]

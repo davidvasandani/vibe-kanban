@@ -7,15 +7,16 @@ use std::{path::Path, time::Duration};
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
 pub use cli::GhCli;
-use cli::{GhCliError, GitHubRepoInfo};
+use cli::{CheckPage, GhCliError, GitHubRepoInfo};
 use tokio::task;
 use tracing::info;
 
 use crate::{
     GitHostProvider,
     types::{
-        CreatePrRequest, GitHostError, PrComment, PrReviewComment, ProviderKind, PullRequestDetail,
-        UnifiedPrComment,
+        CreatePrRequest, GitHostError, MergeMethod, MergeOutcome, PrChecks, PrComment,
+        PrReviewComment, PrState, ProviderKind, PullRequestDetail, SourceRead, UnifiedPrComment,
+        UpdatePrFields, aggregate_checks,
     },
 };
 
@@ -138,7 +139,10 @@ impl From<GhCliError> for GitHostError {
             },
             GhCliError::CommandFailed(msg) => {
                 let lower = msg.to_ascii_lowercase();
-                if lower.contains("403") || lower.contains("forbidden") {
+                if lower.contains("403")
+                    || lower.contains("forbidden")
+                    || lower.contains("resource not accessible")
+                {
                     GitHostError::InsufficientPermissions(msg.clone())
                 } else if lower.contains("404") || lower.contains("not found") {
                     GitHostError::RepoNotFoundOrNoAccess(msg.clone())
@@ -395,5 +399,148 @@ impl GitHostProvider for GitHubProvider {
 
     fn provider_kind(&self) -> ProviderKind {
         ProviderKind::GitHub
+    }
+
+    async fn repo_identity(
+        &self,
+        repo_path: &Path,
+        remote_url: &str,
+    ) -> Result<(String, String), GitHostError> {
+        let info = self.get_repo_info(remote_url, repo_path).await?;
+        Ok((info.owner, info.repo_name))
+    }
+
+    async fn get_pr_state(
+        &self,
+        repo_path: &Path,
+        remote_url: &str,
+        number: i64,
+    ) -> Result<PrState, GitHostError> {
+        let info = self.get_repo_info(remote_url, repo_path).await?;
+        let (cli, path) = (self.gh_cli.clone(), repo_path.to_path_buf());
+        blocking("reading the PR", move || cli.get_pr_state(&info, number, &path)).await
+    }
+
+    async fn list_pr_checks(
+        &self,
+        repo_path: &Path,
+        remote_url: &str,
+        head_sha: &str,
+    ) -> Result<PrChecks, GitHostError> {
+        let info = self.get_repo_info(remote_url, repo_path).await?;
+        let read = |fetch: fn(&GhCli, &GitHubRepoInfo, &str, &Path) -> Result<CheckPage, GhCliError>| {
+            let (cli, info, sha, path) = (
+                self.gh_cli.clone(),
+                info.clone(),
+                head_sha.to_string(),
+                repo_path.to_path_buf(),
+            );
+            async move {
+                source_read(
+                    blocking("reading checks", move || fetch(&cli, &info, &sha, &path)).await,
+                )
+            }
+        };
+        let check_runs = read(GhCli::list_check_runs).await;
+        let statuses = read(GhCli::get_combined_status).await;
+        // Actions jobs only matter when check runs are unreadable (they are a
+        // subset of check runs), so skip the extra calls otherwise.
+        let actions_jobs = if matches!(check_runs, SourceRead::Ok { .. }) {
+            SourceRead::Error("not read: check runs were readable".to_string())
+        } else {
+            read(GhCli::list_actions_jobs).await
+        };
+        Ok(aggregate_checks(head_sha, check_runs, statuses, actions_jobs))
+    }
+
+    async fn merge_pr(
+        &self,
+        repo_path: &Path,
+        remote_url: &str,
+        number: i64,
+        method: MergeMethod,
+        head_sha: &str,
+        delete_branch: Option<&str>,
+    ) -> Result<MergeOutcome, GitHostError> {
+        let info = self.get_repo_info(remote_url, repo_path).await?;
+        let (cli, merge_info, sha, path) = (
+            self.gh_cli.clone(),
+            info.clone(),
+            head_sha.to_string(),
+            repo_path.to_path_buf(),
+        );
+        // Not retried: a merge is not idempotent from the caller's view, and
+        // the head-SHA guard already turns a race into a clear refusal.
+        let mut outcome = blocking("merging the PR", move || {
+            cli.merge_pr(&merge_info, number, method, &sha, &path)
+        })
+        .await?;
+        if let Some(branch) = delete_branch.filter(|_| outcome.merged) {
+            let (cli, branch, path) = (
+                self.gh_cli.clone(),
+                branch.to_string(),
+                repo_path.to_path_buf(),
+            );
+            match blocking("deleting the branch", move || {
+                cli.delete_remote_branch(&info, &branch, &path)
+            })
+            .await
+            {
+                Ok(()) => outcome.branch_deleted = Some(true),
+                Err(error) => {
+                    outcome.branch_deleted = Some(false);
+                    outcome.branch_delete_error = Some(error.to_string());
+                }
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn update_pr(
+        &self,
+        repo_path: &Path,
+        remote_url: &str,
+        number: i64,
+        fields: &UpdatePrFields,
+    ) -> Result<(), GitHostError> {
+        let info = self.get_repo_info(remote_url, repo_path).await?;
+        if fields.title.is_some() || fields.body.is_some() {
+            let (cli, info, path) = (self.gh_cli.clone(), info.clone(), repo_path.to_path_buf());
+            let (title, body) = (fields.title.clone(), fields.body.clone());
+            blocking("editing the PR", move || {
+                cli.patch_pr(&info, number, title.as_deref(), body.as_deref(), &path)
+            })
+            .await?;
+        }
+        if let Some(ready) = fields.ready_for_review {
+            let (cli, path) = (self.gh_cli.clone(), repo_path.to_path_buf());
+            blocking("changing draft state", move || {
+                cli.set_pr_ready(&info, number, ready, &path)
+            })
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+/// Run a blocking `gh` call off the async runtime and map its error.
+async fn blocking<T: Send + 'static>(
+    what: &str,
+    call: impl FnOnce() -> Result<T, GhCliError> + Send + 'static,
+) -> Result<T, GitHostError> {
+    task::spawn_blocking(call)
+        .await
+        .map_err(|err| {
+            GitHostError::PullRequest(format!("Failed to run the GitHub CLI for {what}: {err}"))
+        })?
+        .map_err(GitHostError::from)
+}
+
+/// A 403 on one check source is a coverage fact, not a failure of the call.
+fn source_read(result: Result<CheckPage, GitHostError>) -> SourceRead {
+    match result {
+        Ok((checks, truncated)) => SourceRead::Ok { checks, truncated },
+        Err(GitHostError::InsufficientPermissions(detail)) => SourceRead::Forbidden(detail),
+        Err(error) => SourceRead::Error(error.to_string()),
     }
 }
