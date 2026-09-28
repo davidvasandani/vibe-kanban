@@ -13,6 +13,7 @@
       "hostSwitchMessage": "You have unsaved changes for the current host. Switching hosts will discard those drafts."
     },
     "layout": {
+      "resizeDrawer": "설정 크기 조정",
       "nav": {
         "title": "설정",
         "general": "일반",

@@ -21,7 +21,10 @@ import {
   resolveLabel,
   type ProjectMutations,
 } from "@/shared/types/actions";
-import { SettingsDialog } from "@/shared/dialogs/settings/SettingsDialog";
+import {
+  SettingsDialog,
+  toggleSettingsDrawer,
+} from "@/shared/dialogs/settings/SettingsDialog";
 import { useAppNavigation } from "@/shared/hooks/useAppNavigation";
 import { useAppRuntime } from "@/shared/hooks/useAppRuntime";
 import { useOrganizationStore } from "@/shared/stores/useOrganizationStore";
@@ -153,7 +156,7 @@ export function RemoteActionsProvider({
   const executeAction = useCallback(
     async (action: ActionDefinition): Promise<void> => {
       if (action.id === "settings") {
-        await SettingsDialog.show({
+        await toggleSettingsDrawer({
           initialSection: "organizations",
         });
         return;

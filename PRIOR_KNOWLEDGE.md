@@ -1,75 +1,45 @@
-# Prior knowledge — vk/80c1-tasks-should-sur
+# Prior knowledge — vk/4643-move-settings-to
 
-Distilled from the VK wiki (`wiki/`), the homelab knowledge base
-(`homelab/knowledge-base/`), prior SpecKit research, and the homelab
-constitution. Read-only recall; nothing below was changed by this stage.
+Sources searched: `wiki/INDEX.md` and its pages, plus
+`docs/knowledge-base/INDEX.md` and its pages, for "settings", "drawer",
+"modal" and "dialog". No page covers how the Settings surface itself is laid
+out. The pages below are the closest matches.
 
-## Already survives a restart (reuse, don't reinvent)
+## What applies
 
-- **Persistent processes** (dev servers, background helpers, pollers) running
-  on the coordinator are detached on shutdown (`detach_execution_for_handoff`)
-  and re-adopted by `pgid` on boot (`try_adopt_execution`)
-  — `wiki/agent-process-lifecycle.md` "What already survives restarts",
-  `wiki/vk-pollers.md` "A poller is a background helper, deliberately".
-- A poller's **deadline lives in its own process group** (a watchdog), so
-  re-adoption preserves it. A server-owned timer would reset on restart
-  (`wiki/vk-pollers.md`, "A deadline belongs to the process group").
-- **Interrupted coding-agent turns** get `Interrupted` status, a WIP commit,
-  and an optional one-shot resume on boot (`resume_interrupted_on_startup`,
-  default off; a resume is never itself resumed).
-- The **worker drain** is in the homelab distributor
-  (`modules/vibe-kanban-rebuild.nix` ~3257-3506). SIGUSR1 closes admission;
-  the worker restarts only while `/health.drain_safe`, i.e. no active job
-  (pollers included); SIGUSR2 reopens it. This protects "coordinator soft
-  restarts" from worker replacement.
+- **`wiki/flexible-collapsible-panel-stacks.md`** covers the workspace right
+  drawer (`RightSidebar.tsx`):
+  - `RightSidebar` is shared between the desktop drawer and the mobile `git`
+    tab. Desktop-only chrome has to be opted into by the layout mount.
+  - Every ancestor in a height-constrained stack needs `min-h-0`.
+  - **Implication:** Settings should not go into `RightSidebar`. It is a fixed
+    300px, workspace-only, mobile-shared stack, and Settings must open from
+    every route. Build an app-shell-level drawer instead.
+- **`docs/knowledge-base/nested-flex-scroll-containment.md`:** in a fixed
+  header plus scrolling body, the shell is `flex flex-col h-full`, the header
+  is `shrink-0`, and the body is `min-h-0 flex-1 overflow-y-auto`. The drawer
+  gets a definite height from `fixed inset-y-0`. Keep the existing section
+  scroll owner (the content column's `overflow-y-auto`).
+- **`docs/knowledge-base/pipeline-settings-editor.md`** (Settings host
+  switching):
+  - Dirty-state confirmation is global across sections.
+  - The host-scoped subtree is keyed by the selected host.
+  - Drawer changes must keep `SettingsDirtyProvider` / `SettingsHostProvider`
+    wrapping and the close-with-confirmation flow untouched.
+- **`docs/knowledge-base/remote-machine-management.md`:** removing the route's
+  active host closes Settings through the section's `onClose` prop. The drawer
+  must keep passing `onClose` into sections.
+- **`wiki/appbar-rail-and-org-tiles.md`:** the AppBar rail (remote) holds a
+  settings gear. It calls `SettingsDialog.show()` like the other entry points,
+  so as long as that API stays the same those entry points need no changes.
 
-## Deferred designs, and why
+## Gotchas found while scouting the code
 
-- Tier-3 restart survival for **coordinator-local** agents was deferred
-  (`homelab/specs/vk/1a64-coding-agent-pro/research.md`). The options are
-  exec-in-place upgrade and a supervisor/runner split. The cluster worker
-  already *is* a runner split for worker-placed workspaces. So the cheap,
-  correct fix is to stop the coordinator undoing that split.
-- A VK-owned wake-up scheduler (VAS-283 option B) is out of scope and must not
-  be reopened incidentally (`wiki/vk-pollers.md`).
-
-## Cluster protocol facts that constrain the design
-
-- Worker output is an in-memory **ring-buffer journal**, capacity 4096 events
-  (`crates/worker/src/journal.rs`, `DEFAULT_JOURNAL_CAPACITY`). Acknowledgement
-  does not trim it. A replay past the trimmed front returns a replay gap.
-- The coordinator persists the acknowledged cursor
-  (`execution_worker_jobs.last_event_sequence`). The tracker acknowledges only
-  after pushing to the MsgStore, and never acknowledges terminal events until
-  the process row is persisted (`wiki/worker-journal-agent-stream-boundary.md`,
-  and `container.rs`).
-- Only worker `Stdout` bytes and `LogMsg::Stdout` may reach agent stdout.
-  `Structured` metadata goes through `classify_worker_structured`
-  (constitution IX 0.37.0).
-- A worker lease proves process liveness, not turn liveness, for
-  signal-driven executors (`wiki/agent-process-lifecycle.md`).
-- `finalize_task` is the single convergence point for notifications and the
-  auto-remediation trigger. `Interrupted`/`Killed`/`Indeterminate` never
-  trigger remediation (`wiki/auto-error-remediation.md`).
-- A worker restart interrupts its jobs rather than resuming them
-  (`crates/worker/src/lib.rs`, recovery comment).
-
-## Governing principles
-
-- homelab constitution 6 (explicit, actionable failures; level-triggered
-  reconciliation). Principle 89: a fast restart still destroys every in-flight
-  session, so fix it at the boundary we own. Principle 90 (probes). Principle
-  126 (a deploy restarts a service; it does not take it down).
-- homelab constitution entry "Vibe Kanban worker recovery (vk/611f)": preserve
-  active processes and document maintenance stops.
-- VK repo rule: the dispatch and re-attach log pipelines must not diverge. A
-  second resolution rule for the same fact is a recurring defect class
-  (`wiki/vk-pollers.md`, "`PollerSpec` is retained, not re-derived").
-
-## Gaps found (no prior page covers them)
-
-- Coordinator shutdown **cancels** worker jobs (`kill_all_running_processes`
-  → `stop_execution`).
-- No re-attach of worker trackers after boot. Worker-owned rows that were left
-  `Running` are orphaned. Boot reconcile writes terminal evidence without
-  finalization.
+- The dialog/overlay z-layers in `@vibe/ui` are 9998/9999, and dropdowns are
+  10000. A non-modal drawer should sit below 9998 so that the confirm dialogs
+  and dropdowns opened from Settings still stack above it.
+- `Scope.SETTINGS` in `keyboard/registry.ts` is declared but not used.
+  Settings' Escape handling is a hand-rolled `window` listener, and a
+  non-modal drawer has to scope it to focus inside the drawer.
+- About 20 call sites use `SettingsDialog.show(...)`, and some of them `await`
+  it. Keep the nice-modal API.

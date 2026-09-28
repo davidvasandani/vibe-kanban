@@ -72,7 +72,10 @@ import { EditorSelectionDialog } from '@/shared/dialogs/command-bar/EditorSelect
 import { StartReviewDialog } from '@/shared/dialogs/command-bar/StartReviewDialog';
 import posthog from 'posthog-js';
 import { WorkspacesGuideDialog } from '@/shared/dialogs/shared/WorkspacesGuideDialog';
-import { SettingsDialog } from '@/shared/dialogs/settings/SettingsDialog';
+import {
+  SettingsDialog,
+  toggleSettingsDrawer,
+} from '@/shared/dialogs/settings/SettingsDialog';
 import { CreateWorkspaceFromPrDialog } from '@/shared/dialogs/command-bar/CreateWorkspaceFromPrDialog';
 import { buildWorkspaceCreateInitialState } from '@/shared/lib/workspaceCreateState';
 import { setCreateModeSeedState } from '@/features/create-mode/model/createModeSeedStore';
@@ -420,8 +423,9 @@ export const Actions = {
     shortcut: 'G S',
     requiresTarget: ActionTargetType.NONE,
     execute: async () => {
-      await SettingsDialog.show();
+      await toggleSettingsDrawer();
     },
+    isActive: (ctx) => ctx.isSettingsOpen,
   },
 
   ProjectSettings: {

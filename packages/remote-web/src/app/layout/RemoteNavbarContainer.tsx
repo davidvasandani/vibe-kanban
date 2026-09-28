@@ -6,7 +6,7 @@ import {
   type MobileTabId,
   type NavbarSectionItem,
 } from "@vibe/ui/components/Navbar";
-import { SettingsDialog } from "@/shared/dialogs/settings/SettingsDialog";
+import { toggleSettingsDrawer } from "@/shared/dialogs/settings/SettingsDialog";
 import { CommandBarDialog } from "@/shared/dialogs/command-bar/CommandBarDialog";
 import { useMobileActiveTab } from "@/shared/stores/useUiPreferencesStore";
 import { useMobileWorkspaceTitle } from "@remote/shared/stores/useMobileWorkspaceTitle";
@@ -207,7 +207,7 @@ export function RemoteNavbarContainer({
   }, [navigate, hostId, isOnProjectPage, projectId, isOnWorkspaceView]);
 
   const handleOpenSettings = useCallback(() => {
-    SettingsDialog.show();
+    void toggleSettingsDrawer();
   }, []);
 
   const handleOpenCommandBar = useCallback(() => {

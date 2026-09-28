@@ -27,7 +27,11 @@ import { useOrgRailStore } from "@/shared/stores/useOrgRailStore";
 import { useDiscordOnlineCount } from "@/shared/hooks/useDiscordOnlineCount";
 import { useGitHubStars } from "@/shared/hooks/useGitHubStars";
 import { AppBarNotificationBellContainer } from "@/pages/workspaces/AppBarNotificationBellContainer";
-import { SettingsDialog } from "@/shared/dialogs/settings/SettingsDialog";
+import {
+  SettingsDialog,
+  toggleSettingsDrawer,
+} from "@/shared/dialogs/settings/SettingsDialog";
+import { useSettingsDrawerInset } from "@/shared/stores/useSettingsDrawerStore";
 import { CommandBarDialog } from "@/shared/dialogs/command-bar/CommandBarDialog";
 import { useCommandBarShortcut } from "@/shared/hooks/useCommandBarShortcut";
 import { listOrganizationProjects } from "@remote/shared/lib/api";
@@ -79,6 +83,8 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
     isWorkspaceContextRoute || isProjectRoute,
   );
   const isMobile = useIsMobile();
+  // Reserve room for the docked Settings drawer so it sits beside the app.
+  const settingsDrawerInset = useSettingsDrawerInset(isMobile);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
 
   const { data: organizationsData } = useUserOrganizations();
@@ -172,7 +178,7 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
   }, []);
 
   const handleOpenSettings = useCallback(() => {
-    void SettingsDialog.show();
+    void toggleSettingsDrawer();
   }, []);
 
   const handleOpenCommandBar = useCallback(() => {
@@ -271,6 +277,9 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
           ? "fixed inset-0 pb-[env(safe-area-inset-bottom)]"
           : "h-screen",
       )}
+      style={
+        settingsDrawerInset ? { marginRight: settingsDrawerInset } : undefined
+      }
     >
       {isSignedIn && (
         <GlobalSearchDialog
