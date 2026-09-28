@@ -1223,6 +1223,7 @@ async fn run_job(
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            utils::command_ext::place_in_spawn_cgroup(&mut command);
             command
                 .group_spawn()
                 .map(|child| (child, None, None))

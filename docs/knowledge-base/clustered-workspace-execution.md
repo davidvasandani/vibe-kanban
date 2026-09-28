@@ -17,6 +17,21 @@ worker unit's Nix `path`, with an evaluated-module assertion on that exact unit.
 Installing the package only for the coordinator or globally does not express or
 reliably satisfy the worker execution contract.
 
+Process ownership also includes the memory boundary. Children must never share
+the worker's leaf cgroup, because a ceiling there throttles the control plane
+(accept loop, heartbeats, journal) along with a runaway build
+(`vk/ad2a-failed-to-start`). With `VK_WORKER_JOB_CGROUP` set, and the unit
+delegated with `DelegateSubgroup=supervisor`, `job_cgroup.rs` creates a
+sibling `jobs` cgroup that carries `VK_WORKER_JOB_MEMORY_HIGH` and
+`VK_WORKER_JOB_MEMORY_MAX`. Placement uses two layers, because cgroup v2
+never migrates memory that is already charged. Children spawned through
+`utils::command_ext` (every executor, plus worker scripts) join `jobs` in a
+`pre_exec` hook of raw open/write/close calls, which are safe after fork.
+A plain thread then sweeps any other PID out of `supervisor` every 200 ms,
+which covers PTYs, one-off commands and future call sites that bypass the
+helper. Setup failure never stops the worker. It serves on and
+reports `job_cgroup.state = "failed"` on `/health`.
+
 Persist the worker ID on both the workspace and execution job. Never infer
 affinity from the currently selected UI host, and never retry a dispatch on a
 different worker. Dispatch is idempotent by coordinator execution ID so a lost
