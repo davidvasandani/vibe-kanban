@@ -248,6 +248,12 @@ supervisor/runner split — trade-offs in
 `homelab/specs/vk/1a64-coding-agent-pro/research.md`) all build on this pgid
 substrate.
 
+Worker-owned executions survive a coordinator restart without any of this:
+shutdown hands them off (no cancel, no WIP commit) and boot re-attaches the
+event tracker from the acknowledged cursor with a seeded MsgStore — see
+[[coordinator-restart-handoff]]. Only coordinator-local agents still need the
+Tier-3 designs.
+
 ## Enablement order (why OpenCode first)
 
 OpenCode's child is an HTTP server; its stdout matters only until the
@@ -263,3 +269,4 @@ the stored `base_url` + password. Codex (stdio JSON-RPC; turn end currently
 - vk/9f36-vk-queued-messag
 - vk/869c-vk-background-po
 - vk/7655-turn-ends-aren-t
+- vk/80c1-tasks-should-sur

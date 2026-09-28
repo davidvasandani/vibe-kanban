@@ -119,6 +119,42 @@ impl MsgStore {
             .collect()
     }
 
+    /// [`Self::history_plus_stream`], plus how many retained history messages
+    /// match `count`, both taken under the same lock so the count describes
+    /// exactly the history the stream replays.
+    pub fn history_plus_stream_counting(
+        &self,
+        count: impl Fn(&LogMsg) -> bool,
+    ) -> (
+        usize,
+        futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>,
+    ) {
+        let inner = self.inner.read().unwrap();
+        let rx = self.sender.subscribe();
+        let history = inner
+            .history
+            .iter()
+            .map(|s| s.msg.clone())
+            .collect::<Vec<_>>();
+        drop(inner);
+        let matched = history.iter().filter(|msg| count(msg)).count();
+        (matched, Self::chain_history_and_live(history, rx))
+    }
+
+    fn chain_history_and_live(
+        history: Vec<LogMsg>,
+        rx: broadcast::Receiver<LogMsg>,
+    ) -> futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>> {
+        let hist = futures::stream::iter(history.into_iter().map(Ok::<_, std::io::Error>));
+        let live = BroadcastStream::new(rx).map(|res| match res {
+            Ok(msg) => Ok(msg),
+            Err(BroadcastStreamRecvError::Lagged(n)) => Err(std::io::Error::other(format!(
+                "MsgStore history/live stream lagged by {n} messages; resubscribe required"
+            ))),
+        });
+        Box::pin(hist.chain(live))
+    }
+
     /// History then live, as `LogMsg`.
     pub fn history_plus_stream(
         &self,
@@ -135,15 +171,7 @@ impl MsgStore {
             .collect::<Vec<_>>();
         drop(inner);
 
-        let hist = futures::stream::iter(history.into_iter().map(Ok::<_, std::io::Error>));
-        let live = BroadcastStream::new(rx).map(|res| match res {
-            Ok(msg) => Ok(msg),
-            Err(BroadcastStreamRecvError::Lagged(n)) => Err(std::io::Error::other(format!(
-                "MsgStore history/live stream lagged by {n} messages; resubscribe required"
-            ))),
-        });
-
-        Box::pin(hist.chain(live))
+        Self::chain_history_and_live(history, rx)
     }
 
     pub fn stdout_chunked_stream(

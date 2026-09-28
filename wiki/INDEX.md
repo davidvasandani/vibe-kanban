@@ -270,3 +270,12 @@ contributed to it.
   must never be projected into agent stdout, where vendor parsers render it as
   "Unrecognized JSON message". Coordinator classifier routing and the rule for
   new kinds (`vk/5276-debug-unrecogniz`).
+- [coordinator-restart-handoff.md](coordinator-restart-handoff.md) — Why a VK
+  deploy no longer stops worker-owned tasks (parents, sub-tasks, pollers).
+  Shutdown hands them off with no cancel and no WIP commit. Boot re-attaches
+  each tracker from the acknowledged cursor, with a seeded MsgStore and a
+  count-based writer skip. Reconcile defers a `Running` row to that tracker
+  so finalization still runs. A replay gap on a live job is reported, not
+  treated as an ending. Unanswered approvals are replayed. The handoff
+  cursor is persisted only after the log writer has drained. Six Codex
+  rounds of cursor and log-writer traps (`vk/80c1-tasks-should-sur`).
