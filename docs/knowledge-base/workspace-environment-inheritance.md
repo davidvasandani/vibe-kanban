@@ -1,6 +1,6 @@
 # Workspace environment inheritance
 
-Tags: `6d24-org-env-vars-are`, `5e29-vk-github-fine-g`, `vk/b0d4-env-vars-value-f`, `vk/a63c-don-t-obfuscate`
+Tags: `6d24-org-env-vars-are`, `5e29-vk-github-fine-g`, `vk/b0d4-env-vars-value-f`, `vk/a63c-don-t-obfuscate`, `vk/2eb6-keep-env-vars-un`
 
 ## One workspace has multiple process boundaries
 
@@ -103,15 +103,44 @@ Tests use a fake CLI with synthetic data to check argument/token handling, byte
 preservation, provider failures, limits, bootstrap precedence and cancellation.
 A response-level test protects actionable error propagation through `ApiError`.
 
-## Keep reference drafts readable
+## Keep references readable: one normalization rule
 
-`OrganizationEnvVarsCard` derives the add and replacement input types directly
-from each current draft. Exact `op://` prefixes use text inputs; other values
-use password inputs. Match the resolver's case-sensitive, untrimmed rule and
-allow incomplete reference paths while typing. Removing the prefix immediately
-restores masking without transforming the submitted value.
+A 1Password reference is a pointer, not a secret, so it stays visible both as a
+draft and after it is saved. Literal values stay masked, and the server never
+returns them.
 
-This is draft presentation only: saved rows remain redacted and edit starts with
-an empty replacement value. Do not retrieve stored or resolved secrets to render
-references. Adjacent rendered-DOM tests cover both forms, prefix transitions,
-exact mutation payloads and cancelling/reopening the editor with synthetic data.
+**One rule, used everywhere.** `api_types::normalize_secret_reference`, mirrored
+by `secretReference.ts` in web-core, decides what counts as a reference:
+1. Trim the value.
+2. Remove one matching pair of `"…"`, `'…'`, `“…”` or `‘…’` quotes, then trim
+   again.
+3. If the result starts with the case-sensitive prefix `op://`, it is a
+   reference.
+
+Anything else is a literal and is used byte for byte. The rule is applied in
+three places. The remote create and update routes store references bare.
+`environment_secrets` detects and reads references with it (and still rejects
+a reference-shaped `OP_SERVICE_ACCOUNT_TOKEN`). The UI uses it for input types
+and submitted payloads. Do not reintroduce bare `starts_with("op://")` checks:
+1Password's *Copy Secret Reference* wraps the value in double quotes, and the
+exact-prefix check from `vk/a63c` masked those pastes and then injected
+`"op://…"` into agents literally.
+
+**Tolerate on read as well as normalizing on write.** Rows saved with quotes
+before the fix are not migrated. They work because the resolver and the listing
+apply the same rule, which is cheaper and safer than rewriting encrypted rows.
+
+**Surface references, never literals.** `OrganizationEnvVar.reference` is set
+only on the admin-only listing and on create/update responses. The listing
+decrypts server-side and keeps only values that normalize to a reference, so
+filtering happens on the server, not in CSS. `query_as!` builds its target
+struct from the selected columns, so adding an API field would break the build.
+Point the macro at a private row struct instead. That keeps the SQL text, and
+therefore the `crates/remote/.sqlx` offline cache, unchanged.
+
+**Normalize drafts carefully.** Trimming on every keystroke drops a space typed
+in the middle of a path (`op://Vault/alderbridge nix …`). While the user types,
+only remove a quote pair (`reference !== value.trim()`). Apply the full
+normalization at submit. Edit starts from the saved reference and stays empty
+for literals. Rendered-DOM tests cover a quoted paste, the payloads, saved
+reference versus literal rows, and the prefilled edit, all with synthetic data.
