@@ -315,9 +315,9 @@ mod final_output_reconciliation_tests {
     use super::{
         ExecutionProcessStatus, ExecutionWorkerDispatchState, ExecutionWorkerJob, JobState,
         JobSummary, TerminalEvidence, TerminalState, Utc, history_has_final_assistant_message,
-        normalized_final_assistant_state, replay_gap_terminal_evidence, should_ack_worker_batch,
-        wait_for_unfinalized_output, worker_job_has_positive_liveness,
-        worker_lease_is_turn_evidence,
+        normalized_final_assistant_state, replay_gap_job_is_live, replay_gap_terminal_evidence,
+        should_ack_worker_batch, should_hand_off_worker_job, wait_for_unfinalized_output,
+        worker_job_has_positive_liveness, worker_lease_is_turn_evidence,
     };
 
     fn normalized_message(entry_type: NormalizedEntryType, content: &str) -> LogMsg {
@@ -589,12 +589,7 @@ mod final_output_reconciliation_tests {
             assert!(!live(&candidate), "not positive liveness, case {change}");
         }
         assert!(
-            !replay_gap_job_is_live(
-                &known,
-                Uuid::new_v4(),
-                known.execution_process_id,
-                &summary
-            ),
+            !replay_gap_job_is_live(&known, Uuid::new_v4(), known.execution_process_id, &summary),
             "another worker's inventory is not evidence"
         );
     }
@@ -3005,11 +3000,8 @@ impl LocalContainerService {
                             // output is not evidence that the execution ended:
                             // record it as incomplete, say so in the chat, and
                             // keep following from the earliest retained event.
-                            match ExecutionWorkerJob::mark_output_incomplete(
-                                &db.pool,
-                                execution_id,
-                            )
-                            .await
+                            match ExecutionWorkerJob::mark_output_incomplete(&db.pool, execution_id)
+                                .await
                             {
                                 Ok(true) => {}
                                 Ok(false) => tracing::warn!(%execution_id,
