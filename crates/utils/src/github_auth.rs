@@ -722,6 +722,19 @@ mod tests {
         git(&["config", "remote.upstream.gh-resolved", "Org-A/app"]);
         assert_eq!(token_of(&fx.gh(&fork, &["pr", "list"], &[]).1), TOKEN_A);
 
+        // `-a` approves in `pr review`; short letters outside repo/api never
+        // consume the next argument.
+        assert_eq!(
+            token_of(
+                &fx.gh(
+                    &fx.work,
+                    &["pr", "review", "-a", "https://github.com/org-b/svc/pull/1"],
+                    &[]
+                )
+                .1
+            ),
+            TOKEN_B
+        );
         // `-d` is boolean for `pr merge`, so the URL after it is the target.
         assert_eq!(
             token_of(

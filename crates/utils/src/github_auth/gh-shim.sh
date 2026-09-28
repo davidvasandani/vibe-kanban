@@ -44,9 +44,12 @@ vk_owner_of() {
 # Flags whose separate value can look like a repository or URL (PR bodies,
 # titles, templates, JSON fields, ...). An argument right after one of these is
 # that flag's value, never a target. Boolean flags are not listed, so
-# `gh repo create --private OWNER/REPO` still selects OWNER. Short flags that
-# are boolean in some commands (`pr merge -d/-m/-r`, `pr checkout -f`) only
-# take a value in the commands listed for them.
+# `gh repo create --private OWNER/REPO` still selects OWNER.
+#
+# Long flag names mean the same thing everywhere. Short letters do not: gh
+# reuses them (`pr review -a` approves, `pr merge -d` deletes the branch), so a
+# short flag only consumes a value in `gh repo` and `gh api`/`gh workflow`,
+# where each listed letter always takes one.
 vk_takes_value() {
   case "$1" in
     --body | --title | --notes | --description | --template | --json | --jq | \
@@ -55,13 +58,12 @@ vk_takes_value() {
       --homepage | --method | --input | --subject | --body-file | --hostname | \
       --branch | --remote-name | --fork-name | --org | --visibility | --team | \
       --gitignore | --license | --add-topic | --remove-topic | --default-branch | \
-      --upstream-remote-name | \
-      -b | -t | -p | -q | -F | -H | -B | -S | -l | -a | -L)
+      --upstream-remote-name)
       return 0
       ;;
-    -f | -X) [ "$vk_cmd" = api ] || [ "$vk_cmd" = workflow ] ;;
-    -d | -u) [ "$vk_cmd" = repo ] ;;
-    -n) [ "$vk_cmd" = release ] ;;
+    -b | -d | -u | -l) [ "$vk_cmd" = repo ] ;;
+    -t | -p) [ "$vk_cmd" = repo ] || [ "$vk_cmd" = api ] ;;
+    -f | -F | -H | -X | -q) [ "$vk_cmd" = api ] || [ "$vk_cmd" = workflow ] ;;
     *) return 1 ;;
   esac
 }
