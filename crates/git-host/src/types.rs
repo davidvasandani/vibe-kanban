@@ -310,20 +310,19 @@ impl SourceRead {
     }
 }
 
-const FAILED_CONCLUSIONS: &[&str] = &[
-    "failure",
-    "timed_out",
-    "cancelled",
-    "action_required",
-    "startup_failure",
-    "error",
-];
+/// Conclusions that count as a pass. Anything else a *finished* check reports
+/// — `failure`, `cancelled`, `timed_out`, `stale`, `action_required`, a
+/// status `error`, or a conclusion GitHub adds later — is not a pass, so an
+/// unfamiliar value can never make CI read as green.
+const PASSING_CONCLUSIONS: &[&str] = &["success", "neutral", "skipped"];
 
 impl PrCheck {
     pub fn is_failed(&self) -> bool {
-        self.conclusion
-            .as_deref()
-            .is_some_and(|conclusion| FAILED_CONCLUSIONS.contains(&conclusion))
+        self.is_finished()
+            && !self
+                .conclusion
+                .as_deref()
+                .is_some_and(|conclusion| PASSING_CONCLUSIONS.contains(&conclusion))
     }
 
     pub fn is_finished(&self) -> bool {
@@ -744,6 +743,20 @@ mod pr_management_tests {
         assert_eq!(passing.overall, ChecksOverall::Passing);
 
         assert_eq!(checks_with(vec![]).overall, ChecksOverall::None);
+
+        // Aged-out and unfamiliar conclusions are never a pass.
+        for conclusion in ["stale", "action_required", "some_future_value"] {
+            let result = checks_with(vec![check(
+                "a",
+                CheckSource::CheckRuns,
+                "completed",
+                Some(conclusion),
+            )]);
+            assert_eq!(result.overall, ChecksOverall::Failing, "{conclusion}");
+        }
+        let no_conclusion =
+            checks_with(vec![check("a", CheckSource::CheckRuns, "completed", None)]);
+        assert_eq!(no_conclusion.overall, ChecksOverall::Failing);
 
         let status_error = aggregate_checks(
             "abc",
