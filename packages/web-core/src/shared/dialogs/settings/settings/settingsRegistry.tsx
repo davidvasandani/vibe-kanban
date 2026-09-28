@@ -27,7 +27,7 @@ import { McpSettingsSection } from './McpSettingsSection';
 import { RelaySettingsSectionContent } from './RelaySettingsSection';
 import { AttachmentsSettingsSection } from './AttachmentsSettingsSection';
 import { CliToolsSettingsSection } from './CliToolsSettingsSection';
-import { AwsSettingsSection } from './AwsSettingsSection';
+import { AuthSettingsSection } from './AuthSettingsSection';
 import { JiraSyncSettingsSection } from './JiraSyncSettingsSection';
 import { SlackSettingsSection } from './SlackSettingsSection';
 import { PipelinesSettingsSection } from './PipelinesSettingsSection';
@@ -43,7 +43,7 @@ export type SettingsSectionType =
   | 'skills'
   | 'mcp'
   | 'cli-tools'
-  | 'aws'
+  | 'auth'
   | 'pipelines'
   | 'workers'
   | 'relay'
@@ -64,7 +64,7 @@ export type SettingsSectionInitialState = {
   skills: undefined;
   mcp: undefined;
   'cli-tools': undefined;
-  aws: undefined;
+  auth: undefined;
   pipelines: undefined;
   workers: undefined;
   relay: { hostId?: string } | undefined;
@@ -86,7 +86,7 @@ export const SETTINGS_SECTION_DEFINITIONS: SettingsSectionDefinition[] = [
   { id: 'skills', icon: BookOpenTextIcon, group: 'host' },
   { id: 'mcp', icon: PlugIcon, group: 'host' },
   { id: 'cli-tools', icon: WrenchIcon, group: 'host' },
-  { id: 'aws', icon: KeyIcon, group: 'host' },
+  { id: 'auth', icon: KeyIcon, group: 'host' },
   { id: 'pipelines', icon: ListChecksIcon, group: 'host' },
   { id: 'workers', icon: HardDrivesIcon, group: 'host' },
   { id: 'organizations', icon: BuildingsIcon, group: 'universal' },
@@ -150,8 +150,8 @@ export function renderSettingsSection(
       return <RouteScopedMcpSettingsSection />;
     case 'cli-tools':
       return <CliToolsSettingsSection />;
-    case 'aws':
-      return <AwsSettingsSection />;
+    case 'auth':
+      return <AuthSettingsSection />;
     case 'pipelines':
       return <PipelinesSettingsSection />;
     case 'workers':

@@ -16,7 +16,8 @@ Each tool card shows the pinned catalogue version, any host-provided copy,
 install/update/remove actions, and its authentication state. Credentials stay
 in each vendor's own store: Vibe Kanban never copies or keeps them. Where a
 host is configured for it, Vibe Kanban can drive a tool's sign-in unattended
-(see [Unattended re-authentication](#unattended-re-authentication)); otherwise
+(see [Unattended re-authentication](#unattended-re-authentication), shown in
+**Settings → Auth**); otherwise
 each card links to the vendor's own authentication guide.
 
 ## Azure CLI and Microsoft Entra device lookup
@@ -123,7 +124,7 @@ See Microsoft's
 
 ## Unattended re-authentication
 
-The **Unattended re-authentication** card on this page lists the credentials
+The auto-auth dashboard at the top of **Settings → Auth** lists the credentials
 the selected host can sign back in with no human involved:
 
 | Target id               | What it repairs                                    | How                                                                 |
@@ -145,7 +146,7 @@ the gateway's own callback page for an sgsc backend.
 
 - A definitive refusal (a rejected password, a Conditional Access block or a
   locked account) is never retried. Agents and the automatic sweep leave a
-  refused target alone until you re-run it from this card after fixing the
+  refused target alone until you re-run it from **Settings → Auth** after fixing the
   credential.
 - Only an expired Entra flow or a rotated one-time code is retried, at most
   three times.

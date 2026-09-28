@@ -29,8 +29,8 @@
         "mcpDesc": "モデルコンテキストプロトコルサーバー",
         "cli-tools": "CLI ツール",
         "cli-toolsDesc": "エージェント向けのアプリ管理コマンドラインツール",
-        "aws": "AWS",
-        "awsDesc": "AWS SSO プロファイルとサインイン",
+        "auth": "認証",
+        "authDesc": "自動認証ダッシュボードと AWS SSO プロファイル",
         "organizations": "Organization Settings",
         "organizationsDesc": "Manage organization members and permissions",
         "remote-projects": "プロジェクト",
@@ -883,7 +883,7 @@
       }
     },
     "reauth": {
-      "title": "無人再認証",
+      "title": "自動認証",
       "description": "保存済みの Entra ブラウザーセッションと 1Password を使い、人の操作なしでこのホストが再サインインする資格情報です。成功は、ベンダー自身の資格情報ストアを独立して確認した後にのみ報告されます。",
       "loading": "資格情報を確認しています…",
       "empty": "このホストには再認証の対象が構成されていません。",
@@ -912,6 +912,17 @@
         "manual": "設定から",
         "agent": "エージェントによる",
         "sweep": "自動スイープによる"
+      },
+      "summary": {
+        "healthy": "サインイン済み",
+        "attention": "要対応",
+        "unknown": "不明",
+        "notConfigured": "未構成"
+      },
+      "kind": {
+        "aws_sso": "AWS SSO",
+        "cli_tool": "CLI ツール",
+        "sgsc": "sgsc-mcp ゲートウェイ"
       }
     },
     "aws": {
