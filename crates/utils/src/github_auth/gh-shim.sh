@@ -40,15 +40,32 @@ vk_owner_of() {
   printf '%s' "$vk_o"
 }
 
+# Flags whose separate value can look like a repository or URL (PR bodies,
+# titles, templates, JSON fields, ...). An argument right after one of these is
+# that flag's value, never a target. Boolean flags are not listed, so
+# `gh repo create --private OWNER/REPO` still selects OWNER.
+vk_takes_value() {
+  case "$1" in
+    -b | --body | -t | --title | -m | --message | -n | --notes | \
+      -d | --description | -p | --template | --json | -q | --jq | \
+      -F | --field | -f | --raw-field | -H | --head | --header | -B | --base | \
+      -S | --search | -l | --label | -a | --assignee | -r | --reviewer | \
+      --milestone | --source | --remote | -L | --limit | --homepage | \
+      -X | --method | --input)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 vk_flag_repo=""
 vk_api=""
 vk_url=""
 vk_repo_pos=""
 vk_cmd=""
+vk_sub=""
 vk_state=cmd
 vk_expect=""
-# The previous argument. A URL or OWNER/REPO right after a flag may be that
-# flag's value (`--body https://github.com/...`), so it never selects a target.
 vk_prev=""
 for vk_arg do
   if [ -n "$vk_expect" ]; then
@@ -68,11 +85,14 @@ for vk_arg do
       vk_prev=""
       continue
       ;;
+    -R?*)
+      vk_flag_repo=${vk_arg#-R}
+      vk_prev=""
+      continue
+      ;;
   esac
-  vk_after_flag=""
-  case "$vk_prev" in
-    -*) vk_after_flag=1 ;;
-  esac
+  vk_is_value=""
+  if vk_takes_value "$vk_prev"; then vk_is_value=1; fi
   vk_prev=$vk_arg
   case "$vk_state" in
     cmd)
@@ -84,13 +104,22 @@ for vk_arg do
           ;;
       esac
       ;;
-    sub) vk_state=target ;;
+    sub)
+      vk_sub=$vk_arg
+      # Only these take a repository as their first positional; others (for
+      # example `rename NEW-NAME`) keep GH_REPO / current-repository routing.
+      case "$vk_sub" in
+        view | clone | fork | delete | archive | unarchive | edit | sync | create | set-default)
+          vk_state=target
+          ;;
+        *) vk_state=rest ;;
+      esac
+      ;;
     target)
-      # The first positional after `gh repo SUB` names the repository.
       case "$vk_arg" in
         -*) ;;
         *)
-          if [ -z "$vk_after_flag" ]; then
+          if [ -z "$vk_is_value" ]; then
             vk_repo_pos=$vk_arg
             vk_state=rest
           fi
@@ -104,7 +133,7 @@ for vk_arg do
       /repos/*/*) vk_api=${vk_arg#/repos/} ;;
     esac
   fi
-  if [ -z "$vk_url" ] && [ -z "$vk_after_flag" ]; then
+  if [ -z "$vk_url" ] && [ -z "$vk_is_value" ]; then
     case "$vk_arg" in
       https://github.com/*/*) vk_url=$vk_arg ;;
     esac

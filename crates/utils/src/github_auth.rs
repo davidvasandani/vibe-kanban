@@ -490,6 +490,54 @@ mod tests {
             ),
             TOKEN_B
         );
+        // Boolean flags do not hide the repository; value flags do.
+        assert_eq!(
+            token_of(
+                &fx.gh(
+                    &repo_a,
+                    &[
+                        "repo",
+                        "create",
+                        "--private",
+                        "--template",
+                        "org-a/tmpl",
+                        "org-b/new"
+                    ],
+                    &[]
+                )
+                .1
+            ),
+            TOKEN_B
+        );
+        // `rename` takes a new name, not a repository.
+        assert_eq!(
+            token_of(
+                &fx.gh(
+                    &repo_a,
+                    &["repo", "rename", "new-name"],
+                    &[("GH_REPO", "org-b/svc")]
+                )
+                .1
+            ),
+            TOKEN_B
+        );
+        // Attached short flag value.
+        assert_eq!(
+            token_of(&fx.gh(&repo_a, &["pr", "view", "-Rorg-b/svc", "1"], &[]).1),
+            TOKEN_B
+        );
+        // A URL after a boolean flag still names the target.
+        assert_eq!(
+            token_of(
+                &fx.gh(
+                    &repo_a,
+                    &["pr", "view", "--web", "https://github.com/org-b/svc/pull/1"],
+                    &[]
+                )
+                .1
+            ),
+            TOKEN_B
+        );
         // GH_REPO replaces the current repository, but explicit targets win.
         assert_eq!(
             token_of(
