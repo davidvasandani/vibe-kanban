@@ -21,4 +21,4 @@ changes.
 ## Phase 3: Validation
 - [x] T009 [P] Unit tests for filter and options (fail open, case-insensitive cross-project, No issue, AND composition, stale hidden names, input immutability) in `packages/web-core/src/pages/workspaces/workspaceSidebarFilters.test.ts` (depends on T002)
 - [x] T010 Run the verification: `pnpm run generate-types:check`, `cargo test -p db`, vitest, `pnpm run check`, `pnpm run lint`, `scripts/check-i18n.sh` and `pnpm run format` (depends on T001–T009)
-- [ ] T011 Runtime check that the filter dialog renders the status control and hides matching workspaces (depends on T010)
+- [ ] T011 Runtime check that the filter dialog renders the status control and hides matching workspaces (depends on T010) — **Not completed:** the dev stack built and served on this worker (think3), but no browser could reach it. `agent-browser` is not installed, the workspace browser runs on another host, and the preview lease could not be scoped to this workspace. Verify on deploy.
