@@ -71,12 +71,30 @@ impl RepoContext {
                 }
             }
 
+            if !all_status.is_empty() && all_status.contains(SPECKIT_COMMAND_PATH_MARKER) {
+                all_status.push_str(SPECKIT_COMMAND_RESTORE_NOTE);
+            }
+
             all_status
         })
         .await
         .unwrap_or_default()
     }
 }
+
+/// Path fragment of the harness-generated SpecKit command files.
+const SPECKIT_COMMAND_PATH_MARKER: &str = ".claude/commands/speckit.";
+
+/// Appended to the uncommitted-changes report when it lists SpecKit command
+/// files. Vibe Kanban now writes them task-agnostic (identical for every task),
+/// so a diff here is a repo whose base branch still carries an older harness's
+/// per-task copy. Committing it once restores the shared version; reverting it
+/// only makes the harness rewrite it and the Stop hook block again.
+const SPECKIT_COMMAND_RESTORE_NOTE: &str = "\nNote: if `.claude/commands/speckit.*.md` \
+    changed without you editing them, Vibe Kanban regenerated them in their task-agnostic \
+    form (the current task's spec dir now lives in the untracked `.specify/feature-dir`). \
+    Commit that change as-is; do not revert it. It is identical for every task, so it will \
+    not recur once merged.\n";
 
 /// Environment variables to inject into executor processes
 #[derive(Debug, Clone)]
@@ -248,6 +266,43 @@ mod tests {
         assert_eq!(merged.vars.get("VK_PROJECT_NAME").unwrap(), "runtime");
         assert_eq!(merged.vars.get("FOO").unwrap(), "profile"); // overrides
         assert_eq!(merged.vars.get("BAR").unwrap(), "profile");
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn uncommitted_report_explains_regenerated_speckit_commands() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir_all(repo.join(".claude/commands")).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["config", "commit.gpgsign", "false"]);
+        let cmd = repo.join(".claude/commands/speckit.plan.md");
+        std::fs::write(&cmd, "specs/vk/old-task/plan.md\n").unwrap();
+        std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let ctx = RepoContext::new(root.path().to_path_buf(), vec!["repo".to_string()]);
+
+        std::fs::write(repo.join("README.md"), "changed\n").unwrap();
+        let unrelated = ctx.check_uncommitted_changes().await;
+        assert!(unrelated.contains("README.md"));
+        assert!(!unrelated.contains(SPECKIT_COMMAND_RESTORE_NOTE));
+
+        std::fs::write(&cmd, "<FEATURE_DIR>/plan.md\n").unwrap();
+        let speckit = ctx.check_uncommitted_changes().await;
+        assert!(speckit.contains(".claude/commands/speckit.plan.md"));
+        assert!(speckit.ends_with(SPECKIT_COMMAND_RESTORE_NOTE));
     }
 
     #[test]
