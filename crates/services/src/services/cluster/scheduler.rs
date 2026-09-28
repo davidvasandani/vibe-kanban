@@ -124,6 +124,88 @@ pub fn eligibility(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerUnavailableReason {
+    NotRegistered,
+    Offline,
+    LeaseExpired,
+}
+
+/// The assigned worker of a sticky workspace cannot take a dispatch. The
+/// message is shown to the user, so it names the host and says what to do.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[error("{}", self.message())]
+pub struct WorkerUnavailable {
+    pub worker: String,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub reason: WorkerUnavailableReason,
+}
+
+impl WorkerUnavailable {
+    fn message(&self) -> String {
+        let last_seen = self
+            .last_heartbeat_at
+            .map(|at| at.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "never".into());
+        let state = match self.reason {
+            WorkerUnavailableReason::NotRegistered => {
+                format!(
+                    "Execution server {} is not registered with this coordinator.",
+                    self.worker
+                )
+            }
+            WorkerUnavailableReason::Offline => format!(
+                "Execution server {} is offline (last heartbeat {last_seen}).",
+                self.worker
+            ),
+            WorkerUnavailableReason::LeaseExpired => format!(
+                "Execution server {} has stopped responding (last heartbeat {last_seen}).",
+                self.worker
+            ),
+        };
+        format!(
+            "{state} Move this workspace to another execution server, or retry once {} recovers.",
+            self.worker
+        )
+    }
+}
+
+/// Liveness gate for dispatching to a workspace's *assigned* worker.
+///
+/// Deliberately narrower than [`eligibility`]: affinity is sticky, so mount
+/// health and executor capability stay placement rules. What this refuses is
+/// a worker the registry has already written off. Dispatching there only
+/// waits out transport timeouts and then reports an opaque error.
+/// A draining worker with a live lease is still dispatched to, as before.
+pub fn dispatch_liveness(
+    worker_node_id: Uuid,
+    worker: Option<&WorkerNode>,
+    now: DateTime<Utc>,
+) -> Result<(), WorkerUnavailable> {
+    let Some(worker) = worker else {
+        return Err(WorkerUnavailable {
+            worker: worker_node_id.to_string(),
+            last_heartbeat_at: None,
+            reason: WorkerUnavailableReason::NotRegistered,
+        });
+    };
+    let reason = if worker.status == WorkerNodeStatus::Offline {
+        WorkerUnavailableReason::Offline
+    } else if worker
+        .lease_expires_at
+        .is_none_or(|lease_expires_at| lease_expires_at <= now)
+    {
+        WorkerUnavailableReason::LeaseExpired
+    } else {
+        return Ok(());
+    };
+    Err(WorkerUnavailable {
+        worker: worker.hostname.clone(),
+        last_heartbeat_at: worker.last_heartbeat_at,
+        reason,
+    })
+}
+
 /// Whether a worker advertising `advertised` can run `requested`.
 ///
 /// `ExecutorProfileId` renders as `EXECUTOR:VARIANT` whenever a variant is set,
@@ -346,6 +428,81 @@ mod tests {
         assert_eq!(
             scheduler.select(&workers, "codex", None, now).unwrap().id,
             Uuid::from_u128(1)
+        );
+    }
+
+    #[test]
+    fn dispatch_liveness_admits_live_online_and_draining_workers() {
+        let now = Utc::now();
+        let online = worker(5, now);
+        assert_eq!(dispatch_liveness(online.id, Some(&online), now), Ok(()));
+
+        // Drain is an admission policy the worker owns; a live lease keeps
+        // the pre-existing dispatch behaviour.
+        let mut draining = worker(5, now);
+        draining.status = WorkerNodeStatus::Draining;
+        assert_eq!(dispatch_liveness(draining.id, Some(&draining), now), Ok(()));
+    }
+
+    #[test]
+    fn dispatch_liveness_refuses_offline_worker_with_actionable_message() {
+        let now = Utc::now();
+        let heartbeat = DateTime::parse_from_rfc3339("2026-09-28T17:06:35.807Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut offline = worker(5, now);
+        offline.status = WorkerNodeStatus::Offline;
+        offline.last_heartbeat_at = Some(heartbeat);
+        offline.lease_expires_at = Some(heartbeat + Duration::seconds(30));
+
+        let error = dispatch_liveness(offline.id, Some(&offline), now).unwrap_err();
+        assert_eq!(error.reason, WorkerUnavailableReason::Offline);
+        assert_eq!(
+            error.to_string(),
+            "Execution server think5 is offline (last heartbeat 2026-09-28 17:06:35 UTC). \
+             Move this workspace to another execution server, or retry once think5 recovers."
+        );
+    }
+
+    #[test]
+    fn dispatch_liveness_refuses_expired_or_missing_lease_before_expiry_sweep() {
+        // `expire_leases` may not have run yet, so a row can still say
+        // `online` after its lease lapsed. The lease is the authority.
+        let now = Utc::now();
+        let mut expired = worker(5, now);
+        expired.lease_expires_at = Some(now);
+        let error = dispatch_liveness(expired.id, Some(&expired), now).unwrap_err();
+        assert_eq!(error.reason, WorkerUnavailableReason::LeaseExpired);
+        assert!(error.to_string().contains("think5 has stopped responding"));
+
+        let mut missing = worker(5, now);
+        missing.lease_expires_at = None;
+        missing.last_heartbeat_at = None;
+        let error = dispatch_liveness(missing.id, Some(&missing), now).unwrap_err();
+        assert_eq!(error.reason, WorkerUnavailableReason::LeaseExpired);
+        assert!(error.to_string().contains("(last heartbeat never)"));
+
+        // Expired leases on a draining row are not exempt.
+        let mut draining = worker(5, now);
+        draining.status = WorkerNodeStatus::Draining;
+        draining.lease_expires_at = Some(now - Duration::seconds(1));
+        assert_eq!(
+            dispatch_liveness(draining.id, Some(&draining), now)
+                .unwrap_err()
+                .reason,
+            WorkerUnavailableReason::LeaseExpired
+        );
+    }
+
+    #[test]
+    fn dispatch_liveness_refuses_unregistered_worker_by_id() {
+        let id = Uuid::from_u128(9);
+        let error = dispatch_liveness(id, None, Utc::now()).unwrap_err();
+        assert_eq!(error.reason, WorkerUnavailableReason::NotRegistered);
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("Execution server {id} is not registered"))
         );
     }
 

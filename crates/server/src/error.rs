@@ -91,6 +91,10 @@ pub enum ApiError {
     /// could not be served, which is the whole diagnosis.
     #[error("{0}")]
     ClusterProvisioning(String),
+    /// The workspace's assigned execution server is not live. The message
+    /// names the server and tells the user to move the workspace or wait.
+    #[error("{0}")]
+    WorkerUnavailable(String),
     #[error(transparent)]
     CommandBuilder(#[from] CommandBuildError),
     #[error(transparent)]
@@ -177,6 +181,9 @@ impl From<ContainerError> for ApiError {
             // Must stay above the catch-all: falling into `Container` is what
             // renders a failure as "An internal error occurred".
             ContainerError::SharedStore(msg) => ApiError::ClusterProvisioning(msg),
+            ContainerError::WorkerUnavailable(error) => {
+                ApiError::WorkerUnavailable(error.to_string())
+            }
             // This typed error contains only curated, secret-free diagnostics.
             ContainerError::EnvironmentSecret(error) => ApiError::BadRequest(error.to_string()),
             ContainerError::GitHubOwnerToken(error) => ApiError::GitHubOwnerToken(error),
@@ -539,6 +546,11 @@ impl IntoResponse for ApiError {
                 "ClusterProvisioningError",
                 msg.clone(),
             ),
+            ApiError::WorkerUnavailable(msg) => ErrorInfo::with_status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WorkerUnavailableError",
+                msg.clone(),
+            ),
             ApiError::Multipart(_) => ErrorInfo::bad_request(
                 "MultipartError",
                 "Failed to upload file. Please ensure the file is valid and try again.",
@@ -747,6 +759,30 @@ mod cluster_provisioning_error_tests {
             !body.contains("An internal error occurred"),
             "the generic message defeats the purpose of the variant: {body}"
         );
+    }
+
+    /// Same trap as the shared-store arm: falling into `ApiError::Container`
+    /// turns "think5 is offline, move the workspace" back into a generic 500.
+    #[tokio::test]
+    async fn offline_worker_is_a_503_that_names_the_server() {
+        use services::services::cluster::{WorkerUnavailable, WorkerUnavailableReason};
+
+        let response = ApiError::from(ContainerError::WorkerUnavailable(WorkerUnavailable {
+            worker: "think5".into(),
+            last_heartbeat_at: None,
+            reason: WorkerUnavailableReason::Offline,
+        }))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("Execution server think5 is offline (last heartbeat never)"),
+            "{body}"
+        );
+        assert!(body.contains("Move this workspace to another execution server"));
+        assert!(!body.contains("An internal error occurred"), "{body}");
     }
 
     #[tokio::test]

@@ -1,101 +1,93 @@
-# SPEC — Migrate the Personal ServiceNow MCP from stdio to HTTPS
+# SPEC: Fail fast when a workspace's assigned worker is offline
 
-Task: `vk/975e-migrate-personal`
+Task: `vk/ad2a-failed-to-start` (reported from VAS-747, Mycroft "Improve inference" interface)
 
 ## Problem
 
-The bundled **Personal ServiceNow** catalog entry (`personal_servicenow` in
-`crates/executors/default_mcp.json`) launches a stdio child process,
-`personal-servicenow-mcp`. Every schedulable execution host therefore has to
-carry the wrapper, a 1Password-backed credential oneshot and the ServiceNow
-OAuth secret. The saved settings entry (Settings → MCP Servers → Edit MCP
-server) shows `Transport: stdio (command)`.
+Starting a follow-up turn in a clustered workspace failed with:
 
-A dedicated, always-on Streamable HTTP deployment already runs on think1 at
-`https://snow.vasandani.dev/mcp` (homelab `modules/personal-servicenow-mcp.nix`).
-It sits behind Cloudflare Access, with a `/mcp` bypass for the reviewed source
-CIDRs, plus a mandatory origin bearer. The homelab runbook deferred the VK
-switch until public proof exists. It also requires header values to go through
-the owning runtime secret boundary, not catalog JSON. Homelab constitution
-principle 64 forbids serializing deployment-supplied machine credentials into
-settings or native client config.
+```
+Failed to start execution: worker transport failed: error sending request for url
+(http://172.16.100.105:8086/v1/executions/b87cb4d6-a195-4f0b-b6fd-b35c77a16cff)
+```
 
-## Evidence gathered (2026-09-28, from a cluster worker)
+## Diagnosis (live cluster, 2026-09-28)
 
-- `GET https://snow.vasandani.dev/mcp` with no bearer → `403 Forbidden`, an
-  origin rejection. So the `/mcp` Access bypass applies to worker egress.
-- `GET https://snow.vasandani.dev/healthz` → `302`: Access SSO still gates
-  non-`/mcp` paths.
-- `POST initialize` with the origin bearer → `200`, `mcp-session-id` issued,
-  `serverInfo.name = personalmcpservicenow`.
-- VK already rewrites a settings-owned public MCP URL to the host's loopback
-  route when it writes native config (`route_mcp_url_for_runtime`), and maps it
-  back on read (`public_mcp_url_for_runtime`).
+- The workspace is sticky-placed on **think5** (worker `001537ef…`,
+  `http://172.16.100.105:8086`). The coordinator runs on think2.
+- think5's `vibe-kanban-worker.service` is `active`, but its HTTP server has
+  stopped accepting connections. The listen socket's accept queue is full
+  (`Recv-Q 129` against a backlog of 128), and even `curl 127.0.0.1:8086/health`
+  on think5 times out.
+- Cause: a runtime `systemctl set-property` (applied 13:25 UTC, not declared in
+  Nix) set `MemoryHigh=8G` / `MemoryMax=10G` on the worker unit. A poller in
+  another workspace runs `go test` on a Microsoft Graph beta package, and one
+  `go vet` child holds 5.3 GB RSS. Agent children share the worker's leaf
+  cgroup, so the cgroup sits at `memory.high` (10.6M `high` events, about 8%
+  `full` memory pressure). The kernel throttles every task in it, including the
+  worker's own 13 MB control plane, which sits in D-state reclaim.
+- The worker's heartbeats stopped. The coordinator marked think5 `offline` at
+  17:07 UTC (last heartbeat 17:06:35). The coordinator's endpoint check has
+  logged `unreachable endpoint http://172.16.100.105:8086` every minute since.
+- Even so, at 18:52 `dispatch_execution` sent the new execution to think5. It
+  checks only the workspace placement (`Ready` plus a `worker_node_id`) and
+  never the assigned worker's registry state. It then waited out two 30s
+  transport attempts (`retryable_dispatch_error` retries `Transport` once),
+  about 60s in total, and returned an opaque transport error. The HTTP caller
+  got a generic 500 "An internal error occurred".
+- The transport error drops its cause. `reqwest::Error`'s `Display` shows only
+  "error sending request for url (…)", so "operation timed out" and "connection
+  refused" never reach the user.
 
-## Goal
+## Goals
 
-The Personal ServiceNow MCP is consumed over HTTPS (MCP Streamable HTTP)
-instead of stdio, and the origin bearer never enters VK settings, native agent
-config, catalog JSON, or Git.
-
-1. **Catalog (vibe-kanban):** the bundled `personal_servicenow` tile becomes a
-   URL-only HTTP definition, `https://snow.vasandani.dev/mcp`.
-2. **Runtime route (homelab):** the existing per-host loopback MCP gateway
-   (`services.vibeKanban.protectedMcpRoutes`) is generalised. It can now attach
-   an origin `Authorization: Bearer` resolved from a 1Password reference, and
-   the Access service-token pair becomes optional. Every VK host (think1–5)
-   gets a `personal_servicenow` route on one fleet-wide loopback port.
-3. **Credential:** the think1 bearer is mirrored into a Homelab 1Password item
-   that the routes reference. The think1 file remains the origin's source, and
-   the rotation procedure updates both.
-4. **Live settings:** the saved entry is switched to the URL-only HTTP
-   definition. No secret is involved.
-5. **Docs** in both repos describe HTTPS as primary and stdio as the rollback.
+1. **Fail fast and say why.** When the workspace's assigned worker is not live
+   (no registry row, `offline`, or lease missing or expired), refuse the
+   dispatch before any worker-job record is created or any network call is
+   made. The error names the worker's hostname and its last heartbeat, and
+   tells the user to move the workspace to another execution server or retry
+   once the worker recovers.
+2. **Surface it as a typed, user-visible error.** The HTTP API returns
+   `503 Service Unavailable`, error type `WorkerUnavailableError`, with the
+   message above, instead of a generic 500. The execution's stderr log carries
+   the same message.
+3. **Keep the transport cause.** `WorkerClientError::Transport` renders the
+   full `source()` chain, for example "…: operation timed out".
 
 ## Non-goals
 
-- Removing the fleet-local stdio wrapper and credential units. They are the
-  rollback path; removal is a follow-up after soak.
-- Changing the think1 service, the Access policy, the CIDR list or the bearer
-  value.
-- Any VK Rust code path beyond the catalog and its test.
+- Automatically re-placing the workspace on another worker. Affinity is sticky
+  by design ("never retry a dispatch on a different worker"). Moving a
+  workspace goes through the existing affinity-migration flow.
+- Changing retry counts or timeouts for a worker that is still `online` with a
+  valid lease.
+- Changing drain semantics. A `draining` worker with a valid lease keeps its
+  current behaviour.
+- Host remediation on think5 (the cgroup layout, the runtime `MemoryHigh`, the
+  runaway `go vet`). That is operational and handled separately.
 
-## Requirements
+## Behaviour
 
-- **FR-1** `default_mcp.json` `personal_servicenow` MUST be exactly
-  `{"type":"http","url":"https://snow.vasandani.dev/mcp"}`. The id and `meta`
-  name/description stay unchanged.
-- **FR-2** A VK unit test MUST pin that shape, and assert there are no
-  `command`/`args`/`env`/`headers` fields.
-- **FR-3** `protectedMcpRoutes.<name>` MUST accept an optional
-  `bearerTokenRef`. `clientIdRef`/`clientSecretRef` MUST be optional, but
-  either both set or both null. Every route MUST carry at least one credential
-  (the Access pair or the bearer). Evaluation assertions MUST enforce these
-  rules.
-- **FR-4** When `bearerTokenRef` is set, the gateway MUST send
-  `Authorization: Bearer <value>` upstream, replacing any client-supplied
-  Authorization. It MUST validate the value's charset before writing it into
-  the runtime Caddyfile, and MUST fail closed with a secret-safe JSON-RPC 401
-  when the value is unavailable. Access-only routes MUST keep their current
-  rendered behaviour.
-- **FR-5** think1–5 MUST declare the `personal_servicenow` route with an
-  identical port. `tests/vibe-kanban-cluster.nix` MUST cover a bearer-only
-  route and the new assertions.
-- **FR-6** Docs: the VK connector subsection and the homelab runbook
-  (registration, rotation, rollback) MUST be updated.
-- **FR-7** The live settings entry MUST be migrated only after the routes are
-  deployed and a routed `initialize` succeeds from a worker.
+| Assigned worker state | Before | After |
+| --- | --- | --- |
+| `online`, lease valid | dispatch | dispatch (unchanged) |
+| `draining`, lease valid | dispatch | dispatch (unchanged) |
+| `online`/`draining`, lease missing or expired | about 60s of timeouts, then an opaque 500 | immediate 503 `WorkerUnavailableError` |
+| `offline` | about 60s of timeouts, then an opaque 500 | immediate 503 `WorkerUnavailableError` |
+| no registry row | about 60s, then `EndpointNotFound` or an opaque 500 | immediate 503 `WorkerUnavailableError` |
+
+Message shape:
+
+> Execution server think5 is offline (last heartbeat 2026-09-28 17:06:35 UTC).
+> Move this workspace to another execution server, or retry once think5
+> recovers.
 
 ## Acceptance criteria
 
-- `cargo test -p executors personal_servicenow` passes.
-- `default_mcp.json` parses.
-- `nix eval --impure --file tests/vibe-kanban-cluster.nix` passes.
-- The `think1`..`think5` toplevel drvPaths evaluate.
-- `pnpm run format` leaves no diff.
-- Endpoint proof: `initialize`, `tools/list` including
-  `sn_access_cycle_report`, and invalid-bearer rejection. After deployment,
-  the same proof through `http://127.0.0.1:<port>/mcp` with no client header.
-- After the live migration, the settings read model shows
-  `personal_servicenow` as `http` → `https://snow.vasandani.dev/mcp`, and a new
-  session lists the ServiceNow tools.
+- Unit tests cover the liveness classification for every row in the table
+  above.
+- `ContainerError::WorkerUnavailable` maps to `ApiError::WorkerUnavailable`,
+  which renders as a 503 with its message.
+- A test shows that the `Transport` display includes the source chain.
+- `cargo test` for the affected crates passes, and so do `pnpm run format` and
+  clippy.

@@ -64,7 +64,7 @@ use serde_json::json;
 use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
-    cluster::{ClusterConfig, WorkerClient},
+    cluster::{ClusterConfig, WorkerClient, dispatch_liveness},
     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
     container::{ContainerError, ContainerRef, ContainerService},
     diff_stream::{self, DiffStreamHandle},
@@ -4745,6 +4745,11 @@ impl ContainerService for LocalContainerService {
         let worker_node_id = placement.worker_node_id.ok_or_else(|| {
             ContainerError::Other(anyhow!("Ready cluster workspace has no assigned worker"))
         })?;
+        // Before any worker-job record or network call: a worker the registry
+        // has already written off would only cost two transport timeouts and
+        // then an opaque error. Affinity stays sticky — refuse, never reroute.
+        let worker = WorkerNode::find_by_id(&self.db.pool, worker_node_id).await?;
+        dispatch_liveness(worker_node_id, worker.as_ref(), Utc::now())?;
         let coordinator_id = self.cluster_config.coordinator_id.ok_or_else(|| {
             ContainerError::Other(anyhow!("Cluster coordinator identity is missing"))
         })?;
