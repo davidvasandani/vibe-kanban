@@ -540,6 +540,18 @@ mod tests {
             ),
             TOKEN_B
         );
+        // A flag value that looks like --repo is still just the value.
+        assert_eq!(
+            token_of(
+                &fx.gh(
+                    &fx.work,
+                    &["pr", "create", "--body", "--repo=org-b/app"],
+                    &[("GH_REPO", "Org-A/app")]
+                )
+                .1
+            ),
+            TOKEN_A
+        );
         // An --input file path is a flag value, not the API endpoint.
         assert_eq!(
             token_of(

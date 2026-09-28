@@ -79,6 +79,12 @@ for vk_arg do
   fi
   vk_positional=1
   if [ -z "$vk_dashdash" ]; then
+    # The value of a value-taking flag is consumed first, even if it looks
+    # like an option (`--body '--repo=OWNER/REPO'`).
+    if vk_takes_value "$vk_prev"; then
+      vk_prev=""
+      continue
+    fi
     case "$vk_arg" in
       --)
         vk_dashdash=1
@@ -101,8 +107,6 @@ for vk_arg do
         ;;
       -*) vk_positional="" ;;
     esac
-    # A value of a value-taking flag is not a positional argument.
-    if vk_takes_value "$vk_prev"; then vk_positional=""; fi
   fi
   vk_prev=$vk_arg
   case "$vk_state" in
