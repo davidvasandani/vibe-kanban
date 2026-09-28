@@ -3,7 +3,7 @@
 Contributing tasks: `a898-allow-mcp-server`, `4ae2-add-a-shared-mcp`,
 `c3fb-add-slack-mcp-se`, `76d1-vk-mcp-ux`, `d893-fix-slack-mcp`,
 `067cb434-mcp-tools`, `4daf-gmail-mcp`, `vk/a5f8-concat-repeating`,
-`967a-migrate-slack-mc`, `VAS-356`, `vk/802c-register-servicenow`
+`967a-migrate-slack-mc`, `VAS-356`, `vk/802c-register-servicenow`, `vk/975e-migrate-personal`
 
 Vibe Kanban derives shared MCP settings from each base executor's native config
 file. There is no separate registry: the native files remain the source consumed
@@ -113,6 +113,14 @@ A template can be instantiated more than once; see
 [multi-instance-catalog-templates](multi-instance-catalog-templates.md) for the
 identifier-allocation rules, the `servers` XOR `conflicts` taken-names trap, and
 why every per-instance value needs its own placeholder.
+
+A catalog entry may instead be URL-only HTTP when the deployment supplies the
+origin credential through a runtime route (`VIBE_MCP_RUNTIME_ROUTES`). Personal
+ServiceNow is the example. `mcp_config.rs` pins the exact object and asserts
+that no `command`/`args`/`env`/`headers` remain. Switching an existing tile from
+stdio to HTTP leaves saved stdio entries untouched: an automatic read-time
+rewrite would need a credential the catalog lacks. Migrate the saved entry with
+an explicit settings save instead.
 
 Two placeholder rules that documentation, not code, has to enforce — nothing
 validates that a `YOUR_*` value was replaced:
