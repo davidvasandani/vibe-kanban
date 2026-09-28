@@ -147,8 +147,7 @@ repaired unattended in one attempt. The flow went from the AWS device page
 to the Entra account picker, then the password and TOTP from 1Password
 Connect, then the AWS approval, and the STS probe confirmed it.
 `cli-tool:graph-powershell-1.0` then repaired silently from the refreshed
-profile session, with no factors spent. Homelab principle 127 (drafted as
-123) is the constitutional rule behind the lockout safety.
+profile session, with no factors spent. Homelab principle 129 (drafted as 123) is the constitutional rule behind the lockout safety.
 
 ## Review note
 
