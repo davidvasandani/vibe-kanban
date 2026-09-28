@@ -149,6 +149,11 @@ for vk_arg do
         vk_prev=""
         continue
         ;;
+      -R=*)
+        vk_flag_repo=${vk_arg#-R=}
+        vk_prev=""
+        continue
+        ;;
       -R?*)
         vk_flag_repo=${vk_arg#-R}
         vk_prev=""

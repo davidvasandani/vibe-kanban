@@ -604,6 +604,10 @@ mod tests {
             token_of(&fx.gh(&repo_a, &["pr", "view", "-Rorg-b/svc", "1"], &[]).1),
             TOKEN_B
         );
+        assert_eq!(
+            token_of(&fx.gh(&repo_a, &["pr", "view", "1", "-R=org-b/svc"], &[]).1),
+            TOKEN_B
+        );
         // A URL after a boolean flag still names the target.
         assert_eq!(
             token_of(
