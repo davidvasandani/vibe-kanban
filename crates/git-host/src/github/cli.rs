@@ -701,6 +701,22 @@ struct RestMergeResponse {
 /// A page of checks plus whether the provider reported more than it returned.
 pub type CheckPage = (Vec<PrCheck>, bool);
 
+/// Percent-encode a ref name for a URL path. Git allows `#`, `%`, `?` and
+/// other characters in branch names that would otherwise change which URL is
+/// requested (`feature#1` would address `heads/feature`). `/` separates ref
+/// path segments and stays literal.
+fn encode_ref_path(name: &str) -> String {
+    let mut encoded = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
 fn lower(value: &str) -> String {
     value.to_ascii_lowercase()
 }
@@ -861,7 +877,7 @@ impl GhCli {
             Self::api_args(
                 repo_info,
                 Some("DELETE"),
-                format!("git/refs/heads/{branch}"),
+                format!("git/refs/heads/{}", encode_ref_path(branch)),
             ),
             Some(repo_path),
         )?;
@@ -1112,6 +1128,17 @@ mod pr_management_parser_tests {
         assert_eq!(placeholder.len(), 1);
         assert_eq!(placeholder[0].name, "deploy-invariants");
         assert!(!placeholder[0].is_finished());
+    }
+
+    #[test]
+    fn ref_paths_encode_url_significant_characters() {
+        assert_eq!(
+            encode_ref_path("vk/53bc-agents-fall-back"),
+            "vk/53bc-agents-fall-back"
+        );
+        assert_eq!(encode_ref_path("feature#123"), "feature%23123");
+        assert_eq!(encode_ref_path("a%b?c d"), "a%25b%3Fc%20d");
+        assert_eq!(encode_ref_path("ünï"), "%C3%BCn%C3%AF");
     }
 
     #[test]

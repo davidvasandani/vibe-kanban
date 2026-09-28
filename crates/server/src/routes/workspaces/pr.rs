@@ -1054,8 +1054,22 @@ async fn resolve_pr_target(
     let provider = git_host.provider_kind();
     let host_error = |error| PrToolError::from_git_host(error, provider);
 
-    let number = match pr.map(str::trim).filter(|pr| !pr.is_empty()) {
-        Some(reference) => match parse_pr_reference(reference) {
+    // An explicit reference wins; otherwise the PR VK recorded for this
+    // workspace + repo, by its URL so its repository is checked too — a PR
+    // opened against another remote (e.g. an `upstream/main` base) must not
+    // resolve to a same-numbered PR on this one.
+    let explicit = pr.map(str::trim).filter(|pr| !pr.is_empty());
+    let reference = match explicit {
+        Some(reference) => Some(reference.to_string()),
+        None => PullRequest::find_by_workspace_and_repo_id(pool, workspace.id, repo_id)
+            .await?
+            .into_iter()
+            .next()
+            .map(|recorded| recorded.pr_url),
+    };
+
+    let number = match reference {
+        Some(reference) => match parse_pr_reference(&reference) {
             Err(error) => {
                 return Ok(Err(PrToolError::InvalidPrReference {
                     detail: error.to_string(),
@@ -1087,32 +1101,23 @@ async fn resolve_pr_target(
             }
         },
         None => {
-            let recorded = PullRequest::find_by_workspace_and_repo_id(pool, workspace.id, repo_id)
-                .await?
-                .into_iter()
-                .next();
-            match recorded {
-                Some(recorded) => recorded.pr_number,
+            let prs = match git_host
+                .list_prs_for_branch(&repo.path, &remote.url, &workspace.branch)
+                .await
+            {
+                Ok(prs) => prs,
+                Err(error) => return Ok(Err(host_error(error))),
+            };
+            match prs
+                .iter()
+                .find(|pr| matches!(pr.status, MergeStatus::Open))
+                .or(prs.first())
+            {
+                Some(pr) => pr.number,
                 None => {
-                    let prs = match git_host
-                        .list_prs_for_branch(&repo.path, &remote.url, &workspace.branch)
-                        .await
-                    {
-                        Ok(prs) => prs,
-                        Err(error) => return Ok(Err(host_error(error))),
-                    };
-                    match prs
-                        .iter()
-                        .find(|pr| matches!(pr.status, MergeStatus::Open))
-                        .or(prs.first())
-                    {
-                        Some(pr) => pr.number,
-                        None => {
-                            return Ok(Err(PrToolError::NoPrForWorkspace {
-                                branch: workspace.branch.clone(),
-                            }));
-                        }
-                    }
+                    return Ok(Err(PrToolError::NoPrForWorkspace {
+                        branch: workspace.branch.clone(),
+                    }));
                 }
             }
         }
