@@ -55,6 +55,34 @@ coordinator scales with open clients.** Look there first.
   case. Such a result is served, but it is retried within 60 s instead of
   being cached for the whole tier. `None` is never cached.
 
+## Bound the response, not just the work (2026-09-29)
+
+The cache bounds the **work**. It does not bound **one request's latency**.
+The summaries handler still awaited every workspace's stats, so each row's
+cheap metadata (process status, unseen turns, PR, affinity) waited on the
+slowest `git status`. Measured from a worker: 0.27 s, then 16.6 s, then 1.8 s
+for 204 active rows. On mobile the rows rendered blank.
+
+- `DiffStatsCache::get_within(id, max_age, deadline, compute)` waits at most
+  `deadline`. If the fresh value misses it, the call returns the slot's
+  `last_known` stats (`None` if never computed). The spawned leader keeps
+  running and publishes, so the next poll is a hit. Missing the deadline
+  starts no extra compute, and a caller queued behind a leader just reads the
+  fallback.
+- `last_known` lives in a sync mutex beside the async `state` lock, because
+  a leader holds `state` for the whole computation. It is written on every
+  successful compute, **including one invalidated mid-flight**, and it survives
+  `invalidate`. It is a display fallback, never "fresh": a recompute that
+  fits the deadline always wins.
+- A compute that **finished and failed** still returns `None`, not
+  `last_known`. A failure can mean the worktree is gone, and old numbers
+  would mislead.
+- The budget is **request-wide** (`SUMMARY_DIFF_STATS_BUDGET` = 3 s, one
+  deadline taken before `buffer_unordered`). A per-item timeout would still
+  add up to about N/concurrency × timeout. Items that reach the buffer after
+  the deadline get a zero duration. `tokio::time::timeout` polls the inner
+  future once first, so an immediate fresh hit is still served.
+
 Rejected alternatives: tuning NFS mount options (`nocto` or a long `actimeo`
 breaks cross-host coherency; homelab principle 120), a background refresher
 (does work when nobody is looking), and client-side throttling alone (N
@@ -63,3 +91,4 @@ devices still multiply the work).
 ## Contributed by
 
 - vk/78a5-analyze-and-redu
+- vk/b923-workspaces-loadi

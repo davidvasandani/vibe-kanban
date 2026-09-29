@@ -21,7 +21,7 @@ changes.
 - [x] T008 Run `cargo test -p services workspace_diff_stats`, `cargo test -p server workspace_summary`, the web-core Vitest file, `pnpm run check`, `pnpm run lint` and `pnpm run format`. Formatting may touch any changed file. (Depends on T004–T007.)
 
 ## Phase 4: Documentation
-- [ ] T009 [P] Record the budget and fallback rule in `wiki/coordinator-nfs-load.md` and the client deadline and dedupe trap in `docs/knowledge-base/authoritative-snapshot-stream-handoffs.md`, plus `wiki/INDEX.md` and `docs/knowledge-base/INDEX.md` (knowledge-base stage; depends on T008)
+- [x] T009 [P] Record the budget and fallback rule in `wiki/coordinator-nfs-load.md` and the client deadline and dedupe trap in `docs/knowledge-base/authoritative-snapshot-stream-handoffs.md`, plus `wiki/INDEX.md` and `docs/knowledge-base/INDEX.md` (knowledge-base stage; depends on T008)
 
 <!--
 Dependency graph:
