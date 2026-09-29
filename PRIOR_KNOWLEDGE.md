@@ -1,70 +1,60 @@
-# PRIOR KNOWLEDGE — vk/975e-migrate-personal
+# Prior knowledge: Workspaces sidebar loading blank
 
-Distilled from the two project knowledge bases (homelab `knowledge-base/`,
-`docs/knowledge/`, and the runbooks under `docs/`; vibe-kanban
-`docs/knowledge-base/` and `wiki/`). This pass was read-only.
+Task: `vk/b923-workspaces-loadi`. This file pulls together what the project
+knowledge bases (`wiki/` and `docs/knowledge-base/`) already record about this
+problem area. The knowledge bases were only read, not changed, in this stage.
 
-## The hosted service already exists (homelab)
+## Relevant pages
 
-- `docs/personal-servicenow-mcp-deployment.md`: think1 runs Supergateway 3.4.3
-  (stdio → stateful Streamable HTTP) on `127.0.0.1:8790`. Caddy on
-  `172.16.100.101:8191` enforces the origin bearer and proxies only `/mcp`.
-  The public URL is `https://snow.vasandani.dev/mcp`. There is no SSE endpoint.
-- Cloudflare Access SSO gates the hostname. `/mcp` bypasses SSO only for the
-  reviewed Claude/Scott/Camero CIDRs, the same list as lmi/cdp. The origin
-  bearer is still mandatory. The bearer is generated at
-  `/var/lib/personal-servicenow-mcp/http-token`.
-- The runbook defers the VK switch explicitly: migrate the bundled entry only
-  after public initialize, tools/list, a bounded read and negative-auth proof.
-  Header values go through the owning runtime secret boundary, **not catalog
-  JSON**. Test in *new* sessions, because existing sessions keep the inventory
-  they started with.
-- The fleet-local stdio path (`personalServiceNowMcp` in
-  `modules/vibe-kanban-rebuild.nix`, enabled on think1–5) is the rollback path
-  and is independent of the hosted service.
+- `wiki/coordinator-nfs-load.md` (task `vk/78a5-analyze-and-redu`)
+- `docs/knowledge-base/authoritative-snapshot-stream-handoffs.md`
+  (summary retention on failed refresh, `vk/113f-sidebar-randomly`)
+- `docs/knowledge-base/workspace-summary-ordering.md` (`vk/9391-workspace-order`)
+- `docs/analysis/coordinator-nfs-io-pressure.md` (numbers behind the NFS page)
 
-## HTTP MCP exposure pattern (homelab `docs/knowledge/mcp-over-http-public-exposure.md`)
+## What we already know
 
-- Use Streamable HTTP, not SSE. Supergateway has no inbound auth, so Caddy
-  enforces the bearer. The edge rule is IP allowlist **and** origin bearer.
-- LAN hairpin: on-LAN clients reach `/mcp` through Cloudflare. That works only
-  when their egress IP is allowlisted. Cluster workers egress via Scott's
-  residential IP, which is listed. Verified this task: no-bearer `/mcp` gets
-  an origin 403, and `/healthz` gets an Access 302.
+1. **Two independent sources feed the sidebar.** Names, pins and `is_running`
+   come from the JSON-patch WebSocket streams. PR, diff, approval, poller,
+   unseen-activity, elapsed-time and affinity metadata come from
+   `POST /api/workspaces/summaries`, polled every 15 s for both the active
+   and the archived scope. "Names but no enrichment" points to the summaries
+   query, not to deleted workspaces. That is exactly what the screenshot
+   shows.
+2. **A failed refresh must reject, never resolve to an empty map.** React
+   Query then keeps the last successful snapshot for the same key. Host and
+   archive scope stay in the query key. Do not use `keepPreviousData`, because
+   it leaks across hosts. Commit `04618693` shipped this. Any new
+   timeout or abort path must therefore **reject**, so this protection covers
+   it too.
+3. **Summaries cost is NFS-bound and scales with open clients.** Each
+   workspace's diff stats run several git subprocesses over NFS. Before the
+   shared cache, one request took 34–43 s. The fix was
+   `WORKSPACE_DIFF_STATS`, a single-flight cache per workspace, with a
+   process-wide limit of 4 permits, tiered staleness (30 s running, 5 min
+   idle, 60 min archived) and generation-based invalidation.
+4. **The leader runs in its own `tokio::spawn` and owns the slot lock and the
+   permit.** A dropped or cancelled waiter therefore does not cancel the git
+   work or break the concurrency limit. This is what makes a waiter-side
+   deadline safe: the work finishes and is published for the next poll.
+5. **Rejected alternatives on record:** NFS mount tuning (breaks coherency), a
+   background refresher (does work when nobody is looking) and client-side
+   throttling alone. A request-driven deadline with a last-known fallback is
+   none of these. Work still only starts because a client asked.
+6. **Ordering must tolerate summaries that have not arrived.** The sort falls
+   back to the streamed `updatedAt` when `latestProcessCompletedAt` is
+   missing. A missing summary is a normal state and does not prove the
+   workspace is inactive.
+7. Tools: `node scripts/time-workspace-summaries.mjs` times the endpoint. The
+   service account can `ssh think2` from any worker, which gives access to the
+   `cloudflared-connector` and `vibe-kanban-dev` journals.
 
-## VK catalog and settings (vibe-kanban `shared-mcp-configuration.md`, homelab `vk-bundled-mcp-catalog.md`)
+## Gaps this task fills
 
-- `crates/executors/default_mcp.json` is the catalog: a server map plus
-  `meta`. An HTTP entry with a placeholder header already exists (`context7`).
-  No test enumerates the catalog. `personal_servicenow` has one pinning test in
-  `mcp_config.rs`.
-- **Catalog changes do not rewrite native files saved from an older template.**
-  Settings are derived from native agent files. A historical-template
-  migration (the Slack precedent) is only safe when the replacement needs no
-  new secret. A stdio → HTTP migration here would need the bearer, so it must
-  be an explicit settings save, not an automatic read-time rewrite.
-- `POST /api/mcp-config/shared` takes the *complete* logical server list and
-  writes each assigned native profile atomically, keeping a `.bak`. Codex
-  accepts Streamable HTTP (`url`/`http_headers`).
-- Placeholders are not validated. Document that `YOUR_TOKEN` has to be
-  replaced. Never commit real-looking credentials.
-- Static-bearer HTTP MCPs (LogMeIn, Firecrawl-browser, Windows MCP) are already
-  stored in settings as `type: http` with an `Authorization` header. That is
-  the established boundary for an operator-held static bearer.
-
-## Cluster runtime (vibe-kanban `cluster-mcp-runtime-connectivity.md`)
-
-- Persistence, runtime adoption and worker connectivity are separate
-  boundaries. A coordinator Test passing does not prove a worker can connect.
-  Direct public MCP URLs pass through to workers unchanged.
-
-## Governing principle (homelab constitution 64)
-
-Deployment-supplied machine credentials for a settings-managed public MCP
-endpoint are attached only at the final outbound hop. They are never
-serialized into settings or native client config. The existing mechanism is
-`services.vibeKanban.protectedMcpRoutes`: a per-host Caddy loopback gateway,
-`vibe-kanban-mcp-access`, that resolves 1Password refs at start. Today it only
-injects Cloudflare Access service-token headers, for `vibe.vasandani.dev` on
-port 18901. The lmi/cdp/windows entries that keep a bearer in settings predate
-this principle and are not a precedent to copy.
+- Nothing bounded how long **one summaries request** could take. Every row's
+  metadata waited on the slowest `git status`. Measured today: 0.27–16.6 s
+  from a worker.
+- Nothing bounded how long the **client** waits, and React Query dedupes polls
+  onto an in-flight promise. So one request that never settles on mobile
+  blanks the sidebar until a reload. The tunnel logged 142 abandoned
+  summaries requests since 2026-09-28.
