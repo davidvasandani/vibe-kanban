@@ -89,6 +89,18 @@ pub fn mcp_gateway_key_path() -> std::path::PathBuf {
     asset_dir().join("mcp_gateway_aead_key")
 }
 
+/// Host-local key used to encrypt per-owner GitHub tokens stored in SQLite.
+/// Separate from the MCP gateway key so neither rotation affects the other.
+pub fn github_owner_tokens_key_path() -> std::path::PathBuf {
+    asset_dir().join("github_owner_tokens_aead_key")
+}
+
+/// App-owned directory holding the `gh` routing shim. Derived on the host
+/// that spawns the child; never sent to a cluster worker.
+pub fn github_auth_bin_dir() -> std::path::PathBuf {
+    asset_dir().join("github-auth").join("bin")
+}
+
 pub fn relay_host_credentials_path() -> std::path::PathBuf {
     asset_dir().join("relay_host_credentials.json")
 }

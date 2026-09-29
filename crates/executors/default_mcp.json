@@ -79,8 +79,8 @@
     }
   },
   "personal_servicenow": {
-    "command": "personal-servicenow-mcp",
-    "args": []
+    "type": "http",
+    "url": "https://snow.vasandani.dev/mcp"
   },
   "meta": {
     "vibe_kanban": {

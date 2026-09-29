@@ -30,6 +30,8 @@ contributed to it.
   Also covers the browser session and profile-lock hazards and the
   stale-response rules for the Settings card.
 
+- [mcp-pr-tools-and-connection-notices.md](mcp-pr-tools-and-connection-notices.md) — Why a Claude "failed to connect" notice can name a shadowing project `.mcp.json` duplicate rather than the working VK server (same-name replacement, ancestor loading, `disabledMcpjsonServers`); reading CI without the Checks permission (per-source coverage, truncation, superseded runs, pass-by-allowlist, two-witness merge gate); safe SHA-guarded merge, fork-aware encoded branch deletion, remote-aware PR resolution and endpoint-routed `gh api` credentials (`vk/53bc-agents-fall-back`).
+
 - [mcp-oauth-connection-identity.md](mcp-oauth-connection-identity.md) — Preserve owner-bound gateway identity across identifier changes and both OAuth completion paths.
 
 - [issue-workspace-lifecycle.md](issue-workspace-lifecycle.md) — Comment-driven activation, transactional Done reopening, queue handoff ordering and local/remote sync boundaries.
@@ -176,6 +178,7 @@ contributed to it.
   `NODE_ENV=production` act() gotcha, and how an external-connector link
   (Jira badge) is surfaced identically on the card and the panel header (one
   `JiraBadge` + `jiraLink` data prop + `getJiraLinkForIssue` lookup).
+- [workspace-sidebar-filtering.md](workspace-sidebar-filtering.md) — The one pure `filterSidebarWorkspaces` pipeline for the active and archived lists. Joining local workspaces to remote issue status through `local_workspace_id`. Need-gated per-project shape subscriptions, fail-open hiding and the `__no_issue__` sentinel. Global name-keyed hide lists. The typed Rust scratch silently drops frontend-only preference fields. web-core is not covered by repo lint, and the i18n duplicate check fails spuriously without `diff`.
 - [kanban-board-filtering.md](kanban-board-filtering.md) — The single
   `filterKanbanIssues` pipeline and its stage order, why view defaults (Team
   view hides sub-issues) must yield to an explicit search while deliberate
@@ -275,6 +278,16 @@ contributed to it.
   must never be projected into agent stdout, where vendor parsers render it as
   "Unrecognized JSON message". Coordinator classifier routing and the rule for
   new kinds (`vk/5276-debug-unrecogniz`).
+- [github-owner-token-routing.md](github-owner-token-routing.md) — One PAT per
+  GitHub owner, chosen per `gh` invocation and per Git URL
+  (`vk/0f52-manage-gh-token`). Covers: machine secrets kept out of `Config` in
+  a host-key-encrypted table; environment names that survive Codex's
+  KEY/SECRET/TOKEN filter (hex owner encoding, `GIT_CONFIG_PARAMETERS` instead
+  of `GIT_CONFIG_KEY_n`, a manifest name disjoint from per-owner names);
+  owner-scoped Git credential contexts; a prepended `gh` shim that survives
+  profile PATH merging; and the gh argument-parsing traps (value flags consumed
+  first, short letters reused per subcommand, `--`, `GH_REPO`, `gh-resolved`,
+  API placeholders).
 - [coordinator-restart-handoff.md](coordinator-restart-handoff.md) — Why a VK
   deploy no longer stops worker-owned tasks (parents, sub-tasks, pollers).
   Shutdown hands them off with no cancel and no WIP commit. Boot re-attaches

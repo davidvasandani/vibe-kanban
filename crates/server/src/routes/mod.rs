@@ -16,6 +16,7 @@ pub mod attachments;
 pub mod events;
 pub mod execution_processes;
 pub mod frontend;
+pub mod github_owner_tokens;
 pub mod global_search;
 pub mod health;
 pub mod host_relay;
@@ -63,6 +64,7 @@ pub fn router(
         .merge(organizations::router())
         .merge(filesystem::router())
         .merge(repo::router())
+        .merge(github_owner_tokens::router())
         .merge(events::router(&deployment))
         .merge(approvals::router())
         .merge(browser_sessions::router(&deployment))

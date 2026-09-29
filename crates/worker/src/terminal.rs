@@ -69,6 +69,7 @@ impl TerminalService {
                 .environment
                 .insert("PATH".into(), path.to_string_lossy().into_owned());
         }
+        utils::github_auth::apply_github_routing(&mut request.environment);
         let terminal_id = Uuid::new_v4();
         let (tx, rx) = mpsc::channel(OUTPUT_QUEUE_CAPACITY);
         let session = tokio::task::spawn_blocking(move || {

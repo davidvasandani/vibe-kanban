@@ -886,3 +886,19 @@ centered modal with a full-screen overlay that blocked the chat. No existing
 principle covered whether an auxiliary surface may be modal. XXXVI and XXXVII
 govern scroll and height inside a host, not whether a surface may cover its
 neighbours. Numeral XLII was unused on this branch.
+
+## Review: vk/4dac-filter-workspace
+
+Applied `/speckit.constitution`: no amendment (version stays 0.39.0). The task
+adds a user-set sidebar filter that hides workspaces by their linked issue's
+status. The existing principles cover it:
+- XXXIV: a workspace whose issue or status hasn't loaded stays visible. Hiding
+  requires positive evidence.
+- XXXV: status comes only from the workspace's own `issue_id`, joined via
+  `local_workspace_id`.
+- XXXVIII: this is a deliberate filter, so it still applies during search.
+- III: it reuses the existing filter dialog, preference scratch and cached
+  Electric shapes.
+Status names rather than ids key the global preference, following the existing
+`list_view_status_filter_name` convention. That is an established repository
+pattern, not a new principle.

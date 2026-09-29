@@ -1,45 +1,70 @@
-# Prior knowledge — vk/4643-move-settings-to
+# PRIOR KNOWLEDGE — vk/975e-migrate-personal
 
-Sources searched: `wiki/INDEX.md` and its pages, plus
-`docs/knowledge-base/INDEX.md` and its pages, for "settings", "drawer",
-"modal" and "dialog". No page covers how the Settings surface itself is laid
-out. The pages below are the closest matches.
+Distilled from the two project knowledge bases (homelab `knowledge-base/`,
+`docs/knowledge/`, and the runbooks under `docs/`; vibe-kanban
+`docs/knowledge-base/` and `wiki/`). This pass was read-only.
 
-## What applies
+## The hosted service already exists (homelab)
 
-- **`wiki/flexible-collapsible-panel-stacks.md`** covers the workspace right
-  drawer (`RightSidebar.tsx`):
-  - `RightSidebar` is shared between the desktop drawer and the mobile `git`
-    tab. Desktop-only chrome has to be opted into by the layout mount.
-  - Every ancestor in a height-constrained stack needs `min-h-0`.
-  - **Implication:** Settings should not go into `RightSidebar`. It is a fixed
-    300px, workspace-only, mobile-shared stack, and Settings must open from
-    every route. Build an app-shell-level drawer instead.
-- **`docs/knowledge-base/nested-flex-scroll-containment.md`:** in a fixed
-  header plus scrolling body, the shell is `flex flex-col h-full`, the header
-  is `shrink-0`, and the body is `min-h-0 flex-1 overflow-y-auto`. The drawer
-  gets a definite height from `fixed inset-y-0`. Keep the existing section
-  scroll owner (the content column's `overflow-y-auto`).
-- **`docs/knowledge-base/pipeline-settings-editor.md`** (Settings host
-  switching):
-  - Dirty-state confirmation is global across sections.
-  - The host-scoped subtree is keyed by the selected host.
-  - Drawer changes must keep `SettingsDirtyProvider` / `SettingsHostProvider`
-    wrapping and the close-with-confirmation flow untouched.
-- **`docs/knowledge-base/remote-machine-management.md`:** removing the route's
-  active host closes Settings through the section's `onClose` prop. The drawer
-  must keep passing `onClose` into sections.
-- **`wiki/appbar-rail-and-org-tiles.md`:** the AppBar rail (remote) holds a
-  settings gear. It calls `SettingsDialog.show()` like the other entry points,
-  so as long as that API stays the same those entry points need no changes.
+- `docs/personal-servicenow-mcp-deployment.md`: think1 runs Supergateway 3.4.3
+  (stdio → stateful Streamable HTTP) on `127.0.0.1:8790`. Caddy on
+  `172.16.100.101:8191` enforces the origin bearer and proxies only `/mcp`.
+  The public URL is `https://snow.vasandani.dev/mcp`. There is no SSE endpoint.
+- Cloudflare Access SSO gates the hostname. `/mcp` bypasses SSO only for the
+  reviewed Claude/Scott/Camero CIDRs, the same list as lmi/cdp. The origin
+  bearer is still mandatory. The bearer is generated at
+  `/var/lib/personal-servicenow-mcp/http-token`.
+- The runbook defers the VK switch explicitly: migrate the bundled entry only
+  after public initialize, tools/list, a bounded read and negative-auth proof.
+  Header values go through the owning runtime secret boundary, **not catalog
+  JSON**. Test in *new* sessions, because existing sessions keep the inventory
+  they started with.
+- The fleet-local stdio path (`personalServiceNowMcp` in
+  `modules/vibe-kanban-rebuild.nix`, enabled on think1–5) is the rollback path
+  and is independent of the hosted service.
 
-## Gotchas found while scouting the code
+## HTTP MCP exposure pattern (homelab `docs/knowledge/mcp-over-http-public-exposure.md`)
 
-- The dialog/overlay z-layers in `@vibe/ui` are 9998/9999, and dropdowns are
-  10000. A non-modal drawer should sit below 9998 so that the confirm dialogs
-  and dropdowns opened from Settings still stack above it.
-- `Scope.SETTINGS` in `keyboard/registry.ts` is declared but not used.
-  Settings' Escape handling is a hand-rolled `window` listener, and a
-  non-modal drawer has to scope it to focus inside the drawer.
-- About 20 call sites use `SettingsDialog.show(...)`, and some of them `await`
-  it. Keep the nice-modal API.
+- Use Streamable HTTP, not SSE. Supergateway has no inbound auth, so Caddy
+  enforces the bearer. The edge rule is IP allowlist **and** origin bearer.
+- LAN hairpin: on-LAN clients reach `/mcp` through Cloudflare. That works only
+  when their egress IP is allowlisted. Cluster workers egress via Scott's
+  residential IP, which is listed. Verified this task: no-bearer `/mcp` gets
+  an origin 403, and `/healthz` gets an Access 302.
+
+## VK catalog and settings (vibe-kanban `shared-mcp-configuration.md`, homelab `vk-bundled-mcp-catalog.md`)
+
+- `crates/executors/default_mcp.json` is the catalog: a server map plus
+  `meta`. An HTTP entry with a placeholder header already exists (`context7`).
+  No test enumerates the catalog. `personal_servicenow` has one pinning test in
+  `mcp_config.rs`.
+- **Catalog changes do not rewrite native files saved from an older template.**
+  Settings are derived from native agent files. A historical-template
+  migration (the Slack precedent) is only safe when the replacement needs no
+  new secret. A stdio → HTTP migration here would need the bearer, so it must
+  be an explicit settings save, not an automatic read-time rewrite.
+- `POST /api/mcp-config/shared` takes the *complete* logical server list and
+  writes each assigned native profile atomically, keeping a `.bak`. Codex
+  accepts Streamable HTTP (`url`/`http_headers`).
+- Placeholders are not validated. Document that `YOUR_TOKEN` has to be
+  replaced. Never commit real-looking credentials.
+- Static-bearer HTTP MCPs (LogMeIn, Firecrawl-browser, Windows MCP) are already
+  stored in settings as `type: http` with an `Authorization` header. That is
+  the established boundary for an operator-held static bearer.
+
+## Cluster runtime (vibe-kanban `cluster-mcp-runtime-connectivity.md`)
+
+- Persistence, runtime adoption and worker connectivity are separate
+  boundaries. A coordinator Test passing does not prove a worker can connect.
+  Direct public MCP URLs pass through to workers unchanged.
+
+## Governing principle (homelab constitution 64)
+
+Deployment-supplied machine credentials for a settings-managed public MCP
+endpoint are attached only at the final outbound hop. They are never
+serialized into settings or native client config. The existing mechanism is
+`services.vibeKanban.protectedMcpRoutes`: a per-host Caddy loopback gateway,
+`vibe-kanban-mcp-access`, that resolves 1Password refs at start. Today it only
+injects Cloudflare Access service-token headers, for `vibe.vasandani.dev` on
+port 18901. The lmi/cdp/windows entries that keep a bearer in settings predate
+this principle and are not a precedent to copy.

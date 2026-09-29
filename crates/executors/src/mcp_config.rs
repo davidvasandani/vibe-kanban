@@ -40,6 +40,74 @@ pub fn has_runtime_route_for_public_url(url: &str) -> bool {
     runtime_routes().contains_key(url)
 }
 
+/// The runtime route `url` belongs to, identified by its public URL, when
+/// `url` is either side of one: the public logical URL settings keep, or the
+/// loopback URL the host serves it on.
+pub fn runtime_route_key(url: &str) -> Option<String> {
+    url_route_key(url, &runtime_routes())
+}
+
+fn url_route_key(url: &str, routes: &BTreeMap<String, String>) -> Option<String> {
+    routes
+        .iter()
+        .find(|(public, local)| *public == url || *local == url)
+        .map(|(public, _)| public.clone())
+}
+
+/// Route keys of the servers in an MCP config object (`{"mcpServers": …}`)
+/// that point at a runtime route — the managed entries a shadowing project
+/// entry would otherwise displace.
+pub fn routed_mcp_server_keys(
+    config: &Value,
+    route_key: impl Fn(&str) -> Option<String>,
+) -> std::collections::BTreeSet<String> {
+    config
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|servers| servers.values())
+        .flat_map(|entry| {
+            ["url", "httpUrl"]
+                .into_iter()
+                .filter_map(|key| entry.get(key).and_then(Value::as_str))
+                .filter_map(&route_key)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Names of project-scope (`.mcp.json`) servers that duplicate a server this
+/// deployment already provides through a runtime route.
+///
+/// Such an entry reaches the public URL directly, without the credentials the
+/// loopback route injects, so it fails — and when it shares the managed
+/// entry's name, Claude Code lets the project entry *replace* the working one.
+/// Callers disable exactly these names; every other project server is left
+/// alone.
+pub fn shadowed_project_mcp_servers(
+    mcp_json: &Value,
+    is_routed: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let Some(servers) = mcp_json.get("mcpServers").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = servers
+        .iter()
+        .filter(|(_, entry)| {
+            ["url", "httpUrl"].iter().any(|key| {
+                entry
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(&is_routed)
+            })
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn route_mcp_url(url: &str, routes: &BTreeMap<String, String>) -> String {
     routes.get(url).cloned().unwrap_or_else(|| url.to_string())
 }
@@ -962,16 +1030,22 @@ mod tests {
     }
 
     #[test]
-    fn personal_servicenow_catalog_uses_the_fleet_installed_stdio_wrapper() {
+    fn personal_servicenow_catalog_uses_the_hosted_https_endpoint() {
         let value = serde_json::from_str::<Value>(DEFAULT_MCP_JSON).unwrap();
         let server = &value["personal_servicenow"];
+        // URL-only on purpose: the deployment's runtime route attaches the
+        // origin bearer, so no credential or placeholder header belongs here,
+        // and a stdio launcher must not creep back in.
         assert_eq!(
             server,
             &serde_json::json!({
-                "command": "personal-servicenow-mcp",
-                "args": []
+                "type": "http",
+                "url": "https://snow.vasandani.dev/mcp"
             })
         );
+        for field in ["command", "args", "env", "headers"] {
+            assert!(server.get(field).is_none(), "unexpected `{field}`");
+        }
         assert_eq!(
             value["meta"]["personal_servicenow"]["name"],
             serde_json::json!("Personal ServiceNow")
@@ -1464,6 +1538,85 @@ mod tests {
             servers["other"]["url"],
             serde_json::json!("https://example.test/mcp")
         );
+    }
+
+    #[test]
+    fn runtime_route_key_matches_either_side_exactly() {
+        let routes = BTreeMap::from([(
+            "https://vibe.vasandani.dev/mcp".to_string(),
+            "http://127.0.0.1:18901/mcp".to_string(),
+        )]);
+        let key = Some("https://vibe.vasandani.dev/mcp".to_string());
+        assert_eq!(
+            url_route_key("https://vibe.vasandani.dev/mcp", &routes),
+            key
+        );
+        assert_eq!(url_route_key("http://127.0.0.1:18901/mcp", &routes), key);
+        assert_eq!(
+            url_route_key("https://vibe.vasandani.dev/mcp/other", &routes),
+            None
+        );
+        assert_eq!(
+            url_route_key("https://vibe.vasandani.dev/mcp", &BTreeMap::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn routed_server_keys_read_managed_entries() {
+        let routes = BTreeMap::from([(
+            "https://vibe.vasandani.dev/mcp".to_string(),
+            "http://127.0.0.1:18901/mcp".to_string(),
+        )]);
+        let user_config = serde_json::json!({"mcpServers": {
+            "vibe_kanban": {"type": "http", "url": "http://127.0.0.1:18901/mcp"},
+            "slack": {"command": "slack-mcp"}
+        }});
+        let keys = routed_mcp_server_keys(&user_config, |url| url_route_key(url, &routes));
+        assert_eq!(
+            keys.into_iter().collect::<Vec<_>>(),
+            vec!["https://vibe.vasandani.dev/mcp".to_string()]
+        );
+        assert!(routed_mcp_server_keys(&serde_json::json!({}), |_| None).is_empty());
+    }
+
+    #[test]
+    fn shadowed_project_servers_are_only_runtime_routed_duplicates() {
+        let routed = |url: &str| {
+            url == "https://vibe.vasandani.dev/mcp" || url == "http://127.0.0.1:18901/mcp"
+        };
+        // The homelab repository's `.mcp.json` shape that produced the
+        // "vibe-kanban (CLIENT_HTTP_UNEXPECTED_CONTENT)" notice.
+        let mcp_json = serde_json::json!({
+            "mcpServers": {
+                "vibe-kanban": {
+                    "type": "http",
+                    "url": "https://vibe.vasandani.dev/mcp",
+                    "headers": {"Authorization": "Bearer ${VIBE_KANBAN_MCP_TOKEN}"}
+                },
+                "vibe_kanban": {"httpUrl": "http://127.0.0.1:18901/mcp"},
+                "tldraw": {"type": "http", "url": "https://draw.vasandani.dev/mcp"},
+                "fetch": {"command": "uvx", "args": ["mcp-server-fetch"]},
+                "not-an-object": "https://vibe.vasandani.dev/mcp"
+            }
+        });
+        assert_eq!(
+            shadowed_project_mcp_servers(&mcp_json, routed),
+            vec!["vibe-kanban".to_string(), "vibe_kanban".to_string()]
+        );
+    }
+
+    #[test]
+    fn shadowed_project_servers_tolerate_unexpected_shapes() {
+        let routed = |_: &str| true;
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"mcpServers": []}),
+            serde_json::json!({"mcpServers": {"x": {"url": 7}}}),
+            serde_json::json!([1, 2]),
+        ] {
+            assert!(shadowed_project_mcp_servers(&value, routed).is_empty());
+        }
     }
 
     #[tokio::test]

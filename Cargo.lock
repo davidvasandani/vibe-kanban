@@ -11624,6 +11624,7 @@ dependencies = [
  "futures",
  "json-patch 2.0.0",
  "jsonwebtoken",
+ "libc",
  "nix 0.29.0",
  "open",
  "regex",

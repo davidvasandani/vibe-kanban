@@ -5,6 +5,7 @@ pub mod execution_process_logs;
 pub mod execution_process_repo_state;
 pub mod execution_worker_job;
 pub mod file;
+pub mod github_owner_token;
 pub mod mcp_gateway;
 pub mod merge;
 pub mod preview_lease;

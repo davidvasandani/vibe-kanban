@@ -1,39 +1,31 @@
-# Implementation plan — vk/4643-move-settings-to
+# Implementation plan: vk/ad2a-failed-to-start
 
-See `SPEC.md` and `PRIOR_KNOWLEDGE.md`.
-
-1. **Store.** Add `packages/web-core/src/shared/stores/useSettingsDrawerStore.ts`
-   (zustand). It holds:
-   - `isOpen`, `width`, `requestClose`
-   - `setOpen`, `setWidth` (clamped, persisted to
-     `localStorage['vibe.ui.settingsDrawerWidth']`), `registerCloseRequest`
-   - `clampSettingsDrawerWidth(width, viewport)`, exported
-   - `useSettingsDrawerInset(isMobile)`
-   - Vitest: `useSettingsDrawerStore.test.ts`
-2. **Drawer rendering.** Rewrite the chrome of `SettingsDialogContent` in
-   `SettingsDialog.tsx`:
-   - Remove the overlay.
-   - On desktop, render a fixed right drawer at `z-[90]` with a left-edge
-     resize handle (pointer drag) and `border-l`. On mobile, keep the
-     full-screen sheet.
-   - Narrow the nav column to `md:w-48`.
-   - Scope Escape to the drawer (`onKeyDown` on the drawer, skipping
-     `defaultPrevented`).
-   - Register `handleCloseWithConfirmation` as the store's `requestClose`.
-     Set `isOpen` on mount and clear it on unmount.
-   - React to changes in the `initialSection`/`initialState` props (re-show
-     while open).
-3. **Toggle.** Export `toggleSettingsDrawer()` from `SettingsDialog.tsx`.
-   `Actions.Settings.execute` calls it, and `isActive` reads
-   `ctx.isSettingsOpen`. Add `isSettingsOpen` to `ActionVisibilityContext` and
-   its type. Point the remote gear handlers (`RemoteAppShell`,
-   `RemoteNavbarContainer`) and the no-arg remote action override at the
-   toggle.
-4. **Layout inset.** Apply `marginRight: useSettingsDrawerInset()` (with a
-   width transition) to the desktop root of `SharedAppLayout.tsx` and
-   `RemoteAppShell.tsx`.
-5. **Verify.** Run web-core vitest, `pnpm run check`, `pnpm run lint` and
-   `pnpm run format`. Then do a manual browser check with the local dev server
-   if one is available.
-6. **Review, knowledge base, PR.** Get a Codex review, update the wiki page,
-   then open the PR and merge it.
+1. **Liveness classifier** (`crates/services/src/services/cluster/scheduler.rs`):
+   add a pure `dispatch_liveness(worker: Option<&WorkerNode>, now) -> Result<(), WorkerUnavailable>`.
+   It returns unavailable when the row is missing, the status is `offline`, or
+   the lease is missing or expired. A `draining` worker with a valid lease stays
+   available. The result carries the hostname and last heartbeat so the caller
+   can build the message. Unit-test every row of the SPEC table.
+2. **Typed error** (`crates/services/src/services/container.rs`): add
+   `ContainerError::WorkerUnavailable(String)`, which displays its message
+   verbatim.
+3. **Dispatch gate** (`crates/local-deployment/src/container.rs::dispatch_execution`):
+   after resolving `worker_node_id`, load `WorkerNode::find_by_id`, run the
+   classifier, and return `WorkerUnavailable` **before**
+   `ExecutionWorkerJob::create_pending` and before any network call.
+4. **API mapping** (`crates/server/src/error.rs`): add
+   `ApiError::WorkerUnavailable(String)`, map it from the container variant
+   above the `Container` catch-all, and render it as `503`,
+   `WorkerUnavailableError`, with its message. Add a unit test.
+5. **Transport cause** (`crates/services/src/services/cluster/client.rs`): have
+   `Transport` render the `source()` chain. Add a unit test using a real
+   `reqwest` error against an unroutable local port.
+6. Run `cargo test -p services -p server -p local-deployment` (the
+   targeted tests), `pnpm run format`, and clippy on the touched crates. Run
+   `generate-types:check` if any TS-exported type changed (none is planned).
+7. Codex review, then fix findings and repeat until the review is clean.
+8. Knowledge base: add a vibe-kanban section on liveness gates for dispatch
+   and on error chains, and a homelab page on worker cgroup memory throttling.
+   Update both INDEXes.
+9. Open PRs (vibe-kanban for code and docs, homelab for the SpecKit artifacts
+   and KB), wait for CI, and merge.

@@ -409,6 +409,7 @@ mod tests {
             expected_gid: 1000,
             executor_profiles: vec!["codex".into()],
             state_dir: PathBuf::from("/shared/execution-logs/worker-state/test"),
+            job_cgroup: None,
         };
         let authority = authority(&config);
         assert_eq!(authority.worker_node_id, config.worker_node_id);

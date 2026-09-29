@@ -1,6 +1,6 @@
 # Clustered workspace execution and shared-storage safety
 
-Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`, `8475-bubblewrap-missi`, `2fe7-vk-coordinator-m`, `eef5-coordinator-miss`, `VAS-448`, `vk/1d23-vk-worker-output`
+Tags: `957e-clustered-vibe-k`, `19a4-git-worktrees-br`, `b72a-internal-error-o`, `8475-bubblewrap-missi`, `2fe7-vk-coordinator-m`, `eef5-coordinator-miss`, `VAS-448`, `vk/1d23-vk-worker-output`, `vk/ad2a-failed-to-start`
 
 ## Keep authority central and process ownership local
 
@@ -16,6 +16,21 @@ by an agent (for example Codex's `bwrap` sandbox helper) therefore belong in the
 worker unit's Nix `path`, with an evaluated-module assertion on that exact unit.
 Installing the package only for the coordinator or globally does not express or
 reliably satisfy the worker execution contract.
+
+Process ownership also includes the memory boundary. Children must never share
+the worker's leaf cgroup, because a ceiling there throttles the control plane
+(accept loop, heartbeats, journal) along with a runaway build
+(`vk/ad2a-failed-to-start`). With `VK_WORKER_JOB_CGROUP` set, and the unit
+delegated with `DelegateSubgroup=supervisor`, `job_cgroup.rs` creates a
+sibling `jobs` cgroup that carries `VK_WORKER_JOB_MEMORY_HIGH` and
+`VK_WORKER_JOB_MEMORY_MAX`. Placement uses two layers, because cgroup v2
+never migrates memory that is already charged. Children spawned through
+`utils::command_ext` (every executor, plus worker scripts) join `jobs` in a
+`pre_exec` hook of raw open/write/close calls, which are safe after fork.
+A plain thread then sweeps any other PID out of `supervisor` every 200 ms,
+which covers PTYs, one-off commands and future call sites that bypass the
+helper. Setup failure never stops the worker. It serves on and
+reports `job_cgroup.state = "failed"` on `/health`.
 
 Persist the worker ID on both the workspace and execution job. Never infer
 affinity from the currently selected UI host, and never retry a dispatch on a
@@ -100,6 +115,29 @@ task) as well as filtering them during placement.
 A failed dispatch must also terminalise its worker-job record. Otherwise a job
 that never started appears pending indefinitely and contaminates later
 reconciliation.
+
+The dispatch path must also honour the registry's own liveness verdict. An
+expired lease that is visible in the admin UI, but ignored by
+`dispatch_execution`, still sends a sticky workspace's turn to a dead worker.
+In `vk/ad2a-failed-to-start`, think5 had been `offline` for about two hours.
+Each start waited out two 30s transport attempts and then reported "worker
+transport failed: error sending request for url (…)", which the API
+rendered as a generic 500. Gate on `dispatch_liveness` (missing row,
+`offline`, or lease missing or expired, where the lease is the authority
+because `expire_leases` may not have swept yet). The gate runs after the
+placement lookup and **before** `create_pending`, so a refusal leaves no record
+to terminalise. Refuse with a typed error (`ContainerError::WorkerUnavailable`
+→ 503 `WorkerUnavailableError`) that names the host, its last heartbeat, and
+the move-workspace remedy. Keep it narrower than scheduler `eligibility`:
+mount health and executor capability are placement rules, and a draining
+worker with a live lease keeps its admission semantics. Never reroute (sticky
+affinity).
+
+`reqwest::Error`'s `Display` omits its cause. "error sending request" is the
+same text for a timeout, a refused port, and a reset. Any transport error that
+reaches a user or an evidence record should render its `source()` chain, as
+`WorkerClientError::Transport` now does: an accept queue that is full (a
+wedged listener) times out, while a dead process is refused.
 
 ## Bind authentication to the complete request
 

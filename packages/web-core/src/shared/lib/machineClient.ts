@@ -7,6 +7,8 @@ import type {
   AwsSsoSession,
   CliToolId,
   CliToolStatus,
+  CreateGitHubOwnerTokenRequest,
+  GitHubOwnerToken,
   ReauthOverview,
   ReauthRunReport,
   Config,
@@ -28,6 +30,7 @@ import type {
   SharedMcpWriteRequest,
   SharedMcpWriteResponse,
   TestMcpServersBody,
+  UpdateGitHubOwnerTokenRequest,
   UpdateMcpServersBody,
   UpdateRepo,
   UserSystemInfo,
@@ -111,6 +114,15 @@ export interface MachineClient {
     body?: SharedMcpTestRequest
   ) => Promise<SharedMcpAssignmentTestResult[]>;
   disconnectSharedMcp: (connectionId: string) => Promise<boolean>;
+  listGitHubOwnerTokens: () => Promise<GitHubOwnerToken[]>;
+  createGitHubOwnerToken: (
+    data: CreateGitHubOwnerTokenRequest
+  ) => Promise<GitHubOwnerToken>;
+  updateGitHubOwnerToken: (
+    id: string,
+    data: UpdateGitHubOwnerTokenRequest
+  ) => Promise<GitHubOwnerToken>;
+  deleteGitHubOwnerToken: (id: string) => Promise<void>;
   startMcpAuth: (
     query: McpServerQuery,
     serverName: string,
@@ -337,6 +349,37 @@ export function createMachineClient(
           runtime,
           target,
           `/api/mcp-gateway/connections/${encodeURIComponent(connectionId)}`,
+          { method: 'DELETE' }
+        )
+      ),
+    listGitHubOwnerTokens: async () =>
+      handleApiResponse<GitHubOwnerToken[]>(
+        await makeMachineRequest(runtime, target, '/api/github-owner-tokens', {
+          cache: 'no-store',
+        })
+      ),
+    createGitHubOwnerToken: async (data) =>
+      handleApiResponse<GitHubOwnerToken>(
+        await makeMachineRequest(runtime, target, '/api/github-owner-tokens', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        })
+      ),
+    updateGitHubOwnerToken: async (id, data) =>
+      handleApiResponse<GitHubOwnerToken>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/github-owner-tokens/${encodeURIComponent(id)}`,
+          { method: 'PUT', body: JSON.stringify(data) }
+        )
+      ),
+    deleteGitHubOwnerToken: async (id) =>
+      handleApiResponse<void>(
+        await makeMachineRequest(
+          runtime,
+          target,
+          `/api/github-owner-tokens/${encodeURIComponent(id)}`,
           { method: 'DELETE' }
         )
       ),

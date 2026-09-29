@@ -135,7 +135,13 @@ export type WorkspaceSortByData = "updated_at" | "created_at";
 
 export type WorkspaceSortOrderData = "asc" | "desc";
 
-export type WorkspaceFilterStateData = { project_ids: Array<string>, pr_filter: WorkspacePrFilterData, };
+export type WorkspaceFilterStateData = { project_ids: Array<string>, pr_filter: WorkspacePrFilterData, 
+/**
+ * Issue statuses whose workspaces are hidden, stored by normalized
+ * (trimmed, lower-cased) name since status ids are per-project and this
+ * preference is global. May include the `__no_issue__` sentinel.
+ */
+hidden_issue_status_names: Array<string>, };
 
 export type WorkspaceSortStateData = { sort_by: WorkspaceSortByData, sort_order: WorkspaceSortOrderData, };
 
@@ -1158,6 +1164,12 @@ merge_stage_ids: Array<string>,
  * Global cap on launches per trailing hour; 0 disables launching.
  */
 max_per_hour: number, };
+
+export type GitHubOwnerToken = { id: string, owner: string, reference?: string, created_at: string, updated_at: string, };
+
+export type CreateGitHubOwnerTokenRequest = { owner: string, value: string, };
+
+export type UpdateGitHubOwnerTokenRequest = { value: string, };
 
 export type PipelineStep = { 
 /**

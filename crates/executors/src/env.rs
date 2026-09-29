@@ -205,7 +205,12 @@ impl ExecutionEnv {
                 self.vars.retain(|key, _| !is_path_key(key));
 
                 let effective_path = if let Some(runtime_path) = runtime_path {
-                    workspace_utils::shell::merge_paths(profile_path, runtime_path)
+                    // Profile entries go first, except that GitHub owner routing's `gh`
+                    // shim (runtime-owned) must stay ahead of any profile `gh`.
+                    workspace_utils::github_auth::preserve_shim_precedence(
+                        workspace_utils::shell::merge_paths(profile_path, &runtime_path),
+                        std::ffi::OsStr::new(&runtime_path),
+                    )
                 } else {
                     profile_path.into()
                 };
@@ -331,6 +336,29 @@ mod tests {
                 PathBuf::from("/profile/bin"),
                 PathBuf::from("/runtime/bin"),
                 PathBuf::from("/managed/cli-tools/bin"),
+            ]
+        );
+    }
+
+    #[test]
+    fn profile_path_cannot_shadow_the_github_routing_shim() {
+        let shim = workspace_utils::assets::github_auth_bin_dir();
+        let mut base = ExecutionEnv::new(RepoContext::default(), false, String::new());
+        let runtime_path =
+            std::env::join_paths([shim.clone(), PathBuf::from("/runtime/bin")]).unwrap();
+        base.insert("PATH", runtime_path.to_string_lossy());
+        let profile = HashMap::from([("PATH".to_string(), "/profile/gh/bin".to_string())]);
+        let merged = base.with_profile(&CmdOverrides {
+            env: Some(profile),
+            ..Default::default()
+        });
+        let paths: Vec<_> = std::env::split_paths(merged.vars.get("PATH").unwrap()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                shim,
+                PathBuf::from("/profile/gh/bin"),
+                PathBuf::from("/runtime/bin"),
             ]
         );
     }
