@@ -117,7 +117,7 @@ In the homelab Nix module, keep `clusterRole = "coordinator"` and add `colocated
 - has no dependency a coordinator restart could propagate through, and is never in the coordinator's restart list;
 - gets its own release root (`/srv/vk-worker-releases`), which only the drain-gated distributor updates, so a coordinator deploy never replaces it;
 - has its own copies of the per-account prerequisites (skills, workspace trust, transcript retention, runtime credentials);
-- yields CPU and IO to the coordinator (`CPUWeight`, `IOWeight`, `CPUQuota`).
+- yields CPU and IO to the coordinator through `CPUWeight` and `IOWeight`. There is no unit-level CPU quota: it would throttle the worker's own control plane together with its agents.
 
 Register it like any worker:
 
