@@ -122,3 +122,34 @@ refreshes, automatic polling recovery, explicit clears, initial failure, and
 late responses after a host switch.
 
 Contributed by: `vk/113f-sidebar-randomly`.
+
+## A polled query needs its own deadline
+
+React Query dedupes `refetchInterval` ticks and focus refetches onto an
+in-flight promise (`cancelRefetch: false`). The `signal` it hands to
+`queryFn` aborts only on cancellation or loss of observers, never on
+elapsed time. So one summaries request that never settles (a suspended
+mobile page, a lost connection behind the Cloudflare tunnel) **captures every
+later poll**. The sidebar then shows names with no metadata until a reload,
+and retention of the last good snapshot does not help when there was never
+one.
+
+- Give the `queryFn` a deadline and forward React Query's `signal`. Combine
+  them with a manual `AbortController` and `setTimeout`: `AbortSignal.any`
+  is missing on older iOS Safari, and `AbortSignal.timeout` ignores Vitest
+  fake timers.
+- **Race the load against the abort, do not just pass the signal.** The remote
+  frontend's WebRTC transport (`requestLocalApiViaWebRtc`) ignores
+  `requestInit.signal`, so an aborted signal alone never settles the promise.
+  `Promise.race([load(), aborted])` holds the deadline for every transport,
+  including body parsing.
+- A timeout must **reject**, so the retention rule above still keeps the last
+  snapshot, and the next poll then issues a new request.
+- Set `refetchOnWindowFocus: true` on queries whose staleness users notice
+  when they resume (the global default is `false`). The `focusManager`
+  listens to `visibilitychange`.
+- Test with a mock request that only settles when its signal aborts, a mock
+  that ignores the signal entirely, `client.cancelQueries`, and
+  `focusManager.setFocused`. Reset the focus manager in `afterEach`.
+
+Contributed by: `vk/b923-workspaces-loadi`.

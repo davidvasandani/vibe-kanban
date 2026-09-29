@@ -272,7 +272,9 @@ contributed to it.
   threads). Root cause was per-client summaries git sweeps. Bulk worktree scans
   go through a shared single-flight, tiered-TTL, generation-invalidated cache
   whose leader task owns the lock and permit past cancellation
-  (`vk/78a5-analyze-and-redu`).
+  (`vk/78a5-analyze-and-redu`). The summaries response is also bounded by a
+  request-wide 3 s budget, using `get_within` with a last-known fallback, so
+  cheap metadata never waits on git (`vk/b923-workspaces-loadi`).
 - [worker-journal-agent-stream-boundary.md](worker-journal-agent-stream-boundary.md)
   — Worker `Structured` metadata (cancellation phases, worker/stream errors)
   must never be projected into agent stdout, where vendor parsers render it as

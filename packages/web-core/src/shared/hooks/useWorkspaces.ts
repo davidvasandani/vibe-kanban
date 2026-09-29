@@ -106,37 +106,98 @@ export const workspaceKeys = {
 
 // workspaceSummaryKeys is imported from @/shared/hooks/workspaceSummaryKeys
 
+// React Query joins every poll onto an in-flight fetch, so a request that never
+// settles (common on suspended mobile pages) would stall the sidebar metadata
+// until reload. The deadline turns it into a failed refresh instead.
+export const SUMMARY_REQUEST_TIMEOUT_MS = 20_000;
+
+// A manual controller rather than AbortSignal.any/timeout: older iOS Safari
+// lacks `any`, and `timeout` ignores fake timers in tests. `aborted` rejects
+// on abort, so the deadline also holds for transports that ignore the signal
+// (the remote frontend's WebRTC transport).
+function withRequestTimeout(upstream: AbortSignal | undefined, ms: number) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    controller.signal.addEventListener(
+      'abort',
+      () => reject(controller.signal.reason),
+      { once: true }
+    );
+  });
+  // Only observed through Promise.race; never an unhandled rejection.
+  aborted.catch(() => {});
+  const abortFromUpstream = () => controller.abort(upstream?.reason);
+  if (upstream?.aborted) {
+    abortFromUpstream();
+  } else {
+    upstream?.addEventListener('abort', abortFromUpstream, { once: true });
+  }
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new DOMException('Request timed out', 'TimeoutError'));
+  }, ms);
+  return {
+    signal: controller.signal,
+    aborted,
+    timedOut: () => timedOut,
+    cleanup: () => {
+      clearTimeout(timer);
+      upstream?.removeEventListener('abort', abortFromUpstream);
+    },
+  };
+}
+
 // Fetch workspace summaries from the API by archived status
 async function fetchWorkspaceSummariesByArchived(
   archived: boolean,
-  hostId: string | null
+  hostId: string | null,
+  signal?: AbortSignal
 ): Promise<Map<string, WorkspaceSummary>> {
   const basePath = hostId ? `/api/host/${hostId}` : '/api';
-  const response = await makeLocalApiRequest(
-    `${basePath}/workspaces/summaries`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ archived }),
+  const request = withRequestTimeout(signal, SUMMARY_REQUEST_TIMEOUT_MS);
+
+  const load = async () => {
+    const response = await makeLocalApiRequest(
+      `${basePath}/workspaces/summaries`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ archived }),
+        signal: request.signal,
+      }
+    );
+
+    // Failed refreshes must reject so React Query retains this scope's last
+    // successful snapshot instead of replacing sidebar metadata with an empty map.
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch workspace summaries (${response.status})`
+      );
     }
-  );
 
-  // Failed refreshes must reject so React Query retains this scope's last
-  // successful snapshot instead of replacing sidebar metadata with an empty map.
-  if (!response.ok) {
-    throw new Error(`Failed to fetch workspace summaries (${response.status})`);
-  }
+    const data: ApiResponse<WorkspaceSummaryResponse> = await response.json();
+    if (!data.success || !Array.isArray(data.data?.summaries)) {
+      throw new Error('Invalid workspace summaries response');
+    }
 
-  const data: ApiResponse<WorkspaceSummaryResponse> = await response.json();
-  if (!data.success || !Array.isArray(data.data?.summaries)) {
-    throw new Error('Invalid workspace summaries response');
-  }
+    const map = new Map<string, WorkspaceSummary>();
+    for (const summary of data.data.summaries) {
+      map.set(summary.workspace_id, summary);
+    }
+    return map;
+  };
 
-  const map = new Map<string, WorkspaceSummary>();
-  for (const summary of data.data.summaries) {
-    map.set(summary.workspace_id, summary);
+  try {
+    return await Promise.race([load(), request.aborted]);
+  } catch (error) {
+    if (request.timedOut()) {
+      throw new Error('Workspace summaries request timed out');
+    }
+    throw error;
+  } finally {
+    request.cleanup();
   }
-  return map;
 }
 
 export function useWorkspaces(): UseWorkspacesResult {
@@ -176,11 +237,13 @@ export function useWorkspaces(): UseWorkspacesResult {
   const { data: activeSummaries = new Map<string, WorkspaceSummary>() } =
     useQuery({
       queryKey: workspaceSummaryKeys.byArchived(false, hostId),
-      queryFn: () => fetchWorkspaceSummariesByArchived(false, hostId),
+      queryFn: ({ signal }) =>
+        fetchWorkspaceSummariesByArchived(false, hostId, signal),
       enabled: activeIsInitialized,
       staleTime: 1000,
       refetchInterval: 15000,
-      refetchOnWindowFocus: false,
+      // Refresh when a backgrounded page or PWA becomes visible again.
+      refetchOnWindowFocus: true,
       refetchOnMount: 'always',
     });
 
@@ -188,11 +251,12 @@ export function useWorkspaces(): UseWorkspacesResult {
   const { data: archivedSummaries = new Map<string, WorkspaceSummary>() } =
     useQuery({
       queryKey: workspaceSummaryKeys.byArchived(true, hostId),
-      queryFn: () => fetchWorkspaceSummariesByArchived(true, hostId),
+      queryFn: ({ signal }) =>
+        fetchWorkspaceSummariesByArchived(true, hostId, signal),
       enabled: archivedIsInitialized,
       staleTime: 1000,
       refetchInterval: 15000,
-      refetchOnWindowFocus: false,
+      refetchOnWindowFocus: true,
       refetchOnMount: 'always',
     });
 

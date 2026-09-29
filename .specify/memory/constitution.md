@@ -631,6 +631,24 @@ anything it opens still appears on top. Deep links that arrive while it is
 already open retarget it rather than being dropped. Existing imperative entry
 points keep their signatures.
 
+### XLIII. Bulk enrichment answers within a budget; polled requests carry deadlines
+An endpoint that enriches many records in one response (per-workspace diff
+stats, for example) MUST answer within a stated request-wide budget. It MUST
+NOT wait for the slowest item. Cheap fields never wait on expensive ones. An
+item whose fresh value misses the budget reports its last known value, or none
+if it has never been computed. It never reports a fabricated default. The
+expensive work that was already requested still finishes and is published for
+the next read. Missing the budget does not start any extra work.
+
+Every client request that is polled or refetched MUST carry its own deadline
+and forward the query library's cancellation signal. A request that never
+settles would otherwise capture every later poll that is deduplicated onto it.
+A timeout rejects, so the last successful snapshot is kept. It never resolves
+to an empty result. Returning to a hidden page refreshes the data. Regression
+coverage drives a request that never settles past its deadline, then shows
+recovery on the next poll. It also drives a slow item past the server budget
+and shows the last-known fallback and later publication.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -652,7 +670,9 @@ points keep their signatures.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.39.0 (adds XLII, making auxiliary surfaces such as Settings
+**Version**: 0.40.0 (adds XLIII, bounding bulk enrichment responses by a
+request-wide budget with last-known fallback and requiring deadlines plus
+cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
 scope Escape to focus, stack below dialogs, and retarget on deep links;
 0.38.1 refines XLI to reuse active items with matching failure
@@ -902,3 +922,15 @@ status. The existing principles cover it:
 Status names rather than ids key the global preference, following the existing
 `list_view_status_filter_name` convention. That is an established repository
 pattern, not a new principle.
+
+## Review: vk/b923-workspaces-loadi
+
+Applied `/speckit.constitution`: added principle XLIII (0.40.0). On mobile the
+Workspaces sidebar showed names but no metadata. The summaries endpoint waited
+for diff stats on every workspace, which took up to 16.6 s over NFS. The client
+fetch had no deadline, and React Query deduplicated each later poll onto a
+request that never settled. XL covers awaited *streams* only, and XXXIX covers
+reads that follow a live subject. Neither bounds a bulk request/response
+enrichment endpoint, and neither requires deadlines on polled queries. XXXIV
+(partial projections) still governs how the rows render while enrichment is
+missing. Numeral XLIII was unused on this branch and on `main`.

@@ -22,6 +22,10 @@
 //! - **Failures are not cached; partial results are retried soon.** A `None`
 //!   result is returned but not stored. An incomplete result (a repo was
 //!   skipped) is returned and kept for at most [`INCOMPLETE_RETRY_AFTER`].
+//! - **Deadline-bounded reads.** [`DiffStatsCache::get_within`] waits at most
+//!   a caller-supplied deadline. When the fresh value is not ready in time it
+//!   returns the slot's last known stats (a display fallback, never "fresh"),
+//!   while the leader keeps running and publishes for the next caller.
 
 use std::{
     future::Future,
@@ -114,6 +118,16 @@ impl Entry {
 struct Slot {
     state: Arc<Mutex<Option<Entry>>>,
     generation: AtomicU64,
+    /// Stats of the latest successful computation, whatever its generation.
+    /// Readable while a leader holds `state`; only `get_within` serves it,
+    /// and only when a fresh value misses the caller's deadline.
+    last_known: StdMutex<Option<DiffStats>>,
+}
+
+impl Slot {
+    fn last_known(&self) -> Option<DiffStats> {
+        self.last_known.lock().ok().and_then(|last| last.clone())
+    }
 }
 
 pub struct DiffStatsCache {
@@ -164,6 +178,12 @@ impl DiffStatsCache {
             let _permit = permits.acquire_owned().await.ok()?;
             let result = compute.await;
 
+            if let Some(outcome) = &result
+                && let Ok(mut last) = slot.last_known.lock()
+            {
+                *last = Some(outcome.stats.clone());
+            }
+
             match &result {
                 Some(outcome) if slot.generation.load(Ordering::Acquire) == generation => {
                     *state = Some(Entry {
@@ -196,6 +216,39 @@ impl DiffStatsCache {
             Err(error) => {
                 tracing::warn!(%workspace_id, "diff stats computation panicked: {error}");
                 None
+            }
+        }
+    }
+
+    /// Like [`Self::get_or_compute`], but waits at most `deadline`.
+    ///
+    /// A fresh hit is served even with a zero deadline. If the fresh value is
+    /// still being computed when the deadline expires, returns the last known
+    /// stats (`None` if never computed). The leader is not cancelled: it
+    /// finishes and publishes, so a later call is a cache hit. A computation
+    /// that finishes and fails still returns `None`.
+    pub async fn get_within<F>(
+        &self,
+        workspace_id: Uuid,
+        max_age: Duration,
+        deadline: Duration,
+        compute: F,
+    ) -> Option<DiffStats>
+    where
+        F: Future<Output = Option<DiffStatsOutcome>> + Send + 'static,
+    {
+        // Holding the slot keeps it from being pruned before the fallback read.
+        let slot = self.slots.entry(workspace_id).or_default().clone();
+        match tokio::time::timeout(
+            deadline,
+            self.get_or_compute(workspace_id, max_age, compute),
+        )
+        .await
+        {
+            Ok(stats) => stats,
+            Err(_) => {
+                tracing::debug!(%workspace_id, "diff stats missed deadline; serving last known");
+                slot.last_known()
             }
         }
     }
@@ -534,6 +587,152 @@ mod tests {
             .await;
 
         assert_eq!(cache.slot_count(), 1);
+    }
+
+    const IDLE: Duration = Duration::from_secs(300);
+    const BUDGET: Duration = Duration::from_secs(3);
+
+    /// Seed `id` with a complete result of `files`, then let it go stale.
+    async fn seed_stale(cache: &DiffStatsCache, id: Uuid, calls: &Arc<AtomicUsize>, files: usize) {
+        cache
+            .get_or_compute(id, IDLE, counted(calls, files, NOW))
+            .await;
+        tokio::time::advance(IDLE + Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_within_returns_last_known_when_recompute_exceeds_deadline() {
+        let cache = DiffStatsCache::new(4);
+        let id = Uuid::new_v4();
+        let calls = Arc::new(AtomicUsize::new(0));
+        seed_stale(&cache, id, &calls, 1).await;
+
+        let bounded = cache
+            .get_within(
+                id,
+                IDLE,
+                BUDGET,
+                counted(&calls, 2, Duration::from_secs(10)),
+            )
+            .await;
+        assert_eq!(bounded.unwrap().files_changed, 1);
+
+        // The leader was not cancelled: it publishes for the next caller.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let next = cache
+            .get_within(id, IDLE, Duration::ZERO, counted(&calls, 3, NOW))
+            .await;
+        assert_eq!(next.unwrap().files_changed, 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_within_returns_none_for_never_computed_slow_workspace_then_serves_published_value()
+    {
+        let cache = DiffStatsCache::new(4);
+        let id = Uuid::new_v4();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let first = cache
+            .get_within(
+                id,
+                IDLE,
+                BUDGET,
+                counted(&calls, 4, Duration::from_secs(10)),
+            )
+            .await;
+        assert!(first.is_none());
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        // A zero deadline still serves a fresh hit.
+        let second = cache
+            .get_within(id, IDLE, Duration::ZERO, counted(&calls, 5, NOW))
+            .await;
+        assert_eq!(second.unwrap().files_changed, 4);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invalidated_entry_keeps_last_known_fallback_but_is_not_fresh() {
+        let cache = DiffStatsCache::new(4);
+        let id = Uuid::new_v4();
+        let calls = Arc::new(AtomicUsize::new(0));
+        cache
+            .get_or_compute(id, IDLE, counted(&calls, 1, NOW))
+            .await;
+
+        // Invalidated stats are never served while a recompute fits the budget.
+        cache.invalidate(id);
+        let recomputed = cache
+            .get_within(id, IDLE, BUDGET, counted(&calls, 2, NOW))
+            .await;
+        assert_eq!(recomputed.unwrap().files_changed, 2);
+
+        // Invalidation keeps the last known value as a deadline fallback.
+        cache.invalidate(id);
+        let fallback = cache
+            .get_within(
+                id,
+                IDLE,
+                BUDGET,
+                counted(&calls, 3, Duration::from_secs(10)),
+            )
+            .await;
+        assert_eq!(fallback.unwrap().files_changed, 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_within_returns_fresh_result_when_compute_finishes_in_time() {
+        let cache = DiffStatsCache::new(4);
+        let id = Uuid::new_v4();
+        let calls = Arc::new(AtomicUsize::new(0));
+        seed_stale(&cache, id, &calls, 1).await;
+
+        let fresh = cache
+            .get_within(id, IDLE, BUDGET, counted(&calls, 2, Duration::from_secs(1)))
+            .await;
+        assert_eq!(fresh.unwrap().files_changed, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_within_reports_none_for_a_finished_failed_compute() {
+        let cache = DiffStatsCache::new(4);
+        let id = Uuid::new_v4();
+        let calls = Arc::new(AtomicUsize::new(0));
+        seed_stale(&cache, id, &calls, 1).await;
+
+        let failed = cache.get_within(id, IDLE, BUDGET, async { None }).await;
+        assert!(failed.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_caller_that_misses_the_deadline_behind_a_leader_starts_no_compute() {
+        let cache = Arc::new(DiffStatsCache::new(4));
+        let id = Uuid::new_v4();
+        let calls = Arc::new(AtomicUsize::new(0));
+        seed_stale(&cache, id, &calls, 1).await;
+
+        let leader = cache
+            .get_within(
+                id,
+                IDLE,
+                Duration::from_secs(1),
+                counted(&calls, 2, Duration::from_secs(10)),
+            )
+            .await;
+        let joiner = cache
+            .get_within(id, IDLE, Duration::from_secs(1), counted(&calls, 3, NOW))
+            .await;
+        assert_eq!(leader.unwrap().files_changed, 1);
+        assert_eq!(joiner.unwrap().files_changed, 1);
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let published = cache
+            .get_or_compute(id, IDLE, counted(&calls, 4, NOW))
+            .await;
+        assert_eq!(published.unwrap().files_changed, 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

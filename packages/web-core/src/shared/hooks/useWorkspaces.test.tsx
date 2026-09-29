@@ -1,10 +1,18 @@
 /* @vitest-environment jsdom */
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import {
+  QueryClient,
+  QueryClientProvider,
+  focusManager,
+} from '@tanstack/react-query';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { WorkspaceSummary, WorkspaceWithStatus } from 'shared/types';
-import { useWorkspaces, type UseWorkspacesResult } from './useWorkspaces';
+import {
+  SUMMARY_REQUEST_TIMEOUT_MS,
+  useWorkspaces,
+  type UseWorkspacesResult,
+} from './useWorkspaces';
 import { workspaceSummaryKeys } from './workspaceSummaryKeys';
 
 const request = vi.hoisted(() => vi.fn());
@@ -111,6 +119,7 @@ beforeEach(() => {
   request.mockResolvedValue(response([summary()]));
 });
 afterEach(() => {
+  focusManager.setFocused(undefined);
   act(() => root.unmount());
   client.clear();
   request.mockReset();
@@ -277,4 +286,94 @@ it('isolates host switches and late responses even when workspace IDs match', as
     '/api/host/second-host/workspaces/summaries',
     expect.anything()
   );
+});
+
+// Models a request that never settles on its own (a suspended mobile page):
+// it only ends when its signal aborts.
+function hangUntilAborted(signals: AbortSignal[]) {
+  return (_url: string, init: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      const signal = init.signal!;
+      signals.push(signal);
+      signal.addEventListener('abort', () => reject(signal.reason));
+    });
+}
+
+it('aborts a summaries request that never settles and recovers on the next poll', async () => {
+  await render();
+  const before = latest;
+  const signals: AbortSignal[] = [];
+  request.mockImplementation(hangUntilAborted(signals));
+
+  await flush(15000);
+  expect(signals).toHaveLength(2);
+  // Polls while the request hangs join it instead of issuing new requests.
+  await flush(SUMMARY_REQUEST_TIMEOUT_MS - 1000);
+  expect(signals).toHaveLength(2);
+  expect(signals.every((signal) => signal.aborted)).toBe(false);
+
+  await flush(1000);
+  expect(signals.every((signal) => signal.aborted)).toBe(true);
+  const state = client.getQueryState(
+    workspaceSummaryKeys.byArchived(false, null)
+  );
+  expect(state?.status).toBe('error');
+  expect((state?.error as Error).message).toBe(
+    'Workspace summaries request timed out'
+  );
+  expect(latest.workspaces).toEqual(before.workspaces);
+
+  request.mockResolvedValue(response([summary({ files_changed: 11 })]));
+  await flush(15000);
+  expect(latest.workspaces[0].filesChanged).toBe(11);
+  expect(latest.archivedWorkspaces[0].filesChanged).toBe(11);
+});
+
+it('forwards query cancellation to the in-flight summaries request', async () => {
+  await render();
+  const signals: AbortSignal[] = [];
+  request.mockImplementation(hangUntilAborted(signals));
+  await flush(15000);
+  expect(signals).toHaveLength(2);
+
+  await act(async () => {
+    await client.cancelQueries({ queryKey: workspaceSummaryKeys.all });
+  });
+  expect(signals.every((signal) => signal.aborted)).toBe(true);
+  expect(latest.workspaces[0].filesChanged).toBe(3);
+});
+
+it('refetches summaries when the page becomes visible again', async () => {
+  await render();
+  await flush(2000);
+  request.mockClear();
+  request.mockResolvedValue(response([summary({ files_changed: 12 })]));
+
+  act(() => focusManager.setFocused(false));
+  act(() => focusManager.setFocused(true));
+  await flush();
+
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(latest.workspaces[0].filesChanged).toBe(12);
+});
+
+it('enforces the deadline even when the transport ignores the abort signal', async () => {
+  await render();
+  const before = latest;
+  // The remote WebRTC transport does not forward `signal`.
+  request.mockImplementation(() => new Promise(() => {}));
+
+  await flush(15000 + SUMMARY_REQUEST_TIMEOUT_MS);
+  const state = client.getQueryState(
+    workspaceSummaryKeys.byArchived(false, null)
+  );
+  expect(state?.status).toBe('error');
+  expect((state?.error as Error).message).toBe(
+    'Workspace summaries request timed out'
+  );
+  expect(latest.workspaces).toEqual(before.workspaces);
+
+  request.mockResolvedValue(response([summary({ files_changed: 13 })]));
+  await flush(15000);
+  expect(latest.workspaces[0].filesChanged).toBe(13);
 });

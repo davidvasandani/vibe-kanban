@@ -24,6 +24,20 @@ use crate::{DeploymentImpl, error::ApiError};
 /// Keeps I/O load bounded when many active workspaces are polled at once.
 const MAX_CONCURRENT_GIT_STATUS: usize = 4;
 
+/// Request-wide budget for the diff-stat phase. Every other summary field is a
+/// cheap bulk read and must not wait on NFS-bound git work: a workspace whose
+/// fresh stats are not ready by then reports its last known stats (or none),
+/// and its computation keeps running and publishes for the next poll.
+const SUMMARY_DIFF_STATS_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Time left before `deadline`, zero once it has passed.
+fn remaining_budget(
+    deadline: tokio::time::Instant,
+    now: tokio::time::Instant,
+) -> std::time::Duration {
+    deadline.saturating_duration_since(now)
+}
+
 /// Skip bulk `git status` for workspaces whose last real activity is older than this.
 /// Filesystem mtime is not used: the worktree poller keeps those timestamps fresh.
 fn git_status_idle_after() -> Duration {
@@ -210,13 +224,15 @@ pub async fn get_workspace_summaries(
         .map(|worker| (worker.id, worker.hostname))
         .collect();
 
-    // 8. Compute diff stats for each workspace (bounded concurrency).
+    // 8. Compute diff stats for each workspace (bounded concurrency), within
+    // SUMMARY_DIFF_STATS_BUDGET for the whole phase.
     // Skip workspaces idle > 14 days so the sidebar poll does not `git status`
     // every stale worktree. On-demand single-workspace status is unchanged.
     // Stats come from the process-wide single-flight cache, so every client's
     // poll shares one computation per workspace per freshness window and git
     // work is bounded across all requests, not per request.
     let now = Utc::now();
+    let diff_deadline = tokio::time::Instant::now() + SUMMARY_DIFF_STATS_BUDGET;
     let diff_futures: Vec<_> = workspaces
         .iter()
         .map(|ws| {
@@ -233,8 +249,9 @@ pub async fn get_workspace_summaries(
                     let workspace_id = workspace.id;
                     let pool = deployment.db().pool.clone();
                     let git = deployment.git().clone();
+                    let budget = remaining_budget(diff_deadline, tokio::time::Instant::now());
                     WORKSPACE_DIFF_STATS
-                        .get_or_compute(workspace_id, max_age, async move {
+                        .get_within(workspace_id, max_age, budget, async move {
                             services::services::diff_stream::compute_diff_stats_outcome(
                                 &pool, &git, &workspace,
                             )
@@ -329,7 +346,7 @@ mod tests {
 
     use super::{
         WorkspaceAffinityKind, affinity_kind, diff_stats_freshness, last_workspace_activity,
-        should_skip_idle_git_status,
+        remaining_budget, should_skip_idle_git_status,
     };
 
     fn placement(
@@ -359,6 +376,25 @@ mod tests {
             status,
             completed_at,
         }
+    }
+
+    #[test]
+    fn remaining_budget_saturates_at_zero_after_the_deadline() {
+        let start = tokio::time::Instant::now();
+        let deadline = start + std::time::Duration::from_secs(3);
+
+        assert_eq!(
+            remaining_budget(deadline, start),
+            std::time::Duration::from_secs(3)
+        );
+        assert_eq!(
+            remaining_budget(deadline, start + std::time::Duration::from_secs(2)),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            remaining_budget(deadline, start + std::time::Duration::from_secs(5)),
+            std::time::Duration::ZERO
+        );
     }
 
     #[test]
