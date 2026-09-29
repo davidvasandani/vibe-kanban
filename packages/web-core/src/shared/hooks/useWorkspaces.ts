@@ -112,10 +112,21 @@ export const workspaceKeys = {
 export const SUMMARY_REQUEST_TIMEOUT_MS = 20_000;
 
 // A manual controller rather than AbortSignal.any/timeout: older iOS Safari
-// lacks `any`, and `timeout` ignores fake timers in tests.
+// lacks `any`, and `timeout` ignores fake timers in tests. `aborted` rejects
+// on abort, so the deadline also holds for transports that ignore the signal
+// (the remote frontend's WebRTC transport).
 function withRequestTimeout(upstream: AbortSignal | undefined, ms: number) {
   const controller = new AbortController();
   let timedOut = false;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    controller.signal.addEventListener(
+      'abort',
+      () => reject(controller.signal.reason),
+      { once: true }
+    );
+  });
+  // Only observed through Promise.race; never an unhandled rejection.
+  aborted.catch(() => {});
   const abortFromUpstream = () => controller.abort(upstream?.reason);
   if (upstream?.aborted) {
     abortFromUpstream();
@@ -128,6 +139,7 @@ function withRequestTimeout(upstream: AbortSignal | undefined, ms: number) {
   }, ms);
   return {
     signal: controller.signal,
+    aborted,
     timedOut: () => timedOut,
     cleanup: () => {
       clearTimeout(timer);
@@ -145,7 +157,7 @@ async function fetchWorkspaceSummariesByArchived(
   const basePath = hostId ? `/api/host/${hostId}` : '/api';
   const request = withRequestTimeout(signal, SUMMARY_REQUEST_TIMEOUT_MS);
 
-  try {
+  const load = async () => {
     const response = await makeLocalApiRequest(
       `${basePath}/workspaces/summaries`,
       {
@@ -174,6 +186,10 @@ async function fetchWorkspaceSummariesByArchived(
       map.set(summary.workspace_id, summary);
     }
     return map;
+  };
+
+  try {
+    return await Promise.race([load(), request.aborted]);
   } catch (error) {
     if (request.timedOut()) {
       throw new Error('Workspace summaries request timed out');

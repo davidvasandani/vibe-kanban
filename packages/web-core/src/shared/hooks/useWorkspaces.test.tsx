@@ -356,3 +356,24 @@ it('refetches summaries when the page becomes visible again', async () => {
   expect(request).toHaveBeenCalledTimes(2);
   expect(latest.workspaces[0].filesChanged).toBe(12);
 });
+
+it('enforces the deadline even when the transport ignores the abort signal', async () => {
+  await render();
+  const before = latest;
+  // The remote WebRTC transport does not forward `signal`.
+  request.mockImplementation(() => new Promise(() => {}));
+
+  await flush(15000 + SUMMARY_REQUEST_TIMEOUT_MS);
+  const state = client.getQueryState(
+    workspaceSummaryKeys.byArchived(false, null)
+  );
+  expect(state?.status).toBe('error');
+  expect((state?.error as Error).message).toBe(
+    'Workspace summaries request timed out'
+  );
+  expect(latest.workspaces).toEqual(before.workspaces);
+
+  request.mockResolvedValue(response([summary({ files_changed: 13 })]));
+  await flush(15000);
+  expect(latest.workspaces[0].filesChanged).toBe(13);
+});
