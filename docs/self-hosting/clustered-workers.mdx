@@ -20,7 +20,7 @@ Before you enable clustering, confirm that:
 - every node mounts it at `/srv/vibe-kanban-shared`;
 - each worker has a stable UUID and reachable LAN address;
 - the coordinator and each worker have separate signing credentials;
-- TCP port `8086` is allowed only on the trusted cluster LAN; and
+- TCP port `8086` (or the worker's configured port) is allowed only on the trusted cluster LAN; and
 - the worker binary and coordinator come from the same Vibe Kanban release.
 
 The Nix options live under `services.vibe-kanban-rebuild`. Use `clusterRole = "coordinator"` on the coordinator and `clusterRole = "worker"` on worker nodes. The module mounts the export at `sharedMount`, creates `sharedRoot` (by default `/srv/vibe-kanban-shared/cluster`) inside it, orders both services after that preparation, and delivers worker credentials through systemd credentials. `worker.expectedSharedUid` and `worker.expectedSharedGid` describe storage-side ownership and are intentionally independent of the worker's local account UID/GID.
@@ -103,9 +103,36 @@ If the worker discarded some output before the coordinator returned, the chat sa
 
 `systemctl stop` and `systemctl restart` both reach the process as the same signal, so a coordinator *stop* for maintenance also leaves remote work running. To stop that work, use **Stop** in the UI, or stop the worker service as described in [Drain a worker](#drain-a-worker).
 
-Work that runs on the coordinator itself (workspaces placed **Local**, or a deployment without workers) still stops. It is marked **Interrupted**, its work in progress is committed, and it is resumed once on startup only when `resume_interrupted_on_startup` is `true` in the coordinator's `config.json` (it is off by default).
+Work that runs on the coordinator itself (workspaces placed **Local**, or a deployment without workers) still stops. It is marked **Interrupted**, its work in progress is committed, and it is resumed once on startup only when `resume_interrupted_on_startup` is `true` in the coordinator's `config.json` (it is off by default). To keep work that must run on the coordinator *host* alive through restarts, run a worker there too. See [Run a worker on the coordinator host](#run-a-worker-on-the-coordinator-host).
 
 An approval or question that is still waiting when the coordinator restarts is shown again after it comes back.
+
+## Run a worker on the coordinator host
+
+An agent that runs inside the coordinator process is tied to it. It talks to the server over anonymous stdio pipes, and it lives in the coordinator service's cgroup, so every coordinator restart ends it. A `vibe-kanban-worker` on the same machine owns its agents and is reached only over HTTP. Work placed on it survives coordinator restarts like work on any other worker.
+
+In the homelab Nix module, keep `clusterRole = "coordinator"` and add `colocatedWorker.enable = true` with a normal `worker` block. The colocated worker:
+
+- runs as its own systemd unit and cgroup, under the worker account (`vibe-kanban`), not the coordinator's (`vibe-kanban-dev`);
+- has no dependency a coordinator restart could propagate through, and is never in the coordinator's restart list;
+- gets its own release root (`/srv/vk-worker-releases`), which only the drain-gated distributor updates, so a coordinator deploy never replaces it;
+- has its own copies of the per-account prerequisites (skills, workspace trust, transcript retention, runtime credentials);
+- yields CPU and IO to the coordinator through `CPUWeight` and `IOWeight`. There is no unit-level CPU quota: it would throttle the worker's own control plane together with its agents.
+
+Register it like any worker:
+
+- a distinct node ID;
+- a listen address on the host's LAN IP;
+- its endpoint in `workerEndpoints`, with the node ID in `workerEndpointIds`;
+- its public key in the coordinator's `trusted_ed25519_public_keys.json`.
+
+Its traffic to the coordinator's own address arrives on the loopback interface, so it needs no firewall opening.
+
+<Note>
+  The scheduler has no per-worker weight. A colocated worker naturally loses automatic placement, because its load score includes the coordinator's own load, and a node ID that sorts last makes it lose ties too. Select it explicitly when a task needs that host.
+</Note>
+
+Existing **Local** workspaces stay Local. The affinity API cannot move them to a worker, and their worktrees are not in shared storage. Start a new workspace when a follow-up must survive restarts.
 
 ## Drain a worker
 

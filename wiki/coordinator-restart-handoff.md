@@ -161,6 +161,31 @@ again after a restart; an agent blocked on approval rarely emits any.
   It is still `Interrupted` + WIP commit + the opt-in
   `resume_interrupted_on_startup` (config-only, default off). Surviving there
   still needs the Tier-3 runner split.
+  - **Work that must run on the coordinator host no longer has to run *in*
+    the coordinator.** think2 now also runs a `vibe-kanban-worker`
+    (homelab `colocatedWorker`, vk/ec43-run-a-vibe-kanba). It is its own
+    systemd unit, cgroup and account (`vibe-kanban`), at
+    `http://172.16.100.102:8096`, so a workspace placed on it gets the
+    handoff above. Pick it in the create dialog when a task needs think2.
+    Automatic placement mostly avoids it:
+    - the score uses host `load_1m`, which includes the coordinator's own
+      load;
+    - its node ID sorts last, so it loses ties;
+    - it advertises `CLAUDE_CODE` only, because think2's `vibe-kanban`
+      account holds the canonical Codex login.
+  - **Existing `Local` workspaces cannot be moved onto a worker.**
+    `PATCH /affinity` refuses `placement_state = 'local'` in SQL
+    (`WorkspacePlacement::reassign`). With `restart_running` it stops the
+    agent *before* failing. Their worktrees also live under
+    `/var/tmp/vibe-kanban/worktrees`, not the shared store. In cluster mode,
+    new workspaces are never placed `Local`: automatic placement picks a
+    worker or fails. So a follow-up that must survive restarts goes in a new
+    workspace. Moving one would need an app change that copies the worktrees
+    into the shared store.
+  - **A worker that is draining (SIGUSR1) still looks schedulable.** The
+    heartbeat does not carry `admission_draining`. A dispatch sent during a
+    distribution drain window is refused by the worker and fails, rather
+    than being placed elsewhere. This is true of every worker.
 - **An unanswered interaction lost in a replay gap.** If the worker's journal
   wraps past a pending `InteractionRequested` while the coordinator is away,
   the request itself is gone, and no coordinator-side state can recreate its
@@ -177,3 +202,4 @@ again after a restart; an agent blocked on approval rarely emits any.
 ## Contributed by
 
 - vk/80c1-tasks-should-sur
+- vk/ec43-run-a-vibe-kanba (colocated worker on the coordinator host)
