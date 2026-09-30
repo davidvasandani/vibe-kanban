@@ -649,6 +649,32 @@ coverage drives a request that never settles past its deadline, then shows
 recovery on the next poll. It also drives a slow item past the server budget
 and shows the last-known fallback and later publication.
 
+### XLIV. A WebSocket is a handshake; finite reads go over HTTP
+Every WebSocket opens a new TCP and TLS connection through the edge proxy, and
+iOS Safari connects them one at a time. A socket is therefore a queued cost of
+0.5 s to 10 s on a phone, even when the server answers in milliseconds.
+- A finite or settled read (a completed turn's log, a snapshot that will not
+  change) MUST use a plain request through `makeLocalApiRequest`, which keeps
+  host scoping and the relay transport. It MUST NOT use a socket that is opened
+  only to wait for `finished`. XL applies to that request: it settles once,
+  has an `AbortController` deadline, and treats a timeout or abort as failure.
+- A snapshot response states whether it is settled. A partial answer (live
+  store still present, subject still running) is never cached or shown as
+  final. The caller falls back to the live path.
+- Sockets are reserved for live data. Consumers of the same stream identity
+  (endpoint plus host scope) MUST share one socket, which lingers briefly
+  after its last consumer so that mount and unmount churn does not reconnect.
+  Equivalent URLs are canonicalized so they share. Filtering that one
+  consumer needs (soft-deleted rows, for example) happens on the client over
+  the shared superset.
+- A primary view MUST NOT queue behind sockets for panels that are not
+  visible. Hidden mobile panels mount or subscribe on first show, or after the
+  primary view settles.
+- Each settled item is fetched at most once per scope. Speculative responses
+  are kept for the next page, not discarded and refetched.
+Regression coverage counts sockets (one per identity for N consumers) and
+requests (one per settled item per scope).
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -670,7 +696,7 @@ and shows the last-known fallback and later publication.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.40.0 (adds XLIII, bounding bulk enrichment responses by a
+**Version**: 0.41.0 (adds XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
@@ -934,3 +960,17 @@ reads that follow a live subject. Neither bounds a bulk request/response
 enrichment endpoint, and neither requires deadlines on polled queries. XXXIV
 (partial projections) still governs how the rows render while enrichment is
 missing. Numeral XLIII was unused on this branch and on `main`.
+
+## Review: vk/45a2-make-workspace-c
+
+Applied `/speckit.constitution`: added principle XLIV (0.41.0). Phone chat
+loads took 40 s to 2 min while every stream finished in under 120 ms on the
+server. A workspace page opened about 29 WebSockets, including 10 history
+sockets (each completed turn twice) and three copies of the session process
+stream. Behind Cloudflare, each socket is a new handshake, and Safari connects
+them one at a time. XL makes each awaited stream settle but says nothing about
+how many there are or which transport a settled read should use. XLIII bounds
+request/response enrichment, not sockets. XLIV fills that gap. Numeral XLIV was
+unused on this branch and on `main`. The homelab constitution named by the
+command template was not changed, because this project only manages the Vibe
+Kanban repository.
