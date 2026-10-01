@@ -75,3 +75,50 @@ a page. It needs:
 
 It is worth it only if HTTP history plus sharing still leaves the chat queued
 behind other live sockets on the phone.
+
+## Measurements before and after (2026-10-01, task T051)
+
+Method: a local proxy (`/tmp/probe/proxy.js`) sits in front of the
+coordinator's real data (workspace `14312466-…`, 6 completed turns). In "old"
+mode it forwards everything, including the deployed `f4b01e4` frontend. In
+"new" mode it serves this branch's production build of `local-web`, forwards
+`/api` HTTP and WebSocket traffic, and emulates the not-yet-deployed
+`GET …/normalized-logs` by draining the coordinator's existing `…/ws` replay
+on the proxy side. Both modes pay the same proxy hop. Latency is injected in
+the proxy: `RTT_MS` on every request and upgrade, plus `WS_HANDSHAKE_MS` on
+each WebSocket upgrade, which models the new TCP+TLS handshake through
+Cloudflare. The probe is Playwright with the iPhone 13 profile; it polls
+`.animate-spin` inside `.w-chat` until rows render. WebKit is Playwright
+1.60's build, run headless with Mesa software EGL.
+
+| Run | Rows rendered | Sockets before rows | `normalized-logs/ws` | Session streams | History GETs |
+| --- | --- | --- | --- | --- | --- |
+| Chromium, no added latency, old | 3.4 s | 23 | 5 | 3 | 0 |
+| Chromium, no added latency, new | 3.6 s | 11 | 0 | 1 | 5 |
+| Chromium, 150 ms RTT + 500 ms/handshake, old | 14.7 s / 14.6 s | 19 | 5 / 10 | 3 | 0 |
+| Chromium, 150 ms RTT + 500 ms/handshake, new | 7.0 s / 6.2 s | 9 / 8 | 0 | 1 | 5 / 6 |
+| WebKit, 150 ms RTT + 500 ms/handshake, old | 6.0 s / 6.1 s | 24 | 10 | 3 | 0 |
+| WebKit, 150 ms RTT + 500 ms/handshake, new | 4.1 s / 4.1 s | 11 | 0 | 1 | 5 |
+
+Direct to the coordinator before the change (no proxy, Chromium): rows at
+2.1 s, 29 sockets, 10 `normalized-logs/ws`, 3 session streams, 4
+discovered-options and 3 approvals.
+
+Notes:
+- With no handshake cost, the change saves sockets, not time. The gain
+  appears once each socket costs a handshake, which is the phone's situation.
+- In the new build, each GET is issued once per turn. 6 GETs means the top
+  sentinel also loaded the oldest turn; the 5 it already had were not
+  refetched. The old build fetched the same turns twice (10 sockets).
+- Still on the chat's critical path: the shared session stream and the
+  workspace-list streams (`workspaces/streams/ws`), whose first frame took
+  1.3–2.2 s on the server. `WorkspacesMain`'s `isLoading` waits on those
+  streams. This task did not change them; they are the next candidate.
+- The git diff socket now opens after the history settles (3.5 s), not
+  before. The preview-settings and browser-session sockets do not open on the
+  chat tab.
+- One bare `discovered-options/ws?executor=…` remains. It opens before the
+  session id is known and closes when the session-scoped one replaces it.
+- Playwright WebKit on Linux is not iOS Safari, and the proxy does not
+  serialize WebSocket connects. The real phone check is the Caddy access log
+  after deploy (see the task's "After deploy" section).

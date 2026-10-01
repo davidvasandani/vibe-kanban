@@ -254,11 +254,15 @@ contributed to it.
   deadline isolation, Unicode matching, historical session navigation and
   organization redirect coordination.
 - [awaited-stream-settlement.md](awaited-stream-settlement.md) — An awaited
-  log stream must settle exactly once: a close is never completion, only
-  settled-history reads get an idle deadline, and a failed turn degrades the
-  chat instead of blocking it. Includes a debugging recipe for a chat spinner
-  that never clears (direct coordinator access, phone-width iframe
-  reproduction, NFS I/O-wait signature) (`vk/5f70-not-loading-chat`).
+  log read must settle exactly once: a close is never completion, only
+  settled-history reads get a deadline, and a failed turn degrades the chat
+  instead of blocking it. Includes a debugging recipe for a chat spinner that
+  never clears (direct coordinator access, phone-width iframe reproduction,
+  NFS I/O-wait signature) (`vk/5f70-not-loading-chat`). Each WebSocket is a
+  new handshake through Cloudflare, and Safari connects them one at a time,
+  so history goes over HTTP with a `complete` flag. Identical streams share
+  one socket, settled turns are fetched once per scope, and hidden mobile
+  panels wait for the chat (`vk/45a2-make-workspace-c`).
 - [auto-error-remediation.md](auto-error-remediation.md) — Self-spawned
   agent work: trigger at `finalize_task` and hand off over a broadcast
   channel. Subscribe before boot resumes agents. Reserve guard slots before

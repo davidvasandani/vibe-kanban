@@ -1,16 +1,78 @@
 # Awaited stream settlement (chat history loading)
 
-The chat's conversation view loads completed turns by opening
-`/api/execution-processes/{id}/normalized-logs/ws` (`raw-logs/ws` for
-scripts) through `streamJsonPatchEntries` and waiting for `{"finished": true}`.
-`useConversationHistory` wraps each fetch in a promise, and
-`loadProcessesInOrder` awaits them in `Promise.all` slices. The first
-`'initial'` emit, which clears `ConversationList`'s spinner, happens only after
-those promises settle. So **one unsettled fetch holds the whole chat behind
-its spinner**, with nothing to recover it.
+The chat loads completed turns with plain HTTP requests:
+`GET /api/execution-processes/{id}/normalized-logs` (`raw-logs` for scripts),
+through `fetchProcessLogSnapshot` in
+`shared/hooks/useConversationHistory/fetchHistoricEntries.ts`. It falls back
+to the `…/ws` replay (`streamJsonPatchEntries`, awaited until
+`{"finished": true}`) only when the server says its snapshot is not settled.
+`loadProcessesInOrder` awaits these fetches in `Promise.all` slices, and the
+first `'initial'` emit, which clears `ConversationList`'s spinner, happens
+only after those promises settle. So **one unsettled fetch would hold the
+whole chat behind its spinner**, with nothing to recover it. The rules below
+exist to prevent that.
 
-## Rules
+## Each WebSocket is a handshake; history goes over HTTP
 
+Every WebSocket is a new TCP and TLS handshake through Cloudflare. Plain
+requests reuse the page's one HTTP/2 or HTTP/3 connection. iOS Safari
+connects WebSockets **one at a time**. Since 2026-09-28, Cloudflare has served
+this zone from distant data centres (Marseille, Sydney, Copenhagen), so a
+handshake costs about 0.5 s and up to 10 s. Phone chat loads took 40 s to
+2 min while every stream finished in under 120 ms on the coordinator: a
+workspace page opened about 29 sockets, and the chat's history sockets came
+last. Rules (constitution XLIV):
+
+- **A settled read is a request, not a socket.** Completed turns use the GET
+  above, through `makeLocalApiRequest`, which keeps `/api/host/{id}` scoping
+  and the relay/WebRTC transport. Only running turns keep
+  `loadRunningAndEmitWithBackoff` over a socket.
+- **The response says whether it is settled.** `complete` is false while the
+  process has a live `MsgStore` or a `running` row, or when the settled
+  source ended without `Finished`. The client then uses the socket replay,
+  which converges when the store drops. A process that finished between the
+  process snapshot and the GET therefore ends up complete, not truncated.
+- **The server drains on a spawned task.** Historical normalization is
+  cancelled when its stream drops, so an aborting client would otherwise
+  cancel a cold normalization every time and the sidecar would never be
+  written. The per-execution lease and the global permit still bound it.
+- **One socket per stream identity.** `useJsonPatchWsStream` subscribes to
+  `shared/lib/sharedJsonPatchStream.ts`, a registry keyed by endpoint plus
+  host (the host comes from `useHostId()`, because the module-level
+  `getCurrentHostId()` is updated only in a layout effect after render). The
+  socket lingers 3 s after its last subscriber, which absorbs remount churn.
+  `useExecutionProcesses` always asks for `show_soft_deleted=true` and
+  filters `dropped` locally, which is exactly what the server's `false`
+  does. Discovery URLs drop `workspace_id`/`repo_id` when `session_id` is
+  set, because the server ignores them then.
+- **Fetch each settled turn once per scope.** `loadProcessesInOrder` fetches
+  a whole slice but keeps responses only up to the threshold. The top
+  sentinel then fires "load earlier" as soon as a short window renders, so
+  the discarded turns used to be fetched again. `createSettledEntriesCache`
+  keeps them for the scope.
+- **Hidden mobile panels wait.** Preview and browser panels mount on first
+  visit. The workspace diff stream (613 KB; first frame 15 s cold, 42 s on the
+  phone) waits for a diff tab or for the chat's first settled history
+  (`useChatHistoryReadyStore`).
+
+Measured on workspace `14312466-…` (6 turns), through a local proxy that
+adds 150 ms RTT and 500 ms per socket handshake: Chromium rows went from
+14.6 s to 6.2–7.0 s, and Playwright WebKit from 6.1 s to 4.1 s. Sockets before
+rows went from 19–24 to 8–11, `normalized-logs/ws` from 5–10 to 0, and session
+streams from 3 to 1. With no handshake cost the time is unchanged, so do not
+expect a desktop speed-up. Method and table:
+`specs/vk/45a2-make-workspace-c/research.md`. After deploy, the real check is
+the Caddy access log on think2: the gap from `GET /api/workspaces/{id}` to the
+last history GET, and the count of `101` upgrades per load.
+
+## Settlement rules (socket and HTTP)
+
+- **HTTP: a deadline, and every non-success is a failure.**
+  `fetchProcessLogSnapshot` uses an `AbortController` deadline
+  (`HISTORY_HTTP_DEADLINE_MS`, 30 s, total). Timeout, caller abort, transport
+  error, non-2xx, `success: false` and a body that is not a snapshot all
+  reject, through one `settled` guard, so a late response cannot settle the
+  request twice. None of them is an empty, finished turn.
 - **A close is never completion.** The server closes cleanly (code 1000)
   *without* `finished` when the log stream errors (both handlers in
   `crates/server/src/routes/execution_processes.rs` `break` and then
@@ -68,3 +130,4 @@ reads terminate on their own).
 ## Contributed by
 
 - vk/5f70-not-loading-chat
+- vk/45a2-make-workspace-c

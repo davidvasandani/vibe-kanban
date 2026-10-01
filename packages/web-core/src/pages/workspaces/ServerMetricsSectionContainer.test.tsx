@@ -63,6 +63,7 @@ vi.mock('@/shared/lib/electric/collections', () => ({
 }));
 
 import { ServerMetricsSectionContainer } from './ServerMetricsSectionContainer';
+import { resetSharedJsonPatchStreamsForTests } from '@/shared/lib/sharedJsonPatchStream';
 
 /** A socket that connects but never delivers `Ready`, so REST stays in play. */
 class SilentWebSocket {
@@ -197,6 +198,8 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => root.unmount());
+  // Streams linger after unmount so remounts reuse them; tests start clean.
+  resetSharedJsonPatchStreamsForTests();
   container.remove();
   queryClient.clear();
   vi.restoreAllMocks();

@@ -1,32 +1,12 @@
-import { useEffect, useState, useRef } from 'react';
-import { produce } from 'immer';
+import { useCallback, useMemo, useSyncExternalStore } from 'react';
 import type { Operation } from 'rfc6902';
-import { applyUpsertPatch } from '@/shared/lib/jsonPatch';
+import type { LocalApiWebSocketOptions } from '@/shared/lib/localApiTransport';
+import { useHostId } from '@/shared/providers/HostIdProvider';
 import {
-  openLocalApiWebSocket,
-  type LocalApiWebSocketOptions,
-} from '@/shared/lib/localApiTransport';
-
-type WsJsonPatchMsg = { JsonPatch: Operation[] };
-type WsReadyMsg = { Ready: true };
-type WsFinishedMsg = { finished: boolean };
-type WsMsg = WsJsonPatchMsg | WsReadyMsg | WsFinishedMsg;
-
-const MAX_RECONNECT_DELAY_MS = 8_000;
-
-export function getReconnectDelay(
-  attempt: number,
-  random: () => number = Math.random
-): number {
-  const exponential = Math.min(
-    MAX_RECONNECT_DELAY_MS,
-    1_000 * 2 ** Math.max(0, attempt)
-  );
-  // ±20% jitter prevents every stream and browser tab from reconnecting in a
-  // synchronized burst when the replacement server becomes available.
-  const jitter = 0.8 + Math.min(1, Math.max(0, random())) * 0.4;
-  return Math.min(MAX_RECONNECT_DELAY_MS, Math.round(exponential * jitter));
-}
+  acquireSharedJsonPatchStream,
+  idleJsonPatchStreamSnapshot,
+  sharedJsonPatchStreamKey,
+} from '@/shared/lib/sharedJsonPatchStream';
 
 interface UseJsonPatchStreamOptions<T> {
   /**
@@ -50,8 +30,15 @@ interface UseJsonPatchStreamResult<T> {
   error: string | null;
 }
 
+const noopSubscribe = () => () => {};
+
 /**
- * Generic hook for consuming WebSocket streams that send JSON messages with patches
+ * Generic hook for consuming WebSocket streams that send JSON messages with
+ * patches.
+ *
+ * Every consumer of the same endpoint on the same host shares one socket
+ * (see `sharedJsonPatchStream.ts`): each websocket is a separate handshake
+ * through the edge proxy, and Safari opens them one at a time.
  */
 export const useJsonPatchWsStream = <T extends object>(
   endpoint: string | undefined,
@@ -59,252 +46,56 @@ export const useJsonPatchWsStream = <T extends object>(
   initialData: () => T,
   options?: UseJsonPatchStreamOptions<T>
 ): UseJsonPatchStreamResult<T> => {
-  const [data, setData] = useState<T | undefined>(undefined);
-  const [isConnected, setIsConnected] = useState(false);
-  const [isInitialized, setIsInitialized] = useState(false);
-  const initializedForEndpointRef = useRef<string | undefined>(undefined);
-  const [error, setError] = useState<string | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const dataRef = useRef<T | undefined>(undefined);
-  const retryTimerRef = useRef<number | null>(null);
-  const retryAttemptsRef = useRef<number>(0);
-  const [retryNonce, setRetryNonce] = useState(0);
-  const finishedRef = useRef<boolean>(false);
-
   const injectInitialEntry = options?.injectInitialEntry;
   const deduplicatePatches = options?.deduplicatePatches;
-  // A different host is a different stream even when the path is identical.
   const socketOptions = options?.socketOptions;
-  const socketScopeKey = socketOptions
-    ? [
-        socketOptions.hostScope ?? '',
-        socketOptions.hostId ?? '',
-        socketOptions.relayHostId ?? '',
-      ].join('|')
-    : '';
-  const socketOptionsRef = useRef(socketOptions);
-  socketOptionsRef.current = socketOptions;
+  // A different host is a different stream even when the path is identical.
+  // The route context, not the module-level host id: that one is only
+  // updated in a layout effect, after this render has already picked a key.
+  const currentHostId = useHostId();
+  const streamKey =
+    enabled && endpoint
+      ? sharedJsonPatchStreamKey(endpoint, socketOptions, currentHostId)
+      : undefined;
 
-  // Endpoint changes are a different execution stream and must reset the
-  // snapshot. A reconnect attempt to the *same* endpoint is not: keeping the
-  // last good snapshot rendered is what makes a server restart a recoverable
-  // transport outage instead of a blank page.
-  useEffect(() => {
-    retryAttemptsRef.current = 0;
-    finishedRef.current = false;
-    dataRef.current = undefined;
-    initializedForEndpointRef.current = undefined;
-    setData(undefined);
-    setIsConnected(false);
-    setIsInitialized(false);
-    setError(null);
-  }, [endpoint, enabled, socketScopeKey]);
+  // Shared streams come from a registry keyed by streamKey, so recomputing
+  // this for a new options object returns the same stream.
+  const stream = useMemo(
+    () =>
+      streamKey && endpoint
+        ? acquireSharedJsonPatchStream<T>(
+            endpoint,
+            {
+              initialData,
+              injectInitialEntry,
+              deduplicatePatches,
+              socketOptions,
+            },
+            currentHostId
+          )
+        : null,
+    [
+      streamKey,
+      endpoint,
+      currentHostId,
+      initialData,
+      injectInitialEntry,
+      deduplicatePatches,
+      socketOptions,
+    ]
+  );
 
-  function scheduleReconnect() {
-    if (retryTimerRef.current) return; // already scheduled
-    const attempt = retryAttemptsRef.current;
-    const delay = getReconnectDelay(attempt);
-    retryTimerRef.current = window.setTimeout(() => {
-      retryTimerRef.current = null;
-      setRetryNonce((n) => n + 1);
-    }, delay);
-  }
-
-  useEffect(() => {
-    if (!enabled || !endpoint) {
-      // Close connection and reset state
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-      if (retryTimerRef.current) {
-        window.clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = null;
-      }
-      retryAttemptsRef.current = 0;
-      finishedRef.current = false;
-      setData(undefined);
-      setIsConnected(false);
-      setIsInitialized(false);
-      setError(null);
-      dataRef.current = undefined;
-      return;
-    }
-
-    // Initialize data
-    if (!dataRef.current) {
-      dataRef.current = initialData();
-
-      // Inject initial entry if provided
-      if (injectInitialEntry) {
-        injectInitialEntry(dataRef.current);
-      }
-    }
-
-    let cancelled = false;
-
-    // Create WebSocket if it doesn't exist
-    if (!wsRef.current) {
-      // Reset finished flag for new connection
-      finishedRef.current = false;
-
-      void (async () => {
-        try {
-          const scopedOptions = socketOptionsRef.current;
-          const ws = scopedOptions
-            ? await openLocalApiWebSocket(endpoint, scopedOptions)
-            : await openLocalApiWebSocket(endpoint);
-
-          if (cancelled) {
-            ws.close();
-            return;
-          }
-
-          ws.onopen = () => {
-            setIsConnected(true);
-            // Opening the transport does not prove this patch stream is
-            // authoritative. Only Ready resets failure pressure.
-            if (retryTimerRef.current) {
-              window.clearTimeout(retryTimerRef.current);
-              retryTimerRef.current = null;
-            }
-          };
-
-          ws.onmessage = (event) => {
-            try {
-              const msg: WsMsg = JSON.parse(event.data);
-
-              // Handle JsonPatch messages (same as SSE json_patch event)
-              if ('JsonPatch' in msg) {
-                const patches: Operation[] = msg.JsonPatch;
-                const filtered = deduplicatePatches
-                  ? deduplicatePatches(patches)
-                  : patches;
-
-                const current = dataRef.current;
-                if (!filtered.length || !current) return;
-
-                // Use Immer for structural sharing - only modified parts get new references
-                const next = produce(current, (draft) => {
-                  applyUpsertPatch(draft, filtered);
-                });
-
-                dataRef.current = next;
-                setData(next);
-              }
-
-              // Handle Ready messages (initial data has been sent)
-              if ('Ready' in msg) {
-                initializedForEndpointRef.current = endpoint;
-                retryAttemptsRef.current = 0;
-                setIsInitialized(true);
-                setError(null);
-              }
-
-              // Handle finished messages ({finished: true})
-              // Treat finished as terminal - do NOT reconnect
-              if ('finished' in msg) {
-                finishedRef.current = true;
-                ws.close(1000, 'finished');
-                wsRef.current = null;
-                setIsConnected(false);
-              }
-            } catch (err) {
-              console.error('Failed to process WebSocket message:', err);
-              setError('Failed to process stream update');
-            }
-          };
-
-          ws.onerror = () => {
-            // Don't set error here — onclose always fires after onerror
-            // and handles retry logic. Setting error eagerly hides data
-            // that was already received.
-          };
-
-          ws.onclose = (evt) => {
-            setIsConnected(false);
-            wsRef.current = null;
-
-            // Do not reconnect if we received a finished message or clean close
-            if (
-              cancelled ||
-              finishedRef.current ||
-              (evt?.code === 1000 && evt?.wasClean)
-            ) {
-              return;
-            }
-
-            // Otherwise, reconnect on unexpected/error closures
-            retryAttemptsRef.current += 1;
-            // InitialData is only a local placeholder. A bounded connection
-            // error depends on whether an authoritative Ready was received.
-            if (
-              initializedForEndpointRef.current !== endpoint &&
-              retryAttemptsRef.current > 6
-            ) {
-              setError('Connection failed');
-            }
-            scheduleReconnect();
-          };
-
-          wsRef.current = ws;
-        } catch (error) {
-          if (cancelled) {
-            return;
-          }
-
-          console.error('Failed to open WebSocket stream:', error);
-          retryAttemptsRef.current += 1;
-          if (
-            initializedForEndpointRef.current !== endpoint &&
-            retryAttemptsRef.current > 6
-          ) {
-            setError('Connection failed');
-          }
-          scheduleReconnect();
-        }
-      })();
-    }
-
-    return () => {
-      cancelled = true;
-      if (wsRef.current) {
-        const ws = wsRef.current;
-
-        // Clear all event handlers first to prevent callbacks after cleanup
-        ws.onopen = null;
-        ws.onmessage = null;
-        ws.onerror = null;
-        ws.onclose = null;
-
-        // Close regardless of state
-        ws.close();
-        wsRef.current = null;
-      }
-      if (retryTimerRef.current) {
-        window.clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = null;
-      }
-      finishedRef.current = false;
-      setIsConnected(false);
-    };
-  }, [
-    endpoint,
-    enabled,
-    socketScopeKey,
-    initialData,
-    injectInitialEntry,
-    deduplicatePatches,
-    retryNonce,
-  ]);
-
-  const isInitializedForCurrentEndpoint =
-    isInitialized && initializedForEndpointRef.current === endpoint;
+  const subscribe = stream?.subscribe ?? noopSubscribe;
+  const getSnapshot = useCallback(
+    () => (stream ? stream.getSnapshot() : idleJsonPatchStreamSnapshot<T>()),
+    [stream]
+  );
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   return {
-    data,
-    isConnected,
-    isInitialized: isInitializedForCurrentEndpoint,
-    error,
+    data: snapshot.data,
+    isConnected: snapshot.isConnected,
+    isInitialized: snapshot.isInitialized,
+    error: snapshot.error,
   };
 };
