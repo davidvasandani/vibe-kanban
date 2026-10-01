@@ -116,14 +116,34 @@ Principle XLIV (constitution 0.41.0) records the rule.
       source, and incomplete reads.
 - [ ] The knowledge base records the handshake-cost rule and the numbers.
 
+## Clarifications
+
+Resolved in `/speckit.clarify` (2026-10-01). No answers were supplied with the
+command. Each question below was decided from the task text, the existing
+constants, and the baseline probe.
+
+- **History request deadline is 30 s, total.** This matches the existing
+  `HISTORY_STREAM_IDLE_TIMEOUT_MS`, so the HTTP and socket paths fail on the
+  same scale. A request has no progress signal to reset an idle timer, so the
+  bound is total. FR-5 makes this safe for cold logs: the server keeps
+  building and stores the result, so "load earlier" succeeds on retry. Healthy
+  reads finish in under 120 ms, so 30 s only bounds the failure case.
+- **Script turns move to requests as well.** The chat loads them through the
+  same history path (`raw-logs/ws`). Leaving them on sockets would keep a
+  handshake per setup or cleanup turn, against FR-1 and XLIV. Raw output
+  becomes the same `STDOUT`/`STDERR` entries the socket produces.
+- **On mobile, the diff stream starts when a diff tab is shown or the chat's
+  initial history settles, whichever comes first.** The chat header's
+  diff-stats pill reads that stream. Waiting for a diff tab alone would leave
+  the pill empty until the user leaves the chat. Starting after the history
+  settles keeps the 613 KB, slow-first-frame stream out of the chat's critical
+  path, which is what the task asks for. Once started, it stays connected for
+  that workspace.
+- **A shared stream lingers 3 s after its last subscriber leaves.** In the
+  probe, the churn (approvals and discovered-options closing and reopening)
+  happened within about 150 ms of mounting. 3 s absorbs remounts and quick tab
+  switches, while a stream nobody needs still closes promptly.
+
 ## Open Questions
 
-- [NEEDS CLARIFICATION: How long should the per-request history deadline be?
-  The live-stream idle bound is 30 s, but a request has no progress signal.]
-- [NEEDS CLARIFICATION: Should script turns (setup and cleanup output) also
-  move to requests, or only agent turns?]
-- [NEEDS CLARIFICATION: On mobile, should the diff stream wait for a diff tab
-  only, or also start once the chat has loaded, so that the chat's diff-stats
-  pill still fills in?]
-- [NEEDS CLARIFICATION: How long should a shared stream stay open after its
-  last subscriber leaves?]
+None remain.
