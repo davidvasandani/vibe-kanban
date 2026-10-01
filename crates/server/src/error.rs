@@ -470,6 +470,11 @@ impl IntoResponse for ApiError {
                     ),
                 )
             }
+            // A configured org token that could not be read; the message names
+            // the owner and the reason.
+            ApiError::GitService(GitServiceError::GitCLI(
+                git::GitCliError::CredentialUnavailable(msg),
+            )) => ErrorInfo::with_status(StatusCode::UNAUTHORIZED, "GitServiceError", msg.clone()),
             ApiError::GitService(e) => ErrorInfo::with_status(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "GitServiceError",

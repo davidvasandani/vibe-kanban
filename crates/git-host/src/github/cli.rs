@@ -16,7 +16,11 @@ use serde::Deserialize;
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use url::Url;
-use utils::{command_ext::NoWindowExt, shell::resolve_executable_path_blocking};
+use utils::{
+    command_ext::NoWindowExt,
+    github_credentials::{GitHubCredentials, looks_like_gh_auth_failure, parse_github_repo},
+    shell::resolve_executable_path_blocking,
+};
 
 use crate::types::{
     CheckSource, CreatePrRequest, MergeMethod, MergeOutcome, PrCheck, PrComment, PrCommentAuthor,
@@ -131,12 +135,64 @@ pub enum GhCliError {
     UnexpectedOutput(String),
 }
 
+/// The repository a `gh` invocation targets, which selects its credential.
 #[derive(Debug, Clone, Default)]
-pub struct GhCli;
+struct Target {
+    owner: Option<String>,
+    repo: Option<String>,
+    /// Further spellings of the owner seen in the checkout's remotes.
+    spellings: Vec<String>,
+}
+
+impl Target {
+    /// Org tokens are github.com credentials: an Enterprise repository whose
+    /// owner shares a configured name keeps the host's existing credentials.
+    fn repo(info: &GitHubRepoInfo) -> Self {
+        match info.hostname.as_deref() {
+            Some(host)
+                if !host.eq_ignore_ascii_case("github.com")
+                    && !host.eq_ignore_ascii_case("www.github.com") =>
+            {
+                Self::default()
+            }
+            _ => Self::named(&info.owner, &info.repo_name),
+        }
+    }
+
+    fn named(owner: &str, repo: &str) -> Self {
+        Self {
+            owner: Some(owner.to_string()),
+            repo: Some(repo.to_string()),
+            spellings: Vec::new(),
+        }
+    }
+
+    /// A remote or PR URL; owners of non-github.com URLs are unknown.
+    fn url(url: &str) -> Self {
+        parse_github_repo(url)
+            .map(|parsed| Self {
+                owner: Some(parsed.owner),
+                repo: Some(parsed.repo),
+                spellings: Vec::new(),
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// `gh` runner. With credentials, each invocation authenticates with the
+/// org token of the owner it targets (see `utils::github_credentials`).
+#[derive(Debug, Clone, Default)]
+pub struct GhCli {
+    credentials: GitHubCredentials,
+}
 
 impl GhCli {
     pub fn new() -> Self {
-        Self {}
+        Self::default()
+    }
+
+    pub fn with_credentials(credentials: GitHubCredentials) -> Self {
+        Self { credentials }
     }
 
     /// Ensure the GitHub CLI binary is discoverable.
@@ -145,12 +201,17 @@ impl GhCli {
         Ok(())
     }
 
-    fn run<I, S>(&self, args: I, dir: Option<&Path>) -> Result<String, GhCliError>
+    fn run<I, S>(&self, target: Target, args: I, dir: Option<&Path>) -> Result<String, GhCliError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
         self.ensure_available()?;
+        let selection = self
+            .credentials
+            .select_owner(target.owner.as_deref())
+            .with_repo(target.repo.as_deref())
+            .with_owner_spellings(target.spellings);
         let gh = resolve_executable_path_blocking("gh").ok_or(GhCliError::NotAvailable)?;
         let mut cmd = Command::new(&gh);
         if let Some(d) = dir {
@@ -159,6 +220,10 @@ impl GhCli {
         for arg in args {
             cmd.arg(arg);
         }
+        // An unreadable configured token never falls back to another identity.
+        selection
+            .apply_gh(&mut cmd)
+            .map_err(GhCliError::AuthFailed)?;
         let output = cmd
             .no_window()
             .output()
@@ -169,6 +234,14 @@ impl GhCli {
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // Name the owner and credential source on auth failures. The original
+        // text stays in the message, so classification below (and by callers,
+        // e.g. a 403 meaning "no Checks permission") is unchanged.
+        let stderr = if output.status.code() == Some(4) || looks_like_gh_auth_failure(&stderr) {
+            selection.attribute(&stderr)
+        } else {
+            stderr
+        };
 
         // Check exit code first - gh CLI uses exit code 4 for auth failures
         if output.status.code() == Some(4) {
@@ -195,6 +268,7 @@ impl GhCli {
         repo_path: &Path,
     ) -> Result<GitHubRepoInfo, GhCliError> {
         let raw = self.run(
+            Target::url(remote_url),
             ["repo", "view", remote_url, "--json", "owner,name,url"],
             Some(repo_path),
         )?;
@@ -256,13 +330,14 @@ impl GhCli {
             args.push(OsString::from("--draft"));
         }
 
-        let raw = self.run(args, Some(repo_path))?;
+        let raw = self.run(Target::repo(repo_info), args, Some(repo_path))?;
         Self::parse_pr_create_text(&raw, request)
     }
 
     /// Retrieve details for a pull request by URL.
     pub fn view_pr(&self, pr_url: &str) -> Result<PullRequestDetail, GhCliError> {
         let raw = self.run(
+            Target::url(pr_url),
             [
                 "pr",
                 "view",
@@ -283,6 +358,7 @@ impl GhCli {
     ) -> Result<Vec<PullRequestDetail>, GhCliError> {
         let repo_spec = repo_info.repo_spec();
         let raw = self.run(
+            Target::repo(repo_info),
             [
                 "pr",
                 "list",
@@ -306,6 +382,7 @@ impl GhCli {
             "number,url,title,headRefName,baseRefName,state,mergedAt,mergeCommit,updatedAt";
 
         let open_raw = self.run(
+            Target::named(owner, repo),
             [
                 "pr",
                 "list",
@@ -320,6 +397,7 @@ impl GhCli {
         )?;
 
         let closed_raw = self.run(
+            Target::named(owner, repo),
             [
                 "pr",
                 "list",
@@ -365,6 +443,7 @@ impl GhCli {
     ) -> Result<Vec<PrComment>, GhCliError> {
         let repo_spec = repo_info.repo_spec();
         let raw = self.run(
+            Target::repo(repo_info),
             [
                 "pr",
                 "view",
@@ -396,7 +475,7 @@ impl GhCli {
             args.push("--hostname".to_string());
             args.push(host.clone());
         }
-        let raw = self.run(args, None)?;
+        let raw = self.run(Target::repo(repo_info), args, None)?;
         Self::parse_pr_review_comments(&raw)
     }
 
@@ -407,7 +486,20 @@ impl GhCli {
         repo: &str,
         pr_number: i64,
     ) -> Result<(), GhCliError> {
+        // The checkout's remotes may spell the owner differently from GitHub's
+        // canonical login; git matches URL prefixes case-sensitively.
+        let remote_urls = raw_remote_urls(repo_path);
+        let spellings: Vec<String> = remote_urls
+            .iter()
+            .filter_map(|url| parse_github_repo(url))
+            .map(|target| target.owner)
+            .filter(|spelling| spelling.eq_ignore_ascii_case(owner))
+            .collect();
+        self.ensure_checkout_stays_on_token(repo_path, owner, repo, &remote_urls, &spellings)?;
+        let mut target = Target::named(owner, repo);
+        target.spellings = spellings;
         self.run(
+            target,
             [
                 "pr",
                 "checkout",
@@ -420,6 +512,92 @@ impl GhCli {
         )?;
         Ok(())
     }
+
+    /// `gh pr checkout` fetches through git. With an org token, every URL it may
+    /// fetch for `owner` (the repository's HTTPS URLs and the checkout's own
+    /// remotes) must still reach `https://github.com/` after git's
+    /// `insteadOf` rewrites; an inherited rule that outranks ours would fetch
+    /// as another identity (e.g. SSH), so refuse instead.
+    fn ensure_checkout_stays_on_token(
+        &self,
+        repo_path: &Path,
+        owner: &str,
+        repo: &str,
+        remote_urls: &[String],
+        spellings: &[String],
+    ) -> Result<(), GhCliError> {
+        let selection = self
+            .credentials
+            .select_owner(Some(owner))
+            .with_repo(Some(repo))
+            .with_owner_spellings(spellings.iter().cloned());
+        if !selection.is_org_token() {
+            return Ok(());
+        }
+        let git = resolve_executable_path_blocking("git")
+            .ok_or_else(|| GhCliError::CommandFailed("git is not available".into()))?;
+        let mut candidates = vec![
+            format!("https://github.com/{owner}/{repo}"),
+            format!("https://github.com/{owner}/{repo}.git"),
+        ];
+        candidates.extend(
+            remote_urls
+                .iter()
+                .filter(|url| {
+                    parse_github_repo(url)
+                        .is_some_and(|target| target.owner.eq_ignore_ascii_case(owner))
+                })
+                .cloned(),
+        );
+        for candidate in candidates {
+            let mut command = Command::new(&git);
+            command
+                .current_dir(repo_path)
+                .args(["ls-remote", "--get-url", &candidate]);
+            selection
+                .apply_gh(&mut command)
+                .map_err(GhCliError::AuthFailed)?;
+            let output = command
+                .no_window()
+                .output()
+                .map_err(|err| GhCliError::CommandFailed(err.to_string()))?;
+            let effective = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // It must stay on HTTPS github.com *and* in the same owner (spelled
+            // as the candidate spells it, which the helper covers); an
+            // inherited rule moving it elsewhere outranks our identity rule.
+            let same_owner = parse_github_repo(&effective)
+                .zip(parse_github_repo(&candidate))
+                .is_some_and(|(effective, candidate)| effective.owner == candidate.owner);
+            if !effective.starts_with("https://github.com/") || !same_owner {
+                return Err(GhCliError::AuthFailed(format!(
+                    "the {owner} org token cannot be used: inherited git configuration rewrites \
+                     {candidate} to {effective} (a url.*.insteadOf rule), which bypasses the \
+                     token; remove that rule on the Vibe Kanban host"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The checkout's remote URLs as configured, before `insteadOf` rewrites
+/// (`git remote -v` shows them already rewritten).
+fn raw_remote_urls(repo_path: &Path) -> Vec<String> {
+    let Some(git) = resolve_executable_path_blocking("git") else {
+        return Vec::new();
+    };
+    Command::new(git)
+        .current_dir(repo_path)
+        .args(["config", "--get-regexp", r"^remote\..*\.(url|pushurl)$"])
+        .no_window()
+        .output()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl GhCli {
@@ -783,7 +961,7 @@ impl GhCli {
         let mut args = Self::api_args(repo_info, Some(method), path);
         args.push(OsString::from("--input"));
         args.push(file.path().as_os_str().to_os_string());
-        self.run(args, Some(repo_path))
+        self.run(Target::repo(repo_info), args, Some(repo_path))
     }
 
     pub fn get_pr_state(
@@ -793,6 +971,7 @@ impl GhCli {
         repo_path: &Path,
     ) -> Result<PrState, GhCliError> {
         let raw = self.run(
+            Target::repo(repo_info),
             Self::api_args(repo_info, None, format!("pulls/{number}")),
             Some(repo_path),
         )?;
@@ -806,6 +985,7 @@ impl GhCli {
         repo_path: &Path,
     ) -> Result<CheckPage, GhCliError> {
         let raw = self.run(
+            Target::repo(repo_info),
             Self::api_args(
                 repo_info,
                 None,
@@ -823,6 +1003,7 @@ impl GhCli {
         repo_path: &Path,
     ) -> Result<CheckPage, GhCliError> {
         let raw = self.run(
+            Target::repo(repo_info),
             Self::api_args(
                 repo_info,
                 None,
@@ -842,6 +1023,7 @@ impl GhCli {
         repo_path: &Path,
     ) -> Result<CheckPage, GhCliError> {
         let raw = self.run(
+            Target::repo(repo_info),
             Self::api_args(
                 repo_info,
                 None,
@@ -854,6 +1036,7 @@ impl GhCli {
         let mut checks = Vec::new();
         for run in latest_runs(runs.workflow_runs) {
             let raw_jobs = self.run(
+                Target::repo(repo_info),
                 Self::api_args(
                     repo_info,
                     None,
@@ -897,6 +1080,7 @@ impl GhCli {
         repo_path: &Path,
     ) -> Result<(), GhCliError> {
         self.run(
+            Target::repo(repo_info),
             Self::api_args(
                 repo_info,
                 Some("DELETE"),
@@ -947,7 +1131,7 @@ impl GhCli {
         if !ready {
             args.push("--undo");
         }
-        self.run(args, Some(repo_path))?;
+        self.run(Target::repo(repo_info), args, Some(repo_path))?;
         Ok(())
     }
 
@@ -1193,6 +1377,28 @@ mod pr_management_parser_tests {
         assert!(outcome.merged);
         assert_eq!(outcome.sha.as_deref(), Some("abc"));
         assert_eq!(outcome.branch_deleted, None);
+    }
+
+    #[test]
+    fn enterprise_targets_never_select_github_com_org_tokens() {
+        let info = |hostname: Option<&str>| GitHubRepoInfo {
+            owner: "sweetgreen".into(),
+            repo_name: "app".into(),
+            hostname: hostname.map(str::to_string),
+        };
+        assert_eq!(
+            Target::repo(&info(None)).owner.as_deref(),
+            Some("sweetgreen")
+        );
+        assert_eq!(
+            Target::repo(&info(Some("github.com"))).owner.as_deref(),
+            Some("sweetgreen")
+        );
+        assert_eq!(Target::repo(&info(Some("ghe.example.com"))).owner, None);
+        assert_eq!(
+            Target::url("https://ghe.example.com/sweetgreen/app").owner,
+            None
+        );
     }
 
     #[test]

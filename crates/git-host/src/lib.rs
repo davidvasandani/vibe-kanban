@@ -16,6 +16,7 @@ pub use types::{
     SourceState, UnifiedPrComment, UpdatePrFields, aggregate_checks, merge_gate,
     parse_pr_reference, same_repo,
 };
+pub use utils::github_credentials::GitHubCredentials;
 
 use self::{azure::AzureDevOpsProvider, github::GitHubProvider};
 
@@ -117,9 +118,22 @@ pub enum GitHostService {
 }
 
 impl GitHostService {
+    /// A provider using the host's existing credentials. Workspace and
+    /// repository operations should use [`Self::from_url_with_credentials`].
     pub fn from_url(url: &str) -> Result<Self, GitHostError> {
+        Self::from_url_with_credentials(url, GitHubCredentials::default())
+    }
+
+    /// A provider whose GitHub calls use each target owner's org token from
+    /// `credentials`; providers other than GitHub ignore them.
+    pub fn from_url_with_credentials(
+        url: &str,
+        credentials: GitHubCredentials,
+    ) -> Result<Self, GitHostError> {
         match detect_provider_from_url(url) {
-            ProviderKind::GitHub => Ok(Self::GitHub(GitHubProvider::new()?)),
+            ProviderKind::GitHub => {
+                Ok(Self::GitHub(GitHubProvider::with_credentials(credentials)?))
+            }
             ProviderKind::AzureDevOps => Ok(Self::AzureDevOps(AzureDevOpsProvider::new()?)),
             ProviderKind::Unknown => Err(GitHostError::UnsupportedProvider),
         }

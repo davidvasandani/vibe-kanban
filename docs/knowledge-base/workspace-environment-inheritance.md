@@ -71,7 +71,7 @@ without duplicating spawn logic. A credential-preparation oneshot that owns a
 `RuntimeDirectory` must remain active (`RemainAfterExit=true`), or systemd
 removes the directory as soon as preparation finishes.
 
-**Superseded in practice by the app-owned router (`vk/0f52-manage-gh-token`).**
+**Superseded in practice by the app-owned router (`vk/0f52-manage-gh-token`); server-side operations use the same Settings tokens per request (`vk/8b57-use-settings-git`).**
 Per-owner PATs are now configured in Settings → Repositories and routed by an
 app-written shim plus `GIT_CONFIG_PARAMETERS`, prepared on each executing host.
 The coordinator resolves the values and sends them through the authenticated

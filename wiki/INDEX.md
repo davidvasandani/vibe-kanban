@@ -79,6 +79,7 @@ contributed to it.
   paths, generated TypeScript types, generic route/UI behavior, focused
   validation, and host-first PATH propagation across local and clustered
   workspace process boundaries.
+- [claude-missing-transcript-fallback.md](claude-missing-transcript-fallback.md) — When Claude's private transcript is gone, a follow-up starts a visible fresh session instead of failing forever with `No conversation found`. Covers the fail-open probe across all `projects/*` folders (vendor scope verified on 2.1.281), resolving from the execution env, the stderr notice channel (IX) and why history is never seeded (`vk/9f5d-no-conversation`).
 - [agent-process-lifecycle.md](agent-process-lifecycle.md) — How a coding-agent
   turn ends at the process level: the one-turn-one-`ExecutionProcess` identity
   chain, the implicit app-server marker (`exit_signal: Some` vs `None`, distinct
@@ -293,7 +294,14 @@ contributed to it.
   owner-scoped Git credential contexts; a prepended `gh` shim that survives
   profile PATH merging; and the gh argument-parsing traps (value flags consumed
   first, short letters reused per subcommand, `--`, `GH_REPO`, `gh-resolved`,
-  API placeholders).
+  API placeholders). Also covers server-side git/PR operations
+  (`vk/8b57-use-settings-git`): a per-request owner-keyed credential set,
+  a TTL'd and invalidated `op://` cache, fail-closed unavailable owners,
+  attributed 401/403s, and the push skip. It lists every git config path that
+  routes around a credential helper (URL forms,
+  `insteadOf`/`pushInsteadOf` longest-first-match, `extraHeader`, rewritten
+  `remote -v`/libgit2 URLs, `gh pr checkout`'s own git, Enterprise), with
+  network-free verification recipes.
 - [coordinator-restart-handoff.md](coordinator-restart-handoff.md) — Why a VK
   deploy no longer stops worker-owned tasks (parents, sub-tasks, pollers).
   Shutdown hands them off with no cancel and no WIP commit. Boot re-attaches
@@ -305,6 +313,9 @@ contributed to it.
   rounds of cursor and log-writer traps (`vk/80c1-tasks-should-sur`).
   Coordinator-host work can use think2's colocated worker. Existing `Local`
   workspaces cannot be moved to a worker (`vk/ec43-run-a-vibe-kanba`).
+  A worker journal behind the cursor (undrained worker restart) is resolved
+  from matching inventory evidence (`Interrupted` → Resume) or classified
+  `Indeterminate`, never polled forever (`vk/9c15-stopped-job-look`).
 - [read-only-markdown-links.md](read-only-markdown-links.md) — Bare-URL
   autolinking and the clickability policy in read-only markdown. Mutation
   listeners are exact-class. Read-only editors still export via `onChange`

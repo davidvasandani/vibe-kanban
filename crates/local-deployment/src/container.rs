@@ -286,6 +286,18 @@ fn replay_gap_terminal_evidence(
     {
         return None;
     }
+    terminal_summary_states(summary)
+}
+
+/// The dispatch state and process status a terminal worker summary stands
+/// for, when its job state and terminal evidence agree.
+fn terminal_summary_states(
+    summary: &JobSummary,
+) -> Option<(
+    ExecutionWorkerDispatchState,
+    ExecutionProcessStatus,
+    TerminalEvidence,
+)> {
     let evidence = summary.terminal.as_ref()?;
     let (worker_state, process_state) = match (&summary.state, &evidence.state) {
         (JobState::Completed, TerminalState::Completed) => (
@@ -307,6 +319,41 @@ fn replay_gap_terminal_evidence(
         _ => return None,
     };
     Some((worker_state, process_state, evidence.clone()))
+}
+
+/// Whether the worker's journal is behind the tracker's cursor. Every cursor
+/// value is a sequence this worker's journal served, so a live journal never
+/// reports less; a lower `latest_available` means the worker lost that
+/// journal (it restarted and recovered the job from a stale persisted
+/// summary). Polling on would wait forever for events that cannot come.
+fn worker_journal_regressed(cursor: u64, latest_available: u64) -> bool {
+    latest_available < cursor
+}
+
+/// Terminal evidence that resolves a regressed journal: the summary must be
+/// this exact dispatch and describe the journal the worker is serving now
+/// (its last sequence is that journal's latest), not some other generation.
+fn journal_regression_terminal_evidence(
+    known: &ExecutionWorkerJob,
+    worker_node_id: Uuid,
+    execution_id: Uuid,
+    latest_available: u64,
+    summary: &JobSummary,
+) -> Option<(
+    ExecutionWorkerDispatchState,
+    ExecutionProcessStatus,
+    TerminalEvidence,
+)> {
+    if known.worker_node_id != worker_node_id
+        || known.execution_process_id != execution_id
+        || summary.execution_id != execution_id
+        || summary.worker_job_id != known.worker_job_id
+        || summary.request_digest != known.request_digest
+        || summary.last_sequence != latest_available
+    {
+        return None;
+    }
+    terminal_summary_states(summary)
 }
 
 fn worker_job_has_positive_liveness(
@@ -350,9 +397,10 @@ mod final_output_reconciliation_tests {
         ExecutionEventPayload, ExecutionProcessStatus, ExecutionWorkerDispatchState,
         ExecutionWorkerJob, InteractionRequest, JobState, JobSummary, TerminalEvidence,
         TerminalState, Utc, durable_worker_cursor, history_has_final_assistant_message,
-        normalized_final_assistant_state, replay_gap_job_is_live, replay_gap_terminal_evidence,
-        should_ack_worker_batch, should_hand_off_worker_job, wait_for_unfinalized_output,
-        worker_event_is_output, worker_job_has_positive_liveness, worker_lease_is_turn_evidence,
+        journal_regression_terminal_evidence, normalized_final_assistant_state,
+        replay_gap_job_is_live, replay_gap_terminal_evidence, should_ack_worker_batch,
+        should_hand_off_worker_job, wait_for_unfinalized_output, worker_event_is_output,
+        worker_job_has_positive_liveness, worker_journal_regressed, worker_lease_is_turn_evidence,
     };
 
     fn normalized_message(entry_type: NormalizedEntryType, content: &str) -> LogMsg {
@@ -584,6 +632,129 @@ mod final_output_reconciliation_tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn journal_regression_is_a_latest_sequence_behind_the_cursor() {
+        assert!(worker_journal_regressed(2549, 6));
+        assert!(worker_journal_regressed(1, 0));
+        assert!(!worker_journal_regressed(6, 6));
+        assert!(!worker_journal_regressed(6, 9000));
+        assert!(!worker_journal_regressed(0, 0));
+    }
+
+    #[test]
+    fn journal_regression_recovers_only_matching_current_terminal_evidence() {
+        // The incident shape: the coordinator consumed thousands of events,
+        // then the worker restarted and recovered the job as interrupted at
+        // its stale persisted sequence + 1.
+        let mut known = known_worker_job(ExecutionWorkerDispatchState::Running);
+        known.last_event_sequence = 2549;
+        known.worker_last_sequence = 2549;
+        let summary = JobSummary {
+            execution_id: known.execution_process_id,
+            worker_job_id: known.worker_job_id,
+            workspace_id: Uuid::new_v4(),
+            request_digest: known.request_digest.clone(),
+            state: JobState::Interrupted,
+            last_sequence: 6,
+            terminal: Some(TerminalEvidence {
+                state: TerminalState::Interrupted,
+                exit_code: None,
+                signal: None,
+                observed_at: Utc::now(),
+            }),
+        };
+        let resolve = |summary: &JobSummary| {
+            journal_regression_terminal_evidence(
+                &known,
+                known.worker_node_id,
+                known.execution_process_id,
+                6,
+                summary,
+            )
+        };
+        let (worker_state, process_state, evidence) = resolve(&summary).unwrap();
+        assert_eq!(worker_state, ExecutionWorkerDispatchState::Interrupted);
+        assert_eq!(process_state, ExecutionProcessStatus::Interrupted);
+        assert_eq!(Some(evidence), summary.terminal);
+        assert!(
+            replay_gap_terminal_evidence(
+                &known,
+                known.worker_node_id,
+                known.execution_process_id,
+                6,
+                &summary
+            )
+            .is_none(),
+            "replay-gap rules reject this summary, which is why regression needs its own rule"
+        );
+
+        for (state, terminal, worker, process) in [
+            (
+                JobState::Completed,
+                TerminalState::Completed,
+                ExecutionWorkerDispatchState::Completed,
+                ExecutionProcessStatus::Completed,
+            ),
+            (
+                JobState::Failed,
+                TerminalState::Failed,
+                ExecutionWorkerDispatchState::Failed,
+                ExecutionProcessStatus::Failed,
+            ),
+            (
+                JobState::Killed,
+                TerminalState::Killed,
+                ExecutionWorkerDispatchState::Killed,
+                ExecutionProcessStatus::Killed,
+            ),
+        ] {
+            let mut candidate = summary.clone();
+            candidate.state = state;
+            candidate.terminal.as_mut().unwrap().state = terminal;
+            let (worker_state, process_state, _) = resolve(&candidate).unwrap();
+            assert_eq!(worker_state, worker);
+            assert_eq!(process_state, process);
+        }
+
+        for change in 0..8 {
+            let mut candidate = summary.clone();
+            match change {
+                0 => candidate.execution_id = Uuid::new_v4(),
+                1 => candidate.worker_job_id = Uuid::new_v4(),
+                2 => candidate.request_digest = "different".into(),
+                3 => candidate.last_sequence = 5,
+                4 => candidate.last_sequence = 7,
+                5 => candidate.terminal = None,
+                6 => candidate.state = JobState::Running,
+                _ => candidate.terminal.as_mut().unwrap().state = TerminalState::Completed,
+            }
+            assert!(
+                resolve(&candidate).is_none(),
+                "invalid evidence case {change}"
+            );
+        }
+        assert!(
+            journal_regression_terminal_evidence(
+                &known,
+                Uuid::new_v4(),
+                known.execution_process_id,
+                6,
+                &summary
+            )
+            .is_none()
+        );
+        assert!(
+            journal_regression_terminal_evidence(
+                &known,
+                known.worker_node_id,
+                Uuid::new_v4(),
+                6,
+                &summary
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -3090,6 +3261,7 @@ impl LocalContainerService {
             let mut cursor = resume_from.unwrap_or(0);
             let mut retry_delay = Duration::from_millis(100);
             let mut final_output_deadline: Option<tokio::time::Instant> = None;
+            let mut regression_reported = false;
             'poll: loop {
                 let batch = match client.events(worker_node_id, execution_id, cursor).await {
                     Ok(batch) => {
@@ -3274,6 +3446,69 @@ impl LocalContainerService {
                 };
 
                 let mut terminal = None;
+                if worker_journal_regressed(cursor, batch.latest_available) {
+                    // The worker restarted and rebuilt this job's journal
+                    // below what was already consumed; its recovered terminal
+                    // event sits at a sequence this cursor has passed. Resolve
+                    // the job from its inventory summary instead of polling
+                    // for events that will never arrive.
+                    let recovered = match (
+                        ExecutionWorkerJob::find_by_execution_id(&db.pool, execution_id).await,
+                        client.inventory(worker_node_id).await,
+                    ) {
+                        (Ok(Some(known)), Ok(inventory)) => inventory.iter().find_map(|summary| {
+                            journal_regression_terminal_evidence(
+                                &known,
+                                worker_node_id,
+                                execution_id,
+                                batch.latest_available,
+                                summary,
+                            )
+                        }),
+                        (known, inventory) => {
+                            tracing::warn!(%execution_id, database_error = ?known.err(),
+                                inventory_error = ?inventory.err(),
+                                "Unable to verify terminal evidence after worker journal regression; retrying");
+                            tokio::time::sleep(retry_delay).await;
+                            retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
+                            continue 'poll;
+                        }
+                    };
+                    if !regression_reported {
+                        regression_reported = true;
+                        tracing::warn!(%execution_id, %worker_node_id, cursor,
+                            latest_available = batch.latest_available,
+                            recovered = recovered.is_some(),
+                            "Worker journal regressed below the coordinator cursor; the worker restarted");
+                        if let Err(error) =
+                            ExecutionWorkerJob::mark_output_incomplete(&db.pool, execution_id).await
+                        {
+                            tracing::error!(%execution_id, %error, "Failed to record incomplete worker output");
+                        }
+                        store.push(LogMsg::Stderr(format!(
+                            "The worker restarted while this execution was running; output after event {cursor} may be missing"
+                        )));
+                    }
+                    match recovered {
+                        // Finalize through the normal terminal path below.
+                        Some(recovered) => terminal = Some(recovered),
+                        None => {
+                            tracing::warn!(%execution_id, %worker_node_id,
+                                "No matching terminal evidence after worker journal regression; marking execution indeterminate");
+                            if !ExecutionProcess::was_stopped(&db.pool, execution_id).await
+                                && let Err(update_error) =
+                                    mark_remote_execution_indeterminate(&db, execution_id).await
+                            {
+                                tracing::error!(%execution_id, %update_error, "Failed to reconcile regressed worker execution");
+                                tokio::time::sleep(retry_delay).await;
+                                continue 'poll;
+                            }
+                            container.finalize_remote_execution(execution_id).await;
+                            container.finish_msg_store(&execution_id).await;
+                            break;
+                        }
+                    }
+                }
                 let had_events = !batch.events.is_empty();
                 // Output effects are durable once pushed (the raw-log writer
                 // follows the store). An interaction or terminal event has

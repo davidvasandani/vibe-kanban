@@ -15,7 +15,7 @@ mod validation;
 
 use cli::{ChangeType, StatusDiffEntry, StatusDiffOptions};
 pub use cli::{GitCli, GitCliError, StatusEntry, WorktreeStatus};
-pub use utils::path::ALWAYS_SKIP_DIRS;
+pub use utils::{github_credentials::GitHubCredentials, path::ALWAYS_SKIP_DIRS};
 pub use validation::is_valid_branch_prefix;
 
 /// Statistics for a single file based on git history
@@ -79,6 +79,13 @@ pub struct GitBranch {
     pub is_remote: bool,
     #[ts(type = "Date")]
     pub last_commit_date: DateTime<Utc>,
+}
+
+/// Whether [`GitService::push_to_remote_if_needed`] pushed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushOutcome {
+    Pushed,
+    AlreadyUpToDate,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -730,6 +737,7 @@ impl GitService {
         repo_path: &Path,
         branch_name: &str,
         base_branch_name: Option<&str>,
+        credentials: &GitHubCredentials,
     ) -> Result<(usize, usize), GitServiceError> {
         let repo = Repository::open(repo_path)?;
         let branch_ref = Self::find_branch(&repo, branch_name)?.into_reference();
@@ -742,7 +750,7 @@ impl GitService {
         }
         .into_reference();
         let remote = self.get_remote_from_branch_ref(&repo, &base_branch_ref)?;
-        self.fetch_all_from_remote(&repo, &remote)?;
+        self.fetch_all_from_remote(&repo, &remote, credentials)?;
         self.get_branch_status_inner(&repo, &branch_ref, &base_branch_ref)
     }
 
@@ -1173,6 +1181,7 @@ impl GitService {
         new_base_branch: &str,
         old_base_branch: &str,
         task_branch: &str,
+        credentials: &GitHubCredentials,
     ) -> Result<String, GitServiceError> {
         let worktree_repo = Repository::open(worktree_path)?;
         let main_repo = self.open_repo(repo_path)?;
@@ -1193,7 +1202,7 @@ impl GitService {
         let nbr = Self::find_branch(&main_repo, new_base_branch)?.into_reference();
         // If the target base is remote, update it first so CLI sees latest
         if nbr.is_remote() {
-            self.fetch_branch_from_remote(&main_repo, &nbr)?;
+            self.fetch_branch_from_remote(&main_repo, &nbr, credentials)?;
         }
 
         // Ensure identity for any commits produced by rebase
@@ -1437,11 +1446,16 @@ impl GitService {
                 "Remote for branch '{branch_name}' has no name"
             ))
         })?;
-        let url = remote.url().map(|url| url.to_string()).ok_or_else(|| {
-            GitServiceError::InvalidRepository(format!(
-                "Remote for branch '{branch_name}' has no URL"
-            ))
-        })?;
+        // libgit2 reports the `insteadOf`-rewritten URL; prefer the configured
+        // one so credential selection still sees the GitHub owner.
+        let url = GitCli::new()
+            .configured_remote_url(repo_path, &name)
+            .or_else(|| remote.url().map(|url| url.to_string()))
+            .ok_or_else(|| {
+                GitServiceError::InvalidRepository(format!(
+                    "Remote for branch '{branch_name}' has no URL"
+                ))
+            })?;
         Ok(GitRemote { name, url })
     }
 
@@ -1475,10 +1489,11 @@ impl GitService {
         repo_path: &Path,
         remote_url: &str,
         branch_name: &str,
+        credentials: &GitHubCredentials,
     ) -> Result<bool, GitServiceError> {
         let git_cli = GitCli::new();
         git_cli
-            .check_remote_branch_exists(repo_path, remote_url, branch_name)
+            .check_remote_branch_exists_with(repo_path, remote_url, branch_name, credentials)
             .map_err(GitServiceError::from)
     }
 
@@ -1521,6 +1536,7 @@ impl GitService {
         worktree_path: &Path,
         branch_name: &str,
         force: bool,
+        credentials: &GitHubCredentials,
     ) -> Result<(), GitServiceError> {
         let repo = Repository::open(worktree_path)?;
         self.check_worktree_clean(&repo)?;
@@ -1529,12 +1545,73 @@ impl GitService {
         let remote = self.default_remote(&repo, worktree_path)?;
 
         let git_cli = GitCli::new();
-        if let Err(e) = git_cli.push(worktree_path, &remote.url, branch_name, force) {
+        if let Err(e) =
+            git_cli.push_with(worktree_path, &remote.url, branch_name, force, credentials)
+        {
             tracing::error!("Push to remote failed: {}", e);
             return Err(e.into());
         }
 
-        let mut branch = Self::find_branch(&repo, branch_name)?;
+        Self::record_pushed_branch(&repo, &remote, branch_name)
+    }
+
+    /// Push `branch_name` unless the remote branch already points at its local
+    /// tip, read directly from the remote (a local `origin/<branch>` may be
+    /// stale). Skipping matters when the branch was pushed by the agent: a
+    /// server-side push problem must not block opening a PR that needs no
+    /// push. When skipped, the tracking ref and upstream are recorded as a
+    /// push would have, and the clean-worktree check (which only protects a
+    /// push) does not apply.
+    pub fn push_to_remote_if_needed(
+        &self,
+        worktree_path: &Path,
+        branch_name: &str,
+        credentials: &GitHubCredentials,
+    ) -> Result<PushOutcome, GitServiceError> {
+        let repo = Repository::open(worktree_path)?;
+        let remote = self.default_remote(&repo, worktree_path)?;
+        let local = Self::find_branch(&repo, branch_name)?
+            .get()
+            .target()
+            .map(|oid| oid.to_string());
+        let cli = GitCli::new();
+        // The read must hit the push destination; with a `pushInsteadOf`
+        // sending pushes elsewhere, the shortcut is not safe.
+        let remote_tip =
+            match cli.push_and_fetch_resolve_alike(worktree_path, &remote.url, credentials) {
+                Ok(true) => {
+                    cli.remote_branch_oid(worktree_path, &remote.url, branch_name, credentials)
+                }
+                Ok(false) => Ok(None),
+                Err(error) => Err(error),
+            };
+        match (local, remote_tip) {
+            (Some(local), Ok(Some(remote_tip))) if local == remote_tip => {
+                tracing::info!(
+                    branch = branch_name,
+                    remote = %remote.name,
+                    "Remote branch already at local HEAD; skipping push"
+                );
+                Self::record_pushed_branch(&repo, &remote, branch_name)?;
+                Ok(PushOutcome::AlreadyUpToDate)
+            }
+            // An unreadable remote falls through to the push, which reports
+            // the failure with the same credential attribution.
+            _ => {
+                self.push_to_remote(worktree_path, branch_name, false, credentials)?;
+                Ok(PushOutcome::Pushed)
+            }
+        }
+    }
+
+    /// Record what a push of `branch_name` to `remote` leaves behind: the
+    /// remote-tracking ref at the local tip, and the upstream.
+    fn record_pushed_branch(
+        repo: &Repository,
+        remote: &GitRemote,
+        branch_name: &str,
+    ) -> Result<(), GitServiceError> {
+        let mut branch = Self::find_branch(repo, branch_name)?;
         if !branch.get().is_remote() {
             if let Some(branch_target) = branch.get().target() {
                 let remote_ref = format!("refs/remotes/{}/{branch_name}", remote.name);
@@ -1557,14 +1634,20 @@ impl GitService {
         repo: &Repository,
         remote: &Remote,
         refspec: &str,
+        credentials: &GitHubCredentials,
     ) -> Result<(), GitServiceError> {
-        // Get the remote
+        let git_cli = GitCli::new();
+        // The configured URL, not libgit2's `insteadOf`-rewritten one (see
+        // `GitCli::list_remotes`).
         let remote_url = remote
-            .url()
+            .name()
+            .and_then(|name| git_cli.configured_remote_url(repo.path(), name))
+            .or_else(|| remote.url().map(str::to_string))
             .ok_or_else(|| GitServiceError::InvalidRepository("Remote has no URL".to_string()))?;
 
-        let git_cli = GitCli::new();
-        if let Err(e) = git_cli.fetch_with_refspec(repo.path(), remote_url, refspec) {
+        if let Err(e) =
+            git_cli.fetch_with_refspec_with(repo.path(), &remote_url, refspec, credentials)
+        {
             tracing::error!("Fetch from GitHub failed: {}", e);
             return Err(e.into());
         }
@@ -1576,6 +1659,7 @@ impl GitService {
         &self,
         repo: &Repository,
         branch: &Reference,
+        credentials: &GitHubCredentials,
     ) -> Result<(), GitServiceError> {
         let remote = self.get_remote_from_branch_ref(repo, branch)?;
         let default_remote = self.default_remote(repo, repo.path())?;
@@ -1586,7 +1670,7 @@ impl GitService {
         let remote_prefix = format!("refs/remotes/{remote_name}/");
         let src_ref = dest_ref.replacen(&remote_prefix, "refs/heads/", 1);
         let refspec = format!("+{src_ref}:{dest_ref}");
-        self.fetch_from_remote(repo, &remote, &refspec)
+        self.fetch_from_remote(repo, &remote, &refspec, credentials)
     }
 
     /// Fetch from remote repository using native git authentication
@@ -1594,11 +1678,12 @@ impl GitService {
         &self,
         repo: &Repository,
         remote: &Remote,
+        credentials: &GitHubCredentials,
     ) -> Result<(), GitServiceError> {
         let default_remote = self.default_remote(repo, repo.path())?;
         let remote_name = remote.name().unwrap_or(&default_remote.name);
         let refspec = format!("+refs/heads/*:refs/remotes/{remote_name}/*");
-        self.fetch_from_remote(repo, remote, &refspec)
+        self.fetch_from_remote(repo, remote, &refspec, credentials)
     }
 
     /// Clone a repository to the specified directory

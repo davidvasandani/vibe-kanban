@@ -30,7 +30,8 @@ use git_host::{
 };
 use serde::{Deserialize, Serialize};
 use services::services::{
-    config::DEFAULT_PR_DESCRIPTION_PROMPT, container::ContainerService, remote_sync,
+    config::DEFAULT_PR_DESCRIPTION_PROMPT, container::ContainerService, github_credentials,
+    remote_sync,
 };
 use ts_rs::TS;
 use utils::response::ApiResponse;
@@ -91,6 +92,16 @@ impl PrError {
 fn pr_error<T>(error: PrError) -> ApiResponse<T, PrError> {
     let message = error.message();
     ApiResponse::error_with_data_and_message(error, &message)
+}
+
+/// A git authentication failure, keeping the typed `GitCliNotLoggedIn` for the
+/// UI but with a message naming the owner and credential source (the git
+/// layer attributes it), instead of the generic "host not authenticated".
+fn git_credential_error<T>(what: &str, detail: &str) -> ApiResponse<T, PrError> {
+    ApiResponse::error_with_data_and_message(
+        PrError::GitCliNotLoggedIn,
+        &format!("{what}: {detail}"),
+    )
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -263,14 +274,24 @@ pub async fn create_pr(
             Err(_) => (push_remote.clone(), target_branch.clone()),
         };
 
-    match git.check_remote_branch_exists(&repo_path, &target_remote.url, &base_branch) {
+    // Every remote's owner, so the push remote, the base remote and any fork
+    // each authenticate with their own org token.
+    let credentials = github_credentials::resolve_for_repo(pool, git, &repo_path).await;
+
+    match git.check_remote_branch_exists(&repo_path, &target_remote.url, &base_branch, &credentials)
+    {
         Ok(false) => {
             return Ok(ResponseJson(pr_error(PrError::TargetBranchNotFound {
                 branch: target_branch.clone(),
             })));
         }
-        Err(GitServiceError::GitCLI(GitCliError::AuthFailed(_))) => {
-            return Ok(ResponseJson(pr_error(PrError::GitCliNotLoggedIn)));
+        Err(GitServiceError::GitCLI(
+            GitCliError::AuthFailed(detail) | GitCliError::CredentialUnavailable(detail),
+        )) => {
+            return Ok(ResponseJson(git_credential_error(
+                "reading the target branch failed",
+                &detail,
+            )));
         }
         Err(GitServiceError::GitCLI(GitCliError::NotAvailable)) => {
             return Ok(ResponseJson(pr_error(PrError::GitCliNotInstalled)));
@@ -279,11 +300,18 @@ pub async fn create_pr(
         Ok(true) => {}
     }
 
-    if let Err(e) = git.push_to_remote(&worktree_path, &workspace.branch, false) {
+    // Skips the push when the agent already pushed this commit, so a server
+    // push problem cannot block opening the PR.
+    if let Err(e) = git.push_to_remote_if_needed(&worktree_path, &workspace.branch, &credentials) {
         tracing::error!("Failed to push branch to remote: {}", e);
         match e {
-            GitServiceError::GitCLI(GitCliError::AuthFailed(_)) => {
-                return Ok(ResponseJson(pr_error(PrError::GitCliNotLoggedIn)));
+            GitServiceError::GitCLI(
+                GitCliError::AuthFailed(detail) | GitCliError::CredentialUnavailable(detail),
+            ) => {
+                return Ok(ResponseJson(git_credential_error(
+                    "git push failed",
+                    &detail,
+                )));
             }
             GitServiceError::GitCLI(GitCliError::NotAvailable) => {
                 return Ok(ResponseJson(pr_error(PrError::GitCliNotInstalled)));
@@ -292,18 +320,19 @@ pub async fn create_pr(
         }
     }
 
-    let git_host = match GitHostService::from_url(&target_remote.url) {
-        Ok(host) => host,
-        Err(GitHostError::UnsupportedProvider) => {
-            return Ok(ResponseJson(pr_error(PrError::UnsupportedProvider)));
-        }
-        Err(GitHostError::CliNotInstalled { provider }) => {
-            return Ok(ResponseJson(pr_error(PrError::CliNotInstalled {
-                provider,
-            })));
-        }
-        Err(e) => return Err(ApiError::GitHost(e)),
-    };
+    let git_host =
+        match GitHostService::from_url_with_credentials(&target_remote.url, credentials.clone()) {
+            Ok(host) => host,
+            Err(GitHostError::UnsupportedProvider) => {
+                return Ok(ResponseJson(pr_error(PrError::UnsupportedProvider)));
+            }
+            Err(GitHostError::CliNotInstalled { provider }) => {
+                return Ok(ResponseJson(pr_error(PrError::CliNotInstalled {
+                    provider,
+                })));
+            }
+            Err(e) => return Err(ApiError::GitHost(e)),
+        };
 
     let provider = git_host.provider_kind();
 
@@ -398,8 +427,12 @@ pub async fn create_pr(
                         provider: *provider,
                     })))
                 }
-                GitHostError::AuthFailed(_) => {
-                    Ok(ResponseJson(pr_error(PrError::CliNotLoggedIn { provider })))
+                // The message names the owner and credential source.
+                GitHostError::AuthFailed(detail) => {
+                    Ok(ResponseJson(ApiResponse::error_with_data_and_message(
+                        PrError::CliNotLoggedIn { provider },
+                        &format!("Failed to create the pull request: {detail}"),
+                    )))
                 }
                 // Provider refusals ("a pull request for branch … already
                 // exists", validation errors) are the caller's to act on; an
@@ -446,8 +479,9 @@ pub async fn attach_existing_pr(
 
     let git = deployment.git();
     let remote = git.resolve_remote_for_branch(&repo.path, &workspace_repo.target_branch)?;
+    let credentials = github_credentials::resolve_for_repo(pool, git, &repo.path).await;
 
-    let git_host = match GitHostService::from_url(&remote.url) {
+    let git_host = match GitHostService::from_url_with_credentials(&remote.url, credentials) {
         Ok(host) => host,
         Err(GitHostError::UnsupportedProvider) => {
             return Ok(ResponseJson(pr_error(PrError::UnsupportedProvider)));
@@ -473,8 +507,11 @@ pub async fn attach_existing_pr(
                 provider,
             })));
         }
-        Err(GitHostError::AuthFailed(_)) => {
-            return Ok(ResponseJson(pr_error(PrError::CliNotLoggedIn { provider })));
+        Err(GitHostError::AuthFailed(detail)) => {
+            return Ok(ResponseJson(ApiResponse::error_with_data_and_message(
+                PrError::CliNotLoggedIn { provider },
+                &detail,
+            )));
         }
         Err(e) => return Err(ApiError::GitHost(e)),
     };
@@ -598,8 +635,9 @@ pub async fn get_pr_comments(
 
     let git = deployment.git();
     let remote = git.resolve_remote_for_branch(&repo.path, &workspace_repo.target_branch)?;
+    let credentials = github_credentials::resolve_for_repo(pool, git, &repo.path).await;
 
-    let git_host = match GitHostService::from_url(&remote.url) {
+    let git_host = match GitHostService::from_url_with_credentials(&remote.url, credentials) {
         Ok(host) => host,
         Err(GitHostError::CliNotInstalled { provider }) => {
             return Ok(ResponseJson(ApiResponse::error_with_data(
@@ -631,9 +669,12 @@ pub async fn get_pr_comments(
                         provider: *provider,
                     }),
                 )),
-                GitHostError::AuthFailed(_) => Ok(ResponseJson(ApiResponse::error_with_data(
-                    GetPrCommentsError::CliNotLoggedIn { provider },
-                ))),
+                GitHostError::AuthFailed(detail) => {
+                    Ok(ResponseJson(ApiResponse::error_with_data_and_message(
+                        GetPrCommentsError::CliNotLoggedIn { provider },
+                        detail,
+                    )))
+                }
                 _ => Err(ApiError::GitHost(e)),
             }
         }
@@ -781,9 +822,12 @@ pub async fn create_workspace_from_pr(
     // Use gh pr checkout to fetch and switch to the PR branch
     // This handles SSH/HTTPS auth correctly regardless of fork URL format
     let worktree_path = PathBuf::from(&container_ref).join(&repo.name);
-    match GhCli::new().get_repo_info(&remote.url, &worktree_path) {
+    let gh = GhCli::with_credentials(
+        github_credentials::resolve_for_repo(pool, deployment.git(), &repo.path).await,
+    );
+    match gh.get_repo_info(&remote.url, &worktree_path) {
         Ok(repo_info) => {
-            if let Err(e) = GhCli::new().pr_checkout(
+            if let Err(e) = gh.pr_checkout(
                 &worktree_path,
                 &repo_info.owner,
                 &repo_info.repo_name,
@@ -904,6 +948,9 @@ pub enum PrToolError {
     },
     CliNotLoggedIn {
         provider: ProviderKind,
+        /// Names the owner and credential source (see
+        /// `utils::github_credentials`).
+        detail: String,
     },
     MergeRefused {
         reason: String,
@@ -936,8 +983,11 @@ impl PrToolError {
             PrToolError::CliNotInstalled { provider } => {
                 format!("{provider} CLI is not installed on the Vibe Kanban host")
             }
-            PrToolError::CliNotLoggedIn { provider } => {
+            PrToolError::CliNotLoggedIn { provider, detail } if detail.is_empty() => {
                 format!("{provider} CLI is not authenticated on the Vibe Kanban host")
+            }
+            PrToolError::CliNotLoggedIn { provider, detail } => {
+                format!("{provider} authentication failed: {detail}")
             }
             PrToolError::MergeRefused { reason, retryable } => {
                 if *retryable {
@@ -957,7 +1007,7 @@ impl PrToolError {
         match error {
             GitHostError::UnsupportedProvider => PrToolError::UnsupportedProvider,
             GitHostError::CliNotInstalled { provider } => PrToolError::CliNotInstalled { provider },
-            GitHostError::AuthFailed(_) => PrToolError::CliNotLoggedIn { provider },
+            GitHostError::AuthFailed(detail) => PrToolError::CliNotLoggedIn { provider, detail },
             other => PrToolError::GithubError {
                 detail: other.to_string(),
             },
@@ -1043,7 +1093,11 @@ async fn resolve_pr_target(
     let remote = deployment
         .git()
         .resolve_remote_for_branch(&repo.path, &workspace_repo.target_branch)?;
-    let git_host = match GitHostService::from_url(&remote.url) {
+    // All remotes: an explicit PR URL may name any of them (see below).
+    let credentials =
+        github_credentials::resolve_for_repo(pool, deployment.git(), &repo.path).await;
+    let git_host = match GitHostService::from_url_with_credentials(&remote.url, credentials.clone())
+    {
         Ok(host) => host,
         Err(GitHostError::UnsupportedProvider) => return Ok(Err(PrToolError::UnsupportedProvider)),
         Err(GitHostError::CliNotInstalled { provider }) => {
@@ -1097,7 +1151,9 @@ async fn resolve_pr_target(
                 let mut workspace_repos = Vec::new();
                 let mut owner_remote = None;
                 for url in candidates {
-                    let Ok(candidate_host) = GitHostService::from_url(&url) else {
+                    let Ok(candidate_host) =
+                        GitHostService::from_url_with_credentials(&url, credentials.clone())
+                    else {
                         continue;
                     };
                     let (remote_host, remote_owner, remote_repo) =
@@ -1335,6 +1391,7 @@ mod pr_tool_error_tests {
             },
             PrToolError::CliNotLoggedIn {
                 provider: ProviderKind::GitHub,
+                detail: String::new(),
             },
             PrToolError::MergeRefused {
                 reason: "checks are failing: lint".into(),

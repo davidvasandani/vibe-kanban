@@ -256,7 +256,11 @@ Remote liveness and terminal state require worker evidence. A timeout,
 disconnect, missing handle, or expired lease is not proof that a process
 completed or was killed; expose interruption or indeterminacy and preserve the
 workspace until reconciliation establishes safety. Ordered event streams carry
-monotonic cursors and make replay gaps visible. Shared Git worktree
+monotonic cursors and make replay gaps visible. A producer whose latest
+sequence is behind the consumer's cursor has lost the stream the cursor came
+from: that regression is a discontinuity like a gap, and MUST be resolved from
+matching terminal evidence or classified indeterminate, never polled as "no new
+events". Shared Git worktree
 administration remains single-owner and serialized even when ordinary commands
 run on several nodes.
 
@@ -675,7 +679,42 @@ iOS Safari connects them one at a time. A socket is therefore a queued cost of
 Regression coverage counts sockets (one per identity for N consumers) and
 requests (one per settled item per scope).
 
-### XLV. Rendered links are detected everywhere and allow-listed by scheme
+### XLV. Credentials follow the target resource, never ambient identity
+When Vibe Kanban itself (not an agent) calls an external service on a user's
+behalf, it MUST choose the credential from the settings authority that owns
+it, keyed by the resource the call targets (for GitHub, the owner of the target
+repository). It is resolved per request, so a settings edit applies to the next
+call. Ambient process credentials (environment tokens, CLI logins, host
+credential helpers) are used only when the settings authority has no entry for
+that target, and that fallback is logged. A configured entry that cannot be
+read fails closed. It never falls through to another identity. Credentials
+reach only the one child process or request that needs them, through
+command-scoped mechanisms. They are never written to global config or the
+server environment, and never logged. Every authentication or permission
+failure names the target and the credential source that was used, so the
+operator knows which credential to fix.
+
+### XLVI. A lost continuation is a visible fresh start, never a stuck session
+An executor's vendor-private continuation artifact (a Claude transcript, a
+Codex rollout) can disappear: vendor retention cleanup, a host move without a
+transfer, or manual deletion. VK's session record outlives it.
+- Before resuming, an executor that can cheaply prove the artifact is absent
+  (an existence check in the directory the child will actually read,
+  resolved from the execution env, not the server's own env) MUST start a
+  fresh vendor session in the same workspace. Repeating a resume that is
+  certain to fail strands the workspace on every follow-up.
+- The proof fails open. An unreadable or unresolvable location, or an id
+  that is not one safe path segment, resumes as before, so a broken probe
+  never discards a valid conversation.
+- The fresh start is never silent. The agent's prompt says the earlier
+  conversation could not be restored and points to the workspace's files
+  and git history. The user sees a Vibe Kanban diagnostic on the execution's
+  stderr (never agent stdout, per IX) naming the missing session id. A
+  `warn!` log records it.
+- VK never fabricates vendor-private history from its normalized logs to
+  imitate the lost conversation.
+
+### XLVII. Rendered links are detected everywhere and allow-listed by scheme
 Read-only markdown is where users act on what agents report, so every URL
 shown there MUST be clickable, whether it is written as `[text](url)` or bare.
 - Clickability is decided by an explicit allow-list: `http`/`https` open in a
@@ -711,7 +750,7 @@ regex.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.42.0 (adds XLV, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and round-trips; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
+**Version**: 0.44.0 (adds XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
@@ -990,12 +1029,55 @@ unused on this branch and on `main`. The homelab constitution named by the
 command template was not changed, because this project only manages the Vibe
 Kanban repository.
 
+## Review: vk/8b57-use-settings-git
+
+Applied `/speckit.constitution`: added principle XLV (0.42.0). The VK
+server's own `git push` and `gh` calls used the server process's ambient GitHub
+credential, while agents used the per-owner org token from Settings. The
+result was a 403 on `create_pr` for a repository the configured token could
+write to. Some neighbouring principles touch this but none cover it:
+- XXI requires errors to say *what* failed, but not which credential source
+  was used.
+- XXIV/XXIX make Settings the authority for MCP definitions only.
+- XVII/XXIII cover redaction and snapshots for agent execution, not the
+  server's own outbound calls.
+Numeral XLV was unused on this branch and on `main` (which took XLIV for vk/45a2).
+
+## Review: vk/9c15-stopped-job-look
+
+Applied `/speckit.constitution`: refined XVIII (0.42.1, patch). A worker
+restarted without a drain recovered its job as `interrupted`, but its
+recovered journal restarted at the stale persisted `last_sequence + 1`, below
+the coordinator's cursor. The tracker read each empty batch as "nothing new"
+and the row stayed `Running` until a manual Stop. XVIII (replay gaps visible)
+and XXX (recovery classifies every execution) already forbid the outcome. Only
+the regression case was unnamed, so a clarifying sentence was enough and no
+new principle was added. The homelab constitution named by the command
+template was not changed, because this project only manages the Vibe Kanban
+repository.
+
+## Review: vk/9f5d-no-conversation
+
+Applied `/speckit.constitution`: added principle XLVI (0.43.0). Workspace
+`vk/d97a-build-daily-repo` failed every follow-up with `No conversation found
+with session ID`, because Claude's default 30-day cleanup deleted its
+transcript before homelab raised retention. XXV covers moving continuation
+artifacts between nodes, and IX covers which stream VK may write to. Neither
+says what an executor does once the artifact is gone. Codex already starts a
+replacement thread, while Claude kept repeating a resume that could only
+fail. XLVI makes the fallback a rule, keeps it fail-open and visible, and
+keeps the `vk/6026-no-conversation` boundary against fabricating history.
+Numeral XLVI was unused on this branch and on `main`. The homelab
+constitution named by the command template was not changed, because this
+project only manages the Vibe Kanban repository.
+
 ## Review: vk/e4ef-urls-always-clic
 
-Applied `/speckit.constitution` and added principle XLV (0.42.0). Agent
+Applied `/speckit.constitution` and added principle XLVII (0.44.0). Agent
 replies showed bare PR URLs as plain text, because the read-only Lexical
 renderer only linked `[text](url)`, and `http://` links were disabled. No
-principle covered link rendering. XLV puts the scheme allow-list, read-only
-detection and the round-trip into one rule. Numeral XLV was unused. The
+principle covered link rendering. XLVII puts the scheme allow-list, read-only
+detection and the round-trip into one rule. Main took XLV and XLVI while this
+branch was open (vk/8b57, vk/9f5d), so the rule was renumbered on merge. The
 homelab constitution named by the command template was not changed, because
 this project only manages the Vibe Kanban repository.

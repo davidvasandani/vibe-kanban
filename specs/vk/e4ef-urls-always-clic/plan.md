@@ -72,13 +72,13 @@ See `./research.md`.
 - I (clarity): one small plugin plus a pure helper, commented where it is not
   obvious (the class-keyed mutation listener, the export skip).
 - II (test the contract): there are rendered-DOM tests for every acceptance
-  criterion, and the regex is tested separately (XLV asks for both).
+  criterion, and the regex is tested separately (XLVII asks for both).
 - III (small steps): reuses Lexical's `AutoLinkNode` and the existing
   `ReadOnlyLinkPlugin` policy rather than a second sanitiser.
 - IV (shared boundaries): the plugin lives in `packages/ui` next to its
   siblings, and wiring stays in the `web-core` editor. Both `local-web` and
   `remote-web` get the change. Nothing in it is host-specific.
-- XLV: the scheme allow-list, read-only-only detection, skipping fenced
+- XLVII: the scheme allow-list, read-only-only detection, skipping fenced
   blocks, inline code linked, and the round-trip are all satisfied.
 - No new dependencies (Constraints).
 
