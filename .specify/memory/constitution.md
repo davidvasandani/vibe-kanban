@@ -256,7 +256,11 @@ Remote liveness and terminal state require worker evidence. A timeout,
 disconnect, missing handle, or expired lease is not proof that a process
 completed or was killed; expose interruption or indeterminacy and preserve the
 workspace until reconciliation establishes safety. Ordered event streams carry
-monotonic cursors and make replay gaps visible. Shared Git worktree
+monotonic cursors and make replay gaps visible. A producer whose latest
+sequence is behind the consumer's cursor has lost the stream the cursor came
+from: that regression is a discontinuity like a gap, and MUST be resolved from
+matching terminal evidence or classified indeterminate, never polled as "no new
+events". Shared Git worktree
 administration remains single-owner and serialized even when ordinary commands
 run on several nodes.
 
@@ -711,7 +715,7 @@ operator knows which credential to fix.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.42.0 (adds XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
+**Version**: 0.42.1 (refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
@@ -1003,3 +1007,16 @@ write to. Some neighbouring principles touch this but none cover it:
 - XVII/XXIII cover redaction and snapshots for agent execution, not the
   server's own outbound calls.
 Numeral XLV was unused on this branch and on `main` (which took XLIV for vk/45a2).
+
+## Review: vk/9c15-stopped-job-look
+
+Applied `/speckit.constitution`: refined XVIII (0.42.1, patch). A worker
+restarted without a drain recovered its job as `interrupted`, but its
+recovered journal restarted at the stale persisted `last_sequence + 1`, below
+the coordinator's cursor. The tracker read each empty batch as "nothing new"
+and the row stayed `Running` until a manual Stop. XVIII (replay gaps visible)
+and XXX (recovery classifies every execution) already forbid the outcome. Only
+the regression case was unnamed, so a clarifying sentence was enough and no
+new principle was added. The homelab constitution named by the command
+template was not changed, because this project only manages the Vibe Kanban
+repository.

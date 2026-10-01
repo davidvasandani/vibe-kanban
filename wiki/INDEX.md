@@ -312,3 +312,6 @@ contributed to it.
   rounds of cursor and log-writer traps (`vk/80c1-tasks-should-sur`).
   Coordinator-host work can use think2's colocated worker. Existing `Local`
   workspaces cannot be moved to a worker (`vk/ec43-run-a-vibe-kanba`).
+  A worker journal behind the cursor (undrained worker restart) is resolved
+  from matching inventory evidence (`Interrupted` → Resume) or classified
+  `Indeterminate`, never polled forever (`vk/9c15-stopped-job-look`).
