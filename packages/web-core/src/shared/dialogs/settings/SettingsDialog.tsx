@@ -26,7 +26,7 @@ import type {
 import {
   SETTINGS_SECTION_DEFINITIONS,
   isHostSpecificSettingsSection,
-} from './settings/settingsRegistry';
+} from './settings/SettingsRegistry';
 import {
   SettingsDirtyProvider,
   useSettingsDirty,

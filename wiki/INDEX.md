@@ -179,7 +179,7 @@ contributed to it.
   `NODE_ENV=production` act() gotcha, and how an external-connector link
   (Jira badge) is surfaced identically on the card and the panel header (one
   `JiraBadge` + `jiraLink` data prop + `getJiraLinkForIssue` lookup).
-- [workspace-sidebar-filtering.md](workspace-sidebar-filtering.md) — The one pure `filterSidebarWorkspaces` pipeline for the active and archived lists. Joining local workspaces to remote issue status through `local_workspace_id`. Need-gated per-project shape subscriptions, fail-open hiding and the `__no_issue__` sentinel. Global name-keyed hide lists. The typed Rust scratch silently drops frontend-only preference fields. web-core is not covered by repo lint, and the i18n duplicate check fails spuriously without `diff`.
+- [workspace-sidebar-filtering.md](workspace-sidebar-filtering.md) — The one pure `filterSidebarWorkspaces` pipeline for the active and archived lists. Joining local workspaces to remote issue status through `local_workspace_id`. Need-gated per-project shape subscriptions, fail-open hiding and the `__no_issue__` sentinel. Global name-keyed hide lists. The typed Rust scratch silently drops frontend-only preference fields. web-core is now covered by repo lint (`vk/848f-lint-packages-we`), and the i18n duplicate check fails spuriously without `diff`.
 - [kanban-board-filtering.md](kanban-board-filtering.md) — The single
   `filterKanbanIssues` pipeline and its stage order, why view defaults (Team
   view hides sub-issues) must yield to an explicit search while deliberate
@@ -313,6 +313,7 @@ contributed to it.
   rounds of cursor and log-writer traps (`vk/80c1-tasks-should-sur`).
   Coordinator-host work can use think2's colocated worker. Existing `Local`
   workspaces cannot be moved to a worker (`vk/ec43-run-a-vibe-kanba`).
+<<<<<<< HEAD
   A worker journal behind the cursor (undrained worker restart) is resolved
   from matching inventory evidence (`Interrupted` → Resume) or classified
   `Indeterminate`, never polled forever (`vk/9c15-stopped-job-look`).
@@ -323,3 +324,7 @@ contributed to it.
   byte-identical on export. So display-only changes use tagged, microtask-
   queued updates, export is skipped while a read-only tree holds auto links,
   and links are unwrapped on becoming editable (`vk/e4ef-urls-always-clic`).
+=======
+
+- [frontend-linting.md](frontend-linting.md) — One shared ESLint rule set (`eslint.frontend.cjs`) for local-web, web-core and remote-web. Plugins resolve from the consuming package, and a tsconfig that covers tests prevents parse errors. Directive comments are banned outright, and layer boundaries forbid same-feature aliased imports. Covers the `ignoreRestSiblings` trap and patterns for fixing `exhaustive-deps` without changing when hooks fire (`vk/848f-lint-packages-we`).
+>>>>>>> 75322329 (build(lint): lint web-core and remote-web with local-web's rules)

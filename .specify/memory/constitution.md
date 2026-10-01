@@ -728,6 +728,23 @@ shown there MUST be clickable, whether it is written as `[text](url)` or bare.
   punctuation and unbalanced closing brackets are not part of the URL.
 Regression coverage renders real markdown through the editor, not just the
 regex.
+### XLVIII. Every shipped frontend package is linted, by the same rules
+A package whose source ships in a frontend bundle (`packages/local-web`,
+`packages/web-core`, `packages/remote-web`, `packages/ui`) MUST be covered by
+`pnpm run lint` and by CI, with zero warnings tolerated. A package that only
+gets linted when someone points another package's config at it is not linted.
+- Shared rules live in one place and every package consumes them. A package
+  supplies only what is its own: its tsconfig and its package-specific
+  ignores. Copying a rule set into a second package forks it.
+- Type-aware linting resolves each file against a tsconfig that includes it,
+  test files too. A parse error caused by tsconfig scoping is a gap in
+  coverage, not a lint result.
+- Findings are fixed in code. A rule is never disabled package-wide to get
+  green. A justified exception is scoped to the named file in the shared
+  config and says why, because inline `eslint-disable` comments are banned.
+- `react-hooks/exhaustive-deps` findings are judged one by one. Adding a
+  missing dependency mechanically can turn a mount-only effect into a
+  resubscribe loop. Each fix keeps the hook's current firing behaviour.
 
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
@@ -750,7 +767,7 @@ regex.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.44.0 (adds XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
+**Version**: 0.45.0 (adds XLVIII, requiring every shipped frontend package to be linted by `pnpm run lint` and CI from one shared rule set, with tsconfig coverage for tests, fixes in code instead of package-wide disables, and per-case judgement on hook dependencies; 0.44.0 added XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,

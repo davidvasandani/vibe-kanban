@@ -44,6 +44,7 @@ jobs:
               - 'packages/web-core/**'
               - 'packages/remote-web/**'
               - 'packages/ui/**'
+              - 'eslint.frontend.cjs'
               - 'shared/**'
               - 'scripts/check-i18n.sh'
               - 'scripts/check-legacy-frontend-paths.sh'
@@ -94,11 +95,12 @@ jobs:
           pnpm run test:format-prerequisites
           npx concurrently \
             --kill-others-on-fail \
-            --names "local:lint,local:fmt,local:build,remote:fmt,remote:build,remote:test,ui:check,ui:lint,ui:fmt,core:check,core:fmt,core:test,i18n,legacy" \
+            --names "local:lint,local:fmt,local:build,remote:lint,remote:fmt,remote:build,remote:test,ui:check,ui:lint,ui:fmt,core:check,core:lint,core:fmt,core:test,i18n,legacy" \
             --timings \
             "cd packages/local-web && npm run lint" \
             "cd packages/local-web && npm run format:check" \
             "cd packages/local-web && npm run build" \
+            "cd packages/remote-web && npm run lint" \
             "cd packages/remote-web && npm run format:check" \
             "cd packages/remote-web && npm run build" \
             "cd packages/remote-web && npm run test" \
@@ -106,6 +108,7 @@ jobs:
             "cd packages/ui && npm run lint" \
             "cd packages/ui && npm run format:check" \
             "cd packages/web-core && npm run check" \
+            "cd packages/web-core && npm run lint" \
             "cd packages/web-core && npm run format:check" \
             "cd packages/web-core && npm run test" \
             "GITHUB_BASE_REF=${{ github.base_ref || 'main' }} ./scripts/check-i18n.sh" \

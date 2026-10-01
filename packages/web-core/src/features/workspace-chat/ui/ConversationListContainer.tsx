@@ -161,7 +161,9 @@ export const ConversationList = forwardRef<
   const repos = reposProp;
   const resetAction = useResetProcess(attempt.id, attempt.session?.id);
   const conversationScopeKey = `${attempt.id}:${sessionScopeId ?? attempt.session?.id ?? 'new'}`;
-  const [filteredEntries, setFilteredEntries] = useState<DisplayEntry[]>([]);
+  const [conversationRows, setConversationRows] = useState<ConversationRow[]>(
+    []
+  );
   const [dataVersion, setDataVersion] = useState(0);
   const [loading, setLoading] = useState(true);
   const [hasSetupScriptRun, setHasSetupScriptRun] = useState(false);
@@ -257,7 +259,6 @@ export const ConversationList = forwardRef<
     setHasSetupScriptRun(false);
     setHasCleanupScriptRun(false);
     setHasRunningProcess(false);
-    setFilteredEntries([]);
     setDataVersion(0);
     lastSettledTailStartIndexRef.current = null;
     reset();
@@ -371,7 +372,7 @@ export const ConversationList = forwardRef<
     prevEntriesRef.current = derivedTimeline.displayEntries;
     prevRowsRef.current = derivedTimeline.rows;
 
-    setFilteredEntries(derivedTimeline.displayEntries);
+    setConversationRows(derivedTimeline.rows);
     setDataVersion((current) => current + 1);
     setEntries(derivedEntries.entries);
 
@@ -416,10 +417,6 @@ export const ConversationList = forwardRef<
 
   const prevEntriesRef = useRef<DisplayEntry[]>([]);
   const prevRowsRef = useRef<ConversationRow[]>([]);
-  const conversationRows = useMemo(
-    () => prevRowsRef.current,
-    [filteredEntries]
-  );
 
   const clearHistoryAnchor = useCallback(() => {
     if (historyAnchorFrameRef.current !== null) {
@@ -794,12 +791,7 @@ export const ConversationList = forwardRef<
     };
 
     correctScroll();
-  }, [
-    conversationRows,
-    firstUnvirtualizedRowIndex,
-    conversationVirtualizer,
-    scrollToAbsoluteIndex,
-  ]);
+  }, [conversationRows, conversationVirtualizer]);
 
   useImperativeHandle(
     ref,

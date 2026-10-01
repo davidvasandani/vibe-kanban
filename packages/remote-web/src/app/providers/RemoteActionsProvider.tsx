@@ -137,6 +137,7 @@ export function RemoteActionsProvider({
     [
       appRuntime,
       hostId,
+      appNavigation,
       queryClient,
       openStatusSelection,
       openPrioritySelection,

@@ -19,12 +19,12 @@ import { useUiPreferencesStore } from '@/shared/stores/useUiPreferencesStore';
 import { cn } from '@/shared/lib/utils';
 import { isTauriMac } from '@/shared/lib/platform';
 
-import { NavbarContainer } from './NavbarContainer';
+import { NavbarContainer } from '@/shared/components/ui-new/containers/NavbarContainer';
 import { AppBar, type AppBarHostStatus } from '@vibe/ui/components/AppBar';
 import { AppBarOrgTile } from '@vibe/ui/components/AppBarOrgTile';
 import { MobileDrawer } from '@vibe/ui/components/MobileDrawer';
 import { OrgSwitcher } from '@vibe/ui/components/OrgSwitcher';
-import { AppBarUserPopoverContainer } from './AppBarUserPopoverContainer';
+import { AppBarUserPopoverContainer } from '@/shared/components/ui-new/containers/AppBarUserPopoverContainer';
 import { useUserOrganizations } from '@/shared/hooks/useUserOrganizations';
 import { useOrganizationStore } from '@/shared/stores/useOrganizationStore';
 import { useOrgRailStore } from '@/shared/stores/useOrgRailStore';
@@ -64,7 +64,7 @@ import { WorkspacesSidebarReopenTag } from '@vibe/ui/components/WorkspacesSideba
 import { useRemoteCloudHostsAppBarModel } from '@/shared/hooks/useRemoteCloudHosts';
 import { CloudShutdownExportBanner } from '@/shared/components/CloudShutdownExportBanner';
 import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
-import { shouldShowRestartBanner } from './restartVisibility';
+import { shouldShowRestartBanner } from '@/shared/components/ui-new/containers/restartVisibility';
 import { useSettingsDrawerInset } from '@/shared/stores/useSettingsDrawerStore';
 
 export function SharedAppLayout() {

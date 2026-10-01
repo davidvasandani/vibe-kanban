@@ -179,7 +179,8 @@ export const useKanbanIssueComposerStore = create<KanbanIssueComposerState>()(
           return state;
         }
 
-        const { [key]: _removed, ...rest } = state.byKey;
+        const rest = { ...state.byKey };
+        delete rest[key];
         return { byKey: rest };
       }),
   })

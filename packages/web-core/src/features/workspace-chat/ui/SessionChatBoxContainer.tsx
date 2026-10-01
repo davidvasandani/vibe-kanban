@@ -641,7 +641,6 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     isQueueLoading,
     isSending,
     mcpRefresh,
-    send,
     sessionHasRunningAgent,
     sessionId,
   ]);

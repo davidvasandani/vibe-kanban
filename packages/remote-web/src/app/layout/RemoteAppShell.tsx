@@ -88,7 +88,10 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
 
   const { data: organizationsData } = useUserOrganizations();
-  const organizations = organizationsData?.organizations ?? [];
+  const organizations = useMemo(
+    () => organizationsData?.organizations ?? [],
+    [organizationsData?.organizations],
+  );
   const selectedOrgId = useOrganizationStore((s) => s.selectedOrgId);
   const setSelectedOrgId = useOrganizationStore((s) => s.setSelectedOrgId);
   const isOrgRailExpanded = useOrgRailStore((s) => s.expanded);

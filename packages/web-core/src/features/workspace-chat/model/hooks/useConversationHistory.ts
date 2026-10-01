@@ -58,6 +58,85 @@ import {
   type PlanRevealState,
 } from '../plan-reveal-transition';
 
+const patchWithKey = (
+  patch: PatchType,
+  executionProcessId: string,
+  index: number,
+  processCreatedAt: string
+) => {
+  return {
+    ...patch,
+    patchKey: `${executionProcessId}:${index}`,
+    executionProcessId,
+    processCreatedAt,
+  };
+};
+
+// Build the keyed store the rest of the hook works in from an ordered fetch
+// result. Kept separate so ordering lives in one tested place.
+const toExecutionProcessState = (
+  loaded: LoadedProcessEntries<PatchType>[]
+): ExecutionProcessStateStore => {
+  const state: ExecutionProcessStateStore = {};
+  for (const { process, entries } of loaded) {
+    state[process.id] = {
+      executionProcess: process,
+      entries: entries.map((e, idx) =>
+        patchWithKey(e, process.id, idx, process.created_at)
+      ),
+    };
+  }
+  return state;
+};
+
+// The websocket replay of a settled turn. Only the fallback now: used when
+// the HTTP snapshot reports the turn is not settled yet.
+const streamHistoricExecutionProcessEntries = (
+  executionProcess: ExecutionProcess
+) => {
+  let url = '';
+  if (executionProcess.executor_action.typ.type === 'ScriptRequest') {
+    url = `/api/execution-processes/${executionProcess.id}/raw-logs/ws`;
+  } else {
+    url = `/api/execution-processes/${executionProcess.id}/normalized-logs/ws`;
+  }
+
+  return new Promise<PatchType[]>((resolve, reject) => {
+    const controller = streamJsonPatchEntries<PatchType>(url, {
+      idleTimeoutMs: HISTORY_STREAM_IDLE_TIMEOUT_MS,
+      onFinished: (allEntries) => {
+        controller.close();
+        resolve(allEntries);
+      },
+      onError: (err) => {
+        // Logged once, by loadSettledProcessEntries, which sees every failure.
+        controller.close();
+        reject(err);
+      },
+    });
+  });
+};
+
+// Completed turns load over plain HTTP: requests share the page's existing
+// connection, while each websocket is a new handshake through the edge
+// proxy, and Safari opens those one at a time.
+const loadSettledProcessEntries = (
+  executionProcess: ExecutionProcess
+): Promise<HistoricEntriesResult> =>
+  loadHistoricProcessEntries(executionProcess, {
+    fetchSnapshot: (process) =>
+      fetchProcessLogSnapshot(process, {
+        deadlineMs: HISTORY_HTTP_DEADLINE_MS,
+      }),
+    streamFallback: streamHistoricExecutionProcessEntries,
+  }).catch((err: unknown) => {
+    console.warn(
+      `Error loading entries for historic execution process ${executionProcess.id}`,
+      err
+    );
+    throw err;
+  });
+
 export const useConversationHistory = ({
   attempt,
   onTimelineUpdated,
@@ -138,75 +217,15 @@ export const useConversationHistory = ({
     );
   }, [executionProcessesRaw]);
 
-  // The websocket replay of a settled turn. Only the fallback now: used when
-  // the HTTP snapshot reports the turn is not settled yet.
-  const streamHistoricExecutionProcessEntries = (
-    executionProcess: ExecutionProcess
-  ) => {
-    let url = '';
-    if (executionProcess.executor_action.typ.type === 'ScriptRequest') {
-      url = `/api/execution-processes/${executionProcess.id}/raw-logs/ws`;
-    } else {
-      url = `/api/execution-processes/${executionProcess.id}/normalized-logs/ws`;
-    }
-
-    return new Promise<PatchType[]>((resolve, reject) => {
-      const controller = streamJsonPatchEntries<PatchType>(url, {
-        idleTimeoutMs: HISTORY_STREAM_IDLE_TIMEOUT_MS,
-        onFinished: (allEntries) => {
-          controller.close();
-          resolve(allEntries);
-        },
-        onError: (err) => {
-          // Logged once, by loadSettledProcessEntries, which sees every failure.
-          controller.close();
-          reject(err);
-        },
-      });
-    });
-  };
-
-  // Completed turns load over plain HTTP: requests share the page's existing
-  // connection, while each websocket is a new handshake through the edge
-  // proxy, and Safari opens those one at a time.
-  const loadSettledProcessEntries = (
-    executionProcess: ExecutionProcess
-  ): Promise<HistoricEntriesResult> =>
-    loadHistoricProcessEntries(executionProcess, {
-      fetchSnapshot: (process) =>
-        fetchProcessLogSnapshot(process, {
-          deadlineMs: HISTORY_HTTP_DEADLINE_MS,
-        }),
-      streamFallback: streamHistoricExecutionProcessEntries,
-    }).catch((err: unknown) => {
-      console.warn(
-        `Error loading entries for historic execution process ${executionProcess.id}`,
-        err
-      );
-      throw err;
-    });
-
-  const loadEntriesForHistoricExecutionProcess = (
-    executionProcess: ExecutionProcess
-  ): Promise<PatchType[]> =>
-    settledEntriesCacheRef.current.get(
-      executionProcess,
-      loadSettledProcessEntries
-    );
-
-  const patchWithKey = (
-    patch: PatchType,
-    executionProcessId: string,
-    index: number,
-    processCreatedAt: string
-  ) => {
-    return {
-      ...patch,
-      patchKey: `${executionProcessId}:${index}`,
-      executionProcessId,
-      processCreatedAt,
-    };
-  };
+  // Reads only a ref, so its identity is stable for the hook's lifetime.
+  const loadEntriesForHistoricExecutionProcess = useCallback(
+    (executionProcess: ExecutionProcess): Promise<PatchType[]> =>
+      settledEntriesCacheRef.current.get(
+        executionProcess,
+        loadSettledProcessEntries
+      ),
+    []
+  );
 
   const flattenEntries = (
     executionProcessState: ExecutionProcessStateStore
@@ -335,23 +354,6 @@ export const useConversationHistory = ({
     [loadRunningAndEmit]
   );
 
-  // Build the keyed store the rest of the hook works in from an ordered fetch
-  // result. Kept separate so ordering lives in one tested place.
-  const toExecutionProcessState = (
-    loaded: LoadedProcessEntries<PatchType>[]
-  ): ExecutionProcessStateStore => {
-    const state: ExecutionProcessStateStore = {};
-    for (const { process, entries } of loaded) {
-      state[process.id] = {
-        executionProcess: process,
-        entries: entries.map((e, idx) =>
-          patchWithKey(e, process.id, idx, process.created_at)
-        ),
-      };
-    }
-    return state;
-  };
-
   const loadHistoricEntries = useCallback(
     async (maxEntries?: number): Promise<ExecutionProcessStateStore> => {
       if (!executionProcesses?.current) return {};
@@ -374,7 +376,7 @@ export const useConversationHistory = ({
 
       return toExecutionProcessState(loaded);
     },
-    [executionProcesses]
+    [executionProcesses, loadEntriesForHistoricExecutionProcess]
   );
 
   const hasUnloadedHistoricProcesses = useCallback((): boolean => {
@@ -411,7 +413,7 @@ export const useConversationHistory = ({
 
       return { batch: toExecutionProcessState(loaded), failedProcessCount };
     },
-    []
+    [loadEntriesForHistoricExecutionProcess]
   );
 
   const loadEarlier = useCallback(async (): Promise<void> => {

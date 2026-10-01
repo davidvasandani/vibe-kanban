@@ -237,6 +237,7 @@ export function ActionsProvider({ children }: ActionsProviderProps) {
   }, [
     appRuntime,
     hostId,
+    appNavigation,
     queryClient,
     selectWorkspace,
     activeWorkspaces,

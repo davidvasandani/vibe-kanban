@@ -39,7 +39,7 @@ Any integration that talks to an outside service lives in `crates/remote`
    into `v1_public` next to `github_app::public_router()`).
 6. **Frontend**: a `*SettingsSection.tsx` in
    `packages/web-core/src/shared/dialogs/settings/settings/`, registered in
-   `settingsRegistry.tsx` (union + initial-state map + definitions +
+   `SettingsRegistry.tsx` (union + initial-state map + definitions +
    render switch) plus `settings.layout.nav.<id>` en-locale labels; an api
    group in `shared/lib/api.ts` using `makeRemoteRequest` (GET 404 →
    `null`); a react-query hook.

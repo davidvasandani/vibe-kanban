@@ -216,6 +216,7 @@ const ResolveConflictsDialogImpl = create<ResolveConflictsDialogProps>(
       queryClient,
       selectSession,
       modal,
+      t,
     ]);
 
     const handleCancel = useCallback(() => {

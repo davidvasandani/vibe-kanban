@@ -709,6 +709,7 @@ export const ChangesPanelContainer = memo(function ChangesPanelContainer({
 
   useEffect(() => {
     if (!hasItems) return;
+    const topBandCandidates = topBandCandidatesRef.current;
 
     const firstWrapper = document.querySelector('[data-diff-path]');
     const scrollRoot =
@@ -785,7 +786,7 @@ export const ChangesPanelContainer = memo(function ChangesPanelContainer({
     mutationObs.observe(scrollRoot, { childList: true, subtree: true });
 
     return () => {
-      topBandCandidatesRef.current.clear();
+      topBandCandidates.clear();
       intersectionObs.disconnect();
       mutationObs.disconnect();
     };
