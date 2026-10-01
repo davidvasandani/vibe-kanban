@@ -139,6 +139,43 @@ declared a still-running agent finished-with-unknown-outcome just because the
 coordinator had been away long enough for the ring to wrap. Terminal-evidence
 recovery and the unreachable/mismatch → `Indeterminate` rules are unchanged.
 
+## A journal behind the cursor is a worker restart
+
+The worker writes a job's `JobSummary` to its recovery store only on state
+transitions, so the on-disk `last_sequence` stays at the value from
+`Running` for the whole run. On boot, `with_recovery_and_drain` marks every
+non-terminal job `Interrupted`, and `EventJournal::recover` puts that
+terminal event at `persisted last_sequence + 1`. For a long run that is far
+below the coordinator's cursor. `replay_after(cursor)` then returns no
+events, no gap and `latest_available < cursor`. The tracker read this as
+"nothing new" and polled forever. The row stayed `Running` (Stop spinner)
+until a manual Stop. Incident: think4 worker restarted without a drain,
+2026-10-01, recovered at `last_sequence: 5`, coordinator cursor in the
+thousands.
+
+Every cursor value is a sequence that journal served, so a live journal
+never reports `latest_available < cursor`. That makes the regression
+unambiguous (`worker_journal_regressed`). The tracker then reads the
+inventory:
+
+- **Exact-identity summary, plus `last_sequence == latest_available`**
+  (`journal_regression_terminal_evidence`): the second check confirms the
+  summary describes the journal now being served. The tracker marks output
+  incomplete, pushes one stderr notice and sets `terminal`, then falls into
+  the **normal** terminal block. A worker restart therefore yields
+  `Interrupted`, and the chat shows Resume.
+- **Readable, but no matching summary:** `Indeterminate` (skipped if the
+  user already stopped the row), then finalize.
+- **Lookup error:** back off and re-poll. Never infer an outcome.
+
+The replay-gap evidence rule cannot be reused here. It requires
+`summary.last_sequence >= cursor`, which the recovered summary fails by
+construction. Flagging the case as a gap on the worker would therefore have
+produced `Indeterminate` and lost Resume. Persisting `last_sequence` more
+often was also rejected. It only narrows the window, because a worker can die
+between serving a batch and saving it. Both helpers share
+`terminal_summary_states` with replay-gap recovery.
+
 ## Pending approvals are replayed, not dropped
 
 An approval waiter lives only in memory (`route_worker_interaction`), and the
@@ -203,3 +240,4 @@ again after a restart; an agent blocked on approval rarely emits any.
 
 - vk/80c1-tasks-should-sur
 - vk/ec43-run-a-vibe-kanba (colocated worker on the coordinator host)
+- vk/9c15-stopped-job-look (journal regression after an undrained worker restart)
