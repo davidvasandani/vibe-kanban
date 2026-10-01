@@ -1286,6 +1286,8 @@ enum TranscriptStatus {
 /// Claude's config root as the launched child will see it: non-empty
 /// `CLAUDE_CONFIG_DIR`, else `$HOME/.claude`. Each variable comes from the
 /// execution env (including a worker's scoped `HOME`) before the process env.
+/// A relative value would resolve against the child's working directory, not
+/// ours, so it yields `None` rather than a path we cannot vouch for.
 fn claude_config_dir(
     vars: &HashMap<String, String>,
     process_env: impl Fn(&str) -> Option<String>,
@@ -1296,9 +1298,11 @@ fn claude_config_dir(
             .or_else(|| process_env(key))
             .filter(|value| !value.is_empty())
     };
-    lookup("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| lookup("HOME").map(|home| PathBuf::from(home).join(".claude")))
+    let dir = match lookup("CLAUDE_CONFIG_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(lookup("HOME")?).join(".claude"),
+    };
+    dir.is_absolute().then_some(dir)
 }
 
 /// Look for `<session_id>.jsonl` in every `projects/*` folder. Claude Code
@@ -1318,11 +1322,27 @@ fn claude_transcript_status(config_dir: &Path, session_id: &str) -> TranscriptSt
         return TranscriptStatus::Unknown;
     };
     let file_name = format!("{session_id}.jsonl");
-    let found = entries
-        .flatten()
-        .any(|entry| entry.path().join(&file_name).is_file());
-    if found {
-        TranscriptStatus::Present
+    // Only a clean "not there" in every project counts as missing; any other
+    // error leaves the answer unknown unless another project has the file.
+    let mut inconclusive = false;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            inconclusive = true;
+            continue;
+        };
+        match std::fs::metadata(entry.path().join(&file_name)) {
+            Ok(metadata) if metadata.is_file() => return TranscriptStatus::Present,
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(_) => inconclusive = true,
+        }
+    }
+    if inconclusive {
+        TranscriptStatus::Unknown
     } else {
         TranscriptStatus::Missing
     }
@@ -5370,6 +5390,36 @@ mod missing_transcript_tests {
     }
 
     #[test]
+    fn stray_files_in_projects_do_not_block_a_missing_answer() {
+        let dir = config_with_projects(&["-srv-a"]);
+        std::fs::write(dir.path().join("projects/stray-file"), "x").unwrap();
+
+        assert_eq!(
+            claude_transcript_status(dir.path(), SESSION),
+            TranscriptStatus::Missing
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_project_folder_fails_open() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = config_with_projects(&["-srv-a", "-srv-locked"]);
+        let locked = dir.path().join("projects/-srv-locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root ignores permission bits, so the check is only meaningful otherwise.
+        let enforced = std::fs::read_dir(&locked).is_err();
+
+        let status = claude_transcript_status(dir.path(), SESSION);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        if enforced {
+            assert_eq!(status, TranscriptStatus::Unknown);
+        }
+    }
+
+    #[test]
     fn unsafe_session_ids_fail_open() {
         let dir = config_with_projects(&["-srv-a"]);
         for id in ["", ".", "..", "../x", "a/b", "a\\b", "a\0b"] {
@@ -5409,6 +5459,15 @@ mod missing_transcript_tests {
             ("HOME".to_string(), String::new()),
         ]);
         assert_eq!(claude_config_dir(&empty, none), None);
+
+        // Relative values resolve against the child's cwd, not ours.
+        let relative_cfg = HashMap::from([
+            ("CLAUDE_CONFIG_DIR".to_string(), "cfg".to_string()),
+            ("HOME".to_string(), "/scoped/home".to_string()),
+        ]);
+        assert_eq!(claude_config_dir(&relative_cfg, none), None);
+        let relative_home = HashMap::from([("HOME".to_string(), "home".to_string())]);
+        assert_eq!(claude_config_dir(&relative_home, none), None);
         assert_eq!(
             claude_config_dir(&HashMap::new(), process),
             Some(PathBuf::from("/server/home/.claude"))
