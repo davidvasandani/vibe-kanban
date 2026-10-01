@@ -311,11 +311,19 @@ impl CredentialSelection {
             // gh's own fetches go through the checkout's remotes, which may be
             // SSH; route the owner's SSH URLs to HTTPS too.
             if rewrite_ssh {
-                for ssh in [
-                    format!("git@github.com:{owner}/"),
-                    format!("ssh://git@github.com/{owner}/"),
-                ] {
-                    rewrites.push(format!("url.{base}.insteadOf={ssh}"));
+                // Every SSH form `parse_github_repo` accepts.
+                for host in ["github.com", "www.github.com"] {
+                    for ssh in [
+                        format!("git@{host}:{owner}/"),
+                        format!("{host}:{owner}/"),
+                        format!("ssh://git@{host}/{owner}/"),
+                        format!("ssh://git@{host}:22/{owner}/"),
+                        format!("ssh://{host}/{owner}/"),
+                        format!("ssh://{host}:22/{owner}/"),
+                        format!("git+ssh://git@{host}/{owner}/"),
+                    ] {
+                        rewrites.push(format!("url.{base}.insteadOf={ssh}"));
+                    }
                 }
             }
         }
@@ -699,6 +707,17 @@ mod tests {
             get_url(&selection, "ssh://git@github.com/SweetGreen/platform-ops"),
             "https://github.com/SweetGreen/platform-ops"
         );
+        for ssh in [
+            "ssh://git@github.com:22/sweetgreen/platform-ops.git",
+            "git+ssh://git@github.com/sweetgreen/platform-ops.git",
+            "github.com:sweetgreen/platform-ops.git",
+        ] {
+            assert_eq!(
+                get_url(&selection, ssh),
+                "https://github.com/sweetgreen/platform-ops.git",
+                "{ssh}"
+            );
+        }
         assert_eq!(
             get_url(&selection, "git@github.com:someone/x.git"),
             "git@github.com:someone/x.git"
