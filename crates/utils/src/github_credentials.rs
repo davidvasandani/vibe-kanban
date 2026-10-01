@@ -633,6 +633,7 @@ mod tests {
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", home)
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .current_dir(home)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env(OWNERS_ENV, "sweetgreen")
             .args(["credential", "fill"])
@@ -721,6 +722,7 @@ mod tests {
                 .env("PATH", std::env::var("PATH").unwrap_or_default())
                 .env("HOME", home.path())
                 .env("GIT_CONFIG_NOSYSTEM", "1")
+                .current_dir(home.path())
                 .args(["ls-remote", "--get-url", url]);
             selection.apply_gh(&mut command).unwrap();
             String::from_utf8(command.output().unwrap().stdout)
@@ -771,9 +773,11 @@ mod tests {
                 .env("HOME", home.path())
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .args(args);
-            if repo.exists() {
-                command.current_dir(&repo);
-            }
+            command.current_dir(if repo.exists() {
+                repo.as_path()
+            } else {
+                home.path()
+            });
             if let Some(selection) = selection {
                 selection
                     .apply_git(&mut command, "https://github.com/sweetgreen/x")
@@ -827,6 +831,8 @@ mod tests {
                 .env("PATH", std::env::var("PATH").unwrap_or_default())
                 .env("HOME", home.path())
                 .env("GIT_CONFIG_NOSYSTEM", "1")
+                // Not the process cwd: a CI checkout persists its own extraHeader.
+                .current_dir(home.path())
                 .args(["config", "--get-urlmatch", "http.extraheader", url]);
             selection.apply_git(&mut command, url).unwrap();
             String::from_utf8(command.output().unwrap().stdout)
