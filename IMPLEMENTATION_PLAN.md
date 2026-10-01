@@ -1,110 +1,66 @@
-# Implementation plan: workspace chat loads fast over expensive handshakes
+# Implementation plan: bare URLs always clickable
 
-Task `vk/45a2-make-workspace-c`. See `SPEC.md` for the diagnosis and the
-design, and `PRIOR_KNOWLEDGE.md` for the rules inherited from earlier tasks.
+Task `vk/e4ef-urls-always-clic`. See `SPEC.md` for the design and
+`PRIOR_KNOWLEDGE.md` for the link rules inherited from PR #313.
 
-## Step 1: server log snapshot (`crates/services`)
+## Step 1: URL detection helper and plugin (`packages/ui`)
 
-File: `crates/services/src/services/container.rs`
+File: `packages/ui/src/components/ReadOnlyAutoLinkPlugin.tsx` (new)
 
-1. Add `pub struct LogSnapshot { entries: Vec<serde_json::Value>, complete: bool }`.
-2. Extract the source choice into a free function
-   `normalized_log_snapshot_from_sources(id, live_store, status_running, settled_stream)`:
-   - With a live store, materialize `indexed_entry_patches_from_history`
-     (falling back to rebased materialization) and set `complete: false`.
-   - Otherwise drain the finite settled stream, keep only indexed patches,
-     `materialize_entries` them, and set `complete = !status_running`. Return
-     `None` when the stream is `None`. A stream error or a missing `Finished`
-     returns `None`, never a partial complete snapshot.
-3. Add a trait method `normalized_log_snapshot(&self, id, status_running)`.
-4. Add `raw_log_snapshot_from_sources` / `raw_log_snapshot`, which turns
-   stdout and stderr into `{type: 'STDOUT'|'STDERR', content}` in order. With a
-   live store it snapshots history and returns `complete: false`. Otherwise it
-   loads the stored raw messages.
-5. Unit tests: a live store never opens the fallback (pending stream under
-   timeout); the settled stream materializes; a stream without `Finished` is
-   not complete; a running status is not complete; raw ordering.
+1. `export function findUrlMatches(text): { start, end, url }[]`
+   - Scan with `/https?:\/\/[^\s<>]+/gi`.
+   - Trim trailing characters from `.,;:!?'"*` and backticks.
+   - Trim a trailing `)`, `]` or `}` only when the candidate has more closers
+     than openers of that kind. Loop until stable.
+   - Drop the match if only the scheme is left (`https://`).
+2. `ReadOnlyAutoLinkPlugin()` links text in updates tagged
+   `AUTO_LINK_UPDATE_TAG` (plus `HISTORY_MERGE_TAG`). It runs once on mount,
+   and then from an update listener over the dirty leaves of any update that
+   does not carry the tag.
+   - `$linkUrls(node)`: skip the node if it is not simple text, or if an
+     ancestor is a link or a `CodeNode`. Otherwise split each match out, wrap
+     it in `$createAutoLinkNode(url)`, and continue on the tail.
+   - On unmount (the editor becomes editable), unwrap every `AutoLinkNode`.
+   - Queue the mount and unmount updates with `queueMicrotask`, so they never
+     batch with a content update and hide it behind the tag.
+   - Throw if `AutoLinkNode` is not registered on the editor.
+3. `MarkdownSyncPlugin.tsx`: do not call `onChange` for updates tagged
+   `AUTO_LINK_UPDATE_TAG`. Splitting formatted text is not byte-identical on
+   export (`**a https://b**` gains `&#32;`). Issue descriptions wire
+   `onChange` while read-only, and composers are `disabled` while sending.
 
-## Step 2: routes (`crates/server`)
+## Step 2: allow `http` and auto links (`packages/ui`)
 
-File: `crates/server/src/routes/execution_processes.rs`
+File: `packages/ui/src/components/ReadOnlyLinkPlugin.tsx`
 
-1. `ExecutionProcessLogSnapshot { entries: Vec<JsonValue> (TS: Array<PatchType>), complete: bool }`
-   with `#[derive(Serialize, TS)]`.
-2. `GET /{id}/normalized-logs` and `GET /{id}/raw-logs`. Each spawns the
-   snapshot in a `tokio::spawn`, so a client abort does not cancel a cold
-   materialization, and awaits the join handle. A `None` result returns
-   `complete: true` with no entries for processes with nothing to show. This
-   matches the socket, which sends `finished` immediately when there are no
-   logs.
-3. Register the type in `crates/server/src/bin/generate_types.rs` and run
-   `pnpm run generate-types`.
+1. Change the external check to `/^https?:\/\//i`.
+2. Register the same mutation listener for `AutoLinkNode`, because mutation
+   listeners are per class. Update the comments.
 
-## Step 3: HTTP history loader (web-core)
+## Step 3: wire into the editor (`packages/web-core`)
 
-New file: `packages/web-core/src/shared/hooks/useConversationHistory/fetchHistoricEntries.ts`
+File: `packages/web-core/src/shared/components/WYSIWYGEditor.tsx`
 
-- `fetchProcessLogSnapshot(process, { deadlineMs, signal, request })`
-  wraps `makeLocalApiRequest` with an `AbortController` deadline and settles
-  once. It rejects on timeout, abort, non-2xx, `success: false` and bad JSON.
-- `loadHistoricProcessEntries(process, deps)` uses HTTP first. On
-  `complete: false` it falls back to the socket loader. It returns
-  `{ entries, complete }`.
-- Constant `HISTORY_HTTP_DEADLINE_MS = 30_000` in `constants.ts`.
-- Tests: `fetchHistoricEntries.test.ts`.
+1. Add `AutoLinkNode` to `nodes`.
+2. Render `{disabled && <ReadOnlyAutoLinkPlugin />}` next to `ReadOnlyLinkPlugin`.
 
-## Step 4: history once per scope (web-core)
+## Step 4: tests (`packages/web-core`)
 
-`useConversationHistory.ts`:
+- `ReadOnlyAutoLinkPlugin.test.tsx` (new, jsdom). It runs
+  `findUrlMatches` table tests and renders markdown through `LexicalComposer`
+  with both plugins, checking:
+  - the screenshot sentence
+  - parentheses and quotes
+  - multiple URLs
+  - bold text
+  - code blocks are not linked; inline code is linked and keeps its code format
+  - existing markdown links are left alone
+  - an `http` URL is clickable
+  - the markdown export round-trips
+- `ReadOnlyLinkPlugin.test.tsx`: update the `http` expectations, which were
+  disabled and are now clickable.
 
-- `settledEntriesCacheRef: Map<processId, PatchType[]>`, cleared on scope
-  change.
-- `loadEntriesForHistoricExecutionProcess` → cache hit, or the HTTP loader
-  (store the result when it is complete).
-- The running → finished reload bypasses the cache and replaces the entry.
-- A pure helper `createHistoricEntriesLoader(fetcher)` in
-  `conversation-history-paging.ts` holds the cache and in-flight dedup, so
-  "loaded once per scope" can be tested without React.
+## Step 5: verify
 
-## Step 5: shared JSON-patch streams (web-core)
-
-New file: `packages/web-core/src/shared/lib/sharedJsonPatchStream.ts`
-
-- Registry keyed by `endpoint + resolved host scope`. Subscribe/unsubscribe
-  with ref counting. The socket opens on the first subscribe and closes
-  `STREAM_LINGER_MS` after the last unsubscribe.
-- Reconnect, backoff, `Ready`, `finished` and the clean-close rules move over
-  from `useJsonPatchWsStream`.
-- `useJsonPatchWsStream` becomes a `useSyncExternalStore` adapter. The
-  `injectInitialEntry` and `deduplicatePatches` options (unused in the repo)
-  are kept in the key via a per-hook fallback: when present, the stream is
-  private (unshared).
-- `useExecutionProcesses` always sets `show_soft_deleted=true` and filters
-  `dropped` on the client unless `showSoftDeleted`.
-- `agentsApi.getDiscoveredOptionsStreamUrl` drops `workspace_id` and
-  `repo_id` when `session_id` is present.
-- Tests: the shared stream (one socket for N consumers, linger, reconnect
-  keeps the snapshot) and `useExecutionProcesses` (one socket for plain and
-  soft-deleted consumers, with filtering).
-
-## Step 6: mobile deferral (web-core)
-
-- `WorkspacesLayout` mobile branch: track visited tabs. Mount
-  `PreviewBrowserContainer` / `BrowserPanelContainer` only once visited.
-- `useMobileDiffStreamGate`: a small zustand store (`useChatLoadGateStore`)
-  with `chatHistorySettled(workspaceId)`, set by `useConversationHistory` on
-  its first non-loading `'initial'` emit. `WorkspaceProvider` enables the diff
-  stream when `!isMobile || tab ∈ {changes, git} || settled`, and stays
-  enabled once it has been enabled.
-
-## Step 7: measure, document, verify
-
-- Re-run `/tmp/probe/probe.js` against a local build of the change: the
-  server binary on a spare port serving the built frontend, with the same
-  database? Not possible without a copy of production data. Instead, deploy
-  after merge and re-run the probe against the coordinator. Before merge,
-  verify with unit tests and a local dev instance probe.
-- Update `wiki/awaited-stream-settlement.md` (HTTP rules and the WebSocket
-  cost rule) and `wiki/INDEX.md`.
-- `pnpm run check`, `pnpm run lint`, `cargo test --workspace`,
-  `pnpm run format`.
+`pnpm --filter @vibe/web-core exec vitest run`, `pnpm run check`,
+`pnpm run lint`, `pnpm run format`.

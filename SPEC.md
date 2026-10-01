@@ -1,182 +1,97 @@
-# SPEC: Workspace chat loads fast when every WebSocket handshake is expensive
+# SPEC: Bare URLs are always clickable in rendered markdown
 
-Task: `vk/45a2-make-workspace-c`.
+Task: `vk/e4ef-urls-always-clic`.
 
 ## Problem
 
-Opening a workspace chat on the phone takes 40 s to 2 min. The server is not
-the bottleneck: every stream the chat needs finishes in under 120 ms on the
-coordinator. The cost is per-WebSocket: each one needs a new TCP and TLS
-handshake through Cloudflare. Since 2026-09-28 those handshakes are served
-from distant data centres and cost about 0.5 s each, sometimes up to 10 s.
-iOS Safari connects WebSockets one at a time. Plain `fetch` requests reuse
-one HTTP/2 or HTTP/3 connection and pay no handshake.
+Agent replies often contain bare URLs, for example "pushed to PR #1803:
+https://github.com/sweetgreen/terraform-infrastructure/pull/1803." The chat
+renders them as plain text. Users have to select and copy them; they cannot
+click them.
 
-A workspace page opens about 25–29 WebSockets. The chat's history sockets sit
-at the back of that queue.
+Read-only markdown (conversation entries, issue descriptions, comments,
+approvals, notes) is rendered by `WYSIWYGEditor` in `disabled` mode. That
+uses Lexical's markdown import, and the `LINK` transformer only recognises
+`[text](url)`. A bare URL stays a `TextNode`. `ReadOnlyLinkPlugin` only sees
+`LinkNode`s, so it never runs on bare URLs.
 
-## Baseline measurement (before)
+There is a second gap: `ReadOnlyLinkPlugin` makes only `https://` links
+clickable. Markdown links to `http://` destinations, such as
+`http://localhost:3000` dev servers or LAN addresses, render as disabled.
 
-Headless mobile Chromium (iPhone 13 profile) against the coordinator
-`http://172.16.100.102:3334/workspaces/14312466-…`. The session now has 6
-completed turns. No added latency:
+## Goals
 
-| Metric | Value |
-| --- | --- |
-| WebSockets opened before rows rendered | 29 |
-| `normalized-logs/ws` | 10 (5 + 5) |
-| `execution-processes/stream/session/ws` | 3 |
-| `agents/discovered-options/ws` | 4 |
-| `approvals/stream/ws` | 3 (two closed before or right after being established) |
-| History over HTTP | 0 |
-| Time until chat rows (no spinner in `.w-chat`) | 2.1 s |
+1. In read-only rendering, every bare `http://` or `https://` URL in normal
+   prose becomes a clickable link. That covers paragraphs, list items,
+   headings, quotes, table cells, and bold or italic text.
+2. Links open in a new tab with `rel="noopener noreferrer"`, the same as
+   existing external links.
+3. Trailing sentence punctuation is not part of the link: `.`, `,`, `;`,
+   `:`, `!`, `?`, quotes, and closing brackets with no matching opener. So
+   `(see https://x.y/a_(b))` links `https://x.y/a_(b)`, and `https://x.y.`
+   links `https://x.y`.
+4. URLs that directly follow non-space punctuation are linked too, such as
+   `(https://…)`, `"https://…"` and `<https://…>`. Lexical's stock
+   `AutoLinkPlugin` does not handle these, because it only treats `.,;` and
+   whitespace as boundaries.
+5. Explicit markdown links to `http://` destinations are clickable as well.
+6. Some text is left alone:
+   - fenced code blocks. Inline code is still linked, and the link wraps the
+     code-styled text.
+   - text that is already inside a link
+   - anything whose scheme is not `http` or `https`. `javascript:`, `data:`
+     and the rest are still never clickable.
+7. Editing mode is unchanged: no autolinking while the user is composing.
+8. Stored markdown is unchanged. Linking never reaches `onChange`, and the
+   links are removed when the editor becomes editable (see Design).
 
-### Why history loads twice (confirmed)
+## Non-goals
 
-This is not the initial-load effect re-running. `loadProcessesInOrder` fetches
-a slice of `HISTORY_FETCH_CONCURRENCY = 5` newest processes at once, keeps
-responses only until `MIN_INITIAL_ENTRIES` is crossed, and **discards** the
-rest. Here the newest turn alone crossed the threshold, so 4 of the 5
-responses were thrown away. The chat then renders a short list, the
-top-of-list sentinel's `IntersectionObserver` fires `loadEarlier`, and
-`loadEarlierBatch` fetches those same 4 processes (plus the oldest one)
-again. The probe shows the second batch is exactly
-`{first batch} − {newest} + {oldest}`.
+- `www.example.com` without a scheme, and email addresses.
+- `SimpleMarkdown` and `RawLogText`, which already linkify with their own
+  regexes.
+- Client-side routing for links that point into the app.
 
-### The three session process streams
+## Design
 
-`WorkspacesLayout` (`useExecutionProcesses(selectedSession.id)`),
-`SessionChatBoxContainer` (`useExecutionProcesses(lastSessionId)`) and
-`ExecutionProcessesProvider` (`show_soft_deleted=true`). On mobile,
-`BrowserPanelContainer` is also mounted (hidden) and calls it again. The server
-treats `show_soft_deleted=false` exactly as a `!dropped` filter
-(`events/streams.rs`), so one `show_soft_deleted=true` stream plus client-side
-filtering can serve every caller.
-
-### Discovered options
-
-`ModelSelectorContainer` and `WYSIWYGEditor` both call the discovery stream
-for the same session, one with `workspace_id` and one without. When
-`session_id` is present, the server derives the workspace from the session and
-uses `workspace_id` only as a consistency check (`discover_executor_options`).
-`repo_id` is ignored. With a session, both calls are therefore the same stream.
-
-## Goals and design
-
-### G1. Completed turns load over HTTP
-
-**Server.** Add `GET /api/execution-processes/{id}/normalized-logs` and
-`GET /api/execution-processes/{id}/raw-logs`. Each returns
-`ApiResponse<ExecutionProcessLogSnapshot>`:
-
-```ts
-{ entries: PatchType[]; complete: boolean }
-```
-
-`entries` is exactly the `entries` array the matching `…/ws` replay converges
-to. `complete` is true only when the log is settled, meaning no live
-`MsgStore` exists for the process and its status is not `running`.
-
-- Normalized: reuse `stream_normalized_logs`. It already reads the
-  materialized sidecar first. On a miss it does the bounded historical
-  normalization under the per-execution lease and global permit, and writes
-  the sidecar. Materialize the `/entries/<n>` patches with
-  `normalized_log_cache::materialize_entries`, which is the same function
-  that builds the sidecar. When a live store exists, snapshot its buffered
-  history (`indexed_entry_patches_from_history`) instead of following the
-  tail, and return `complete: false`.
-- The drain runs in a spawned task. If the client aborts, a cold
-  normalization still finishes and writes its sidecar, so the next attempt
-  ("load earlier") is fast. The work stays bounded by the existing lease and
-  permit.
-- Raw: reuse `stream_raw_logs`. Stdout and stderr become
-  `{type: 'STDOUT' | 'STDERR', content}` in order, exactly as
-  `ConversationPatch::add_stdout/add_stderr` do for the socket.
-- `GET …/messages` was checked and does not fit. It projects entries into
-  truncated `SessionMessage` rows, drops tool/diff/stdout entries and caps
-  text at 4000 characters.
-- New Rust types derive `TS` and are generated by `pnpm run generate-types`.
-
-**Client.** A new `fetchHistoricProcessEntries` loader:
-
-- Uses `makeLocalApiRequest` (host scoping `/api/host/{id}`, remote-web relay
-  and WebRTC transport).
-- Has an `AbortController` deadline (`HISTORY_HTTP_DEADLINE_MS`). A timeout,
-  an abort, a non-2xx status, `success: false` and malformed JSON all reject.
-  It settles exactly once.
-- On `complete: false` (the process finished between the snapshot and the
-  fetch, or its store is still live), it falls back to the existing
-  `normalized-logs/ws` / `raw-logs/ws` path with its idle timeout. That path
-  converges to the full log when the store drops. A truncated snapshot is
-  never cached or shown as final.
-- `useConversationHistory` uses it for every non-running process: the
-  initial load, "load earlier", and the reload after running → finished.
-  Running processes keep `loadRunningAndEmitWithBackoff` over WebSocket.
-
-### G2. No duplicate sockets or history loads
-
-- **Shared JSON-patch streams.** `useJsonPatchWsStream` subscribes to a
-  ref-counted stream keyed by endpoint and resolved host scope. Consumers of
-  the same key share one socket, snapshot, reconnect and backoff state. After
-  the last subscriber leaves, the socket lingers for `STREAM_LINGER_MS`
-  (3 s) before closing, which absorbs mount/unmount churn. The existing
-  semantics carry over unchanged: keep the snapshot while reconnecting to the
-  same endpoint, only `Ready` resets backoff, `finished` is terminal, and a
-  clean 1000 close does not reconnect.
-- **One session process stream.** `useExecutionProcesses` always requests
-  `show_soft_deleted=true` and filters `dropped` on the client when the caller
-  did not ask for soft-deleted rows. Every caller then shares one socket.
-- **Discovery.** `getDiscoveredOptionsStreamUrl` drops `workspace_id` and
-  `repo_id` when `session_id` is given, so the two chat consumers share one
-  URL.
-- **History once per scope.** `useConversationHistory` keeps a per-scope
-  cache of settled (`complete`) entries for completed processes. Responses
-  that `loadProcessesInOrder` discards past the threshold stay in the cache,
-  and "load earlier" reads the cache before fetching. The cache is cleared
-  when the scope changes. A failed fetch is not cached, so "load earlier"
-  still retries it.
-
-### G3. The chat's requests go first on mobile
-
-On the mobile layout:
-
-- `PreviewBrowserContainer` (preview settings scratch stream) and
-  `BrowserPanelContainer` (browser-session socket and a process stream) mount
-  only once their tab has been shown. After that they stay mounted, which
-  keeps the existing "preserve sockets across tab switches" behaviour.
-- The workspace git diff stream (`WorkspaceProvider`) is deferred on mobile
-  until a diff-consuming tab (`changes`, `git`) is shown or the chat's initial
-  history has settled, whichever comes first. The chat's diff-stats pill then
-  fills in after the rows appear, not before. Desktop is unchanged.
-
-### Stretch goal
-
-An HTTP snapshot of the session's processes before the live stream attaches
-is **not** built. With G1 and G2 the chat needs exactly one socket before
-its rows render (the shared session stream). Multiplexing all subscriptions
-over one socket is written up as a proposal in the wiki page.
-
-## Constraints kept
-
-- `wiki/awaited-stream-settlement.md` rules, applied to HTTP: settle once;
-  close or timeout is a failure; a failed turn is skipped, counted and
-  retryable through "load earlier", with no auto-retry during initial load;
-  one unsettled fetch never holds the spinner (the deadline bounds it).
-- The workspace summaries path (#350), NFS and Cloudflare configuration are
-  not touched.
+- A new `ReadOnlyAutoLinkPlugin` in `packages/ui/src/components/`. It
+  links text in its own Lexical update tagged `AUTO_LINK_UPDATE_TAG`. That
+  update runs once on mount, and again for the dirty leaves of every later
+  update that does not carry the tag.
+  - It skips nodes that are not simple text, text whose parent is a link,
+    and text inside a `CodeNode`. Inline code is simple text with a `code`
+    format, so it is still linked.
+  - It scans the text with `/https?:\/\/[^\s<>]+/gi`, trims trailing
+    punctuation and unbalanced closers, and then splits the node. Each URL
+    slice is wrapped in an `AutoLinkNode` and keeps its text format. It loops
+    over the remainder, so several URLs in one node are all linked.
+  - A `findUrlMatches(text)` helper is exported so it can be unit-tested.
+- Why the update is tagged and not a node transform: read-only editors still
+  sync markdown out. Issue descriptions wire `onChange` while displayed, and
+  composers are `disabled` while sending. Splitting formatted text is not
+  byte-identical on export (`**a https://b**` gains `&#32;`), so linking must
+  never reach `onChange`. `MarkdownSyncPlugin` skips updates carrying the
+  tag, and it also skips any update while the editor is read-only and the
+  tree still holds auto links. A selection is enough to trigger such an
+  update. An editable tree is exempt, because an `AutoLinkNode` pasted into a
+  composer is user content. The mount and unmount updates are queued in a
+  microtask, because Lexical merges the tags of updates batched into one
+  commit, and an untagged content change such as the initial parse would
+  otherwise be hidden.
+- On unmount, when the editor becomes editable, every `AutoLinkNode` is
+  unwrapped. Lexical's normalization merges the text back together, so
+  editing starts from the original node structure.
+- `WYSIWYGEditor` registers `AutoLinkNode` and mounts
+  `ReadOnlyAutoLinkPlugin` only when `disabled`, next to
+  `ReadOnlyLinkPlugin`.
+- `ReadOnlyLinkPlugin` also listens to `AutoLinkNode` mutations, because
+  Lexical mutation listeners match exact node classes. Its external check
+  becomes `/^https?:\/\//i`.
 
 ## Acceptance
 
-- For the workspace above: zero `normalized-logs/ws` for completed turns,
-  exactly one `execution-processes/stream/session/ws`, each history GET issued
-  once, and a spinner that does not wait on git diff, discovered-options,
-  approvals, preview or browser-session sockets.
-- Before and after WebSocket counts and time until rows, measured with a
-  Playwright mobile probe (no added latency, and with 150 ms RTT added via
-  CDP). WebKit is not installed on the worker, so Chromium with added latency
-  stands in for the phone.
-- Vitest: the HTTP loader (success, timeout, error status, abort,
-  finished-during-load), the shared session stream (one socket for many
-  consumers), and single history load per scope. Rust tests for the new
-  routes' snapshot logic.
-- Wiki updated with the "each WebSocket is a handshake" rule and numbers.
+- The screenshot case: a bare GitHub PR URL followed by `.` renders as an
+  `<a href=… target=_blank>` without the period.
+- Vitest covers the punctuation, parenthesis, code, existing-link, multiple-URL
+  and `http` cases, and the markdown round-trip.
+- `pnpm run check`, `pnpm run lint` and the web-core vitest suite pass.

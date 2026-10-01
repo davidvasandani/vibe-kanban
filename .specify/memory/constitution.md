@@ -675,6 +675,21 @@ iOS Safari connects them one at a time. A socket is therefore a queued cost of
 Regression coverage counts sockets (one per identity for N consumers) and
 requests (one per settled item per scope).
 
+### XLV. Rendered links are detected everywhere and allow-listed by scheme
+Read-only markdown is where users act on what agents report, so every URL
+shown there MUST be clickable, whether it is written as `[text](url)` or bare.
+- Clickability is decided by an explicit allow-list: `http`/`https` open in a
+  new tab with `noopener noreferrer`, and named in-app routes open in place.
+  Every other scheme (`javascript:`, `data:`, and so on) is rendered inert.
+- Bare-URL detection runs only in read-only rendering. It never rewrites what
+  the user is composing, and serialising back to markdown MUST reproduce the
+  source text.
+- Detection skips fenced code blocks and text already inside a link. Inline
+  code keeps its code styling and still becomes a link. Trailing sentence
+  punctuation and unbalanced closing brackets are not part of the URL.
+Regression coverage renders real markdown through the editor, not just the
+regex.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -696,7 +711,7 @@ requests (one per settled item per scope).
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.41.0 (adds XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
+**Version**: 0.42.0 (adds XLV, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and round-trips; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
@@ -974,3 +989,13 @@ request/response enrichment, not sockets. XLIV fills that gap. Numeral XLIV was
 unused on this branch and on `main`. The homelab constitution named by the
 command template was not changed, because this project only manages the Vibe
 Kanban repository.
+
+## Review: vk/e4ef-urls-always-clic
+
+Applied `/speckit.constitution` and added principle XLV (0.42.0). Agent
+replies showed bare PR URLs as plain text, because the read-only Lexical
+renderer only linked `[text](url)`, and `http://` links were disabled. No
+principle covered link rendering. XLV puts the scheme allow-list, read-only
+detection and the round-trip into one rule. Numeral XLV was unused. The
+homelab constitution named by the command template was not changed, because
+this project only manages the Vibe Kanban repository.

@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
-import { $isLinkNode, LinkNode } from '@lexical/link';
-import { $getNodeByKey } from 'lexical';
+import { $isLinkNode, AutoLinkNode, LinkNode } from '@lexical/link';
+import { $getNodeByKey, type MutationListener } from 'lexical';
 
 // Only the canonical UUID route is allowed; arbitrary relative paths (including
 // protocol-relative URLs) remain disabled. Both web apps own this route.
@@ -13,7 +13,7 @@ const issueRoute = new RegExp(`^/projects/${uuid}/issues/${uuid}$`);
 
 function updateLink(dom: HTMLAnchorElement, href: string) {
   const trimmed = href.trim();
-  const external = /^https:\/\//i.test(trimmed);
+  const external = /^https?:\/\//i.test(trimmed);
   const clickable = external || issueRoute.test(trimmed);
 
   if (clickable) {
@@ -50,29 +50,34 @@ function updateLink(dom: HTMLAnchorElement, href: string) {
   }
 }
 
-/** Keep external HTTPS and explicit issue links usable in read-only messages. */
+/** Keep external HTTP(S) and explicit issue links usable in read-only messages. */
 export function ReadOnlyLinkPlugin() {
   const [editor] = useLexicalComposerContext();
 
-  useEffect(
-    () =>
-      // `skipInitialization` defaults to false, so links that already exist when
-      // this mounts arrive here as 'created' — no separate initial sweep needed.
-      editor.registerMutationListener(LinkNode, (mutations) => {
-        editor.read(() => {
-          for (const [nodeKey, mutation] of mutations) {
-            if (mutation === 'destroyed') continue;
-            const dom = editor.getElementByKey(nodeKey);
-            const node = $getNodeByKey(nodeKey);
-            if (dom instanceof HTMLAnchorElement && $isLinkNode(node)) {
-              // Read the model: a previous pass may have removed the DOM href.
-              updateLink(dom, node.getURL());
-            }
+  useEffect(() => {
+    const listener: MutationListener = (mutations) => {
+      editor.read(() => {
+        for (const [nodeKey, mutation] of mutations) {
+          if (mutation === 'destroyed') continue;
+          const dom = editor.getElementByKey(nodeKey);
+          const node = $getNodeByKey(nodeKey);
+          if (dom instanceof HTMLAnchorElement && $isLinkNode(node)) {
+            // Read the model: a previous pass may have removed the DOM href.
+            updateLink(dom, node.getURL());
           }
-        });
-      }),
-    [editor]
-  );
+        }
+      });
+    };
+    // `skipInitialization` defaults to false, so links that already exist when
+    // this mounts arrive here as 'created' — no separate initial sweep needed.
+    // Mutation listeners match the exact class, so bare URLs detected as
+    // `AutoLinkNode`s need their own registration.
+    const unregister = [editor.registerMutationListener(LinkNode, listener)];
+    if (editor.hasNodes([AutoLinkNode])) {
+      unregister.push(editor.registerMutationListener(AutoLinkNode, listener));
+    }
+    return () => unregister.forEach((fn) => fn());
+  }, [editor]);
 
   return null;
 }
