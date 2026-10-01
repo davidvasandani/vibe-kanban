@@ -763,33 +763,45 @@ impl GitCli {
 
     /// List all remotes with their URLs using `git remote -v`.
     /// Returns a Vec of (name, url) tuples, deduplicated (fetch/push show the same URL).
+    /// The repository's remotes as configured, first URL per name, in config
+    /// order. Read from config rather than `git remote -v`, which prints URLs
+    /// already rewritten by `insteadOf`: a rewrite to an SSH host alias would
+    /// hide the GitHub owner whose credential applies. Git applies the same
+    /// rewrites itself when a command contacts the URL.
     pub fn list_remotes(&self, repo_path: &Path) -> Result<Vec<(String, String)>, GitCliError> {
-        let output = self.git(repo_path, ["remote", "-v"])?;
+        let output = match self.git(
+            repo_path,
+            [
+                "config",
+                "--local",
+                "--includes",
+                "--get-regexp",
+                r"^remote\..*\.url$",
+            ],
+        ) {
+            Ok(output) => output,
+            // Exit 1 with no output: no remotes configured.
+            Err(GitCliError::CommandFailed(msg)) if msg == "Command failed with no output" => {
+                String::new()
+            }
+            Err(error) => return Err(error),
+        };
         let mut seen = std::collections::HashSet::new();
         let mut remotes = Vec::new();
-
         for line in output.lines() {
-            let line = line.trim();
-            if line.is_empty() {
+            let Some((key, url)) = line.trim().split_once(' ') else {
                 continue;
-            }
-            // Format: "name\turl (fetch)" or "name\turl (push)"
-            let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 2 {
-                let name = parts[0].to_string();
-                // Remove the " (fetch)" or " (push)" suffix from URL
-                let url = parts[1]
-                    .strip_suffix(" (fetch)")
-                    .or_else(|| parts[1].strip_suffix(" (push)"))
-                    .unwrap_or(parts[1])
-                    .to_string();
-
-                if seen.insert(name.clone()) {
-                    remotes.push((name, url));
-                }
+            };
+            let Some(name) = key
+                .strip_prefix("remote.")
+                .and_then(|key| key.strip_suffix(".url"))
+            else {
+                continue;
+            };
+            if seen.insert(name.to_string()) {
+                remotes.push((name.to_string(), url.trim().to_string()));
             }
         }
-
         Ok(remotes)
     }
 

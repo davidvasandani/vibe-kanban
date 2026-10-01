@@ -1541,3 +1541,34 @@ fn org_token_commands_refuse_inherited_rewrites_that_bypass_the_token() {
         }
     }
 }
+
+#[test]
+fn list_remotes_reports_configured_urls_not_rewritten_ones() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo_path = temp_dir.path().join("repo");
+    let repo = Repository::init(&repo_path).unwrap();
+    assert!(GitCli::new().list_remotes(&repo_path).unwrap().is_empty());
+    repo.remote("origin", "https://github.com/sweetgreen/app.git")
+        .unwrap();
+    repo.remote("upstream", "git@github.com:other/app.git")
+        .unwrap();
+    // A rewrite to an SSH host alias would hide the owner if reported.
+    repo.config()
+        .unwrap()
+        .set_str("url.git@github-work:.insteadOf", "https://github.com/")
+        .unwrap();
+    let remotes = GitCli::new().list_remotes(&repo_path).unwrap();
+    assert_eq!(
+        remotes,
+        vec![
+            (
+                "origin".to_string(),
+                "https://github.com/sweetgreen/app.git".to_string()
+            ),
+            (
+                "upstream".to_string(),
+                "git@github.com:other/app.git".to_string()
+            ),
+        ]
+    );
+}
