@@ -305,3 +305,10 @@ contributed to it.
   rounds of cursor and log-writer traps (`vk/80c1-tasks-should-sur`).
   Coordinator-host work can use think2's colocated worker. Existing `Local`
   workspaces cannot be moved to a worker (`vk/ec43-run-a-vibe-kanba`).
+- [read-only-markdown-links.md](read-only-markdown-links.md) — Bare-URL
+  autolinking and the clickability policy in read-only markdown. Mutation
+  listeners are exact-class. Read-only editors still export via `onChange`
+  (issue descriptions, sending composers), and split formatted text is not
+  byte-identical on export. So display-only changes use tagged, microtask-
+  queued updates, export is skipped while a read-only tree holds auto links,
+  and links are unwrapped on becoming editable (`vk/e4ef-urls-always-clic`).
