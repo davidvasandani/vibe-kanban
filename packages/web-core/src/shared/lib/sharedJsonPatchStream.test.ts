@@ -146,6 +146,33 @@ describe('SharedJsonPatchStream', () => {
     expect(onB).not.toBe(onA);
   });
 
+  it('reconnects to the host it was created for, not the current one', async () => {
+    const first = new FakeSocket();
+    transport.open
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(new FakeSocket());
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    host.id = 'host-a';
+    const onA = acquire('/api/approvals/stream/ws');
+    onA.subscribe(() => {});
+    await flush();
+
+    // The route moves to host B while A's stream is still alive; then A's
+    // socket drops and reconnects.
+    host.id = 'host-b';
+    first.onclose?.({ code: 1006, wasClean: false });
+    await vi.advanceTimersByTimeAsync(8_000);
+
+    expect(transport.open).toHaveBeenCalledTimes(2);
+    for (const [, options] of transport.open.mock.calls) {
+      expect(options).toMatchObject({
+        hostScope: 'explicit',
+        hostId: 'host-a',
+        relayHostId: 'host-a',
+      });
+    }
+  });
+
   it('keeps consumers that rewrite patches on a private stream', () => {
     const shared = acquire();
     const rewriting = acquireSharedJsonPatchStream('/api/fixture', {

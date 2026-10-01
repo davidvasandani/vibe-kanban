@@ -485,7 +485,10 @@ describe('ServerMetricsSectionContainer', () => {
     // Expanding is what opens it.
     await renderContainer({ expanded: true });
     expect(mocks.openWebSocket).toHaveBeenCalledTimes(1);
-    expect(mocks.openWebSocket).toHaveBeenCalledWith('/api/cluster/metrics/ws');
+    expect(mocks.openWebSocket).toHaveBeenCalledWith(
+      '/api/cluster/metrics/ws',
+      expect.objectContaining({ hostScope: 'explicit', hostId: null })
+    );
   });
 
   it('keeps rendering the other nodes when one node is malformed', async () => {

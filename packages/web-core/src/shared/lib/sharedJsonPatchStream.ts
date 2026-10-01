@@ -203,10 +203,10 @@ export class SharedJsonPatchStream<T extends object> {
     void (async () => {
       let ws: WebSocket;
       try {
-        const socketOptions = this.options.socketOptions;
-        ws = socketOptions
-          ? await openLocalApiWebSocket(this.endpoint, socketOptions)
-          : await openLocalApiWebSocket(this.endpoint);
+        ws = await openLocalApiWebSocket(
+          this.endpoint,
+          this.options.socketOptions
+        );
       } catch (error) {
         if (generation !== this.generation) return;
         this.opening = false;
@@ -314,6 +314,31 @@ export function sharedJsonPatchStreamKey(
 }
 
 /**
+ * Socket options that keep a stream on the host its key was built for.
+ *
+ * The default `current` scope resolves the host when the socket opens. A
+ * stream that reconnects, or lingers, after the route has moved to another
+ * host would otherwise connect there while still registered under the old
+ * host, and a later consumer of the old host would read the other host's
+ * data. The route host is also the relay host in remote-web, so both are
+ * pinned. A null host stays unscoped.
+ */
+export function pinSocketHost(
+  socketOptions: LocalApiWebSocketOptions | undefined,
+  currentHostId: string | null
+): LocalApiWebSocketOptions {
+  if (socketOptions && (socketOptions.hostScope ?? 'current') !== 'current') {
+    return socketOptions;
+  }
+  return {
+    ...socketOptions,
+    hostScope: 'explicit',
+    hostId: currentHostId,
+    relayHostId: socketOptions?.relayHostId ?? currentHostId,
+  };
+}
+
+/**
  * The shared stream for `endpoint` on its resolved host, created on first use.
  * Nothing connects until someone subscribes. Streams whose consumers alter
  * the data (`injectInitialEntry`, `deduplicatePatches`) are kept private.
@@ -331,7 +356,10 @@ export function acquireSharedJsonPatchStream<T extends object>(
     : sharedJsonPatchStreamKey(endpoint, options.socketOptions, currentHostId);
   const existing = registry.get(key);
   if (existing) return existing as unknown as SharedJsonPatchStream<T>;
-  const created = new SharedJsonPatchStream<T>(endpoint, options);
+  const created = new SharedJsonPatchStream<T>(endpoint, {
+    ...options,
+    socketOptions: pinSocketHost(options.socketOptions, currentHostId),
+  });
   if (!isPrivate) {
     registry.set(key, created as unknown as SharedJsonPatchStream<object>);
   }
