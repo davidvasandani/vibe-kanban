@@ -90,7 +90,7 @@ See `./research.md`.
 
 ## Constitution Check
 
-- **XLIV, credentials follow the target resource.** Per-request, owner-keyed
+- **XLV, credentials follow the target resource.** Per-request, owner-keyed
   selection from Settings. Fallback happens only when no row exists, and is
   logged. Unreadable rows fail closed. Credentials are command-scoped
   (per-`Command` env), never global config. Errors are attributed to the

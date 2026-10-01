@@ -1,7 +1,14 @@
 # Lazy-loading normalized conversation history
 
 Tags: `65ab-lazy-load-vk-wor`, `vk/6df4-loading-chat-pin`, `vk/29d8-vk-list-all-mess`,
-`vk/3fb0-debug-why-vk-mes`
+`vk/3fb0-debug-why-vk-mes`, `vk/45a2-make-workspace-c`
+
+> **Transport update (`vk/45a2-make-workspace-c`):** completed turns now load
+> over `GET /api/execution-processes/{id}/normalized-logs` (`raw-logs` for
+> scripts), which returns `{entries, complete}` from the same sidecar and
+> bounded normalization. Only running turns, and snapshots reported as
+> incomplete, still use the per-process WebSocket mentioned below. Settled
+> turns are fetched once per scope. See `wiki/awaited-stream-settlement.md`.
 
 ## Why frontend virtualization is insufficient
 

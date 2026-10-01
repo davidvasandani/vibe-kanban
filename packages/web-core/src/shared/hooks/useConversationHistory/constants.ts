@@ -20,6 +20,13 @@ export const HISTORY_FETCH_CONCURRENCY = 5;
  * Live streams are not bounded — a running agent may be silent for minutes.
  */
 export const HISTORY_STREAM_IDLE_TIMEOUT_MS = 30_000;
+/**
+ * Total deadline for one completed turn's history request. A request has no
+ * per-message progress to reset an idle timer, so the bound is total. A cold
+ * server-side normalization keeps running past it and stores its result, so a
+ * turn that times out loads quickly when "load earlier" retries it.
+ */
+export const HISTORY_HTTP_DEADLINE_MS = 30_000;
 export const REMAINING_BATCH_SIZE = 50;
 export const MAX_RECENT_HISTORY_PROCESSES = 20;
 

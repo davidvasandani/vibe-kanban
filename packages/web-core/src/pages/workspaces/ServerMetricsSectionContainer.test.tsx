@@ -63,6 +63,7 @@ vi.mock('@/shared/lib/electric/collections', () => ({
 }));
 
 import { ServerMetricsSectionContainer } from './ServerMetricsSectionContainer';
+import { resetSharedJsonPatchStreamsForTests } from '@/shared/lib/sharedJsonPatchStream';
 
 /** A socket that connects but never delivers `Ready`, so REST stays in play. */
 class SilentWebSocket {
@@ -197,6 +198,8 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => root.unmount());
+  // Streams linger after unmount so remounts reuse them; tests start clean.
+  resetSharedJsonPatchStreamsForTests();
   container.remove();
   queryClient.clear();
   vi.restoreAllMocks();
@@ -482,7 +485,10 @@ describe('ServerMetricsSectionContainer', () => {
     // Expanding is what opens it.
     await renderContainer({ expanded: true });
     expect(mocks.openWebSocket).toHaveBeenCalledTimes(1);
-    expect(mocks.openWebSocket).toHaveBeenCalledWith('/api/cluster/metrics/ws');
+    expect(mocks.openWebSocket).toHaveBeenCalledWith(
+      '/api/cluster/metrics/ws',
+      expect.objectContaining({ hostScope: 'explicit', hostId: null })
+    );
   });
 
   it('keeps rendering the other nodes when one node is malformed', async () => {

@@ -12,7 +12,7 @@
 - **Rejected:** `git -c credential.helper=…` with the token in the helper
   text, because the token would be in argv.
 - **Rejected:** writing a repo or global config, because it persists and
-  leaks across concurrent requests (constitution XLIV).
+  leaks across concurrent requests (constitution XLV).
 
 ## R2: How to inject a token into `gh`
 - **Chosen:** `GH_TOKEN` in the child env, removing `GITHUB_TOKEN`,

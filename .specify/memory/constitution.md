@@ -649,7 +649,33 @@ coverage drives a request that never settles past its deadline, then shows
 recovery on the next poll. It also drives a slow item past the server budget
 and shows the last-known fallback and later publication.
 
-### XLIV. Credentials follow the target resource, never ambient identity
+### XLIV. A WebSocket is a handshake; finite reads go over HTTP
+Every WebSocket opens a new TCP and TLS connection through the edge proxy, and
+iOS Safari connects them one at a time. A socket is therefore a queued cost of
+0.5 s to 10 s on a phone, even when the server answers in milliseconds.
+- A finite or settled read (a completed turn's log, a snapshot that will not
+  change) MUST use a plain request through `makeLocalApiRequest`, which keeps
+  host scoping and the relay transport. It MUST NOT use a socket that is opened
+  only to wait for `finished`. XL applies to that request: it settles once,
+  has an `AbortController` deadline, and treats a timeout or abort as failure.
+- A snapshot response states whether it is settled. A partial answer (live
+  store still present, subject still running) is never cached or shown as
+  final. The caller falls back to the live path.
+- Sockets are reserved for live data. Consumers of the same stream identity
+  (endpoint plus host scope) MUST share one socket, which lingers briefly
+  after its last consumer so that mount and unmount churn does not reconnect.
+  Equivalent URLs are canonicalized so they share. Filtering that one
+  consumer needs (soft-deleted rows, for example) happens on the client over
+  the shared superset.
+- A primary view MUST NOT queue behind sockets for panels that are not
+  visible. Hidden mobile panels mount or subscribe on first show, or after the
+  primary view settles.
+- Each settled item is fetched at most once per scope. Speculative responses
+  are kept for the next page, not discarded and refetched.
+Regression coverage counts sockets (one per identity for N consumers) and
+requests (one per settled item per scope).
+
+### XLV. Credentials follow the target resource, never ambient identity
 When Vibe Kanban itself (not an agent) calls an external service on a user's
 behalf, it MUST choose the credential from the settings authority that owns
 it, keyed by the resource the call targets (for GitHub, the owner of the target
@@ -685,7 +711,7 @@ operator knows which credential to fix.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.41.0 (adds XLIV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.40.0 added XLIII, bounding bulk enrichment responses by a
+**Version**: 0.42.0 (adds XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
@@ -950,9 +976,23 @@ enrichment endpoint, and neither requires deadlines on polled queries. XXXIV
 (partial projections) still governs how the rows render while enrichment is
 missing. Numeral XLIII was unused on this branch and on `main`.
 
+## Review: vk/45a2-make-workspace-c
+
+Applied `/speckit.constitution`: added principle XLIV (0.41.0). Phone chat
+loads took 40 s to 2 min while every stream finished in under 120 ms on the
+server. A workspace page opened about 29 WebSockets, including 10 history
+sockets (each completed turn twice) and three copies of the session process
+stream. Behind Cloudflare, each socket is a new handshake, and Safari connects
+them one at a time. XL makes each awaited stream settle but says nothing about
+how many there are or which transport a settled read should use. XLIII bounds
+request/response enrichment, not sockets. XLIV fills that gap. Numeral XLIV was
+unused on this branch and on `main`. The homelab constitution named by the
+command template was not changed, because this project only manages the Vibe
+Kanban repository.
+
 ## Review: vk/8b57-use-settings-git
 
-Applied `/speckit.constitution`: added principle XLIV (0.41.0). The VK
+Applied `/speckit.constitution`: added principle XLV (0.42.0). The VK
 server's own `git push` and `gh` calls used the server process's ambient GitHub
 credential, while agents used the per-owner org token from Settings. The
 result was a 403 on `create_pr` for a repository the configured token could
@@ -962,4 +1002,4 @@ write to. Some neighbouring principles touch this but none cover it:
 - XXIV/XXIX make Settings the authority for MCP definitions only.
 - XVII/XXIII cover redaction and snapshots for agent execution, not the
   server's own outbound calls.
-Numeral XLIV was unused on this branch.
+Numeral XLV was unused on this branch and on `main` (which took XLIV for vk/45a2).
