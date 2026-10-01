@@ -1,60 +1,59 @@
-# Prior knowledge: Workspaces sidebar loading blank
+# Prior knowledge: workspace chat load with expensive WebSocket handshakes
 
-Task: `vk/b923-workspaces-loadi`. This file pulls together what the project
-knowledge bases (`wiki/` and `docs/knowledge-base/`) already record about this
-problem area. The knowledge bases were only read, not changed, in this stage.
+Task: `vk/45a2-make-workspace-c`. This file pulls together what the project
+knowledge bases (`wiki/` and `docs/knowledge-base/`) already say about this
+problem. The knowledge bases were only read in this stage, not changed.
 
 ## Relevant pages
 
-- `wiki/coordinator-nfs-load.md` (task `vk/78a5-analyze-and-redu`)
+- `wiki/awaited-stream-settlement.md` (`vk/5f70-not-loading-chat`)
+- `docs/knowledge-base/lazy-loading-normalized-conversation-history.md`
+  (`65ab-lazy-load-vk-wor`, `vk/6df4-loading-chat-pin`, `vk/3fb0-debug-why-vk-mes`)
 - `docs/knowledge-base/authoritative-snapshot-stream-handoffs.md`
-  (summary retention on failed refresh, `vk/113f-sidebar-randomly`)
-- `docs/knowledge-base/workspace-summary-ordering.md` (`vk/9391-workspace-order`)
-- `docs/analysis/coordinator-nfs-io-pressure.md` (numbers behind the NFS page)
+  (`vk/3488-fix-stale-execut`, `vk/113f-sidebar-randomly`)
+- `wiki/workspace-carousel-view.md` (several chats at once, so socket count
+  per chat matters)
+- `wiki/coordinator-nfs-load.md` (cold git diff reads over NFS are slow;
+  #350 bounded the summaries path, which must not be touched)
 
 ## What we already know
 
-1. **Two independent sources feed the sidebar.** Names, pins and `is_running`
-   come from the JSON-patch WebSocket streams. PR, diff, approval, poller,
-   unseen-activity, elapsed-time and affinity metadata come from
-   `POST /api/workspaces/summaries`, polled every 15 s for both the active
-   and the archived scope. "Names but no enrichment" points to the summaries
-   query, not to deleted workspaces. That is exactly what the screenshot
-   shows.
-2. **A failed refresh must reject, never resolve to an empty map.** React
-   Query then keeps the last successful snapshot for the same key. Host and
-   archive scope stay in the query key. Do not use `keepPreviousData`, because
-   it leaks across hosts. Commit `04618693` shipped this. Any new
-   timeout or abort path must therefore **reject**, so this protection covers
-   it too.
-3. **Summaries cost is NFS-bound and scales with open clients.** Each
-   workspace's diff stats run several git subprocesses over NFS. Before the
-   shared cache, one request took 34–43 s. The fix was
-   `WORKSPACE_DIFF_STATS`, a single-flight cache per workspace, with a
-   process-wide limit of 4 permits, tiered staleness (30 s running, 5 min
-   idle, 60 min archived) and generation-based invalidation.
-4. **The leader runs in its own `tokio::spawn` and owns the slot lock and the
-   permit.** A dropped or cancelled waiter therefore does not cancel the git
-   work or break the concurrency limit. This is what makes a waiter-side
-   deadline safe: the work finishes and is published for the next poll.
-5. **Rejected alternatives on record:** NFS mount tuning (breaks coherency), a
-   background refresher (does work when nobody is looking) and client-side
-   throttling alone. A request-driven deadline with a last-known fallback is
-   none of these. Work still only starts because a client asked.
-6. **Ordering must tolerate summaries that have not arrived.** The sort falls
-   back to the streamed `updatedAt` when `latestProcessCompletedAt` is
-   missing. A missing summary is a normal state and does not prove the
-   workspace is inactive.
-7. Tools: `node scripts/time-workspace-summaries.mjs` times the endpoint. The
-   service account can `ssh think2` from any worker, which gives access to the
-   `cloudflared-connector` and `vibe-kanban-dev` journals.
+1. **An awaited log fetch settles exactly once.** `finished` means success.
+   Close, error, parse failure, open failure and idle timeout all mean
+   failure. The idle deadline applies only to settled history, never to a
+   running turn. A failed turn is skipped, counted and retryable through "load
+   earlier", with no auto-retry during the initial load. One unsettled fetch
+   must never hold the spinner. All of these carry over to the HTTP path, with
+   an `AbortController` deadline in place of the idle timer.
+2. **The server already has a finite settled source.** A finished process is
+   served from its materialized normalized-log sidecar. On a miss, it does one
+   bounded historical normalization (newest 2,000 messages) under a
+   per-execution lease and a global permit of 1, then writes the sidecar.
+   `ContainerService::normalized_entries` reads the same sources.
+3. **A request-scoped read must never follow a live store's tail**
+   (`vk/3fb0`). The tail only ends when the turn does, and the store's own
+   `Finished` is filtered out. Snapshot the buffered history with
+   `select_history`, and let `status` (here, `complete: false`) distinguish a
+   partial read from a settled one. Test the source selection with a
+   never-yielding fallback under `tokio::time::timeout`.
+4. **Cancellation drops the historical normalizer.** The lease and permit are
+   tied to the stream's lifetime, so a dropped reader aborts materialization.
+   For HTTP that means an aborted client request would cancel a cold
+   normalization unless the drain is detached.
+5. **Frontend history invariants** (`65ab`): load on top intersection or an
+   explicit action, through one single-flight path. Every result is scoped to
+   a generation. Results commit in request order, never completion order.
+   Concurrency only tunes latency, never what is shown.
+6. **Snapshot streams keep their state during transport loss** and replace it
+   with a full snapshot on reconnect. Only `Ready` resets backoff. A sharing
+   layer must keep these properties per stream identity (endpoint plus host
+   scope).
+7. **Debugging recipe**: talk to the coordinator directly at
+   `http://172.16.100.102:3334`. Workers have Node 24. Only
+   `ConversationList`'s spinner sits inside `.w-chat`.
 
 ## Gaps this task fills
 
-- Nothing bounded how long **one summaries request** could take. Every row's
-  metadata waited on the slowest `git status`. Measured today: 0.27–16.6 s
-  from a worker.
-- Nothing bounded how long the **client** waits, and React Query dedupes polls
-  onto an in-flight promise. So one request that never settles on mobile
-  blanks the sidebar until a reload. The tunnel logged 142 abandoned
-  summaries requests since 2026-09-28.
+- No page yet records that WebSocket *count* is itself the cost behind
+  Cloudflare and iOS Safari, or that history should go over HTTP.
+- Nothing yet shares identical JSON-patch streams across components.

@@ -1,143 +1,182 @@
-# SPEC: Workspaces sidebar loads blank (no row metadata) on mobile
+# SPEC: Workspace chat loads fast when every WebSocket handshake is expensive
 
-Task: `vk/b923-workspaces-loadi` ("Workspaces loading Blank", reported with a
-phone screenshot of the Workspaces tab at 15:30 UTC on 2026-09-29, deploy
-`03e6b4d`).
+Task: `vk/45a2-make-workspace-c`.
 
-## Symptom
+## Problem
 
-On the phone (vibe.vasandani.dev through the Cloudflare tunnel) the Workspaces
-sidebar rendered its section skeleton and workspace names, but **every row was
-blank below its title**: no elapsed time, no diff stats (`files +N -M`), no host
-affinity label, no PR badge. Only the pin icon, which comes from the workspace
-stream rather than the summaries, was drawn. "Needs Attention" and "Polling"
-were empty, and both are driven only by summary fields (`has_unseen_turns`,
-`has_pending_approval`, `has_running_poller`).
+Opening a workspace chat on the phone takes 40 s to 2 min. The server is not
+the bottleneck: every stream the chat needs finishes in under 120 ms on the
+coordinator. The cost is per-WebSocket: each one needs a new TCP and TLS
+handshake through Cloudflare. Since 2026-09-28 those handshakes are served
+from distant data centres and cost about 0.5 s each, sometimes up to 10 s.
+iOS Safari connects WebSockets one at a time. Plain `fetch` requests reuse
+one HTTP/2 or HTTP/3 connection and pay no handshake.
 
-The same page on desktop, opened minutes later, rendered all of this metadata.
+A workspace page opens about 25–29 WebSockets. The chat's history sockets sit
+at the back of that queue.
 
-## Diagnosis
+## Baseline measurement (before)
 
-Row metadata comes from one request, `POST /api/workspaces/summaries`
-(`useWorkspaces.fetchWorkspaceSummariesByArchived`), polled every 15 s by React
-Query. Names, pin state and `is_running` come from the separate workspaces
-WebSocket stream. So "names but no metadata" means **the stream was fine and
-the summaries query never gave the page any data**.
+Headless mobile Chromium (iPhone 13 profile) against the coordinator
+`http://172.16.100.102:3334/workspaces/14312466-…`. The session now has 6
+completed turns. No added latency:
 
-Evidence gathered on the live cluster:
+| Metric | Value |
+| --- | --- |
+| WebSockets opened before rows rendered | 29 |
+| `normalized-logs/ws` | 10 (5 + 5) |
+| `execution-processes/stream/session/ws` | 3 |
+| `agents/discovered-options/ws` | 4 |
+| `approvals/stream/ws` | 3 (two closed before or right after being established) |
+| History over HTTP | 0 |
+| Time until chat rows (no spinner in `.w-chat`) | 2.1 s |
 
-1. **Summaries latency depends on the slowest workspace.** The handler awaits
-   diff stats for every active workspace (204 active rows today) before replying.
-   Diff stats come from `git status` and diff runs on NFS, at most 4 at a time,
-   shared through `WORKSPACE_DIFF_STATS`. Idle entries go stale after 5 minutes.
-   Back-to-back probes from a worker measured **0.27 s, 16.6 s, 1.8 s, 0.30 s**
-   for the active list and up to 6.8 s for the archived list. That cheap
-   metadata (process status, unseen turns, PR, affinity) comes from a handful of
-   bulk SQL reads, but it is held hostage by the git work.
-2. **Tunnel clients abandon summaries requests.** `cloudflared-connector` on
-   think2 logged 142 `Incoming request ended abruptly: context canceled` errors
-   for `https://vibe.vasandani.dev/api/workspaces/summaries` since 2026-09-28.
-3. **The client has no deadline and one stuck fetch blocks all later polls.**
-   `fetchWorkspaceSummariesByArchived` calls `fetch` with no timeout and does
-   not forward React Query's `AbortSignal`. React Query dedupes interval and
-   focus refetches onto an in-flight promise (`cancelRefetch: false`). So when a
-   mobile browser leaves the request hanging (the app is backgrounded or the
-   radio changes, and the request never settles), **every later poll joins the
-   same dead promise**. The sidebar stays blank until a full reload. On a fresh
-   page load there is no earlier snapshot to keep, so the rows are blank from
-   the start.
-4. `refetchOnWindowFocus: false` also means that coming back to the tab or PWA
-   does not ask for fresh summaries.
+### Why history loads twice (confirmed)
 
-The WebSocket stream reconnects with backoff and keeps its last snapshot, so it
-is not implicated. Whether any workspace was truly running at 15:30 could not
-be checked independently (the coordinator DB was not readable from the worker).
-The spec treats the empty Running section as consistent with the stream.
+This is not the initial-load effect re-running. `loadProcessesInOrder` fetches
+a slice of `HISTORY_FETCH_CONCURRENCY = 5` newest processes at once, keeps
+responses only until `MIN_INITIAL_ENTRIES` is crossed, and **discards** the
+rest. Here the newest turn alone crossed the threshold, so 4 of the 5
+responses were thrown away. The chat then renders a short list, the
+top-of-list sentinel's `IntersectionObserver` fires `loadEarlier`, and
+`loadEarlierBatch` fetches those same 4 processes (plus the oldest one)
+again. The probe shows the second batch is exactly
+`{first batch} − {newest} + {oldest}`.
 
-## Goals
+### The three session process streams
 
-- G1. A summaries poll **always settles** in bounded time on the client. A hung
-  or slow request is aborted and the next poll starts a new request. It never
-  joins a dead one.
-- G2. The summaries endpoint **responds in bounded time** no matter how slow
-  git or NFS is. Cheap metadata must never wait on slow diff stats.
-- G3. Bounding latency must **not blank rows that already have stats**. A
-  workspace whose fresh diff stats miss the deadline reports its last known
-  stats (stale but truthful). If it has never been computed, it reports none.
-  The background computation keeps going, so a later poll gets fresh values.
-- G4. Returning to the page (visibility or focus) refreshes summaries promptly.
-- G5. The existing behaviour stays: a failed refresh keeps the last successful
-  snapshot for that host scope (`04618693`). Single-flight and the
-  process-wide concurrency bound stay. Invalidation still wins races for
-  *fresh* results.
+`WorkspacesLayout` (`useExecutionProcesses(selectedSession.id)`),
+`SessionChatBoxContainer` (`useExecutionProcesses(lastSessionId)`) and
+`ExecutionProcessesProvider` (`show_soft_deleted=true`). On mobile,
+`BrowserPanelContainer` is also mounted (hidden) and calls it again. The server
+treats `show_soft_deleted=false` exactly as a `!dropped` filter
+(`events/streams.rs`), so one `show_soft_deleted=true` stream plus client-side
+filtering can serve every caller.
 
-## Non-goals
+### Discovered options
 
-- Streaming summaries over the WebSocket, or changing the summaries response
-  shape or the generated TS types.
-- Changing diff-stat freshness tiers, the 14-day idle skip, or git concurrency.
-- The WebSocket stream, the sort order or the section categorisation.
-- Homelab/Caddy/Cloudflare configuration (out of scope for this repo).
+`ModelSelectorContainer` and `WYSIWYGEditor` both call the discovery stream
+for the same session, one with `workspace_id` and one without. When
+`session_id` is present, the server derives the workspace from the session and
+uses `workspace_id` only as a consistency check (`discover_executor_options`).
+`repo_id` is ignored. With a session, both calls are therefore the same stream.
 
-## Design
+## Goals and design
 
-### Backend: deadline-bounded diff stats with last-known fallback
+### G1. Completed turns load over HTTP
 
-- `DiffStatsCache` keeps, per slot, the **last published stats**
-  (`last_known`), updated whenever a leader publishes a result. It is readable
-  without taking the slot's async lock, which a running leader holds for the
-  whole computation.
-- New `DiffStatsCache::get_within(workspace_id, max_age, deadline, compute)`:
-  runs the existing `get_or_compute` path under `tokio::time::timeout(deadline)`.
-  - A fresh hit, or a computation that finishes within the deadline, returns
-    that result, exactly as today.
-  - On timeout it returns `last_known` (`None` if never computed). Because the
-    leader is a spawned task that owns the slot lock and the permit, dropping
-    the waiting future does not cancel the computation. It still publishes, so
-    the next poll is a cache hit. Single-flight and the bound are unchanged.
-  - Invalidation bumps the generation but leaves `last_known` in place. It is
-    a display fallback only and never counts as fresh.
-- `get_workspace_summaries` uses `get_within` with one **request-wide
-  deadline** (`SUMMARY_DIFF_STATS_BUDGET`, 3 s), measured from the start of the
-  diff phase. That caps the whole diff phase rather than each workspace.
-  Workspaces still queued in `buffer_unordered` when the budget runs out go
-  straight to their last known stats, so the response time is about
-  `DB reads + 3 s` at worst.
+**Server.** Add `GET /api/execution-processes/{id}/normalized-logs` and
+`GET /api/execution-processes/{id}/raw-logs`. Each returns
+`ApiResponse<ExecutionProcessLogSnapshot>`:
 
-### Frontend: deadline, abort and resume refresh
+```ts
+{ entries: PatchType[]; complete: boolean }
+```
 
-- `fetchWorkspaceSummariesByArchived` accepts React Query's `signal` and
-  combines it with a request timeout (`SUMMARY_REQUEST_TIMEOUT_MS`, 20 s)
-  through a small helper that works where `AbortSignal.any` or
-  `AbortSignal.timeout` is missing (older iOS Safari). On timeout the promise
-  rejects. React Query keeps the last successful data (G5), and the next
-  interval tick starts a new request (G1).
-- Both summaries queries set `refetchOnWindowFocus: true`. React Query's
-  focusManager listens to `visibilitychange`, so resuming the PWA refetches
-  (G4). `staleTime` stays 1 s.
+`entries` is exactly the `entries` array the matching `…/ws` replay converges
+to. `complete` is true only when the log is settled, meaning no live
+`MsgStore` exists for the process and its status is not `running`.
 
-## Acceptance criteria
+- Normalized: reuse `stream_normalized_logs`. It already reads the
+  materialized sidecar first. On a miss it does the bounded historical
+  normalization under the per-execution lease and global permit, and writes
+  the sidecar. Materialize the `/entries/<n>` patches with
+  `normalized_log_cache::materialize_entries`, which is the same function
+  that builds the sidecar. When a live store exists, snapshot its buffered
+  history (`indexed_entry_patches_from_history`) instead of following the
+  tail, and return `complete: false`.
+- The drain runs in a spawned task. If the client aborts, a cold
+  normalization still finishes and writes its sidecar, so the next attempt
+  ("load earlier") is fast. The work stays bounded by the existing lease and
+  permit.
+- Raw: reuse `stream_raw_logs`. Stdout and stderr become
+  `{type: 'STDOUT' | 'STDERR', content}` in order, exactly as
+  `ConversationPatch::add_stdout/add_stderr` do for the socket.
+- `GET …/messages` was checked and does not fit. It projects entries into
+  truncated `SessionMessage` rows, drops tool/diff/stdout entries and caps
+  text at 4000 characters.
+- New Rust types derive `TS` and are generated by `pnpm run generate-types`.
 
-- AC1. Backend unit test: when a computation outlasts the deadline,
-  `get_within` returns the last known stats, and the computation later
-  publishes so a following call is a fresh cache hit with one compute.
-- AC2. Backend unit test: a never-computed workspace whose computation
-  outlasts the deadline returns `None`, and a later call returns the published
-  value without recomputing.
-- AC3. Backend unit test: invalidation keeps the last known value as a
-  fallback, but a stale fallback never passes as fresh (a within-deadline
-  recompute still runs and wins).
-- AC4. Frontend test: a summaries fetch that never resolves is aborted after
-  the timeout, and the hook recovers with data from the next request.
-- AC5. Frontend test: aborting React Query's signal aborts the underlying
-  request.
-- AC6. `pnpm run check`, `pnpm run lint`, the web-core tests,
-  `cargo test -p services` and the summary route tests pass, plus
-  `pnpm run format`.
+**Client.** A new `fetchHistoricProcessEntries` loader:
 
-## Risks
+- Uses `makeLocalApiRequest` (host scoping `/api/host/{id}`, remote-web relay
+  and WebRTC transport).
+- Has an `AbortController` deadline (`HISTORY_HTTP_DEADLINE_MS`). A timeout,
+  an abort, a non-2xx status, `success: false` and malformed JSON all reject.
+  It settles exactly once.
+- On `complete: false` (the process finished between the snapshot and the
+  fetch, or its store is still live), it falls back to the existing
+  `normalized-logs/ws` / `raw-logs/ws` path with its idle timeout. That path
+  converges to the full log when the store drops. A truncated snapshot is
+  never cached or shown as final.
+- `useConversationHistory` uses it for every non-running process: the
+  initial load, "load earlier", and the reload after running → finished.
+  Running processes keep `loadRunningAndEmitWithBackoff` over WebSocket.
 
-- Stale diff stats can show for up to one poll after a slow recompute. This is
-  acceptable, since the alternative is showing no metadata at all.
-- A 20 s client timeout under a 3 s server budget leaves room for slow mobile
-  links and DB contention without false aborts.
+### G2. No duplicate sockets or history loads
+
+- **Shared JSON-patch streams.** `useJsonPatchWsStream` subscribes to a
+  ref-counted stream keyed by endpoint and resolved host scope. Consumers of
+  the same key share one socket, snapshot, reconnect and backoff state. After
+  the last subscriber leaves, the socket lingers for `STREAM_LINGER_MS`
+  (3 s) before closing, which absorbs mount/unmount churn. The existing
+  semantics carry over unchanged: keep the snapshot while reconnecting to the
+  same endpoint, only `Ready` resets backoff, `finished` is terminal, and a
+  clean 1000 close does not reconnect.
+- **One session process stream.** `useExecutionProcesses` always requests
+  `show_soft_deleted=true` and filters `dropped` on the client when the caller
+  did not ask for soft-deleted rows. Every caller then shares one socket.
+- **Discovery.** `getDiscoveredOptionsStreamUrl` drops `workspace_id` and
+  `repo_id` when `session_id` is given, so the two chat consumers share one
+  URL.
+- **History once per scope.** `useConversationHistory` keeps a per-scope
+  cache of settled (`complete`) entries for completed processes. Responses
+  that `loadProcessesInOrder` discards past the threshold stay in the cache,
+  and "load earlier" reads the cache before fetching. The cache is cleared
+  when the scope changes. A failed fetch is not cached, so "load earlier"
+  still retries it.
+
+### G3. The chat's requests go first on mobile
+
+On the mobile layout:
+
+- `PreviewBrowserContainer` (preview settings scratch stream) and
+  `BrowserPanelContainer` (browser-session socket and a process stream) mount
+  only once their tab has been shown. After that they stay mounted, which
+  keeps the existing "preserve sockets across tab switches" behaviour.
+- The workspace git diff stream (`WorkspaceProvider`) is deferred on mobile
+  until a diff-consuming tab (`changes`, `git`) is shown or the chat's initial
+  history has settled, whichever comes first. The chat's diff-stats pill then
+  fills in after the rows appear, not before. Desktop is unchanged.
+
+### Stretch goal
+
+An HTTP snapshot of the session's processes before the live stream attaches
+is **not** built. With G1 and G2 the chat needs exactly one socket before
+its rows render (the shared session stream). Multiplexing all subscriptions
+over one socket is written up as a proposal in the wiki page.
+
+## Constraints kept
+
+- `wiki/awaited-stream-settlement.md` rules, applied to HTTP: settle once;
+  close or timeout is a failure; a failed turn is skipped, counted and
+  retryable through "load earlier", with no auto-retry during initial load;
+  one unsettled fetch never holds the spinner (the deadline bounds it).
+- The workspace summaries path (#350), NFS and Cloudflare configuration are
+  not touched.
+
+## Acceptance
+
+- For the workspace above: zero `normalized-logs/ws` for completed turns,
+  exactly one `execution-processes/stream/session/ws`, each history GET issued
+  once, and a spinner that does not wait on git diff, discovered-options,
+  approvals, preview or browser-session sockets.
+- Before and after WebSocket counts and time until rows, measured with a
+  Playwright mobile probe (no added latency, and with 150 ms RTT added via
+  CDP). WebKit is not installed on the worker, so Chromium with added latency
+  stands in for the phone.
+- Vitest: the HTTP loader (success, timeout, error status, abort,
+  finished-during-load), the shared session stream (one socket for many
+  consumers), and single history load per scope. Rust tests for the new
+  routes' snapshot logic.
+- Wiki updated with the "each WebSocket is a handshake" rule and numbers.

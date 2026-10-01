@@ -1994,9 +1994,16 @@ export const agentsApi = {
   ): string => {
     const params = new URLSearchParams();
     params.set('executor', agent);
-    if (opts?.workspaceId) params.set('workspace_id', opts.workspaceId);
-    if (opts?.sessionId) params.set('session_id', opts.sessionId);
-    if (opts?.repoId) params.set('repo_id', opts.repoId);
+    if (opts?.sessionId) {
+      // A session fixes the workspace and working directory on the server,
+      // which then only uses workspace_id as a consistency check and ignores
+      // repo_id. Leaving them out makes every caller for this session share
+      // one discovery socket.
+      params.set('session_id', opts.sessionId);
+    } else {
+      if (opts?.workspaceId) params.set('workspace_id', opts.workspaceId);
+      if (opts?.repoId) params.set('repo_id', opts.repoId);
+    }
 
     return `/api/agents/discovered-options/ws?${params.toString()}`;
   },

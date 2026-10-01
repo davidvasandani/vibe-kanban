@@ -47,7 +47,7 @@ use executors::{
         utils::{
             ConversationPatch,
             patch::{
-                fix_patch_ops, is_add_or_replace, normalized_entry_from_patch_value,
+                PatchType, fix_patch_ops, is_add_or_replace, normalized_entry_from_patch_value,
                 patch_entry_path,
             },
         },
@@ -266,6 +266,143 @@ where
     }
 
     entries_from_patches(id, &patches)
+}
+
+/// An execution's conversation entries as one response rather than a stream:
+/// the `entries` array the matching log websocket's replay converges to.
+///
+/// `complete` is the only thing that lets a caller treat `entries` as final.
+/// It is false whenever the answer could still grow — a live store (the turn
+/// is running, or has only just finished and is still being finalized), a
+/// process whose row still says `Running`, or a settled source that ended
+/// without its `Finished` sentinel. A caller that gets `complete: false` must
+/// not cache or present the entries as the whole turn.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LogSnapshot {
+    pub entries: Vec<serde_json::Value>,
+    pub complete: bool,
+}
+
+/// Materialize indexed entry patches, re-basing when strict application
+/// fails. Only used for snapshots already reported as incomplete, or for a
+/// settled source whose patches turned out not to apply — the strict form is
+/// what decides whether a settled answer may be called complete.
+fn materialize_or_rebase(id: &Uuid, patches: &[Patch]) -> Vec<serde_json::Value> {
+    match normalized_log_cache::materialize_entries(patches) {
+        Ok(values) => values,
+        Err(e) => {
+            let (values, dropped) = normalized_log_cache::materialize_entries_rebased(patches);
+            tracing::warn!(
+                execution_id = %id,
+                dropped_operations = dropped,
+                "Could not materialize log snapshot strictly, re-based it: {e}"
+            );
+            values
+        }
+    }
+}
+
+/// Source selection for [`ContainerService::normalized_log_snapshot`],
+/// separate so it is testable without a database — the same split, for the
+/// same reason, as [`normalized_entries_from_sources`]. A live store is
+/// snapshotted and never followed: its stream is a tail that only ends with
+/// the turn.
+async fn normalized_log_snapshot_from_sources<Fut>(
+    id: &Uuid,
+    live_store: Option<Arc<MsgStore>>,
+    process_running: bool,
+    settled_stream: impl FnOnce() -> Fut,
+) -> LogSnapshot
+where
+    Fut: Future<Output = Option<BoxStream<'static, Result<LogMsg, std::io::Error>>>>,
+{
+    if let Some(store) = live_store {
+        let patches = indexed_entry_patches_from_history(&store);
+        return LogSnapshot {
+            entries: materialize_or_rebase(id, &patches),
+            complete: false,
+        };
+    }
+
+    // No logs at all: the websocket answers this with an immediate
+    // `finished`, so the snapshot is the same empty, settled answer.
+    let Some(mut stream) = settled_stream().await else {
+        return LogSnapshot {
+            entries: Vec::new(),
+            complete: !process_running,
+        };
+    };
+
+    let mut patches = Vec::new();
+    let mut finished = false;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(LogMsg::JsonPatch(patch)) => {
+                if is_indexed_entry_patch(&patch) {
+                    patches.push(patch);
+                }
+            }
+            Ok(LogMsg::Finished) => {
+                finished = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(execution_id = %id, "Log snapshot source failed: {e}");
+                break;
+            }
+        }
+    }
+
+    match normalized_log_cache::materialize_entries(&patches) {
+        Ok(entries) => LogSnapshot {
+            entries,
+            complete: finished && !process_running,
+        },
+        Err(_) => LogSnapshot {
+            entries: materialize_or_rebase(id, &patches),
+            complete: false,
+        },
+    }
+}
+
+/// The `{type: "STDOUT" | "STDERR", content}` entry a raw log message becomes,
+/// exactly as `ConversationPatch::add_stdout/add_stderr` build it for the
+/// raw-logs websocket.
+fn raw_log_entry(msg: &LogMsg) -> Option<serde_json::Value> {
+    let patch_type = match msg {
+        LogMsg::Stdout(content) => PatchType::Stdout(content.clone()),
+        LogMsg::Stderr(content) => PatchType::Stderr(content.clone()),
+        _ => return None,
+    };
+    serde_json::to_value(patch_type).ok()
+}
+
+/// Source selection for [`ContainerService::raw_log_snapshot`]: a live store's
+/// buffered output (incomplete), otherwise the stored raw messages.
+async fn raw_log_snapshot_from_sources<Fut>(
+    live_store: Option<Arc<MsgStore>>,
+    process_running: bool,
+    stored_messages: impl FnOnce() -> Fut,
+) -> LogSnapshot
+where
+    Fut: Future<Output = Option<Vec<LogMsg>>>,
+{
+    if let Some(store) = live_store {
+        return LogSnapshot {
+            entries: store.select_history(raw_log_entry),
+            complete: false,
+        };
+    }
+
+    let entries = stored_messages()
+        .await
+        .map(|messages| messages.iter().filter_map(raw_log_entry).collect())
+        .unwrap_or_default();
+    LogSnapshot {
+        entries,
+        complete: !process_running,
+    }
 }
 
 async fn replay_materialized_log(
@@ -2086,6 +2223,30 @@ pub trait ContainerService {
         .await
     }
 
+    /// The normalized entries of an execution as one settled-or-not
+    /// response, for request/response readers such as the chat history GET.
+    /// Same sources as [`Self::stream_normalized_logs`] — the materialized
+    /// sidecar, else one bounded historical normalization that writes it — so
+    /// the answer is exactly what the websocket replay converges to.
+    async fn normalized_log_snapshot(&self, id: &Uuid, process_running: bool) -> LogSnapshot {
+        normalized_log_snapshot_from_sources(
+            id,
+            self.get_msg_store_by_id(id).await,
+            process_running,
+            || self.stream_normalized_logs(id),
+        )
+        .await
+    }
+
+    /// The raw stdout/stderr of an execution as one response, in the entry
+    /// shape the raw-logs websocket produces.
+    async fn raw_log_snapshot(&self, id: &Uuid, process_running: bool) -> LogSnapshot {
+        raw_log_snapshot_from_sources(self.get_msg_store_by_id(id).await, process_running, || {
+            execution_process::load_raw_log_messages(&self.db().pool, *id)
+        })
+        .await
+    }
+
     /// Write the normalized-log cache for an execution the moment it leaves
     /// `Running`, straight from its in-memory patches — every caller here is
     /// removing the execution's `MsgStore` from the map because the process
@@ -3465,6 +3626,186 @@ mod tests {
         assert!(
             script.poller.is_some(),
             "the selected process should still be identifiable as a poller"
+        );
+    }
+}
+
+#[cfg(test)]
+mod log_snapshot_tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use executors::logs::utils::ConversationPatch;
+    use futures::StreamExt;
+    use serde_json::json;
+    use tokio::time::Duration;
+    use utils::msg_store::MsgStore;
+    use uuid::Uuid;
+
+    use super::{
+        LogMsg, LogSnapshot, NormalizedEntry, NormalizedEntryType,
+        normalized_log_snapshot_from_sources, raw_log_snapshot_from_sources,
+    };
+
+    fn assistant(index: usize, content: &str) -> json_patch::Patch {
+        ConversationPatch::add_normalized_entry(
+            index,
+            NormalizedEntry {
+                timestamp: None,
+                entry_type: NormalizedEntryType::AssistantMessage,
+                content: content.to_string(),
+                metadata: None,
+            },
+        )
+    }
+
+    fn contents(snapshot: &LogSnapshot) -> Vec<String> {
+        snapshot
+            .entries
+            .iter()
+            .map(|entry| {
+                entry["content"]["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn live_store_is_snapshotted_as_incomplete_without_opening_the_tail() {
+        let store = MsgStore::new();
+        store.push(LogMsg::JsonPatch(assistant(0, "still working")));
+        let opened = Arc::new(AtomicBool::new(false));
+        let opened_flag = opened.clone();
+
+        let snapshot = tokio::time::timeout(
+            Duration::from_secs(5),
+            normalized_log_snapshot_from_sources(
+                &Uuid::new_v4(),
+                Some(Arc::new(store)),
+                false,
+                || async move {
+                    opened_flag.store(true, Ordering::Relaxed);
+                    Some(futures::stream::pending().boxed())
+                },
+            ),
+        )
+        .await
+        .expect("a live store must be snapshotted, not followed");
+
+        assert!(!opened.load(Ordering::Relaxed));
+        assert!(!snapshot.complete, "a live store's answer can still grow");
+        assert_eq!(contents(&snapshot), vec!["still working"]);
+    }
+
+    #[tokio::test]
+    async fn settled_stream_with_finished_is_complete() {
+        let patches = vec![
+            Ok(LogMsg::JsonPatch(assistant(0, "first"))),
+            Ok(LogMsg::JsonPatch(ConversationPatch::add_stdout(
+                1,
+                "out".to_string(),
+            ))),
+            Ok(LogMsg::Finished),
+        ];
+        let snapshot =
+            normalized_log_snapshot_from_sources(&Uuid::new_v4(), None, false, || async move {
+                Some(futures::stream::iter(patches).boxed())
+            })
+            .await;
+
+        assert!(snapshot.complete);
+        assert_eq!(snapshot.entries.len(), 2);
+        assert_eq!(
+            snapshot.entries[1],
+            json!({"type": "STDOUT", "content": "out"})
+        );
+    }
+
+    #[tokio::test]
+    async fn settled_stream_without_finished_is_not_complete() {
+        let patches = vec![
+            Ok(LogMsg::JsonPatch(assistant(0, "cut off"))),
+            Err(std::io::Error::other("read failed")),
+        ];
+        let snapshot =
+            normalized_log_snapshot_from_sources(&Uuid::new_v4(), None, false, || async move {
+                Some(futures::stream::iter(patches).boxed())
+            })
+            .await;
+
+        assert!(!snapshot.complete, "a source that failed is not settled");
+        assert_eq!(contents(&snapshot), vec!["cut off"]);
+    }
+
+    #[tokio::test]
+    async fn running_status_is_never_complete() {
+        let patches = vec![
+            Ok(LogMsg::JsonPatch(assistant(0, "recovered after restart"))),
+            Ok(LogMsg::Finished),
+        ];
+        let snapshot =
+            normalized_log_snapshot_from_sources(&Uuid::new_v4(), None, true, || async move {
+                Some(futures::stream::iter(patches).boxed())
+            })
+            .await;
+
+        assert!(!snapshot.complete);
+    }
+
+    #[tokio::test]
+    async fn missing_logs_are_an_empty_settled_answer() {
+        let snapshot =
+            normalized_log_snapshot_from_sources(&Uuid::new_v4(), None, false, || async { None })
+                .await;
+        assert_eq!(
+            snapshot,
+            LogSnapshot {
+                entries: Vec::new(),
+                complete: true
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_snapshot_keeps_stdout_and_stderr_in_order() {
+        let snapshot = raw_log_snapshot_from_sources(None, false, || async {
+            Some(vec![
+                LogMsg::Stdout("one".to_string()),
+                LogMsg::Ready,
+                LogMsg::Stderr("two".to_string()),
+                LogMsg::Stdout("three".to_string()),
+            ])
+        })
+        .await;
+
+        assert!(snapshot.complete);
+        assert_eq!(
+            snapshot.entries,
+            vec![
+                json!({"type": "STDOUT", "content": "one"}),
+                json!({"type": "STDERR", "content": "two"}),
+                json!({"type": "STDOUT", "content": "three"}),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_snapshot_of_a_live_store_is_incomplete() {
+        let store = MsgStore::new();
+        store.push(LogMsg::Stdout("partial".to_string()));
+        let snapshot = raw_log_snapshot_from_sources(Some(Arc::new(store)), false, || async {
+            panic!("stored messages must not be read while a live store exists")
+        })
+        .await;
+
+        assert!(!snapshot.complete);
+        assert_eq!(
+            snapshot.entries,
+            vec![json!({"type": "STDOUT", "content": "partial"})]
         );
     }
 }

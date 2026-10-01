@@ -189,6 +189,28 @@ export function WorkspacesLayout() {
   const [mobileTab, setMobileActiveTab] = useMobileActiveTab();
   const mainContainerRef = useRef<WorkspacesMainContainerHandle>(null);
 
+  // Mobile tabs stay mounted once shown, to keep their sockets and scroll
+  // positions across tab switches. Panels with their own sockets are not
+  // mounted before then: on a phone every websocket is a queued handshake,
+  // and the chat must not wait behind panels that cannot be seen.
+  const [visitedMobileTabs, setVisitedMobileTabs] = useState<{
+    workspaceId: string | undefined;
+    tabs: ReadonlySet<string>;
+  }>({ workspaceId, tabs: new Set([mobileTab]) });
+  useEffect(() => {
+    setVisitedMobileTabs((current) => {
+      if (current.workspaceId !== workspaceId) {
+        return { workspaceId, tabs: new Set([mobileTab]) };
+      }
+      if (current.tabs.has(mobileTab)) return current;
+      return { workspaceId, tabs: new Set([...current.tabs, mobileTab]) };
+    });
+  }, [mobileTab, workspaceId]);
+  const hasVisitedMobileTab = (tab: string) =>
+    tab === mobileTab ||
+    (visitedMobileTabs.workspaceId === workspaceId &&
+      visitedMobileTabs.tabs.has(tab));
+
   // On mobile, the workspaces landing (no workspace selected, not creating)
   // should default to the Active list rather than the empty "select a
   // workspace to get started" chat view. Only default when newly entering the
@@ -314,7 +336,8 @@ export function WorkspacesLayout() {
 
   // ── Mobile layout ──────────────────────────────────────────────────
   // Uses `hidden` CSS class (NOT conditional rendering) to preserve
-  // WebSocket connections and scroll positions across tab switches.
+  // WebSocket connections and scroll positions across tab switches. The
+  // preview and browser panels mount on first visit (see hasVisitedMobileTab).
   if (isMobile) {
     const mobileContent = (
       <ReviewProvider workspaceId={selectedWorkspace?.id}>
@@ -393,7 +416,7 @@ export function WorkspacesLayout() {
                 mobileTab !== 'preview' && 'hidden'
               )}
             >
-              {selectedWorkspace?.id && (
+              {selectedWorkspace?.id && hasVisitedMobileTab('preview') && (
                 <PreviewBrowserContainer
                   workspaceId={selectedWorkspace.id}
                   className=""
@@ -408,7 +431,7 @@ export function WorkspacesLayout() {
                 mobileTab !== 'browser' && 'hidden'
               )}
             >
-              {selectedWorkspace?.id && (
+              {selectedWorkspace?.id && hasVisitedMobileTab('browser') && (
                 <BrowserPanelContainer
                   workspaceId={selectedWorkspace.id}
                   className=""

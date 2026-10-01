@@ -6,6 +6,12 @@ import {
 import { useExecutionProcessesContext } from '@/shared/hooks/useExecutionProcessesContext';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { streamJsonPatchEntries } from '@/shared/lib/streamJsonPatchEntries';
+import {
+  fetchProcessLogSnapshot,
+  loadHistoricProcessEntries,
+  type HistoricEntriesResult,
+} from '@/shared/hooks/useConversationHistory/fetchHistoricEntries';
+import { useChatHistoryReadyStore } from '@/shared/stores/useChatHistoryReadyStore';
 import type {
   AddEntryType,
   ConversationTimelineSource,
@@ -33,12 +39,14 @@ export interface UseConversationHistoryResult {
 }
 import {
   HISTORY_FETCH_CONCURRENCY,
+  HISTORY_HTTP_DEADLINE_MS,
   HISTORY_STREAM_IDLE_TIMEOUT_MS,
   MAX_RECENT_HISTORY_PROCESSES,
   MIN_INITIAL_ENTRIES,
   REMAINING_BATCH_SIZE,
 } from '@/shared/hooks/useConversationHistory/constants';
 import {
+  createSettledEntriesCache,
   getRecentProcessIdsToRetain,
   getUnloadedHistoricProcesses,
   loadProcessesInOrder,
@@ -51,9 +59,14 @@ import {
 } from '../plan-reveal-transition';
 
 export const useConversationHistory = ({
+  attempt,
   onTimelineUpdated,
   scopeKey,
 }: UseConversationHistoryParams): UseConversationHistoryResult => {
+  const workspaceId = attempt?.id;
+  const markChatHistorySettled = useChatHistoryReadyStore(
+    (state) => state.markSettled
+  );
   const {
     executionProcessesVisible: executionProcessesRaw,
     isLoading,
@@ -73,6 +86,8 @@ export const useConversationHistory = ({
   const scopeGenerationRef = useRef(0);
   const loadEarlierInFlightRef = useRef(false);
   const planRevealStateRef = useRef<PlanRevealState>(INITIAL_PLAN_REVEAL_STATE);
+  // Completed turns already fetched in this scope, so none is requested twice.
+  const settledEntriesCacheRef = useRef(createSettledEntriesCache<PatchType>());
   const [hasEarlierHistory, setHasEarlierHistory] = useState(false);
   const [isLoadingEarlier, setIsLoadingEarlier] = useState(false);
   const [loadEarlierError, setLoadEarlierError] = useState<string | null>(null);
@@ -123,7 +138,9 @@ export const useConversationHistory = ({
     );
   }, [executionProcessesRaw]);
 
-  const loadEntriesForHistoricExecutionProcess = (
+  // The websocket replay of a settled turn. Only the fallback now: used when
+  // the HTTP snapshot reports the turn is not settled yet.
+  const streamHistoricExecutionProcessEntries = (
     executionProcess: ExecutionProcess
   ) => {
     let url = '';
@@ -141,16 +158,41 @@ export const useConversationHistory = ({
           resolve(allEntries);
         },
         onError: (err) => {
-          console.warn(
-            `Error loading entries for historic execution process ${executionProcess.id}`,
-            err
-          );
+          // Logged once, by loadSettledProcessEntries, which sees every failure.
           controller.close();
           reject(err);
         },
       });
     });
   };
+
+  // Completed turns load over plain HTTP: requests share the page's existing
+  // connection, while each websocket is a new handshake through the edge
+  // proxy, and Safari opens those one at a time.
+  const loadSettledProcessEntries = (
+    executionProcess: ExecutionProcess
+  ): Promise<HistoricEntriesResult> =>
+    loadHistoricProcessEntries(executionProcess, {
+      fetchSnapshot: (process) =>
+        fetchProcessLogSnapshot(process, {
+          deadlineMs: HISTORY_HTTP_DEADLINE_MS,
+        }),
+      streamFallback: streamHistoricExecutionProcessEntries,
+    }).catch((err: unknown) => {
+      console.warn(
+        `Error loading entries for historic execution process ${executionProcess.id}`,
+        err
+      );
+      throw err;
+    });
+
+  const loadEntriesForHistoricExecutionProcess = (
+    executionProcess: ExecutionProcess
+  ): Promise<PatchType[]> =>
+    settledEntriesCacheRef.current.get(
+      executionProcess,
+      loadSettledProcessEntries
+    );
 
   const patchWithKey = (
     patch: PatchType,
@@ -497,6 +539,7 @@ export const useConversationHistory = ({
     emittedEmptyInitialRef.current = false;
     streamingProcessIdsRef.current.clear();
     planRevealStateRef.current = INITIAL_PLAN_REVEAL_STATE;
+    settledEntriesCacheRef.current = createSettledEntriesCache<PatchType>();
     previousStatusMapRef.current.clear();
     loadEarlierInFlightRef.current = false;
     setHasEarlierHistory(false);
@@ -517,6 +560,7 @@ export const useConversationHistory = ({
         if (emittedEmptyInitialRef.current) return;
         emittedEmptyInitialRef.current = true;
         emitEntries(displayedExecutionProcesses.current, 'initial', false);
+        if (workspaceId) markChatHistorySettled(workspaceId);
         return;
       }
 
@@ -530,6 +574,7 @@ export const useConversationHistory = ({
       });
       emitEntries(displayedExecutionProcesses.current, 'initial', false);
       setHasEarlierHistory(hasUnloadedHistoricProcesses());
+      if (workspaceId) markChatHistorySettled(workspaceId);
     })();
     return () => {
       cancelled = true;
@@ -541,6 +586,8 @@ export const useConversationHistory = ({
     loadHistoricEntries,
     hasUnloadedHistoricProcesses,
     emitEntries,
+    workspaceId,
+    markChatHistorySettled,
   ]); // include idListKey so new processes trigger reload
 
   useEffect(() => {
@@ -607,7 +654,12 @@ export const useConversationHistory = ({
       for (const process of processesToReload) {
         let entries: PatchType[];
         try {
-          entries = await loadEntriesForHistoricExecutionProcess(process);
+          // Bypass the cache: this turn was running when it was last read.
+          const result = await loadSettledProcessEntries(process);
+          entries = result.entries;
+          if (result.complete) {
+            settledEntriesCacheRef.current.set(process.id, entries);
+          }
         } catch {
           continue;
         }

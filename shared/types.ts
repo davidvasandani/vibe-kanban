@@ -74,6 +74,14 @@ export type BrowserSessionError = { "code": "CONTROL_CONFLICT", controller: Brow
 
 export type BrowserSessionWithState = { session: BrowserSession, live: BrowserSessionLiveState | null, };
 
+export type ExecutionProcessLogSnapshot = { entries: Array<PatchType>, 
+/**
+ * True only when `entries` is settled. False while the process still has
+ * a live log store or is running, or when the settled source ended early:
+ * the caller must not treat those entries as the whole turn.
+ */
+complete: boolean, };
+
 export type BrowserSessionListQuery = { workspace_id: string, include_closed: boolean, };
 
 export type BrowserPrincipalKind = "human" | "agent";

@@ -20,7 +20,7 @@ use deployment::Deployment;
 use executors::logs::{NormalizedEntry, NormalizedEntryType};
 use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
-use services::services::container::ContainerService;
+use services::services::container::{ContainerService, LogSnapshot};
 use ts_rs::TS;
 use utils::{log_msg::LogMsg, response::ApiResponse};
 use uuid::Uuid;
@@ -253,6 +253,79 @@ async fn get_execution_worker_job(
     let job = ExecutionWorkerJob::find_by_execution_id(&deployment.db().pool, execution_process.id)
         .await?;
     Ok(ResponseJson(ApiResponse::success(job)))
+}
+
+/// An execution's conversation entries in one response: the `entries` array
+/// the matching `…/normalized-logs/ws` or `…/raw-logs/ws` replay converges
+/// to. Completed turns load this over plain HTTP so the chat does not pay a
+/// websocket handshake per turn (see `wiki/awaited-stream-settlement.md`).
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct ExecutionProcessLogSnapshot {
+    #[ts(type = "Array<PatchType>")]
+    pub entries: Vec<serde_json::Value>,
+    /// True only when `entries` is settled. False while the process still has
+    /// a live log store or is running, or when the settled source ended early:
+    /// the caller must not treat those entries as the whole turn.
+    pub complete: bool,
+}
+
+impl From<LogSnapshot> for ExecutionProcessLogSnapshot {
+    fn from(snapshot: LogSnapshot) -> Self {
+        Self {
+            entries: snapshot.entries,
+            complete: snapshot.complete,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogSnapshotKind {
+    Normalized,
+    Raw,
+}
+
+/// Builds the snapshot on a spawned task and waits for it. Detached on purpose:
+/// a cold historical normalization is cancelled when its stream is dropped, so
+/// a client that gives up on its deadline would otherwise cancel it every time
+/// and the turn would never get its sidecar. The per-execution lease and the
+/// global normalization permit still bound the work.
+async fn log_snapshot(
+    deployment: DeploymentImpl,
+    execution_process: &ExecutionProcess,
+    kind: LogSnapshotKind,
+) -> Result<ExecutionProcessLogSnapshot, ApiError> {
+    let id = execution_process.id;
+    let running = execution_process.status == ExecutionProcessStatus::Running;
+    let task = tokio::spawn(async move {
+        let container = deployment.container();
+        match kind {
+            LogSnapshotKind::Normalized => container.normalized_log_snapshot(&id, running).await,
+            LogSnapshotKind::Raw => container.raw_log_snapshot(&id, running).await,
+        }
+    });
+    let snapshot = task.await.map_err(|e| {
+        ApiError::Io(std::io::Error::other(format!(
+            "log snapshot task failed: {e}"
+        )))
+    })?;
+    Ok(snapshot.into())
+}
+
+async fn get_normalized_logs_snapshot(
+    Extension(execution_process): Extension<ExecutionProcess>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<ExecutionProcessLogSnapshot>>, ApiError> {
+    let snapshot =
+        log_snapshot(deployment, &execution_process, LogSnapshotKind::Normalized).await?;
+    Ok(ResponseJson(ApiResponse::success(snapshot)))
+}
+
+async fn get_raw_logs_snapshot(
+    Extension(execution_process): Extension<ExecutionProcess>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<ExecutionProcessLogSnapshot>>, ApiError> {
+    let snapshot = log_snapshot(deployment, &execution_process, LogSnapshotKind::Raw).await?;
+    Ok(ResponseJson(ApiResponse::success(snapshot)))
 }
 
 async fn stream_raw_logs_ws(
@@ -526,7 +599,9 @@ pub(super) fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/repo-states", get(get_execution_process_repo_states))
         .route("/worker-job", get(get_execution_worker_job))
         .route("/messages", get(get_execution_process_messages))
+        .route("/raw-logs", get(get_raw_logs_snapshot))
         .route("/raw-logs/ws", get(stream_raw_logs_ws))
+        .route("/normalized-logs", get(get_normalized_logs_snapshot))
         .route("/normalized-logs/ws", get(stream_normalized_logs_ws))
         .layer(from_fn_with_state(
             deployment.clone(),
@@ -750,5 +825,30 @@ mod tests {
         assert_eq!(messages[0].role, "assistant");
         assert_eq!(messages[0].text, "answer");
         assert!(!has_more);
+    }
+}
+
+#[cfg(test)]
+mod log_snapshot_wire_tests {
+    use serde_json::json;
+    use services::services::container::LogSnapshot;
+
+    use super::ExecutionProcessLogSnapshot;
+
+    #[test]
+    fn snapshot_serializes_entries_and_completeness_for_the_chat() {
+        let wire: ExecutionProcessLogSnapshot = LogSnapshot {
+            entries: vec![json!({"type": "STDOUT", "content": "hi"})],
+            complete: false,
+        }
+        .into();
+
+        assert_eq!(
+            serde_json::to_value(&wire).unwrap(),
+            json!({
+                "entries": [{"type": "STDOUT", "content": "hi"}],
+                "complete": false
+            })
+        );
     }
 }

@@ -39,6 +39,7 @@ fn generate_types_content() -> String {
         services::services::browser::types::BrowserPageInfo::decl(),
         services::services::browser::types::BrowserSessionError::decl(),
         services::services::browser::BrowserSessionWithState::decl(),
+        server::routes::execution_processes::ExecutionProcessLogSnapshot::decl(),
         server::routes::browser_sessions::BrowserSessionListQuery::decl(),
         server::routes::browser_sessions::BrowserPrincipalKind::decl(),
         server::routes::browser_sessions::BrowserAcquireRequest::decl(),
