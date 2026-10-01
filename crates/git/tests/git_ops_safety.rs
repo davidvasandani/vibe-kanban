@@ -1496,3 +1496,48 @@ fn push_if_needed_pushes_when_push_url_is_rewritten_elsewhere() {
         head
     );
 }
+
+#[test]
+fn org_token_commands_refuse_inherited_rewrites_that_bypass_the_token() {
+    use utils::github_credentials::{GitHubToken, OwnerCredential};
+
+    let temp_dir = TempDir::new().unwrap();
+    let repo_path = temp_dir.path().join("repo");
+    let repo = Repository::init(&repo_path).unwrap();
+    let url = "https://github.com/sweetgreen/app.git";
+    // An equally long rule, which git ranks above the command-scoped one.
+    repo.config()
+        .unwrap()
+        .set_str("url.git@github.com:sweetgreen/app.git.insteadOf", url)
+        .unwrap();
+    repo.config()
+        .unwrap()
+        .set_str("url.git@github.com:sweetgreen/app.git.pushInsteadOf", url)
+        .unwrap();
+    let mut credentials = GitHubCredentials::default();
+    credentials.insert(
+        "sweetgreen",
+        OwnerCredential::OrgToken(GitHubToken::new("synthetic-token")),
+    );
+    let cli = GitCli::new();
+    for result in [
+        cli.check_remote_branch_exists_with(&repo_path, url, "main", &credentials)
+            .map(|_| ()),
+        cli.push_with(&repo_path, url, "main", false, &credentials),
+    ] {
+        match result {
+            Err(GitCliError::CredentialUnavailable(message)) => {
+                assert!(
+                    message.contains("sweetgreen org token cannot be used"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("git@github.com:sweetgreen/app.git"),
+                    "{message}"
+                );
+                assert!(!message.contains("synthetic-token"), "{message}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+}
