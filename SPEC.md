@@ -61,12 +61,14 @@ VK records the new session id from the stream as it already does today.
    conversation could not be restored and the agent should check the
    workspace's files and git history for prior work.
 4. **FR-4 Visible, never silent.** Log a `warn` with the missing session id
-   when falling back. Also write a system status line into the execution's
-   log stream, so the chat shows the user that the earlier Claude
+   when falling back. Also write a Vibe Kanban diagnostic line to the
+   execution's stderr ahead of Claude's own stderr. Per constitution IX it
+   must never be injected into agent stdout. The chat then shows the user that the earlier Claude
    transcript was missing and a new conversation was started. Prior
    knowledge (`vk/6026-no-conversation`) forbids silently substituting an
    empty session.
-5. **FR-5 Scope.** This change touches only the Claude Code executor.
+5. **FR-5 Scope.** This change touches only the Claude Code executor (plus a
+   generic stderr helper in `stdout_dup.rs`).
    Other executors, the DB schema and the frontend stay unchanged.
 
 ## Non-goals
@@ -81,7 +83,6 @@ VK records the new session id from the stream as it already does today.
 - Unit tests: transcript present (in any project dir) → resume; present
   under `CLAUDE_CONFIG_DIR` → resume; projects dir present but file absent
   → fresh; projects dir unreadable or missing → resume; unsafe session id →
-  resume. The fallback notice parses as a Claude `system`/`status` line and
-  normalizes to a visible system message.
+  resume. The stderr notice comes before the child's own stderr output.
 - `cargo test -p executors` passes; `pnpm run format` leaves the tree clean;
   clippy is clean for the crate.

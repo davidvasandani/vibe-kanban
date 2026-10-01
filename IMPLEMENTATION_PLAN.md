@@ -2,7 +2,8 @@
 
 Task: `vk/9f5d-no-conversation`. See `SPEC.md` and `PRIOR_KNOWLEDGE.md`.
 
-All changes are in `crates/executors/src/executors/claude.rs`.
+Changes are in `crates/executors/src/executors/claude.rs` and
+`crates/executors/src/stdout_dup.rs`.
 
 ## Steps
 
@@ -30,13 +31,15 @@ All changes are in `crates/executors/src/executors/claude.rs`.
    - Otherwise keep today's behaviour (`--resume`, optional
      `--resume-session-at`).
 
-4. **Visible notice.** Add an `Option<String>` startup-notice parameter to
-   `spawn_internal`. Inside the spawned task, before control-protocol
-   initialization, write a serialized
-   `{"type":"system","subtype":"status","status":<notice>}` line through
-   `log_writer.log_raw`. The existing normalizer turns `status` system
-   messages into a `SystemMessage` entry. Build it with `serde_json` so the
-   text is escaped.
+4. **Visible notice on stderr (constitution IX).** VK must not inject its
+   own metadata into the agent's stdout, so the notice can't be a fake
+   Claude JSON line. Add `prepend_child_stderr(child, notice)` to
+   `stdout_dup.rs`. It takes the child's stderr, puts in a fresh pipe, and
+   runs a task that writes the notice first and then copies the original
+   stderr through. `normalize_claude_stderr_logs` already renders stderr
+   as a visible error entry, which is the same channel worker diagnostics
+   use. `spawn_internal` gains an `Option<&str>` startup notice and calls
+   the helper right after spawning.
 
 5. **Tests** (`#[cfg(test)]` in `claude.rs`, using `tempfile`):
    - present in some project dir → `Present`
@@ -44,8 +47,8 @@ All changes are in `crates/executors/src/executors/claude.rs`.
    - no projects dir → `Unknown`
    - unsafe ids (`""`, `"../x"`, `"a/b"`) → `Unknown`
    - `CLAUDE_CONFIG_DIR` in vars wins over `HOME`; `HOME` maps to `.claude`
-   - the notice line parses as `ClaudeJson::System` with subtype `status`
-     and normalizes to a `SystemMessage` with the notice text.
+   - `prepend_child_stderr` on a real child (`sh -c 'echo inner >&2'`)
+     yields the notice line before `inner`, and EOF once the child exits.
 
 6. **Verify:** `cargo test -p executors claude`,
    `cargo clippy -p executors --all-targets`, `pnpm run format`.

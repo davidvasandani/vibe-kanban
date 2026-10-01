@@ -839,7 +839,7 @@ impl StandardCodingAgentExecutor for ClaudeCode {
     ) -> Result<SpawnedChild, ExecutorError> {
         let command_builder = self.build_command_builder().await?;
         let command_parts = command_builder.build_initial()?;
-        self.spawn_internal(current_dir, prompt, command_parts, env)
+        self.spawn_internal(current_dir, prompt, command_parts, env, None)
             .await
     }
 
@@ -853,18 +853,42 @@ impl StandardCodingAgentExecutor for ClaudeCode {
     ) -> Result<SpawnedChild, ExecutorError> {
         let command_builder = self.build_command_builder().await?;
 
-        let mut args = vec!["--resume".to_string(), session_id.to_string()];
+        let vars = env.clone().with_profile(&self.cmd).vars;
+        let config_dir = claude_config_dir(&vars, |key| std::env::var(key).ok());
+        let status = config_dir
+            .as_deref()
+            .map_or(TranscriptStatus::Unknown, |dir| {
+                claude_transcript_status(dir, session_id)
+            });
 
-        // --resume-session-at truncates Claude's conversation history to the specified
-        // message and continues from there.
-        if let Some(uuid) = reset_to_message_id {
-            args.push("--resume-session-at".to_string());
-            args.push(uuid.to_string());
+        match follow_up_start(status, session_id, reset_to_message_id) {
+            FollowUpStart::Resume(args) => {
+                let command_parts = command_builder.build_follow_up(&args)?;
+                self.spawn_internal(current_dir, prompt, command_parts, env, None)
+                    .await
+            }
+            FollowUpStart::Fresh => {
+                // The transcript is gone (vendor retention cleanup, host move or
+                // manual deletion), so `--resume` would fail on every follow-up.
+                // Start a new conversation in the same workspace and say so
+                // (constitution XLVI).
+                tracing::warn!(
+                    missing_session_id = %session_id,
+                    config_dir = ?config_dir,
+                    "Claude transcript missing; starting a new conversation in the same workspace"
+                );
+                let command_parts = command_builder.build_initial()?;
+                let prompt = format!("{MISSING_TRANSCRIPT_AGENT_NOTICE}\n\n{prompt}");
+                self.spawn_internal(
+                    current_dir,
+                    &prompt,
+                    command_parts,
+                    env,
+                    Some(missing_transcript_user_notice(session_id)),
+                )
+                .await
+            }
         }
-
-        let command_parts = command_builder.build_follow_up(&args)?;
-        self.spawn_internal(current_dir, prompt, command_parts, env)
-            .await
     }
 
     fn normalize_logs(
@@ -1110,6 +1134,7 @@ impl ClaudeCode {
         prompt: &str,
         command_parts: CommandParts,
         env: &ExecutionEnv,
+        startup_notice: Option<String>,
     ) -> Result<SpawnedChild, ExecutorError> {
         let (program_path, mut args) = command_parts.into_resolved().await?;
         // Only suppress a project entry when the launched agent's own user
@@ -1158,6 +1183,9 @@ impl ClaudeCode {
         }
 
         let mut child = command.group_spawn_no_window()?;
+        if let Some(notice) = startup_notice {
+            crate::stdout_dup::prepend_child_stderr(&mut child, notice)?;
+        }
         let child_stdout = child.inner().stdout.take().ok_or_else(|| {
             ExecutorError::Io(std::io::Error::other("Claude Code missing stdout"))
         })?;
@@ -1226,6 +1254,104 @@ impl ClaudeCode {
             mcp_refresh: Some(mcp_refresh_rx),
         })
     }
+}
+
+/// Shown to the agent ahead of the user's message when its earlier Claude
+/// transcript could not be found.
+const MISSING_TRANSCRIPT_AGENT_NOTICE: &str = "[Vibe Kanban] Your earlier conversation in this \
+workspace could not be restored: its Claude Code transcript no longer exists. This is a new \
+conversation. Before continuing, check the workspace's files, git status and git log for the \
+work already done, and don't assume anything beyond what you can find there.";
+
+/// Shown to the user (on stderr, never agent stdout) when a follow-up starts
+/// fresh because the requested transcript is gone.
+fn missing_transcript_user_notice(session_id: &str) -> String {
+    format!(
+        "Vibe Kanban: Claude Code no longer has the transcript for session {session_id} \
+(it was removed, e.g. by Claude's transcript cleanup). Started a new Claude conversation in \
+this workspace; the agent does not remember the earlier conversation."
+    )
+}
+
+/// Whether Claude's private transcript for a session exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranscriptStatus {
+    Present,
+    /// The projects folder was read and no project holds the transcript.
+    Missing,
+    /// The check could not be done; callers must behave as if it were present.
+    Unknown,
+}
+
+/// Claude's config root as the launched child will see it: non-empty
+/// `CLAUDE_CONFIG_DIR`, else `$HOME/.claude`. Each variable comes from the
+/// execution env (including a worker's scoped `HOME`) before the process env.
+fn claude_config_dir(
+    vars: &HashMap<String, String>,
+    process_env: impl Fn(&str) -> Option<String>,
+) -> Option<PathBuf> {
+    let lookup = |key: &str| {
+        vars.get(key)
+            .cloned()
+            .or_else(|| process_env(key))
+            .filter(|value| !value.is_empty())
+    };
+    lookup("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| lookup("HOME").map(|home| PathBuf::from(home).join(".claude")))
+}
+
+/// Look for `<session_id>.jsonl` in every `projects/*` folder. Claude Code
+/// 2.1.281 resolves `--resume <id>` across all project folders, not only the
+/// cwd's (verified against the pinned binary; see
+/// `specs/vk/9f5d-no-conversation/research.md`). Fails open: anything that
+/// prevents a definite answer is `Unknown`.
+fn claude_transcript_status(config_dir: &Path, session_id: &str) -> TranscriptStatus {
+    let safe_segment = !session_id.is_empty()
+        && session_id != "."
+        && session_id != ".."
+        && !session_id.contains(['/', '\\', '\0']);
+    if !safe_segment {
+        return TranscriptStatus::Unknown;
+    }
+    let Ok(entries) = std::fs::read_dir(config_dir.join("projects")) else {
+        return TranscriptStatus::Unknown;
+    };
+    let file_name = format!("{session_id}.jsonl");
+    let found = entries
+        .flatten()
+        .any(|entry| entry.path().join(&file_name).is_file());
+    if found {
+        TranscriptStatus::Present
+    } else {
+        TranscriptStatus::Missing
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FollowUpStart {
+    /// Follow-up arguments for `--resume`.
+    Resume(Vec<String>),
+    /// Start a new conversation; the requested one cannot be resumed.
+    Fresh,
+}
+
+fn follow_up_start(
+    status: TranscriptStatus,
+    session_id: &str,
+    reset_to_message_id: Option<&str>,
+) -> FollowUpStart {
+    if status == TranscriptStatus::Missing {
+        return FollowUpStart::Fresh;
+    }
+    let mut args = vec!["--resume".to_string(), session_id.to_string()];
+    // --resume-session-at truncates Claude's conversation history to the specified
+    // message and continues from there.
+    if let Some(uuid) = reset_to_message_id {
+        args.push("--resume-session-at".to_string());
+        args.push(uuid.to_string());
+    }
+    FollowUpStart::Resume(args)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5162,5 +5288,169 @@ mod tests {
             vars.get("BASH_DEFAULT_TIMEOUT_MS").map(String::as_str),
             Some(BASH_DEFAULT_TIMEOUT_MS.to_string().as_str())
         );
+    }
+}
+
+#[cfg(test)]
+mod missing_transcript_tests {
+    use super::*;
+
+    const SESSION: &str = "f54d7e57-b912-487e-9d3b-50f3f6d7dd94";
+
+    fn config_with_projects(projects: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for project in projects {
+            std::fs::create_dir_all(dir.path().join("projects").join(project)).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn transcript_in_any_project_folder_is_present() {
+        let dir = config_with_projects(&["-srv-a", "-srv-b"]);
+        std::fs::write(
+            dir.path()
+                .join("projects/-srv-b")
+                .join(format!("{SESSION}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            claude_transcript_status(dir.path(), SESSION),
+            TranscriptStatus::Present
+        );
+    }
+
+    #[test]
+    fn readable_projects_without_transcript_is_missing() {
+        let dir = config_with_projects(&["-srv-a"]);
+        std::fs::write(dir.path().join("projects/-srv-a/other.jsonl"), "{}\n").unwrap();
+
+        assert_eq!(
+            claude_transcript_status(dir.path(), SESSION),
+            TranscriptStatus::Missing
+        );
+
+        let empty = config_with_projects(&[]);
+        std::fs::create_dir_all(empty.path().join("projects")).unwrap();
+        assert_eq!(
+            claude_transcript_status(empty.path(), SESSION),
+            TranscriptStatus::Missing
+        );
+    }
+
+    #[test]
+    fn a_directory_named_like_the_transcript_is_not_present() {
+        let dir = config_with_projects(&["-srv-a"]);
+        std::fs::create_dir_all(
+            dir.path()
+                .join("projects/-srv-a")
+                .join(format!("{SESSION}.jsonl")),
+        )
+        .unwrap();
+
+        assert_eq!(
+            claude_transcript_status(dir.path(), SESSION),
+            TranscriptStatus::Missing
+        );
+    }
+
+    #[test]
+    fn unreadable_or_absent_projects_folder_fails_open() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            claude_transcript_status(dir.path(), SESSION),
+            TranscriptStatus::Unknown
+        );
+        assert_eq!(
+            claude_transcript_status(&dir.path().join("does-not-exist"), SESSION),
+            TranscriptStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn unsafe_session_ids_fail_open() {
+        let dir = config_with_projects(&["-srv-a"]);
+        for id in ["", ".", "..", "../x", "a/b", "a\\b", "a\0b"] {
+            assert_eq!(
+                claude_transcript_status(dir.path(), id),
+                TranscriptStatus::Unknown,
+                "{id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_dir_prefers_execution_env_then_process_env() {
+        let none = |_: &str| None;
+        let vars = HashMap::from([
+            ("HOME".to_string(), "/scoped/home".to_string()),
+            ("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string()),
+        ]);
+        assert_eq!(claude_config_dir(&vars, none), Some(PathBuf::from("/cfg")));
+
+        let vars = HashMap::from([("HOME".to_string(), "/scoped/home".to_string())]);
+        let process = |key: &str| (key == "HOME").then(|| "/server/home".to_string());
+        assert_eq!(
+            claude_config_dir(&vars, process),
+            Some(PathBuf::from("/scoped/home/.claude"))
+        );
+
+        let process_cfg =
+            |key: &str| (key == "CLAUDE_CONFIG_DIR").then(|| "/process/cfg".to_string());
+        assert_eq!(
+            claude_config_dir(&vars, process_cfg),
+            Some(PathBuf::from("/process/cfg"))
+        );
+
+        let empty = HashMap::from([
+            ("CLAUDE_CONFIG_DIR".to_string(), String::new()),
+            ("HOME".to_string(), String::new()),
+        ]);
+        assert_eq!(claude_config_dir(&empty, none), None);
+        assert_eq!(
+            claude_config_dir(&HashMap::new(), process),
+            Some(PathBuf::from("/server/home/.claude"))
+        );
+    }
+
+    #[test]
+    fn follow_up_resumes_unless_transcript_is_missing() {
+        let expected = FollowUpStart::Resume(vec![
+            "--resume".to_string(),
+            SESSION.to_string(),
+            "--resume-session-at".to_string(),
+            "msg-1".to_string(),
+        ]);
+        assert_eq!(
+            follow_up_start(TranscriptStatus::Present, SESSION, Some("msg-1")),
+            expected
+        );
+        assert_eq!(
+            follow_up_start(TranscriptStatus::Unknown, SESSION, Some("msg-1")),
+            expected
+        );
+        assert_eq!(
+            follow_up_start(TranscriptStatus::Present, SESSION, None),
+            FollowUpStart::Resume(vec!["--resume".to_string(), SESSION.to_string()])
+        );
+        assert_eq!(
+            follow_up_start(TranscriptStatus::Missing, SESSION, Some("msg-1")),
+            FollowUpStart::Fresh
+        );
+        assert_eq!(
+            follow_up_start(TranscriptStatus::Missing, SESSION, None),
+            FollowUpStart::Fresh
+        );
+    }
+
+    #[test]
+    fn user_notice_names_the_missing_session() {
+        let notice = missing_transcript_user_notice(SESSION);
+        assert!(notice.starts_with("Vibe Kanban:"), "{notice}");
+        assert!(notice.contains(SESSION), "{notice}");
+        assert!(!notice.contains('\n'), "one stderr line: {notice}");
+        assert!(MISSING_TRANSCRIPT_AGENT_NOTICE.contains("git log"));
     }
 }
