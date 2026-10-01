@@ -41,6 +41,15 @@ last. Rules (constitution XLIV):
   host (the host comes from `useHostId()`, because the module-level
   `getCurrentHostId()` is updated only in a layout effect after render). The
   socket lingers 3 s after its last subscriber, which absorbs remount churn.
+  A shared stream must also **pin its host**. The default `current` scope
+  resolves the host when the socket opens, so a stream that reconnects or
+  lingers after navigation would connect to the new host while still
+  registered under the old one, and serve the wrong host's approvals or
+  discovery. `pinSocketHost` sets `hostScope: explicit` plus the same id as
+  `relayHostId` (the route host is the relay host in remote-web). This was
+  found in Codex review. Tests that render stream consumers must call
+  `resetSharedJsonPatchStreamsForTests()` in `afterEach`, or a lingering
+  stream from one test is reused by the next.
   `useExecutionProcesses` always asks for `show_soft_deleted=true` and
   filters `dropped` locally, which is exactly what the server's `false`
   does. Discovery URLs drop `workspace_id`/`repo_id` when `session_id` is
