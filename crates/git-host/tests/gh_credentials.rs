@@ -113,4 +113,52 @@ printf '{{"owner":{{"login":"%s"}},"name":"r","url":"https://github.com/o/r"}}' 
     );
     let after = std::fs::read_to_string(&invoked).unwrap().lines().count();
     assert_eq!(before, after, "gh must not run for an unavailable token");
+
+    // `gh pr checkout` is refused when an inherited rewrite would send its
+    // fetch past the org token (here: an exact-URL rule, which outranks ours).
+    let checkout = root.path().join("checkout");
+    let init = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    init(&["init", "-q", checkout.to_str().unwrap()]);
+    let checkout_str = checkout.to_str().unwrap();
+    init(&[
+        "-C",
+        checkout_str,
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/sweetgreen/platform-ops.git",
+    ]);
+    let before = std::fs::read_to_string(&invoked).unwrap().lines().count();
+    cli.pr_checkout(&checkout, "sweetgreen", "platform-ops", 7)
+        .expect("no rewrite: checkout runs");
+    let after_ok = std::fs::read_to_string(&invoked).unwrap().lines().count();
+    assert_eq!(after_ok, before + 1);
+    init(&[
+        "-C",
+        checkout_str,
+        "config",
+        "url.git@github.com:sweetgreen/platform-ops.git.insteadOf",
+        "https://github.com/sweetgreen/platform-ops.git",
+    ]);
+    let error = cli
+        .pr_checkout(&checkout, "sweetgreen", "platform-ops", 7)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("sweetgreen org token cannot be used"),
+        "{error}"
+    );
+    let after = std::fs::read_to_string(&invoked).unwrap().lines().count();
+    assert_eq!(
+        after, after_ok,
+        "gh must not run when the fetch would bypass the token"
+    );
 }

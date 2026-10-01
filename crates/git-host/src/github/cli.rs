@@ -481,6 +481,7 @@ impl GhCli {
         repo: &str,
         pr_number: i64,
     ) -> Result<(), GhCliError> {
+        self.ensure_checkout_stays_on_token(repo_path, owner, repo)?;
         self.run(
             Target::named(owner, repo),
             [
@@ -493,6 +494,65 @@ impl GhCli {
             ],
             Some(repo_path),
         )?;
+        Ok(())
+    }
+
+    /// `gh pr checkout` fetches through git. With an org token, every URL it may
+    /// fetch for `owner` (the repository's HTTPS URLs and the checkout's own
+    /// remotes) must still reach `https://github.com/` after git's
+    /// `insteadOf` rewrites; an inherited rule that outranks ours would fetch
+    /// as another identity (e.g. SSH), so refuse instead.
+    fn ensure_checkout_stays_on_token(
+        &self,
+        repo_path: &Path,
+        owner: &str,
+        repo: &str,
+    ) -> Result<(), GhCliError> {
+        let selection = self
+            .credentials
+            .select_owner(Some(owner))
+            .with_repo(Some(repo));
+        if !selection.is_org_token() {
+            return Ok(());
+        }
+        let git = resolve_executable_path_blocking("git")
+            .ok_or_else(|| GhCliError::CommandFailed("git is not available".into()))?;
+        let git_output = |args: &[&str]| -> Result<String, GhCliError> {
+            let mut command = Command::new(&git);
+            command.current_dir(repo_path).args(args);
+            selection
+                .apply_gh(&mut command)
+                .map_err(GhCliError::AuthFailed)?;
+            let output = command
+                .no_window()
+                .output()
+                .map_err(|err| GhCliError::CommandFailed(err.to_string()))?;
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        };
+        let mut candidates = vec![
+            format!("https://github.com/{owner}/{repo}"),
+            format!("https://github.com/{owner}/{repo}.git"),
+        ];
+        candidates.extend(
+            // Raw configured URLs: `git remote -v` would show them already rewritten.
+            git_output(&["config", "--get-regexp", r"^remote\..*\.url$"])?
+                .lines()
+                .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
+                .filter(|url| {
+                    parse_github_repo(url)
+                        .is_some_and(|target| target.owner.eq_ignore_ascii_case(owner))
+                }),
+        );
+        for candidate in candidates {
+            let effective = git_output(&["ls-remote", "--get-url", &candidate])?;
+            if !effective.starts_with("https://github.com/") {
+                return Err(GhCliError::AuthFailed(format!(
+                    "the {owner} org token cannot be used: inherited git configuration rewrites \
+                     {candidate} to {effective} (a url.*.insteadOf rule), which bypasses the \
+                     token; remove that rule on the Vibe Kanban host"
+                )));
+            }
+        }
         Ok(())
     }
 }
