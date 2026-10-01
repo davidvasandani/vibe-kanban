@@ -68,10 +68,10 @@ after a reload. For a new preference:
 
 ## Verification notes
 
-- The repository `pnpm run lint` does not cover `packages/web-core`: web-core
-  has no ESLint config. To lint changed web-core files, run
-  `npx eslint --no-eslintrc -c .eslintrc.cjs ../web-core/src/<file>` from
-  `packages/local-web`.
+- `pnpm run lint` covers `packages/web-core` (and `packages/remote-web`) with
+  local-web's rules (see [frontend-linting](frontend-linting.md)). To lint
+  only web-core, run `pnpm run web-core:lint`, or `npx eslint src/<file>`
+  from `packages/web-core`. The old `--no-eslintrc` workaround is gone.
 - `scripts/check-i18n.sh`'s duplicate-key check needs GNU `diff`. On worker
   hosts that lack diffutils it reports "duplicate keys detected" for **every**
   locale file, including untouched ones. That is an environment failure, not a
@@ -81,3 +81,4 @@ after a reload. For a new preference:
 ## Contributed by
 
 - vk/4dac-filter-workspace
+- vk/848f-lint-packages-we (verification notes)

@@ -14,7 +14,7 @@ import type { BranchItem, RepoItem } from '@/shared/types/selectionItems';
 import { repoApi } from '@/shared/lib/api';
 import { resolveDefaultBranch } from '@/shared/lib/defaultBranch';
 import { cn } from '@/shared/lib/utils';
-import { useCreateMode } from '@/features/create-mode/model/useCreateMode';
+import { useCreateMode } from '../model/useCreateMode';
 import { FolderPickerDialog } from '@/shared/dialogs/shared/FolderPickerDialog';
 import { SettingsDialog } from '@/shared/dialogs/settings/SettingsDialog';
 import { PrimaryButton } from '@vibe/ui/components/PrimaryButton';
@@ -210,7 +210,7 @@ export function CreateModeRepoPickerBar({
       },
       'Failed to register repository'
     );
-  }, [addRepoWithBranchSelection, runPickerAction, t]);
+  }, [addRepoWithBranchSelection, queryClient, runPickerAction, t]);
 
   const handleCreateRepo = useCallback(async () => {
     await runPickerAction(
@@ -235,7 +235,7 @@ export function CreateModeRepoPickerBar({
       },
       'Failed to create repository'
     );
-  }, [addRepoWithBranchSelection, runPickerAction, t]);
+  }, [addRepoWithBranchSelection, queryClient, runPickerAction, t]);
 
   const handleChangeBranch = useCallback(
     async (repo: Repo) => {

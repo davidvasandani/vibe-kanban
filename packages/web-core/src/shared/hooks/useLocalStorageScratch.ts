@@ -80,7 +80,9 @@ export function localStorageScratchUpdate(
         storageArea: localStorage,
       })
     );
-  } catch {}
+  } catch {
+    // Notifying other listeners is best-effort; the write already landed.
+  }
 
   return true;
 }

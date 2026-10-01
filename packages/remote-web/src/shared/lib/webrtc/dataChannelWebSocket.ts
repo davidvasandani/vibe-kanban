@@ -1,4 +1,4 @@
-import type { WsFrame, WsClose, WsError } from "shared/types";
+import type { WsFrame, WsClose } from "shared/types";
 import {
   base64ToBytes,
   bytesToBase64,
@@ -116,7 +116,7 @@ class DataChannelWebSocket extends EventTarget {
       .openWs(path, protocols, {
         onFrame: (frame: WsFrame) => this.handleFrame(frame),
         onClose: (close: WsClose) => this.handleClose(close),
-        onError: (error: WsError) => this.handleError(error),
+        onError: () => this.handleError(),
       })
       .then((ws) => {
         this.connId = ws.connId;
@@ -182,7 +182,7 @@ class DataChannelWebSocket extends EventTarget {
     this.emitClose(close.code ?? 1005, close.reason ?? "", true);
   }
 
-  private handleError(_error: WsError): void {
+  private handleError(): void {
     this.readyStateValue = WebSocket.CLOSED;
     this.emitError();
     this.emitClose(1006, "", false);

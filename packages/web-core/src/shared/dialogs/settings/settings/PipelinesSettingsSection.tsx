@@ -42,6 +42,8 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const UNSELECTED_SCOPE_KEY = ['machine', 'unselected'] as const;
+
 function scopeSignature(scopeKey: readonly string[]): string {
   return scopeKey.join('\u0000');
 }
@@ -134,12 +136,14 @@ function PipelineStatusRow({
 export function PipelinesSettingsSection() {
   const { t } = useTranslation('settings');
   const machineClient = useSettingsMachineClient();
-  const scopeKey =
-    machineClient?.queryScopeKey ?? (['machine', 'unselected'] as const);
+  const scopeKey = machineClient?.queryScopeKey ?? UNSELECTED_SCOPE_KEY;
   const scope = scopeSignature(scopeKey);
   const { setDirty: setContextDirty } = useSettingsDirty();
   const statusesQuery = usePipelineStatuses(machineClient);
-  const statuses = statusesQuery.data ?? [];
+  const statuses = useMemo(
+    () => statusesQuery.data ?? [],
+    [statusesQuery.data]
+  );
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draftKind, setDraftKind] = useState<DraftKind | null>(null);

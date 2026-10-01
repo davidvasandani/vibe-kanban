@@ -4,7 +4,7 @@ import {
   renderSettingsSection,
   type SettingsSectionInitialState,
   type SettingsSectionType,
-} from './settingsRegistry';
+} from './SettingsRegistry';
 
 export type { SettingsSectionInitialState, SettingsSectionType };
 

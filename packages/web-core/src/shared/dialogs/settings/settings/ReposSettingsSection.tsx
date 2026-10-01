@@ -134,10 +134,14 @@ export function ReposSettingsSection({
   const { t } = useTranslation('settings');
   const queryClient = useQueryClient();
   const machineClient = useSettingsMachineClient();
-  const reposQueryKey = [
-    'repos',
-    ...(machineClient?.queryScopeKey ?? ['machine', 'unselected']),
-  ] as const;
+  const reposQueryKey = useMemo(
+    () =>
+      [
+        'repos',
+        ...(machineClient?.queryScopeKey ?? ['machine', 'unselected']),
+      ] as const,
+    [machineClient?.queryScopeKey]
+  );
 
   // Fetch all repos
   const {

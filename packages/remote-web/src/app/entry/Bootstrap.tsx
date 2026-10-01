@@ -18,7 +18,7 @@ import { queryClient } from "@/shared/lib/queryClient";
 import {
   requestLocalApiViaWebRtc,
   openLocalApiWebSocketViaWebRtc,
-} from "@remote/shared/lib/webrtc";
+} from "@remote/shared/lib/webrtc/transport";
 
 if (import.meta.env.VITE_PUBLIC_POSTHOG_KEY) {
   posthog.init(import.meta.env.VITE_PUBLIC_POSTHOG_KEY, {

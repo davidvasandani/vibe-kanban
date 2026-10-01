@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { CreateModeRepoPickerBar } from "@/shared/components/CreateModeRepoPickerBar";
+import { CreateModeRepoPickerBar } from "@/features/create-mode/ui/CreateModeRepoPickerBar";
 
 // The repository step is the first half of the new-workspace config, and its
 // Continue action commits it. It must obey the same contract as the prompt

@@ -180,7 +180,6 @@ export function RemoteNavbarContainer({
     }
     return undefined;
   }, [
-    location.pathname,
     organizationName,
     isOnProjectPage,
     isOnWorkspaceView,

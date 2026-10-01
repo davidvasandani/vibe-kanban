@@ -39,7 +39,7 @@ Do not manually edit shared/remote-types.ts, instead edit crates/remote/src/bin/
 - Prepare SQLx (remote package, postgres): `pnpm run remote:prepare-db`
 - Local NPX build: `pnpm run build:npx` then `pnpm pack` in `npx-cli/`
 - Format code: `pnpm run format` (runs `cargo fmt` for all backend Rust workspaces + web-core/web Prettier)
-- Lint: `pnpm run lint` (runs web/ui ESLint + `cargo clippy` for all backend Rust workspaces)
+- Lint: `pnpm run lint` (runs ESLint for local-web, web-core, remote-web and ui + `cargo clippy` for all backend Rust workspaces). The three app packages share one rule set in `eslint.frontend.cjs`; each package's `.eslintrc.cjs` only supplies its tsconfig and ignores.
 
 ## Before Completing a Task
 - In a fresh worktree, run `pnpm install --frozen-lockfile` before verification.

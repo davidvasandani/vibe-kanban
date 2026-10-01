@@ -24,7 +24,7 @@ import {
   consumeCreateModeSeedState,
   getCreateModeSeedVersion,
   subscribeCreateModeSeedState,
-} from '@/features/create-mode/model/createModeSeedStore';
+} from '@/shared/stores/createModeSeedStore';
 import { ReviewProvider } from '@/shared/hooks/ReviewProvider';
 import { ChangesViewProvider } from '@/shared/hooks/ChangesViewProvider';
 import { WorkspacesSidebarContainer } from './WorkspacesSidebarContainer';
@@ -35,7 +35,7 @@ import {
 } from './WorkspacesMainContainer';
 import { RightSidebar } from './RightSidebar';
 import { ChangesPanelContainer } from './ChangesPanelContainer';
-import { CreateChatBoxContainer } from '@/shared/components/CreateChatBoxContainer';
+import { CreateChatBoxContainer } from '@/features/create-mode/ui/CreateChatBoxContainer';
 import { PreviewBrowserContainer } from './PreviewBrowserContainer';
 import { BrowserPanelContainer } from './BrowserPanelContainer';
 import { WorkspacesGuideDialog } from '@/shared/dialogs/shared/WorkspacesGuideDialog';

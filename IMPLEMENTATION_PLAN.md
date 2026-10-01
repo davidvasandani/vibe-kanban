@@ -1,66 +1,54 @@
-# Implementation plan: bare URLs always clickable
+# Implementation plan: lint web-core and remote-web
 
-Task `vk/e4ef-urls-always-clic`. See `SPEC.md` for the design and
-`PRIOR_KNOWLEDGE.md` for the link rules inherited from PR #313.
+Task `vk/848f-lint-packages-we`. See `SPEC.md` for the design,
+`PRIOR_KNOWLEDGE.md` for rules inherited from earlier tasks, and
+`specs/vk/848f-lint-packages-we/plan.md` §7 for the reasoning behind each
+hook fix.
 
-## Step 1: URL detection helper and plugin (`packages/ui`)
+## Steps
 
-File: `packages/ui/src/components/ReadOnlyAutoLinkPlugin.tsx` (new)
+1. **Extract the shared rule set.** Move local-web's `.eslintrc.cjs` body
+   into `eslint.frontend.cjs` as `createFrontendConfig({ project,
+   ignorePatterns })`. Reduce local-web's config to a call into it. Hash
+   `eslint --print-config` for sample local-web files before and after: the
+   hashes must match.
+2. **Wire web-core.** Add `.eslintrc.cjs`, a `tsconfig.eslint.json` that
+   includes tests and `*.config.ts`, and a `lint` script.
+3. **Wire remote-web.** Same files as web-core, plus local-web's ESLint
+   devDependencies at the same versions. Run `pnpm install` to update
+   `pnpm-lock.yaml`.
+4. **Root and CI.** Add `web-core:lint` and `remote-web:lint`, and append
+   both to `lint`. In `frontend-checks`, add `core:lint` and `remote:lint`
+   to the job, and add `eslint.frontend.cjs` to the path filter.
+5. **Naming rule.** PascalCase for `src/**/!(use*).tsx`, camelCase for
+   `src/**/use*.{ts,tsx}`. Rename `settingsRegistry.tsx` to
+   `SettingsRegistry.tsx`.
+6. **Layer moves.** Use `git mv` and change only import paths:
+   `createModeSeedStore` → `shared/stores`, the create-mode chat box
+   containers → `features/create-mode/ui`, and `SharedAppLayout` →
+   `pages/root`. Same-feature imports become relative. Typecheck all three
+   apps.
+7. **Code findings.** Fix the unused variables (copy plus `delete`, drop
+   unused parameters), add the `no-empty` comment, remove the directives and
+   type `rehypePlugins`, add the switch cases, and delete the barrel.
+8. **`exhaustive-deps`.** Work one site at a time, as in plan §7. Re-lint
+   after each group until both packages report 0 problems.
+9. **Verify.** `pnpm run lint`, `pnpm run check`, `pnpm run format`, the
+   web-core and remote-web vitest suites, and a negative proof (add an
+   unused import, lint exits 1, revert).
+10. **Docs.** Update the `AGENTS.md` lint line, the wiki "Verification
+    notes", and the stale `settingsRegistry.tsx` mentions.
+11. **Review, knowledge base, PR.** Codex review until clean, a wiki page on
+    frontend linting, then open and merge the PR.
 
-1. `export function findUrlMatches(text): { start, end, url }[]`
-   - Scan with `/https?:\/\/[^\s<>]+/gi`.
-   - Trim trailing characters from `.,;:!?'"*` and backticks.
-   - Trim a trailing `)`, `]` or `}` only when the candidate has more closers
-     than openers of that kind. Loop until stable.
-   - Drop the match if only the scheme is left (`https://`).
-2. `ReadOnlyAutoLinkPlugin()` links text in updates tagged
-   `AUTO_LINK_UPDATE_TAG` (plus `HISTORY_MERGE_TAG`). It runs once on mount,
-   and then from an update listener over the dirty leaves of any update that
-   does not carry the tag.
-   - `$linkUrls(node)`: skip the node if it is not simple text, or if an
-     ancestor is a link or a `CodeNode`. Otherwise split each match out, wrap
-     it in `$createAutoLinkNode(url)`, and continue on the tail.
-   - On unmount (the editor becomes editable), unwrap every `AutoLinkNode`.
-   - Queue the mount and unmount updates with `queueMicrotask`, so they never
-     batch with a content update and hide it behind the tag.
-   - Throw if `AutoLinkNode` is not registered on the editor.
-3. `MarkdownSyncPlugin.tsx`: do not call `onChange` for updates tagged
-   `AUTO_LINK_UPDATE_TAG`. Splitting formatted text is not byte-identical on
-   export (`**a https://b**` gains `&#32;`). Issue descriptions wire
-   `onChange` while read-only, and composers are `disabled` while sending.
+## Risks
 
-## Step 2: allow `http` and auto links (`packages/ui`)
-
-File: `packages/ui/src/components/ReadOnlyLinkPlugin.tsx`
-
-1. Change the external check to `/^https?:\/\//i`.
-2. Register the same mutation listener for `AutoLinkNode`, because mutation
-   listeners are per class. Update the comments.
-
-## Step 3: wire into the editor (`packages/web-core`)
-
-File: `packages/web-core/src/shared/components/WYSIWYGEditor.tsx`
-
-1. Add `AutoLinkNode` to `nodes`.
-2. Render `{disabled && <ReadOnlyAutoLinkPlugin />}` next to `ReadOnlyLinkPlugin`.
-
-## Step 4: tests (`packages/web-core`)
-
-- `ReadOnlyAutoLinkPlugin.test.tsx` (new, jsdom). It runs
-  `findUrlMatches` table tests and renders markdown through `LexicalComposer`
-  with both plugins, checking:
-  - the screenshot sentence
-  - parentheses and quotes
-  - multiple URLs
-  - bold text
-  - code blocks are not linked; inline code is linked and keeps its code format
-  - existing markdown links are left alone
-  - an `http` URL is clickable
-  - the markdown export round-trips
-- `ReadOnlyLinkPlugin.test.tsx`: update the `http` expectations, which were
-  disabled and are now clickable.
-
-## Step 5: verify
-
-`pnpm --filter @vibe/web-core exec vitest run`, `pnpm run check`,
-`pnpm run lint`, `pnpm run format`.
+- **Hook dependency edits change behaviour.** Each site is reasoned through
+  in plan §7, and the vitest suites cover the conversation-history and
+  settings code paths.
+- **File moves break imports that tsc can't see,** such as `vi.mock`
+  specifiers. Vitest mocks by resolved module id, so a component that
+  imports its dependency relatively is still mocked by an aliased
+  specifier. The remote-web test suite confirms this.
+- **Lockfile churn.** pnpm also deduped `debug` and `acorn` within their
+  existing ranges. No new packages were added.

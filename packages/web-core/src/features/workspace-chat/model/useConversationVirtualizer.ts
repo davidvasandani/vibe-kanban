@@ -221,7 +221,7 @@ export function useConversationVirtualizer({
     return () => {
       virtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined;
     };
-  }, [shouldSuppressSizeAdjustment, virtualizer]);
+  }, [scrollContainerRef, shouldSuppressSizeAdjustment, virtualizer]);
 
   // -------------------------------------------------------------------------
   // Reactive isAtBottom state
@@ -335,7 +335,7 @@ export function useConversationVirtualizer({
         el.scrollTop = el.scrollHeight - el.clientHeight;
       }
     },
-    [scrollContainerRef, virtualizer]
+    [scrollContainerRef]
   );
 
   const scrollToIndex = useCallback(
