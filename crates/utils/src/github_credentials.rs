@@ -276,30 +276,40 @@ impl CredentialSelection {
         };
         let mut environment =
             routing_environment(&spellings.join(","), None, |key| std::env::var(key).ok());
-        if rewrite_ssh {
-            for spelling in spellings.clone() {
-                let lower = spelling.to_ascii_lowercase();
-                if !spellings.contains(&lower) {
-                    spellings.push(lower);
+        for spelling in spellings.clone() {
+            let lower = spelling.to_ascii_lowercase();
+            if !spellings.contains(&lower) {
+                spellings.push(lower);
+            }
+        }
+        // Keep the owner's HTTPS URLs on HTTPS. Git applies the *longest*
+        // matching `insteadOf`/`pushInsteadOf`, so these identity rewrites beat
+        // an inherited `url."git@github.com:".insteadOf=https://github.com/`
+        // that would send the command to SSH, past the credential helper.
+        let mut rewrites = Vec::new();
+        for owner in &spellings {
+            let base = format!("https://github.com/{owner}/");
+            for variable in ["insteadOf", "pushInsteadOf"] {
+                rewrites.push(format!("url.{base}.{variable}={base}"));
+            }
+            // gh's own fetches go through the checkout's remotes, which may be
+            // SSH; route the owner's SSH URLs to HTTPS too.
+            if rewrite_ssh {
+                for ssh in [
+                    format!("git@github.com:{owner}/"),
+                    format!("ssh://git@github.com/{owner}/"),
+                ] {
+                    rewrites.push(format!("url.{base}.insteadOf={ssh}"));
                 }
             }
-            let rewrites: Vec<String> = spellings
-                .iter()
-                .flat_map(|owner| {
-                    let key = format!("url.https://github.com/{owner}/.insteadOf");
-                    [
-                        format!("{key}=git@github.com:{owner}/"),
-                        format!("{key}=ssh://git@github.com/{owner}/"),
-                    ]
-                })
-                .map(|entry| sq_quote(&entry))
-                .collect();
-            if let Some((_, parameters)) = environment
-                .iter_mut()
-                .find(|(key, _)| key == GIT_CONFIG_PARAMETERS)
-            {
+        }
+        if let Some((_, parameters)) = environment
+            .iter_mut()
+            .find(|(key, _)| key == GIT_CONFIG_PARAMETERS)
+        {
+            for entry in rewrites {
                 parameters.push(' ');
-                parameters.push_str(&rewrites.join(" "));
+                parameters.push_str(&sq_quote(&entry));
             }
         }
         environment.push((token_env_name(&first), token.expose().to_owned()));
@@ -683,6 +693,64 @@ mod tests {
         assert_eq!(
             get_url(&selection, "git@github.com:someone/x.git"),
             "git@github.com:someone/x.git"
+        );
+    }
+
+    #[test]
+    fn inherited_https_to_ssh_rewrites_cannot_bypass_the_org_token() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".gitconfig"),
+            "[url \"git@github.com:\"]\n\tinsteadOf = https://github.com/\n\tpushInsteadOf = https://github.com/\n",
+        )
+        .unwrap();
+        let repo = home.path().join("repo");
+        let git = |selection: Option<&CredentialSelection>, args: &[&str]| {
+            let mut command = Command::new("git");
+            command
+                .env_clear()
+                .env("PATH", std::env::var("PATH").unwrap_or_default())
+                .env("HOME", home.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(args);
+            if repo.exists() {
+                command.current_dir(&repo);
+            }
+            if let Some(selection) = selection {
+                selection
+                    .apply_git(&mut command, "https://github.com/sweetgreen/x")
+                    .unwrap();
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let credentials = credentials();
+        let org = credentials.select_owner(Some("sweetgreen"));
+        let url = "https://github.com/sweetgreen/x";
+        assert_eq!(git(Some(&org), &["ls-remote", "--get-url", url]), url);
+        // Without an org token the inherited rewrite still applies.
+        assert_eq!(
+            git(None, &["ls-remote", "--get-url", url]),
+            "git@github.com:sweetgreen/x"
+        );
+        let other = credentials.select_owner(Some("someone"));
+        assert_eq!(
+            git(
+                Some(&other),
+                &["ls-remote", "--get-url", "https://github.com/someone/y"]
+            ),
+            "git@github.com:someone/y"
+        );
+        git(None, &["init", "-q", repo.to_str().unwrap()]);
+        git(None, &["remote", "add", "origin", url]);
+        assert_eq!(
+            git(Some(&org), &["remote", "get-url", "--push", "origin"]),
+            url
+        );
+        assert_eq!(
+            git(None, &["remote", "get-url", "--push", "origin"]),
+            "git@github.com:sweetgreen/x"
         );
     }
 
