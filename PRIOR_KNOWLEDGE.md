@@ -1,60 +1,81 @@
-# Prior knowledge: Workspaces sidebar loading blank
+# Prior knowledge: server-side GitHub operations and org tokens
 
-Task: `vk/b923-workspaces-loadi`. This file pulls together what the project
+Task: `vk/8b57-use-settings-git`. This file distills what the project
 knowledge bases (`wiki/` and `docs/knowledge-base/`) already record about this
-problem area. The knowledge bases were only read, not changed, in this stage.
+problem area. The knowledge bases were only read in this stage, not changed.
 
 ## Relevant pages
 
-- `wiki/coordinator-nfs-load.md` (task `vk/78a5-analyze-and-redu`)
-- `docs/knowledge-base/authoritative-snapshot-stream-handoffs.md`
-  (summary retention on failed refresh, `vk/113f-sidebar-randomly`)
-- `docs/knowledge-base/workspace-summary-ordering.md` (`vk/9391-workspace-order`)
-- `docs/analysis/coordinator-nfs-io-pressure.md` (numbers behind the NFS page)
+- `wiki/github-owner-token-routing.md` (`vk/0f52-manage-gh-token`)
+- `wiki/mcp-pr-tools-and-connection-notices.md` (`vk/53bc-agents-fall-back`)
+- `docs/knowledge-base/workspace-environment-inheritance.md` (several tasks,
+  including `vk/0f52`)
+- `wiki/vk-pollers.md` (rule: MCP-reachable routes must carry a message)
 
-## What we already know
+## What to build on
 
-1. **Two independent sources feed the sidebar.** Names, pins and `is_running`
-   come from the JSON-patch WebSocket streams. PR, diff, approval, poller,
-   unseen-activity, elapsed-time and affinity metadata come from
-   `POST /api/workspaces/summaries`, polled every 15 s for both the active
-   and the archived scope. "Names but no enrichment" points to the summaries
-   query, not to deleted workspaces. That is exactly what the screenshot
-   shows.
-2. **A failed refresh must reject, never resolve to an empty map.** React
-   Query then keeps the last successful snapshot for the same key. Host and
-   archive scope stay in the query key. Do not use `keepPreviousData`, because
-   it leaks across hosts. Commit `04618693` shipped this. Any new
-   timeout or abort path must therefore **reject**, so this protection covers
-   it too.
-3. **Summaries cost is NFS-bound and scales with open clients.** Each
-   workspace's diff stats run several git subprocesses over NFS. Before the
-   shared cache, one request took 34–43 s. The fix was
-   `WORKSPACE_DIFF_STATS`, a single-flight cache per workspace, with a
-   process-wide limit of 4 permits, tiered staleness (30 s running, 5 min
-   idle, 60 min archived) and generation-based invalidation.
-4. **The leader runs in its own `tokio::spawn` and owns the slot lock and the
-   permit.** A dropped or cancelled waiter therefore does not cancel the git
-   work or break the concurrency limit. This is what makes a waiter-side
-   deadline safe: the work finishes and is published for the next poll.
-5. **Rejected alternatives on record:** NFS mount tuning (breaks coherency), a
-   background refresher (does work when nobody is looking) and client-side
-   throttling alone. A request-driven deadline with a last-known fallback is
-   none of these. Work still only starts because a client asked.
-6. **Ordering must tolerate summaries that have not arrived.** The sort falls
-   back to the streamed `updatedAt` when `latestProcessCompletedAt` is
-   missing. A missing summary is a normal state and does not prove the
-   workspace is inactive.
-7. Tools: `node scripts/time-workspace-summaries.mjs` times the endpoint. The
-   service account can `ssh think2` from any worker, which gives access to the
-   `cloudflared-connector` and `vibe-kanban-dev` journals.
+### Storage and secrecy (from `github-owner-token-routing`)
 
-## Gaps this task fills
+- Tokens live in their own SQLite table `github_owner_tokens`, never in
+  `Config`. `/api/info` returns the whole Config, and `PUT /api/config`
+  overwrites it.
+- Owner uniqueness is `UNIQUE COLLATE NOCASE`, so lookups by owner should be
+  case-insensitive.
+- Values are `McpGatewaySecretStore` envelopes under a separate host key,
+  bound by AAD to the row id. Only `op://` references are ever returned. The
+  empty-table path never touches the key file. Keep that property: a server
+  with no org tokens must not create or read the key on every PR poll.
+- Runtime `sqlx::query_as` calls keep the `.sqlx` offline cache unchanged.
 
-- Nothing bounded how long **one summaries request** could take. Every row's
-  metadata waited on the slowest `git status`. Measured today: 0.27–16.6 s
-  from a worker.
-- Nothing bounded how long the **client** waits, and React Query dedupes polls
-  onto an in-flight promise. So one request that never settles on mobile
-  blanks the sidebar until a reload. The tunnel logged 142 abandoned
-  summaries requests since 2026-09-28.
+### Git credential mechanics (verified with real git)
+
+- `credential.https://github.com/<owner>.helper=` (an empty value, which
+  resets inherited helpers) followed by an inline `!f(){…}` helper routes only
+  that owner's URLs. Command-scope config (`GIT_CONFIG_PARAMETERS`) is read
+  last.
+- Path matching is case-sensitive, so emit both the as-typed and the
+  lowercase spelling.
+- Use `GIT_CONFIG_PARAMETERS` (sq-quoted, appended after any existing value),
+  not `GIT_CONFIG_COUNT`/`KEY_n`.
+- The helper names an env var (`VK_GITHUB_PAT_<HEX>`), so the token never
+  appears in config text. `routing_environment(owners, None, lookup)` already
+  produces exactly this text without the shim.
+- Testing recipe: `git credential fill` under a temporary `HOME` with
+  `GIT_CONFIG_NOSYSTEM=1`; a fake `gh` that prints `GH_TOKEN`.
+
+### Fail-closed semantics
+
+- A configured owner whose token is empty or unresolvable fails closed and
+  names the owner. Unconfigured owners pass through unchanged. That matches
+  this task's "fallback only when no configured token".
+- `environment_secrets`: the literal `OP_SERVICE_ACCOUNT_TOKEN` in org Env Vars
+  wins over the service env. Ambient `OP_*` variables are stripped. Reads are
+  bounded to 30 s. Errors never carry provider output or values.
+
+### PR tools (from `mcp-pr-tools-and-connection-notices`)
+
+- Fine-grained PATs get 403 on check-runs and status. That is a coverage fact
+  (`SourceRead::Forbidden`), not a call failure. Credential attribution must
+  not turn those per-source 403s into hard failures of `list_pr_checks`.
+- Merge is `PUT pulls/{n}/merge` with a `sha` guard. The branch is deleted via
+  `DELETE git/refs/heads/<enc>` only when the head repo equals the base repo.
+- A PR URL is resolved against **all** of the checkout's remotes, so
+  credentials must cover every remote's owner, not just the default remote's.
+- `gh api` has no `--repo`. The owner is known from `GitHubRepoInfo` in
+  `GhCli::api_args`, so it can be passed explicitly.
+- Every MCP-reachable route error must carry a `message`
+  (`error_with_data_and_message`). Provider refusals become messages, not 500s.
+
+### Deployment interaction (from `workspace-environment-inheritance`)
+
+- The Nix `gh` router (`githubAuth.orgTokenRefs`) still exists, but no host
+  configures it. Where configured, it overrides `GH_TOKEN` for its own
+  owners. That is out of scope here.
+- Keep the long-lived server process environment secret-free. Inject secrets
+  only into the specific child process. Never mutate the server env or write
+  git config.
+
+## Gaps the knowledge base does not cover (new in this task)
+
+- Nothing yet describes server-side (non-agent) credential selection, op
+  resolution caching, or attributing auth errors to a credential source.

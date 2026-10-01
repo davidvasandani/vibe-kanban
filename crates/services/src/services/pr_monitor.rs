@@ -20,6 +20,7 @@ use tracing::{debug, error, info, warn};
 use crate::services::{
     analytics::AnalyticsContext,
     container::ContainerService,
+    github_credentials,
     remote_client::{RemoteClient, RemoteClientError},
     remote_sync,
 };
@@ -127,7 +128,9 @@ impl<C: ContainerService + Send + Sync + 'static> PrMonitorService<C> {
 
     /// Check the status of a single open PR and handle state changes.
     async fn check_open_pr(&self, pr: &PullRequest) -> Result<(), PrMonitorError> {
-        let git_host = GitHostService::from_url(&pr.pr_url)?;
+        let credentials =
+            github_credentials::resolve_for_urls(&self.db.pool, [pr.pr_url.as_str()]).await;
+        let git_host = GitHostService::from_url_with_credentials(&pr.pr_url, credentials)?;
         let status = git_host.get_pr_status(&pr.pr_url).await?;
 
         debug!(

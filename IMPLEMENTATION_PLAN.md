@@ -1,101 +1,128 @@
-# Implementation plan: Workspaces sidebar loads blank on mobile
+# Implementation plan: server-side GitHub credentials from the org-token table
 
-Task `vk/b923-workspaces-loadi`. See `SPEC.md` for the diagnosis and design and
-`PRIOR_KNOWLEDGE.md` for the constraints inherited from earlier tasks.
+Task `vk/8b57-use-settings-git`. See `SPEC.md` for requirements (FR-1…FR-9).
 
-## Step 1: backend cache, last-known fallback (`crates/services`)
+## Step 1: `utils::github_credentials` (new module, pure, no I/O)
 
-File: `crates/services/src/services/workspace_diff_stats.rs`
+File: `crates/utils/src/github_credentials.rs`, exported from `lib.rs`.
 
-1. Add `last_known: StdMutex<Option<DiffStats>>` to `Slot`. It is a sync
-   mutex, readable while a leader holds the async `state` lock.
-2. In the leader task, when a result is published (generation still matches),
-   also store `outcome.stats` into `last_known`. Also store it when the result
-   was invalidated mid-computation: the value is still the newest observation
-   of the tree and is only ever used as a display fallback. Failures (`None`)
-   leave `last_known` untouched.
-3. Add `pub async fn get_within(&self, workspace_id, max_age, deadline,
-   compute) -> Option<DiffStats>`:
-   - Resolve the slot `Arc` first, so the fallback reads the same slot.
-   - `tokio::time::timeout(deadline, self.get_or_compute(...))`.
-   - `Ok(result)`: return `result` unchanged. A finished-but-failed compute
-     (`None`) stays `None`, as it does today (see the clarification in
-     `specs/vk/b923-workspaces-loadi/spec.md`).
-   - `Err(Elapsed)`: return `last_known`, cloned. The spawned leader keeps
-     running and publishes.
-4. `invalidate` is unchanged. It bumps the generation and leaves `last_known`
-   alone.
-5. Unit tests (paused tokio time):
-   - `get_within_returns_last_known_when_recompute_exceeds_deadline`
-   - `get_within_returns_none_for_never_computed_slow_workspace_then_serves_published_value`
-   - `invalidated_entry_keeps_last_known_fallback_but_is_not_fresh`
-   - `get_within_returns_fresh_result_when_compute_finishes_in_time`
+- `GitHubRepoRef { owner, repo }` and `parse_github_repo(url) ->
+  Option<GitHubRepoRef>`. Accepts https/http (with userinfo, `.git`, trailing
+  `/`, extra path such as `/pull/12`), `ssh://[user@]github.com[:port]/o/r`,
+  scp-like `[user@]github.com:o/r`. The host matches `github.com` or
+  `www.github.com` case-insensitively. The owner must pass `is_valid_owner`,
+  and the repo must be non-empty.
+- `GitHubToken(Arc<str>)` with a redacting `Debug`.
+- `OwnerCredential { OrgToken(GitHubToken), Unavailable(String) }`.
+- `GitHubCredentials`: a map from lowercase owner to (owner as entered,
+  `OwnerCredential`). Derives `Default` and `Clone`, with a redacting `Debug`.
+  Has `insert`, `select_owner(owner)`, `select_url(url)`.
+- `CredentialSelection` (owned): `OrgToken { owner, token }`, `Unavailable {
+  owner, reason }`, `Fallback { owner: Option<String> }`. Methods:
+  - `source_label()` returns `org-token` / `unavailable` / `fallback`.
+  - `git_auth(url) -> GitCommandAuth { url, set, remove }`. `OrgToken`
+    yields the PAT variable plus the `GIT_CONFIG_PARAMETERS` produced by
+    `github_auth::routing_environment(owner, None, process lookup)`, removes
+    `OWNERS_ENV`, and rewrites SSH and scp URLs to HTTPS. `Fallback` yields
+    no changes.
+  - `apply_git(&mut Command, url) -> Result<OsString url, String>`.
+    `Unavailable` returns an error.
+  - `gh_env()` / `apply_gh(&mut Command)`: `GH_TOKEN` plus the git auth;
+    removes `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`
+    and `OWNERS_ENV`.
+  - `attribute(repo: Option<&str>, detail) -> String`: the FR-6 wording.
+- `looks_like_git_auth_failure(msg)` and `looks_like_gh_auth_failure(msg,
+  exit_code)`.
+- Unit tests: parsing table, case-insensitive selection, fallback, the env
+  produced, a real `git credential fill` (temp HOME, an ambient global helper
+  that prints `ambient`) returning the org token for the owner and `ambient`
+  for others, SSH rewrite, `gh` env override against an ambient
+  `GITHUB_TOKEN`/`GH_TOKEN` via `sh -c`, attribution wording, and redacting
+  `Debug`.
 
-## Step 2: backend summaries handler (`crates/server`)
+## Step 2: `git` crate: credentialed network commands
 
-File: `crates/server/src/routes/workspaces/workspace_summary.rs`
+- `GitCliError::CredentialUnavailable(String)`.
+- `classify_cli_error`: also treat `403`, `write access to repository not
+  granted`, `permission to … denied`, `the requested url returned error: 401`
+  as `AuthFailed`.
+- `GitCli::push_with`, `fetch_with_refspec_with`, `check_remote_branch_exists_with`
+  and a new `remote_branch_oid_with` take `&GitHubCredentials`. They select by
+  URL, apply the auth, run, and on `AuthFailed` re-wrap the message with the
+  attribution. The existing names delegate with an empty set (local-path
+  callers in workspace-manager and the tests).
+- `GitService`: `push_to_remote`, `check_remote_branch_exists`,
+  `get_remote_branch_status`, `rebase_branch` gain `creds:
+  &GitHubCredentials`. `fetch_*` is threaded through. Add
+  `push_to_remote_if_needed(worktree, branch, creds) -> PushOutcome
+  { Pushed, AlreadyUpToDate }` (FR-7). It compares `ls-remote` against the
+  local branch tip, and when they match it records the tracking ref and
+  upstream as a push would. The tracking-ref update is factored into a helper.
+- Tests (`crates/git/tests` or unit): skip versus push against a local bare
+  remote, and that an `Unavailable` selection refuses to run.
 
-1. Add `const SUMMARY_DIFF_STATS_BUDGET: std::time::Duration =
-   Duration::from_secs(3)` with a doc comment explaining the request-wide
-   budget and the fallback.
-2. Before building `diff_futures`, capture
-   `let diff_deadline = tokio::time::Instant::now() + SUMMARY_DIFF_STATS_BUDGET;`.
-3. Inside each future, compute
-   `diff_deadline.saturating_duration_since(Instant::now())` and call
-   `WORKSPACE_DIFF_STATS.get_within(...)` instead of `get_or_compute`.
-   A zero remaining budget still serves fresh cache hits, because `timeout`
-   polls the inner future once before checking the deadline, and otherwise
-   serves last-known stats.
-4. Add a small pure helper, `remaining_budget(deadline, now)`, with a unit
-   test for the saturating behaviour.
+## Step 3: `git-host`: credentialed `gh`
 
-## Step 3: frontend fetch deadline and abort (`packages/web-core`)
+- `GhCli { credentials: GitHubCredentials }`, `GhCli::with_credentials`.
+  `run(owner: Option<&str>, args, dir)` applies `select_owner`. `Unavailable`
+  becomes `GhCliError::AuthFailed(attributed)` without spawning. On failure, an
+  auth-looking stderr is prefixed with the attribution and still classified as
+  before (so a 403 stays `InsufficientPermissions` → check coverage
+  `Forbidden`).
+- Each method passes its owner: `get_repo_info` (parse URL), `view_pr`
+  (parse PR URL), and the rest from `GitHubRepoInfo` / `owner` args.
+- `GitHubProvider::with_credentials`. `GitHostService::from_url_with_credentials`.
+  `from_url` delegates with an empty set.
 
-File: `packages/web-core/src/shared/hooks/useWorkspaces.ts`
+## Step 4: `services::github_credentials` (resolver)
 
-1. Export `SUMMARY_REQUEST_TIMEOUT_MS = 20_000`.
-2. Add `withRequestTimeout(signal, ms)`, which returns
-   `{ signal, cleanup }`. It uses an `AbortController`, a `setTimeout` that
-   aborts with a `TimeoutError`-named reason, and forwards an upstream abort.
-   It works without `AbortSignal.any`/`timeout` and with fake timers.
-3. `fetchWorkspaceSummariesByArchived(archived, hostId, signal?)` passes the
-   combined signal to `makeLocalApiRequest`. It keeps the timer armed through
-   `response.json()` and calls `cleanup()` in `finally`. A timeout rejects
-   with `Workspace summaries request timed out`.
-4. Both `useQuery` calls use `queryFn: ({ signal }) => ...(archived, hostId,
-   signal)` and `refetchOnWindowFocus: true`.
+File: `crates/services/src/services/github_credentials.rs`.
 
-## Step 4: frontend tests
+- `resolve_for_urls(pool, urls) -> GitHubCredentials`, and `resolve_for_repo(pool,
+  git, repo_path)`, which takes all remotes from `git.list_remotes`.
+- Parse owners. Return early with an empty set when there are none. List rows
+  (DB error → every requested owner `Unavailable`). Match case-insensitively.
+  Load the store only if a row matched. Decrypt (`Undecryptable` →
+  `Unavailable`). Literal → `OrgToken`. Reference → cached op resolution
+  (60 s TTL, key `(id, updated_at, reference)`) via
+  `resolve_environment_secrets`. Errors and empty values → `Unavailable` with
+  the error's `Display` (never the value or the reference).
+- `invalidate_cache()` is called from `github_owner_tokens::{create,update,delete}`.
+- FR-5 logging with per-owner last-source dedup.
+- Testable inner fn with an injected resolver: selection, case-insensitive
+  match, fallback for unknown owners, unavailable on resolve failure, cache hit
+  within the TTL, miss after `updated_at` changes or `invalidate_cache`, no key
+  access when nothing matched.
+- Expose `github_owner_tokens::decrypt_rows_for(...)` as `pub(crate)` helpers
+  as needed.
 
-File: `packages/web-core/src/shared/hooks/useWorkspaces.test.tsx`
+## Step 5: server routes and PR monitor
 
-1. `aborts a summaries request that never settles and recovers on the next poll`:
-   a request mock returns a never-resolving promise that rejects when its
-   `signal` aborts. Advance 20 s and check that the signal was aborted and the
-   query errored while keeping earlier data. Then resolve normally on the next
-   interval and check the new data.
-2. `forwards query cancellation to the in-flight summaries request`: start a
-   pending request, call `client.cancelQueries`, and check that the captured
-   signal is aborted.
-3. `refetches summaries when the page becomes visible again`: dispatch
-   `visibilitychange` through `focusManager.setFocused(true)` and check that a
-   new request was made.
-4. The existing tests must still pass.
+- `routes/workspaces/pr.rs`:
+  - `create_pr` resolves creds for the repo, passes them to
+    `check_remote_branch_exists`, `push_to_remote_if_needed` and
+    `from_url_with_credentials`. `AuthFailed`/`CredentialUnavailable` → `PrError::GitCliNotLoggedIn`
+    with the attributed message (`error_with_data_and_message`). `gh`
+    `AuthFailed` → `CliNotLoggedIn` with `e.to_string()`.
+  - `attach_existing_pr`, `get_pr_comments`, `create_workspace_from_pr`
+    (`GhCli::with_credentials`), `resolve_pr_target` (credentials for all
+    remotes, used for each candidate host).
+  - `PrToolError::CliNotLoggedIn` gains `detail`, and the message uses it.
+- `routes/workspaces/git.rs`: push, force push, branch status, rebase.
+- `routes/repo.rs`: list open PRs (repo creds), PR info (URL creds).
+- `pr_monitor.rs`: `resolve_for_urls(pool, [pr_url])`.
+- `error.rs`: map `CredentialUnavailable` like `AuthFailed` if there is a
+  match there.
 
-## Step 5: verify
+## Step 6: UI copy and docs
 
-- `pnpm install --frozen-lockfile` (fresh worktree)
-- `cargo test -p services workspace_diff_stats`
-- `cargo test -p server workspace_summary`
-- `pnpm --filter @vibe/web-core exec vitest run src/shared/hooks/useWorkspaces.test.tsx`
-- `pnpm run check`, `pnpm run lint`, `pnpm run format`
-- Live evidence: after deploy, `node scripts/time-workspace-summaries.mjs` (or
-  curl) should show the p100 latency near DB time + 3 s.
+- `GitHubOwnerTokensCard.tsx` description (FR-9).
+- `docs/` page for GitHub organization tokens, if one exists: note that
+  server-side operations use them.
 
-## Step 6: review, knowledge, PR
+## Step 7: Verify
 
-- Codex review of the diff, iterating until there are no significant findings.
-- Update `wiki/coordinator-nfs-load.md` (budget and fallback rule) and
-  `docs/knowledge-base/authoritative-snapshot-stream-handoffs.md` (client
-  deadline and dedupe trap), plus the indexes.
-- Open a PR against `main` and merge it.
+- `cargo test -p utils -p git -p git-host -p services -p server` (targeted
+  tests), `pnpm run check`, `pnpm run lint`, `pnpm run format`.
+- No TS type changes are expected (`PrToolError` is not exported, `PrError`
+  is unchanged). Run `pnpm run generate-types:check` to confirm.

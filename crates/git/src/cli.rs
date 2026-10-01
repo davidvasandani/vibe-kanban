@@ -23,7 +23,11 @@ use std::{
 };
 
 use thiserror::Error;
-use utils::{path::ALWAYS_SKIP_DIRS, shell::resolve_executable_path_blocking};
+use utils::{
+    github_credentials::{GitHubCredentials, looks_like_git_auth_failure},
+    path::ALWAYS_SKIP_DIRS,
+    shell::resolve_executable_path_blocking,
+};
 
 use super::Commit;
 
@@ -37,6 +41,10 @@ pub enum GitCliError {
     AuthFailed(String),
     #[error("push rejected: {0}")]
     PushRejected(String),
+    /// The target owner's configured org token could not be read; the
+    /// command was not run.
+    #[error("{0}")]
+    CredentialUnavailable(String),
     #[error("rebase in progress in this worktree")]
     RebaseInProgress,
 }
@@ -468,19 +476,31 @@ impl GitCli {
         remote_url: &str,
         refspec: &str,
     ) -> Result<(), GitCliError> {
-        let envs = vec![(OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0"))];
+        self.fetch_with_refspec_with(
+            repo_path,
+            remote_url,
+            refspec,
+            &GitHubCredentials::default(),
+        )
+    }
 
-        let args = [
-            OsString::from("fetch"),
-            OsString::from(remote_url),
-            OsString::from(refspec),
-        ];
-
-        match self.git_with_env(repo_path, args, &envs) {
-            Ok(_) => Ok(()),
-            Err(GitCliError::CommandFailed(msg)) => Err(self.classify_cli_error(msg)),
-            Err(err) => Err(err),
-        }
+    /// [`Self::fetch_with_refspec`] authenticating a GitHub remote with its
+    /// owner's org token from `credentials`.
+    pub fn fetch_with_refspec_with(
+        &self,
+        repo_path: &Path,
+        remote_url: &str,
+        refspec: &str,
+        credentials: &GitHubCredentials,
+    ) -> Result<(), GitCliError> {
+        self.git_network(repo_path, remote_url, credentials, |url| {
+            vec![
+                OsString::from("fetch"),
+                OsString::from(url),
+                OsString::from(refspec),
+            ]
+        })
+        .map(|_| ())
     }
 
     /// Push a branch to the given remote using native git authentication.
@@ -491,24 +511,38 @@ impl GitCli {
         branch: &str,
         force: bool,
     ) -> Result<(), GitCliError> {
+        self.push_with(
+            repo_path,
+            remote_url,
+            branch,
+            force,
+            &GitHubCredentials::default(),
+        )
+    }
+
+    /// [`Self::push`] authenticating a GitHub remote with its owner's org
+    /// token from `credentials`.
+    pub fn push_with(
+        &self,
+        repo_path: &Path,
+        remote_url: &str,
+        branch: &str,
+        force: bool,
+        credentials: &GitHubCredentials,
+    ) -> Result<(), GitCliError> {
         let refspec = if force {
             format!("+refs/heads/{branch}:refs/heads/{branch}")
         } else {
             format!("refs/heads/{branch}:refs/heads/{branch}")
         };
-        let envs = vec![(OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0"))];
-
-        let args = [
-            OsString::from("push"),
-            OsString::from(remote_url),
-            OsString::from(refspec),
-        ];
-
-        match self.git_with_env(repo_path, args, &envs) {
-            Ok(_) => Ok(()),
-            Err(GitCliError::CommandFailed(msg)) => Err(self.classify_cli_error(msg)),
-            Err(err) => Err(err),
-        }
+        self.git_network(repo_path, remote_url, credentials, |url| {
+            vec![
+                OsString::from("push"),
+                OsString::from(url),
+                OsString::from(refspec),
+            ]
+        })
+        .map(|_| ())
     }
 
     /// This directly queries the remote without fetching.
@@ -518,18 +552,88 @@ impl GitCli {
         remote_url: &str,
         branch_name: &str,
     ) -> Result<bool, GitCliError> {
-        let envs = vec![(OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0"))];
+        self.check_remote_branch_exists_with(
+            repo_path,
+            remote_url,
+            branch_name,
+            &GitHubCredentials::default(),
+        )
+    }
 
-        let args = [
-            OsString::from("ls-remote"),
-            OsString::from("--heads"),
-            OsString::from(remote_url),
-            OsString::from(format!("refs/heads/{branch_name}")),
-        ];
+    pub fn check_remote_branch_exists_with(
+        &self,
+        repo_path: &Path,
+        remote_url: &str,
+        branch_name: &str,
+        credentials: &GitHubCredentials,
+    ) -> Result<bool, GitCliError> {
+        Ok(self
+            .remote_branch_oid(repo_path, remote_url, branch_name, credentials)?
+            .is_some())
+    }
 
-        match self.git_with_env(repo_path, args, &envs) {
-            Ok(output) => Ok(!output.trim().is_empty()),
-            Err(GitCliError::CommandFailed(msg)) => Err(self.classify_cli_error(msg)),
+    /// The commit `refs/heads/<branch_name>` points at on the remote, read
+    /// directly with `ls-remote` (no fetch); `None` when the branch is absent.
+    pub fn remote_branch_oid(
+        &self,
+        repo_path: &Path,
+        remote_url: &str,
+        branch_name: &str,
+        credentials: &GitHubCredentials,
+    ) -> Result<Option<String>, GitCliError> {
+        let refname = format!("refs/heads/{branch_name}");
+        let output = self.git_network(repo_path, remote_url, credentials, |url| {
+            vec![
+                OsString::from("ls-remote"),
+                OsString::from("--heads"),
+                OsString::from(url),
+                OsString::from(&refname),
+            ]
+        })?;
+        Ok(output.lines().find_map(|line| {
+            let (oid, name) = line.split_once('\t')?;
+            (name.trim() == refname).then(|| oid.trim().to_string())
+        }))
+    }
+
+    /// Run a command that contacts `remote_url`. A GitHub remote whose owner
+    /// has an org token in `credentials` gets that token for this one command
+    /// (see `utils::github_credentials`); an unreadable configured token
+    /// refuses to run; anything else uses git's existing authentication.
+    /// Authentication failures name the owner and the credential source.
+    fn git_network(
+        &self,
+        repo_path: &Path,
+        remote_url: &str,
+        credentials: &GitHubCredentials,
+        args: impl FnOnce(&str) -> Vec<OsString>,
+    ) -> Result<String, GitCliError> {
+        let selection = credentials.select_url(remote_url);
+        // Collect the selection's environment changes from a scratch command
+        // so they apply to exactly this invocation.
+        let mut scratch = Command::new("git");
+        let url = selection
+            .apply_git(&mut scratch, remote_url)
+            .map_err(GitCliError::CredentialUnavailable)?;
+        let mut envs = vec![(OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0"))];
+        let mut removed = Vec::new();
+        for (key, value) in scratch.get_envs() {
+            match value {
+                Some(value) => envs.push((key.to_os_string(), value.to_os_string())),
+                None => removed.push(key.to_os_string()),
+            }
+        }
+        tracing::debug!(
+            owner = selection.owner().unwrap_or("-"),
+            source = selection.source_label(),
+            "git network command"
+        );
+        match self.git_impl_full(repo_path, args(&url), Some(&envs), &removed, None) {
+            Ok(output) => Ok(String::from_utf8_lossy(&output).to_string()),
+            Err(GitCliError::CommandFailed(msg)) => Err(match self.classify_cli_error(msg) {
+                GitCliError::AuthFailed(msg) => GitCliError::AuthFailed(selection.attribute(&msg)),
+                other => other,
+            }),
             Err(err) => Err(err),
         }
     }
@@ -832,10 +936,7 @@ impl GitCli {
 impl GitCli {
     fn classify_cli_error(&self, msg: String) -> GitCliError {
         let lower = msg.to_ascii_lowercase();
-        if lower.contains("authentication failed")
-            || lower.contains("could not read username")
-            || lower.contains("invalid username or password")
-        {
+        if looks_like_git_auth_failure(&msg) {
             GitCliError::AuthFailed(msg)
         } else if lower.contains("non-fast-forward")
             || lower.contains("failed to push some refs")
@@ -888,6 +989,23 @@ impl GitCli {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.git_impl_full(repo_path, args, envs, &[], stdin)
+    }
+
+    /// [`Self::git_impl`] that also removes `removed` from the inherited
+    /// environment.
+    fn git_impl_full<I, S>(
+        &self,
+        repo_path: &Path,
+        args: I,
+        envs: Option<&[(OsString, OsString)]>,
+        removed: &[OsString],
+        stdin: Option<&[u8]>,
+    ) -> Result<Vec<u8>, GitCliError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         self.ensure_available()?;
         let git = resolve_executable_path_blocking("git").ok_or(GitCliError::NotAvailable)?;
         let mut cmd = Command::new(&git);
@@ -898,10 +1016,15 @@ impl GitCli {
                 cmd.env(k, v);
             }
         }
-
-        for a in args {
-            cmd.arg(a);
+        for key in removed {
+            cmd.env_remove(key);
         }
+
+        let args: Vec<OsString> = args
+            .into_iter()
+            .map(|a| a.as_ref().to_os_string())
+            .collect();
+        cmd.args(&args);
 
         if stdin.is_some() {
             cmd.stdin(Stdio::piped());
@@ -916,7 +1039,9 @@ impl GitCli {
             stdin = ?stdin.as_ref().map(|s| String::from_utf8_lossy(s)),
             repo = ?repo_path,
             "Running git command: {:?}",
-            cmd
+            // Arguments only: `Command`'s Debug output includes environment
+            // changes, which can carry a credential.
+            args
         );
 
         use utils::command_ext::NoWindowExt;

@@ -10,6 +10,7 @@ pub use cli::GhCli;
 use cli::{CheckPage, GhCliError, GitHubRepoInfo};
 use tokio::task;
 use tracing::info;
+use utils::github_credentials::GitHubCredentials;
 
 use crate::{
     GitHostProvider,
@@ -27,8 +28,14 @@ pub struct GitHubProvider {
 
 impl GitHubProvider {
     pub fn new() -> Result<Self, GitHostError> {
+        Self::with_credentials(GitHubCredentials::default())
+    }
+
+    /// A provider whose `gh` calls authenticate each target repository's owner
+    /// with its org token from `credentials` (others keep the existing login).
+    pub fn with_credentials(credentials: GitHubCredentials) -> Result<Self, GitHostError> {
         Ok(Self {
-            gh_cli: GhCli::new(),
+            gh_cli: GhCli::with_credentials(credentials),
         })
     }
 
@@ -555,5 +562,32 @@ fn source_read(result: Result<CheckPage, GitHostError>) -> SourceRead {
         Ok((checks, truncated)) => SourceRead::Ok { checks, truncated },
         Err(GitHostError::InsufficientPermissions(detail)) => SourceRead::Forbidden(detail),
         Err(error) => SourceRead::Error(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod credential_error_tests {
+    use utils::github_credentials::{GitHubCredentials, GitHubToken, OwnerCredential};
+
+    use super::*;
+
+    /// Attribution prefixes the message but keeps a 403 a permission error, so
+    /// check coverage still reports the source as forbidden.
+    #[test]
+    fn attributed_forbidden_stays_insufficient_permissions() {
+        let mut credentials = GitHubCredentials::default();
+        credentials.insert(
+            "sweetgreen",
+            OwnerCredential::OrgToken(GitHubToken::new("synthetic")),
+        );
+        let detail = credentials
+            .select_url("https://github.com/sweetgreen/platform-ops")
+            .attribute("gh: Resource not accessible by personal access token (HTTP 403)");
+        let error = GitHostError::from(GhCliError::CommandFailed(detail));
+        assert!(matches!(error, GitHostError::InsufficientPermissions(_)));
+        assert!(matches!(
+            source_read(Err(error)),
+            SourceRead::Forbidden(detail) if detail.contains("sweetgreen org token")
+        ));
     }
 }

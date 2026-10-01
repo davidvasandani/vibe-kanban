@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use git::{GitCli, GitCliError, GitService};
+use git::{GitCli, GitCliError, GitHubCredentials, GitService, PushOutcome};
 use git2::{PushOptions, Repository, build::CheckoutBuilder};
 use tempfile::TempDir;
 // Avoid direct git CLI usage in tests; exercise GitService instead.
@@ -418,6 +418,7 @@ fn rebase_preserves_untracked_files() {
         "new-base",
         "old-base",
         "feature",
+        &GitHubCredentials::default(),
     );
     assert!(res.is_ok(), "rebase should succeed: {res:?}");
 
@@ -440,6 +441,7 @@ fn rebase_aborts_on_uncommitted_tracked_changes() {
         "new-base",
         "old-base",
         "feature",
+        &GitHubCredentials::default(),
     );
     assert!(res.is_err(), "rebase should fail on dirty worktree");
 
@@ -461,6 +463,7 @@ fn rebase_aborts_if_untracked_would_be_overwritten_by_base() {
         "new-base",
         "old-base",
         "feature",
+        &GitHubCredentials::default(),
     );
     assert!(
         res.is_err(),
@@ -695,6 +698,7 @@ fn rebase_refuses_to_abort_existing_rebase() {
             "new-base",
             "old-base",
             "feature",
+            &GitHubCredentials::default(),
         )
         .expect_err("first rebase should error and leave in-progress state");
 
@@ -706,6 +710,7 @@ fn rebase_refuses_to_abort_existing_rebase() {
         "new-base",
         "old-base",
         "feature",
+        &GitHubCredentials::default(),
     );
     assert!(res.is_err(), "should error because rebase is in progress");
     // Note: We do not auto-abort; user should resolve or abort explicitly
@@ -726,6 +731,7 @@ fn rebase_fast_forwards_when_no_unique_commits() {
             "new-base",
             "old-base",
             "feature",
+            &GitHubCredentials::default(),
         )
         .expect("rebase should succeed");
     let after_oid = g.get_head_info(&worktree_path).unwrap().oid;
@@ -757,6 +763,7 @@ fn rebase_applies_multiple_commits_onto_ahead_base() {
             "new-base",
             "old-base",
             "feature",
+            &GitHubCredentials::default(),
         )
         .expect("rebase should succeed");
 
@@ -902,6 +909,7 @@ fn rebase_preserves_rename_changes() {
             "new-base",
             "old-base",
             "feature",
+            &GitHubCredentials::default(),
         )
         .expect("rebase should succeed");
     // after rebase, renamed file present; original absent
@@ -1346,4 +1354,106 @@ fn merge_base_ahead_of_task_should_error() {
         res.is_err(),
         "Merge should error when base branch is ahead of task branch"
     );
+}
+
+#[test]
+fn push_if_needed_skips_when_remote_branch_is_at_head_and_pushes_otherwise() {
+    let temp_dir = TempDir::new().unwrap();
+    let remote_path = temp_dir.path().join("remote.git");
+    Repository::init_bare(&remote_path).expect("init bare remote");
+    let remote_url = remote_path.to_str().expect("remote path str");
+    let seed_path = temp_dir.path().join("seed");
+    GitService::new()
+        .initialize_repo_with_main_branch(&seed_path)
+        .expect("init seed repo");
+    let seed_repo = Repository::open(&seed_path).expect("open seed repo");
+    seed_repo.remote("origin", remote_url).expect("add remote");
+    push_ref(&seed_repo, "refs/heads/main", "refs/heads/main");
+    Repository::open_bare(&remote_path)
+        .expect("open bare remote")
+        .set_head("refs/heads/main")
+        .expect("set remote HEAD");
+    let local_path = temp_dir.path().join("local");
+    let local_repo = Repository::clone(remote_url, &local_path).expect("clone local");
+    configure_user(&local_repo);
+    checkout_branch(&local_repo, "main");
+    write_file(&local_path, "file.txt", "one\n");
+    commit_all(&local_repo, "first");
+    let branch = "main".to_string();
+    // The agent already pushed this commit.
+    push_ref(
+        &local_repo,
+        &format!("refs/heads/{branch}"),
+        &format!("refs/heads/{branch}"),
+    );
+
+    // A dirty worktree makes any push attempt fail, so success proves the
+    // push was skipped.
+    write_file(&local_path, "file.txt", "uncommitted\n");
+    let service = GitService::new();
+    let credentials = GitHubCredentials::default();
+    assert_eq!(
+        service
+            .push_to_remote_if_needed(&local_path, &branch, &credentials)
+            .unwrap(),
+        PushOutcome::AlreadyUpToDate
+    );
+    let head = local_repo.head().unwrap().target().unwrap();
+    let tracking = local_repo
+        .find_reference(&format!("refs/remotes/origin/{branch}"))
+        .unwrap();
+    assert_eq!(tracking.target(), Some(head));
+
+    // A new local commit differs from the remote, so it is pushed.
+    commit_all(&local_repo, "second");
+    let head = local_repo.head().unwrap().target().unwrap();
+    assert_eq!(
+        service
+            .push_to_remote_if_needed(&local_path, &branch, &credentials)
+            .unwrap(),
+        PushOutcome::Pushed
+    );
+    let remote = Repository::open_bare(&remote_path).unwrap();
+    assert_eq!(
+        remote
+            .find_reference(&format!("refs/heads/{branch}"))
+            .unwrap()
+            .target(),
+        Some(head)
+    );
+}
+
+#[test]
+fn unavailable_org_token_refuses_network_commands_without_running_them() {
+    use utils::github_credentials::OwnerCredential;
+
+    let temp_dir = TempDir::new().unwrap();
+    let repo_path = temp_dir.path().join("repo");
+    Repository::init(&repo_path).unwrap();
+    let mut credentials = GitHubCredentials::default();
+    credentials.insert(
+        "Broken-Org",
+        OwnerCredential::Unavailable("1Password lookup failed".into()),
+    );
+    let cli = GitCli::new();
+    let url = "https://github.com/broken-org/app.git";
+    for result in [
+        cli.push_with(&repo_path, url, "main", false, &credentials),
+        cli.fetch_with_refspec_with(
+            &repo_path,
+            url,
+            "+refs/heads/*:refs/remotes/o/*",
+            &credentials,
+        ),
+        cli.check_remote_branch_exists_with(&repo_path, url, "main", &credentials)
+            .map(|_| ()),
+    ] {
+        match result {
+            Err(GitCliError::CredentialUnavailable(message)) => {
+                assert!(message.contains("broken-org org token is configured but unavailable"));
+                assert!(message.contains("1Password lookup failed"));
+            }
+            other => panic!("expected CredentialUnavailable, got {other:?}"),
+        }
+    }
 }

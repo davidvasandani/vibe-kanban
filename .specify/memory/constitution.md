@@ -649,6 +649,21 @@ coverage drives a request that never settles past its deadline, then shows
 recovery on the next poll. It also drives a slow item past the server budget
 and shows the last-known fallback and later publication.
 
+### XLIV. Credentials follow the target resource, never ambient identity
+When Vibe Kanban itself (not an agent) calls an external service on a user's
+behalf, it MUST choose the credential from the settings authority that owns
+it, keyed by the resource the call targets (for GitHub, the owner of the target
+repository). It is resolved per request, so a settings edit applies to the next
+call. Ambient process credentials (environment tokens, CLI logins, host
+credential helpers) are used only when the settings authority has no entry for
+that target, and that fallback is logged. A configured entry that cannot be
+read fails closed. It never falls through to another identity. Credentials
+reach only the one child process or request that needs them, through
+command-scoped mechanisms. They are never written to global config or the
+server environment, and never logged. Every authentication or permission
+failure names the target and the credential source that was used, so the
+operator knows which credential to fix.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -670,7 +685,7 @@ and shows the last-known fallback and later publication.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.40.0 (adds XLIII, bounding bulk enrichment responses by a
+**Version**: 0.41.0 (adds XLIV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
@@ -934,3 +949,17 @@ reads that follow a live subject. Neither bounds a bulk request/response
 enrichment endpoint, and neither requires deadlines on polled queries. XXXIV
 (partial projections) still governs how the rows render while enrichment is
 missing. Numeral XLIII was unused on this branch and on `main`.
+
+## Review: vk/8b57-use-settings-git
+
+Applied `/speckit.constitution`: added principle XLIV (0.41.0). The VK
+server's own `git push` and `gh` calls used the server process's ambient GitHub
+credential, while agents used the per-owner org token from Settings. The
+result was a 403 on `create_pr` for a repository the configured token could
+write to. Some neighbouring principles touch this but none cover it:
+- XXI requires errors to say *what* failed, but not which credential source
+  was used.
+- XXIV/XXIX make Settings the authority for MCP definitions only.
+- XVII/XXIII cover redaction and snapshots for agent execution, not the
+  server's own outbound calls.
+Numeral XLIV was unused on this branch.
