@@ -289,7 +289,14 @@ contributed to it.
   owner-scoped Git credential contexts; a prepended `gh` shim that survives
   profile PATH merging; and the gh argument-parsing traps (value flags consumed
   first, short letters reused per subcommand, `--`, `GH_REPO`, `gh-resolved`,
-  API placeholders).
+  API placeholders). Also covers server-side git/PR operations
+  (`vk/8b57-use-settings-git`): a per-request owner-keyed credential set,
+  a TTL'd and invalidated `op://` cache, fail-closed unavailable owners,
+  attributed 401/403s, and the push skip. It lists every git config path that
+  routes around a credential helper (URL forms,
+  `insteadOf`/`pushInsteadOf` longest-first-match, `extraHeader`, rewritten
+  `remote -v`/libgit2 URLs, `gh pr checkout`'s own git, Enterprise), with
+  network-free verification recipes.
 - [coordinator-restart-handoff.md](coordinator-restart-handoff.md) — Why a VK
   deploy no longer stops worker-owned tasks (parents, sub-tasks, pollers).
   Shutdown hands them off with no cancel and no WIP commit. Boot re-attaches
