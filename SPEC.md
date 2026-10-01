@@ -1,88 +1,97 @@
-# SPEC: Claude follow-ups survive a deleted session transcript
+# SPEC: Bare URLs are always clickable in rendered markdown
 
-Task: `vk/9f5d-no-conversation`.
+Task: `vk/e4ef-urls-always-clic`.
 
 ## Problem
 
-Workspace `vk/d97a-build-daily-repo` (SWE-21, Claude Code session
-`4c9c88ce`) can no longer take a follow-up. Every message fails within a
-few seconds with:
+Agent replies often contain bare URLs, for example "pushed to PR #1803:
+https://github.com/sweetgreen/terraform-infrastructure/pull/1803." The chat
+renders them as plain text. Users have to select and copy them; they cannot
+click them.
 
-```
-No conversation found with session ID: f54d7e57-b912-487e-9d3b-50f3f6d7dd94
-```
+Read-only markdown (conversation entries, issue descriptions, comments,
+approvals, notes) is rendered by `WYSIWYGEditor` in `disabled` mode. That
+uses Lexical's markdown import, and the `LINK` transformer only recognises
+`[text](url)`. A bare URL stays a `TextNode`. `ReadOnlyLinkPlugin` only sees
+`LinkNode`s, so it never runs on bare URLs.
 
-The follow-up execution (`8dfca28c`, 2026-10-01 10:53Z) ran
-`claude --resume f54d7e57-…` and exited 1. The same thing happened on
-2026-09-30.
+There is a second gap: `ReadOnlyLinkPlugin` makes only `https://` links
+clickable. Markdown links to `http://` destinations, such as
+`http://localhost:3000` dev servers or LAN addresses, render as disabled.
 
-## Root cause
+## Goals
 
-- Claude Code stores each conversation as
-  `$CLAUDE_CONFIG_DIR|$HOME/.claude/projects/<cwd-slug>/<session-id>.jsonl`.
-  `--resume <id>` fails with the message above when that file is missing.
-- The last successful turn was on 2026-07-07. Claude Code's default
-  `cleanupPeriodDays` is 30, so it deleted the transcript around
-  2026-08-06.
-- The homelab retention fix (`claudeTranscriptRetentionDays`, default 3650,
-  homelab #1228) only landed on 2026-09-16. It stops future deletions but
-  can't restore files already deleted. Transcripts can also be lost when a
-  workspace moves to a worker that never received them.
-- Vibe Kanban still holds `f54d7e57…` as the session's agent session id.
-  Each follow-up passes it to `--resume`, so the workspace stays stuck no
-  matter what the user sends.
-- Codex already handles this case: when its rollout is missing it starts a
-  replacement thread in the same workspace (`ForkRejection::ConversationMissing`
-  in `codex.rs`). The Claude executor has no equivalent.
-
-## Goal
-
-When a Claude Code follow-up names a session whose transcript is
-provably missing, start a fresh Claude session in the same workspace
-instead of failing. The next follow-up then resumes the new session, since
-VK records the new session id from the stream as it already does today.
-
-## Requirements
-
-1. **FR-1 Detect a missing transcript before spawning.** Resolve Claude's
-   config dir the same way the child process will see it:
-   `CLAUDE_CONFIG_DIR`, else `$HOME/.claude`. Each variable is read from the
-   execution env merged with the profile env first, then from the process
-   env. The transcript counts as missing only when `<config>/projects` can
-   be listed and none of its project subdirectories contains
-   `<session-id>.jsonl`.
-2. **FR-2 Fail open.** If the projects dir can't be read (missing dir,
-   permission error, no HOME), resume as today, so a broken probe never
-   discards a valid session. Session ids that aren't one safe path segment
-   (empty, containing `/` or `..`) also resume as today.
-3. **FR-3 Fresh session fallback.** When the transcript is missing, spawn
-   the initial command (no `--resume`, no `--resume-session-at`). Put a
-   short notice in front of the user's prompt saying the earlier
-   conversation could not be restored and the agent should check the
-   workspace's files and git history for prior work.
-4. **FR-4 Visible, never silent.** Log a `warn` with the missing session id
-   when falling back. Also write a Vibe Kanban diagnostic line to the
-   execution's stderr ahead of Claude's own stderr. Per constitution IX it
-   must never be injected into agent stdout. The chat then shows the user that the earlier Claude
-   transcript was missing and a new conversation was started. Prior
-   knowledge (`vk/6026-no-conversation`) forbids silently substituting an
-   empty session.
-5. **FR-5 Scope.** This change touches only the Claude Code executor (plus a
-   generic stderr helper in `stdout_dup.rs`).
-   Other executors, the DB schema and the frontend stay unchanged.
+1. In read-only rendering, every bare `http://` or `https://` URL in normal
+   prose becomes a clickable link. That covers paragraphs, list items,
+   headings, quotes, table cells, and bold or italic text.
+2. Links open in a new tab with `rel="noopener noreferrer"`, the same as
+   existing external links.
+3. Trailing sentence punctuation is not part of the link: `.`, `,`, `;`,
+   `:`, `!`, `?`, quotes, and closing brackets with no matching opener. So
+   `(see https://x.y/a_(b))` links `https://x.y/a_(b)`, and `https://x.y.`
+   links `https://x.y`.
+4. URLs that directly follow non-space punctuation are linked too, such as
+   `(https://…)`, `"https://…"` and `<https://…>`. Lexical's stock
+   `AutoLinkPlugin` does not handle these, because it only treats `.,;` and
+   whitespace as boundaries.
+5. Explicit markdown links to `http://` destinations are clickable as well.
+6. Some text is left alone:
+   - fenced code blocks. Inline code is still linked, and the link wraps the
+     code-styled text.
+   - text that is already inside a link
+   - anything whose scheme is not `http` or `https`. `javascript:`, `data:`
+     and the rest are still never clickable.
+7. Editing mode is unchanged: no autolinking while the user is composing.
+8. Stored markdown is unchanged. Linking never reaches `onChange`, and the
+   links are removed when the editor becomes editable (see Design).
 
 ## Non-goals
 
-- Recovering the deleted transcript, or rebuilding it from VK's stored
-  logs.
-- Changing transcript retention (homelab already owns that).
-- Cross-worker transcript transfer (`session-transfers` already owns that).
+- `www.example.com` without a scheme, and email addresses.
+- `SimpleMarkdown` and `RawLogText`, which already linkify with their own
+  regexes.
+- Client-side routing for links that point into the app.
+
+## Design
+
+- A new `ReadOnlyAutoLinkPlugin` in `packages/ui/src/components/`. It
+  links text in its own Lexical update tagged `AUTO_LINK_UPDATE_TAG`. That
+  update runs once on mount, and again for the dirty leaves of every later
+  update that does not carry the tag.
+  - It skips nodes that are not simple text, text whose parent is a link,
+    and text inside a `CodeNode`. Inline code is simple text with a `code`
+    format, so it is still linked.
+  - It scans the text with `/https?:\/\/[^\s<>]+/gi`, trims trailing
+    punctuation and unbalanced closers, and then splits the node. Each URL
+    slice is wrapped in an `AutoLinkNode` and keeps its text format. It loops
+    over the remainder, so several URLs in one node are all linked.
+  - A `findUrlMatches(text)` helper is exported so it can be unit-tested.
+- Why the update is tagged and not a node transform: read-only editors still
+  sync markdown out. Issue descriptions wire `onChange` while displayed, and
+  composers are `disabled` while sending. Splitting formatted text is not
+  byte-identical on export (`**a https://b**` gains `&#32;`), so linking must
+  never reach `onChange`. `MarkdownSyncPlugin` skips updates carrying the
+  tag, and it also skips any update while the editor is read-only and the
+  tree still holds auto links. A selection is enough to trigger such an
+  update. An editable tree is exempt, because an `AutoLinkNode` pasted into a
+  composer is user content. The mount and unmount updates are queued in a
+  microtask, because Lexical merges the tags of updates batched into one
+  commit, and an untagged content change such as the initial parse would
+  otherwise be hidden.
+- On unmount, when the editor becomes editable, every `AutoLinkNode` is
+  unwrapped. Lexical's normalization merges the text back together, so
+  editing starts from the original node structure.
+- `WYSIWYGEditor` registers `AutoLinkNode` and mounts
+  `ReadOnlyAutoLinkPlugin` only when `disabled`, next to
+  `ReadOnlyLinkPlugin`.
+- `ReadOnlyLinkPlugin` also listens to `AutoLinkNode` mutations, because
+  Lexical mutation listeners match exact node classes. Its external check
+  becomes `/^https?:\/\//i`.
 
 ## Acceptance
 
-- Unit tests: transcript present (in any project dir) → resume; present
-  under `CLAUDE_CONFIG_DIR` → resume; projects dir present but file absent
-  → fresh; projects dir unreadable or missing → resume; unsafe session id →
-  resume. The stderr notice comes before the child's own stderr output.
-- `cargo test -p executors` passes; `pnpm run format` leaves the tree clean;
-  clippy is clean for the crate.
+- The screenshot case: a bare GitHub PR URL followed by `.` renders as an
+  `<a href=… target=_blank>` without the period.
+- Vitest covers the punctuation, parenthesis, code, existing-link, multiple-URL
+  and `http` cases, and the markdown round-trip.
+- `pnpm run check`, `pnpm run lint` and the web-core vitest suite pass.

@@ -714,6 +714,21 @@ transfer, or manual deletion. VK's session record outlives it.
 - VK never fabricates vendor-private history from its normalized logs to
   imitate the lost conversation.
 
+### XLVII. Rendered links are detected everywhere and allow-listed by scheme
+Read-only markdown is where users act on what agents report, so every URL
+shown there MUST be clickable, whether it is written as `[text](url)` or bare.
+- Clickability is decided by an explicit allow-list: `http`/`https` open in a
+  new tab with `noopener noreferrer`, and named in-app routes open in place.
+  Every other scheme (`javascript:`, `data:`, and so on) is rendered inert.
+- Bare-URL detection runs only in read-only rendering. It never rewrites what
+  the user is composing, and serialising back to markdown MUST reproduce the
+  source text.
+- Detection skips fenced code blocks and text already inside a link. Inline
+  code keeps its code styling and still becomes a link. Trailing sentence
+  punctuation and unbalanced closing brackets are not part of the URL.
+Regression coverage renders real markdown through the editor, not just the
+regex.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -735,7 +750,7 @@ transfer, or manual deletion. VK's session record outlives it.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.43.0 (adds XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
+**Version**: 0.44.0 (adds XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
@@ -1055,3 +1070,14 @@ keeps the `vk/6026-no-conversation` boundary against fabricating history.
 Numeral XLVI was unused on this branch and on `main`. The homelab
 constitution named by the command template was not changed, because this
 project only manages the Vibe Kanban repository.
+
+## Review: vk/e4ef-urls-always-clic
+
+Applied `/speckit.constitution` and added principle XLVII (0.44.0). Agent
+replies showed bare PR URLs as plain text, because the read-only Lexical
+renderer only linked `[text](url)`, and `http://` links were disabled. No
+principle covered link rendering. XLVII puts the scheme allow-list, read-only
+detection and the round-trip into one rule. Main took XLV and XLVI while this
+branch was open (vk/8b57, vk/9f5d), so the rule was renumbered on merge. The
+homelab constitution named by the command template was not changed, because
+this project only manages the Vibe Kanban repository.

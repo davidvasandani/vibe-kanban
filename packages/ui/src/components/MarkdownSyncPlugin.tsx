@@ -6,6 +6,7 @@ import {
   type Transformer,
 } from '@lexical/markdown';
 import { $getRoot, type EditorState } from 'lexical';
+import { $hasAutoLinks, AUTO_LINK_UPDATE_TAG } from './ReadOnlyAutoLinkPlugin';
 
 type MarkdownSyncPluginProps = {
   value: string;
@@ -73,9 +74,21 @@ export function MarkdownSyncPlugin({
 
   // Handle editor changes (editor → external)
   useEffect(() => {
-    return editor.registerUpdateListener(({ editorState }) => {
+    return editor.registerUpdateListener(({ editorState, tags }) => {
       onEditorStateChange?.(editorState);
-      if (!onChange) return;
+      // Read-only auto links are display-only: a tree that holds them has
+      // split text whose export would rewrite the value. That covers the
+      // linking update and any later one (a read-only selection, say) until
+      // the links are unwrapped. A fresh parse never contains them (see
+      // ReadOnlyAutoLinkPlugin). In an editable editor an auto link can only
+      // be user content (pasted from a rendered message), so it syncs.
+      if (
+        !onChange ||
+        tags.has(AUTO_LINK_UPDATE_TAG) ||
+        (!editor.isEditable() && editorState.read($hasAutoLinks))
+      ) {
+        return;
+      }
 
       const markdown = editorState.read(() =>
         $convertToMarkdownString(transformers)

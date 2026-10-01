@@ -1,57 +1,66 @@
-# Implementation plan: Claude follow-ups survive a deleted transcript
+# Implementation plan: bare URLs always clickable
 
-Task: `vk/9f5d-no-conversation`. See `SPEC.md` and `PRIOR_KNOWLEDGE.md`.
+Task `vk/e4ef-urls-always-clic`. See `SPEC.md` for the design and
+`PRIOR_KNOWLEDGE.md` for the link rules inherited from PR #313.
 
-Changes are in `crates/executors/src/executors/claude.rs` and
-`crates/executors/src/stdout_dup.rs`.
+## Step 1: URL detection helper and plugin (`packages/ui`)
 
-## Steps
+File: `packages/ui/src/components/ReadOnlyAutoLinkPlugin.tsx` (new)
 
-1. **Config-dir resolution helper.**
-   `fn claude_config_dir(vars: &HashMap<String, String>) -> Option<PathBuf>`:
-   look up `CLAUDE_CONFIG_DIR` (non-empty) and then `HOME` → `HOME/.claude`.
-   For each variable, check `vars` (execution env + profile env) before the
-   process env.
+1. `export function findUrlMatches(text): { start, end, url }[]`
+   - Scan with `/https?:\/\/[^\s<>]+/gi`.
+   - Trim trailing characters from `.,;:!?'"*` and backticks.
+   - Trim a trailing `)`, `]` or `}` only when the candidate has more closers
+     than openers of that kind. Loop until stable.
+   - Drop the match if only the scheme is left (`https://`).
+2. `ReadOnlyAutoLinkPlugin()` links text in updates tagged
+   `AUTO_LINK_UPDATE_TAG` (plus `HISTORY_MERGE_TAG`). It runs once on mount,
+   and then from an update listener over the dirty leaves of any update that
+   does not carry the tag.
+   - `$linkUrls(node)`: skip the node if it is not simple text, or if an
+     ancestor is a link or a `CodeNode`. Otherwise split each match out, wrap
+     it in `$createAutoLinkNode(url)`, and continue on the tail.
+   - On unmount (the editor becomes editable), unwrap every `AutoLinkNode`.
+   - Queue the mount and unmount updates with `queueMicrotask`, so they never
+     batch with a content update and hide it behind the tag.
+   - Throw if `AutoLinkNode` is not registered on the editor.
+3. `MarkdownSyncPlugin.tsx`: do not call `onChange` for updates tagged
+   `AUTO_LINK_UPDATE_TAG`. Splitting formatted text is not byte-identical on
+   export (`**a https://b**` gains `&#32;`). Issue descriptions wire
+   `onChange` while read-only, and composers are `disabled` while sending.
 
-2. **Transcript probe.**
-   `fn transcript_status(config_dir: &Path, session_id: &str) -> TranscriptStatus`
-   returns `Present`, `Missing` or `Unknown`.
-   - `Unknown` when the session id isn't one safe file-name segment (empty,
-     `/`, `\`, `..`, NUL) or when `config_dir/projects` can't be read.
-   - `Present` when any `projects/<dir>/<id>.jsonl` exists. Errors reading
-     an individual entry are skipped.
-   - `Missing` otherwise.
+## Step 2: allow `http` and auto links (`packages/ui`)
 
-3. **Follow-up wiring** in `ClaudeCode::spawn_follow_up`:
-   - Compute `env.clone().with_profile(&self.cmd)` vars, resolve the config
-     dir and probe.
-   - On `Missing`: `tracing::warn!`, then build the *initial* command, put
-     `MISSING_TRANSCRIPT_AGENT_NOTICE` in front of the prompt, and pass a
-     user-facing notice to `spawn_internal`.
-   - Otherwise keep today's behaviour (`--resume`, optional
-     `--resume-session-at`).
+File: `packages/ui/src/components/ReadOnlyLinkPlugin.tsx`
 
-4. **Visible notice on stderr (constitution IX).** VK must not inject its
-   own metadata into the agent's stdout, so the notice can't be a fake
-   Claude JSON line. Add `prepend_child_stderr(child, notice)` to
-   `stdout_dup.rs`. It takes the child's stderr, puts in a fresh pipe, and
-   runs a task that writes the notice first and then copies the original
-   stderr through. `normalize_claude_stderr_logs` already renders stderr
-   as a visible error entry, which is the same channel worker diagnostics
-   use. `spawn_internal` gains an `Option<&str>` startup notice and calls
-   the helper right after spawning.
+1. Change the external check to `/^https?:\/\//i`.
+2. Register the same mutation listener for `AutoLinkNode`, because mutation
+   listeners are per class. Update the comments.
 
-5. **Tests** (`#[cfg(test)]` in `claude.rs`, using `tempfile`):
-   - present in some project dir → `Present`
-   - projects dir exists, file absent → `Missing`
-   - no projects dir → `Unknown`
-   - unsafe ids (`""`, `"../x"`, `"a/b"`) → `Unknown`
-   - `CLAUDE_CONFIG_DIR` in vars wins over `HOME`; `HOME` maps to `.claude`
-   - `prepend_child_stderr` on a real child (`sh -c 'echo inner >&2'`)
-     yields the notice line before `inner`, and EOF once the child exits.
+## Step 3: wire into the editor (`packages/web-core`)
 
-6. **Verify:** `cargo test -p executors claude`,
-   `cargo clippy -p executors --all-targets`, `pnpm run format`.
+File: `packages/web-core/src/shared/components/WYSIWYGEditor.tsx`
 
-7. **Wiki** (stage 12): new page `wiki/claude-missing-transcript-fallback.md`
-   plus an index line.
+1. Add `AutoLinkNode` to `nodes`.
+2. Render `{disabled && <ReadOnlyAutoLinkPlugin />}` next to `ReadOnlyLinkPlugin`.
+
+## Step 4: tests (`packages/web-core`)
+
+- `ReadOnlyAutoLinkPlugin.test.tsx` (new, jsdom). It runs
+  `findUrlMatches` table tests and renders markdown through `LexicalComposer`
+  with both plugins, checking:
+  - the screenshot sentence
+  - parentheses and quotes
+  - multiple URLs
+  - bold text
+  - code blocks are not linked; inline code is linked and keeps its code format
+  - existing markdown links are left alone
+  - an `http` URL is clickable
+  - the markdown export round-trips
+- `ReadOnlyLinkPlugin.test.tsx`: update the `http` expectations, which were
+  disabled and are now clickable.
+
+## Step 5: verify
+
+`pnpm --filter @vibe/web-core exec vitest run`, `pnpm run check`,
+`pnpm run lint`, `pnpm run format`.

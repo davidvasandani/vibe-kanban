@@ -316,3 +316,10 @@ contributed to it.
   A worker journal behind the cursor (undrained worker restart) is resolved
   from matching inventory evidence (`Interrupted` → Resume) or classified
   `Indeterminate`, never polled forever (`vk/9c15-stopped-job-look`).
+- [read-only-markdown-links.md](read-only-markdown-links.md) — Bare-URL
+  autolinking and the clickability policy in read-only markdown. Mutation
+  listeners are exact-class. Read-only editors still export via `onChange`
+  (issue descriptions, sending composers), and split formatted text is not
+  byte-identical on export. So display-only changes use tagged, microtask-
+  queued updates, export is skipped while a read-only tree holds auto links,
+  and links are unwrapped on becoming editable (`vk/e4ef-urls-always-clic`).

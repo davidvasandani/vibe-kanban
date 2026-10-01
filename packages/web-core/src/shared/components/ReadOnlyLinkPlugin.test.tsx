@@ -135,12 +135,13 @@ describe('read-only issue references', () => {
     expect(link.getAttribute('href')).toBe(issueUrl);
   });
 
-  it.each(['https://example.com/issue/1', hexIssueUrl])(
-    'preserves allowed destination %s',
-    async (href) => {
-      expect((await renderLink(href)).getAttribute('href')).toBe(href);
-    }
-  );
+  it.each([
+    'https://example.com/issue/1',
+    'http://localhost:3000',
+    hexIssueUrl,
+  ])('preserves allowed destination %s', async (href) => {
+    expect((await renderLink(href)).getAttribute('href')).toBe(href);
+  });
 
   it.each([
     'javascript:alert(1)',
@@ -152,7 +153,6 @@ describe('read-only issue references', () => {
     `${issueUrl}?redirect=evil`,
     '#fragment',
     '../file',
-    'http://example.com',
     // Issue lookup is an exact match against lowercase UUIDs and route params
     // are never normalised, so any shouted variant is a dead link.
     issueUrl.replace('/projects/', '/Projects/'),
