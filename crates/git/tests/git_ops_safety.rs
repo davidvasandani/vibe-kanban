@@ -1548,9 +1548,10 @@ fn list_remotes_reports_configured_urls_not_rewritten_ones() {
     let repo_path = temp_dir.path().join("repo");
     let repo = Repository::init(&repo_path).unwrap();
     assert!(GitCli::new().list_remotes(&repo_path).unwrap().is_empty());
-    repo.remote("origin", "https://github.com/sweetgreen/app.git")
-        .unwrap();
+    // Configured upstream-first; the listing keeps `git remote -v` (name) order.
     repo.remote("upstream", "git@github.com:other/app.git")
+        .unwrap();
+    repo.remote("origin", "https://github.com/sweetgreen/app.git")
         .unwrap();
     // A rewrite to an SSH host alias would hide the owner if reported.
     repo.config()
@@ -1570,5 +1571,9 @@ fn list_remotes_reports_configured_urls_not_rewritten_ones() {
                 "git@github.com:other/app.git".to_string()
             ),
         ]
+    );
+    assert_eq!(
+        GitCli::new().get_remote_url(&repo_path, "origin").unwrap(),
+        "https://github.com/sweetgreen/app.git"
     );
 }

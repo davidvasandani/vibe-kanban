@@ -1446,11 +1446,16 @@ impl GitService {
                 "Remote for branch '{branch_name}' has no name"
             ))
         })?;
-        let url = remote.url().map(|url| url.to_string()).ok_or_else(|| {
-            GitServiceError::InvalidRepository(format!(
-                "Remote for branch '{branch_name}' has no URL"
-            ))
-        })?;
+        // libgit2 reports the `insteadOf`-rewritten URL; prefer the configured
+        // one so credential selection still sees the GitHub owner.
+        let url = GitCli::new()
+            .configured_remote_url(repo_path, &name)
+            .or_else(|| remote.url().map(|url| url.to_string()))
+            .ok_or_else(|| {
+                GitServiceError::InvalidRepository(format!(
+                    "Remote for branch '{branch_name}' has no URL"
+                ))
+            })?;
         Ok(GitRemote { name, url })
     }
 
@@ -1631,14 +1636,17 @@ impl GitService {
         refspec: &str,
         credentials: &GitHubCredentials,
     ) -> Result<(), GitServiceError> {
-        // Get the remote
+        let git_cli = GitCli::new();
+        // The configured URL, not libgit2's `insteadOf`-rewritten one (see
+        // `GitCli::list_remotes`).
         let remote_url = remote
-            .url()
+            .name()
+            .and_then(|name| git_cli.configured_remote_url(repo.path(), name))
+            .or_else(|| remote.url().map(str::to_string))
             .ok_or_else(|| GitServiceError::InvalidRepository("Remote has no URL".to_string()))?;
 
-        let git_cli = GitCli::new();
         if let Err(e) =
-            git_cli.fetch_with_refspec_with(repo.path(), remote_url, refspec, credentials)
+            git_cli.fetch_with_refspec_with(repo.path(), &remote_url, refspec, credentials)
         {
             tracing::error!("Fetch from GitHub failed: {}", e);
             return Err(e.into());

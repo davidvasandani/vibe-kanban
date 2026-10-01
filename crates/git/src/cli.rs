@@ -757,52 +757,82 @@ impl GitCli {
         repo_path: &Path,
         remote_name: &str,
     ) -> Result<String, GitCliError> {
+        // `remote get-url` validates the remote and prints the rewritten URL;
+        // report the configured one (see `list_remotes`).
         let output = self.git(repo_path, ["remote", "get-url", remote_name])?;
-        Ok(output.trim().to_string())
+        Ok(self
+            .configured_remote_url(repo_path, remote_name)
+            .unwrap_or_else(|| output.trim().to_string()))
     }
 
     /// List all remotes with their URLs using `git remote -v`.
     /// Returns a Vec of (name, url) tuples, deduplicated (fetch/push show the same URL).
-    /// The repository's remotes as configured, first URL per name, in config
-    /// order. Read from config rather than `git remote -v`, which prints URLs
-    /// already rewritten by `insteadOf`: a rewrite to an SSH host alias would
-    /// hide the GitHub owner whose credential applies. Git applies the same
-    /// rewrites itself when a command contacts the URL.
+    /// List all remotes with their URLs, deduplicated, in `git remote -v`
+    /// order (sorted by name). URLs are the *configured* ones: `git remote -v`
+    /// and libgit2 print URLs already rewritten by `insteadOf`, and a rewrite to
+    /// an SSH host alias would hide the GitHub owner whose credential applies.
+    /// Git applies the same rewrites itself when a command contacts the URL.
     pub fn list_remotes(&self, repo_path: &Path) -> Result<Vec<(String, String)>, GitCliError> {
-        let output = match self.git(
-            repo_path,
-            [
-                "config",
-                "--local",
-                "--includes",
-                "--get-regexp",
-                r"^remote\..*\.url$",
-            ],
-        ) {
-            Ok(output) => output,
-            // Exit 1 with no output: no remotes configured.
-            Err(GitCliError::CommandFailed(msg)) if msg == "Command failed with no output" => {
-                String::new()
-            }
-            Err(error) => return Err(error),
-        };
+        let output = self.git(repo_path, ["remote", "-v"])?;
+        let configured = self.configured_remote_urls(repo_path);
         let mut seen = std::collections::HashSet::new();
         let mut remotes = Vec::new();
+
+        for line in output.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            // Format: "name\turl (fetch)" or "name\turl (push)"
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 2 {
+                let name = parts[0].to_string();
+                // Remove the " (fetch)" or " (push)" suffix from URL
+                let url = parts[1]
+                    .strip_suffix(" (fetch)")
+                    .or_else(|| parts[1].strip_suffix(" (push)"))
+                    .unwrap_or(parts[1])
+                    .to_string();
+
+                if seen.insert(name.clone()) {
+                    let url = configured.get(&name).cloned().unwrap_or(url);
+                    remotes.push((name, url));
+                }
+            }
+        }
+
+        Ok(remotes)
+    }
+
+    /// The configured (pre-`insteadOf`) URL of remote `name`, if any.
+    pub fn configured_remote_url(&self, repo_path: &Path, name: &str) -> Option<String> {
+        self.configured_remote_urls(repo_path).remove(name)
+    }
+
+    /// First configured `remote.<name>.url` per remote, across every scope git
+    /// reads (local, worktree, global, includes).
+    fn configured_remote_urls(
+        &self,
+        repo_path: &Path,
+    ) -> std::collections::HashMap<String, String> {
+        let mut urls = std::collections::HashMap::new();
+        let Ok(output) = self.git(repo_path, ["config", "--get-regexp", r"^remote\..*\.url$"])
+        else {
+            return urls;
+        };
         for line in output.lines() {
             let Some((key, url)) = line.trim().split_once(' ') else {
                 continue;
             };
-            let Some(name) = key
+            if let Some(name) = key
                 .strip_prefix("remote.")
                 .and_then(|key| key.strip_suffix(".url"))
-            else {
-                continue;
-            };
-            if seen.insert(name.to_string()) {
-                remotes.push((name.to_string(), url.trim().to_string()));
+            {
+                urls.entry(name.to_string())
+                    .or_insert_with(|| url.trim().to_string());
             }
         }
-        Ok(remotes)
+        urls
     }
 
     // Parse `git diff --name-status` output into structured entries.
