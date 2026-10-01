@@ -1457,3 +1457,42 @@ fn unavailable_org_token_refuses_network_commands_without_running_them() {
         }
     }
 }
+
+#[test]
+fn push_if_needed_pushes_when_push_url_is_rewritten_elsewhere() {
+    let temp_dir = TempDir::new().unwrap();
+    let remote_path = temp_dir.path().join("remote.git");
+    let push_path = temp_dir.path().join("push-target.git");
+    Repository::init_bare(&remote_path).unwrap();
+    Repository::init_bare(&push_path).unwrap();
+    let remote_url = remote_path.to_str().unwrap();
+    let local_path = temp_dir.path().join("local");
+    GitService::new()
+        .initialize_repo_with_main_branch(&local_path)
+        .unwrap();
+    let local_repo = Repository::open(&local_path).unwrap();
+    configure_user(&local_repo);
+    local_repo.remote("origin", remote_url).unwrap();
+    // The fetch destination already has the commit...
+    push_ref(&local_repo, "refs/heads/main", "refs/heads/main");
+    // ...but pushes go elsewhere.
+    local_repo
+        .config()
+        .unwrap()
+        .set_str(
+            &format!("url.{}.pushInsteadOf", push_path.to_str().unwrap()),
+            remote_url,
+        )
+        .unwrap();
+
+    let outcome = GitService::new()
+        .push_to_remote_if_needed(&local_path, "main", &GitHubCredentials::default())
+        .unwrap();
+    assert_eq!(outcome, PushOutcome::Pushed);
+    let head = local_repo.head().unwrap().target();
+    let pushed = Repository::open_bare(&push_path).unwrap();
+    assert_eq!(
+        pushed.find_reference("refs/heads/main").unwrap().target(),
+        head
+    );
+}

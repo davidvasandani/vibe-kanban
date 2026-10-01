@@ -297,9 +297,14 @@ impl CredentialSelection {
             // empty value resets the list; this owner-scoped URL outranks a
             // host-wide `http.https://github.com/.extraHeader`.
             rewrites.push(format!("http.{base}.extraHeader="));
-            // A repository-scoped header is more specific still.
+            // Repository-scoped rewrites and headers are more specific still.
+            // (Git keeps the first of equally long rewrites, so an inherited
+            // rule naming exactly the full repository URL is not overridden.)
             if let Some(repo) = &self.repo {
                 for url in [format!("{base}{repo}"), format!("{base}{repo}.git")] {
+                    for variable in ["insteadOf", "pushInsteadOf"] {
+                        rewrites.push(format!("url.{url}.{variable}={url}"));
+                    }
                     rewrites.push(format!("http.{url}.extraHeader="));
                 }
             }

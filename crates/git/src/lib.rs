@@ -1569,8 +1569,17 @@ impl GitService {
             .get()
             .target()
             .map(|oid| oid.to_string());
+        let cli = GitCli::new();
+        // The read must hit the push destination; with a `pushInsteadOf`
+        // sending pushes elsewhere, the shortcut is not safe.
         let remote_tip =
-            GitCli::new().remote_branch_oid(worktree_path, &remote.url, branch_name, credentials);
+            match cli.push_and_fetch_resolve_alike(worktree_path, &remote.url, credentials) {
+                Ok(true) => {
+                    cli.remote_branch_oid(worktree_path, &remote.url, branch_name, credentials)
+                }
+                Ok(false) => Ok(None),
+                Err(error) => Err(error),
+            };
         match (local, remote_tip) {
             (Some(local), Ok(Some(remote_tip))) if local == remote_tip => {
                 tracing::info!(

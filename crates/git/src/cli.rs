@@ -572,6 +572,65 @@ impl GitCli {
             .is_some())
     }
 
+    /// Whether a push to `remote_url` and a read from it reach the same place
+    /// once git applies `pushInsteadOf`/`insteadOf` rewrites (no network).
+    pub fn push_and_fetch_resolve_alike(
+        &self,
+        repo_path: &Path,
+        remote_url: &str,
+        credentials: &GitHubCredentials,
+    ) -> Result<bool, GitCliError> {
+        let mut contacted = String::new();
+        let fetch = self.git_network(repo_path, remote_url, credentials, |url| {
+            contacted = url.to_string();
+            vec![
+                OsString::from("ls-remote"),
+                OsString::from("--get-url"),
+                OsString::from(url),
+            ]
+        })?;
+        // `git remote get-url --push` only knows remotes from config files, so
+        // apply git's rule directly: the longest matching `pushInsteadOf`
+        // (the first of equally long ones) rewrites a push URL; with none,
+        // pushes follow `insteadOf`, like reads.
+        let rules = match self.git_network(repo_path, remote_url, credentials, |_| {
+            vec![
+                OsString::from("config"),
+                OsString::from("--get-regexp"),
+                OsString::from(r"^url\..*\.pushinsteadof$"),
+            ]
+        }) {
+            Ok(rules) => rules,
+            // Exit 1 with no output: no such rules.
+            Err(GitCliError::CommandFailed(_)) => String::new(),
+            Err(error) => return Err(error),
+        };
+        let mut push: Option<(usize, String)> = None;
+        for line in rules.lines() {
+            let Some((key, prefix)) = line.split_once(' ') else {
+                continue;
+            };
+            let Some(base) = key
+                .strip_prefix("url.")
+                .and_then(|key| key.strip_suffix(".pushinsteadof"))
+            else {
+                continue;
+            };
+            if contacted.starts_with(prefix)
+                && push.as_ref().is_none_or(|(len, _)| prefix.len() > *len)
+            {
+                push = Some((
+                    prefix.len(),
+                    format!("{base}{}", &contacted[prefix.len()..]),
+                ));
+            }
+        }
+        Ok(match push {
+            Some((_, push)) => push == fetch.trim(),
+            None => true,
+        })
+    }
+
     /// The commit `refs/heads/<branch_name>` points at on the remote, read
     /// directly with `ls-remote` (no fetch); `None` when the branch is absent.
     pub fn remote_branch_oid(
