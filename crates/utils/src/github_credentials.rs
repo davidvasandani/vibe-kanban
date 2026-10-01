@@ -297,6 +297,12 @@ impl CredentialSelection {
             // empty value resets the list; this owner-scoped URL outranks a
             // host-wide `http.https://github.com/.extraHeader`.
             rewrites.push(format!("http.{base}.extraHeader="));
+            // A repository-scoped header is more specific still.
+            if let Some(repo) = &self.repo {
+                for url in [format!("{base}{repo}"), format!("{base}{repo}.git")] {
+                    rewrites.push(format!("http.{url}.extraHeader="));
+                }
+            }
             // gh's own fetches go through the checkout's remotes, which may be
             // SSH; route the owner's SSH URLs to HTTPS too.
             if rewrite_ssh {
@@ -757,7 +763,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(
             home.path().join(".gitconfig"),
-            "[http \"https://github.com/\"]\n\textraHeader = AUTHORIZATION: basic AMBIENT\n",
+            "[http \"https://github.com/\"]\n\textraHeader = AUTHORIZATION: basic AMBIENT\n[http \"https://github.com/sweetgreen/x.git\"]\n\textraHeader = AUTHORIZATION: basic REPO\n[http \"https://github.com/sweetgreen/x\"]\n\textraHeader = AUTHORIZATION: basic REPO\n",
         )
         .unwrap();
         let header = |selection: &CredentialSelection, url: &str| {
@@ -775,13 +781,12 @@ mod tests {
                 .to_owned()
         };
         let credentials = credentials();
-        assert_eq!(
-            header(
-                &credentials.select_owner(Some("sweetgreen")),
-                "https://github.com/sweetgreen/x"
-            ),
-            ""
-        );
+        for url in [
+            "https://github.com/sweetgreen/x",
+            "https://github.com/sweetgreen/x.git",
+        ] {
+            assert_eq!(header(&credentials.select_url(url), url), "", "{url}");
+        }
         assert_eq!(
             header(
                 &credentials.select_owner(Some("someone")),
