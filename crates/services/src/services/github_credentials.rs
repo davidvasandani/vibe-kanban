@@ -27,7 +27,7 @@ use std::{
 use api_types::normalize_secret_reference;
 use chrono::{DateTime, Utc};
 use db::models::github_owner_token::GitHubOwnerTokenRow;
-use git::GitService;
+use git::{GitCli, GitService};
 use sqlx::SqlitePool;
 use utils::github_credentials::{
     GitHubCredentials, GitHubToken, OwnerCredential, parse_github_repo,
@@ -72,7 +72,7 @@ pub async fn resolve_for_repo(
     git: &GitService,
     repo_path: &Path,
 ) -> GitHubCredentials {
-    let urls: Vec<String> = match git.list_remotes(repo_path) {
+    let mut urls: Vec<String> = match git.list_remotes(repo_path) {
         Ok(remotes) => remotes.into_iter().map(|remote| remote.url).collect(),
         Err(error) => {
             tracing::warn!(
@@ -83,6 +83,18 @@ pub async fn resolve_for_repo(
             Vec::new()
         }
     };
+    // `git remote -v` shows URLs after `insteadOf` rewriting; one rewritten to
+    // an SSH host alias no longer names its GitHub owner, while libgit2 and
+    // git itself still contact the configured URL. Read those too.
+    if let Ok(raw) = GitCli::new().git(
+        repo_path,
+        ["config", "--get-regexp", r"^remote\..*\.(url|pushurl)$"],
+    ) {
+        urls.extend(
+            raw.lines()
+                .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string)),
+        );
+    }
     resolve_for_urls(pool, urls.iter().map(String::as_str)).await
 }
 

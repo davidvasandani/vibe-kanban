@@ -146,6 +146,7 @@ impl GitHubCredentials {
                 .get(&owner.to_ascii_lowercase())
                 .map(|(configured, _)| configured.clone()),
             repo: None,
+            other_spellings: Vec::new(),
             kind,
         }
     }
@@ -178,6 +179,8 @@ pub struct CredentialSelection {
     /// Owner as entered in Settings, when configured.
     configured_owner: Option<String>,
     repo: Option<String>,
+    /// Further spellings of the same owner that git may see in URLs.
+    other_spellings: Vec<String>,
     kind: SelectionKind,
 }
 
@@ -187,8 +190,22 @@ impl CredentialSelection {
             owner,
             configured_owner: None,
             repo,
+            other_spellings: Vec::new(),
             kind: SelectionKind::Fallback,
         }
+    }
+
+    /// Also cover these spellings of the owner (case variants used by the
+    /// checkout's remotes); git matches URL prefixes case-sensitively.
+    pub fn with_owner_spellings(mut self, spellings: impl IntoIterator<Item = String>) -> Self {
+        if let Some(owner) = self.owner.clone() {
+            self.other_spellings.extend(
+                spellings
+                    .into_iter()
+                    .filter(|spelling| spelling.eq_ignore_ascii_case(&owner)),
+            );
+        }
+        self
     }
 
     /// Name the repository in attributed errors.
@@ -270,6 +287,11 @@ impl CredentialSelection {
             && !spellings.contains(configured)
         {
             spellings.push(configured.clone());
+        }
+        for spelling in &self.other_spellings {
+            if !spellings.contains(spelling) {
+                spellings.push(spelling.clone());
+            }
         }
         let Some(first) = spellings.first().cloned() else {
             return Vec::new();
@@ -649,6 +671,14 @@ mod tests {
                 "{url}: {output}"
             );
         }
+        // A remote spelling outside the canonical/configured/lower-case set is
+        // covered once named (as `gh pr checkout` does for its remotes).
+        let shouting = "https://github.com/SWEETGREEN/platform-ops.git";
+        let selection = credentials
+            .select_owner(Some("sweetgreen"))
+            .with_owner_spellings(["SWEETGREEN".to_string(), "someone".to_string()]);
+        let output = git_credential_fill(home.path(), &selection, shouting);
+        assert!(output.contains(&format!("password={TOKEN}")), "{output}");
         let other = "https://github.com/someone/x.git";
         let output = git_credential_fill(home.path(), &credentials.select_url(other), other);
         assert!(output.contains("password=ambient"), "{output}");
