@@ -292,6 +292,11 @@ impl CredentialSelection {
             for variable in ["insteadOf", "pushInsteadOf"] {
                 rewrites.push(format!("url.{base}.{variable}={base}"));
             }
+            // An inherited Authorization header (e.g. persisted by a checkout
+            // action) would be sent instead of the helper's credential. An
+            // empty value resets the list; this owner-scoped URL outranks a
+            // host-wide `http.https://github.com/.extraHeader`.
+            rewrites.push(format!("http.{base}.extraHeader="));
             // gh's own fetches go through the checkout's remotes, which may be
             // SSH; route the owner's SSH URLs to HTTPS too.
             if rewrite_ssh {
@@ -359,19 +364,10 @@ impl CredentialSelection {
 
 const GIT_CONFIG_PARAMETERS: &str = "GIT_CONFIG_PARAMETERS";
 
-/// An `https://` URL with no userinfo, which leaves authentication to the
-/// credential helper.
+/// Already in the exact form the owner-scoped helper context matches:
+/// `https://github.com/…` with no userinfo, port or `www.` host.
 fn is_plain_https(url: &str) -> bool {
-    let url = url.trim();
-    let Some(rest) = url
-        .get(..8)
-        .filter(|scheme| scheme.eq_ignore_ascii_case("https://"))
-        .map(|_| &url[8..])
-    else {
-        return false;
-    };
-    let authority = rest.split('/').next().unwrap_or_default();
-    !authority.contains('@')
+    url.trim().starts_with("https://github.com/")
 }
 
 /// Quote a `GIT_CONFIG_PARAMETERS` entry the way git's `sq_quote` does.
@@ -551,6 +547,8 @@ mod tests {
         for url in [
             "https://user:old-token@github.com/sweetgreen/platform-ops.git",
             "http://github.com/sweetgreen/platform-ops",
+            "https://www.github.com/sweetgreen/platform-ops",
+            "https://github.com:443/sweetgreen/platform-ops.git",
         ] {
             let mut command = Command::new("git");
             assert_eq!(
@@ -751,6 +749,45 @@ mod tests {
         assert_eq!(
             git(None, &["remote", "get-url", "--push", "origin"]),
             "git@github.com:sweetgreen/x"
+        );
+    }
+
+    #[test]
+    fn inherited_authorization_headers_are_reset_for_org_token_owners() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".gitconfig"),
+            "[http \"https://github.com/\"]\n\textraHeader = AUTHORIZATION: basic AMBIENT\n",
+        )
+        .unwrap();
+        let header = |selection: &CredentialSelection, url: &str| {
+            let mut command = Command::new("git");
+            command
+                .env_clear()
+                .env("PATH", std::env::var("PATH").unwrap_or_default())
+                .env("HOME", home.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(["config", "--get-urlmatch", "http.extraheader", url]);
+            selection.apply_git(&mut command, url).unwrap();
+            String::from_utf8(command.output().unwrap().stdout)
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+        let credentials = credentials();
+        assert_eq!(
+            header(
+                &credentials.select_owner(Some("sweetgreen")),
+                "https://github.com/sweetgreen/x"
+            ),
+            ""
+        );
+        assert_eq!(
+            header(
+                &credentials.select_owner(Some("someone")),
+                "https://github.com/someone/x"
+            ),
+            "AUTHORIZATION: basic AMBIENT"
         );
     }
 
