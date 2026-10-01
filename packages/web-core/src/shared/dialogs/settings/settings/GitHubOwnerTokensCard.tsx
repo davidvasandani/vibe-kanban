@@ -130,7 +130,7 @@ export function GitHubOwnerTokensCard() {
   return (
     <SettingsCard
       title="GitHub organization tokens"
-      description="One fine-grained personal access token per GitHub organization or user. Workspace sessions on this machine use the matching owner's token for gh commands (by the repository each command targets) and for HTTPS git operations; other owners keep their existing authentication. Enter a token or an op://vault/item/field reference. Values are encrypted at rest; tokens are never shown again, while references stay visible. Changes apply to newly started processes."
+      description="One fine-grained personal access token per GitHub organization or user. Workspace sessions and Vibe Kanban itself (creating, checking, merging and updating pull requests, pushes and fetches) use the matching owner's token for gh commands (by the repository each command targets) and for git operations; other owners keep their existing authentication. Enter a token or an op://vault/item/field reference. Values are encrypted at rest; tokens are never shown again, while references stay visible. Vibe Kanban's own operations use changes immediately; running workspace sessions pick them up when they next start."
     >
       {error && (
         <div className="bg-error/10 border border-error/50 rounded-sm p-3 text-error text-sm">

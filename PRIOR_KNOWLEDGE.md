@@ -1,59 +1,81 @@
-# Prior knowledge: workspace chat load with expensive WebSocket handshakes
+# Prior knowledge: server-side GitHub operations and org tokens
 
-Task: `vk/45a2-make-workspace-c`. This file pulls together what the project
-knowledge bases (`wiki/` and `docs/knowledge-base/`) already say about this
-problem. The knowledge bases were only read in this stage, not changed.
+Task: `vk/8b57-use-settings-git`. This file distills what the project
+knowledge bases (`wiki/` and `docs/knowledge-base/`) already record about this
+problem area. The knowledge bases were only read in this stage, not changed.
 
 ## Relevant pages
 
-- `wiki/awaited-stream-settlement.md` (`vk/5f70-not-loading-chat`)
-- `docs/knowledge-base/lazy-loading-normalized-conversation-history.md`
-  (`65ab-lazy-load-vk-wor`, `vk/6df4-loading-chat-pin`, `vk/3fb0-debug-why-vk-mes`)
-- `docs/knowledge-base/authoritative-snapshot-stream-handoffs.md`
-  (`vk/3488-fix-stale-execut`, `vk/113f-sidebar-randomly`)
-- `wiki/workspace-carousel-view.md` (several chats at once, so socket count
-  per chat matters)
-- `wiki/coordinator-nfs-load.md` (cold git diff reads over NFS are slow;
-  #350 bounded the summaries path, which must not be touched)
+- `wiki/github-owner-token-routing.md` (`vk/0f52-manage-gh-token`)
+- `wiki/mcp-pr-tools-and-connection-notices.md` (`vk/53bc-agents-fall-back`)
+- `docs/knowledge-base/workspace-environment-inheritance.md` (several tasks,
+  including `vk/0f52`)
+- `wiki/vk-pollers.md` (rule: MCP-reachable routes must carry a message)
 
-## What we already know
+## What to build on
 
-1. **An awaited log fetch settles exactly once.** `finished` means success.
-   Close, error, parse failure, open failure and idle timeout all mean
-   failure. The idle deadline applies only to settled history, never to a
-   running turn. A failed turn is skipped, counted and retryable through "load
-   earlier", with no auto-retry during the initial load. One unsettled fetch
-   must never hold the spinner. All of these carry over to the HTTP path, with
-   an `AbortController` deadline in place of the idle timer.
-2. **The server already has a finite settled source.** A finished process is
-   served from its materialized normalized-log sidecar. On a miss, it does one
-   bounded historical normalization (newest 2,000 messages) under a
-   per-execution lease and a global permit of 1, then writes the sidecar.
-   `ContainerService::normalized_entries` reads the same sources.
-3. **A request-scoped read must never follow a live store's tail**
-   (`vk/3fb0`). The tail only ends when the turn does, and the store's own
-   `Finished` is filtered out. Snapshot the buffered history with
-   `select_history`, and let `status` (here, `complete: false`) distinguish a
-   partial read from a settled one. Test the source selection with a
-   never-yielding fallback under `tokio::time::timeout`.
-4. **Cancellation drops the historical normalizer.** The lease and permit are
-   tied to the stream's lifetime, so a dropped reader aborts materialization.
-   For HTTP that means an aborted client request would cancel a cold
-   normalization unless the drain is detached.
-5. **Frontend history invariants** (`65ab`): load on top intersection or an
-   explicit action, through one single-flight path. Every result is scoped to
-   a generation. Results commit in request order, never completion order.
-   Concurrency only tunes latency, never what is shown.
-6. **Snapshot streams keep their state during transport loss** and replace it
-   with a full snapshot on reconnect. Only `Ready` resets backoff. A sharing
-   layer must keep these properties per stream identity (endpoint plus host
-   scope).
-7. **Debugging recipe**: talk to the coordinator directly at
-   `http://172.16.100.102:3334`. Workers have Node 24. Only
-   `ConversationList`'s spinner sits inside `.w-chat`.
+### Storage and secrecy (from `github-owner-token-routing`)
 
-## Gaps this task fills
+- Tokens live in their own SQLite table `github_owner_tokens`, never in
+  `Config`. `/api/info` returns the whole Config, and `PUT /api/config`
+  overwrites it.
+- Owner uniqueness is `UNIQUE COLLATE NOCASE`, so lookups by owner should be
+  case-insensitive.
+- Values are `McpGatewaySecretStore` envelopes under a separate host key,
+  bound by AAD to the row id. Only `op://` references are ever returned. The
+  empty-table path never touches the key file. Keep that property: a server
+  with no org tokens must not create or read the key on every PR poll.
+- Runtime `sqlx::query_as` calls keep the `.sqlx` offline cache unchanged.
 
-- No page yet records that WebSocket *count* is itself the cost behind
-  Cloudflare and iOS Safari, or that history should go over HTTP.
-- Nothing yet shares identical JSON-patch streams across components.
+### Git credential mechanics (verified with real git)
+
+- `credential.https://github.com/<owner>.helper=` (an empty value, which
+  resets inherited helpers) followed by an inline `!f(){…}` helper routes only
+  that owner's URLs. Command-scope config (`GIT_CONFIG_PARAMETERS`) is read
+  last.
+- Path matching is case-sensitive, so emit both the as-typed and the
+  lowercase spelling.
+- Use `GIT_CONFIG_PARAMETERS` (sq-quoted, appended after any existing value),
+  not `GIT_CONFIG_COUNT`/`KEY_n`.
+- The helper names an env var (`VK_GITHUB_PAT_<HEX>`), so the token never
+  appears in config text. `routing_environment(owners, None, lookup)` already
+  produces exactly this text without the shim.
+- Testing recipe: `git credential fill` under a temporary `HOME` with
+  `GIT_CONFIG_NOSYSTEM=1`; a fake `gh` that prints `GH_TOKEN`.
+
+### Fail-closed semantics
+
+- A configured owner whose token is empty or unresolvable fails closed and
+  names the owner. Unconfigured owners pass through unchanged. That matches
+  this task's "fallback only when no configured token".
+- `environment_secrets`: the literal `OP_SERVICE_ACCOUNT_TOKEN` in org Env Vars
+  wins over the service env. Ambient `OP_*` variables are stripped. Reads are
+  bounded to 30 s. Errors never carry provider output or values.
+
+### PR tools (from `mcp-pr-tools-and-connection-notices`)
+
+- Fine-grained PATs get 403 on check-runs and status. That is a coverage fact
+  (`SourceRead::Forbidden`), not a call failure. Credential attribution must
+  not turn those per-source 403s into hard failures of `list_pr_checks`.
+- Merge is `PUT pulls/{n}/merge` with a `sha` guard. The branch is deleted via
+  `DELETE git/refs/heads/<enc>` only when the head repo equals the base repo.
+- A PR URL is resolved against **all** of the checkout's remotes, so
+  credentials must cover every remote's owner, not just the default remote's.
+- `gh api` has no `--repo`. The owner is known from `GitHubRepoInfo` in
+  `GhCli::api_args`, so it can be passed explicitly.
+- Every MCP-reachable route error must carry a `message`
+  (`error_with_data_and_message`). Provider refusals become messages, not 500s.
+
+### Deployment interaction (from `workspace-environment-inheritance`)
+
+- The Nix `gh` router (`githubAuth.orgTokenRefs`) still exists, but no host
+  configures it. Where configured, it overrides `GH_TOKEN` for its own
+  owners. That is out of scope here.
+- Keep the long-lived server process environment secret-free. Inject secrets
+  only into the specific child process. Never mutate the server env or write
+  git config.
+
+## Gaps the knowledge base does not cover (new in this task)
+
+- Nothing yet describes server-side (non-agent) credential selection, op
+  resolution caching, or attributing auth errors to a credential source.

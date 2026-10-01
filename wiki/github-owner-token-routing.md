@@ -118,6 +118,77 @@ unchanged.
 - **Worker boundary.** A worker dispatch test proves the shim directory is
   first on PATH and that the Git parameters reach the child.
 
+## Server-side operations: per-request credentials
+
+The VK server's own git and `gh` calls (create, status, checks, merge and
+update of PRs, pushes, rebase and status fetches, the PR monitor) used to run
+with the process's ambient credential. On think2 that is a global
+`credential.https://github.com.helper = gh auth git-credential`, so
+`create_pr` got a 403 even though the org token could write. The shape of the
+fix:
+
+- **Split.** `utils::github_credentials` holds the pure part: owner parsing, a
+  `GitHubCredentials` set, and `CredentialSelection` applied to one
+  `Command`. `services::github_credentials` resolves the set per request
+  (`resolve_for_repo` covers *every* remote, `resolve_for_urls` covers a PR
+  URL). `git`/`git-host` cannot depend on services, so routes pass the set in.
+  `GitService` network methods take `&GitHubCredentials`, which forces every
+  call site to decide.
+- **Freshness.** The table is re-read on every call. Only `op://` resolutions
+  are cached: 60 s, keyed `(row id, updated_at, reference)`, cleared on
+  Settings writes, and guarded by a generation counter so a lookup in flight
+  cannot re-insert after an invalidation. Use the server's
+  `OP_SERVICE_ACCOUNT_TOKEN`, because there is no workspace org here.
+- **Fail closed.** No row means fallback. A row that cannot be decrypted or
+  resolved, or a table read error, makes the owner *unavailable*, and the
+  command is never spawned. Load the key file only when a requested owner has
+  a row.
+- **Never `Debug` a `Command`.** Its Debug output prints environment changes.
+  `GitCli` traced it, which would have logged the token. Trace the args only.
+- **Attribute auth failures**, for example "the sweetgreen org token … was
+  rejected" or "no org token for owner X; used the server's fallback". Keep the
+  original stderr in the message so a 403 is still classified
+  `InsufficientPermissions`, which check coverage reads as `forbidden`.
+- **Push skip.** `create_pr` checks `ls-remote` against the local tip, not a
+  possibly stale `origin/<branch>`. Skip only when `pushInsteadOf` does not
+  send pushes elsewhere.
+
+### Git config can route around a credential helper (12 Codex rounds)
+
+Installing an owner-scoped helper is not enough. Each of these bypassed it,
+and each fix is command-scoped `GIT_CONFIG_PARAMETERS`:
+
+- **URL form.** Use exactly `https://github.com/<owner>/<repo>.git`. SSH,
+  `www.`, a port, `http://` and embedded userinfo all skip the helper
+  context, so rewrite them for that command.
+- **`url.*.insteadOf` / `pushInsteadOf`** (for example a host-wide
+  https→ssh rule). Git takes the *longest* match and keeps the *first* of
+  equally long ones. Identity rules at the owner and repository prefixes beat
+  shorter rules. A rule exactly as long as the full URL still wins, so resolve
+  the effective URL first (`ls-remote --get-url`, and `pushInsteadOf` by
+  git's rule) and refuse if it moved.
+- **`http.<url>.extraHeader`** (an Authorization header persisted by a CI
+  checkout) outranks the helper. An empty value resets it. Emit the reset at
+  the owner and repository URLs, because a more specific scope wins.
+- **`git remote -v` and libgit2 `Remote::url()` report URLs *after*
+  `insteadOf`.** A rewrite to an SSH host alias hides the owner. Use the
+  configured `remote.<name>.url` (all scopes, `git remote -v` order), but
+  only when it names a GitHub repo. An alias such as `gh:owner/repo` needs
+  the expanded form.
+- **`gh pr checkout` runs git itself.** Add SSH→HTTPS `insteadOf` for every
+  SSH spelling, plus the owner spellings the checkout's remotes use (prefix
+  matching is case-sensitive). Run the same effective-URL guard first, and
+  check the owner too, not just the host.
+- **Enterprise.** A GHE remote with a same-named owner must not get the
+  github.com token.
+
+Verify these with real git and no network: `git credential fill`,
+`git ls-remote --get-url`, `git config --get-urlmatch http.extraheader <url>`,
+and `git remote get-url --push`, all under a temporary `HOME` with
+`GIT_CONFIG_NOSYSTEM=1`. Note that `git remote get-url` ignores remotes
+defined only through `-c`.
+
 ## Contributed by
 
 - vk/0f52-manage-gh-token
+- vk/8b57-use-settings-git

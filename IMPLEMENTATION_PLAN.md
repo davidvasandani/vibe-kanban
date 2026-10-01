@@ -1,110 +1,128 @@
-# Implementation plan: workspace chat loads fast over expensive handshakes
+# Implementation plan: server-side GitHub credentials from the org-token table
 
-Task `vk/45a2-make-workspace-c`. See `SPEC.md` for the diagnosis and the
-design, and `PRIOR_KNOWLEDGE.md` for the rules inherited from earlier tasks.
+Task `vk/8b57-use-settings-git`. See `SPEC.md` for requirements (FR-1…FR-9).
 
-## Step 1: server log snapshot (`crates/services`)
+## Step 1: `utils::github_credentials` (new module, pure, no I/O)
 
-File: `crates/services/src/services/container.rs`
+File: `crates/utils/src/github_credentials.rs`, exported from `lib.rs`.
 
-1. Add `pub struct LogSnapshot { entries: Vec<serde_json::Value>, complete: bool }`.
-2. Extract the source choice into a free function
-   `normalized_log_snapshot_from_sources(id, live_store, status_running, settled_stream)`:
-   - With a live store, materialize `indexed_entry_patches_from_history`
-     (falling back to rebased materialization) and set `complete: false`.
-   - Otherwise drain the finite settled stream, keep only indexed patches,
-     `materialize_entries` them, and set `complete = !status_running`. Return
-     `None` when the stream is `None`. A stream error or a missing `Finished`
-     returns `None`, never a partial complete snapshot.
-3. Add a trait method `normalized_log_snapshot(&self, id, status_running)`.
-4. Add `raw_log_snapshot_from_sources` / `raw_log_snapshot`, which turns
-   stdout and stderr into `{type: 'STDOUT'|'STDERR', content}` in order. With a
-   live store it snapshots history and returns `complete: false`. Otherwise it
-   loads the stored raw messages.
-5. Unit tests: a live store never opens the fallback (pending stream under
-   timeout); the settled stream materializes; a stream without `Finished` is
-   not complete; a running status is not complete; raw ordering.
+- `GitHubRepoRef { owner, repo }` and `parse_github_repo(url) ->
+  Option<GitHubRepoRef>`. Accepts https/http (with userinfo, `.git`, trailing
+  `/`, extra path such as `/pull/12`), `ssh://[user@]github.com[:port]/o/r`,
+  scp-like `[user@]github.com:o/r`. The host matches `github.com` or
+  `www.github.com` case-insensitively. The owner must pass `is_valid_owner`,
+  and the repo must be non-empty.
+- `GitHubToken(Arc<str>)` with a redacting `Debug`.
+- `OwnerCredential { OrgToken(GitHubToken), Unavailable(String) }`.
+- `GitHubCredentials`: a map from lowercase owner to (owner as entered,
+  `OwnerCredential`). Derives `Default` and `Clone`, with a redacting `Debug`.
+  Has `insert`, `select_owner(owner)`, `select_url(url)`.
+- `CredentialSelection` (owned): `OrgToken { owner, token }`, `Unavailable {
+  owner, reason }`, `Fallback { owner: Option<String> }`. Methods:
+  - `source_label()` returns `org-token` / `unavailable` / `fallback`.
+  - `git_auth(url) -> GitCommandAuth { url, set, remove }`. `OrgToken`
+    yields the PAT variable plus the `GIT_CONFIG_PARAMETERS` produced by
+    `github_auth::routing_environment(owner, None, process lookup)`, removes
+    `OWNERS_ENV`, and rewrites SSH and scp URLs to HTTPS. `Fallback` yields
+    no changes.
+  - `apply_git(&mut Command, url) -> Result<OsString url, String>`.
+    `Unavailable` returns an error.
+  - `gh_env()` / `apply_gh(&mut Command)`: `GH_TOKEN` plus the git auth;
+    removes `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`
+    and `OWNERS_ENV`.
+  - `attribute(repo: Option<&str>, detail) -> String`: the FR-6 wording.
+- `looks_like_git_auth_failure(msg)` and `looks_like_gh_auth_failure(msg,
+  exit_code)`.
+- Unit tests: parsing table, case-insensitive selection, fallback, the env
+  produced, a real `git credential fill` (temp HOME, an ambient global helper
+  that prints `ambient`) returning the org token for the owner and `ambient`
+  for others, SSH rewrite, `gh` env override against an ambient
+  `GITHUB_TOKEN`/`GH_TOKEN` via `sh -c`, attribution wording, and redacting
+  `Debug`.
 
-## Step 2: routes (`crates/server`)
+## Step 2: `git` crate: credentialed network commands
 
-File: `crates/server/src/routes/execution_processes.rs`
+- `GitCliError::CredentialUnavailable(String)`.
+- `classify_cli_error`: also treat `403`, `write access to repository not
+  granted`, `permission to … denied`, `the requested url returned error: 401`
+  as `AuthFailed`.
+- `GitCli::push_with`, `fetch_with_refspec_with`, `check_remote_branch_exists_with`
+  and a new `remote_branch_oid_with` take `&GitHubCredentials`. They select by
+  URL, apply the auth, run, and on `AuthFailed` re-wrap the message with the
+  attribution. The existing names delegate with an empty set (local-path
+  callers in workspace-manager and the tests).
+- `GitService`: `push_to_remote`, `check_remote_branch_exists`,
+  `get_remote_branch_status`, `rebase_branch` gain `creds:
+  &GitHubCredentials`. `fetch_*` is threaded through. Add
+  `push_to_remote_if_needed(worktree, branch, creds) -> PushOutcome
+  { Pushed, AlreadyUpToDate }` (FR-7). It compares `ls-remote` against the
+  local branch tip, and when they match it records the tracking ref and
+  upstream as a push would. The tracking-ref update is factored into a helper.
+- Tests (`crates/git/tests` or unit): skip versus push against a local bare
+  remote, and that an `Unavailable` selection refuses to run.
 
-1. `ExecutionProcessLogSnapshot { entries: Vec<JsonValue> (TS: Array<PatchType>), complete: bool }`
-   with `#[derive(Serialize, TS)]`.
-2. `GET /{id}/normalized-logs` and `GET /{id}/raw-logs`. Each spawns the
-   snapshot in a `tokio::spawn`, so a client abort does not cancel a cold
-   materialization, and awaits the join handle. A `None` result returns
-   `complete: true` with no entries for processes with nothing to show. This
-   matches the socket, which sends `finished` immediately when there are no
-   logs.
-3. Register the type in `crates/server/src/bin/generate_types.rs` and run
-   `pnpm run generate-types`.
+## Step 3: `git-host`: credentialed `gh`
 
-## Step 3: HTTP history loader (web-core)
+- `GhCli { credentials: GitHubCredentials }`, `GhCli::with_credentials`.
+  `run(owner: Option<&str>, args, dir)` applies `select_owner`. `Unavailable`
+  becomes `GhCliError::AuthFailed(attributed)` without spawning. On failure, an
+  auth-looking stderr is prefixed with the attribution and still classified as
+  before (so a 403 stays `InsufficientPermissions` → check coverage
+  `Forbidden`).
+- Each method passes its owner: `get_repo_info` (parse URL), `view_pr`
+  (parse PR URL), and the rest from `GitHubRepoInfo` / `owner` args.
+- `GitHubProvider::with_credentials`. `GitHostService::from_url_with_credentials`.
+  `from_url` delegates with an empty set.
 
-New file: `packages/web-core/src/shared/hooks/useConversationHistory/fetchHistoricEntries.ts`
+## Step 4: `services::github_credentials` (resolver)
 
-- `fetchProcessLogSnapshot(process, { deadlineMs, signal, request })`
-  wraps `makeLocalApiRequest` with an `AbortController` deadline and settles
-  once. It rejects on timeout, abort, non-2xx, `success: false` and bad JSON.
-- `loadHistoricProcessEntries(process, deps)` uses HTTP first. On
-  `complete: false` it falls back to the socket loader. It returns
-  `{ entries, complete }`.
-- Constant `HISTORY_HTTP_DEADLINE_MS = 30_000` in `constants.ts`.
-- Tests: `fetchHistoricEntries.test.ts`.
+File: `crates/services/src/services/github_credentials.rs`.
 
-## Step 4: history once per scope (web-core)
+- `resolve_for_urls(pool, urls) -> GitHubCredentials`, and `resolve_for_repo(pool,
+  git, repo_path)`, which takes all remotes from `git.list_remotes`.
+- Parse owners. Return early with an empty set when there are none. List rows
+  (DB error → every requested owner `Unavailable`). Match case-insensitively.
+  Load the store only if a row matched. Decrypt (`Undecryptable` →
+  `Unavailable`). Literal → `OrgToken`. Reference → cached op resolution
+  (60 s TTL, key `(id, updated_at, reference)`) via
+  `resolve_environment_secrets`. Errors and empty values → `Unavailable` with
+  the error's `Display` (never the value or the reference).
+- `invalidate_cache()` is called from `github_owner_tokens::{create,update,delete}`.
+- FR-5 logging with per-owner last-source dedup.
+- Testable inner fn with an injected resolver: selection, case-insensitive
+  match, fallback for unknown owners, unavailable on resolve failure, cache hit
+  within the TTL, miss after `updated_at` changes or `invalidate_cache`, no key
+  access when nothing matched.
+- Expose `github_owner_tokens::decrypt_rows_for(...)` as `pub(crate)` helpers
+  as needed.
 
-`useConversationHistory.ts`:
+## Step 5: server routes and PR monitor
 
-- `settledEntriesCacheRef: Map<processId, PatchType[]>`, cleared on scope
-  change.
-- `loadEntriesForHistoricExecutionProcess` → cache hit, or the HTTP loader
-  (store the result when it is complete).
-- The running → finished reload bypasses the cache and replaces the entry.
-- A pure helper `createHistoricEntriesLoader(fetcher)` in
-  `conversation-history-paging.ts` holds the cache and in-flight dedup, so
-  "loaded once per scope" can be tested without React.
+- `routes/workspaces/pr.rs`:
+  - `create_pr` resolves creds for the repo, passes them to
+    `check_remote_branch_exists`, `push_to_remote_if_needed` and
+    `from_url_with_credentials`. `AuthFailed`/`CredentialUnavailable` → `PrError::GitCliNotLoggedIn`
+    with the attributed message (`error_with_data_and_message`). `gh`
+    `AuthFailed` → `CliNotLoggedIn` with `e.to_string()`.
+  - `attach_existing_pr`, `get_pr_comments`, `create_workspace_from_pr`
+    (`GhCli::with_credentials`), `resolve_pr_target` (credentials for all
+    remotes, used for each candidate host).
+  - `PrToolError::CliNotLoggedIn` gains `detail`, and the message uses it.
+- `routes/workspaces/git.rs`: push, force push, branch status, rebase.
+- `routes/repo.rs`: list open PRs (repo creds), PR info (URL creds).
+- `pr_monitor.rs`: `resolve_for_urls(pool, [pr_url])`.
+- `error.rs`: map `CredentialUnavailable` like `AuthFailed` if there is a
+  match there.
 
-## Step 5: shared JSON-patch streams (web-core)
+## Step 6: UI copy and docs
 
-New file: `packages/web-core/src/shared/lib/sharedJsonPatchStream.ts`
+- `GitHubOwnerTokensCard.tsx` description (FR-9).
+- `docs/` page for GitHub organization tokens, if one exists: note that
+  server-side operations use them.
 
-- Registry keyed by `endpoint + resolved host scope`. Subscribe/unsubscribe
-  with ref counting. The socket opens on the first subscribe and closes
-  `STREAM_LINGER_MS` after the last unsubscribe.
-- Reconnect, backoff, `Ready`, `finished` and the clean-close rules move over
-  from `useJsonPatchWsStream`.
-- `useJsonPatchWsStream` becomes a `useSyncExternalStore` adapter. The
-  `injectInitialEntry` and `deduplicatePatches` options (unused in the repo)
-  are kept in the key via a per-hook fallback: when present, the stream is
-  private (unshared).
-- `useExecutionProcesses` always sets `show_soft_deleted=true` and filters
-  `dropped` on the client unless `showSoftDeleted`.
-- `agentsApi.getDiscoveredOptionsStreamUrl` drops `workspace_id` and
-  `repo_id` when `session_id` is present.
-- Tests: the shared stream (one socket for N consumers, linger, reconnect
-  keeps the snapshot) and `useExecutionProcesses` (one socket for plain and
-  soft-deleted consumers, with filtering).
+## Step 7: Verify
 
-## Step 6: mobile deferral (web-core)
-
-- `WorkspacesLayout` mobile branch: track visited tabs. Mount
-  `PreviewBrowserContainer` / `BrowserPanelContainer` only once visited.
-- `useMobileDiffStreamGate`: a small zustand store (`useChatLoadGateStore`)
-  with `chatHistorySettled(workspaceId)`, set by `useConversationHistory` on
-  its first non-loading `'initial'` emit. `WorkspaceProvider` enables the diff
-  stream when `!isMobile || tab ∈ {changes, git} || settled`, and stays
-  enabled once it has been enabled.
-
-## Step 7: measure, document, verify
-
-- Re-run `/tmp/probe/probe.js` against a local build of the change: the
-  server binary on a spare port serving the built frontend, with the same
-  database? Not possible without a copy of production data. Instead, deploy
-  after merge and re-run the probe against the coordinator. Before merge,
-  verify with unit tests and a local dev instance probe.
-- Update `wiki/awaited-stream-settlement.md` (HTTP rules and the WebSocket
-  cost rule) and `wiki/INDEX.md`.
-- `pnpm run check`, `pnpm run lint`, `cargo test --workspace`,
-  `pnpm run format`.
+- `cargo test -p utils -p git -p git-host -p services -p server` (targeted
+  tests), `pnpm run check`, `pnpm run lint`, `pnpm run format`.
+- No TS type changes are expected (`PrToolError` is not exported, `PrError`
+  is unchanged). Run `pnpm run generate-types:check` to confirm.

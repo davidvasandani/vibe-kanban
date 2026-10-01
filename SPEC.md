@@ -1,182 +1,221 @@
-# SPEC: Workspace chat loads fast when every WebSocket handshake is expensive
+# SPEC: Server-side GitHub operations use the org-token table
 
-Task: `vk/45a2-make-workspace-c`.
+Task: `vk/8b57-use-settings-git` ("Use Settings → GitHub organization tokens
+for server-side git/PR operations (create_pr push, get_pr, merge_pr)").
 
 ## Problem
 
-Opening a workspace chat on the phone takes 40 s to 2 min. The server is not
-the bottleneck: every stream the chat needs finishes in under 120 ms on the
-coordinator. The cost is per-WebSocket: each one needs a new TCP and TLS
-handshake through Cloudflare. Since 2026-09-28 those handshakes are served
-from distant data centres and cost about 0.5 s each, sometimes up to 10 s.
-iOS Safari connects WebSockets one at a time. Plain `fetch` requests reuse
-one HTTP/2 or HTTP/3 connection and pay no handshake.
+Settings → Repositories → **GitHub organization tokens** (`github_owner_tokens`
+table, `services::github_owner_tokens`) stores one fine-grained PAT per GitHub
+owner, either as a literal or an `op://` reference. Today those tokens reach
+only **workspace agent processes**: `launch_environment` resolves them into
+`VK_GITHUB_ROUTED_OWNERS` + `VK_GITHUB_PAT_<HEX>`, and `apply_github_routing`
+turns those into owner-scoped `GIT_CONFIG_PARAMETERS` credential helpers and a
+`gh` routing shim.
 
-A workspace page opens about 25–29 WebSockets. The chat's history sockets sit
-at the back of that queue.
+The VK server's own GitHub operations ignore the table:
 
-## Baseline measurement (before)
+- `git` network commands (`GitCli::push`, `fetch_with_refspec`,
+  `check_remote_branch_exists`) inherit the server process's git config. In
+  production that is the global `credential.https://github.com.helper = gh auth
+  git-credential`, which uses whatever `GH_TOKEN`/`GITHUB_TOKEN`/`gh auth`
+  login the server has.
+- `gh` subprocesses (`git_host::github::GhCli::run`) inherit the server
+  environment the same way.
 
-Headless mobile Chromium (iPhone 13 profile) against the coordinator
-`http://172.16.100.102:3334/workspaces/14312466-…`. The session now has 6
-completed turns. No added latency:
+Repro (2026-09-30, `sweetgreen/platform-ops`): the agent's own `git push`
+worked with the `sweetgreen` org token. MCP `create_pr` failed three times with
+`remote: Write access to repository not granted … 403`, even though the branch
+was already pushed, because `create_pr` always pushes.
 
-| Metric | Value |
-| --- | --- |
-| WebSockets opened before rows rendered | 29 |
-| `normalized-logs/ws` | 10 (5 + 5) |
-| `execution-processes/stream/session/ws` | 3 |
-| `agents/discovered-options/ws` | 4 |
-| `approvals/stream/ws` | 3 (two closed before or right after being established) |
-| History over HTTP | 0 |
-| Time until chat rows (no spinner in `.w-chat`) | 2.1 s |
+## Goals
 
-### Why history loads twice (confirmed)
+1. Every server-side GitHub operation for a workspace repository authenticates
+   with the org-token table entry for the **owner of the target repository**.
+2. Server operations do not depend on the server's ambient GitHub credentials
+   (`GH_TOKEN`, `GITHUB_TOKEN`, `gh auth`, host credential helpers), nor on
+   their absence, whenever the owner has an org token.
+3. Token edits apply on the next server call, with no restart.
+4. `create_pr` does not push when the remote branch already equals local HEAD.
+5. 401/403 failures name the owner and the credential source.
 
-This is not the initial-load effect re-running. `loadProcessesInOrder` fetches
-a slice of `HISTORY_FETCH_CONCURRENCY = 5` newest processes at once, keeps
-responses only until `MIN_INITIAL_ENTRIES` is crossed, and **discards** the
-rest. Here the newest turn alone crossed the threshold, so 4 of the 5
-responses were thrown away. The chat then renders a short list, the
-top-of-list sentinel's `IntersectionObserver` fires `loadEarlier`, and
-`loadEarlierBatch` fetches those same 4 processes (plus the oldest one)
-again. The probe shows the second batch is exactly
-`{first batch} − {newest} + {oldest}`.
+## Non-goals
 
-### The three session process streams
+- Changing how agent processes are routed (`apply_github_routing`, the shim).
+- GitHub Enterprise hosts. Org tokens are scoped to `github.com`. Other hosts
+  keep the existing server credential and are logged as fallback.
+- Azure DevOps providers. They are unchanged.
+- The homelab `githubAuth.orgTokenRefs` `gh` router. It is not configured in
+  production. Where it is configured it still overrides `GH_TOKEN` for its own
+  owners. This is recorded as a known interaction, not changed here.
+- Shared-repository provisioning fetches (`workspace-manager`
+  `SharedRepositoryStore::ensure` falling back to a forge fetch for a branch
+  the checkout never fetched). That path is synchronous inside the workspace
+  manager, has no database access, and is best-effort. It keeps the existing
+  credential, and this is documented.
 
-`WorkspacesLayout` (`useExecutionProcesses(selectedSession.id)`),
-`SessionChatBoxContainer` (`useExecutionProcesses(lastSessionId)`) and
-`ExecutionProcessesProvider` (`show_soft_deleted=true`). On mobile,
-`BrowserPanelContainer` is also mounted (hidden) and calls it again. The server
-treats `show_soft_deleted=false` exactly as a `!dropped` filter
-(`events/streams.rs`), so one `show_soft_deleted=true` stream plus client-side
-filtering can serve every caller.
+## Functional requirements
 
-### Discovered options
+### FR-1 Owner parsing
 
-`ModelSelectorContainer` and `WYSIWYGEditor` both call the discovery stream
-for the same session, one with `workspace_id` and one without. When
-`session_id` is present, the server derives the workspace from the session and
-uses `workspace_id` only as a consistency check (`discover_executor_options`).
-`repo_id` is ignored. With a session, both calls are therefore the same stream.
+`utils::github_credentials::parse_github_repo(url)` returns
+`Some(GitHubRepoRef { owner, repo })` for `github.com` (and `www.github.com`)
+URLs in these forms:
 
-## Goals and design
+- `https://github.com/o/r`, `https://github.com/o/r.git`,
+  `https://user[:pw]@github.com/o/r`, `http://…`, a trailing `/`.
+- PR and tree URLs: `https://github.com/o/r/pull/12`.
+- `ssh://git@github.com/o/r.git`, `ssh://git@github.com:22/o/r`.
+- scp-like `git@github.com:o/r.git` and `github.com:o/r`.
 
-### G1. Completed turns load over HTTP
+The host comparison is case-insensitive. The owner must pass `is_valid_owner`.
+Any other host or shape returns `None`, which means fallback. The owner keeps
+its spelling. Lookups compare owners case-insensitively.
 
-**Server.** Add `GET /api/execution-processes/{id}/normalized-logs` and
-`GET /api/execution-processes/{id}/raw-logs`. Each returns
-`ApiResponse<ExecutionProcessLogSnapshot>`:
+### FR-2 Credential resolution (per request)
 
-```ts
-{ entries: PatchType[]; complete: boolean }
-```
+`services::github_credentials::resolve_for_urls(pool, urls)` returns a
+`GitHubCredentials` set. It covers every distinct `github.com` owner named by
+`urls`, each entry being one of:
 
-`entries` is exactly the `entries` array the matching `…/ws` replay converges
-to. `complete` is true only when the log is settled, meaning no live
-`MsgStore` exists for the process and its status is not `running`.
+- `OrgToken(token)`: the owner has a row and its value decrypted (and
+  `op://`-resolved) to a non-empty token.
+- `Unavailable(reason)`: the owner has a row, but decryption, the 1Password
+  lookup, or the key file failed, or the value resolved to empty. Operations
+  on this owner **fail closed** with the reason. They never fall back.
+- Owners with no row are absent, which means fallback.
 
-- Normalized: reuse `stream_normalized_logs`. It already reads the
-  materialized sidecar first. On a miss it does the bounded historical
-  normalization under the per-execution lease and global permit, and writes
-  the sidecar. Materialize the `/entries/<n>` patches with
-  `normalized_log_cache::materialize_entries`, which is the same function
-  that builds the sidecar. When a live store exists, snapshot its buffered
-  history (`indexed_entry_patches_from_history`) instead of following the
-  tail, and return `complete: false`.
-- The drain runs in a spawned task. If the client aborts, a cold
-  normalization still finishes and writes its sidecar, so the next attempt
-  ("load earlier") is fast. The work stays bounded by the existing lease and
-  permit.
-- Raw: reuse `stream_raw_logs`. Stdout and stderr become
-  `{type: 'STDOUT' | 'STDERR', content}` in order, exactly as
-  `ConversationPatch::add_stdout/add_stderr` do for the socket.
-- `GET …/messages` was checked and does not fit. It projects entries into
-  truncated `SessionMessage` rows, drops tool/diff/stdout entries and caps
-  text at 4000 characters.
-- New Rust types derive `TS` and are generated by `pnpm run generate-types`.
+The table is read from SQLite on **every** call, so edits apply immediately.
+`op://` resolution is cached in-process with a 60 s TTL, keyed by
+`(row id, updated_at, reference)`. The cache is also cleared on every
+create/update/delete through the settings API, so re-saving the same reference
+takes effect on the next call. Literal values are never cached beyond the
+request. Resolved values and references are never logged, and never appear in
+`Debug` output (`GitHubToken`'s `Debug` prints `<redacted>`).
 
-**Client.** A new `fetchHistoricProcessEntries` loader:
+The 1Password service-account token comes from the server's
+`OP_SERVICE_ACCOUNT_TOKEN`, which is the existing `resolve_environment_secrets`
+fallback.
 
-- Uses `makeLocalApiRequest` (host scoping `/api/host/{id}`, remote-web relay
-  and WebRTC transport).
-- Has an `AbortController` deadline (`HISTORY_HTTP_DEADLINE_MS`). A timeout,
-  an abort, a non-2xx status, `success: false` and malformed JSON all reject.
-  It settles exactly once.
-- On `complete: false` (the process finished between the snapshot and the
-  fetch, or its store is still live), it falls back to the existing
-  `normalized-logs/ws` / `raw-logs/ws` path with its idle timeout. That path
-  converges to the full log when the store drops. A truncated snapshot is
-  never cached or shown as final.
-- `useConversationHistory` uses it for every non-running process: the
-  initial load, "load earlier", and the reload after running → finished.
-  Running processes keep `loadRunningAndEmitWithBackoff` over WebSocket.
+### FR-3 Applying credentials to git subprocesses
 
-### G2. No duplicate sockets or history loads
+`GitCli` network methods (`push`, `fetch_with_refspec`,
+`check_remote_branch_exists`) accept `&GitHubCredentials` and select an entry
+by the owner of the URL they contact. For `OrgToken`, that one command gets:
 
-- **Shared JSON-patch streams.** `useJsonPatchWsStream` subscribes to a
-  ref-counted stream keyed by endpoint and resolved host scope. Consumers of
-  the same key share one socket, snapshot, reconnect and backoff state. After
-  the last subscriber leaves, the socket lingers for `STREAM_LINGER_MS`
-  (3 s) before closing, which absorbs mount/unmount churn. The existing
-  semantics carry over unchanged: keep the snapshot while reconnecting to the
-  same endpoint, only `Ready` resets backoff, `finished` is terminal, and a
-  clean 1000 close does not reconnect.
-- **One session process stream.** `useExecutionProcesses` always requests
-  `show_soft_deleted=true` and filters `dropped` on the client when the caller
-  did not ask for soft-deleted rows. Every caller then shares one socket.
-- **Discovery.** `getDiscoveredOptionsStreamUrl` drops `workspace_id` and
-  `repo_id` when `session_id` is given, so the two chat consumers share one
-  URL.
-- **History once per scope.** `useConversationHistory` keeps a per-scope
-  cache of settled (`complete`) entries for completed processes. Responses
-  that `loadProcessesInOrder` discards past the threshold stay in the cache,
-  and "load earlier" reads the cache before fetching. The cache is cleared
-  when the scope changes. A failed fetch is not cached, so "load earlier"
-  still retries it.
+- `VK_GITHUB_PAT_<HEX>=<token>` in its environment;
+- `GIT_CONFIG_PARAMETERS`, holding the existing value (if any) followed by
+  `credential.https://github.com/<owner>.helper=` (a reset) and the inline
+  helper that prints the variable (both the as-typed and the lowercase
+  spelling). This is the same text `routing_environment` produces;
+- `VK_GITHUB_ROUTED_OWNERS` removed, so a `gh` shim on the server's PATH
+  cannot re-route;
+- an SSH URL rewritten to `https://github.com/<owner>/<repo>.git` for that
+  command, because SSH keys would otherwise bypass the helper.
 
-### G3. The chat's requests go first on mobile
+Nothing is written to any git config file. For `Unavailable`, the command is
+not run, and `GitCliError::CredentialUnavailable(message)` is returned. With no
+entry, the command runs exactly as before (fallback).
 
-On the mobile layout:
+### FR-4 Applying credentials to `gh` / REST / GraphQL
 
-- `PreviewBrowserContainer` (preview settings scratch stream) and
-  `BrowserPanelContainer` (browser-session socket and a process stream) mount
-  only once their tab has been shown. After that they stay mounted, which
-  keeps the existing "preserve sockets across tab switches" behaviour.
-- The workspace git diff stream (`WorkspaceProvider`) is deferred on mobile
-  until a diff-consuming tab (`changes`, `git`) is shown or the chat's initial
-  history has settled, whichever comes first. The chat's diff-stats pill then
-  fills in after the rows appear, not before. Desktop is unchanged.
+`GhCli` carries a `GitHubCredentials`. Every `gh` invocation names its target
+owner (taken from `GitHubRepoInfo`, the remote URL, or the PR URL). For
+`OrgToken`, the subprocess gets `GH_TOKEN=<token>`, and `GITHUB_TOKEN`,
+`GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` and `VK_GITHUB_ROUTED_OWNERS`
+are removed. `gh` sends the token as the `Authorization` header for REST
+(`gh api`) and GraphQL. The git parameters from FR-3 are added too, so `gh pr
+checkout`'s fetch uses the same token. For `Unavailable`, `gh` is not run. With
+no entry, the existing environment is inherited.
 
-### Stretch goal
+`GitHostService::from_url_with_credentials(url, credentials)` builds a
+provider with credentials. `from_url` keeps its current behaviour, an empty
+set, for non-workspace call sites.
 
-An HTTP snapshot of the session's processes before the live stream attaches
-is **not** built. With G1 and G2 the chat needs exactly one socket before
-its rows render (the shared session stream). Multiplexing all subscriptions
-over one socket is written up as a proposal in the wiki page.
+### FR-5 Logging which source was used
 
-## Constraints kept
+Each owner a request resolves is logged once as
+`owner=<owner> source=org-token|fallback|unavailable`, with no secret. This is
+`info` when the owner's source changed since it was last logged and `debug`
+otherwise, so the 60 s PR monitor does not flood the log.
 
-- `wiki/awaited-stream-settlement.md` rules, applied to HTTP: settle once;
-  close or timeout is a failure; a failed turn is skipped, counted and
-  retryable through "load earlier", with no auto-retry during initial load;
-  one unsettled fetch never holds the spinner (the deadline bounds it).
-- The workspace summaries path (#350), NFS and Cloudflare configuration are
-  not touched.
+### FR-6 Error attribution on 401/403
+
+When a git or `gh` command fails with an authentication or permission error
+(git: `Authentication failed`, `could not read Username`, `403`, `Write access
+to repository not granted`, `Permission … denied`, `401`; gh: exit 4, `HTTP
+401`, `HTTP 403`, `Bad credentials`, `Resource not accessible`), the error
+message starts with an attribution:
+
+- org token: `the sweetgreen org token (Settings → Repositories → GitHub
+  organization tokens) was rejected or lacks access to sweetgreen/platform-ops`
+- fallback: `no org token for owner sweetgreen; used the server's fallback
+  credential, which was rejected or lacks access. Add a sweetgreen token in
+  Settings → Repositories → GitHub organization tokens`
+
+Then comes the original stderr. Unavailable reads `the sweetgreen org token is
+configured but unavailable: <reason>`. These messages reach MCP callers:
+
+- `create_pr` returns `PrError::GitCliNotLoggedIn` / `CliNotLoggedIn` with the
+  attributed message, not the generic one.
+- PR tool routes (`get_pr`, `list_pr_checks`, `merge_pr`, `update_pr`) map
+  credential-attributed failures to `PrToolError::GithubError { detail }`
+  carrying the attribution.
+
+### FR-7 `create_pr` skips a redundant push
+
+Before pushing, `create_pr` reads the push remote's `refs/heads/<branch>` with
+`git ls-remote`, using the org-token credential. If that SHA equals the local
+`refs/heads/<branch>` tip in the worktree, the push is skipped (logged at info)
+and the remote-tracking ref and upstream are recorded locally, as a push would
+have done. If the read fails or differs, the push runs as before. The
+authoritative check is against the remote, not a possibly stale local
+`origin/<branch>`.
+
+### FR-8 Coverage
+
+Credentials (FR-3/FR-4) are passed in at:
+
+- `create_pr`: target-branch existence check, push-skip check, push, PR
+  create (`gh repo view` for target and head, `gh pr create`).
+- `attach_existing_pr`, PR comments, `create_workspace_from_pr`
+  (`gh repo view`, `gh pr checkout`).
+- `resolve_pr_target` and everything on `PrTarget`: `get_pr`/status, checks,
+  merge, branch delete after merge, update, draft/ready, and the cross-remote
+  `repo_identity` scan.
+- `routes/workspaces/git.rs`: push, force push, branch status (fetch), rebase
+  (fetch of the remote base).
+- `routes/repo.rs`: list open PRs, PR info by URL.
+- `pr_monitor`: `get_pr_status` for each open PR, by its PR URL owner.
+
+### FR-9 Settings copy
+
+The Org tokens card description changes "Changes apply to newly started
+processes" to say that server operations (PR creation, status, merge, push)
+use changes immediately, while running agent sessions pick them up on their
+next start.
 
 ## Acceptance
 
-- For the workspace above: zero `normalized-logs/ws` for completed turns,
-  exactly one `execution-processes/stream/session/ws`, each history GET issued
-  once, and a spinner that does not wait on git diff, discovered-options,
-  approvals, preview or browser-session sockets.
-- Before and after WebSocket counts and time until rows, measured with a
-  Playwright mobile probe (no added latency, and with 150 ms RTT added via
-  CDP). WebKit is not installed on the worker, so Chromium with added latency
-  stands in for the phone.
-- Vitest: the HTTP loader (success, timeout, error status, abort,
-  finished-during-load), the shared session stream (one socket for many
-  consumers), and single history load per scope. Rust tests for the new
-  routes' snapshot logic.
-- Wiki updated with the "each WebSocket is a handshake" rule and numbers.
+- With only a `sweetgreen` org token and no `GH_TOKEN`/`GITHUB_TOKEN`/`gh
+  auth` on the server, `create_pr` → `get_pr` → `merge_pr` works for a
+  `sweetgreen/*` repo. Verified by unit tests that the `gh`/`git` subprocesses
+  receive the org token and not the ambient one, and by the end-to-end PR for
+  this task.
+- With the token removed, the error says `no org token for owner sweetgreen`,
+  not a bare 403.
+- Rotating the token in Settings takes effect on the next call: the table is
+  re-read and the cache is invalidated on write.
+- Tests cover owner parsing (HTTPS, SSH, scp, PR URLs, case-insensitive
+  owner/host, non-GitHub hosts), token selection, fallback, the unavailable
+  fail-closed path, the env and GIT_CONFIG_PARAMETERS a git command receives
+  (real `git credential fill`), gh env overrides, error attribution, the
+  op-cache TTL and invalidation, and the skipped push.
+
+## Risks
+
+- `GIT_CONFIG_PARAMETERS` precedence: verified in the agent path. Command
+  scope is read last, and the empty helper resets inherited helpers for that
+  URL prefix only.
+- Skipping the push also skips `push_to_remote`'s clean-worktree check.
+  Uncommitted changes were never part of the PR, so opening it is correct.

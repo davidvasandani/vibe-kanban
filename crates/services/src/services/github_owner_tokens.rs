@@ -103,16 +103,16 @@ fn validate_owner(owner: &str) -> Result<String, GitHubOwnerTokenError> {
     }
 }
 
-fn binding(id: Uuid) -> Vec<u8> {
+pub(crate) fn binding(id: Uuid) -> Vec<u8> {
     format!("vk-github-owner-token|{id}").into_bytes()
 }
 
-fn load_store() -> Result<McpGatewaySecretStore, GitHubOwnerTokenError> {
+pub(crate) fn load_store() -> Result<McpGatewaySecretStore, GitHubOwnerTokenError> {
     McpGatewaySecretStore::load_or_generate(&github_owner_tokens_key_path())
         .map_err(|_| GitHubOwnerTokenError::KeyUnavailable)
 }
 
-fn decrypt(
+pub(crate) fn decrypt(
     store: &McpGatewaySecretStore,
     row: &GitHubOwnerTokenRow,
 ) -> Result<String, GitHubOwnerTokenError> {
@@ -160,7 +160,9 @@ pub async fn create(
     pool: &SqlitePool,
     request: CreateGitHubOwnerTokenRequest,
 ) -> Result<GitHubOwnerToken, GitHubOwnerTokenError> {
-    create_with(pool, &load_store()?, request).await
+    let created = create_with(pool, &load_store()?, request).await;
+    super::github_credentials::invalidate_cache();
+    created
 }
 
 async fn create_with(
@@ -190,7 +192,9 @@ pub async fn update(
     id: Uuid,
     request: UpdateGitHubOwnerTokenRequest,
 ) -> Result<GitHubOwnerToken, GitHubOwnerTokenError> {
-    update_with(pool, &load_store()?, id, request).await
+    let updated = update_with(pool, &load_store()?, id, request).await;
+    super::github_credentials::invalidate_cache();
+    updated
 }
 
 async fn update_with(
@@ -210,6 +214,7 @@ async fn update_with(
 }
 
 pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<(), GitHubOwnerTokenError> {
+    super::github_credentials::invalidate_cache();
     if GitHubOwnerTokenRow::delete(pool, id).await? {
         Ok(())
     } else {
