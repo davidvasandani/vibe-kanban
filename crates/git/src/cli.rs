@@ -24,7 +24,9 @@ use std::{
 
 use thiserror::Error;
 use utils::{
-    github_credentials::{CredentialSelection, GitHubCredentials, looks_like_git_auth_failure},
+    github_credentials::{
+        CredentialSelection, GitHubCredentials, looks_like_git_auth_failure, parse_github_repo,
+    },
     path::ALWAYS_SKIP_DIRS,
     shell::resolve_executable_path_blocking,
 };
@@ -810,7 +812,10 @@ impl GitCli {
     }
 
     /// First configured `remote.<name>.url` per remote, across every scope git
-    /// reads (local, worktree, global, includes).
+    /// reads (local, worktree, global, includes), kept only when it names a
+    /// github.com repository. An alias such as `gh:owner/repo` (expanded by
+    /// `insteadOf`) identifies nothing until rewritten, so the expanded URL
+    /// stays authoritative for those.
     fn configured_remote_urls(
         &self,
         repo_path: &Path,
@@ -827,6 +832,7 @@ impl GitCli {
             if let Some(name) = key
                 .strip_prefix("remote.")
                 .and_then(|key| key.strip_suffix(".url"))
+                && parse_github_repo(url.trim()).is_some()
             {
                 urls.entry(name.to_string())
                     .or_insert_with(|| url.trim().to_string());

@@ -1577,3 +1577,22 @@ fn list_remotes_reports_configured_urls_not_rewritten_ones() {
         "https://github.com/sweetgreen/app.git"
     );
 }
+
+#[test]
+fn list_remotes_expands_aliases_that_name_no_repository() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo_path = temp_dir.path().join("repo");
+    let repo = Repository::init(&repo_path).unwrap();
+    repo.remote("origin", "gh:sweetgreen/app.git").unwrap();
+    repo.config()
+        .unwrap()
+        .set_str("url.https://github.com/.insteadOf", "gh:")
+        .unwrap();
+    assert_eq!(
+        GitCli::new().list_remotes(&repo_path).unwrap(),
+        vec![(
+            "origin".to_string(),
+            "https://github.com/sweetgreen/app.git".to_string()
+        )]
+    );
+}

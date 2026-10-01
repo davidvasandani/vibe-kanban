@@ -556,7 +556,13 @@ impl GhCli {
                 .output()
                 .map_err(|err| GhCliError::CommandFailed(err.to_string()))?;
             let effective = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !effective.starts_with("https://github.com/") {
+            // It must stay on HTTPS github.com *and* in the same owner (spelled
+            // as the candidate spells it, which the helper covers); an
+            // inherited rule moving it elsewhere outranks our identity rule.
+            let same_owner = parse_github_repo(&effective)
+                .zip(parse_github_repo(&candidate))
+                .is_some_and(|(effective, candidate)| effective.owner == candidate.owner);
+            if !effective.starts_with("https://github.com/") || !same_owner {
                 return Err(GhCliError::AuthFailed(format!(
                     "the {owner} org token cannot be used: inherited git configuration rewrites \
                      {candidate} to {effective} (a url.*.insteadOf rule), which bypasses the \
