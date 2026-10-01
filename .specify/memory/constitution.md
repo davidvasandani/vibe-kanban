@@ -694,6 +694,26 @@ server environment, and never logged. Every authentication or permission
 failure names the target and the credential source that was used, so the
 operator knows which credential to fix.
 
+### XLVI. A lost continuation is a visible fresh start, never a stuck session
+An executor's vendor-private continuation artifact (a Claude transcript, a
+Codex rollout) can disappear: vendor retention cleanup, a host move without a
+transfer, or manual deletion. VK's session record outlives it.
+- Before resuming, an executor that can cheaply prove the artifact is absent
+  (an existence check in the directory the child will actually read,
+  resolved from the execution env, not the server's own env) MUST start a
+  fresh vendor session in the same workspace. Repeating a resume that is
+  certain to fail strands the workspace on every follow-up.
+- The proof fails open. An unreadable or unresolvable location, or an id
+  that is not one safe path segment, resumes as before, so a broken probe
+  never discards a valid conversation.
+- The fresh start is never silent. The agent's prompt says the earlier
+  conversation could not be restored and points to the workspace's files
+  and git history. The user sees a Vibe Kanban diagnostic on the execution's
+  stderr (never agent stdout, per IX) naming the missing session id. A
+  `warn!` log records it.
+- VK never fabricates vendor-private history from its normalized logs to
+  imitate the lost conversation.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -715,7 +735,7 @@ operator knows which credential to fix.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.42.1 (refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
+**Version**: 0.43.0 (adds XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
@@ -1020,3 +1040,18 @@ the regression case was unnamed, so a clarifying sentence was enough and no
 new principle was added. The homelab constitution named by the command
 template was not changed, because this project only manages the Vibe Kanban
 repository.
+
+## Review: vk/9f5d-no-conversation
+
+Applied `/speckit.constitution`: added principle XLVI (0.43.0). Workspace
+`vk/d97a-build-daily-repo` failed every follow-up with `No conversation found
+with session ID`, because Claude's default 30-day cleanup deleted its
+transcript before homelab raised retention. XXV covers moving continuation
+artifacts between nodes, and IX covers which stream VK may write to. Neither
+says what an executor does once the artifact is gone. Codex already starts a
+replacement thread, while Claude kept repeating a resume that could only
+fail. XLVI makes the fallback a rule, keeps it fail-open and visible, and
+keeps the `vk/6026-no-conversation` boundary against fabricating history.
+Numeral XLVI was unused on this branch and on `main`. The homelab
+constitution named by the command template was not changed, because this
+project only manages the Vibe Kanban repository.

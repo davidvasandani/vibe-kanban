@@ -1,97 +1,88 @@
-# SPEC: A worker restart must not leave a stopped job looking Running
+# SPEC: Claude follow-ups survive a deleted session transcript
 
-Task: `vk/9c15-stopped-job-look` ("Stopped Job looks Running").
+Task: `vk/9f5d-no-conversation`.
 
 ## Problem
 
-After a VK restart, a stopped job kept showing as running in the chat. The
-**Stop** button kept its spinner and the last tool call kept its loading
-placeholder. Only after the user pressed **Stop** did the UI switch to "This
-run was interrupted by a vibe-kanban restart" with **Resume**.
+Workspace `vk/d97a-build-daily-repo` (SWE-21, Claude Code session
+`4c9c88ce`) can no longer take a follow-up. Every message fails within a
+few seconds with:
 
-Evidence from production (think4 worker, workspace `8b57b52f…`, execution
-`64369241-f659-4acf-9611-9ab6e1919b97`):
+```
+No conversation found with session ID: f54d7e57-b912-487e-9d3b-50f3f6d7dd94
+```
 
-- `vibe-kanban-worker` on think4 was restarted at 08:44:49 UTC **without a
-  drain** (no SIGUSR1). Its agent child died with it.
-- On boot the worker recovered the job from its recovery store as
-  `interrupted` (`observed_at 08:44:55`). The recovered summary has
-  `last_sequence: 5`.
-- The coordinator row stayed `Running` until the user pressed Stop about 25
-  minutes later.
+The follow-up execution (`8dfca28c`, 2026-10-01 10:53Z) ran
+`claude --resume f54d7e57-…` and exited 1. The same thing happened on
+2026-09-30.
 
 ## Root cause
 
-The worker persists a job's `JobSummary` (`WorkerJob::persist`) only on
-state transitions. During a long run the on-disk `last_sequence` stays at
-the value from the `Running` transition (5 here), while the journal goes on
-to thousands of events, all delivered to and acknowledged by the coordinator.
+- Claude Code stores each conversation as
+  `$CLAUDE_CONFIG_DIR|$HOME/.claude/projects/<cwd-slug>/<session-id>.jsonl`.
+  `--resume <id>` fails with the message above when that file is missing.
+- The last successful turn was on 2026-07-07. Claude Code's default
+  `cleanupPeriodDays` is 30, so it deleted the transcript around
+  2026-08-06.
+- The homelab retention fix (`claudeTranscriptRetentionDays`, default 3650,
+  homelab #1228) only landed on 2026-09-16. It stops future deletions but
+  can't restore files already deleted. Transcripts can also be lost when a
+  workspace moves to a worker that never received them.
+- Vibe Kanban still holds `f54d7e57…` as the session's agent session id.
+  Each follow-up passes it to `--resume`, so the workspace stays stuck no
+  matter what the user sends.
+- Codex already handles this case: when its rollout is missing it starts a
+  replacement thread in the same workspace (`ForkRejection::ConversationMissing`
+  in `codex.rs`). The Claude executor has no equivalent.
 
-`ExecutionSupervisor::with_recovery_and_drain` rebuilds the journal with
-`EventJournal::recover`. That places the synthetic terminal event at
-`persisted last_sequence + 1` (sequence 6). The coordinator's tracker
-(`track_worker_msgs_in_store`) polls `events(after = cursor)` with its real
-cursor (thousands). `replay_after` returns:
+## Goal
 
-- no events (`6 <= cursor`);
-- no replay gap (`cursor + 1 >= earliest_available`);
-- `latest_available = 6 < cursor`.
-
-The tracker treats that as "nothing new yet" and polls forever. The terminal
-event is never observed and the row stays `Running`. Boot reconciliation
-(`ExecutionReconciler`) defers running rows with terminal summaries to that
-same tracker (see `wiki/coordinator-restart-handoff.md`), so a coordinator
-restart hits the same hang. The frontend is correct: it renders the row's
-`running` status.
+When a Claude Code follow-up names a session whose transcript is
+provably missing, start a fresh Claude session in the same workspace
+instead of failing. The next follow-up then resumes the new session, since
+VK records the new session id from the stream as it already does today.
 
 ## Requirements
 
-- **R1 — Detect journal regression.** A batch whose `latest_available` is
-  below the coordinator's cursor proves the worker lost the journal the
-  cursor was read from (a worker restart). In normal operation every cursor
-  value came from that worker's own events, so `latest_available >= cursor`
-  always holds. The tracker must stop treating this batch as "no new events".
-- **R2 — Finalize from matching terminal evidence.** On regression, consult
-  the worker inventory. If a summary matches this dispatch exactly (worker,
-  execution, worker job id, request digest), is terminal with consistent
-  terminal evidence (state/evidence pair as in replay-gap recovery), and its
-  `last_sequence` equals the batch's `latest_available` (same journal
-  generation), finalize the row through the **normal** terminal path:
-  persist the dispatch state and the process status, acknowledge, run
-  `finalize_remote_execution`, and finish the MsgStore. For a worker restart
-  the status is `Interrupted`, so the existing Resume affordance appears with
-  no Stop click.
-- **R3 — Honest output.** Mark the job `output_complete = false`. Push one
-  stderr notice saying the worker restarted and output after the
-  coordinator's cursor may be missing.
-- **R4 — No matching evidence.** If the inventory is reachable but has no
-  matching terminal summary, the regressed job's state cannot be trusted.
-  Mark the row `Indeterminate` (the existing unknown-outcome rule) and
-  finalize, rather than leaving it `Running`. If the inventory or database
-  lookup fails, retry with the tracker's existing backoff and never infer a
-  terminal state.
-- **R5 — Do not touch healthy paths.** Batches with
-  `latest_available >= cursor`, replay gaps, interactions, handoff and
-  re-attach keep their current behavior.
-- **R6 — Tests.** Unit tests cover the pure regression predicate and the
-  evidence matcher: identity mismatches, non-terminal or contradictory
-  summaries, journal-generation mismatch, and all four terminal states.
+1. **FR-1 Detect a missing transcript before spawning.** Resolve Claude's
+   config dir the same way the child process will see it:
+   `CLAUDE_CONFIG_DIR`, else `$HOME/.claude`. Each variable is read from the
+   execution env merged with the profile env first, then from the process
+   env. The transcript counts as missing only when `<config>/projects` can
+   be listed and none of its project subdirectories contains
+   `<session-id>.jsonl`.
+2. **FR-2 Fail open.** If the projects dir can't be read (missing dir,
+   permission error, no HOME), resume as today, so a broken probe never
+   discards a valid session. Session ids that aren't one safe path segment
+   (empty, containing `/` or `..`) also resume as today.
+3. **FR-3 Fresh session fallback.** When the transcript is missing, spawn
+   the initial command (no `--resume`, no `--resume-session-at`). Put a
+   short notice in front of the user's prompt saying the earlier
+   conversation could not be restored and the agent should check the
+   workspace's files and git history for prior work.
+4. **FR-4 Visible, never silent.** Log a `warn` with the missing session id
+   when falling back. Also write a Vibe Kanban diagnostic line to the
+   execution's stderr ahead of Claude's own stderr. Per constitution IX it
+   must never be injected into agent stdout. The chat then shows the user that the earlier Claude
+   transcript was missing and a new conversation was started. Prior
+   knowledge (`vk/6026-no-conversation`) forbids silently substituting an
+   empty session.
+5. **FR-5 Scope.** This change touches only the Claude Code executor (plus a
+   generic stderr helper in `stdout_dup.rs`).
+   Other executors, the DB schema and the frontend stay unchanged.
 
 ## Non-goals
 
-- Persisting the worker's `last_sequence` more often. It narrows the window
-  but cannot close it, because the worker can die between delivering a batch
-  and saving. The coordinator-side rule covers every case.
-- Changing the frontend; it already renders the row status faithfully.
-- Repairing historical rows. The incident row was already finalized by the
-  user's Stop.
-- A job missing entirely from the worker's inventory (state dir wiped). That
-  keeps today's `events` error/retry behavior.
+- Recovering the deleted transcript, or rebuilding it from VK's stored
+  logs.
+- Changing transcript retention (homelab already owns that).
+- Cross-worker transcript transfer (`session-transfers` already owns that).
 
 ## Acceptance
 
-- `cargo test -p local-deployment` passes, including the new tests.
-- `pnpm run backend:check`, `cargo clippy` and `pnpm run format` are clean.
-- Reasoned trace: with the incident's values (cursor ≫ 6, recovered
-  `Interrupted` summary at `last_sequence = 6`), the tracker finalizes the row
-  as `Interrupted` on its first poll after the worker restarts.
+- Unit tests: transcript present (in any project dir) → resume; present
+  under `CLAUDE_CONFIG_DIR` → resume; projects dir present but file absent
+  → fresh; projects dir unreadable or missing → resume; unsafe session id →
+  resume. The stderr notice comes before the child's own stderr output.
+- `cargo test -p executors` passes; `pnpm run format` leaves the tree clean;
+  clippy is clean for the crate.

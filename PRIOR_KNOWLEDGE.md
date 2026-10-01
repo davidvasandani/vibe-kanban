@@ -1,81 +1,53 @@
-# Prior knowledge: server-side GitHub operations and org tokens
+# Prior knowledge: `No conversation found with session ID`
 
-Task: `vk/8b57-use-settings-git`. This file distills what the project
-knowledge bases (`wiki/` and `docs/knowledge-base/`) already record about this
-problem area. The knowledge bases were only read in this stage, not changed.
+Task: `vk/9f5d-no-conversation`. Read-only recall from the project knowledge
+bases (`vibe-kanban/wiki/`, `homelab/docs/knowledge-base/`).
 
-## Relevant pages
+## Directly relevant
 
-- `wiki/github-owner-token-routing.md` (`vk/0f52-manage-gh-token`)
-- `wiki/mcp-pr-tools-and-connection-notices.md` (`vk/53bc-agents-fall-back`)
-- `docs/knowledge-base/workspace-environment-inheritance.md` (several tasks,
-  including `vk/0f52`)
-- `wiki/vk-pollers.md` (rule: MCP-reachable routes must carry a message)
+### homelab `vibe-kanban-claude-transcript-retention.md` (`vk/6026-no-conversation`)
 
-## What to build on
+- An earlier incident hit the same error (a workspace idle from Jul 27 to
+  Sep 2). The Vibe session and its normalized UI logs live in VK's DB.
+  Claude's private transcript is separate, at
+  `~/.claude/projects/<slug>/<id>.jsonl`.
+- Cause: Claude Code's default `cleanupPeriodDays` is 30 days, so idle
+  transcripts get deleted. Homelab now sets `claudeTranscriptRetentionDays`
+  (default 3650) via the `vibe-kanban-claude-retention` oneshot, for both
+  the coordinator and the workers.
+- **Recovery boundary:** retention doesn't bring back deleted JSONL files.
+  "Do not fabricate Claude-private history from normalized UI logs or
+  silently substitute an empty session. A deliberately new conversation …
+  is a separate recovery choice."
+  → **Constraint for this task:** a fresh-session fallback must be visible
+  to the user (a system message in the chat) and to the agent (a notice in
+  its prompt). It must never pretend to be the original conversation.
 
-### Storage and secrecy (from `github-owner-token-routing`)
+### wiki `agent-process-lifecycle.md`
 
-- Tokens live in their own SQLite table `github_owner_tokens`, never in
-  `Config`. `/api/info` returns the whole Config, and `PUT /api/config`
-  overwrites it.
-- Owner uniqueness is `UNIQUE COLLATE NOCASE`, so lookups by owner should be
-  case-insensitive.
-- Values are `McpGatewaySecretStore` envelopes under a separate host key,
-  bound by AAD to the row id. Only `op://` references are ever returned. The
-  empty-table path never touches the key file. Keep that property: a server
-  with no org tokens must not create or read the key on every PR poll.
-- Runtime `sqlx::query_as` calls keep the `.sqlx` offline cache unchanged.
+- Follow-ups re-invoke Claude with `--resume <agent_session_id>`. ACP
+  resume replays a `.jsonl` transcript into a fresh process. Nothing there
+  covers a transcript going missing.
 
-### Git credential mechanics (verified with real git)
+### Codex precedent (code, not wiki)
 
-- `credential.https://github.com/<owner>.helper=` (an empty value, which
-  resets inherited helpers) followed by an inline `!f(){…}` helper routes only
-  that owner's URLs. Command-scope config (`GIT_CONFIG_PARAMETERS`) is read
-  last.
-- Path matching is case-sensitive, so emit both the as-typed and the
-  lowercase spelling.
-- Use `GIT_CONFIG_PARAMETERS` (sq-quoted, appended after any existing value),
-  not `GIT_CONFIG_COUNT`/`KEY_n`.
-- The helper names an env var (`VK_GITHUB_PAT_<HEX>`), so the token never
-  appears in config text. `routing_environment(owners, None, lookup)` already
-  produces exactly this text without the shim.
-- Testing recipe: `git credential fill` under a temporary `HOME` with
-  `GIT_CONFIG_NOSYSTEM=1`; a fake `gh` that prints `GH_TOKEN`.
+- `crates/executors/src/executors/codex.rs` `classify_fork_rejection`:
+  `ConversationMissing` / `LineageUnusable` → start a replacement thread in
+  the same workspace and log `warn`. This is the precedent for falling
+  back automatically.
 
-### Fail-closed semantics
+## Worker / scoped-home facts (code)
 
-- A configured owner whose token is empty or unresolvable fails closed and
-  names the owner. Unconfigured owners pass through unchanged. That matches
-  this task's "fallback only when no configured token".
-- `environment_secrets`: the literal `OP_SERVICE_ACCOUNT_TOKEN` in org Env Vars
-  wins over the service env. Ambient `OP_*` variables are stripped. Reads are
-  bounded to 30 s. Errors never carry provider output or values.
+- Workers give each execution a scoped `HOME`
+  (`crates/worker/src/execution.rs` `prepare_scoped_home`). It symlinks
+  every entry of the real home, including `.claude/projects`, so
+  transcripts are shared across executions on the same host. The scoped
+  `HOME` reaches the executor through `ExecutionEnv.vars`
+  (`env.vars.extend(environment)`).
+- So the executor must resolve the config dir from the execution env
+  merged with the profile env, not from its own process `HOME`.
 
-### PR tools (from `mcp-pr-tools-and-connection-notices`)
+## Gaps
 
-- Fine-grained PATs get 403 on check-runs and status. That is a coverage fact
-  (`SourceRead::Forbidden`), not a call failure. Credential attribution must
-  not turn those per-source 403s into hard failures of `list_pr_checks`.
-- Merge is `PUT pulls/{n}/merge` with a `sha` guard. The branch is deleted via
-  `DELETE git/refs/heads/<enc>` only when the head repo equals the base repo.
-- A PR URL is resolved against **all** of the checkout's remotes, so
-  credentials must cover every remote's owner, not just the default remote's.
-- `gh api` has no `--repo`. The owner is known from `GitHubRepoInfo` in
-  `GhCli::api_args`, so it can be passed explicitly.
-- Every MCP-reachable route error must carry a `message`
-  (`error_with_data_and_message`). Provider refusals become messages, not 500s.
-
-### Deployment interaction (from `workspace-environment-inheritance`)
-
-- The Nix `gh` router (`githubAuth.orgTokenRefs`) still exists, but no host
-  configures it. Where configured, it overrides `GH_TOKEN` for its own
-  owners. That is out of scope here.
-- Keep the long-lived server process environment secret-free. Inject secrets
-  only into the specific child process. Never mutate the server env or write
-  git config.
-
-## Gaps the knowledge base does not cover (new in this task)
-
-- Nothing yet describes server-side (non-agent) credential selection, op
-  resolution caching, or attributing auth errors to a credential source.
+- No wiki page covers executor-side handling of a missing transcript. That
+  page gets written in stage 12.
