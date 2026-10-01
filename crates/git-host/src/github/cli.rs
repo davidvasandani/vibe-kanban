@@ -540,9 +540,15 @@ impl GhCli {
             format!("https://github.com/{owner}/{repo}"),
             format!("https://github.com/{owner}/{repo}.git"),
         ];
-        candidates.extend(remote_urls.iter().cloned().filter(|url| {
-            parse_github_repo(url).is_some_and(|target| target.owner.eq_ignore_ascii_case(owner))
-        }));
+        candidates.extend(
+            remote_urls
+                .iter()
+                .filter(|url| {
+                    parse_github_repo(url)
+                        .is_some_and(|target| target.owner.eq_ignore_ascii_case(owner))
+                })
+                .cloned(),
+        );
         for candidate in candidates {
             let mut command = Command::new(&git);
             command
