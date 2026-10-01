@@ -143,8 +143,18 @@ struct Target {
 }
 
 impl Target {
+    /// Org tokens are github.com credentials: an Enterprise repository whose
+    /// owner shares a configured name keeps the host's existing credentials.
     fn repo(info: &GitHubRepoInfo) -> Self {
-        Self::named(&info.owner, &info.repo_name)
+        match info.hostname.as_deref() {
+            Some(host)
+                if !host.eq_ignore_ascii_case("github.com")
+                    && !host.eq_ignore_ascii_case("www.github.com") =>
+            {
+                Self::default()
+            }
+            _ => Self::named(&info.owner, &info.repo_name),
+        }
     }
 
     fn named(owner: &str, repo: &str) -> Self {
@@ -1264,6 +1274,28 @@ mod pr_management_parser_tests {
         assert!(outcome.merged);
         assert_eq!(outcome.sha.as_deref(), Some("abc"));
         assert_eq!(outcome.branch_deleted, None);
+    }
+
+    #[test]
+    fn enterprise_targets_never_select_github_com_org_tokens() {
+        let info = |hostname: Option<&str>| GitHubRepoInfo {
+            owner: "sweetgreen".into(),
+            repo_name: "app".into(),
+            hostname: hostname.map(str::to_string),
+        };
+        assert_eq!(
+            Target::repo(&info(None)).owner.as_deref(),
+            Some("sweetgreen")
+        );
+        assert_eq!(
+            Target::repo(&info(Some("github.com"))).owner.as_deref(),
+            Some("sweetgreen")
+        );
+        assert_eq!(Target::repo(&info(Some("ghe.example.com"))).owner, None);
+        assert_eq!(
+            Target::url("https://ghe.example.com/sweetgreen/app").owner,
+            None
+        );
     }
 
     #[test]

@@ -217,21 +217,22 @@ impl CredentialSelection {
     }
 
     /// Prepare `command` (a git invocation) to contact `url`, returning the URL
-    /// to pass to git. An org token rewrites SSH remotes to HTTPS, since SSH
-    /// keys would bypass the credential helper. `Err` (unavailable) means the
-    /// command must not run.
+    /// to pass to git. With an org token the URL becomes a credential-free
+    /// `https://github.com/<owner>/<repo>.git`: SSH keys, and userinfo embedded
+    /// in an HTTPS remote, would otherwise bypass the credential helper.
+    /// `Err` (unavailable) means the command must not run.
     pub fn apply_git(&self, command: &mut Command, url: &str) -> Result<String, String> {
         let token = match &self.kind {
             SelectionKind::Fallback => return Ok(url.to_owned()),
             SelectionKind::Unavailable(_) => return Err(self.unavailable_message()),
             SelectionKind::OrgToken(token) => token,
         };
-        for (key, value) in self.git_environment(token) {
+        for (key, value) in self.git_environment(token, false) {
             command.env(key, value);
         }
         command.env_remove(OWNERS_ENV);
         Ok(match parse_github_repo(url) {
-            Some(target) if !is_https(url) => {
+            Some(target) if !is_plain_https(url) => {
                 format!("https://github.com/{}/{}.git", target.owner, target.repo)
             }
             _ => url.to_owned(),
@@ -239,15 +240,17 @@ impl CredentialSelection {
     }
 
     /// Prepare `command` (a gh invocation). The org token becomes `GH_TOKEN`
-    /// and wins over any ambient token or `gh auth` login; the git variables are
-    /// added too so gh's own git calls (`pr checkout`) use the same token.
+    /// and wins over any ambient token or `gh auth` login. The git variables
+    /// are added too, with SSH URLs for the owner rewritten to HTTPS, so gh's
+    /// own git calls (`pr checkout` fetching through an SSH remote) use the
+    /// same token.
     pub fn apply_gh(&self, command: &mut Command) -> Result<(), String> {
         let token = match &self.kind {
             SelectionKind::Fallback => return Ok(()),
             SelectionKind::Unavailable(_) => return Err(self.unavailable_message()),
             SelectionKind::OrgToken(token) => token,
         };
-        for (key, value) in self.git_environment(token) {
+        for (key, value) in self.git_environment(token, true) {
             command.env(key, value);
         }
         for key in COMPETING_GH_TOKENS {
@@ -258,22 +261,48 @@ impl CredentialSelection {
         Ok(())
     }
 
-    fn git_environment(&self, token: &GitHubToken) -> Vec<(String, String)> {
+    fn git_environment(&self, token: &GitHubToken, rewrite_ssh: bool) -> Vec<(String, String)> {
         // Git matches credential URL contexts case-sensitively, so cover the
         // spelling the target used and the one entered in Settings
         // (`routing_environment` adds the lower-cased form of each).
-        let mut spellings: Vec<&str> = self.owner.iter().map(String::as_str).collect();
+        let mut spellings: Vec<String> = self.owner.iter().cloned().collect();
         if let Some(configured) = &self.configured_owner
-            && !spellings.contains(&configured.as_str())
+            && !spellings.contains(configured)
         {
-            spellings.push(configured);
+            spellings.push(configured.clone());
         }
-        let Some(first) = spellings.first() else {
+        let Some(first) = spellings.first().cloned() else {
             return Vec::new();
         };
         let mut environment =
             routing_environment(&spellings.join(","), None, |key| std::env::var(key).ok());
-        environment.push((token_env_name(first), token.expose().to_owned()));
+        if rewrite_ssh {
+            for spelling in spellings.clone() {
+                let lower = spelling.to_ascii_lowercase();
+                if !spellings.contains(&lower) {
+                    spellings.push(lower);
+                }
+            }
+            let rewrites: Vec<String> = spellings
+                .iter()
+                .flat_map(|owner| {
+                    let key = format!("url.https://github.com/{owner}/.insteadOf");
+                    [
+                        format!("{key}=git@github.com:{owner}/"),
+                        format!("{key}=ssh://git@github.com/{owner}/"),
+                    ]
+                })
+                .map(|entry| sq_quote(&entry))
+                .collect();
+            if let Some((_, parameters)) = environment
+                .iter_mut()
+                .find(|(key, _)| key == GIT_CONFIG_PARAMETERS)
+            {
+                parameters.push(' ');
+                parameters.push_str(&rewrites.join(" "));
+            }
+        }
+        environment.push((token_env_name(&first), token.expose().to_owned()));
         environment
     }
 
@@ -318,9 +347,26 @@ impl CredentialSelection {
     }
 }
 
-fn is_https(url: &str) -> bool {
-    let lower = url.trim().to_ascii_lowercase();
-    lower.starts_with("https://") || lower.starts_with("http://")
+const GIT_CONFIG_PARAMETERS: &str = "GIT_CONFIG_PARAMETERS";
+
+/// An `https://` URL with no userinfo, which leaves authentication to the
+/// credential helper.
+fn is_plain_https(url: &str) -> bool {
+    let url = url.trim();
+    let Some(rest) = url
+        .get(..8)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        .map(|_| &url[8..])
+    else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    !authority.contains('@')
+}
+
+/// Quote a `GIT_CONFIG_PARAMETERS` entry the way git's `sq_quote` does.
+fn sq_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 /// Whether git stderr reports an authentication or permission failure.
@@ -491,6 +537,30 @@ mod tests {
                 .unwrap(),
             "https://github.com/sweetgreen/platform-ops.git"
         );
+        // Embedded userinfo would bypass the helper; plain HTTPS is kept.
+        for url in [
+            "https://user:old-token@github.com/sweetgreen/platform-ops.git",
+            "http://github.com/sweetgreen/platform-ops",
+        ] {
+            let mut command = Command::new("git");
+            assert_eq!(
+                credentials
+                    .select_url(url)
+                    .apply_git(&mut command, url)
+                    .unwrap(),
+                "https://github.com/sweetgreen/platform-ops.git",
+                "{url}"
+            );
+        }
+        let plain = "https://github.com/sweetgreen/platform-ops";
+        let mut command = Command::new("git");
+        assert_eq!(
+            credentials
+                .select_url(plain)
+                .apply_git(&mut command, plain)
+                .unwrap(),
+            plain
+        );
         let other = "git@github.com:someone/x.git";
         let mut command = Command::new("git");
         assert_eq!(
@@ -580,6 +650,39 @@ mod tests {
         assert_eq!(
             run(&credentials.select_owner(Some("someone"))),
             "ambient-gh|ambient-github|sweetgreen"
+        );
+    }
+
+    #[test]
+    fn gh_git_calls_rewrite_the_owners_ssh_urls_to_https() {
+        let home = tempfile::tempdir().unwrap();
+        let credentials = credentials();
+        let get_url = |selection: &CredentialSelection, url: &str| {
+            let mut command = Command::new("git");
+            command
+                .env_clear()
+                .env("PATH", std::env::var("PATH").unwrap_or_default())
+                .env("HOME", home.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(["ls-remote", "--get-url", url]);
+            selection.apply_gh(&mut command).unwrap();
+            String::from_utf8(command.output().unwrap().stdout)
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+        let selection = credentials.select_owner(Some("sweetgreen"));
+        assert_eq!(
+            get_url(&selection, "git@github.com:sweetgreen/platform-ops.git"),
+            "https://github.com/sweetgreen/platform-ops.git"
+        );
+        assert_eq!(
+            get_url(&selection, "ssh://git@github.com/SweetGreen/platform-ops"),
+            "https://github.com/SweetGreen/platform-ops"
+        );
+        assert_eq!(
+            get_url(&selection, "git@github.com:someone/x.git"),
+            "git@github.com:someone/x.git"
         );
     }
 
