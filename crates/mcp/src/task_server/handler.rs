@@ -7,7 +7,7 @@ use rmcp::{
 use super::{McpMode, McpServer};
 
 /// What an agent does before abandoning a Vibe Kanban tool for an
-/// out-of-band fallback (homelab principle 130). Both `refresh_mcp_tools` and
+/// out-of-band fallback (homelab principle 143). Both `refresh_mcp_tools` and
 /// `restart_workspace` are registered in every mode, so each rung is callable.
 pub(crate) const RECOVERY_LADDER: &str = "If a Vibe Kanban tool call fails, or the harness says \
      a Vibe Kanban MCP server failed to connect, climb this ladder before using any fallback: \
