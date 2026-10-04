@@ -7,6 +7,7 @@ pub mod execution_worker_job;
 pub mod file;
 pub mod github_owner_token;
 pub mod mcp_gateway;
+pub mod mcp_oauth;
 pub mod merge;
 pub mod preview_lease;
 pub mod project;

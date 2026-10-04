@@ -1,54 +1,90 @@
-# Implementation plan: lint web-core and remote-web
+# Implementation plan: ChatGPT OAuth access to the VK MCP
 
-Task `vk/848f-lint-packages-we`. See `SPEC.md` for the design,
-`PRIOR_KNOWLEDGE.md` for rules inherited from earlier tasks, and
-`specs/vk/848f-lint-packages-we/plan.md` §7 for the reasoning behind each
-hook fix.
+Task `vk/50df-chatgpt-custom-m`. Spec: `SPEC.md`. SpecKit:
+`specs/vk/50df-chatgpt-custom-m/`.
 
-## Steps
+## A. vibe-kanban repo
 
-1. **Extract the shared rule set.** Move local-web's `.eslintrc.cjs` body
-   into `eslint.frontend.cjs` as `createFrontendConfig({ project,
-   ignorePatterns })`. Reduce local-web's config to a call into it. Hash
-   `eslint --print-config` for sample local-web files before and after: the
-   hashes must match.
-2. **Wire web-core.** Add `.eslintrc.cjs`, a `tsconfig.eslint.json` that
-   includes tests and `*.config.ts`, and a `lint` script.
-3. **Wire remote-web.** Same files as web-core, plus local-web's ESLint
-   devDependencies at the same versions. Run `pnpm install` to update
-   `pnpm-lock.yaml`.
-4. **Root and CI.** Add `web-core:lint` and `remote-web:lint`, and append
-   both to `lint`. In `frontend-checks`, add `core:lint` and `remote:lint`
-   to the job, and add `eslint.frontend.cjs` to the path filter.
-5. **Naming rule.** PascalCase for `src/**/!(use*).tsx`, camelCase for
-   `src/**/use*.{ts,tsx}`. Rename `settingsRegistry.tsx` to
-   `SettingsRegistry.tsx`.
-6. **Layer moves.** Use `git mv` and change only import paths:
-   `createModeSeedStore` → `shared/stores`, the create-mode chat box
-   containers → `features/create-mode/ui`, and `SharedAppLayout` →
-   `pages/root`. Same-feature imports become relative. Typecheck all three
-   apps.
-7. **Code findings.** Fix the unused variables (copy plus `delete`, drop
-   unused parameters), add the `no-empty` comment, remove the directives and
-   type `rehypePlugins`, add the switch cases, and delete the barrel.
-8. **`exhaustive-deps`.** Work one site at a time, as in plan §7. Re-lint
-   after each group until both packages report 0 problems.
-9. **Verify.** `pnpm run lint`, `pnpm run check`, `pnpm run format`, the
-   web-core and remote-web vitest suites, and a negative proof (add an
-   unused import, lint exits 1, revert).
-10. **Docs.** Update the `AGENTS.md` lint line, the wiki "Verification
-    notes", and the stale `settingsRegistry.tsx` mentions.
-11. **Review, knowledge base, PR.** Codex review until clean, a wiki page on
-    frontend linting, then open and merge the PR.
+1. **Migration** `crates/db/migrations/20261004000000_mcp_oauth.sql`:
+   - `mcp_oauth_clients(client_id PK, client_secret_hash BLOB NULL,
+     client_name, redirect_uris JSON, token_endpoint_auth_method,
+     created_at)`
+   - `mcp_oauth_authorizations(id PK, client_id FK, redirect_uri,
+     code_challenge, scope, resource, state NULL, consent_hash BLOB,
+     code_hash BLOB UNIQUE NULL, status, grant_id NULL, created_at,
+     expires_at)`
+   - `mcp_oauth_grants(id PK, client_id FK, scope, resource, created_at,
+     revoked_at NULL)`
+   - `mcp_oauth_tokens(token_hash BLOB PK, grant_id FK, kind, expires_at,
+     revoked_at NULL, created_at, last_used_at NULL)`
+   - Indexes on `expires_at`, `grant_id`. FKs `ON DELETE CASCADE`.
+2. **Model** `crates/db/src/models/mcp_oauth.rs`: typed rows and small async
+   fns (insert client, prune, count, find client, create authorization,
+   approve/deny, consume code, create grant + tokens, rotate refresh,
+   revoke grant, verify access token, list grants). Use runtime
+   `sqlx::query*` and transactions where multi-row. Unit tests use an
+   in-memory DB.
+3. **Server module** `crates/server/src/mcp_oauth/` (sibling of `mcp_gateway`):
+   - `config.rs`: `McpOAuthConfig::from_env()` parses
+     `VK_MCP_OAUTH_PUBLIC_URL` → issuer and resource. Pure helpers are tested.
+   - `crypto.rs`: random token (32 bytes, base64url), sha256, PKCE S256
+     verify, verifier charset check, constant-time eq.
+   - `mod.rs`: `public_router()` (`/.well-known/...`, `/oauth/register`,
+     `/oauth/authorize`, `/oauth/token`) and `api_router()` (`/mcp-oauth/
+     verify`, `/mcp-oauth/grants`, `/mcp-oauth/grants/{id}`). Handlers return
+     `404` when config is absent. Consent HTML is rendered inline with
+     escaping and security headers.
+   - Wire into `routes/mod.rs`: public router merged at the top level before
+     the SPA fallback. The API router goes in `relay_signed_routes`, except
+     `verify`, which goes in the plain `api_routes` because Caddy calls it on
+     loopback without relay signing. (Check how relay signature middleware
+     treats unsigned local requests; if it passes them, keep everything in
+     one router.)
+4. **Tests** (route-level, `tower::ServiceExt::oneshot` against the router
+   with an in-memory DB state, or handler-level with pure functions where
+   the deployment type is heavy): metadata, DCR validation, authorize
+   validation split, consent, PKCE, single-use and replay, refresh rotation
+   and reuse, verify, and disabled → 404.
+5. Docs: `crates/mcp/AGENTS.md` section "Remote OAuth access (ChatGPT)";
+   `docs/` page if an MCP doc exists there.
+6. `pnpm run format`, `cargo clippy -p server -p db`,
+   `cargo test -p server mcp_oauth`, `cargo test -p db mcp_oauth`.
 
-## Risks
+## B. homelab repo
 
-- **Hook dependency edits change behaviour.** Each site is reasoned through
-  in plan §7, and the vitest suites cover the conversation-history and
-  settings code paths.
-- **File moves break imports that tsc can't see,** such as `vi.mock`
-  specifiers. Vitest mocks by resolved module id, so a component that
-  imports its dependency relatively is still mocked by an aliased
-  specifier. The remote-web test suite confirms this.
-- **Lockfile churn.** pnpm also deduped `debug` and `acorn` within their
-  existing ranges. No new packages were added.
+1. `terragrunt/modules/cloudflare-tunnel/main.tf`: add `bypass_access_ip_lists
+   = optional(map(string), {})` (path → list key) plus a module-level
+   `ip_lists = map(object({description, cidrs}))`. Create
+   `cloudflare_zero_trust_list` per key. Bypass apps whose path has an
+   ip_list use `include = [{ ip_list = { id } }]`. Precondition: a path can't
+   be in both maps, and a referenced list must exist.
+2. Vendor `terragrunt/environments/cloudflare-tunnel-vibe-remote/openai-chatgpt-connectors.json`
+   and add `scripts/refresh-openai-connector-ranges.sh`. The env
+   `terragrunt.hcl` decodes it into `ip_lists.openai_connectors` and adds
+   the five bypass paths mapped to that list.
+3. `ci/check-edge-exposure.sh`: treat `bypass_access_ip_lists` keys as
+   IP-restricted. Add vibe-specific invariants: the five OAuth paths are
+   list-restricted, and `/mcp`, `/oauth/authorize` and `/oauth` are never
+   bypass paths.
+4. `hosts/think/think2.nix` Caddy `:3343`: a `handle /oauth/mcp*` block before
+   `/mcp*` does `forward_auth 127.0.0.1:3334 { uri /api/mcp-oauth/verify }`,
+   then `rewrite * /mcp` and `reverse_proxy 127.0.0.1:8787`. Set
+   `systemd.services.vibe-kanban-dev.environment.VK_MCP_OAUTH_PUBLIC_URL`.
+   (Or use the vibe-kanban-rebuild/vibe-kanban module option if one fits
+   better.)
+5. Docs: `docs/vibe-kanban-mcp-deployment.md` ChatGPT section,
+   `docs/cloudflare-edge-exposure.md` mechanism note.
+6. Validation: `bash ci/check-edge-exposure.sh`, `tofu validate` on the module
+   copy, `nix-instantiate --parse`, and the existing VK MCP checks
+   (`ci/check-vibe-kanban-mcp-connectivity.sh`, `tests/*.nix` if they
+   evaluate locally).
+
+## C. Rollout
+
+Merge VK first. The new routes are inert until the env var is set. Then merge
+homelab: terragrunt apply creates the list and bypass apps, comin deploys
+Caddy and the env var, and the VK server restarts. Verify:
+`curl https://vibe.vasandani.dev/.well-known/oauth-protected-resource/oauth/mcp`
+(from a non-OpenAI IP: `403`/redirect expected, which is correct), then
+loopback checks on think2, then the user creates the ChatGPT connector with
+OAuth.

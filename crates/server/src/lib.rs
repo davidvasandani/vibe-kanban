@@ -11,3 +11,4 @@ pub mod startup;
 // #[cfg(not(feature = "cloud"))]
 pub type DeploymentImpl = local_deployment::LocalDeployment;
 pub mod mcp_gateway;
+pub mod mcp_oauth;

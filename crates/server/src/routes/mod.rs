@@ -1,7 +1,8 @@
 use axum::{Router, extract::connect_info::IntoMakeServiceWithConnectInfo, routing::get};
+use deployment::Deployment;
 use tower_http::{compression::CompressionLayer, validate_request::ValidateRequestHeaderLayer};
 
-use crate::{DeploymentImpl, mcp_gateway, middleware};
+use crate::{DeploymentImpl, mcp_gateway, mcp_oauth, middleware};
 
 pub mod approvals;
 pub mod aws;
@@ -45,6 +46,11 @@ pub mod workspaces;
 pub fn router(
     deployment: DeploymentImpl,
 ) -> IntoMakeServiceWithConnectInfo<Router, std::net::SocketAddr> {
+    let mcp_oauth_state = mcp_oauth::McpOAuthState::new(
+        deployment.db().pool.clone(),
+        mcp_oauth::McpOAuthConfig::from_env(),
+    );
+
     let relay_signed_routes = Router::new()
         .route("/health", get(health::health_check))
         .merge(aws::router())
@@ -81,6 +87,10 @@ pub fn router(
         .nest("/remote", remote::router())
         .merge(webrtc::router())
         .nest("/attachments", attachments::routes())
+        .nest_service(
+            "/mcp-oauth",
+            mcp_oauth::api_router().with_state(mcp_oauth_state.clone()),
+        )
         .layer(axum::middleware::from_fn_with_state(
             deployment.clone(),
             middleware::sign_relay_response,
@@ -103,6 +113,7 @@ pub fn router(
 
     Router::new()
         .merge(mcp_gateway::gateway_router().with_state(deployment.clone()))
+        .merge(mcp_oauth::public_router().with_state(mcp_oauth_state))
         .route("/", get(frontend::serve_frontend_root))
         .route("/{*path}", get(frontend::serve_frontend))
         .nest("/api", api_routes)

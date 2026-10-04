@@ -746,6 +746,27 @@ gets linted when someone points another package's config at it is not linted.
   missing dependency mechanically can turn a mount-only effect into a
   resubscribe loop. Each fix keeps the hook's current firing behaviour.
 
+### XLIX. A remote MCP client is admitted only by a credential VK issued
+A network client that cannot use the deployment's service credentials (for
+example a ChatGPT connector, which supports only OAuth) is admitted through
+an opt-in OAuth 2.1 authorization server inside VK. VK issues the client's
+token and VK verifies it. VK does not reuse a gateway credential or a header
+an edge may not have set.
+- The feature is inert (every route `404`) until deployment names a public
+  issuer. Local installs gain no new surface.
+- Registration validates and bounds its input. Unclaimed clients are pruned
+  and the total is capped.
+- Consent is a human step behind the host's own login. It is bound to a
+  one-time server-side token, never cached, and never framed. Redirect
+  targets are checked against the registration before anything redirects.
+- Codes need PKCE S256 and are single use. Tokens are opaque and
+  high-entropy, and only their hashes are stored. They are bound to client,
+  resource and expiry. A refresh rotates the token. A replayed code or
+  refresh token revokes the grant.
+- Grants are listable and revocable through the authenticated API.
+  Plaintext tokens and secrets never reach logs, errors or responses beyond
+  the one response that issues them.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -767,7 +788,7 @@ gets linted when someone points another package's config at it is not linted.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.45.0 (adds XLVIII, requiring every shipped frontend package to be linted by `pnpm run lint` and CI from one shared rule set, with tsconfig coverage for tests, fixes in code instead of package-wide disables, and per-case judgement on hook dependencies; 0.44.0 added XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
+**Version**: 0.46.0 (adds XLIX, admitting remote MCP clients that cannot hold deployment credentials only through an opt-in VK-issued OAuth 2.1 grant with PKCE, hashed opaque rotating tokens, SSO-gated non-framable consent, bounded registration and replay revocation; 0.45.0 added XLVIII, requiring every shipped frontend package to be linted by `pnpm run lint` and CI from one shared rule set, with tsconfig coverage for tests, fixes in code instead of package-wide disables, and per-case judgement on hook dependencies; 0.44.0 added XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
@@ -1098,3 +1119,11 @@ detection and the round-trip into one rule. Main took XLV and XLVI while this
 branch was open (vk/8b57, vk/9f5d), so the rule was renumbered on merge. The
 homelab constitution named by the command template was not changed, because
 this project only manages the Vibe Kanban repository.
+
+## Review: vk/50df-chatgpt-custom-m
+
+Applied `/speckit.constitution` and added principle XLIX (0.46.0). ChatGPT
+custom connectors can authenticate only with OAuth, and no principle covered
+VK acting as an authorization server. The homelab constitution got the
+matching edge principle (148), because this task also changes the
+`vibe.vasandani.dev` edge and Caddy routes, with the user's approval.
