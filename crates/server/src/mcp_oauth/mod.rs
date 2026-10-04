@@ -309,21 +309,10 @@ async fn register(State(state): State<McpOAuthState>, body: Bytes) -> Response {
     if let Err(error) = McpOAuth::prune(&state.pool, now).await {
         return server_error("prune OAuth state", error);
     }
-    match McpOAuth::count_clients(&state.pool).await {
-        Ok(count) if count >= MAX_CLIENTS => {
-            return registration_error(
-                "invalid_client_metadata",
-                "the client registration limit has been reached; revoke unused connections and retry later",
-            );
-        }
-        Ok(_) => {}
-        Err(error) => return server_error("count OAuth clients", error),
-    }
-
     let client_id = random_secret(16);
     let client_secret = (method != "none").then(random_token);
     let secret_hash = client_secret.as_deref().map(digest);
-    if let Err(error) = McpOAuth::insert_client(
+    match McpOAuth::insert_client(
         &state.pool,
         NewMcpOAuthClient {
             client_id: &client_id,
@@ -333,10 +322,18 @@ async fn register(State(state): State<McpOAuthState>, body: Bytes) -> Response {
             redirect_uris: &redirect_uris,
         },
         now,
+        MAX_CLIENTS,
     )
     .await
     {
-        return server_error("register OAuth client", error);
+        Ok(true) => {}
+        Ok(false) => {
+            return registration_error(
+                "invalid_client_metadata",
+                "the client registration limit has been reached; revoke unused connections and retry later",
+            );
+        }
+        Err(error) => return server_error("register OAuth client", error),
     }
     tracing::info!(client_id = %client_id, auth_method = %method, "Registered MCP OAuth client");
 
@@ -818,14 +815,7 @@ async fn exchange_code(state: &McpOAuthState, client_id: &str, request: &TokenRe
         Err(error) => return server_error("load authorization code", error),
     };
     if authorization.status == "exchanged" {
-        // A replayed code means it leaked: revoke everything it minted.
-        if let Some(grant_id) = authorization.grant_id.as_deref() {
-            if let Err(error) = McpOAuth::revoke_grant(&state.pool, grant_id, now).await {
-                return server_error("revoke replayed grant", error);
-            }
-            tracing::warn!(client_id = %authorization.client_id, "MCP OAuth code replayed; grant revoked");
-        }
-        return invalid_grant("the authorization code was already used");
+        return code_replayed(state, &authorization.id, now).await;
     }
     if authorization.status != "approved"
         || authorization.expires_at <= timestamp(now)
@@ -854,10 +844,27 @@ async fn exchange_code(state: &McpOAuthState, client_id: &str, request: &TokenRe
             tracing::info!(client_id = %client_id, grant_id = %grant_id, "Issued MCP OAuth grant");
             tokens.response()
         }
-        Ok(ExchangeOutcome::NotApproved) => {
+        // Lost a race with another exchange of the same code: that is a
+        // replay too, so the winner's grant is revoked as well.
+        Ok(ExchangeOutcome::NotApproved) => code_replayed(state, &authorization.id, now).await,
+        Err(error) => server_error("issue tokens", error),
+    }
+}
+
+/// A replayed code means it leaked: revoke everything it minted.
+async fn code_replayed(
+    state: &McpOAuthState,
+    authorization_id: &str,
+    now: DateTime<Utc>,
+) -> Response {
+    match McpOAuth::revoke_exchanged_grant(&state.pool, authorization_id, now).await {
+        Ok(revoked) => {
+            if revoked {
+                tracing::warn!("MCP OAuth authorization code replayed; grant revoked");
+            }
             invalid_grant("the authorization code was already used")
         }
-        Err(error) => server_error("issue tokens", error),
+        Err(error) => server_error("revoke replayed grant", error),
     }
 }
 

@@ -165,18 +165,23 @@ impl McpOAuth {
             .await
     }
 
+    /// Insert a client unless `max_clients` already exist. The count and the
+    /// insert are one statement, so concurrent registrations cannot exceed
+    /// the cap. Returns false when the cap was reached.
     pub async fn insert_client(
         pool: &SqlitePool,
         client: NewMcpOAuthClient<'_>,
         now: DateTime<Utc>,
-    ) -> Result<(), sqlx::Error> {
+        max_clients: i64,
+    ) -> Result<bool, sqlx::Error> {
         let redirect_uris = serde_json::to_string(client.redirect_uris)
             .map_err(|e| sqlx::Error::Encode(e.into()))?;
-        sqlx::query(
+        let result = sqlx::query(
             r#"INSERT INTO mcp_oauth_clients
                    (client_id, client_secret_hash, token_endpoint_auth_method, client_name,
                     redirect_uris, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)"#,
+               SELECT ?, ?, ?, ?, ?, ?
+               WHERE (SELECT COUNT(*) FROM mcp_oauth_clients) < ?"#,
         )
         .bind(client.client_id)
         .bind(client.client_secret_hash)
@@ -184,9 +189,10 @@ impl McpOAuth {
         .bind(client.client_name)
         .bind(redirect_uris)
         .bind(timestamp(now))
+        .bind(max_clients)
         .execute(pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn find_client(
@@ -375,6 +381,27 @@ impl McpOAuth {
         Ok(RotateOutcome::Rotated)
     }
 
+    /// A replayed code means it leaked: when `authorization_id` was already
+    /// exchanged, revoke the grant it minted. Reads the current row so the
+    /// loser of a concurrent exchange also revokes the winner's grant.
+    /// Returns true when a grant was revoked.
+    pub async fn revoke_exchanged_grant(
+        pool: &SqlitePool,
+        authorization_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        let grant_id: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT grant_id FROM mcp_oauth_authorizations WHERE id = ? AND status = 'exchanged'",
+        )
+        .bind(authorization_id)
+        .fetch_optional(pool)
+        .await?;
+        match grant_id.flatten() {
+            Some(grant_id) => Self::revoke_grant(pool, &grant_id, now).await,
+            None => Ok(false),
+        }
+    }
+
     /// Revoke a grant and every token issued under it. Returns false when the
     /// grant does not exist or was already revoked.
     pub async fn revoke_grant(
@@ -514,6 +541,7 @@ mod tests {
                 redirect_uris: &["https://chatgpt.com/cb".to_string()],
             },
             now,
+            200,
         )
         .await
         .unwrap();
@@ -660,6 +688,64 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn losing_a_concurrent_exchange_revokes_the_winner() {
+        let pool = pool().await;
+        let now = t0();
+        client(&pool, "c1", now).await;
+        let authz = approved(&pool, "a1", b"code", now).await;
+        // Both requests read the row while it was approved; one wins.
+        McpOAuth::exchange_code(&pool, &authz, "g1", pair(b"acc", b"ref", now), now)
+            .await
+            .unwrap();
+        let lost = McpOAuth::exchange_code(&pool, &authz, "g2", pair(b"x", b"y", now), now)
+            .await
+            .unwrap();
+        assert_eq!(lost, ExchangeOutcome::NotApproved);
+        assert!(
+            McpOAuth::revoke_exchanged_grant(&pool, "a1", now)
+                .await
+                .unwrap()
+        );
+        let resource = "https://vk/oauth/mcp";
+        assert!(
+            McpOAuth::verify_access_token(&pool, b"acc", resource, now)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn client_cap_is_enforced_by_the_insert() {
+        let pool = pool().await;
+        let now = t0();
+        let uris = ["https://chatgpt.com/cb".to_string()];
+        let new = |id: &'static str| NewMcpOAuthClient {
+            client_id: id,
+            client_secret_hash: None,
+            token_endpoint_auth_method: "none",
+            client_name: None,
+            redirect_uris: &uris,
+        };
+        assert!(
+            McpOAuth::insert_client(&pool, new("a"), now, 2)
+                .await
+                .unwrap()
+        );
+        assert!(
+            McpOAuth::insert_client(&pool, new("b"), now, 2)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !McpOAuth::insert_client(&pool, new("c"), now, 2)
+                .await
+                .unwrap()
+        );
+        assert_eq!(McpOAuth::count_clients(&pool).await.unwrap(), 2);
     }
 
     #[tokio::test]
