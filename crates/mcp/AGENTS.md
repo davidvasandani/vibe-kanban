@@ -414,30 +414,55 @@ Arguments after `--mcp` are passed through to the `vibe-kanban-mcp` binary
 (e.g. `--mode orchestrator`). Add an `env` block with `VIBE_BACKEND_URL` to pin the
 backend as described above.
 
-## Remote access (claude.ai) — proposed, not implemented
+## Remote OAuth access (ChatGPT and other OAuth-only MCP clients)
 
-The stdio server is **local-only**: it cannot be reached over a public URL, so
-claude.ai (web) cannot connect to it as-is. claude.ai's remote-MCP support requires
-**Streamable HTTP** transport plus **OAuth 2.1 with dynamic client registration
-(RFC 7591) and PKCE** — neither of which this crate currently provides
-(`rmcp` is built here with `["server", "transport-io"]` only).
+Some remote MCP clients can only authenticate with OAuth: ChatGPT custom
+connectors, claude.ai and similar. They cannot hold the deployment's static
+bearer or Cloudflare Access service-token headers. For them, the VK
+**server** (not this crate) embeds a small OAuth 2.1 authorization server,
+`crates/server/src/mcp_oauth/`. The MCP transport itself is still the
+deployment's stdio→Streamable-HTTP bridge (supergateway) running this crate
+in `global` mode, so OAuth clients get the full global tool set.
 
-The current design sketch for closing that gap (no code yet):
+- **Opt-in.** `VK_MCP_OAUTH_PUBLIC_URL` (a bare `https` origin, or `http` on
+  loopback) names the issuer. Unset, every route below answers `404`.
+- **Endpoints.**
+  - Discovery: `/.well-known/oauth-protected-resource[/oauth/mcp]`
+    (RFC 9728) and `/.well-known/oauth-authorization-server` (RFC 8414).
+  - Dynamic registration: `POST /oauth/register` (RFC 7591).
+  - Consent: `GET/POST /oauth/authorize`, a server-rendered page.
+  - Tokens: `POST /oauth/token`.
+  - The reverse proxy's token check: `/api/mcp-oauth/verify`.
+  - Owner management: `GET /api/mcp-oauth/grants` and
+    `DELETE /api/mcp-oauth/grants/{id}`.
+- **Resource.** The protected resource is `<issuer>/oauth/mcp`. The reverse
+  proxy `forward_auth`s it to `/api/mcp-oauth/verify` (`204` or `401` with
+  `WWW-Authenticate: Bearer resource_metadata=…` and a JSON-RPC body), then
+  rewrites it to the bridge's `/mcp`. It is deliberately **not** the
+  existing `/mcp`. That route trusts Access-only headers, and an edge bypass
+  for OAuth clients would make those headers forgeable.
+- **Security properties.**
+  - Authorization codes need PKCE S256 and are single use, valid for 60 s.
+  - Access tokens last 1 h. Refresh tokens last 30 d and rotate on use.
+  - Reusing a rotated refresh token, or replaying a code, revokes the grant.
+  - Every secret is stored only as a SHA-256 hash.
+  - Unknown clients or unregistered redirect URIs get an error page and are
+    never redirected.
+  - The consent form carries a one-time server-side token and is
+    `no-store` and non-framable.
+  - Registration is bounded: at most 200 clients, and clients that never
+    obtain a grant are pruned after 24 h.
+- **Consent is the human gate.** `/oauth/authorize` must sit behind the
+  host's own login (Cloudflare Access SSO in the reference deployment). Only
+  discovery, registration, token and `/oauth/mcp` may skip it at the edge.
+- **Deployment.** For the reference deployment (`vibe.vasandani.dev`; edge
+  bypass restricted to OpenAI's published connector ranges, Caddy route on
+  think2), see homelab `docs/vibe-kanban-mcp-deployment.md`. Admitting
+  another vendor (e.g. claude.ai) needs only an edge allowlist for its
+  egress. VK's code is vendor-neutral.
 
-1. Add `transport-streamable-http-server` to `rmcp` and a second binary that serves
-   the existing `McpServer` over HTTP, retargeting tool calls from the local
-   `/api/*` to the hosted backend's `/v1/*`.
-2. Run it as a sidecar with **no public IP**, reachable only through a Cloudflare
-   Tunnel (`cloudflared`).
-3. Front it with a Cloudflare Worker (`@cloudflare/workers-oauth-provider`) that
-   terminates claude.ai's OAuth + DCR, gated at the edge by a Cloudflare Access
-   Service Token, and forwards a short-lived inner JWT to the origin.
-4. Validate that JWT at the origin into the same `RequestContext` the remote crate
-   already produces (`crates/remote/src/auth/middleware.rs`), so authorisation stays
-   at the existing backend boundary.
-
-The stdio path described above is unaffected by this work and remains the supported
-route for locally-running agents.
+The stdio path described above is unaffected and remains the supported route
+for locally running agents.
 
 ## Testing
 
