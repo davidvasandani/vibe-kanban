@@ -814,18 +814,22 @@ async fn exchange_code(state: &McpOAuthState, client_id: &str, request: &TokenRe
         Ok(None) => return invalid_grant("the authorization code is invalid"),
         Err(error) => return server_error("load authorization code", error),
     };
-    if authorization.status == "exchanged" {
-        return code_replayed(state, &authorization.id, now).await;
-    }
-    if authorization.status != "approved"
-        || authorization.expires_at <= timestamp(now)
-        || authorization.client_id != client_id
+    // Check the code's bindings first, so a caller holding a leaked code
+    // without this client's credentials, redirect URI and PKCE verifier can
+    // neither redeem it nor trigger replay revocation of the real grant.
+    if authorization.client_id != client_id
         || authorization.redirect_uri != redirect_uri
         || !pkce_matches(verifier, &authorization.code_challenge)
     {
         return invalid_grant(
-            "the authorization code is expired, or does not match this client, redirect_uri or code_verifier",
+            "the authorization code does not match this client, redirect_uri or code_verifier",
         );
+    }
+    if authorization.status == "exchanged" {
+        return code_replayed(state, &authorization.id, now).await;
+    }
+    if authorization.status != "approved" || authorization.expires_at <= timestamp(now) {
+        return invalid_grant("the authorization code has expired");
     }
 
     let tokens = IssuedTokens::mint();

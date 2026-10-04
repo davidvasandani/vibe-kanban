@@ -500,6 +500,24 @@ async fn code_exchange_checks_pkce_redirect_and_client_and_revokes_on_replay() {
         .to_string();
     assert_eq!(verify_status(&app, &access).await, StatusCode::NO_CONTENT);
 
+    // A different client replaying the leaked code cannot revoke the grant.
+    let foreign = send(
+        &app,
+        post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", code.as_str()),
+                ("redirect_uri", REDIRECT),
+                ("code_verifier", VERIFIER),
+                ("client_id", other_client.as_str()),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(body_json(foreign).await["error"], "invalid_grant");
+    assert_eq!(verify_status(&app, &access).await, StatusCode::NO_CONTENT);
+
     // Replaying the code fails and revokes what it minted.
     let replay = exchange(&app, &client_id, &code).await;
     assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
