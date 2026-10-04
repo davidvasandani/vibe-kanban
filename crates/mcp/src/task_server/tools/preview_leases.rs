@@ -13,6 +13,18 @@ struct CreatePreviewLeaseRequest {
         description = "The single sandbox-local HTTP dev-server port to expose (1024-65535)."
     )]
     port: u16,
+    #[schemars(
+        description = "Workspace ID whose dev-server port should be exposed. Optional when running inside that workspace context."
+    )]
+    workspace_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ListPreviewLeasesRequest {
+    #[schemars(
+        description = "Workspace ID whose active preview leases should be listed. Optional when running inside that workspace context."
+    )]
+    workspace_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -32,6 +44,10 @@ struct CreatePreviewLeaseResponse {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct StopPreviewLeaseRequest {
     lease_id: Uuid,
+    #[schemars(
+        description = "Workspace ID that owns the preview lease. Optional when running inside that workspace context."
+    )]
+    workspace_id: Option<Uuid>,
 }
 
 #[tool_router(router = preview_leases_tools_router, vis = "pub")]
@@ -41,9 +57,11 @@ impl McpServer {
     )]
     async fn create_preview_lease(
         &self,
-        Parameters(CreatePreviewLeaseRequest { port }): Parameters<CreatePreviewLeaseRequest>,
+        Parameters(CreatePreviewLeaseRequest { port, workspace_id }): Parameters<
+            CreatePreviewLeaseRequest,
+        >,
     ) -> Result<CallToolResult, ErrorData> {
-        let workspace_id = match self.resolve_workspace_id(None) {
+        let workspace_id = match self.resolve_workspace_id(workspace_id) {
             Ok(id) => id,
             Err(error) => return Ok(Self::tool_error(error)),
         };
@@ -70,8 +88,11 @@ impl McpServer {
     #[tool(
         description = "List active remote-browser preview leases for the current sandbox workspace. Capability URLs are intentionally never returned by this listing."
     )]
-    async fn list_preview_leases(&self) -> Result<CallToolResult, ErrorData> {
-        let workspace_id = match self.resolve_workspace_id(None) {
+    async fn list_preview_leases(
+        &self,
+        Parameters(ListPreviewLeasesRequest { workspace_id }): Parameters<ListPreviewLeasesRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let workspace_id = match self.resolve_workspace_id(workspace_id) {
             Ok(id) => id,
             Err(error) => return Ok(Self::tool_error(error)),
         };
@@ -93,9 +114,12 @@ impl McpServer {
     )]
     async fn stop_preview_lease(
         &self,
-        Parameters(StopPreviewLeaseRequest { lease_id }): Parameters<StopPreviewLeaseRequest>,
+        Parameters(StopPreviewLeaseRequest {
+            lease_id,
+            workspace_id,
+        }): Parameters<StopPreviewLeaseRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let workspace_id = match self.resolve_workspace_id(None) {
+        let workspace_id = match self.resolve_workspace_id(workspace_id) {
             Ok(id) => id,
             Err(error) => return Ok(Self::tool_error(error)),
         };
