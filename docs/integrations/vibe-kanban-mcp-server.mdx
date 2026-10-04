@@ -297,6 +297,33 @@ Once configured, you'll see the Vibe Kanban MCP server listed and ready to use i
 Similar configuration steps apply to other MCP clients like Claude Desktop, VS Code with MCP extensions, or any custom MCP client implementations.
 </Note>
 
+### ChatGPT and other OAuth-only clients
+
+ChatGPT custom connectors (and similar remote clients) can only sign in with OAuth. A self-hosted Vibe Kanban server can act as their OAuth authorisation server. You approve each connection on a consent page, and the client then gets the full set of MCP tools.
+
+<Steps>
+<Step title="Expose the server publicly">
+  Set `VK_MCP_OAUTH_PUBLIC_URL` to the public HTTPS origin of your server (for example `https://vibe.example.com`). Without it, the OAuth endpoints do not exist.
+
+  Your reverse proxy must:
+  - serve the MCP endpoint at `/oauth/mcp`, admitting a request only when `/api/mcp-oauth/verify` accepts its bearer token
+  - reach `/.well-known/oauth-*`, `/oauth/register` and `/oauth/token` from the client's network
+  - keep `/oauth/authorize` behind your own login, because that page is where you approve connections
+</Step>
+<Step title="Add the connector">
+  In ChatGPT, create a custom connector with the server URL `https://vibe.example.com/oauth/mcp` and the authentication method **OAuth**. ChatGPT registers itself and opens the consent page.
+  <Check>
+  After you click **Approve**, ChatGPT lists the Vibe Kanban tools.
+  </Check>
+</Step>
+</Steps>
+
+<Warning>
+Approving grants full access: the client can create, update and delete issues and workspaces, and run coding agents. Approve only connections you started yourself.
+</Warning>
+
+To see or revoke connected clients, call `GET /api/mcp-oauth/grants` and `DELETE /api/mcp-oauth/grants/{id}`. Revoking a grant stops its tokens immediately.
+
 ## Troubleshooting
 
 <AccordionGroup>

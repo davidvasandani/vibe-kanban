@@ -32,6 +32,13 @@ contributed to it.
 
 - [mcp-pr-tools-and-connection-notices.md](mcp-pr-tools-and-connection-notices.md) — Why a Claude "failed to connect" notice can name a shadowing project `.mcp.json` duplicate rather than the working VK server (same-name replacement, ancestor loading, `disabledMcpjsonServers`); reading CI without the Checks permission (per-source coverage, truncation, superseded runs, pass-by-allowlist, two-witness merge gate); safe SHA-guarded merge, fork-aware encoded branch deletion, remote-aware PR resolution and endpoint-routed `gh api` credentials (`vk/53bc-agents-fall-back`).
 
+- [embedded-mcp-oauth-server.md](embedded-mcp-oauth-server.md) — VK as the
+  OAuth 2.1 server for OAuth-only MCP clients (ChatGPT connectors): opt-in
+  issuer, verify endpoint for reverse-proxy `forward_auth`, opaque hashed
+  tokens, explicit `now`. Treat a lost concurrent code exchange as a replay,
+  enforce caps inside the INSERT, and keep `form-action` out of the consent
+  CSP (`vk/50df-chatgpt-custom-m`).
+
 - [mcp-oauth-connection-identity.md](mcp-oauth-connection-identity.md) — Preserve owner-bound gateway identity across identifier changes and both OAuth completion paths.
 
 - [issue-workspace-lifecycle.md](issue-workspace-lifecycle.md) — Comment-driven activation, transactional Done reopening, queue handoff ordering and local/remote sync boundaries.

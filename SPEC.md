@@ -1,98 +1,136 @@
-# SPEC: Lint web-core and remote-web like local-web
+# SPEC: ChatGPT custom-connector (OAuth) access to the Vibe Kanban MCP
 
-Task: `vk/848f-lint-packages-we`. Feature spec, plan and tasks:
-`specs/vk/848f-lint-packages-we/`.
+Task: `vk/50df-chatgpt-custom-m`. Feature spec, plan and tasks:
+`specs/vk/50df-chatgpt-custom-m/`.
 
 ## Problem
 
-`pnpm run lint` and CI's `frontend-checks` job run ESLint only over
-`packages/local-web` and `packages/ui`. `packages/web-core` holds nearly all
-of the frontend code that both apps ship, and it has no ESLint config and no
-`lint` script. `packages/remote-web` is in the same position. Lint stayed
-green whatever landed in those packages.
+Adding `https://vibe.vasandani.dev/mcp` as a ChatGPT custom connector fails
+with "Error creating connector". The endpoint exists (supergateway, Streamable
+HTTP), but it is locked twice:
 
-## Measured state (main @ 292aba26)
+1. Cloudflare Access: without a service token or an SSO session the edge
+   answers `302` to the Access login page
+   (`www-authenticate: Cloudflare-Access …`).
+2. Origin (Caddy `:3343` on think2): a static `Authorization: Bearer` token,
+   or a `Cf-Access-Jwt-Assertion` header, is required.
 
-- Pointing local-web's config at web-core gives 174 problems. Most are
-  parse errors, because local-web's `parserOptions.project` doesn't include
-  web-core's files, and web-core's own `tsconfig.json` excludes its tests.
-- With web-core's own config, the path-scoped rules apply properly: 61
-  problems. That's 24 `exhaustive-deps`, 14 unused variables, 10 file names,
-  8 layer-boundary imports, 3 directive comments (banned by
-  `eslint-comments/no-use`), 1 `no-empty`, and 1 directive naming a rule from
-  the uninstalled `jsx-a11y` plugin. Removing one directive uncovered a
-  further `exhaustive-deps` site in `McpServerDialog`.
-- Remote-web: 13 problems. That's 5 `exhaustive-deps`, 6 unused variables,
-  1 non-exhaustive switch, and 1 barrel re-export.
+ChatGPT connectors support only **No Auth** or **OAuth** (MCP authorization
+spec: RFC 9728 protected-resource metadata, RFC 8414 AS metadata, RFC 7591
+dynamic client registration, OAuth 2.1 authorization code + PKCE S256). It
+cannot send a static bearer or Access service-token headers, so it can never
+connect today.
+
+## Decisions (confirmed with the user)
+
+- Change both repos: Vibe Kanban (OAuth server) and homelab (edge + Caddy).
+- Open the ChatGPT path past Cloudflare Access, restricted to OpenAI's
+  published connector egress ranges (`openai.com/chatgpt-connectors.json`),
+  with OAuth enforced at the origin.
+- ChatGPT gets the full global tool set.
 
 ## Design
 
-### Shared rule set
-- `eslint.frontend.cjs` (repo root) exports
-  `createFrontendConfig({ project, ignorePatterns })`. Its body is local-web's
-  former `.eslintrc.cjs`, moved as is. Each package's `.eslintrc.cjs` is a
-  call that supplies its own tsconfig and ignores.
-- The config objects are inlined with `require`, so ESLint resolves plugins
-  from the consuming package. Remote-web therefore declares the same ESLint
-  devDependencies (same versions) as web-core and local-web.
-- Before the naming-rule edit, the extraction is verified by hashing
-  `eslint --print-config` output: identical for local-web files.
+### Separate public path: `/oauth/mcp`
 
-### Type-aware parsing that covers tests
-`packages/{web-core,remote-web}/tsconfig.eslint.json` extend the package
-tsconfig, include `src` and `*.config.ts`, and clear the test `exclude`.
-`tsc --noEmit` is unaffected.
+The existing `/mcp` route trusts the *presence* of `Cf-Access-Jwt-Assertion`.
+That is safe only while every `/mcp` request passes Access. An IP-allowlisted
+Access bypass on `/mcp` would let any request from OpenAI egress (e.g. a GPT
+Action with a custom header) forge that header. Instead ChatGPT gets its own
+resource, `https://vibe.vasandani.dev/oauth/mcp`, which accepts **only** a
+Vibe Kanban-issued OAuth access token. `/mcp` and its clients are unchanged.
 
-### Wiring
-- Package `lint` scripts use local-web's flags (`--ext ts,tsx
-  --report-unused-disable-directives --max-warnings 0`).
-- The root has `web-core:lint` and `remote-web:lint`, and both are part of
-  `pnpm run lint`.
-- CI `frontend-checks` runs both. `eslint.frontend.cjs` is added to the
-  workflow's `frontend` path filter, so a change to only the shared config
-  still triggers the job.
+### Vibe Kanban: embedded OAuth 2.1 authorization server
 
-### Rule adjustment
-In `check-file/filename-naming-convention`, PascalCase applies to
-`src/**/!(use*).tsx`, and `src/**/use*.{ts,tsx}` is camelCase. Before, hooks
-that render a provider (`useAppRuntime.tsx`) and hook tests
-(`useWorkspaces.test.tsx`) had to be PascalCase. Local-web has no
-`use*.tsx`, so its result is unchanged.
+Opt-in: enabled only when `VK_MCP_OAUTH_PUBLIC_URL` (e.g.
+`https://vibe.vasandani.dev`) is set to an absolute `https` URL (or `http`
+loopback for development). Unset, every new route answers `404`.
 
-### Findings fixed in code
-- **Layer boundaries.** Modules move and only import paths change.
-  `createModeSeedStore` → `shared/stores`. `CreateChatBoxContainer` and
-  `CreateModeRepoPickerBar` → `features/create-mode/ui`. `SharedAppLayout`
-  (composes page containers) → `pages/root`. Same-feature aliased imports
-  become relative.
-- **Naming.** `settingsRegistry.tsx` → `SettingsRegistry.tsx`.
-- **Unused variables.** Routing-only fields are dropped with a shallow copy
-  plus `delete` instead of a rest-destructure into `_x` names, and unused
-  parameters are removed.
-- **Directive comments.** Removed. `rehypePlugins` is typed with
-  react-markdown's `Options`.
-- **Remote-web.** Explicit no-op cases for the outbound-only `http_request`
-  and `ws_open` messages. The webrtc barrel is deleted.
-- **`exhaustive-deps`.** Each site gets its own judgement (plan §7). Pure
-  helpers move to module scope, ref-only callbacks become stable
-  `useCallback([])`, `?? []` fallbacks are memoized, and unused deps are
-  dropped. Stable values (`queryClient`, the `scrollContainerRef` object,
-  `appNavigation`, `t`) are listed as deps. Two cases needed more than that:
-  - `ConversationListContainer` read a ref through a `useMemo` keyed on
-    unrelated state. It now holds the rows in state, set in the same flush.
-  - `McpServerDialog` must not re-seed an open form when `profiles` arrives
-    late (constitution X). It reads `profiles` through a ref that updates on
-    every render.
+Issuer = `VK_MCP_OAUTH_PUBLIC_URL`; resource = `<issuer>/oauth/mcp`.
+
+| Route | Edge | Purpose |
+|---|---|---|
+| `GET /.well-known/oauth-protected-resource[/oauth/mcp]` | bypass (OpenAI IPs) | RFC 9728 metadata: `resource`, `authorization_servers`, `scopes_supported=["mcp"]`, `bearer_methods_supported=["header"]` |
+| `GET /.well-known/oauth-authorization-server[/…]` | bypass (OpenAI IPs) | RFC 8414 metadata (`code` only, `authorization_code`+`refresh_token`, `S256` only, auth methods `none`/`client_secret_post`/`client_secret_basic`, `registration_endpoint`) |
+| `POST /oauth/register` | bypass (OpenAI IPs) | RFC 7591 DCR |
+| `GET/POST /oauth/authorize` | **Access SSO** | Server-rendered consent page; approve/deny |
+| `POST /oauth/token` | bypass (OpenAI IPs) | code exchange + refresh-token rotation |
+| `GET /api/mcp-oauth/verify` | (loopback, Caddy `forward_auth`) | `200` for a valid access token, else `401` with `WWW-Authenticate: Bearer resource_metadata="…"` and a JSON-RPC error body |
+| `GET /api/mcp-oauth/grants`, `DELETE /api/mcp-oauth/grants/{id}` | Access SSO | list / revoke authorized connectors |
+
+Rules:
+
+- **Registration:** `redirect_uris` required. Each must be `https` (or `http`
+  loopback), with no fragment. Only `authorization_code`/`refresh_token` and
+  `code`. `client_secret_post`/`basic` registrations get a secret (only its
+  hash is stored); `none` gets no secret. Body ≤ 16 KiB. Clients that never
+  completed an authorization are pruned after 24 h, and the number of clients
+  is capped (fails with `400 invalid_client_metadata` once full).
+- **Authorize:** `client_id` and an exact registered `redirect_uri` are
+  validated *before* anything redirects (failure → HTML error page, never a
+  redirect). After that, protocol errors redirect back with `error` and
+  `state`. Requires `response_type=code` and `code_challenge` with
+  `code_challenge_method=S256`. `scope` ⊆ {`mcp`} (default `mcp`). `resource`,
+  when present, must equal the resource URL. GET stores a pending request
+  with a random one-time consent token (hash stored) and renders the form.
+  POST requires the matching consent token and an unexpired pending request
+  (10 min). Approve issues a single-use code (60 s, hash stored), redirects
+  with `code`, `state`, `iss`. Deny redirects with `access_denied`. The
+  responses carry `Cache-Control: no-store`, `X-Frame-Options: DENY`,
+  `Content-Security-Policy: frame-ancestors 'none'` and
+  `Referrer-Policy: no-referrer`.
+- **Token:** client authentication matches the registered method
+  (constant-time). Code exchange verifies the client, redirect_uri, PKCE
+  (`BASE64URL(SHA256(verifier))`, verifier 43–128 unreserved characters), the
+  single-use code and its expiry. Replaying a used code revokes the grant it
+  minted. Each successful exchange creates a grant, a 1 h access token and a
+  30 d refresh token (opaque 256-bit random values, SHA-256 hashes stored).
+  Refresh rotates: the old refresh token is revoked. Reusing a revoked
+  refresh token revokes the whole grant. Errors are RFC 6749 JSON
+  (`invalid_grant`, `invalid_client` with `401`, …) with `no-store`.
+- **Verify:** reads `Authorization: Bearer`, hashes it, and accepts it only
+  if it is an unexpired, unrevoked access token whose resource is this
+  resource. It updates `last_used_at` at most once a minute.
+- No new secrets in config files; plaintext tokens never logged or stored.
+
+Persistence (SQLite migration): `mcp_oauth_clients`,
+`mcp_oauth_authorizations` (pending request + code), `mcp_oauth_grants`, and
+`mcp_oauth_tokens`. Expired rows are pruned opportunistically.
+
+### Homelab
+
+1. `terragrunt/modules/cloudflare-tunnel`: new per-hostname
+   `bypass_access_ip_lists` (path → name of a Zero Trust IP list), backed by a
+   `cloudflare_zero_trust_list` (type `IP`) so 278 CIDRs aren't inlined into
+   policies. `bypass_access_ip_ranges` keeps working unchanged.
+2. `cloudflare-tunnel-vibe-remote`: bypass `/oauth/mcp`, `/oauth/register`,
+   `/oauth/token`, `/.well-known/oauth-protected-resource`,
+   `/.well-known/oauth-authorization-server` for OpenAI connector ranges,
+   vendored as `openai-chatgpt-connectors.json` plus a refresh script.
+   `/oauth/authorize` and `/mcp` stay on hostname Access.
+3. think2 Caddy `:3343`: `handle /oauth/mcp*` → `forward_auth
+   127.0.0.1:3334 { uri /api/mcp-oauth/verify }`, then rewrite to `/mcp` and
+   proxy to supergateway `:8787`. It never consults the static bearer or
+   `Cf-Access-Jwt-Assertion`. All other `/oauth/*` and `/.well-known/*` fall
+   through to the VK server (`:3334`).
+4. `vibe-kanban-dev` gets `VK_MCP_OAUTH_PUBLIC_URL=https://vibe.vasandani.dev`.
+5. Docs: `docs/vibe-kanban-mcp-deployment.md` ChatGPT section.
 
 ## Non-goals
-Migrating to ESLint 9 or upgrading plugins, adding rules local-web doesn't
-have, and linting `packages/public` or `npx-cli`.
+
+- Changing `/mcp` auth or existing clients.
+- A Settings UI for grants (API only; UI can follow).
+- Per-tool scopes (user chose all tools).
+- Public `/oauth/revoke` (revocation goes through the SSO-gated management API).
 
 ## Acceptance
-- `pnpm run lint` exits 0, including `web-core:lint` and `remote-web:lint`.
-- Each new lint exits 1 when an unused import is added to one of its files.
-- No tsconfig-scoping parse errors, test files included.
-- No package-wide disables and no inline directives.
-- `pnpm run check`, `pnpm run format`, and the web-core (664 tests) and
-  remote-web (87 tests) vitest suites pass.
-- The wiki no longer documents the `--no-eslintrc` workaround.
+
+- Unit/route tests cover metadata, DCR validation, the authorize
+  error/redirect split, consent-token checks, PKCE, code single use and
+  replay, refresh rotation and reuse revocation, verify accept/reject, and
+  disabled-by-default `404`.
+- `cargo test -p server`, `cargo clippy`, `pnpm run format` clean. Homelab
+  Nix/terraform validation passes in CI.
+- After deploy, a full end-to-end ChatGPT run:
+  `https://vibe.vasandani.dev/oauth/mcp`, Authentication = OAuth, connector
+  creation succeeds and tools list.
