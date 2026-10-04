@@ -447,9 +447,10 @@
       "count_other": "{{count}}件のレビューコメントが含まれます"
     },
     "interrupted": {
+      "status": "停止",
       "message": "この実行は vibe-kanban の再起動により中断されました。",
-      "resume": "再開",
-      "resuming": "再開中"
+      "restart": "再起動",
+      "restarting": "再起動中"
     },
     "workspace": {
       "create": "作成",

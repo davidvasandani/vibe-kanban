@@ -163,7 +163,9 @@ inventory:
   summary describes the journal now being served. The tracker marks output
   incomplete, pushes one stderr notice and sets `terminal`, then falls into
   the **normal** terminal block. A worker restart therefore yields
-  `Interrupted`, and the chat shows Resume.
+  `Interrupted`, and the chat shows a stopped-run row with a Restart button
+  (`SessionChatBox`'s `interruptedNotice` banner — see
+  [[session-chat-box-stopped-banner]]).
 - **Readable, but no matching summary:** `Indeterminate` (skipped if the
   user already stopped the row), then finalize.
 - **Lookup error:** back off and re-poll. Never infer an outcome.
@@ -241,3 +243,4 @@ again after a restart; an agent blocked on approval rarely emits any.
 - vk/80c1-tasks-should-sur
 - vk/ec43-run-a-vibe-kanba (colocated worker on the coordinator host)
 - vk/9c15-stopped-job-look (journal regression after an undrained worker restart)
+- vk/556e-start-stopped-se (stopped-run banner UI, see [[session-chat-box-stopped-banner]])

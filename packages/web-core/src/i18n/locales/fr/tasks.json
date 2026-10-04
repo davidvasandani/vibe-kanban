@@ -172,9 +172,10 @@
       "count_other": "{{count}} commentaires de révision seront inclus"
     },
     "interrupted": {
+      "status": "Arrêté",
       "message": "Cette exécution a été interrompue par un redémarrage de vibe-kanban.",
-      "resume": "Reprendre",
-      "resuming": "Reprise"
+      "restart": "Redémarrer",
+      "restarting": "Redémarrage"
     },
     "workspace": {
       "create": "Créer",

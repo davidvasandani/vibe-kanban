@@ -1,81 +1,67 @@
-# Prior knowledge: ChatGPT custom-connector access (`vk/50df-chatgpt-custom-m`)
+# Prior knowledge: Start stopped Session UI (`vk/556e-start-stopped-se`)
 
-Distilled from the VK wiki (`wiki/`) and the homelab knowledge bases
-(`docs/knowledge/`, `docs/knowledge-base/`, `knowledge-base/`). Read-only
-recall. Nothing in either base covers OAuth *authorization-server* work or
-ChatGPT. Everything below is adjacent knowledge.
+Distilled from `wiki/` (the project knowledge base). Read-only recall.
 
-## How `/mcp` is served today
+## The "interrupted" banner is the existing stopped-session affordance
 
-- `vibe-kanban-mcp` is stdio-only (`crates/mcp/AGENTS.md`). think2 bridges it
-  with **supergateway** (`modules/vibe-kanban-mcp.nix`) on `127.0.0.1:8787`,
-  Streamable HTTP, `--stateful`, with a 30 min session timeout. Supergateway
-  does **no inbound auth**, so Caddy enforces it
-  (`docs/knowledge/mcp-over-http-public-exposure.md`).
-- Caddy `:3343` (`hosts/think/think2.nix`) `handle /mcp*` accepts the static
-  bearer (`{$VIBE_MCP_BEARER_TOKEN}`) **or the mere presence** of
-  `Cf-Access-Jwt-Assertion`. That presence check is only sound while every
-  `/mcp` request passes Cloudflare Access. → A ChatGPT bypass must not be on
-  `/mcp`.
-- The catch-all `handle` proxies to the VK server on `127.0.0.1:3334`. Caddy
-  evaluates `handle` blocks in source order with the catch-all last.
-- Edge: `vibe.vasandani.dev` is a hostname Access app (email SSO plus Service
-  Auth for the `vibe-mcp-client` token and Ohana's token). `/mcp` inherits it.
-  Agents use a loopback credential gateway that injects the
-  `CF-Access-Client-*` headers
-  (`docs/knowledge-base/vibe-kanban-public-mcp-access-routing.md`).
+`packages/ui/src/components/SessionChatBox.tsx` renders an inline banner
+when the latest coding-agent process for a session has
+`ExecutionProcessStatus.interrupted` (killed by a VK server restart, not a
+normal completion). `wiki/coordinator-restart-handoff.md` confirms this is
+the canonical UI for a stopped-but-resumable run: "It is still `Interrupted`
++ WIP commit + the opt-in `resume_interrupted_on_startup`... the chat shows
+Resume." The banner is computed in
+`packages/web-core/src/features/workspace-chat/ui/SessionChatBoxContainer.tsx`
+(`hasInterruptedLatestProcess`, `handleResumeInterrupted`) and rendered by
+`ChatBoxBase`'s `banner` slot — the topmost row of the composer, above the
+header, editor and footer. `wiki/agent-process-lifecycle.md` has adjacent
+detail on the one-turn-one-`ExecutionProcess` identity chain and why process
+liveness alone isn't turn evidence for non-natural-exit executors.
 
-## Edge-exposure rules (homelab)
+## `ChatBoxBase` layout: banner (top) vs. footer (bottom)
 
-- `docs/cloudflare-edge-exposure.md` and `ci/check-edge-exposure.sh`: every
-  `bypass_access_paths` entry must be IP-restricted
-  (`bypass_access_ip_ranges`) or carry a block-level `# edge-open-ok:`. The
-  vibe block already has `edge-open-ok` for `/v1…`, so the checker would
-  silently pass any new unrestricted vibe path. New paths need an explicit
-  check.
-- A path-scoped bypass app *replaces* the hostname app for that path
-  (most-specific wins). Its only policy is the bypass, so non-matching
-  sources (including service-token clients) are **blocked**. This is another
-  reason not to bypass `/mcp`.
-- Prefer exact CIDRs, and append rather than replace
-  (`knowledge-base/cloudflare-access-trusted-source-bypasses.md`).
-- Terragrunt apply runs in CI on push to `main` (`runs-on: [self-hosted,
-  think2]`). The PR gets a plan
-  (`knowledge-base/cloudflare-access-service-token-live-enablement.md`).
+`packages/ui/src/components/ChatBoxBase.tsx` composes, top to bottom: error
+alert, `banner`, header (`headerLeft`/`headerRight`, only in
+`VisualVariant.NORMAL`), editor, then a `footer` row with `footerLeft`
+(icon-only `ToolbarIconButton`s: attach file, GitHub PR-comment insert, and
+any `toolbarActions` items) and `footerRight` (the status-driven action
+button(s) from `renderActionButtons()` in `SessionChatBox.tsx`). This is the
+only place in the frontend where an icon-button row sits structurally below
+a single-button banner row — i.e. the only real candidate for "icon buttons"
++ "bottom buttons" + a banner-level action button in one composer.
 
-## Cloudflare behaviour worth knowing
+## No literal "Stopped"/"Continue" pair exists in the codebase
 
-- Unauthenticated requests get `302` to `*.cloudflareaccess.com` plus
-  `www-authenticate: Cloudflare-Access resource_metadata=…`. That is the
-  connector-creation failure ChatGPT shows.
-- Cloudflare replaces origin **502/504** bodies with branded HTML. Stable
-  error contracts must use 4xx/503 (`knowledge-base/edge-safe-error-statuses.md`).
-  OAuth errors are 400/401, which is fine.
-- The team domain `vasandani.cloudflareaccess.com` publishes AS metadata, but
-  without a `registration_endpoint`, so ChatGPT's DCR can't use it.
+Exhaustive grep across `packages/{ui,web-core,local-web,remote-web}/src`
+(`.tsx`, `.ts`, and every i18n locale `.json`) found no component or string
+table rendering a status pill literally reading "Stopped", and no button
+literally reading "Continue" for session resumption. The closest real
+affordance is `tasks.json`'s `conversation.interrupted.{message,resume,resuming}`
+("Interrupted" / "Resume" / "Resuming"), used only by the banner above. The
+`IssueWorkspaceCard`/`WorkspaceSummary` components show `Active`/`Archived`
+or raw elapsed-time + status-icon rows, never a "Stopped" word; the kanban
+board, right sidebar, and context bar have no matching strings either. The
+issue's reference screenshot is almost certainly an external/mockup image
+(unrelated app chrome — "Pinned chats" matches no string in this repo), not
+a literal screenshot of vibe-kanban; the issue explicitly authorizes
+discarding its wording once the real UI is found.
 
-## VK server conventions relevant here
+## i18n CI gates (must hold for any wording/layout change here)
 
-- Routers: `crates/server/src/routes/mod.rs`. Non-`/api` routes are merged at
-  the top level before the SPA `/{*path}` GET fallback (see
-  `mcp_gateway::gateway_router`). `/api` has `validate_origin` (rejects
-  mismatched `Origin`; requests with no Origin pass).
-- `mcp_gateway/mod.rs` is the house pattern for secrets: random bytes, store
-  `Sha256` digests, compare with `subtle::ConstantTimeEq`, `URL_SAFE_NO_PAD`
-  base64.
-- DB models use runtime `sqlx::query_as::<_, T>` (no `.sqlx` offline cache
-  entries needed). Tests use `sqlite::memory:` and
-  `sqlx::migrate!("../db/migrations")`.
-- `mcp_auth.rs` has `html_escape` and simple HTML responses (an OAuth
-  *client* flow for upstream MCPs, which is the opposite direction from this
-  task).
-- Shared-gateway connection IDs must stay stable
-  (`wiki/mcp-oauth-connection-identity.md`). Unrelated, but don't touch them.
+- `scripts/check-i18n.sh`: (1) no new `i18next/no-literal-string` ESLint
+  violations versus `main`, so any new/renamed label needs a `t()` key, not
+  a literal; (2) every namespace JSON under
+  `packages/web-core/src/i18n/locales/<lang>/` must have exactly the same
+  key set as the `en` counterpart — all 7 locales (`en es fr ja ko zh-Hans
+  zh-Hant`) move together; (3) no duplicate JSON keys.
+- `scripts/check-unused-i18n-keys.mjs`: every leaf key under `en` must be
+  referenced somewhere in `packages/{web-core,local-web,remote-web,ui}/src`.
+  Renaming/removing `conversation.interrupted.resume`/`resuming` means
+  deleting them from all 7 locale files (not just `en`) once their last use
+  is gone, and adding replacement keys to all 7.
 
 ## Gaps (no prior knowledge)
 
-- MCP authorization spec / ChatGPT connector OAuth requirements (RFC 9728,
-  8414, 7591, PKCE).
-- Cloudflare Zero Trust lists in Access policies. Verified locally against
-  the provider v5 schema: `cloudflare_zero_trust_list{type="IP", items=[{value,
-  description}]}` and the Access include `ip_list = { id }`.
+- No wiki page documents a "stopped session card" with an icon-button row
+  distinct from the composer footer, confirming this is new ground, not a
+  rename of something already designed elsewhere.

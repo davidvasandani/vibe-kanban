@@ -12,6 +12,7 @@ import {
   WarningIcon,
   ArrowUpIcon,
   ArrowsOutIcon,
+  ArrowsClockwiseIcon,
   GithubLogoIcon,
   PencilSimpleIcon,
 } from '@phosphor-icons/react';
@@ -414,6 +415,40 @@ export function SessionChatBox<TExecutor extends string = string>({
     fileInputRef.current?.click();
   };
 
+  // Icon-only toolbar buttons (attach file, PR comments, toolbarActions).
+  // Rendered in the footer normally, or in the interrupted-run banner while
+  // a session is stopped (see renderBanner) so they only appear once.
+  const renderIconButtons = () => (
+    <>
+      <ToolbarIconButton
+        icon={PaperclipIcon}
+        aria-label={t('tasks:taskFormDialog.attachFile')}
+        title={t('tasks:taskFormDialog.attachFile')}
+        onClick={handleAttachClick}
+        disabled={areContentInsertActionsDisabled}
+      />
+      {onPrCommentClick && (
+        <ToolbarIconButton
+          icon={GithubLogoIcon}
+          aria-label="Add PR Comments"
+          title="Insert PR comments into message"
+          onClick={onPrCommentClick}
+          disabled={areContentInsertActionsDisabled}
+        />
+      )}
+      {toolbarActions?.items.map((item) => (
+        <ToolbarIconButton
+          key={item.id}
+          icon={item.icon}
+          aria-label={item.label}
+          title={item.tooltip}
+          onClick={item.onClick}
+          disabled={isDisabled || isRunning || Boolean(item.disabled)}
+        />
+      ))}
+    </>
+  );
+
   const {
     sessions,
     selectedSessionId,
@@ -695,27 +730,35 @@ export function SessionChatBox<TExecutor extends string = string>({
     }
 
     // Interrupted-run banner: the previous run was stopped by a server
-    // restart (e.g. an update) and can be resumed
+    // restart (e.g. an update) and can be resumed. The icon buttons that
+    // normally live in the footer move up into this row while the session
+    // is stopped, replacing the footer entirely with one consolidated row.
     if (interruptedNotice) {
       banners.push(
         <div
           key="interrupted"
           className="bg-warning/5 border-b px-double py-base flex items-center gap-base"
         >
-          <WarningIcon className="h-4 w-4 text-warning flex-shrink-0" />
-          <span className="text-sm text-normal flex-1">
-            {t('conversation.interrupted.message')}
+          {renderIconButtons()}
+          <span
+            className="text-sm text-normal"
+            title={t('conversation.interrupted.message')}
+          >
+            {t('conversation.interrupted.status')}
           </span>
+          <span className="flex-1" />
           <PrimaryButton
             variant="secondary"
             value={
               interruptedNotice.isResuming
-                ? t('conversation.interrupted.resuming')
-                : t('conversation.interrupted.resume')
+                ? t('conversation.interrupted.restarting')
+                : t('conversation.interrupted.restart')
             }
             onClick={interruptedNotice.onResume}
             disabled={interruptedNotice.isResuming}
-            actionIcon={interruptedNotice.isResuming ? 'spinner' : undefined}
+            actionIcon={
+              interruptedNotice.isResuming ? 'spinner' : ArrowsClockwiseIcon
+            }
           />
         </div>
       );
@@ -985,13 +1028,7 @@ export function SessionChatBox<TExecutor extends string = string>({
       }
       footerLeft={
         <>
-          <ToolbarIconButton
-            icon={PaperclipIcon}
-            aria-label={t('tasks:taskFormDialog.attachFile')}
-            title={t('tasks:taskFormDialog.attachFile')}
-            onClick={handleAttachClick}
-            disabled={areContentInsertActionsDisabled}
-          />
+          {!interruptedNotice && renderIconButtons()}
           <input
             ref={fileInputRef}
             type="file"
@@ -999,25 +1036,6 @@ export function SessionChatBox<TExecutor extends string = string>({
             className="hidden"
             onChange={handleFileInputChange}
           />
-          {onPrCommentClick && (
-            <ToolbarIconButton
-              icon={GithubLogoIcon}
-              aria-label="Add PR Comments"
-              title="Insert PR comments into message"
-              onClick={onPrCommentClick}
-              disabled={areContentInsertActionsDisabled}
-            />
-          )}
-          {toolbarActions?.items.map((item) => (
-            <ToolbarIconButton
-              key={item.id}
-              icon={item.icon}
-              aria-label={item.label}
-              title={item.tooltip}
-              onClick={item.onClick}
-              disabled={isDisabled || isRunning || Boolean(item.disabled)}
-            />
-          ))}
         </>
       }
       footerRight={renderActionButtons()}

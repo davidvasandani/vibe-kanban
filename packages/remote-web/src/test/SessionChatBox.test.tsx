@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { BugIcon } from "@phosphor-icons/react";
 import {
   SessionChatBox,
   DEFAULT_CONTINUE_PROMPT,
@@ -14,8 +15,10 @@ function renderChatBox(overrides: {
   isNewSessionMode?: boolean;
   selectedSessionId?: string;
   isDraftLoading?: boolean;
+  interrupted?: boolean;
 }) {
   const onSend = vi.fn();
+  const onResume = vi.fn();
   const hasSession = "selectedSessionId" in overrides;
   render(
     <SessionChatBox
@@ -38,9 +41,22 @@ function renderChatBox(overrides: {
         onSelectSession: vi.fn(),
         isNewSessionMode: overrides.isNewSessionMode ?? false,
       }}
+      interruptedNotice={
+        overrides.interrupted ? { onResume, isResuming: false } : undefined
+      }
+      toolbarActions={{
+        items: [
+          {
+            id: "debug",
+            icon: BugIcon,
+            label: "Debug",
+            onClick: vi.fn(),
+          },
+        ],
+      }}
     />,
   );
-  return { onSend };
+  return { onSend, onResume };
 }
 
 // Without an i18n provider, t() returns the key, so match the key or the
@@ -78,6 +94,36 @@ describe("SessionChatBox – sending the prefilled (placeholder) prompt", () => 
   it("keeps Send enabled when the editor has content", () => {
     renderChatBox({ value: "do the thing", selectedSessionId: "s1" });
     expect(sendButton()).toBeEnabled();
+  });
+});
+
+describe("SessionChatBox – stopped (interrupted) session banner", () => {
+  it("keeps the icon buttons in the footer when not interrupted", () => {
+    renderChatBox({ value: "", selectedSessionId: "s1" });
+    expect(screen.getByRole("button", { name: "Debug" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /restart/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("moves the icon buttons into the banner and adds a restart button when interrupted", async () => {
+    const { onResume } = renderChatBox({
+      value: "",
+      selectedSessionId: "s1",
+      interrupted: true,
+    });
+
+    // Still rendered exactly once (moved, not duplicated).
+    expect(screen.getAllByRole("button", { name: "Debug" })).toHaveLength(1);
+
+    const restartButton = screen.getByRole("button", { name: /restart/i });
+    expect(restartButton).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^resume$/i }),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(restartButton);
+    expect(onResume).toHaveBeenCalledTimes(1);
   });
 });
 

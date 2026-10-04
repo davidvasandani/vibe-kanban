@@ -447,9 +447,10 @@
       "count_other": "{{count}}개의 리뷰 댓글이 포함됩니다"
     },
     "interrupted": {
+      "status": "중지됨",
       "message": "이 실행은 vibe-kanban 재시작으로 인해 중단되었습니다.",
-      "resume": "재개",
-      "resuming": "재개 중"
+      "restart": "재시작",
+      "restarting": "재시작 중"
     },
     "workspace": {
       "create": "만들기",

@@ -320,10 +320,10 @@ contributed to it.
   rounds of cursor and log-writer traps (`vk/80c1-tasks-should-sur`).
   Coordinator-host work can use think2's colocated worker. Existing `Local`
   workspaces cannot be moved to a worker (`vk/ec43-run-a-vibe-kanba`).
-<<<<<<< HEAD
   A worker journal behind the cursor (undrained worker restart) is resolved
-  from matching inventory evidence (`Interrupted` → Resume) or classified
-  `Indeterminate`, never polled forever (`vk/9c15-stopped-job-look`).
+  from matching inventory evidence (`Interrupted` → a stopped-run banner
+  with Restart) or classified `Indeterminate`, never polled forever
+  (`vk/9c15-stopped-job-look`).
 - [read-only-markdown-links.md](read-only-markdown-links.md) — Bare-URL
   autolinking and the clickability policy in read-only markdown. Mutation
   listeners are exact-class. Read-only editors still export via `onChange`
@@ -331,7 +331,9 @@ contributed to it.
   byte-identical on export. So display-only changes use tagged, microtask-
   queued updates, export is skipped while a read-only tree holds auto links,
   and links are unwrapped on becoming editable (`vk/e4ef-urls-always-clic`).
-=======
-
 - [frontend-linting.md](frontend-linting.md) — One shared ESLint rule set (`eslint.frontend.cjs`) for local-web, web-core and remote-web. Plugins resolve from the consuming package, and a tsconfig that covers tests prevents parse errors. Directive comments are banned outright, and layer boundaries forbid same-feature aliased imports. Covers the `ignoreRestSiblings` trap and patterns for fixing `exhaustive-deps` without changing when hooks fire (`vk/848f-lint-packages-we`).
->>>>>>> 75322329 (build(lint): lint web-core and remote-web with local-web's rules)
+- [session-chat-box-stopped-banner.md](session-chat-box-stopped-banner.md) —
+  `SessionChatBox`'s footer icon buttons and its interrupted-run banner
+  share one `renderIconButtons()` closure, rendered in exactly one of the
+  two slots depending on `interruptedNotice`; the footer's `Send` button is
+  deliberately left out of the relocation (`vk/556e-start-stopped-se`).

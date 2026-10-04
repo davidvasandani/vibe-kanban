@@ -1127,3 +1127,20 @@ custom connectors can authenticate only with OAuth, and no principle covered
 VK acting as an authorization server. The homelab constitution got the
 matching edge principle (148), because this task also changes the
 `vibe.vasandani.dev` edge and Caddy routes, with the user's approval.
+
+## Review: vk/556e-start-stopped-se
+
+Applied `/speckit.constitution`: no amendment (version stays 0.46.0). The
+task moves `SessionChatBox`'s footer icon buttons into its existing
+interrupted-run banner (and replaces the banner's "Resume" button with a
+"Restart" one) only while that banner is shown. Existing principles cover
+it: II (added a rendered-DOM regression test for the banner/footer split),
+III (reuses the existing `interruptedNotice`/`toolbarActions` props and
+banner/footer slots rather than adding new plumbing or a new component), IV
+(the change stays inside `packages/ui`'s ownership of the chat box's
+internal layout, so both `local-web` and `remote-web` pick it up
+identically), and VI (extends the banner `ChatBoxBase` already renders
+instead of inventing a separate stopped-session surface). No existing
+principle said anything false or was stretched to cover this; it is a
+layout change within one already-governed component, not a new
+architectural concept.
