@@ -199,6 +199,10 @@ pub struct ExecutorProfile {
     /// Model keys (`provider/model` or `model`) hidden from the model picker.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled_models: Vec<String>,
+    /// Hidden from agent pickers. The agent stays configurable in Settings
+    /// and can still run; this is a display preference, not access control.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
     #[serde(flatten)]
     pub configurations: HashMap<String, CodingAgent>,
 }
@@ -352,6 +356,9 @@ impl ExecutorConfigs {
                     if !override_profile.disabled_models.is_empty() {
                         default_profile.disabled_models = override_profile.disabled_models;
                     }
+                    if override_profile.disabled {
+                        default_profile.disabled = true;
+                    }
                 }
                 None => {
                     // New executor, add completely
@@ -412,6 +419,7 @@ impl ExecutorConfigs {
                 let mut override_profile = ExecutorProfile {
                     recently_used_models: None,
                     disabled_models: Vec::new(),
+                    disabled: false,
                     configurations: override_configurations,
                 };
 
@@ -426,9 +434,14 @@ impl ExecutorConfigs {
                     override_profile.disabled_models = current_profile.disabled_models.clone();
                 }
 
+                if current_profile.disabled != default_profile.disabled {
+                    override_profile.disabled = current_profile.disabled;
+                }
+
                 if !override_profile.configurations.is_empty()
                     || override_profile.recently_used_models.is_some()
                     || !override_profile.disabled_models.is_empty()
+                    || override_profile.disabled
                 {
                     overrides.executors.insert(*executor_key, override_profile);
                 }
@@ -506,12 +519,21 @@ impl ExecutorConfigs {
                     .expect("No default variant found")
             })
     }
+    /// Agents eligible for automatic recommendation: every agent the user has
+    /// not disabled.
+    fn recommendation_candidates(&self) -> impl Iterator<Item = BaseCodingAgent> + '_ {
+        self.executors
+            .iter()
+            .filter(|(_, profile)| !profile.disabled)
+            .map(|(agent, _)| *agent)
+    }
+
     pub async fn get_recommended_executor_profile(
         &self,
     ) -> Result<ExecutorProfileId, ProfileError> {
         let mut agents_with_info: Vec<(BaseCodingAgent, AvailabilityInfo)> = Vec::new();
 
-        for &base_agent in self.executors.keys() {
+        for base_agent in self.recommendation_candidates() {
             let profile_id = ExecutorProfileId::new(base_agent);
             if let Some(coding_agent) = self.get_coding_agent(&profile_id) {
                 let info = coding_agent.get_availability_info();
@@ -633,5 +655,89 @@ mod tests {
                 .executors
                 .contains_key(&BaseCodingAgent::ClaudeCode)
         );
+    }
+
+    #[test]
+    fn disabled_round_trips_without_becoming_a_variant() {
+        let profile: ExecutorProfile = serde_json::from_value(serde_json::json!({
+            "disabled": true,
+            "DEFAULT": { "QWEN_CODE": {} }
+        }))
+        .unwrap();
+
+        assert!(profile.disabled);
+        assert_eq!(
+            profile.configurations.keys().collect::<Vec<_>>(),
+            ["DEFAULT"]
+        );
+        let serialized = serde_json::to_value(&profile).unwrap();
+        assert_eq!(serialized["disabled"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn enabled_is_the_default_and_is_omitted() {
+        let profile: ExecutorProfile = serde_json::from_value(serde_json::json!({
+            "DEFAULT": { "QWEN_CODE": {} }
+        }))
+        .unwrap();
+
+        assert!(!profile.disabled);
+        let serialized = serde_json::to_value(&profile).unwrap();
+        assert!(serialized.get("disabled").is_none());
+    }
+
+    #[test]
+    fn disabled_survives_override_computation_and_merge() {
+        let defaults = ExecutorConfigs::from_defaults();
+        let mut current = defaults.clone();
+        current
+            .executors
+            .get_mut(&BaseCodingAgent::QwenCode)
+            .unwrap()
+            .disabled = true;
+
+        let overrides = ExecutorConfigs::compute_overrides(&defaults, &current).unwrap();
+        let qwen_override = &overrides.executors[&BaseCodingAgent::QwenCode];
+        assert!(qwen_override.disabled);
+        assert!(qwen_override.configurations.is_empty());
+
+        let merged = ExecutorConfigs::merge_with_defaults(defaults.clone(), overrides);
+        assert!(merged.executors[&BaseCodingAgent::QwenCode].disabled);
+        assert!(!merged.executors[&BaseCodingAgent::ClaudeCode].disabled);
+    }
+
+    #[test]
+    fn re_enabling_writes_no_override() {
+        let defaults = ExecutorConfigs::from_defaults();
+        let mut disabled = defaults.clone();
+        disabled
+            .executors
+            .get_mut(&BaseCodingAgent::QwenCode)
+            .unwrap()
+            .disabled = true;
+        let saved = ExecutorConfigs::compute_overrides(&defaults, &disabled).unwrap();
+        let mut current = ExecutorConfigs::merge_with_defaults(defaults.clone(), saved);
+
+        current
+            .executors
+            .get_mut(&BaseCodingAgent::QwenCode)
+            .unwrap()
+            .disabled = false;
+        let overrides = ExecutorConfigs::compute_overrides(&defaults, &current).unwrap();
+        assert!(!overrides.executors.contains_key(&BaseCodingAgent::QwenCode));
+    }
+
+    #[test]
+    fn recommendation_skips_disabled_agents() {
+        let mut configs = ExecutorConfigs::from_defaults();
+        configs
+            .executors
+            .get_mut(&BaseCodingAgent::ClaudeCode)
+            .unwrap()
+            .disabled = true;
+
+        let candidates: Vec<_> = configs.recommendation_candidates().collect();
+        assert!(!candidates.contains(&BaseCodingAgent::ClaudeCode));
+        assert_eq!(candidates.len(), configs.executors.len() - 1);
     }
 }

@@ -39,6 +39,7 @@ import { getIdeName } from '@/shared/lib/ideName';
 import { cn, playSound } from '@/shared/lib/utils';
 import { isTauriApp } from '@/shared/lib/platform';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
+import { filterEnabledAgents } from '@/shared/lib/disabledAgents';
 import { PrimaryButton } from '@vibe/ui/components/PrimaryButton';
 
 type SoundOption = {
@@ -227,10 +228,14 @@ export function LandingPage() {
     };
 
     if (profiles) {
-      return (Object.keys(profiles) as BaseCodingAgent[]).sort(compareAgents);
+      return filterEnabledAgents(
+        (Object.keys(profiles) as BaseCodingAgent[]).sort(compareAgents),
+        profiles,
+        [selectedAgent]
+      );
     }
     return [...Object.values(BaseCodingAgent)].sort(compareAgents);
-  }, [profiles]);
+  }, [profiles, selectedAgent]);
 
   const editorOptions = useMemo(() => Object.values(EditorType), []);
 

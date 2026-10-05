@@ -371,6 +371,13 @@
       "description": "使用不同的配置自定义编码代理的行为。",
       "loading": "加载代理配置中...",
       "selectAgent": "选择代理",
+      "visibility": {
+        "title": "可见性",
+        "description": "已停用的代理不会出现在代理选择器中。它们仍可在此配置，现有工作会继续运行。",
+        "label": "在代理选择器中显示",
+        "defaultLocked": "无法停用默认代理。请先将其他代理设为默认。",
+        "lastLocked": "至少需要保留一个已启用的代理。"
+      },
       "models": {
         "title": "模型",
         "description": "取消勾选的模型将从此代理的模型菜单中隐藏。",
@@ -407,7 +414,8 @@
         "jsonLabel": "代理配置（JSON）",
         "jsonPlaceholder": "加载配置文件中...",
         "jsonLoading": "加载中...",
-        "pathLabel": "配置文件位置："
+        "pathLabel": "配置文件位置：",
+        "disabled": "已停用"
       },
       "errors": {
         "deleteFailed": "删除配置失败。请重试。",

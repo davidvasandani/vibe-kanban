@@ -1,81 +1,65 @@
-# Prior knowledge: ChatGPT custom-connector access (`vk/50df-chatgpt-custom-m`)
+# Prior knowledge: Disable unused agents (`vk/2e22-disable-agent`)
 
-Distilled from the VK wiki (`wiki/`) and the homelab knowledge bases
-(`docs/knowledge/`, `docs/knowledge-base/`, `knowledge-base/`). Read-only
-recall. Nothing in either base covers OAuth *authorization-server* work or
-ChatGPT. Everything below is adjacent knowledge.
+Sources: the VK wiki (`wiki/`, read-only recall), `docs/knowledge-base/`, and
+the homelab knowledge bases. No page covers disabling or hiding whole agents.
+The closest precedent is per-agent model hiding (`disabled_models`).
 
-## How `/mcp` is served today
+## Per-agent preferences on `ExecutorProfile` (`wiki/model-picker-preferences.md`)
 
-- `vibe-kanban-mcp` is stdio-only (`crates/mcp/AGENTS.md`). think2 bridges it
-  with **supergateway** (`modules/vibe-kanban-mcp.nix`) on `127.0.0.1:8787`,
-  Streamable HTTP, `--stateful`, with a 30 min session timeout. Supergateway
-  does **no inbound auth**, so Caddy enforces it
-  (`docs/knowledge/mcp-over-http-public-exposure.md`).
-- Caddy `:3343` (`hosts/think/think2.nix`) `handle /mcp*` accepts the static
-  bearer (`{$VIBE_MCP_BEARER_TOKEN}`) **or the mere presence** of
-  `Cf-Access-Jwt-Assertion`. That presence check is only sound while every
-  `/mcp` request passes Cloudflare Access. → A ChatGPT bypass must not be on
-  `/mcp`.
-- The catch-all `handle` proxies to the VK server on `127.0.0.1:3334`. Caddy
-  evaluates `handle` blocks in source order with the catch-all last.
-- Edge: `vibe.vasandani.dev` is a hostname Access app (email SSO plus Service
-  Auth for the `vibe-mcp-client` token and Ohana's token). `/mcp` inherits it.
-  Agents use a loopback credential gateway that injects the
-  `CF-Access-Client-*` headers
-  (`docs/knowledge-base/vibe-kanban-public-mcp-access-routing.md`).
+There is a checklist for adding a per-agent preference field next to the
+flattened variant map:
 
-## Edge-exposure rules (homelab)
+- **Serde:** `default` plus `skip_serializing_if`, so old files load and
+  unchanged files stay byte-clean. Declared fields are consumed before
+  `#[serde(flatten)]`, so the key is never parsed as a variant.
+- **Merge:** `merge_with_defaults` and `compute_overrides` must both carry
+  the field. Otherwise a preference-only change never reaches
+  `profiles.json`.
+- **Struct literals:** `crates/executors/src/env.rs`,
+  `crates/local-deployment/src/container.rs` and
+  `crates/worker/src/execution.rs`. The worker copies preferences from the
+  source profile.
+- **Frontend:** add the key to `RESERVED_KEYS` in
+  `web-core/src/shared/lib/executor.ts`, or it renders as a configuration in
+  Settings.
+- **Writers spread the profile:** `updateRecentModelEntries` spreads the
+  executor profile when the model picker records a recent model and saves
+  the *whole* profiles file. A new field survives only because of that
+  spread.
 
-- `docs/cloudflare-edge-exposure.md` and `ci/check-edge-exposure.sh`: every
-  `bypass_access_paths` entry must be IP-restricted
-  (`bypass_access_ip_ranges`) or carry a block-level `# edge-open-ok:`. The
-  vibe block already has `edge-open-ok` for `/v1…`, so the checker would
-  silently pass any new unrestricted vibe path. New paths need an explicit
-  check.
-- A path-scoped bypass app *replaces* the hostname app for that path
-  (most-specific wins). Its only policy is the bypass, so non-matching
-  sources (including service-token clients) are **blocked**. This is another
-  reason not to bypass `/mcp`.
-- Prefer exact CIDRs, and append rather than replace
-  (`knowledge-base/cloudflare-access-trusted-source-bypasses.md`).
-- Terragrunt apply runs in CI on push to `main` (`runs-on: [self-hosted,
-  think2]`). The PR gets a plan
-  (`knowledge-base/cloudflare-access-service-token-live-enablement.md`).
+## Hiding without breaking the trigger
 
-## Cloudflare behaviour worth knowing
+From the same page: filter only the list handed to the menu, always keep
+the current selection visible, and never allow the last item to be disabled
+(`toggleDisabledModel` refuses to disable the last model).
 
-- Unauthenticated requests get `302` to `*.cloudflareaccess.com` plus
-  `www-authenticate: Cloudflare-Access resource_metadata=…`. That is the
-  connector-creation failure ChatGPT shows.
-- Cloudflare replaces origin **502/504** bodies with branded HTML. Stable
-  error contracts must use 4xx/503 (`knowledge-base/edge-safe-error-statuses.md`).
-  OAuth errors are 400/401, which is fine.
-- The team domain `vasandani.cloudflareaccess.com` publishes AS metadata, but
-  without a `registration_endpoint`, so ChatGPT's DCR can't use it.
+## Stale copies overwrite saves
 
-## VK server conventions relevant here
+Settings saves profiles via `useSettingsMachineClient()` (it can target
+another host). After a save, invalidate the whole `['user-system']` prefix.
+Otherwise a route-scoped chat copy re-saves stale profiles on its next
+recent-model write and silently reverts the change. `AgentsSettingsSection`
+already does this in `refreshProfileViews()`.
 
-- Routers: `crates/server/src/routes/mod.rs`. Non-`/api` routes are merged at
-  the top level before the SPA `/{*path}` GET fallback (see
-  `mcp_gateway::gateway_router`). `/api` has `validate_origin` (rejects
-  mismatched `Origin`; requests with no Origin pass).
-- `mcp_gateway/mod.rs` is the house pattern for secrets: random bytes, store
-  `Sha256` digests, compare with `subtle::ConstantTimeEq`, `URL_SAFE_NO_PAD`
-  base64.
-- DB models use runtime `sqlx::query_as::<_, T>` (no `.sqlx` offline cache
-  entries needed). Tests use `sqlite::memory:` and
-  `sqlx::migrate!("../db/migrations")`.
-- `mcp_auth.rs` has `html_escape` and simple HTML responses (an OAuth
-  *client* flow for upstream MCPs, which is the opposite direction from this
-  task).
-- Shared-gateway connection IDs must stay stable
-  (`wiki/mcp-oauth-connection-identity.md`). Unrelated, but don't touch them.
+## Built-in executors cannot be deleted
 
-## Gaps (no prior knowledge)
+`compute_overrides` returns `CannotDeleteExecutor` when a built-in executor
+is missing. "Disable" must therefore be a flag, not a removal.
 
-- MCP authorization spec / ChatGPT connector OAuth requirements (RFC 9728,
-  8414, 7591, PKCE).
-- Cloudflare Zero Trust lists in Access policies. Verified locally against
-  the provider v5 schema: `cloudflare_zero_trust_list{type="IP", items=[{value,
-  description}]}` and the Access include `ip_list = { id }`.
+## i18n gate (`docs/knowledge-base/locale-key-consistency.md`, `wiki/issue-workspace-advisory.md`)
+
+Every new `settings.agents.*` key must exist in all seven locales
+(`en, es, fr, ja, ko, zh-Hans, zh-Hant`). An English fallback alone fails
+`scripts/check-i18n.sh`, and the gate also checks interpolation identifiers.
+
+## Lint and test notes (`wiki/frontend-linting.md`)
+
+`pnpm run lint` covers local-web, web-core, remote-web and ui. `web-core`
+test files are linted through a separate tsconfig. Vitest tests sit next to
+the code (for example `shared/lib/disabledModels.test.ts`).
+
+## Settings drawer (`wiki/settings-drawer.md`)
+
+A section's dirty flag is cleared on unmount. Edits should go through the
+existing dirty and save-bar flow (`useSettingsDirty`, `SettingsSaveBar`) so
+the drawer's unsaved-changes guard covers them.

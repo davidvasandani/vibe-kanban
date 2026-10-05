@@ -45,6 +45,12 @@ import {
   toggleDisabledModel,
   updateDisabledModels,
 } from '@/shared/lib/disabledModels';
+import {
+  getDisableAgentBlocker,
+  isAgentDisabled,
+  setAgentDisabled,
+} from '@/shared/lib/disabledAgents';
+import { AgentVisibilityCard } from './AgentVisibilityCard';
 
 type ExecutorsMap = Record<string, Record<string, Record<string, unknown>>>;
 
@@ -250,6 +256,8 @@ export function AgentsSettingsSection() {
   };
 
   const handleMakeDefault = async (executor: string, config: string) => {
+    // A disabled agent (saved or pending) never becomes the default.
+    if (isAgentDisabled(localParsedProfiles?.executors, executor)) return;
     try {
       await updateAndSaveConfig({
         executor_profile: {
@@ -303,8 +311,23 @@ export function AgentsSettingsSection() {
     });
   };
 
+  const handleAgentDisabledChange = (
+    executorType: BaseCodingAgent,
+    disabled: boolean
+  ) => {
+    if (!localParsedProfiles?.executors) return;
+    markDirty({
+      ...localParsedProfiles,
+      executors: setAgentDisabled(
+        localParsedProfiles.executors,
+        executorType,
+        disabled
+      ),
+    });
+  };
+
   // Save handler for agent configuration. Local state already holds every
-  // edit (config forms and model visibility), so save it as a whole.
+  // edit (config forms, agent and model visibility), so save it as a whole.
   const handleSave = async () => {
     if (!isDirty || !localParsedProfiles) return;
 
@@ -385,10 +408,15 @@ export function AgentsSettingsSection() {
               {Object.keys(localParsedProfiles.executors).map((executor) => {
                 const isDefault =
                   config?.executor_profile?.executor === executor;
+                const isDisabled = isAgentDisabled(
+                  localParsedProfiles.executors,
+                  executor
+                );
                 return (
                   <TwoColumnPickerItem
                     key={executor}
                     selected={selectedExecutorType === executor}
+                    muted={isDisabled}
                     onClick={() => {
                       setSelectedExecutorType(executor as BaseCodingAgent);
                       const configs = getExecutorVariantKeys(
@@ -407,11 +435,18 @@ export function AgentsSettingsSection() {
                       />
                     }
                     trailing={
-                      isDefault && (
-                        <TwoColumnPickerBadge variant="brand">
-                          {t('settings.agents.editor.isDefault')}
-                        </TwoColumnPickerBadge>
-                      )
+                      <>
+                        {isDisabled && (
+                          <TwoColumnPickerBadge>
+                            {t('settings.agents.editor.disabled')}
+                          </TwoColumnPickerBadge>
+                        )}
+                        {isDefault && (
+                          <TwoColumnPickerBadge variant="brand">
+                            {t('settings.agents.editor.isDefault')}
+                          </TwoColumnPickerBadge>
+                        )}
+                      </>
                     }
                   >
                     {toPrettyCase(executor)}
@@ -464,6 +499,10 @@ export function AgentsSettingsSection() {
                             executorType={selectedExecutorType}
                             configName={configName}
                             isDefault={isDefault}
+                            agentDisabled={isAgentDisabled(
+                              localParsedProfiles.executors,
+                              selectedExecutorType
+                            )}
                             configCount={configCount}
                             onMakeDefault={handleMakeDefault}
                             onDelete={handleDeleteConfig}
@@ -506,7 +545,28 @@ export function AgentsSettingsSection() {
             </div>
           )}
 
-          {/* Model visibility applies to the agent, not a single config */}
+          {/* Agent and model visibility apply to the agent, not a config */}
+          {selectedExecutorType && (
+            <div className="bg-secondary/50 border border-border rounded-sm p-4">
+              <AgentVisibilityCard
+                executor={selectedExecutorType}
+                agentDisabled={isAgentDisabled(
+                  localParsedProfiles.executors,
+                  selectedExecutorType
+                )}
+                blocker={getDisableAgentBlocker(
+                  localParsedProfiles.executors,
+                  selectedExecutorType,
+                  config?.executor_profile?.executor
+                )}
+                onChange={(disabled) =>
+                  handleAgentDisabledChange(selectedExecutorType, disabled)
+                }
+                disabled={profilesSaving}
+              />
+            </div>
+          )}
+
           {selectedExecutorType && (
             <div className="bg-secondary/50 border border-border rounded-sm p-4">
               <AgentModelsCard
@@ -544,6 +604,7 @@ function ConfigActionsDropdown({
   executorType,
   configName,
   isDefault,
+  agentDisabled,
   configCount,
   onMakeDefault,
   onDelete,
@@ -551,6 +612,7 @@ function ConfigActionsDropdown({
   executorType: BaseCodingAgent;
   configName: string;
   isDefault: boolean;
+  agentDisabled: boolean;
   configCount: number;
   onMakeDefault: (executor: string, config: string) => void;
   onDelete: (executor: string, config: string) => void;
@@ -576,7 +638,7 @@ function ConfigActionsDropdown({
             e.stopPropagation();
             onMakeDefault(executorType, configName);
           }}
-          disabled={isDefault}
+          disabled={isDefault || agentDisabled}
         >
           <div className="flex items-center gap-half w-full">
             <StarIcon className="size-icon-xs mr-base" />

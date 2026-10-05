@@ -1,136 +1,134 @@
-# SPEC: ChatGPT custom-connector (OAuth) access to the Vibe Kanban MCP
+# SPEC: Disable unused coding agents
 
-Task: `vk/50df-chatgpt-custom-m`. Feature spec, plan and tasks:
-`specs/vk/50df-chatgpt-custom-m/`.
+Task: `vk/2e22-disable-agent`. Feature spec, plan and tasks:
+`specs/vk/2e22-disable-agent/`.
 
 ## Problem
 
-Adding `https://vibe.vasandani.dev/mcp` as a ChatGPT custom connector fails
-with "Error creating connector". The endpoint exists (supergateway, Streamable
-HTTP), but it is locked twice:
+Settings → Agents lists every built-in executor (Claude Code, Codex, Gemini,
+Amp, Opencode, Cursor, Qwen Code, Copilot, Droid, Grok). Every agent picker
+shows all of them too: the create-workspace and new-session chat boxes, the
+General default-agent dropdown, the auto error remediation agent, the review
+and conflict dialogs, and onboarding. Most hosts use only one or two agents,
+so the rest clutter every picker. Built-in executors cannot be deleted
+(`ProfileError::CannotDeleteExecutor`), so there is no way to remove them
+today.
 
-1. Cloudflare Access: without a service token or an SSO session the edge
-   answers `302` to the Access login page
-   (`www-authenticate: Cloudflare-Access …`).
-2. Origin (Caddy `:3343` on think2): a static `Authorization: Bearer` token,
-   or a `Cf-Access-Jwt-Assertion` header, is required.
+## Goal
 
-ChatGPT connectors support only **No Auth** or **OAuth** (MCP authorization
-spec: RFC 9728 protected-resource metadata, RFC 8414 AS metadata, RFC 7591
-dynamic client registration, OAuth 2.1 authorization code + PKCE S256). It
-cannot send a static bearer or Access service-token headers, so it can never
-connect today.
-
-## Decisions (confirmed with the user)
-
-- Change both repos: Vibe Kanban (OAuth server) and homelab (edge + Caddy).
-- Open the ChatGPT path past Cloudflare Access, restricted to OpenAI's
-  published connector egress ranges (`openai.com/chatgpt-connectors.json`),
-  with OAuth enforced at the origin.
-- ChatGPT gets the full global tool set.
+Let the user turn individual agents off in Settings → Agents. A disabled agent
+stays configurable in Settings but disappears from every agent picker. It can
+be turned back on at any time.
 
 ## Design
 
-### Separate public path: `/oauth/mcp`
+### Storage: a per-agent flag on `ExecutorProfile` (`profiles.json`)
 
-The existing `/mcp` route trusts the *presence* of `Cf-Access-Jwt-Assertion`.
-That is safe only while every `/mcp` request passes Access. An IP-allowlisted
-Access bypass on `/mcp` would let any request from OpenAI egress (e.g. a GPT
-Action with a custom header) forge that header. Instead ChatGPT gets its own
-resource, `https://vibe.vasandani.dev/oauth/mcp`, which accepts **only** a
-Vibe Kanban-issued OAuth access token. `/mcp` and its clients are unchanged.
+Add `disabled: bool` to `ExecutorProfile` (`crates/executors/src/profile.rs`),
+next to `recently_used_models` and `disabled_models`:
 
-### Vibe Kanban: embedded OAuth 2.1 authorization server
+```rust
+/// Hidden from agent pickers. The agent stays configurable in Settings.
+#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+pub disabled: bool,
+```
 
-Opt-in: enabled only when `VK_MCP_OAUTH_PUBLIC_URL` (e.g.
-`https://vibe.vasandani.dev`) is set to an absolute `https` URL (or `http`
-loopback for development). Unset, every new route answers `404`.
+- It is stored per host, alongside the rest of that host's agent
+  configuration, and is edited and saved through the same Save bar the Agents
+  page already has.
+- It already reaches every picker: `GET /api/info` returns
+  `executors` (flattened `ExecutorConfigs`), which `useUserSystem().profiles`
+  exposes.
+- Serde reads declared fields before `#[serde(flatten)]`, so `disabled` is
+  never parsed as a variant. `skip_serializing_if` keeps unchanged files
+  identical.
+- `merge_with_defaults` copies `disabled = true` from overrides.
+  `compute_overrides` writes the field when it differs from the default
+  (built-in defaults are always `false`), and a profile whose only change is
+  `disabled` is still written to the overrides file.
+- Struct literals in `env.rs`, `local-deployment/container.rs` and
+  `worker/execution.rs` gain the field. The worker copies it from the source
+  profile, as it does with the other preferences.
+- `get_recommended_executor_profile` skips disabled agents, so onboarding
+  never recommends one.
 
-Issuer = `VK_MCP_OAUTH_PUBLIC_URL`; resource = `<issuer>/oauth/mcp`.
+Rejected alternative: `disabled_agents: Vec<BaseCodingAgent>` on the v8 user
+`Config`. Agent installation and configuration are per host and already live
+in `profiles.json`. Putting the flag there means one save path, one
+invalidation path (`['user-system']`), and no second source of truth.
 
-| Route | Edge | Purpose |
-|---|---|---|
-| `GET /.well-known/oauth-protected-resource[/oauth/mcp]` | bypass (OpenAI IPs) | RFC 9728 metadata: `resource`, `authorization_servers`, `scopes_supported=["mcp"]`, `bearer_methods_supported=["header"]` |
-| `GET /.well-known/oauth-authorization-server[/…]` | bypass (OpenAI IPs) | RFC 8414 metadata (`code` only, `authorization_code`+`refresh_token`, `S256` only, auth methods `none`/`client_secret_post`/`client_secret_basic`, `registration_endpoint`) |
-| `POST /oauth/register` | bypass (OpenAI IPs) | RFC 7591 DCR |
-| `GET/POST /oauth/authorize` | **Access SSO** | Server-rendered consent page; approve/deny |
-| `POST /oauth/token` | bypass (OpenAI IPs) | code exchange + refresh-token rotation |
-| `GET /api/mcp-oauth/verify` | (loopback, Caddy `forward_auth`) | `200` for a valid access token, else `401` with `WWW-Authenticate: Bearer resource_metadata="…"` and a JSON-RPC error body |
-| `GET /api/mcp-oauth/grants`, `DELETE /api/mcp-oauth/grants/{id}` | Access SSO | list / revoke authorized connectors |
+### Frontend helpers (`web-core/src/shared/lib/disabledAgents.ts`)
 
-Rules:
+- `isAgentDisabled(profiles, agent)` is the one frontend definition of
+  "disabled".
+- `filterEnabledAgents(agents, profiles, keep?)` keeps the order and drops
+  disabled agents. Any agent in `keep` (the current selection) always stays
+  visible, so a trigger never names an agent its own menu lacks. If no agent
+  is enabled (only possible by hand-editing the file), it returns every
+  agent.
+- `setAgentDisabled(profiles, agent, disabled)` returns a new profiles map.
+  It spreads the existing profile and deletes the key when the agent is
+  re-enabled.
+- `getDisableAgentBlocker(profiles, agent, defaultAgent)` returns
+  `'default' | 'last' | null`. It reads the Settings page's *local*
+  (unsaved) profiles, and re-enabling is never blocked.
+- `disabled` is added to `RESERVED_KEYS` in `shared/lib/executor.ts` so it
+  never shows up as a configuration.
 
-- **Registration:** `redirect_uris` required. Each must be `https` (or `http`
-  loopback), with no fragment. Only `authorization_code`/`refresh_token` and
-  `code`. `client_secret_post`/`basic` registrations get a secret (only its
-  hash is stored); `none` gets no secret. Body ≤ 16 KiB. Clients that never
-  completed an authorization are pruned after 24 h, and the number of clients
-  is capped (fails with `400 invalid_client_metadata` once full).
-- **Authorize:** `client_id` and an exact registered `redirect_uri` are
-  validated *before* anything redirects (failure → HTML error page, never a
-  redirect). After that, protocol errors redirect back with `error` and
-  `state`. Requires `response_type=code` and `code_challenge` with
-  `code_challenge_method=S256`. `scope` ⊆ {`mcp`} (default `mcp`). `resource`,
-  when present, must equal the resource URL. GET stores a pending request
-  with a random one-time consent token (hash stored) and renders the form.
-  POST requires the matching consent token and an unexpired pending request
-  (10 min). Approve issues a single-use code (60 s, hash stored), redirects
-  with `code`, `state`, `iss`. Deny redirects with `access_denied`. The
-  responses carry `Cache-Control: no-store`, `X-Frame-Options: DENY`,
-  `Content-Security-Policy: frame-ancestors 'none'` and
-  `Referrer-Policy: no-referrer`.
-- **Token:** client authentication matches the registered method
-  (constant-time). Code exchange verifies the client, redirect_uri, PKCE
-  (`BASE64URL(SHA256(verifier))`, verifier 43–128 unreserved characters), the
-  single-use code and its expiry. Replaying a used code revokes the grant it
-  minted. Each successful exchange creates a grant, a 1 h access token and a
-  30 d refresh token (opaque 256-bit random values, SHA-256 hashes stored).
-  Refresh rotates: the old refresh token is revoked. Reusing a revoked
-  refresh token revokes the whole grant. Errors are RFC 6749 JSON
-  (`invalid_grant`, `invalid_client` with `401`, …) with `no-store`.
-- **Verify:** reads `Authorization: Bearer`, hashes it, and accepts it only
-  if it is an unexpired, unrevoked access token whose resource is this
-  resource. It updates `last_used_at` at most once a minute.
-- No new secrets in config files; plaintext tokens never logged or stored.
+### Settings → Agents
 
-Persistence (SQLite migration): `mcp_oauth_clients`,
-`mcp_oauth_authorizations` (pending request + code), `mcp_oauth_grants`, and
-`mcp_oauth_tokens`. Expired rows are pruned opportunistically.
+- Agents column: a disabled agent row is dimmed and shows a neutral
+  **Disabled** badge. The order is unchanged.
+- A new **Visibility** card for the selected agent, above the Models card,
+  has a checkbox labelled **Show in agent pickers**:
+  - Unchecking it marks the page dirty. Saving writes `disabled: true`.
+  - It is locked when the agent is the current default ("The default agent
+    can't be disabled. Make another agent the default first.").
+  - It is locked when the agent is the last enabled one ("At least one agent
+    must stay enabled.").
+- **Make Default** is unavailable for a disabled agent's configurations,
+  including a disable that hasn't been saved yet, so the default agent is
+  never a disabled one.
 
-### Homelab
+### Pickers
 
-1. `terragrunt/modules/cloudflare-tunnel`: new per-hostname
-   `bypass_access_ip_lists` (path → name of a Zero Trust IP list), backed by a
-   `cloudflare_zero_trust_list` (type `IP`) so 278 CIDRs aren't inlined into
-   policies. `bypass_access_ip_ranges` keeps working unchanged.
-2. `cloudflare-tunnel-vibe-remote`: bypass `/oauth/mcp`, `/oauth/register`,
-   `/oauth/token`, `/.well-known/oauth-protected-resource`,
-   `/.well-known/oauth-authorization-server` for OpenAI connector ranges,
-   vendored as `openai-chatgpt-connectors.json` plus a refresh script.
-   `/oauth/authorize` and `/mcp` stay on hostname Access.
-3. think2 Caddy `:3343`: `handle /oauth/mcp*` → `forward_auth
-   127.0.0.1:3334 { uri /api/mcp-oauth/verify }`, then rewrite to `/mcp` and
-   proxy to supergateway `:8787`. It never consults the static bearer or
-   `Cf-Access-Jwt-Assertion`. All other `/oauth/*` and `/.well-known/*` fall
-   through to the VK server (`:3334`).
-4. `vibe-kanban-dev` gets `VK_MCP_OAUTH_PUBLIC_URL=https://vibe.vasandani.dev`.
-5. Docs: `docs/vibe-kanban-mcp-deployment.md` ChatGPT section.
+All pickers filter with `filterEnabledAgents`. Each keeps its current value
+visible:
+
+| Picker | Kept visible |
+|---|---|
+| `useExecutorConfig` (create-workspace and new-session chat boxes) | the effective executor |
+| `AgentSelector` (Start review, Resolve conflicts) | `selectedExecutorProfile.executor` |
+| General → default agent dropdown | the draft's default executor |
+| General → auto error remediation agent | the configured remediation executor |
+| Onboarding `LandingPage` | the selected agent |
+
+In `useExecutorConfig` (`resolveEffectiveExecutor`), the fallback chain skips
+`lastUsedConfig` and the config default when their agent is disabled. In
+that case the first enabled agent wins. An explicit user selection and the scratch draft are
+still honoured.
 
 ## Non-goals
 
-- Changing `/mcp` auth or existing clients.
-- A Settings UI for grants (API only; UI can follow).
-- Per-tool scopes (user chose all tools).
-- Public `/oauth/revoke` (revocation goes through the SSO-gated management API).
+- The backend does not refuse to run a disabled agent. Existing sessions,
+  follow-ups, MCP `start_workspace` calls, pipelines and remediation keep
+  working. Disabling is about picker clutter, not access control.
+- The agent list is not reordered.
+- Per-configuration (variant) disabling is out of scope.
 
-## Acceptance
+## Acceptance criteria
 
-- Unit/route tests cover metadata, DCR validation, the authorize
-  error/redirect split, consent-token checks, PKCE, code single use and
-  replay, refresh rotation and reuse revocation, verify accept/reject, and
-  disabled-by-default `404`.
-- `cargo test -p server`, `cargo clippy`, `pnpm run format` clean. Homelab
-  Nix/terraform validation passes in CI.
-- After deploy, a full end-to-end ChatGPT run:
-  `https://vibe.vasandani.dev/oauth/mcp`, Authentication = OAuth, connector
-  creation succeeds and tools list.
+1. In Settings → Agents, unchecking "Show in agent pickers" for Qwen Code and
+   saving writes `"disabled": true` under `QWEN_CODE` in `profiles.json`. The
+   row shows a Disabled badge.
+2. Qwen Code no longer appears in the create-workspace agent picker, the
+   new-session picker, General's default-agent dropdown, the auto remediation
+   agent select, or the review and conflict dialogs.
+3. Re-checking the box and saving removes the key, and the agent reappears
+   everywhere.
+4. The default agent's checkbox is locked with an explanation, and so is the
+   last enabled agent's.
+5. Existing `profiles.json` files without the key load unchanged, and saving
+   without touching the flag writes no `disabled` key.
+6. `cargo test -p executors` covers the serde round-trip, omission when false,
+   and survival through override and merge. Vitest covers the helper module.

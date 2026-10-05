@@ -8,7 +8,11 @@ import type {
   ExecutionProcess,
 } from 'shared/types';
 
-const RESERVED_KEYS = new Set(['recently_used_models', 'disabled_models']);
+const RESERVED_KEYS = new Set([
+  'recently_used_models',
+  'disabled_models',
+  'disabled',
+]);
 
 export function getExecutorVariantKeys(
   executorProfile: ExecutorProfile | Record<string, unknown> | null | undefined
