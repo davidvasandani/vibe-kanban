@@ -318,10 +318,7 @@ fn resolve_hostname(env: Option<String>, kernel: Option<String>, etc: Option<Str
 }
 
 fn resource_snapshot(active_execution_count: u32) -> ResourceSnapshot {
-    let load_1m = std::fs::read_to_string("/proc/loadavg")
-        .ok()
-        .and_then(|value| value.split_whitespace().next()?.parse().ok())
-        .unwrap_or(0.0);
+    let load_1m = load_average_1m().unwrap_or(0.0);
     let available_memory_bytes = std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|value| {
@@ -344,6 +341,25 @@ fn resource_snapshot(active_execution_count: u32) -> ResourceSnapshot {
         available_memory_bytes,
         active_execution_count,
     }
+}
+
+/// One-minute load average. The scheduler places work on the lowest reported
+/// load, so a platform that cannot read it must not report a constant zero:
+/// that would attract every dispatch. Linux reads `/proc/loadavg`; macOS has no
+/// `/proc` and uses `getloadavg(3)`.
+#[cfg(not(target_os = "macos"))]
+fn load_average_1m() -> Option<f64> {
+    std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|value| value.split_whitespace().next()?.parse().ok())
+}
+
+#[cfg(target_os = "macos")]
+fn load_average_1m() -> Option<f64> {
+    let mut loads = [0.0f64; 1];
+    // SAFETY: `getloadavg` writes at most `nelem` (1) samples into `loads`.
+    let samples = unsafe { libc::getloadavg(loads.as_mut_ptr(), 1) };
+    (samples == 1).then_some(loads[0])
 }
 
 #[cfg(test)]

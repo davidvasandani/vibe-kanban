@@ -13024,6 +13024,7 @@ dependencies = [
  "command-group",
  "ed25519-dalek",
  "executors",
+ "libc",
  "node-metrics",
  "portable-pty 0.9.0",
  "reqwest 0.13.2",
