@@ -231,20 +231,27 @@ impl MountInspector for SystemMountInspector {
     }
 
     fn mount_identity(&self, path: &Path) -> io::Result<Option<MountIdentity>> {
-        let canonical = fs::canonicalize(path)?;
-        let contents = fs::read_to_string("/proc/self/mountinfo")?;
-        Ok(parse_mountinfo(&contents)
-            .into_iter()
-            .filter(|entry| canonical.starts_with(&entry.mount_point))
-            .max_by_key(|entry| entry.mount_point.as_os_str().len()))
+        // macOS has no /proc: ask the kernel which mount backs the path.
+        #[cfg(target_os = "macos")]
+        {
+            macos::mount_identity(path)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let canonical = fs::canonicalize(path)?;
+            let contents = fs::read_to_string("/proc/self/mountinfo")?;
+            Ok(parse_mountinfo(&contents)
+                .into_iter()
+                .filter(|entry| canonical.starts_with(&entry.mount_point))
+                .max_by_key(|entry| entry.mount_point.as_os_str().len()))
+        }
     }
 
     fn filesystem_id(&self, path: &Path) -> io::Result<String> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            let dev = fs::metadata(path)?.dev();
-            Ok(format!("{}:{}", linux_major(dev), linux_minor(dev)))
+            Ok(device_id(fs::metadata(path)?.dev()))
         }
         #[cfg(not(unix))]
         {
@@ -273,6 +280,7 @@ impl MountInspector for SystemMountInspector {
     }
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn parse_mountinfo(contents: &str) -> Vec<MountIdentity> {
     contents
         .lines()
@@ -299,6 +307,77 @@ fn unescape_mount_field(value: &str) -> String {
         .replace("\\011", "\t")
         .replace("\\012", "\n")
         .replace("\\134", "\\")
+}
+
+/// Device identity in the form the Linux mount table uses (`major:minor`), so a
+/// path's device can be compared with its mount's.
+#[cfg(unix)]
+fn device_id(dev: u64) -> String {
+    format!("{}:{}", linux_major(dev), linux_minor(dev))
+}
+
+/// Mount identity as reported by `statfs(2)` on macOS, kept free of FFI so the
+/// conversion is tested on every platform.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn mount_identity_from_statfs(
+    mount_on: &[u8],
+    mount_from: &[u8],
+    read_only: bool,
+    mount_point_dev: u64,
+) -> MountIdentity {
+    MountIdentity {
+        mount_point: PathBuf::from(c_field(mount_on)),
+        export: c_field(mount_from),
+        filesystem_id: device_id(mount_point_dev),
+        read_only,
+    }
+}
+
+/// A fixed-size, NUL-terminated C string field as text.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn c_field(bytes: &[u8]) -> String {
+    let end = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::{
+        ffi::CString,
+        fs, io,
+        os::unix::{ffi::OsStrExt, fs::MetadataExt},
+        path::Path,
+    };
+
+    use super::{MountIdentity, mount_identity_from_statfs};
+
+    /// The mount backing `path`, from `statfs(2)`: `f_mntonname` is where it is
+    /// mounted (symlinks such as a synthetic `/srv` resolved), `f_mntfromname`
+    /// is the source (`server:/export` for NFS).
+    pub(super) fn mount_identity(path: &Path) -> io::Result<Option<MountIdentity>> {
+        let canonical = fs::canonicalize(path)?;
+        let c_path = CString::new(canonical.as_os_str().as_bytes())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        // SAFETY: `statfs` writes only into `buffer`, which is a properly sized,
+        // zero-initialised `libc::statfs`, and reads the NUL-terminated path.
+        let mut buffer: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statfs(c_path.as_ptr(), &mut buffer) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mount_on: Vec<u8> = buffer.f_mntonname.iter().map(|&c| c as u8).collect();
+        let mount_from: Vec<u8> = buffer.f_mntfromname.iter().map(|&c| c as u8).collect();
+        let read_only = buffer.f_flags & (libc::MNT_RDONLY as u32) != 0;
+        let mount_point_dev = fs::metadata(super::c_field(&mount_on))?.dev();
+        Ok(Some(mount_identity_from_statfs(
+            &mount_on,
+            &mount_from,
+            read_only,
+            mount_point_dev,
+        )))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -401,6 +480,33 @@ mod tests {
             MountHealth::Unhealthy { reason, .. } => reason,
             MountHealth::Healthy { .. } => panic!("expected unhealthy mount"),
         }
+    }
+
+    #[test]
+    fn statfs_fields_become_a_mount_identity() {
+        let mut mount_on = [0u8; 32];
+        let mount_point = b"/System/Volumes/Data/srv";
+        mount_on[..mount_point.len()].copy_from_slice(mount_point);
+        let mut mount_from = [0u8; 64];
+        let export = b"172.16.0.99:/var/nfs/shared/VibeKanban";
+        mount_from[..export.len()].copy_from_slice(export);
+
+        let identity = mount_identity_from_statfs(&mount_on, &mount_from, false, 42);
+        assert_eq!(
+            identity.mount_point,
+            PathBuf::from("/System/Volumes/Data/srv")
+        );
+        assert_eq!(identity.export, "172.16.0.99:/var/nfs/shared/VibeKanban");
+        assert_eq!(identity.filesystem_id, device_id(42));
+        assert!(!identity.read_only);
+        assert!(mount_identity_from_statfs(&mount_on, &mount_from, true, 42).read_only);
+    }
+
+    #[test]
+    fn c_field_stops_at_the_first_nul_and_tolerates_none() {
+        assert_eq!(c_field(b"abc\0def"), "abc");
+        assert_eq!(c_field(b"abc"), "abc");
+        assert_eq!(c_field(b"\0"), "");
     }
 
     #[test]
