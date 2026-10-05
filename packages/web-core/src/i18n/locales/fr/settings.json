@@ -371,6 +371,13 @@
       "description": "Personnalisez le comportement des agents de codage avec différentes configurations.",
       "loading": "Chargement des configurations d'agents...",
       "selectAgent": "Sélectionner un agent",
+      "visibility": {
+        "title": "Visibilité",
+        "description": "Les agents désactivés sont masqués des sélecteurs d'agents. Ils restent configurables ici et le travail en cours continue de s'exécuter.",
+        "label": "Afficher dans les sélecteurs d'agents",
+        "defaultLocked": "L'agent par défaut ne peut pas être désactivé. Définissez d'abord un autre agent par défaut.",
+        "lastLocked": "Au moins un agent doit rester activé."
+      },
       "models": {
         "title": "Modèles",
         "description": "Les modèles décochés sont masqués du menu des modèles pour cet agent.",
@@ -407,7 +414,8 @@
         "jsonLabel": "Configuration de l'agent (JSON)",
         "jsonPlaceholder": "Chargement des profils...",
         "jsonLoading": "Chargement...",
-        "pathLabel": "Emplacement du fichier de configuration :"
+        "pathLabel": "Emplacement du fichier de configuration :",
+        "disabled": "Désactivé"
       },
       "errors": {
         "deleteFailed": "Échec de la suppression de la configuration. Veuillez réessayer.",

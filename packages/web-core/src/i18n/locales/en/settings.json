@@ -392,6 +392,13 @@
       "description": "Customize the behavior of coding agents with different configurations.",
       "loading": "Loading agent configurations...",
       "selectAgent": "Select agent",
+      "visibility": {
+        "title": "Visibility",
+        "description": "Disabled agents are hidden from agent pickers. They stay configurable here and existing work keeps running.",
+        "label": "Show in agent pickers",
+        "defaultLocked": "The default agent can't be disabled. Make another agent the default first.",
+        "lastLocked": "At least one agent must stay enabled."
+      },
       "models": {
         "title": "Models",
         "description": "Unchecked models are hidden from the model menu for this agent.",
@@ -428,7 +435,8 @@
         "jsonLabel": "Agent Configuration (JSON)",
         "jsonPlaceholder": "Loading profiles...",
         "jsonLoading": "Loading...",
-        "pathLabel": "Configuration file location:"
+        "pathLabel": "Configuration file location:",
+        "disabled": "Disabled"
       },
       "errors": {
         "deleteFailed": "Failed to delete configuration. Please try again.",

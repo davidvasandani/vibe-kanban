@@ -1370,6 +1370,7 @@ fn dispatched_executor_profile(config: &ExecutorConfig) -> Option<ExecutorProfil
     Some(ExecutorProfile {
         recently_used_models: None,
         disabled_models: Vec::new(),
+        disabled: false,
         configurations: HashMap::from([(variant, agent)]),
     })
 }

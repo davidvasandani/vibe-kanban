@@ -767,6 +767,23 @@ an edge may not have set.
   Plaintext tokens and secrets never reach logs, errors or responses beyond
   the one response that issues them.
 
+### L. Hiding a choice never strands a selection or empties a picker
+A user preference that hides options from a picker (disabled agents,
+disabled models) is a display filter. It is not access control and it never
+deletes configuration.
+- The filter is applied to the list handed to the menu, never to selection
+  resolution. The current value always stays visible, so a trigger never
+  names an option its own menu lacks.
+- An implicit fallback (last used, default) skips hidden options. An explicit
+  choice the user already made is honoured.
+- The last visible option cannot be hidden. An option that something else
+  depends on (the default agent) cannot be hidden until that dependency
+  moves, and the UI says why.
+- Per-host agent preferences live on `ExecutorProfile` in `profiles.json`,
+  next to the configuration they qualify. They go through the same save,
+  override and merge path, and they are never kept as a second copy in the
+  user config.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -788,7 +805,7 @@ an edge may not have set.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.46.0 (adds XLIX, admitting remote MCP clients that cannot hold deployment credentials only through an opt-in VK-issued OAuth 2.1 grant with PKCE, hashed opaque rotating tokens, SSO-gated non-framable consent, bounded registration and replay revocation; 0.45.0 added XLVIII, requiring every shipped frontend package to be linted by `pnpm run lint` and CI from one shared rule set, with tsconfig coverage for tests, fixes in code instead of package-wide disables, and per-case judgement on hook dependencies; 0.44.0 added XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
+**Version**: 0.47.0 (adds L, making picker-hiding preferences display filters that keep the current selection visible, skip hidden options only in implicit fallbacks, refuse to hide the last or a depended-on option, and store per-host agent preferences on `ExecutorProfile`; 0.46.0 added XLIX, admitting remote MCP clients that cannot hold deployment credentials only through an opt-in VK-issued OAuth 2.1 grant with PKCE, hashed opaque rotating tokens, SSO-gated non-framable consent, bounded registration and replay revocation; 0.45.0 added XLVIII, requiring every shipped frontend package to be linted by `pnpm run lint` and CI from one shared rule set, with tsconfig coverage for tests, fixes in code instead of package-wide disables, and per-case judgement on hook dependencies; 0.44.0 added XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
@@ -1127,3 +1144,14 @@ custom connectors can authenticate only with OAuth, and no principle covered
 VK acting as an authorization server. The homelab constitution got the
 matching edge principle (148), because this task also changes the
 `vibe.vasandani.dev` edge and Caddy routes, with the user's approval.
+
+## Review: vk/2e22-disable-agent
+
+Applied `/speckit.constitution` and added principle L (0.47.0). The user
+wants unused agents gone from every agent picker. Built-in executors cannot
+be deleted, and no principle said how hiding a choice should interact with
+the current selection or with defaults. `disabled_models` already followed
+these rules informally (wiki `model-picker-preferences`). L makes them
+binding for agents and for any later picker preference. The homelab
+constitution named by the command template was not changed, because this
+project only manages the Vibe Kanban repository.

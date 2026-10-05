@@ -417,6 +417,7 @@ mod tests {
         ExecutorProfile {
             recently_used_models: None,
             disabled_models: Vec::new(),
+            disabled: false,
             configurations: HashMap::from([(variant.to_string(), agent)]),
         }
     }

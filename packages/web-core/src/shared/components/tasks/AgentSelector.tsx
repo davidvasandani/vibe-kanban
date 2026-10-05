@@ -8,6 +8,7 @@ import {
 } from '@vibe/ui/components/DropdownMenu';
 import { Label } from '@vibe/ui/components/Label';
 import type { ExecutorProfileId, BaseCodingAgent } from 'shared/types';
+import { filterEnabledAgents } from '@/shared/lib/disabledAgents';
 
 interface AgentSelectorProps {
   profiles: Record<string, Record<string, unknown>> | null;
@@ -26,10 +27,14 @@ export function AgentSelector({
   className = '',
   showLabel = false,
 }: AgentSelectorProps) {
-  const agents = profiles
-    ? (Object.keys(profiles).sort() as BaseCodingAgent[])
-    : [];
   const selectedAgent = selectedExecutorProfile?.executor;
+  const agents = profiles
+    ? filterEnabledAgents(
+        Object.keys(profiles).sort() as BaseCodingAgent[],
+        profiles,
+        [selectedAgent]
+      )
+    : [];
 
   if (!profiles) return null;
 

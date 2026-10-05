@@ -1516,7 +1516,12 @@ export type ExecutorProfile = { recently_used_models?: ExecutorRecentModels | nu
 /**
  * Model keys (`provider/model` or `model`) hidden from the model picker.
  */
-disabled_models?: Array<string>, } & ({ [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "GROK": Grok } });
+disabled_models?: Array<string>, 
+/**
+ * Hidden from agent pickers. The agent stays configurable in Settings
+ * and can still run; this is a display preference, not access control.
+ */
+disabled?: boolean, } & ({ [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "GROK": Grok } });
 
 export type ExecutorConfigs = { executors: { [key in BaseCodingAgent]?: ExecutorProfile }, };
 

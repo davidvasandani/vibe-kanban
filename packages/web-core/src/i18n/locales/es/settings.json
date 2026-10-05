@@ -371,6 +371,13 @@
       "description": "Personaliza el comportamiento de los agentes con diferentes configuraciones.",
       "loading": "Cargando configuraciones de agentes...",
       "selectAgent": "Seleccionar agente",
+      "visibility": {
+        "title": "Visibilidad",
+        "description": "Los agentes deshabilitados se ocultan de los selectores de agentes. Siguen siendo configurables aquí y el trabajo existente sigue ejecutándose.",
+        "label": "Mostrar en los selectores de agentes",
+        "defaultLocked": "El agente predeterminado no se puede deshabilitar. Primero establece otro agente como predeterminado.",
+        "lastLocked": "Al menos un agente debe permanecer habilitado."
+      },
       "models": {
         "title": "Modelos",
         "description": "Los modelos sin marcar se ocultan del menú de modelos de este agente.",
@@ -407,7 +414,8 @@
         "jsonLabel": "Configuración de Agente (JSON)",
         "jsonPlaceholder": "Cargando perfiles...",
         "jsonLoading": "Cargando...",
-        "pathLabel": "Ubicación del archivo de configuración:"
+        "pathLabel": "Ubicación del archivo de configuración:",
+        "disabled": "Deshabilitado"
       },
       "errors": {
         "deleteFailed": "Error al eliminar la configuración. Por favor, inténtalo de nuevo.",

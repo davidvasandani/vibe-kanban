@@ -533,12 +533,19 @@ impl ExecutionSupervisor {
                     dispatch.mcp_config_snapshot.as_ref(),
                 )
                 .await?;
-            let (recently_used_models, disabled_models) = executor_profile
-                .map(|profile| (profile.recently_used_models, profile.disabled_models))
+            let (recently_used_models, disabled_models, disabled) = executor_profile
+                .map(|profile| {
+                    (
+                        profile.recently_used_models,
+                        profile.disabled_models,
+                        profile.disabled,
+                    )
+                })
                 .unwrap_or_default();
             executor_profile = Some(ExecutorProfile {
                 recently_used_models,
                 disabled_models,
+                disabled,
                 configurations: HashMap::from([(
                     config.variant.unwrap_or_else(|| "DEFAULT".into()),
                     prepared.agent.clone(),
