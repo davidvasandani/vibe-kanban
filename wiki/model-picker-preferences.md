@@ -6,7 +6,8 @@ catalog with per-agent preferences stored in `profiles.json`.
 
 ## Preferences live on `ExecutorProfile`, not in the catalog
 
-Per-agent picker state (`recently_used_models`, `disabled_models`) is stored as
+Per-agent picker state (`recently_used_models`, `disabled_models`, and the
+agent-level `disabled` flag, see [[agent-picker-visibility]]) is stored as
 named fields on `ExecutorProfile`, next to the flattened variant map. Every new
 field of this kind needs four things:
 
@@ -66,3 +67,4 @@ the layout viewport, not `visualViewport`.
 ## Contributed by
 
 - `vk/6823-model-menu`
+- `vk/2e22-disable-agent`

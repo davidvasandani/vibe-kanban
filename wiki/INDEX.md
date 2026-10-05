@@ -62,6 +62,19 @@ contributed to it.
   Hiding keeps the selection visible. Invalidate `['user-system']` so stale
   chat copies cannot overwrite a save. Settings discovery follows the settings
   host, and touch pickers must not autofocus inputs.
+- [agent-picker-visibility.md](agent-picker-visibility.md) — Disabling
+  agents is a per-host `ExecutorProfile.disabled` display flag, not access
+  control. One resolver (`disabledAgents.ts`) keeps the current value visible,
+  never strands a picker, skips disabled agents only in implicit fallbacks,
+  and guards the default/last agent against unsaved state. Includes the
+  picker inventory and the `settings.agents.availability` i18n key trap
+  (`vk/2e22-disable-agent`).
+- [host-env-sensitive-tests.md](host-env-sensitive-tests.md) — The Slack
+  `shared_mcp_config` tests and the worker GitHub-routing test fail only on
+  the agent host because of real `VIBE_KANBAN_SLACK_MCP_URL` and
+  `GIT_CONFIG_*`/`VK_GITHUB_PAT_*` variables. Re-run with them unset before
+  blaming a diff. Also covers foreground-only test runs in VK turns
+  (`vk/2e22-disable-agent`).
 - [browser-title-selection.md](browser-title-selection.md) — Browser-tab titles
   select one meaningful label from an ordered fallback chain, trim metadata
   whitespace, use product branding only as the empty-state fallback, and remain
