@@ -13,6 +13,8 @@ import type {
   PipelineValidation,
 } from 'shared/types';
 import { pipelinesApi } from '@/shared/lib/api';
+import { getHostRequestScopeQueryKey } from '@/shared/lib/hostRequestScope';
+import { useHostId } from '@/shared/providers/HostIdProvider';
 import type { MachineClient } from '@/shared/lib/machineClient';
 
 export const PIPELINES_QUERY_KEY = ['pipelines'] as const;
@@ -31,9 +33,11 @@ export const pipelineSettingsKeys = {
  * stale time keeps the task-create flow snappy without going stale.
  */
 export function usePipelines() {
+  // Pipelines are per-machine files, so the cache is per host.
+  const hostId = useHostId();
   return useQuery<Pipeline[]>({
-    queryKey: PIPELINES_QUERY_KEY,
-    queryFn: () => pipelinesApi.list(),
+    queryKey: [...PIPELINES_QUERY_KEY, getHostRequestScopeQueryKey(hostId)],
+    queryFn: () => pipelinesApi.list(hostId),
     staleTime: 60 * 1000,
   });
 }
@@ -48,9 +52,17 @@ export function useNewIssuePipelineDefaults(
   projectId: string | undefined,
   enabled = true
 ) {
+  // Defaults live in the host's config, so scope the cache (and target the
+  // request) to the host the issue is being created on.
+  const hostId = useHostId();
   return useQuery<NewIssuePipelineDefaultsResponse>({
-    queryKey: [...PIPELINES_QUERY_KEY, 'new-issue-defaults', projectId ?? null],
-    queryFn: () => pipelinesApi.newIssueDefaults(projectId),
+    queryKey: [
+      ...PIPELINES_QUERY_KEY,
+      'new-issue-defaults',
+      getHostRequestScopeQueryKey(hostId),
+      projectId ?? null,
+    ],
+    queryFn: () => pipelinesApi.newIssueDefaults(projectId, hostId),
     enabled,
     staleTime: 60 * 1000,
     retry: 1,

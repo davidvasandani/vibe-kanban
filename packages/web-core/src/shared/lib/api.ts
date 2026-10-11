@@ -1281,19 +1281,23 @@ export const tagsApi = {
 
 // Pipelines APIs (file-based task pipelines; see GET /api/pipelines)
 export const pipelinesApi = {
-  list: async (): Promise<Pipeline[]> => {
-    const response = await makeRequest('/api/pipelines', { cache: 'no-store' });
+  list: async (hostId?: string | null): Promise<Pipeline[]> => {
+    const response = await makeHostAwareRequest('/api/pipelines', hostId, {
+      cache: 'no-store',
+    });
     return handleApiResponse<Pipeline[]>(response);
   },
   /** Default pipelines for a new issue in `projectId` (project → org → machine). */
   newIssueDefaults: async (
-    projectId?: string
+    projectId?: string,
+    hostId?: string | null
   ): Promise<NewIssuePipelineDefaultsResponse> => {
     const query = projectId
       ? `?project_id=${encodeURIComponent(projectId)}`
       : '';
-    const response = await makeRequest(
+    const response = await makeHostAwareRequest(
       `/api/pipelines/new-issue-defaults${query}`,
+      hostId,
       { cache: 'no-store' }
     );
     return handleApiResponse<NewIssuePipelineDefaultsResponse>(response);
