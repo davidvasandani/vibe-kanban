@@ -1,66 +1,54 @@
-# Prior knowledge: default pipelines for new issues
+# Prior knowledge: VK MCP session chat history
 
-Task `vk/16dc-default-pipeline`. Distilled from the project knowledge base
-(`wiki/`), which I only read. Relevant pages:
-`task-pipeline-block`, `kanban-issue-panel-sections`, `auto-error-remediation`,
-`bundled-file-seed-manifests`, `agent-picker-visibility`, `frontend-linting`
-and `create-mode-repo-branch-defaulting`.
+Task `vk/5b8a-vk-mcp-chat-logs`. Distilled from `wiki/`, `docs/knowledge-base/`,
+`crates/mcp/AGENTS.md` and earlier task specs. Read-only summary.
 
-## Pipeline block (wiki: task-pipeline-block)
+## Existing message readers (`vk/29d8-vk-list-all-mess`, `crates/mcp/AGENTS.md`)
 
-- The issue description is the only place the selection is stored, as a
-  delimited `## Pipeline` block. There is no structured copy, and adding one
-  would create a second source of truth. This task changes only which
-  pipelines are *seeded*, not where they are stored.
-- `PipelineSection` is uncontrolled and seeded exactly once, after the
-  pipeline list loads. Callers reseed by remounting it via `key`.
-  - Don't reseed ticks from an effect that watches the selection, because it
-    clobbers the user's ticks.
-  - New seeding inputs (the resolved defaults) must join the single
-    seed-once effect. Seeding must wait until *both* the pipeline list and
-    the defaults have settled, or it will seed from a half-loaded state.
-- Pipeline toggles adjust ticks incrementally. Each seeded pipeline enables
-  its own `default_enabled` stages.
-- Rust composer: every backend path that writes a block, MCP `create_issue`
-  included, must go through `api_types::pipeline_block`, so its output stays
-  byte-identical to the TS composer. MCP's defaulted path must reuse it.
+- `list_recent_messages` / `list_all_messages` / `get_execution.final_message`
+  are projections of `ContainerService::normalized_entries` served through
+  `GET /api/execution-processes/{id}/messages` and
+  `GET /api/sessions/{id}/messages`. The session route resolves **only the
+  newest non-dropped `CodingAgent` execution**. That is the gap this task
+  closes.
+- Projection rules to reuse rather than fork: `entry_role` (drops `Loading`
+  and `TokenUsageInfo`), empty-text skip, 4000-char truncation with a
+  `… [truncated]` marker, ids `{execution_id}:{entry_index}`, `parse_roles`.
+- 29d8 clarified that `all` means "the settled normalized projection Vibe
+  Kanban has", including the legacy normalizer's newest-2,000-raw-message
+  safety window and its omission notice. It is not an unbounded raw-log replay.
+  The same caveat applies per turn here.
+- Execution-first precedence when both `session_id` and `execution_id` are
+  given.
 
-## Issue panel layout (wiki: kanban-issue-panel-sections)
+## Cost of reading turns (`docs/knowledge-base/lazy-loading-normalized-conversation-history.md`, `wiki/awaited-stream-settlement.md`)
 
-- `renderPipeline` renders in both modes. The container branches per mode:
-  create stashes the block until submit; edit seeds from the stored block
-  and applies it with Update Issue. Collapsing is internal to
-  `PipelineSection`, so neither path changes.
-- The panel is shared by local-web and remote-web.
+- A finished turn with a materialized sidecar is a cheap replay. A legacy
+  turn without one needs a full vendor re-normalization, gated by a per-execution
+  lease plus a **global historical-normalization permit**. A session-wide
+  read should therefore load turns **sequentially**, and should skip turns
+  it can rule out without reading (time-window pruning), not fan out.
+- Running turns are read from the live in-memory `MsgStore` snapshot.
 
-## Settings (wiki: auto-error-remediation, agent-picker-visibility)
+## Timestamps (`specs/vk/a22f-time-stamp-chat`)
 
-- `GeneralSettingsSection.updateDraft` uses lodash `merge`, which merges
-  arrays **by index**, so deselecting an item can never shrink a list.
-  Replace whole objects that contain arrays (the remediation card does this
-  for `auto_error_remediation`).
-- Settings under "Machine settings" are per-host. `useUserSystem` inside the
-  settings dialog is wrapped by `SettingsMachineUserSystemProvider`, so
-  `config` and `updateAndSaveConfig` target the selected machine.
-- Bundled and deployed pipelines differ: the live TOMLs are user-editable.
-  Never test against deployed pipeline text, and never assume a pipeline id
-  exists. Defaults must tolerate missing ids.
-- Auto error remediation already has its own `pipeline_ids`. It must keep
-  naming its pipelines explicitly and must not inherit the new defaults.
+- `NormalizedEntry.timestamp` is `Option<String>` and most normalizers leave
+  it `None`. The chat UI falls back to the execution record's time when an
+  entry has none, and never fabricates "now". Date filters should do the same
+  (entry timestamp, else turn `started_at`), so in practice time filtering is
+  turn-granular for most executors.
 
-## Frontend checks (wiki: frontend-linting)
+## MCP conventions (`crates/mcp/AGENTS.md`, `wiki/mcp-pr-tools-and-connection-notices.md`)
 
-- ESLint forbids directive comments outright.
-- The i18n check requires key parity across every locale (en, es, fr, ja,
-  ko, zh-*). Every new key must be added to all of them.
-- `pnpm run lint` also runs the unused-i18n-key check.
+- Every session-reading tool fetches the session and calls
+  `scope_allows_workspace` before reading.
+- Tools are registered by name in `tools/mod.rs` (the scoped tool list) as well
+  as through the `#[tool_router]` impl.
+- The MCP talks HTTP to the backend and mirrors response structs locally
+  (e.g. `RecentMessagesPayload`) instead of importing server types.
 
-## Config storage precedent
+## Constitution points that apply
 
-- Fields added to the v8 `Config` use `#[serde(default)]`, so old configs
-  load without a version bump (examples: `resume_interrupted_on_startup`,
-  `auto_error_remediation`).
-- The precedent for remote project fields is project `context`
-  (`vk/4931-project-context-ui`). That needs a remote migration and a
-  regenerated SQLx offline cache, which requires Postgres, and this
-  environment has none. That is one reason to store overrides locally.
+- III/VI: extend the existing `/messages` projection; no new store.
+- II: unit-test the pure filter, paging and time logic with `#[cfg(test)]`.
+- IX: unknown or absent timestamps degrade safely.

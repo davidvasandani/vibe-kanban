@@ -1,3 +1,4 @@
+pub mod history;
 pub mod queue;
 pub mod review;
 
@@ -349,6 +350,7 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
     let session_id_router = Router::new()
         .route("/", get(get_session).put(update_session))
         .route("/messages", get(get_session_messages))
+        .route("/history", get(history::get_session_history))
         .route("/follow-up", post(follow_up))
         .route("/reset", post(reset_process))
         .route("/setup", post(run_setup_script))

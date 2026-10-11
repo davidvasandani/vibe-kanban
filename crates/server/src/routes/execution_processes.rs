@@ -172,6 +172,80 @@ pub async fn build_recent_messages_response(
     }
 }
 
+/// Projects one normalized entry into a [`SessionMessage`], alongside its
+/// untruncated (trimmed) text so callers can filter on content the
+/// 4000-char cap would hide. `None` for entries that are not messages, are
+/// empty, or fall outside `roles`.
+pub fn project_entry<'a>(
+    index: usize,
+    entry: &'a NormalizedEntry,
+    execution_id: Uuid,
+    roles: Option<&HashSet<String>>,
+) -> Option<(SessionMessage, &'a str)> {
+    let role = entry_role(&entry.entry_type)?;
+    if roles.is_some_and(|roles| !roles.contains(role)) {
+        return None;
+    }
+    let text = entry.content.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let message = SessionMessage {
+        id: format!("{execution_id}:{index}"),
+        role: role.to_string(),
+        text: truncate(text),
+        created_at: entry.timestamp.clone(),
+        execution_id: execution_id.to_string(),
+    };
+    Some((message, text))
+}
+
+/// Characters of context kept on each side of a keyword hit.
+const SNIPPET_CONTEXT_CHARS: usize = 80;
+
+/// Lowercases per char, keeping one output char per input char so match
+/// positions map straight back onto `text` (multi-char lowercase forms such
+/// as `İ` keep only their first char).
+fn fold_chars(text: &str) -> Vec<char> {
+    text.chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect()
+}
+
+/// True when `text` contains `needle` case-insensitively. `needle` must be
+/// non-empty.
+pub fn contains_folded(text: &str, needle: &str) -> bool {
+    find_folded(&fold_chars(text), &fold_chars(needle)).is_some()
+}
+
+fn find_folded(haystack: &[char], needle: &[char]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// A window of `text` around the first case-insensitive occurrence of
+/// `needle`, with `…` marking clipped sides. `None` if there is no hit.
+pub fn match_snippet(text: &str, needle: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let start = find_folded(&fold_chars(text), &fold_chars(needle))?;
+    let end = start + needle.chars().count();
+    let from = start.saturating_sub(SNIPPET_CONTEXT_CHARS);
+    let to = (end + SNIPPET_CONTEXT_CHARS).min(chars.len());
+    let mut snippet = String::new();
+    if from > 0 {
+        snippet.push('…');
+    }
+    snippet.extend(&chars[from..to]);
+    if to < chars.len() {
+        snippet.push('…');
+    }
+    Some(snippet)
+}
+
 fn project_messages(
     entries: &[NormalizedEntry],
     execution_id: Uuid,
@@ -181,23 +255,8 @@ fn project_messages(
     let mut messages: Vec<SessionMessage> = entries
         .iter()
         .enumerate()
-        .filter_map(|(index, entry)| {
-            let role = entry_role(&entry.entry_type)?;
-            if roles.is_some_and(|roles| !roles.contains(role)) {
-                return None;
-            }
-            let text = entry.content.trim();
-            if text.is_empty() {
-                return None;
-            }
-            Some(SessionMessage {
-                id: format!("{execution_id}:{index}"),
-                role: role.to_string(),
-                text: truncate(text),
-                created_at: entry.timestamp.clone(),
-                execution_id: execution_id.to_string(),
-            })
-        })
+        .filter_map(|(index, entry)| project_entry(index, entry, execution_id, roles))
+        .map(|(message, _)| message)
         .collect();
 
     match selection {
@@ -806,6 +865,63 @@ mod tests {
             Some("message 124")
         );
         assert!(recent_has_more);
+    }
+
+    #[test]
+    fn match_snippet_centres_on_the_first_case_insensitive_hit() {
+        let text = format!("{}Needle here{}", "a".repeat(200), "b".repeat(200));
+        let snippet = match_snippet(&text, "nEEDLE").unwrap();
+        assert!(snippet.starts_with('…'));
+        assert!(snippet.ends_with('…'));
+        assert!(snippet.contains("Needle here"));
+        assert_eq!(
+            snippet.chars().count(),
+            2 + "needle".len() + 2 * SNIPPET_CONTEXT_CHARS
+        );
+    }
+
+    #[test]
+    fn match_snippet_is_unclipped_for_short_text_and_none_without_hit() {
+        assert_eq!(
+            match_snippet("Short TEXT", "text").as_deref(),
+            Some("Short TEXT")
+        );
+        assert_eq!(match_snippet("Short", "missing"), None);
+        assert_eq!(match_snippet("Short", ""), None);
+    }
+
+    #[test]
+    fn match_snippet_keeps_multibyte_boundaries() {
+        let text = format!("{}ÄÖÜ İstanbul café{}", "é".repeat(100), "ü".repeat(100));
+        let snippet = match_snippet(&text, "CAFÉ").unwrap();
+        assert!(snippet.contains("café"));
+        assert!(contains_folded(&text, "istanbul"));
+        assert!(!contains_folded(&text, "zzz"));
+    }
+
+    #[test]
+    fn project_entry_returns_untruncated_text_for_filtering() {
+        let execution_id = Uuid::new_v4();
+        let long = format!("{} tail-marker", "x".repeat(MAX_MESSAGE_CHARS + 10));
+        let entry = entry(
+            NormalizedEntryType::ToolUse {
+                tool_name: "bash".to_string(),
+                action_type: executors::logs::ActionType::Other {
+                    description: "run".to_string(),
+                },
+                status: executors::logs::ToolStatus::Success,
+            },
+            &long,
+        );
+
+        let (message, untruncated) = project_entry(3, &entry, execution_id, None).unwrap();
+
+        assert_eq!(message.id, format!("{execution_id}:3"));
+        assert_eq!(message.role, "tool");
+        assert!(message.text.ends_with("… [truncated]"));
+        assert!(untruncated.ends_with("tail-marker"));
+        let roles = HashSet::from(["user".to_string()]);
+        assert!(project_entry(3, &entry, execution_id, Some(&roles)).is_none());
     }
 
     #[test]

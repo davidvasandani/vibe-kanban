@@ -1,112 +1,54 @@
-# Implementation plan: default pipelines for new issues
+# Implementation plan: VK MCP session chat history
 
-Task `vk/16dc-default-pipeline`. See `SPEC.md` for the design and
-`PRIOR_KNOWLEDGE.md` for the constraints this plan respects.
+Task `vk/5b8a-vk-mcp-chat-logs`. See `SPEC.md`.
 
-## Step 1: Config type (services)
+## Step 1: Backend pure logic (`crates/server/src/routes/execution_processes.rs`)
 
-- `crates/services/src/services/config/versions/v8.rs`: add
-  `NewIssuePipelineDefaults { pipeline_ids, organizations, projects }` with
-  `#[serde(default)]`. `Default` sets `pipeline_ids = ["basic"]`.
-- Add `#[serde(default)] pub new_issue_pipelines` to `Config`, and to the
-  `from_v7_config` and `Default` literals.
-- `config/mod.rs`: re-export `pub type NewIssuePipelineDefaults`.
-- Find every other `Config { .. }` struct literal (`rg "auto_error_remediation:"`)
-  and add the field there too.
-- Unit test: a v8 JSON without the field deserializes to the default.
+1. Factor the per-entry projection out of `project_messages` into
+   `project_entries(entries, execution_id) -> Vec<(SessionMessage, untruncated
+   &str)>` (or an equivalent iterator), so `/messages` and the new history
+   route share role mapping, the empty-text skip, truncation and ids.
+   `project_messages` keeps its signature and behaviour.
+2. Add `match_snippet(text, needle_lower) -> Option<String>`, which returns a
+   char-safe window of about 160 chars around the first case-insensitive hit,
+   with `…` on clipped sides.
+3. Add `entry_effective_time(entry_ts: Option<&str>, turn_started_at) ->
+   DateTime<Utc>`, which parses RFC 3339 and falls back to the turn start.
 
-## Step 2: Resolver (services::pipelines)
+## Step 2: Backend route (`crates/server/src/routes/sessions/mod.rs`)
 
-- `NewIssuePipelineSource` enum (`Project | Organization | Machine`, serde
-  snake_case, TS).
-- `NewIssuePipelineDefaultsResponse { pipeline_ids, source }` (TS).
-- Pure `resolve_new_issue_pipelines(defaults, project_id, org_id)`, which
-  returns `(Vec<String>, source)`.
-- Pure `retain_available(ids, &[Pipeline])`: keeps configured order, drops
-  missing ids, dedupes.
-- Unit tests: precedence, an empty override means none, a missing org
-  falls through to machine, filtering and ordering.
+1. `SessionHistoryQuery { since, until, query, roles, execution_id, limit,
+   offset, order }` (serde, with `since`/`until` as `Option<String>` parsed in
+   the handler so the error message is useful).
+2. `SessionHistoryResponse` / `SessionHistoryMessage` (Serialize + TS).
+3. `turn_overlaps(started, completed, since, until) -> bool`, which is pure.
+4. A `paginate(matches, order, offset, limit)` helper, which is pure.
+5. `get_session_history` handler: load turns, validate `execution_id`,
+   prune, load entries sequentially, filter, paginate and respond. Register
+   `.route("/history", get(get_session_history))`.
+6. Unit tests: overlap, effective time fallback, snippet (unicode, edges,
+   no hit), paging (`asc`/`desc`, offset past end, `has_more`), keyword
+   matching beyond the truncation cap, role filter.
 
-## Step 3: Route (server)
+## Step 3: MCP tool (`crates/mcp/src/task_server/tools/sessions.rs`, `tools/mod.rs`)
 
-- `crates/server/src/routes/pipelines.rs`:
-  `GET /pipelines/new-issue-defaults?project_id=`, with deployment state.
-  - Read the config.
-  - If there is no project override and `project_id` is set, look up the org
-    via `deployment.remote_client()?.get_remote_project`, with a 5 s timeout
-    and a warning on failure.
-  - Resolve, then `retain_available(load_pipelines(..))`.
-- `generate_types.rs`: register `NewIssuePipelineDefaults`,
-  `NewIssuePipelineSource`, `NewIssuePipelineDefaultsResponse`. Run
-  `pnpm run generate-types`.
+1. `SearchSessionMessagesRequest` (schemars descriptions) and a mirrored
+   `SessionHistoryPayload` / response.
+2. `search_session_messages` tool: fetch the session, check scope, GET
+   `/api/sessions/{id}/history` with the query, then return.
+3. Register the name in the tool list in `tools/mod.rs`.
+4. Add a hint about earlier turns to the `list_recent_messages` and
+   `list_all_messages` descriptions.
 
-## Step 4: MCP `create_issue`
+## Step 4: Docs
 
-- `remote_issues.rs`:
-  - `pipeline_ids: None` → GET `/api/pipelines/new-issue-defaults?project_id=`.
-    On error, warn and fall back to `[]`.
-  - `Some(ids)` → unchanged (`Some([])` = none).
-  - Resolve the pipeline objects from `/api/pipelines` in both cases.
-    Defaulted ids are already filtered, so a missing one is skipped rather
-    than raised as an error.
-- Update the schemars descriptions for `pipeline_ids` and the
-  `list_pipelines` tool text.
-- Refactor the selection into a small pure helper so a unit test can cover
-  "defaulted ids missing from catalog are skipped, explicit ones error".
+- `crates/mcp/AGENTS.md`: add a `search_session_messages` bullet under
+  "Reading a session before following up".
 
-## Step 5: Frontend data
+## Step 5: Verify
 
-- `api.ts`: `pipelinesApi.newIssueDefaults(projectId?)`.
-- `usePipelines.ts`: `useNewIssuePipelineDefaults(projectId)` with query key
-  `['pipelines', 'new-issue-defaults', projectId]`. It lives under
-  `PIPELINES_QUERY_KEY`, so the existing invalidation also refreshes it.
-
-## Step 6: `PipelineSection`
-
-- `expanded` initial state is `false`.
-- Collapsed header summary: the selected pipeline names after the title.
-- A new `defaultPipelineIds?: string[] | null` prop:
-  - `undefined` → legacy seeding (basic/first).
-  - `null` → still loading, so wait.
-  - an array → seed exactly those pipelines that exist, in their given
-    order. The seed-once effect waits while it is `null`.
-- Update `PipelineSection` tests/stories if present. Add a Vitest for the
-  pure seeding helper (`seedPipelineIds(pipelines, defaults)`) in
-  `taskPipeline.ts`.
-
-## Step 7: Container
-
-- `KanbanIssuePanelContainer`: call
-  `useNewIssuePipelineDefaults(projectId)` (enabled in create mode only) and
-  pass `defaultPipelineIds`: `data.pipeline_ids` on success, `[]` on error,
-  `null` while loading.
-
-## Step 8: Settings card
-
-- New `NewIssuePipelineDefaultsCard.tsx`, rendered at the bottom of
-  `PipelinesSettingsSection`:
-  - Uses `useUserSystem()` (machine-scoped), `usePipelineStatuses` (valid
-    ones), `useUserOrganizations` and `useAllOrganizationProjects`.
-  - Machine checkboxes. Per org and per project, an inherit/override select
-    plus checkboxes.
-  - Each change calls `updateAndSaveConfig({ new_issue_pipelines: next })`
-    with the whole object, then invalidates `PIPELINES_QUERY_KEY`.
-  - Missing ids are shown with a "missing" badge and can be unticked.
-- Pure helpers in `pipelineSettings.ts` (`setMachineDefault`,
-  `setScopeOverride`, `clearScopeOverride`), with tests.
-- i18n: new `settings.pipelines.newIssueDefaults.*` keys in every locale,
-  plus a `taskPipeline` collapsed-summary key if one is needed.
-
-## Step 9: Verify
-
-- `cargo test -p services pipelines`, `cargo test -p mcp`,
-  `cargo check --workspace`.
-- `pnpm run generate-types:check`, `pnpm run check`, `pnpm run lint`, the
-  web-core vitest for the touched files, then `pnpm run format`.
-
-## Step 10: Review, knowledge base, PR
-
-- Codex review loop.
-- Update `wiki/task-pipeline-block.md` (seeding defaults, collapse) and add
-  a topic page on new-issue pipeline defaults. Update `wiki/INDEX.md`.
-- Open the PR and merge it.
+- `cargo test -p server` (route unit tests), `cargo test -p mcp`.
+- `cargo clippy` on the touched crates, `pnpm run format`.
+- `pnpm run generate-types:check`, only if TS-derived types get exported
+  (the new types are not added to `generate_types.rs`, matching
+  `RecentMessagesResponse`).

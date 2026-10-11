@@ -253,6 +253,86 @@ impl From<RecentMessagesPayload> for ListRecentMessagesResponse {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SearchSessionMessagesRequest {
+    #[schemars(description = "Session ID whose chat log to read, across every coding-agent turn")]
+    session_id: Uuid,
+    #[schemars(
+        description = "Inclusive RFC 3339 lower bound, e.g. 2026-10-11T09:00:00Z. Messages without their own timestamp use their turn's start time."
+    )]
+    since: Option<String>,
+    #[schemars(description = "Inclusive RFC 3339 upper bound")]
+    until: Option<String>,
+    #[schemars(
+        description = "Case-insensitive substring to search for. Matches the full message text, even past the 4000-char display cap; each hit includes a match_snippet."
+    )]
+    query: Option<String>,
+    #[schemars(
+        description = "Optional comma-separated role filter, any of: user, assistant, system, tool."
+    )]
+    roles: Option<String>,
+    #[schemars(description = "Restrict to one turn (execution ID) of this session")]
+    execution_id: Option<Uuid>,
+    #[schemars(description = "Page size. Default 50, max 200.")]
+    limit: Option<usize>,
+    #[schemars(description = "Number of matching messages to skip. Default 0.")]
+    offset: Option<usize>,
+    #[schemars(description = "'asc' (oldest first, default) or 'desc' (newest first)")]
+    order: Option<HistoryOrder>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum HistoryOrder {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct SessionHistoryMessage {
+    #[schemars(description = "Stable id for this message, scoped to its execution")]
+    id: String,
+    #[schemars(description = "One of: user, assistant, system, tool")]
+    role: String,
+    text: String,
+    #[schemars(description = "The entry's own timestamp, if the executor reported one")]
+    created_at: Option<String>,
+    #[schemars(
+        description = "Start of the owning turn; the effective time when created_at is null"
+    )]
+    turn_started_at: String,
+    execution_id: String,
+    #[schemars(description = "0-based position of the owning turn in the session")]
+    turn_index: usize,
+    #[schemars(description = "Context around the first keyword hit, when query was given")]
+    match_snippet: Option<String>,
+}
+
+/// Mirrors `SessionHistoryResponse` (`crates/server/src/routes/sessions/history.rs`).
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct SearchSessionMessagesResponse {
+    session_id: String,
+    #[schemars(description = "Coding-agent turns in the session")]
+    turn_count: usize,
+    #[schemars(
+        description = "Turns whose log was read (others were outside the time window or unscanned)"
+    )]
+    turns_scanned: usize,
+    #[schemars(description = "Matches across scanned turns, before paging")]
+    total_matches: usize,
+    offset: usize,
+    limit: usize,
+    order: HistoryOrder,
+    #[schemars(description = "True if more matches follow this page; raise offset to read them")]
+    has_more: bool,
+    #[schemars(
+        description = "False if the request budget ran out before every candidate turn was read; retry or narrow with execution_id/since/until"
+    )]
+    complete: bool,
+    unscanned_execution_ids: Vec<String>,
+    messages: Vec<SessionHistoryMessage>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct RefreshMcpToolsRequest {
     #[schemars(description = "Workspace ID. Optional in an orchestrator-scoped MCP context.")]
     workspace_id: Option<Uuid>,
@@ -605,7 +685,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Read the last N normalized messages (structured, not a raw log dump) for a session or execution — the same conversation the UI shows, without opening the logs websocket. Pass session_id to read the latest coding-agent turn, or execution_id to target a specific turn. Check this before a follow-up run_session_prompt so the nudge responds to what the agent actually said instead of guessing from status/exit_code alone."
+        description = "Read the last N normalized messages (structured, not a raw log dump) for a session or execution — the same conversation the UI shows, without opening the logs websocket. Pass session_id to read the latest coding-agent turn, or execution_id to target a specific turn. Check this before a follow-up run_session_prompt so the nudge responds to what the agent actually said instead of guessing from status/exit_code alone. For earlier turns, or to filter by time or keyword, use search_session_messages."
     )]
     async fn list_recent_messages(
         &self,
@@ -637,7 +717,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Read every available normalized message (structured, not a raw log dump) for a session's latest coding-agent turn or a specific execution. Use this when context may fall outside list_recent_messages' bounded tail. Results preserve the backend's normalized-history safeguards and per-message truncation."
+        description = "Read every available normalized message (structured, not a raw log dump) for a session's latest coding-agent turn or a specific execution. Use this when context may fall outside list_recent_messages' bounded tail. Results preserve the backend's normalized-history safeguards and per-message truncation. For earlier turns of a session, or to filter by time or keyword, use search_session_messages."
     )]
     async fn list_all_messages(
         &self,
@@ -661,6 +741,73 @@ impl McpServer {
         };
 
         Self::success(&ListRecentMessagesResponse::from(payload))
+    }
+
+    #[tool(
+        description = "Search or page through a session's whole chat log: every coding-agent turn, not just the latest. Filter by time window (since/until, RFC 3339), keyword (case-insensitive substring), roles, or one turn (execution_id), and page with limit/offset. Most agents do not timestamp individual messages, so time filtering is usually per turn (by turn start). Check `complete`: when false, some turns went unscanned within the time budget."
+    )]
+    async fn search_session_messages(
+        &self,
+        Parameters(SearchSessionMessagesRequest {
+            session_id,
+            since,
+            until,
+            query,
+            roles,
+            execution_id,
+            limit,
+            offset,
+            order,
+        }): Parameters<SearchSessionMessagesRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        #[derive(Serialize)]
+        struct HistoryQuery {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            since: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            until: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            query: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            roles: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            execution_id: Option<Uuid>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            limit: Option<usize>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            offset: Option<usize>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            order: Option<HistoryOrder>,
+        }
+
+        let session_url = self.url(&format!("/api/sessions/{session_id}"));
+        let session: Session = match self.send_json(self.client.get(&session_url)).await {
+            Ok(value) => value,
+            Err(error_result) => return Ok(Self::tool_error(error_result)),
+        };
+        if let Err(error_result) = self.scope_allows_workspace(session.workspace_id) {
+            return Ok(Self::tool_error(error_result));
+        }
+
+        let url = self.url(&format!("/api/sessions/{session_id}/history"));
+        let history_query = HistoryQuery {
+            since,
+            until,
+            query,
+            roles,
+            execution_id,
+            limit,
+            offset,
+            order,
+        };
+        let response: SearchSessionMessagesResponse = match self
+            .send_json(self.client.get(&url).query(&history_query))
+            .await
+        {
+            Ok(value) => value,
+            Err(error_result) => return Ok(Self::tool_error(error_result)),
+        };
+        Self::success(&response)
     }
 }
 

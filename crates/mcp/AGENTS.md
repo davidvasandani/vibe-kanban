@@ -107,13 +107,31 @@ Two tools close that gap (`src/task_server/tools/sessions.rs`):
   the historical normalizer's newest-2,000-raw-message safety window and
   includes its explicit earlier-messages-omitted notice.
 
-Both are read-only projections of the same normalized-logs pipeline the UI's
+- **`search_session_messages`** — the whole session, not one turn: every
+  non-dropped `CodingAgent` execution, oldest first, each message tagged with
+  `execution_id` and `turn_index`. Filters: `since`/`until` (RFC 3339,
+  inclusive), `query` (case-insensitive substring matched against the
+  *untruncated* text, with a `match_snippet` per hit), `roles`, and
+  `execution_id`. Paged with `limit` (default 50, max 200), `offset`, and
+  `order` (`asc`/`desc`); the response carries `total_matches` and `has_more`.
+  Served by `GET /api/sessions/{id}/history`
+  (`crates/server/src/routes/sessions/history.rs`). Most normalizers leave
+  entry timestamps unset, so a message's effective time falls back to its
+  turn's `started_at` (`created_at` stays null, `turn_started_at` is
+  explicit): time filtering is effectively per turn. Turns outside the window
+  are pruned from execution metadata before any log is read; the rest load
+  sequentially (cold legacy turns share the historical-normalization permit)
+  under a 20 s budget. A budget miss returns `complete: false` plus
+  `unscanned_execution_ids` instead of a silently partial answer.
+
+All of these are read-only projections of the same normalized-logs pipeline the UI's
 conversation view and `.../normalized-logs/ws` already use
 (`ContainerService::normalized_entries`,
 `crates/services/src/services/container.rs`) — served via
-`GET /api/execution-processes/{id}/messages` and
-`GET /api/sessions/{id}/messages` (`crates/server/src/routes/execution_processes.rs`,
-`crates/server/src/routes/sessions/mod.rs`). Neither tool opens a websocket or
+`GET /api/execution-processes/{id}/messages`,
+`GET /api/sessions/{id}/messages` and `GET /api/sessions/{id}/history`
+(`crates/server/src/routes/execution_processes.rs`,
+`crates/server/src/routes/sessions/`). None of them opens a websocket or
 adds a second store: for a finished process this reads the on-disk normalized
 log cache; for a running one it reads the in-memory `MsgStore`. Tool-result and
 message text is truncated (4000 chars) before it leaves the backend, so a
@@ -122,7 +140,8 @@ use the logs websocket in the UI for the full untruncated transcript.
 
 Use `list_recent_messages` (or `get_execution.final_message`) before every
 follow-up `run_session_prompt`; use `list_all_messages` when the recent window
-does not contain enough context. A nudge that ignores the agent's messages is
+does not contain enough context, and `search_session_messages` for earlier
+turns or to find something by time or keyword. A nudge that ignores the agent's messages is
 the same blind retry regardless of how it's phrased.
 
 ## Recovering a wedged MCP session

@@ -722,6 +722,7 @@ pub(crate) mod tests {
             "restart_session".to_string(),
             "restart_workspace".to_string(),
             "run_session_prompt".to_string(),
+            "search_session_messages".to_string(),
             "spawn_background_helper".to_string(),
             "spawn_poller".to_string(),
             "stop_background_helper".to_string(),

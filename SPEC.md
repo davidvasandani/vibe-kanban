@@ -1,177 +1,150 @@
-# SPEC: Default pipelines for new issues
+# SPEC: VK MCP session chat history (filterable, every turn)
 
-Task: `vk/16dc-default-pipeline`. Feature spec, plan and tasks:
-`specs/vk/16dc-default-pipeline/` (homelab repo).
+Task: `vk/5b8a-vk-mcp-chat-logs`. Feature spec, plan and tasks:
+`specs/vk/5b8a-vk-mcp-chat-logs/`.
 
 ## Problem
 
-1. The **Pipeline** card in the kanban issue panel (create and edit modes)
-   renders expanded. It shows the pipeline checkboxes, every stage checkbox,
-   and a 6-row textarea. That pushes the rest of the panel (create button,
-   SpecKit, relationships, comments) below the fold on every issue.
-2. Which pipelines a new issue starts with is hard-coded and inconsistent:
-   - The New Issue UI always pre-selects the `basic` pipeline (or the first
-     pipeline when `basic` is absent).
-   - MCP `create_issue` attaches **no** pipeline unless the caller passes
-     `pipeline_ids`.
-   No setting lets an operator say "new issues get WikiLLM + SpecKit", and
-   nothing lets one project or organization differ from the rest.
+The VK MCP message readers (`list_recent_messages`, `list_all_messages`) read
+**one execution**: the given `execution_id`, or the session's *latest*
+coding-agent turn when only `session_id` is passed. A session is a chain of
+turns (one `CodingAgent` execution process per prompt). Earlier turns can be
+read only if the caller already knows each execution id, and the MCP exposes no
+way to list them. Nothing lets a caller ask "what was said in this session
+yesterday afternoon" or "where did the agent mention `migration`".
 
-## Goals
+## Goal
 
-- G1. The Pipeline card starts **collapsed** in both create and edit modes.
-  While collapsed, its header shows which pipelines are selected, so a
-  collapsed card never hides an attached pipeline.
-- G2. A per-machine setting lists the pipelines that start enabled on new
-  issues. Each pipeline can be turned on or off individually.
-- G3. Organizations and projects can override that setting. A project
-  override beats an organization override, which beats the machine setting.
-  An override can be "no pipelines".
-- G4. The resolved defaults apply to every new issue, whether it is created
-  in the New Issue UI or through MCP `create_issue`. An explicit choice at
-  issue creation still wins: ticking/unticking in the UI, or passing
-  `pipeline_ids` (including `[]`) to MCP.
+Any part of a session's chat log can be retrieved through the VK MCP, across
+every coding-agent turn, with filters:
 
-## Non-goals
-
-- Auto error remediation keeps its own `pipeline_ids` setting. It always
-  names its pipelines explicitly, so the new defaults do not touch it.
-- Issues created by Jira or Slack inbound sync and the remote-web frontend
-  are out of scope. The defaults live in the local host's config, which
-  those paths do not read.
-- No per-stage defaults beyond what already exists. Stages still start
-  ticked according to each pipeline's `default_enabled` flags.
-- No cloud (remote Postgres) schema change. See "Storage" below.
+- **Date/time window**: `since` / `until` (RFC 3339).
+- **Keyword**: case-insensitive substring match on message text.
+- **Role**: the existing `user,assistant,system,tool` filter.
+- **Turn**: restrict to one `execution_id`.
+- **Paging**: `limit` + `offset` over the filtered, chronologically ordered
+  result, with `total_matches` and `has_more` so the caller can walk all of it.
 
 ## Design
 
-### Storage: machine config, not the cloud database
+### Backend: `GET /api/sessions/{id}/history`
 
-Pipelines themselves are per-machine TOML files (`~/.vibe-kanban/pipelines/`),
-and both the UI picker and MCP read them from the local backend
-(`GET /api/pipelines`). Pipeline ids only mean something on the machine that
-defines them, so the defaults and their org/project overrides live beside
-them, in the machine's `config.json`:
+New route in `crates/server/src/routes/sessions/mod.rs`, next to
+`/messages`. Query parameters:
 
-```rust
-/// Pipelines enabled by default on new issues (UI and MCP `create_issue`).
-#[serde(default)]
-pub struct NewIssuePipelineDefaults {
-    /// Machine-wide default. Defaults to ["basic"], the old UI behavior.
-    pub pipeline_ids: Vec<String>,
-    /// Organization id → pipeline ids. A present key overrides the machine
-    /// default; an empty list means "no pipelines".
-    pub organizations: HashMap<Uuid, Vec<String>>,
-    /// Project id → pipeline ids. Beats the organization override.
-    pub projects: HashMap<Uuid, Vec<String>>,
+| param | type | meaning |
+|---|---|---|
+| `since`, `until` | RFC 3339 | inclusive time window on the message timestamp |
+| `query` | string | case-insensitive substring filter (trimmed; empty = none) |
+| `roles` | csv | same parser as `/messages` (`parse_roles`) |
+| `execution_id` | uuid | only that turn (must belong to the session) |
+| `limit` | int | default 50, clamped to 1..=200 |
+| `offset` | int | skip this many matches (default 0) |
+| `order` | `asc`/`desc` | chronological (default `asc`); `desc` returns newest first |
+
+Algorithm:
+
+1. `ExecutionProcess::find_by_session_id(pool, id, false)` → keep
+   `run_reason == CodingAgent`, ascending by `created_at` (already the order).
+2. If `execution_id` is set, keep only it (404 if it is not one of the
+   session's coding-agent turns).
+3. **Prune turns by time window** before reading any logs: a turn whose
+   `[started_at, completed_at or now]` interval does not overlap
+   `[since, until]` cannot contain a match, so its log is never loaded.
+4. For each remaining turn, `ContainerService::normalized_entries` (the same
+   source `/messages` uses — no new store) and project entries with the
+   existing `project_messages` logic (role mapping, empty-text skip,
+   4000-char truncation, `{execution_id}:{index}` ids).
+5. Each message's **effective timestamp** is its entry `timestamp` when the
+   executor reported a parseable one, otherwise the turn's `started_at`. This
+   is exposed as `created_at` (unchanged meaning) plus `turn_started_at`; a
+   message falls in the window based on its effective timestamp. Most
+   normalizers leave entry timestamps unset, so in practice time filtering
+   is turn-granular; that is documented in the tool description.
+   Turns are loaded **sequentially**, because legacy turns without a
+   normalized sidecar compete for the global historical-normalization permit.
+6. Keyword filter runs on the **untruncated** text, so a match past the
+   4000-char cap is still found; a `match_snippet` (≈ 160 chars of context
+   around the first hit) is returned so the match is visible even when the
+   returned `text` is truncated.
+7. **Budget** (constitution LII / XLIII): before loading each turn, check
+   a 20 s request budget. Once it has passed, stop loading further turns
+   (the turn in progress finishes, so its sidecar is still written for the
+   next read). The response sets `complete: false` and lists
+   `unscanned_execution_ids`, so the caller can retry or narrow the window.
+8. Order, then apply `offset`/`limit`; report `total_matches`, `has_more`
+   (`offset + returned < total_matches`), `turns_scanned`, and
+   `turn_count` (all coding-agent turns in the session).
+
+Response (`SessionHistoryResponse`):
+
+```jsonc
+{
+  "session_id": "…",
+  "turn_count": 12,
+  "turns_scanned": 3,
+  "total_matches": 41,
+  "offset": 0,
+  "limit": 50,
+  "has_more": false,
+  "complete": true,
+  "unscanned_execution_ids": [],
+  "messages": [
+    { "id": "<exec>:<idx>", "role": "assistant", "text": "…",
+      "created_at": "…|null", "turn_started_at": "…",
+      "execution_id": "…", "turn_index": 4, "match_snippet": "…|null" }
+  ]
 }
-
-Config.new_issue_pipelines: NewIssuePipelineDefaults   // #[serde(default)]
 ```
 
-`#[serde(default)]` on the new field means existing v8 configs load
-unchanged, so no config version bump is needed.
+Invalid `since`/`until` → 400 with a clear message. `since > until` → 400.
 
-Putting the overrides in the cloud `projects`/`organizations` tables was
-rejected. It needs a remote migration plus a regenerated SQLx offline cache,
-and it would sync pipeline ids to machines that may not define them.
+### MCP: `search_session_messages`
 
-### Resolution: one server endpoint
+New tool in `crates/mcp/src/task_server/tools/sessions.rs`. Parameters mirror
+the backend (`session_id` required, all filters optional). Scope check is the
+same as the other readers: fetch the session, `scope_allows_workspace`. The
+tool returns the backend response verbatim (typed deserialization like
+`RecentMessagesPayload`). It is registered in the tool list in
+`tools/mod.rs` next to `list_all_messages`.
 
-`GET /api/pipelines/new-issue-defaults?project_id=<uuid>` returns:
+Existing tools are **unchanged**. Their descriptions gain one sentence
+pointing to `search_session_messages` for earlier turns, since "latest turn
+only" is the exact gap this task closes.
 
-```json
-{ "pipeline_ids": ["wikillm", "speckit"], "source": "project" }
-```
+### Why not extend `/messages`?
 
-`source` is one of `project`, `organization` or `machine`. Resolution order:
-
-1. `projects[project_id]` if present.
-2. Otherwise `organizations[org_id]` if present. `org_id` comes from
-   `remote_client.get_remote_project(project_id)`, bounded by a 5 s timeout.
-   If that lookup fails, skip this step and log a warning.
-3. Otherwise the machine `pipeline_ids`.
-
-Without `project_id`, only step 3 applies. The resolved ids are then
-filtered to pipelines that currently load (`load_pipelines`), keeping the
-configured order. A deleted or broken pipeline is dropped quietly instead of
-failing issue creation. The pure resolver
-(`resolve_new_issue_pipelines(config, project_id, org_id)`) and the filter
-are unit-tested in `services::services::pipelines`.
-
-### UI: create mode
-
-- `KanbanIssuePanelContainer` passes the project id to the create-mode
-  `PipelineSection`. A new hook, `useNewIssuePipelineDefaults(projectId)`,
-  calls the endpoint.
-- `PipelineSection` gets a `defaultPipelineIds?: string[]` prop that
-  replaces the hard-coded `basic` seeding. Seeding still happens exactly
-  once, after both the pipeline list and the defaults have settled. If the
-  defaults query fails, it seeds nothing rather than guessing. Stage ticks
-  are the union of the seeded pipelines' `default_enabled` stages, as before.
-- The operator's ticks and unticks before submit are the issue-creation
-  override. Nothing else changes in submit.
-
-### UI: collapsed by default
-
-- `PipelineSection` initialises `expanded` to `false` in both modes.
-- When collapsed and at least one pipeline is selected, the header shows the
-  selected names after the title, for example `Pipeline · WikiLLM, SpecKit`.
-  With none selected it shows the title only.
-- Collapsing only hides the card. The composed block is still emitted and
-  appended on submit exactly as when it is expanded.
-
-### UI: Settings → Pipelines → "New issue defaults" card
-
-This card sits in the machine-scoped Pipelines section, beneath the file
-editor. It saves through the machine-scoped `useUserSystem`
-(`SettingsMachineUserSystemProvider`) and replaces the whole
-`new_issue_pipelines` object on every change, because `updateDraft` merges
-arrays by index (see wiki `auto-error-remediation`). It has three parts:
-
-- **Machine default**: one checkbox per valid pipeline ("enabled by default
-  on new issues").
-- **Organization overrides**: per organization, a select with "Use machine
-  default" or "Override". Choosing Override reveals per-pipeline checkboxes.
-  Override with nothing ticked means "no pipelines".
-- **Project overrides**: the same control per project, grouped under
-  `useAllOrganizationProjects`. Its inherit label says "Use organization
-  default".
-
-Each change saves immediately with `updateAndSaveConfig`, like the other
-pipeline mutations in this section, and the `new-issue-defaults` query is
-invalidated afterwards. Override ids that no longer exist as pipeline files
-are shown as "missing" and can be cleared.
-
-### MCP `create_issue`
-
-- `pipeline_ids` omitted (`None`): call
-  `/api/pipelines/new-issue-defaults?project_id=…` and use the result. If
-  the call fails, create the issue without a pipeline and log a warning.
-  Issue creation must not fail because defaults could not be resolved.
-- `pipeline_ids: []`: explicitly no pipeline. This is the issue-creation
-  override.
-- `pipeline_ids: [...]`: unchanged (unknown id → error).
-- `pipeline_stage_ids` keeps its meaning across whichever pipelines were
-  selected.
-- The tool and parameter descriptions are updated to explain the defaults
-  and the `[]` opt-out.
+`/messages` and its two tools are a per-execution contract (status,
+exit_code, final_message describe *one* execution). A session-wide history has
+different response fields (paging, turn metadata) and different cost; mixing
+them would make every existing field ambiguous.
 
 ## Acceptance criteria
 
-1. Opening New Issue or an existing issue shows the Pipeline card collapsed.
-   Its header names the selected pipelines.
-2. With a fresh config, New Issue pre-selects `basic`, matching today, and
-   MCP `create_issue` without `pipeline_ids` attaches the `basic` block with
-   its default stages.
-3. Setting the machine default to `{wikillm, speckit}` makes New Issue
-   pre-select both, and makes MCP `create_issue` without `pipeline_ids`
-   produce the same block the UI would.
-4. A project override beats an organization override, which beats the
-   machine default. An override with nothing ticked yields no pipeline.
-5. MCP `create_issue` with `pipeline_ids: []` yields no pipeline regardless
-   of the defaults.
-6. Default ids naming a missing pipeline are skipped. They never block
-   issue creation.
-7. `pnpm run check`, `pnpm run lint`, `cargo test --workspace` (the touched
-   crates), and `pnpm run generate-types:check` all pass.
+1. With a session of ≥2 coding-agent turns, `search_session_messages` with no
+   filters returns messages from **all** turns, oldest first, each tagged with
+   its `execution_id` and `turn_index`.
+2. `query="foo"` returns only messages whose text contains `foo`
+   case-insensitively, including matches beyond the 4000-char truncation,
+   each with a `match_snippet` containing the hit.
+3. `since`/`until` excludes messages outside the window; turns entirely
+   outside the window are not loaded (`turns_scanned` < `turn_count`).
+4. Messages without an executor timestamp are filtered by their turn's
+   `started_at`.
+5. `limit`/`offset` page through results; `total_matches` and `has_more` are
+   correct; `order=desc` returns newest first.
+6. `execution_id` not in the session → error; malformed or inverted time
+   bounds → 400.
+7. If the budget runs out, the response says `complete: false` and names the
+   unscanned turns. It never presents a partial scan as complete.
+8. Out-of-scope sessions are rejected by the MCP like the other readers.
+9. Unit tests cover the pure filter/paging/snippet/time-window logic.
+10. `crates/mcp/AGENTS.md` documents the new tool.
+
+## Out of scope
+
+- Workspace-wide or cross-session search (callers can `list_sessions` and
+  query each session).
+- Regex or fuzzy matching.
+- Returning text beyond the existing 4000-char per-message cap.
+- Any UI change.
