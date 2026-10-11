@@ -106,13 +106,18 @@ export function PipelineSection({
   // (`togglePipeline`), never by a selection-watching effect — an effect
   // can't tell a user toggle from this seeding and would clobber the parsed
   // ticks with the `default_enabled` union.
+  const awaitingDefaults =
+    !initialBlock && seedDefaultPipeline && defaultPipelineIds === null;
+  // Controls stay disabled until seeded: a tick made before the defaults
+  // arrive would be overwritten by the seeding below.
+  const [seeded, setSeeded] = useState(false);
+  const controlsDisabled = disabled || !seeded;
   const appliedDefaultRef = useRef(false);
   useEffect(() => {
     if (appliedDefaultRef.current || pipelines.length === 0) return;
-    if (!initialBlock && seedDefaultPipeline && defaultPipelineIds === null) {
-      return;
-    }
+    if (awaitingDefaults) return;
     appliedDefaultRef.current = true;
+    setSeeded(true);
     if (initialBlock) {
       const parsed = parsePipelineSelection(initialBlock, pipelines);
       setSelectedIds(parsed.pipelineIds);
@@ -128,7 +133,13 @@ export function PipelineSection({
     setEnabledIds(
       defaultEnabledUnion(pipelines.filter((p) => ids.includes(p.id)))
     );
-  }, [pipelines, initialBlock, seedDefaultPipeline, defaultPipelineIds]);
+  }, [
+    pipelines,
+    initialBlock,
+    seedDefaultPipeline,
+    defaultPipelineIds,
+    awaitingDefaults,
+  ]);
 
   const selectedPipelines = useMemo(
     () =>
@@ -278,7 +289,7 @@ export function PipelineSection({
                   <input
                     type="checkbox"
                     checked={selectedIds.includes(p.id)}
-                    disabled={disabled}
+                    disabled={controlsDisabled}
                     onChange={() => togglePipeline(p.id)}
                     className="mt-0.5"
                   />
@@ -310,7 +321,7 @@ export function PipelineSection({
                   <input
                     type="checkbox"
                     checked={enabledIds.has(step.id)}
-                    disabled={disabled}
+                    disabled={controlsDisabled}
                     onChange={() => toggleStep(step.id)}
                   />
                   <span>
@@ -334,7 +345,7 @@ export function PipelineSection({
               <button
                 type="button"
                 onClick={resetToGenerated}
-                disabled={disabled}
+                disabled={controlsDisabled}
                 className="text-xs text-brand hover:underline disabled:opacity-50"
               >
                 {t('taskPipeline.resetToGenerated')}
@@ -342,7 +353,7 @@ export function PipelineSection({
             </div>
             <textarea
               value={text}
-              disabled={disabled}
+              disabled={controlsDisabled}
               rows={6}
               onChange={(e) => setText(e.target.value)}
               placeholder={t('taskPipeline.addonPlaceholder')}

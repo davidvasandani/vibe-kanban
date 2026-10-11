@@ -107,6 +107,19 @@ describe('PipelineSection', () => {
     expect(header().textContent).toContain('· WikiLLM');
   });
 
+  it('keeps the controls disabled until the defaults arrive', () => {
+    render(null);
+    act(() => header().click());
+    const boxes = () =>
+      Array.from(
+        container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')
+      );
+    expect(boxes().length).toBeGreaterThan(0);
+    expect(boxes().every((b) => b.disabled)).toBe(true);
+    render(['wikillm']);
+    expect(boxes().every((b) => !b.disabled)).toBe(true);
+  });
+
   it('seeds nothing for an empty default list', () => {
     render([]);
     expect(header().textContent).not.toContain('·');
