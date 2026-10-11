@@ -805,6 +805,21 @@ default of its own.
   per-machine files, so their defaults and the org/project overrides are
   per-machine config and are not synced to the cloud.
 
+### LII. Session-wide history reads are scoped, pruned, paged and budgeted
+A read that spans many turns of one conversation (searching a session's chat
+history, for example) reuses the per-turn normalized projection. It never
+replays raw logs or keeps a second store. It checks the caller's MCP scope
+before reading. Turns that a filter can rule out from execution metadata alone
+(a time window that misses the turn) are never loaded. The rest load one at a
+time, because a cold turn competes for the shared historical-normalization
+capacity. Results are ordered deterministically, paged with a server-enforced
+maximum, and report the total count and whether more remain. Filters see the
+untruncated text, while the per-message output cap stays in force. A missing
+entry timestamp falls back to the turn's start and is never replaced by "now".
+The read answers within a stated budget. A budget miss stops loading further
+turns and says which turns went unscanned. It never reports a partial result
+as complete.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -826,7 +841,7 @@ default of its own.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.48.0 (adds LI, making creation defaults resolve once in a backend resolver shared by the UI and MCP, with explicit > project > organization > machine precedence, present-but-empty overrides meaning none, explicit empty choices honoured, missing defaults skipped, and unresolvable defaults degrading to none; 0.47.0 added L, making picker-hiding preferences display filters that keep the current selection visible, skip hidden options only in implicit fallbacks, refuse to hide the last or a depended-on option, and store per-host agent preferences on `ExecutorProfile`; 0.46.0 added XLIX, admitting remote MCP clients that cannot hold deployment credentials only through an opt-in VK-issued OAuth 2.1 grant with PKCE, hashed opaque rotating tokens, SSO-gated non-framable consent, bounded registration and replay revocation; 0.45.0 added XLVIII, requiring every shipped frontend package to be linted by `pnpm run lint` and CI from one shared rule set, with tsconfig coverage for tests, fixes in code instead of package-wide disables, and per-case judgement on hook dependencies; 0.44.0 added XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
+**Version**: 0.49.0 (adds LII, making session-wide history reads reuse the per-turn projection, check scope, prune turns by metadata before loading, load sequentially, page with totals, filter on untruncated text, fall back to turn start for missing timestamps, and answer within a budget that names unscanned turns; 0.48.0 added LI, making creation defaults resolve once in a backend resolver shared by the UI and MCP, with explicit > project > organization > machine precedence, present-but-empty overrides meaning none, explicit empty choices honoured, missing defaults skipped, and unresolvable defaults degrading to none; 0.47.0 added L, making picker-hiding preferences display filters that keep the current selection visible, skip hidden options only in implicit fallbacks, refuse to hide the last or a depended-on option, and store per-host agent preferences on `ExecutorProfile`; 0.46.0 added XLIX, admitting remote MCP clients that cannot hold deployment credentials only through an opt-in VK-issued OAuth 2.1 grant with PKCE, hashed opaque rotating tokens, SSO-gated non-framable consent, bounded registration and replay revocation; 0.45.0 added XLVIII, requiring every shipped frontend package to be linted by `pnpm run lint` and CI from one shared rule set, with tsconfig coverage for tests, fixes in code instead of package-wide disables, and per-case judgement on hook dependencies; 0.44.0 added XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
@@ -1188,3 +1203,14 @@ header names the selected pipelines from the list the card already loads.
 The card stays mounted because it owns the selection, not to label its
 header. The homelab constitution named by the command template was not
 changed, because this project only manages the Vibe Kanban repository.
+
+## Review: vk/5b8a-vk-mcp-chat-logs
+
+Applied `/speckit.constitution` and added principle LII (0.49.0). The user
+wants any part of a session's chat log to be retrievable through the VK MCP,
+filtered by date/time or keyword, and the existing readers only see the latest
+turn. XXXI, XXXIX and XLIII already cover single-turn materialization,
+termination and bulk budgets. No principle said how a read across many turns
+must bound its cost or report a partial scan. The homelab constitution named
+by the command template was not changed, because this project only manages
+the Vibe Kanban repository.
