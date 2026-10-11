@@ -166,10 +166,13 @@ active only when `VIBE_BROWSER_CF_ACCESS_CLIENT_ID`, `_CLIENT_SECRET` and
 
 - Use `Fetch.enable` with URL patterns, not `Network.setExtraHTTPHeaders`.
   The latter adds headers to every request, third parties included.
-- CDP `urlPattern` wildcards span any characters. For example,
-  `https://*.example.com/*` also matches `https://evil.net/?.example.com/`.
-  So every paused request is re-checked with `applies_to`: https only, no IP
-  hosts, and an exact or label-boundary subdomain match.
+- CDP `urlPattern` wildcards span any characters. A pattern like
+  `https://*.example.com/*` misses explicit ports (`:8443`) and trailing-dot
+  hosts, and it also matches `https://evil.net/?.example.com/`. So the driver
+  pauses `https://*example.com*` and decides per request with `applies_to`:
+  https only, no IP hosts, and an exact or label-boundary subdomain match. The
+  test `fetch_patterns_pause_every_in_scope_url` emulates CDP glob matching
+  to prove every in-scope URL form pauses.
 - Every paused request must get `Fetch.continueRequest` or it hangs. The
   reader answers with `send_no_wait`, the same rule as screencast acks.
 - Header overrides do not carry across redirects. Each hop that matches a

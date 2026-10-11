@@ -99,17 +99,14 @@ impl AccessHeaders {
         })
     }
 
-    /// `Fetch.enable` patterns limiting interception to the configured
-    /// domains. `applies_to` is still checked for every paused request.
+    /// `Fetch.enable` patterns that pause every https URL mentioning a
+    /// configured domain. CDP wildcards span any characters, so this also
+    /// catches explicit ports and trailing-dot hosts (and some out-of-scope
+    /// URLs); `applies_to` decides per request whether headers are added.
     pub fn fetch_patterns(&self) -> Vec<Value> {
         self.domains
             .iter()
-            .flat_map(|d| {
-                [
-                    json!({ "urlPattern": format!("https://{d}/*"), "requestStage": "Request" }),
-                    json!({ "urlPattern": format!("https://*.{d}/*"), "requestStage": "Request" }),
-                ]
-            })
+            .map(|d| json!({ "urlPattern": format!("https://*{d}*"), "requestStage": "Request" }))
             .collect()
     }
 
@@ -205,14 +202,50 @@ mod tests {
         assert_eq!(h.merge_headers(None).len(), 2);
     }
 
+    /// CDP `urlPattern` semantics: `*` matches any run of characters.
+    fn cdp_pattern_matches(pattern: &str, url: &str) -> bool {
+        let parts: Vec<&str> = pattern.split('*').collect();
+        let mut rest = url;
+        for (i, part) in parts.iter().enumerate() {
+            if i == 0 {
+                let Some(r) = rest.strip_prefix(part) else {
+                    return false;
+                };
+                rest = r;
+            } else if i == parts.len() - 1 {
+                return rest.ends_with(part);
+            } else {
+                let Some(idx) = rest.find(part) else {
+                    return false;
+                };
+                rest = &rest[idx + part.len()..];
+            }
+        }
+        rest.is_empty()
+    }
+
     #[test]
-    fn fetch_patterns_cover_apex_and_subdomains() {
-        let patterns = headers("example.com").fetch_patterns();
-        let urls: Vec<&str> = patterns
+    fn fetch_patterns_pause_every_in_scope_url() {
+        let h = headers("example.com");
+        let patterns: Vec<String> = h
+            .fetch_patterns()
             .iter()
-            .map(|p| p["urlPattern"].as_str().unwrap())
+            .map(|p| p["urlPattern"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(urls, ["https://example.com/*", "https://*.example.com/*"]);
+        assert_eq!(patterns, ["https://*example.com*"]);
+        for url in [
+            "https://example.com/",
+            "https://app.example.com/path?q=1",
+            "https://app.example.com:8443/",
+            "https://app.example.com./",
+            "https://attacker.net@app.example.com/",
+        ] {
+            assert!(h.applies_to(url), "{url}");
+            assert!(
+                patterns.iter().any(|p| cdp_pattern_matches(p, url)),
+                "{url} would not pause"
+            );
+        }
     }
 
     #[test]
