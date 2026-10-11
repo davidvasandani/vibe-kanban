@@ -31,6 +31,7 @@ use tokio::{
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
 use super::{
+    access_headers::AccessHeaders,
     driver::{BrowserDriver, DriverError, DriverHandle, LaunchOpts},
     types::{BrowserAction, BrowserFrame, BrowserPageInfo, MouseButton},
 };
@@ -82,11 +83,22 @@ pub fn discover_chromium(config_path: Option<&str>) -> Option<PathBuf> {
 
 pub struct CdpDriver {
     executable: PathBuf,
+    access: Option<Arc<AccessHeaders>>,
 }
 
 impl CdpDriver {
     pub fn new(executable: PathBuf) -> Self {
-        Self { executable }
+        Self {
+            executable,
+            access: None,
+        }
+    }
+
+    /// Attach Cloudflare Access service-token headers to in-scope requests
+    /// (see `access_headers`).
+    pub fn with_access_headers(mut self, access: Option<AccessHeaders>) -> Self {
+        self.access = access.map(Arc::new);
+        self
     }
 
     fn user_data_dir(profile: Option<&str>) -> PathBuf {
@@ -189,6 +201,7 @@ impl BrowserDriver for CdpDriver {
             frames_tx.clone(),
             console.clone(),
             frame_seq,
+            self.access.clone(),
         ));
 
         // Attach to the initial page target (create one if needed).
@@ -231,6 +244,16 @@ impl BrowserDriver for CdpDriver {
         };
         handle.call("Page.enable", json!({})).await?;
         handle.call("Runtime.enable", json!({})).await?;
+        if let Some(access) = &self.access {
+            // Only requests matching these patterns pause; reader_loop answers
+            // each one with Fetch.continueRequest.
+            handle
+                .call(
+                    "Fetch.enable",
+                    json!({ "patterns": access.fetch_patterns() }),
+                )
+                .await?;
+        }
         if let Some((width, height)) = opts.viewport {
             handle
                 .call(
@@ -310,6 +333,7 @@ async fn reader_loop(
     frames: broadcast::Sender<BrowserFrame>,
     console: Arc<Mutex<VecDeque<String>>>,
     frame_seq: Arc<AtomicU64>,
+    access: Option<Arc<AccessHeaders>>,
 ) {
     while let Some(Ok(msg)) = stream.next().await {
         let Ok(text) = msg.to_text() else { continue };
@@ -352,6 +376,27 @@ async fn reader_loop(
                         json!({ "sessionId": ack }),
                     )
                     .await;
+                }
+            }
+            Some("Fetch.requestPaused") => {
+                // Every paused request must be continued or it hangs. Never
+                // await a response here (see send_no_wait).
+                let params = &value["params"];
+                let session = value["sessionId"].as_str();
+                if let (Some(access), Some(request_id)) =
+                    (access.as_deref(), params["requestId"].as_str())
+                {
+                    let request = &params["request"];
+                    let mut continue_params = json!({ "requestId": request_id });
+                    if request["url"]
+                        .as_str()
+                        .is_some_and(|url| access.applies_to(url))
+                    {
+                        continue_params["headers"] =
+                            json!(access.merge_headers(request["headers"].as_object()));
+                    }
+                    conn.send_no_wait(session, "Fetch.continueRequest", continue_params)
+                        .await;
                 }
             }
             Some("Runtime.consoleAPICalled") => {
@@ -580,5 +625,39 @@ impl DriverHandle for CdpHandle {
             let _ = utils::process::kill_process_group(&mut child).await;
         }
         self.reader.abort();
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// Opt-in: drives a real Chromium through Cloudflare Access with the
+    /// deployment's service token. Needs VIBE_BROWSER_CF_ACCESS_* and
+    /// VK_BROWSER_LIVE_URL (an Access-gated page that admits the token).
+    /// `cargo test -p services --lib live_access_headers -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn live_access_headers_pass_cloudflare_access() {
+        let url = std::env::var("VK_BROWSER_LIVE_URL").expect("VK_BROWSER_LIVE_URL");
+        let access = AccessHeaders::from_env().expect("VIBE_BROWSER_CF_ACCESS_* configured");
+        let chromium = discover_chromium(None).expect("chromium");
+        let handle = CdpDriver::new(chromium)
+            .with_access_headers(Some(access))
+            .launch(LaunchOpts::default())
+            .await
+            .expect("launch");
+        handle
+            .perform(&BrowserAction::Navigate { url: url.clone() })
+            .await
+            .expect("navigate");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let info = handle.page_info().await.expect("page info");
+        handle.close().await;
+        let landed = info.url.unwrap_or_default();
+        assert!(
+            !landed.contains("cloudflareaccess.com"),
+            "redirected to the Access login: {landed}"
+        );
     }
 }

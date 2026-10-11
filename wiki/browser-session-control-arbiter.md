@@ -157,6 +157,29 @@ just unit tests. The recipe generalizes to any headless VK smoke test:
   broadcast → disconnect auto-release (gen 6, reason `disconnected`) →
   audit rows with no URL/profile → plain close of uncontrolled session.
 
+## Cloudflare Access headers (origin-scoped)
+
+`access_headers.rs` lets managed browsers present a Cloudflare Access service
+token, so agents can open Access-gated apps without an email login. It is
+active only when `VIBE_BROWSER_CF_ACCESS_CLIENT_ID`, `_CLIENT_SECRET` and
+`_DOMAINS` are all set. If there are no domains, nothing is sent (fail closed).
+
+- Use `Fetch.enable` with URL patterns, not `Network.setExtraHTTPHeaders`.
+  The latter adds headers to every request, third parties included.
+- CDP `urlPattern` wildcards span any characters. For example,
+  `https://*.example.com/*` also matches `https://evil.net/?.example.com/`.
+  So every paused request is re-checked with `applies_to`: https only, no IP
+  hosts, and an exact or label-boundary subdomain match.
+- Every paused request must get `Fetch.continueRequest` or it hangs. The
+  reader answers with `send_no_wait`, the same rule as screencast acks.
+- Header overrides do not carry across redirects. Each hop that matches a
+  pattern pauses again and gets the headers again.
+- Interception covers the attached page target only. Popups and new tabs are
+  not covered.
+- Live check (ignored by default):
+  `VK_BROWSER_LIVE_URL=https://<gated host>/ cargo test -p services --lib live_access_headers -- --ignored`.
+
 ## Contributed by
 
 - vk/57e0-add-shared-human
+- vk/5673-cloudflare-acces
