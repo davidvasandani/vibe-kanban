@@ -130,6 +130,8 @@ Supported relationship types: `blocking`, `related`, `has_duplicate`.
 
 Each pipeline stage has an `id`, `label`, `prompt_fragment`, `default_enabled` flag, and `heavy` flag. Pass a pipeline's `id` in `create_issue`'s `pipeline_ids`, and (optionally) a subset of its stage `id`s in `pipeline_stage_ids` — omitting `pipeline_stage_ids` enables each selected pipeline's `default_enabled` stages.
 
+When `create_issue` omits `pipeline_ids`, it attaches the same default pipelines the New Issue form pre-selects. You configure these in **Settings → Pipelines → New issue defaults** on the machine the MCP server talks to. A project override takes precedence over its organization's override, and an organization override takes precedence over the machine default, which is `basic` out of the box. To create an issue without a pipeline, pass `pipeline_ids: []`. A default that names a pipeline that no longer exists is skipped.
+
 ### Repository Management
 
 | Tool | Purpose | Required Parameters | Optional Parameters | Returns |

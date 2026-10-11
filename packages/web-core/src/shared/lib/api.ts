@@ -117,6 +117,7 @@ import {
   OpenRemoteEditorResponse,
   ProfileResponse,
   Pipeline,
+  NewIssuePipelineDefaultsResponse,
   SpecKitTaskStatus,
   SpecKitArtifacts,
   SpecKitArtifact,
@@ -1283,6 +1284,19 @@ export const pipelinesApi = {
   list: async (): Promise<Pipeline[]> => {
     const response = await makeRequest('/api/pipelines', { cache: 'no-store' });
     return handleApiResponse<Pipeline[]>(response);
+  },
+  /** Default pipelines for a new issue in `projectId` (project → org → machine). */
+  newIssueDefaults: async (
+    projectId?: string
+  ): Promise<NewIssuePipelineDefaultsResponse> => {
+    const query = projectId
+      ? `?project_id=${encodeURIComponent(projectId)}`
+      : '';
+    const response = await makeRequest(
+      `/api/pipelines/new-issue-defaults${query}`,
+      { cache: 'no-store' }
+    );
+    return handleApiResponse<NewIssuePipelineDefaultsResponse>(response);
   },
 };
 

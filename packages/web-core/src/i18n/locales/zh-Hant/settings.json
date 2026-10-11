@@ -1079,6 +1079,28 @@
         "resetAllTitle": "Reset all bundled defaults?",
         "resetAllMessage": "This recreates or overwrites all bundled default pipeline files.",
         "resetAllDirtyMessage": "This recreates or overwrites all bundled default pipeline files and discards the open draft."
+      },
+      "newIssueDefaults": {
+        "title": "新問題預設值",
+        "description": "新問題預設啟用的流水線,適用於新建問題表單以及未指定流水線的 MCP create_issue 呼叫。專案覆寫優先於其組織覆寫,組織覆寫優先於本機預設值。儲存在本機上。",
+        "machine": {
+          "label": "本機",
+          "helper": "當專案及其組織都未覆寫時使用。"
+        },
+        "organizations": {
+          "label": "組織覆寫",
+          "helper": "為組織內所有專案覆寫本機預設值。"
+        },
+        "projects": {
+          "label": "專案覆寫",
+          "helper": "為單一專案覆寫組織(或本機)預設值。"
+        },
+        "inheritMachine": "使用本機預設值",
+        "inheritOrganization": "使用組織預設值",
+        "override": "覆寫",
+        "noneSelected": "無流水線:新問題將不帶流水線。",
+        "missing": "{{id}}(遺失)",
+        "saveFailed": "無法儲存新問題預設值,請重試。"
       }
     }
   },

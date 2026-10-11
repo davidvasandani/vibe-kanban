@@ -5,6 +5,7 @@ import {
   type QueryClient,
 } from '@tanstack/react-query';
 import type {
+  NewIssuePipelineDefaultsResponse,
   Pipeline,
   PipelineFileStatus,
   PipelineRawBody,
@@ -34,6 +35,25 @@ export function usePipelines() {
     queryKey: PIPELINES_QUERY_KEY,
     queryFn: () => pipelinesApi.list(),
     staleTime: 60 * 1000,
+  });
+}
+
+/**
+ * Resolve the pipelines a new issue in `projectId` starts with (the
+ * project's override, else its organization's, else the machine default;
+ * see `GET /api/pipelines/new-issue-defaults`). Keyed under
+ * `PIPELINES_QUERY_KEY`, so pipeline-settings invalidation refreshes it.
+ */
+export function useNewIssuePipelineDefaults(
+  projectId: string | undefined,
+  enabled = true
+) {
+  return useQuery<NewIssuePipelineDefaultsResponse>({
+    queryKey: [...PIPELINES_QUERY_KEY, 'new-issue-defaults', projectId ?? null],
+    queryFn: () => pipelinesApi.newIssueDefaults(projectId),
+    enabled,
+    staleTime: 60 * 1000,
+    retry: 1,
   });
 }
 

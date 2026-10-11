@@ -1079,6 +1079,28 @@
         "resetAllTitle": "Reset all bundled defaults?",
         "resetAllMessage": "This recreates or overwrites all bundled default pipeline files.",
         "resetAllDirtyMessage": "This recreates or overwrites all bundled default pipeline files and discards the open draft."
+      },
+      "newIssueDefaults": {
+        "title": "新问题默认值",
+        "description": "新问题默认启用的流水线,适用于新建问题表单以及未指定流水线的 MCP create_issue 调用。项目覆盖优先于其组织覆盖,组织覆盖优先于本机默认值。保存在本机上。",
+        "machine": {
+          "label": "本机",
+          "helper": "当项目及其组织都未覆盖时使用。"
+        },
+        "organizations": {
+          "label": "组织覆盖",
+          "helper": "为组织内所有项目覆盖本机默认值。"
+        },
+        "projects": {
+          "label": "项目覆盖",
+          "helper": "为单个项目覆盖组织(或本机)默认值。"
+        },
+        "inheritMachine": "使用本机默认值",
+        "inheritOrganization": "使用组织默认值",
+        "override": "覆盖",
+        "noneSelected": "无流水线:新问题将不带流水线。",
+        "missing": "{{id}}(缺失)",
+        "saveFailed": "无法保存新问题默认值,请重试。"
       }
     }
   },

@@ -62,6 +62,26 @@ function normalizePipelines(
  * pipeline is respected. Tiebreak = first-seen index across pipelines in
  * selection order, which makes the result deterministic.
  */
+/**
+ * The pipeline ids a fresh (create-mode) picker starts with. `defaults` are
+ * the resolved new-issue defaults: the ids that exist in `pipelines` are
+ * kept, in `defaults` order and without duplicates. `undefined` means the
+ * caller supplies no defaults, so fall back to the historical `basic` (or
+ * first) pipeline.
+ */
+export function seedPipelineIds(
+  pipelines: readonly Pipeline[],
+  defaults: readonly string[] | undefined
+): string[] {
+  if (defaults === undefined) {
+    const fallback =
+      pipelines.find((p) => p.id === 'basic') ?? pipelines[0] ?? null;
+    return fallback ? [fallback.id] : [];
+  }
+  const available = new Set(pipelines.map((p) => p.id));
+  return [...new Set(defaults)].filter((id) => available.has(id));
+}
+
 export function canonicalStageOrder(
   pipelines: readonly Pipeline[]
 ): PipelineStep[] {

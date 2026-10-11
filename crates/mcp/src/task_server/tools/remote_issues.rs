@@ -14,7 +14,10 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{McpServer, ToolError, pipelines::McpPipeline};
+use super::{
+    McpServer, ToolError,
+    pipelines::{McpPipeline, NewIssuePipelineDefaults, select_pipelines},
+};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct McpCreateIssueRequest {
@@ -35,11 +38,11 @@ struct McpCreateIssueRequest {
     )]
     parent_issue_id: Option<String>,
     #[schemars(
-        description = "Optional task pipeline id(s) to attach (see `list_pipelines`). Composes a `## Pipeline` block appended to the description, instructing the execution agent which stages to run and in what order."
+        description = "Task pipeline id(s) to attach (see `list_pipelines`). Composes a `## Pipeline` block appended to the description, instructing the execution agent which stages to run and in what order. When omitted, the configured new-issue default pipelines apply (the project's override, else its organization's, else the machine default; Settings → Pipelines). Pass `[]` to create the issue without a pipeline."
     )]
     pipeline_ids: Option<Vec<String>>,
     #[schemars(
-        description = "Stage ids to enable across the selected `pipeline_ids`. Defaults to each pipeline's default-enabled stages (see `list_pipelines`) when omitted."
+        description = "Stage ids to enable across the selected pipelines (explicit or defaulted). Defaults to each pipeline's default-enabled stages (see `list_pipelines`) when omitted."
     )]
     pipeline_stage_ids: Option<Vec<String>>,
     #[schemars(
@@ -341,7 +344,14 @@ impl McpServer {
             None => None,
         };
 
-        let pipeline_ids = pipeline_ids.unwrap_or_default();
+        // An omitted `pipeline_ids` gets the configured new-issue defaults
+        // (project → organization → machine); an explicit list, including
+        // `[]`, is the issue-creation override and is used as given.
+        let explicit = pipeline_ids.is_some();
+        let pipeline_ids = match pipeline_ids {
+            Some(ids) => ids,
+            None => self.new_issue_default_pipeline_ids(project_id).await,
+        };
         let selected_pipelines: Vec<McpPipeline> = if pipeline_ids.is_empty() {
             Vec::new()
         } else {
@@ -351,21 +361,10 @@ impl McpServer {
                 Ok(p) => p,
                 Err(e) => return Ok(McpServer::tool_error(e)),
             };
-            let mut selected = Vec::with_capacity(pipeline_ids.len());
-            for id in &pipeline_ids {
-                match all_pipelines.iter().find(|p| &p.id == id) {
-                    Some(p) => selected.push(p.clone()),
-                    None => {
-                        return Self::err(
-                            format!(
-                                "Unknown pipeline '{id}'. Use list_pipelines to see available pipelines."
-                            ),
-                            None::<String>,
-                        );
-                    }
-                }
+            match select_pipelines(&all_pipelines, &pipeline_ids, explicit) {
+                Ok(selected) => selected,
+                Err(message) => return Self::err(message, None::<String>),
             }
-            selected
         };
 
         let enabled_stage_ids: HashSet<String> = match pipeline_stage_ids {
@@ -739,6 +738,28 @@ impl McpServer {
 }
 
 impl McpServer {
+    /// The configured default pipelines for a new issue in `project_id`.
+    /// Best-effort: if they cannot be resolved the issue is created without
+    /// a pipeline rather than failing.
+    async fn new_issue_default_pipeline_ids(&self, project_id: Uuid) -> Vec<String> {
+        let url = self.url(&format!(
+            "/api/pipelines/new-issue-defaults?project_id={project_id}"
+        ));
+        match self
+            .send_json::<NewIssuePipelineDefaults>(self.client.get(&url))
+            .await
+        {
+            Ok(defaults) => defaults.pipeline_ids,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to resolve new-issue default pipelines for project {project_id}; \
+                     creating the issue without a pipeline: {e:?}"
+                );
+                Vec::new()
+            }
+        }
+    }
+
     fn parse_issue_sort_field(sort_field: Option<&str>) -> Result<IssueSortField, ToolError> {
         match sort_field
             .unwrap_or("sort_order")

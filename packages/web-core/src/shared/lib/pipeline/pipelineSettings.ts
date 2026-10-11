@@ -1,4 +1,8 @@
-import type { PipelineFileStatus, PipelineParseError } from 'shared/types';
+import type {
+  NewIssuePipelineDefaults,
+  PipelineFileStatus,
+  PipelineParseError,
+} from 'shared/types';
 
 export const BUNDLED_PIPELINE_IDS = [
   'basic',
@@ -76,4 +80,87 @@ export function selectPipelineAfterRefresh(
   }
 
   return statuses[0]?.id ?? null;
+}
+
+/** Which override map of `NewIssuePipelineDefaults` a scope edits. */
+export type PipelineDefaultsScope = 'organizations' | 'projects';
+
+/**
+ * Add or remove `id` from `ids`. The result follows `order` (the pipeline
+ * catalog order) so the stored list, and therefore the composed block,
+ * doesn't depend on click order; ids not in `order` (missing pipelines)
+ * keep their place at the end until removed.
+ */
+export function togglePipelineId(
+  ids: readonly string[],
+  id: string,
+  enabled: boolean,
+  order: readonly string[]
+): string[] {
+  const next = new Set(ids);
+  if (enabled) next.add(id);
+  else next.delete(id);
+  const known = order.filter((o) => next.has(o));
+  const unknown = [...next].filter((o) => !order.includes(o));
+  return [...known, ...unknown];
+}
+
+export function toggleMachineDefault(
+  defaults: NewIssuePipelineDefaults,
+  id: string,
+  enabled: boolean,
+  order: readonly string[]
+): NewIssuePipelineDefaults {
+  return {
+    ...defaults,
+    pipeline_ids: togglePipelineId(defaults.pipeline_ids, id, enabled, order),
+  };
+}
+
+/** The override for `scopeId`, or `undefined` when it inherits. */
+export function getScopeOverride(
+  defaults: NewIssuePipelineDefaults,
+  scope: PipelineDefaultsScope,
+  scopeId: string
+): string[] | undefined {
+  return defaults[scope][scopeId];
+}
+
+/** Set (or replace) an override. An empty list means "no pipelines". */
+export function setScopeOverride(
+  defaults: NewIssuePipelineDefaults,
+  scope: PipelineDefaultsScope,
+  scopeId: string,
+  ids: readonly string[]
+): NewIssuePipelineDefaults {
+  return { ...defaults, [scope]: { ...defaults[scope], [scopeId]: [...ids] } };
+}
+
+/** Remove an override so the scope inherits again. */
+export function clearScopeOverride(
+  defaults: NewIssuePipelineDefaults,
+  scope: PipelineDefaultsScope,
+  scopeId: string
+): NewIssuePipelineDefaults {
+  const rest = Object.fromEntries(
+    Object.entries(defaults[scope]).filter(([key]) => key !== scopeId)
+  );
+  return { ...defaults, [scope]: rest };
+}
+
+export function toggleScopePipeline(
+  defaults: NewIssuePipelineDefaults,
+  scope: PipelineDefaultsScope,
+  scopeId: string,
+  id: string,
+  enabled: boolean,
+  order: readonly string[]
+): NewIssuePipelineDefaults {
+  const current = getScopeOverride(defaults, scope, scopeId) ?? [];
+  return setScopeOverride(
+    defaults,
+    scope,
+    scopeId,
+    togglePipelineId(current, id, enabled, order)
+  );
 }

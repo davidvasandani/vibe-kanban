@@ -1,65 +1,66 @@
-# Prior knowledge: Disable unused agents (`vk/2e22-disable-agent`)
+# Prior knowledge: default pipelines for new issues
 
-Sources: the VK wiki (`wiki/`, read-only recall), `docs/knowledge-base/`, and
-the homelab knowledge bases. No page covers disabling or hiding whole agents.
-The closest precedent is per-agent model hiding (`disabled_models`).
+Task `vk/16dc-default-pipeline`. Distilled from the project knowledge base
+(`wiki/`), which I only read. Relevant pages:
+`task-pipeline-block`, `kanban-issue-panel-sections`, `auto-error-remediation`,
+`bundled-file-seed-manifests`, `agent-picker-visibility`, `frontend-linting`
+and `create-mode-repo-branch-defaulting`.
 
-## Per-agent preferences on `ExecutorProfile` (`wiki/model-picker-preferences.md`)
+## Pipeline block (wiki: task-pipeline-block)
 
-There is a checklist for adding a per-agent preference field next to the
-flattened variant map:
+- The issue description is the only place the selection is stored, as a
+  delimited `## Pipeline` block. There is no structured copy, and adding one
+  would create a second source of truth. This task changes only which
+  pipelines are *seeded*, not where they are stored.
+- `PipelineSection` is uncontrolled and seeded exactly once, after the
+  pipeline list loads. Callers reseed by remounting it via `key`.
+  - Don't reseed ticks from an effect that watches the selection, because it
+    clobbers the user's ticks.
+  - New seeding inputs (the resolved defaults) must join the single
+    seed-once effect. Seeding must wait until *both* the pipeline list and
+    the defaults have settled, or it will seed from a half-loaded state.
+- Pipeline toggles adjust ticks incrementally. Each seeded pipeline enables
+  its own `default_enabled` stages.
+- Rust composer: every backend path that writes a block, MCP `create_issue`
+  included, must go through `api_types::pipeline_block`, so its output stays
+  byte-identical to the TS composer. MCP's defaulted path must reuse it.
 
-- **Serde:** `default` plus `skip_serializing_if`, so old files load and
-  unchanged files stay byte-clean. Declared fields are consumed before
-  `#[serde(flatten)]`, so the key is never parsed as a variant.
-- **Merge:** `merge_with_defaults` and `compute_overrides` must both carry
-  the field. Otherwise a preference-only change never reaches
-  `profiles.json`.
-- **Struct literals:** `crates/executors/src/env.rs`,
-  `crates/local-deployment/src/container.rs` and
-  `crates/worker/src/execution.rs`. The worker copies preferences from the
-  source profile.
-- **Frontend:** add the key to `RESERVED_KEYS` in
-  `web-core/src/shared/lib/executor.ts`, or it renders as a configuration in
-  Settings.
-- **Writers spread the profile:** `updateRecentModelEntries` spreads the
-  executor profile when the model picker records a recent model and saves
-  the *whole* profiles file. A new field survives only because of that
-  spread.
+## Issue panel layout (wiki: kanban-issue-panel-sections)
 
-## Hiding without breaking the trigger
+- `renderPipeline` renders in both modes. The container branches per mode:
+  create stashes the block until submit; edit seeds from the stored block
+  and applies it with Update Issue. Collapsing is internal to
+  `PipelineSection`, so neither path changes.
+- The panel is shared by local-web and remote-web.
 
-From the same page: filter only the list handed to the menu, always keep
-the current selection visible, and never allow the last item to be disabled
-(`toggleDisabledModel` refuses to disable the last model).
+## Settings (wiki: auto-error-remediation, agent-picker-visibility)
 
-## Stale copies overwrite saves
+- `GeneralSettingsSection.updateDraft` uses lodash `merge`, which merges
+  arrays **by index**, so deselecting an item can never shrink a list.
+  Replace whole objects that contain arrays (the remediation card does this
+  for `auto_error_remediation`).
+- Settings under "Machine settings" are per-host. `useUserSystem` inside the
+  settings dialog is wrapped by `SettingsMachineUserSystemProvider`, so
+  `config` and `updateAndSaveConfig` target the selected machine.
+- Bundled and deployed pipelines differ: the live TOMLs are user-editable.
+  Never test against deployed pipeline text, and never assume a pipeline id
+  exists. Defaults must tolerate missing ids.
+- Auto error remediation already has its own `pipeline_ids`. It must keep
+  naming its pipelines explicitly and must not inherit the new defaults.
 
-Settings saves profiles via `useSettingsMachineClient()` (it can target
-another host). After a save, invalidate the whole `['user-system']` prefix.
-Otherwise a route-scoped chat copy re-saves stale profiles on its next
-recent-model write and silently reverts the change. `AgentsSettingsSection`
-already does this in `refreshProfileViews()`.
+## Frontend checks (wiki: frontend-linting)
 
-## Built-in executors cannot be deleted
+- ESLint forbids directive comments outright.
+- The i18n check requires key parity across every locale (en, es, fr, ja,
+  ko, zh-*). Every new key must be added to all of them.
+- `pnpm run lint` also runs the unused-i18n-key check.
 
-`compute_overrides` returns `CannotDeleteExecutor` when a built-in executor
-is missing. "Disable" must therefore be a flag, not a removal.
+## Config storage precedent
 
-## i18n gate (`docs/knowledge-base/locale-key-consistency.md`, `wiki/issue-workspace-advisory.md`)
-
-Every new `settings.agents.*` key must exist in all seven locales
-(`en, es, fr, ja, ko, zh-Hans, zh-Hant`). An English fallback alone fails
-`scripts/check-i18n.sh`, and the gate also checks interpolation identifiers.
-
-## Lint and test notes (`wiki/frontend-linting.md`)
-
-`pnpm run lint` covers local-web, web-core, remote-web and ui. `web-core`
-test files are linted through a separate tsconfig. Vitest tests sit next to
-the code (for example `shared/lib/disabledModels.test.ts`).
-
-## Settings drawer (`wiki/settings-drawer.md`)
-
-A section's dirty flag is cleared on unmount. Edits should go through the
-existing dirty and save-bar flow (`useSettingsDirty`, `SettingsSaveBar`) so
-the drawer's unsaved-changes guard covers them.
+- Fields added to the v8 `Config` use `#[serde(default)]`, so old configs
+  load without a version bump (examples: `resume_interrupted_on_startup`,
+  `auto_error_remediation`).
+- The precedent for remote project fields is project `context`
+  (`vk/4931-project-context-ui`). That needs a remote migration and a
+  regenerated SQLx offline cache, which requires Postgres, and this
+  environment has none. That is one reason to store overrides locally.

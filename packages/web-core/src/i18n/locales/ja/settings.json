@@ -1079,6 +1079,28 @@
         "resetAllTitle": "Reset all bundled defaults?",
         "resetAllMessage": "This recreates or overwrites all bundled default pipeline files.",
         "resetAllDirtyMessage": "This recreates or overwrites all bundled default pipeline files and discards the open draft."
+      },
+      "newIssueDefaults": {
+        "title": "新規課題のデフォルト",
+        "description": "新規課題で既定で有効になるパイプライン。新規課題フォームと、パイプラインを指定しない MCP create_issue 呼び出しに適用されます。プロジェクトの上書きは組織の上書きより、組織の上書きはこのマシンの既定より優先されます。このマシンに保存されます。",
+        "machine": {
+          "label": "このマシン",
+          "helper": "プロジェクトも組織も上書きしていない場合に使用されます。"
+        },
+        "organizations": {
+          "label": "組織ごとの上書き",
+          "helper": "組織内のすべてのプロジェクトでマシンの既定を上書きします。"
+        },
+        "projects": {
+          "label": "プロジェクトごとの上書き",
+          "helper": "1 つのプロジェクトで組織(またはマシン)の既定を上書きします。"
+        },
+        "inheritMachine": "マシンの既定を使用",
+        "inheritOrganization": "組織の既定を使用",
+        "override": "上書き",
+        "noneSelected": "パイプラインなし: 新規課題はパイプラインなしで開始します。",
+        "missing": "{{id}}(見つかりません)",
+        "saveFailed": "新規課題のデフォルトを保存できませんでした。もう一度お試しください。"
       }
     }
   },

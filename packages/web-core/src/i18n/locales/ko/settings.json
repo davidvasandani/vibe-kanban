@@ -1079,6 +1079,28 @@
         "resetAllTitle": "Reset all bundled defaults?",
         "resetAllMessage": "This recreates or overwrites all bundled default pipeline files.",
         "resetAllDirtyMessage": "This recreates or overwrites all bundled default pipeline files and discards the open draft."
+      },
+      "newIssueDefaults": {
+        "title": "새 이슈 기본값",
+        "description": "새 이슈에서 기본으로 활성화되는 파이프라인입니다. 새 이슈 양식과 파이프라인을 지정하지 않은 MCP create_issue 호출에 적용됩니다. 프로젝트 재정의가 조직 재정의보다, 조직 재정의가 이 머신의 기본값보다 우선합니다. 이 머신에 저장됩니다.",
+        "machine": {
+          "label": "이 머신",
+          "helper": "프로젝트와 조직 모두 재정의하지 않을 때 사용됩니다."
+        },
+        "organizations": {
+          "label": "조직별 재정의",
+          "helper": "조직의 모든 프로젝트에서 머신 기본값을 재정의합니다."
+        },
+        "projects": {
+          "label": "프로젝트별 재정의",
+          "helper": "한 프로젝트에서 조직(또는 머신) 기본값을 재정의합니다."
+        },
+        "inheritMachine": "머신 기본값 사용",
+        "inheritOrganization": "조직 기본값 사용",
+        "override": "재정의",
+        "noneSelected": "파이프라인 없음: 새 이슈가 파이프라인 없이 시작됩니다.",
+        "missing": "{{id}} (없음)",
+        "saveFailed": "새 이슈 기본값을 저장하지 못했습니다. 다시 시도하세요."
       }
     }
   },
