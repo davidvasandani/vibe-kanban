@@ -784,6 +784,27 @@ deletes configuration.
   override and merge path, and they are never kept as a second copy in the
   user config.
 
+### LI. Creation defaults resolve once, for every creation path
+A setting that pre-fills a new entity (pipelines on a new issue) is resolved
+by one backend resolver. The UI and every programmatic creation path (MCP,
+integrations that opt in) call that resolver, and none of them hard-codes a
+default of its own.
+- Precedence is most specific first: an explicit choice at creation, then
+  project, then organization, then machine. An override that is present but
+  empty means "none". It never means "inherit".
+- An explicit empty choice at creation (MCP `pipeline_ids: []`, or the
+  operator unticking everything) is honoured. Only an *omitted* choice
+  defaults.
+- Defaults that name something which no longer exists are skipped. They
+  never fail the creation. An explicit choice naming something missing is
+  still an error.
+- If the defaults cannot be resolved, the entity is created without them and
+  a warning is logged. The UI never seeds from a guess while resolution is
+  pending.
+- Defaults live in the same store as the things they name. Pipelines are
+  per-machine files, so their defaults and the org/project overrides are
+  per-machine config and are not synced to the cloud.
+
 ## Constraints
 - Follow the existing architecture and conventions of the repository.
 - Do not introduce new top-level dependencies without recording the reason in
@@ -805,7 +826,7 @@ deletes configuration.
 This constitution supersedes ad-hoc preferences. When a spec or plan conflicts
 with it, the constitution wins or the conflict is recorded as an open question.
 
-**Version**: 0.47.0 (adds L, making picker-hiding preferences display filters that keep the current selection visible, skip hidden options only in implicit fallbacks, refuse to hide the last or a depended-on option, and store per-host agent preferences on `ExecutorProfile`; 0.46.0 added XLIX, admitting remote MCP clients that cannot hold deployment credentials only through an opt-in VK-issued OAuth 2.1 grant with PKCE, hashed opaque rotating tokens, SSO-gated non-framable consent, bounded registration and replay revocation; 0.45.0 added XLVIII, requiring every shipped frontend package to be linted by `pnpm run lint` and CI from one shared rule set, with tsconfig coverage for tests, fixes in code instead of package-wide disables, and per-case judgement on hook dependencies; 0.44.0 added XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
+**Version**: 0.48.0 (adds LI, making creation defaults resolve once in a backend resolver shared by the UI and MCP, with explicit > project > organization > machine precedence, present-but-empty overrides meaning none, explicit empty choices honoured, missing defaults skipped, and unresolvable defaults degrading to none; 0.47.0 added L, making picker-hiding preferences display filters that keep the current selection visible, skip hidden options only in implicit fallbacks, refuse to hide the last or a depended-on option, and store per-host agent preferences on `ExecutorProfile`; 0.46.0 added XLIX, admitting remote MCP clients that cannot hold deployment credentials only through an opt-in VK-issued OAuth 2.1 grant with PKCE, hashed opaque rotating tokens, SSO-gated non-framable consent, bounded registration and replay revocation; 0.45.0 added XLVIII, requiring every shipped frontend package to be linted by `pnpm run lint` and CI from one shared rule set, with tsconfig coverage for tests, fixes in code instead of package-wide disables, and per-case judgement on hook dependencies; 0.44.0 added XLVII, requiring every rendered URL, bare or written as a markdown link, to be clickable through a scheme allow-list, with read-only detection that skips code blocks and never reaches stored markdown; 0.43.0 added XLVI: before resuming, an executor that can prove its vendor continuation artifact is missing starts a visible fresh session in the same workspace, with a fail-open probe, an agent notice, a stderr diagnostic and no fabricated history; 0.42.1 refines XVIII: a producer journal that regressed below the consumer cursor is a discontinuity resolved from matching terminal evidence or classified indeterminate; 0.42.0 added XLV, selecting server-side credentials per request from the settings authority by target resource, with ambient credentials only as a logged fallback, fail-closed unreadable entries, command-scoped delivery, and source-attributed auth errors; 0.41.0 added XLIV, treating each WebSocket as a queued handshake: finite reads go over HTTP with a settled flag and deadline, sockets are shared per identity with a linger, hidden panels defer their sockets, and settled items load once per scope; 0.40.0 added XLIII, bounding bulk enrichment responses by a
 request-wide budget with last-known fallback and requiring deadlines plus
 cancellation on polled client requests; 0.39.0 added XLII, making auxiliary surfaces such as Settings
 non-modal docked drawers that toggle, guard unsaved changes on every close path,
@@ -1155,3 +1176,15 @@ these rules informally (wiki `model-picker-preferences`). L makes them
 binding for agents and for any later picker preference. The homelab
 constitution named by the command template was not changed, because this
 project only manages the Vibe Kanban repository.
+
+## Review: vk/16dc-default-pipeline
+
+Applied `/speckit.constitution` and added principle LI (0.48.0). The New
+Issue UI hard-coded the `basic` pipeline, and MCP `create_issue` attached
+none, so the two paths disagreed and neither could be configured. LI makes
+one resolver and its precedence binding for this and later creation
+defaults. Collapsing the Pipeline card is governed by XXVI: the collapsed
+header names the selected pipelines from the list the card already loads.
+The card stays mounted because it owns the selection, not to label its
+header. The homelab constitution named by the command template was not
+changed, because this project only manages the Vibe Kanban repository.

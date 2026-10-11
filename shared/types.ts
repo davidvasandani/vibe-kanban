@@ -1120,7 +1120,7 @@ export type Config = { config_version: string, theme: ThemeMode, executor_profil
  * restart. Off by default because it spawns agents (and spends
  * tokens) at boot without a human in the loop.
  */
-resume_interrupted_on_startup: boolean, auto_error_remediation: AutoErrorRemediationConfig, };
+resume_interrupted_on_startup: boolean, auto_error_remediation: AutoErrorRemediationConfig, new_issue_pipelines: NewIssuePipelineDefaults, };
 
 export type NotificationConfig = { sound_enabled: boolean, push_enabled: boolean, sound_file: SoundFile, };
 
@@ -1172,6 +1172,22 @@ merge_stage_ids: Array<string>,
  * Global cap on launches per trailing hour; 0 disables launching.
  */
 max_per_hour: number, };
+
+export type NewIssuePipelineDefaults = { 
+/**
+ * Machine-wide default pipeline ids, in compose order.
+ */
+pipeline_ids: Array<string>, 
+/**
+ * Organization id → pipeline ids. A present key overrides the machine
+ * default; an empty list means "no pipelines".
+ */
+organizations: { [key in string]?: Array<string> }, 
+/**
+ * Project id → pipeline ids. Overrides the organization and machine
+ * defaults; an empty list means "no pipelines".
+ */
+projects: { [key in string]?: Array<string> }, };
 
 export type GitHubOwnerToken = { id: string, owner: string, reference?: string, created_at: string, updated_at: string, };
 
@@ -1225,6 +1241,10 @@ export type PipelineParseError = { message: string, line: number | null, column:
 export type PipelineValidation = { valid: boolean, error: PipelineParseError | null, };
 
 export type PipelineFileStatus = { id: string, name: string, stage_count: number | null, valid: boolean, error: PipelineParseError | null, };
+
+export type NewIssuePipelineSource = "project" | "organization" | "machine";
+
+export type NewIssuePipelineDefaultsResponse = { pipeline_ids: Array<string>, source: NewIssuePipelineSource, };
 
 export type PipelineRawBody = { content: string, };
 

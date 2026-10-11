@@ -1,85 +1,112 @@
-# Implementation plan: Disable unused agents
+# Implementation plan: default pipelines for new issues
 
-Task `vk/2e22-disable-agent`. Spec: `SPEC.md`. Prior knowledge:
-`PRIOR_KNOWLEDGE.md`. SpecKit: `specs/vk/2e22-disable-agent/`.
+Task `vk/16dc-default-pipeline`. See `SPEC.md` for the design and
+`PRIOR_KNOWLEDGE.md` for the constraints this plan respects.
 
-## A. Backend (Rust)
+## Step 1: Config type (services)
 
-1. `crates/executors/src/profile.rs`
-   - Add `disabled: bool` to `ExecutorProfile` with
-     `#[serde(default, skip_serializing_if = "std::ops::Not::not")]` and a
-     doc comment.
-   - `merge_with_defaults`: `if override_profile.disabled { default_profile.disabled = true; }`.
-   - `compute_overrides`: initialise `disabled: false`. Set it from
-     `current_profile.disabled` when that differs from the default. Include
-     the profile in the overrides when `disabled` is set.
-   - `get_recommended_executor_profile`: skip profiles with
-     `disabled == true`.
-   - Tests:
-     - serde round-trip (`disabled` is not a variant)
-     - `false` is omitted on serialize
-     - survives `compute_overrides` and `merge_with_defaults`
-     - re-enabling produces no override
-     - the recommended profile ignores disabled agents (use a pure helper so
-       the test does not depend on installed CLIs)
-2. Struct literals: `crates/executors/src/env.rs` and
-   `crates/local-deployment/src/container.rs` get `disabled: false`.
-   `crates/worker/src/execution.rs` copies `disabled` from the source
-   profile.
-3. `pnpm run generate-types` adds `disabled?: boolean` to `ExecutorProfile`
-   in `shared/types.ts`.
+- `crates/services/src/services/config/versions/v8.rs`: add
+  `NewIssuePipelineDefaults { pipeline_ids, organizations, projects }` with
+  `#[serde(default)]`. `Default` sets `pipeline_ids = ["basic"]`.
+- Add `#[serde(default)] pub new_issue_pipelines` to `Config`, and to the
+  `from_v7_config` and `Default` literals.
+- `config/mod.rs`: re-export `pub type NewIssuePipelineDefaults`.
+- Find every other `Config { .. }` struct literal (`rg "auto_error_remediation:"`)
+  and add the field there too.
+- Unit test: a v8 JSON without the field deserializes to the default.
 
-## B. Frontend helpers
+## Step 2: Resolver (services::pipelines)
 
-4. `packages/web-core/src/shared/lib/executor.ts`: add `'disabled'` to
-   `RESERVED_KEYS`.
-5. New `packages/web-core/src/shared/lib/disabledAgents.ts`:
-   - `isAgentDisabled(profiles, agent)`
-   - `filterEnabledAgents(agents, profiles, keep?)`
-   - `setAgentDisabled(profiles, agent, disabled)`
-   - `getDisableAgentBlocker(profiles, agent, defaultAgent)` returns
-     `null | 'default' | 'last'`
-6. `disabledAgents.test.ts` (Vitest) next to it.
+- `NewIssuePipelineSource` enum (`Project | Organization | Machine`, serde
+  snake_case, TS).
+- `NewIssuePipelineDefaultsResponse { pipeline_ids, source }` (TS).
+- Pure `resolve_new_issue_pipelines(defaults, project_id, org_id)`, which
+  returns `(Vec<String>, source)`.
+- Pure `retain_available(ids, &[Pipeline])`: keeps configured order, drops
+  missing ids, dedupes.
+- Unit tests: precedence, an empty override means none, a missing org
+  falls through to machine, filtering and ordering.
 
-## C. Settings → Agents
+## Step 3: Route (server)
 
-7. `AgentsSettingsSection.tsx`:
-   - Agents column: dim disabled rows and add a neutral `Disabled` badge.
-   - New `AgentVisibilityCard` above `AgentModelsCard`, with a
-     `SettingsCheckbox` "Show in agent pickers". It is locked with an
-     explanation when the blocker is `default` or `last`. `onChange` →
-     `markDirty(setAgentDisabled(...))`.
-   - `ConfigActionsDropdown`: add an `agentDisabled` prop that disables
-     "Make Default".
-8. i18n: add `settings.agents.editor.disabled` and
-   `settings.agents.visibility.{title,description,label,defaultLocked,lastLocked}`
-   to all seven locales.
+- `crates/server/src/routes/pipelines.rs`:
+  `GET /pipelines/new-issue-defaults?project_id=`, with deployment state.
+  - Read the config.
+  - If there is no project override and `project_id` is set, look up the org
+    via `deployment.remote_client()?.get_remote_project`, with a 5 s timeout
+    and a warning on failure.
+  - Resolve, then `retain_available(load_pipelines(..))`.
+- `generate_types.rs`: register `NewIssuePipelineDefaults`,
+  `NewIssuePipelineSource`, `NewIssuePipelineDefaultsResponse`. Run
+  `pnpm run generate-types`.
 
-## D. Pickers
+## Step 4: MCP `create_issue`
 
-9. `useExecutorConfig.ts` → `useEffectiveExecutor`:
-   - Skip disabled agents for `lastUsedConfig` and the config default.
-   - Fall back to the first enabled option.
-   - `options = filterEnabledAgents(all, profiles, [effective])`.
-10. `AgentSelector.tsx`: filter with `keep = selectedAgent`.
-11. `GeneralSettingsSection.tsx`:
-    - Default-agent dropdown: filter with `keep = draft executor`.
-    - Remediation executors: filter with
-      `keep = draft.auto_error_remediation.executor`.
-12. `LandingPage.tsx`: filter with `keep = selectedAgent`.
+- `remote_issues.rs`:
+  - `pipeline_ids: None` → GET `/api/pipelines/new-issue-defaults?project_id=`.
+    On error, warn and fall back to `[]`.
+  - `Some(ids)` → unchanged (`Some([])` = none).
+  - Resolve the pipeline objects from `/api/pipelines` in both cases.
+    Defaulted ids are already filtered, so a missing one is skipped rather
+    than raised as an error.
+- Update the schemars descriptions for `pipeline_ids` and the
+  `list_pipelines` tool text.
+- Refactor the selection into a small pure helper so a unit test can cover
+  "defaulted ids missing from catalog are skipped, explicit ones error".
 
-## E. Verify
+## Step 5: Frontend data
 
-13. Run `cargo test -p executors`, `cargo check --workspace`,
-    `pnpm run generate-types:check`, `pnpm run check`, `pnpm run lint`,
-    web-core Vitest (`disabledAgents`, settings tests),
-    `scripts/check-i18n.sh` and `pnpm run format`.
-14. If a dev build is feasible, check in the app UI that toggling hides the
-    agent from the create-workspace picker.
+- `api.ts`: `pipelinesApi.newIssueDefaults(projectId?)`.
+- `usePipelines.ts`: `useNewIssuePipelineDefaults(projectId)` with query key
+  `['pipelines', 'new-issue-defaults', projectId]`. It lives under
+  `PIPELINES_QUERY_KEY`, so the existing invalidation also refreshes it.
 
-## F. Ship
+## Step 6: `PipelineSection`
 
-15. Codex review, then fix findings, then write the wiki page. Update
-    `wiki/model-picker-preferences.md` (the `disabled` field) and add a
-    `wiki/` entry for agent disabling. Then open the PR, wait for CI, and
-    merge.
+- `expanded` initial state is `false`.
+- Collapsed header summary: the selected pipeline names after the title.
+- A new `defaultPipelineIds?: string[] | null` prop:
+  - `undefined` → legacy seeding (basic/first).
+  - `null` → still loading, so wait.
+  - an array → seed exactly those pipelines that exist, in their given
+    order. The seed-once effect waits while it is `null`.
+- Update `PipelineSection` tests/stories if present. Add a Vitest for the
+  pure seeding helper (`seedPipelineIds(pipelines, defaults)`) in
+  `taskPipeline.ts`.
+
+## Step 7: Container
+
+- `KanbanIssuePanelContainer`: call
+  `useNewIssuePipelineDefaults(projectId)` (enabled in create mode only) and
+  pass `defaultPipelineIds`: `data.pipeline_ids` on success, `[]` on error,
+  `null` while loading.
+
+## Step 8: Settings card
+
+- New `NewIssuePipelineDefaultsCard.tsx`, rendered at the bottom of
+  `PipelinesSettingsSection`:
+  - Uses `useUserSystem()` (machine-scoped), `usePipelineStatuses` (valid
+    ones), `useUserOrganizations` and `useAllOrganizationProjects`.
+  - Machine checkboxes. Per org and per project, an inherit/override select
+    plus checkboxes.
+  - Each change calls `updateAndSaveConfig({ new_issue_pipelines: next })`
+    with the whole object, then invalidates `PIPELINES_QUERY_KEY`.
+  - Missing ids are shown with a "missing" badge and can be unticked.
+- Pure helpers in `pipelineSettings.ts` (`setMachineDefault`,
+  `setScopeOverride`, `clearScopeOverride`), with tests.
+- i18n: new `settings.pipelines.newIssueDefaults.*` keys in every locale,
+  plus a `taskPipeline` collapsed-summary key if one is needed.
+
+## Step 9: Verify
+
+- `cargo test -p services pipelines`, `cargo test -p mcp`,
+  `cargo check --workspace`.
+- `pnpm run generate-types:check`, `pnpm run check`, `pnpm run lint`, the
+  web-core vitest for the touched files, then `pnpm run format`.
+
+## Step 10: Review, knowledge base, PR
+
+- Codex review loop.
+- Update `wiki/task-pipeline-block.md` (seeding defaults, collapse) and add
+  a topic page on new-issue pipeline defaults. Update `wiki/INDEX.md`.
+- Open the PR and merge it.

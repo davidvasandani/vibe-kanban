@@ -126,6 +126,10 @@ vi.mock('./SettingsComponents', () => ({
   ),
 }));
 
+vi.mock('./NewIssuePipelineDefaultsCard', () => ({
+  NewIssuePipelineDefaultsCard: () => null,
+}));
+
 vi.mock('./SettingsDirtyContext', () => ({
   useSettingsDirty: () => ({
     setDirty: vi.fn(),

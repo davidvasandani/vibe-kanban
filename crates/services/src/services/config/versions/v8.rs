@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Error;
 use executors::{executors::BaseCodingAgent, profile::ExecutorProfileId};
 use serde::{Deserialize, Serialize};
@@ -72,6 +74,35 @@ impl Default for AutoErrorRemediationConfig {
     }
 }
 
+/// Pipelines enabled by default on new issues, both in the New Issue UI and
+/// for MCP `create_issue` calls that omit `pipeline_ids`. Pipelines are
+/// per-machine files, so their defaults and overrides are per-machine too.
+/// Resolution (most specific first): project, organization, machine; see
+/// `services::services::pipelines::resolve_new_issue_pipelines`.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(default)]
+pub struct NewIssuePipelineDefaults {
+    /// Machine-wide default pipeline ids, in compose order.
+    pub pipeline_ids: Vec<String>,
+    /// Organization id → pipeline ids. A present key overrides the machine
+    /// default; an empty list means "no pipelines".
+    pub organizations: HashMap<Uuid, Vec<String>>,
+    /// Project id → pipeline ids. Overrides the organization and machine
+    /// defaults; an empty list means "no pipelines".
+    pub projects: HashMap<Uuid, Vec<String>>,
+}
+
+impl Default for NewIssuePipelineDefaults {
+    fn default() -> Self {
+        Self {
+            // Matches the New Issue UI's historical `basic` pre-selection.
+            pipeline_ids: vec!["basic".to_string()],
+            organizations: HashMap::new(),
+            projects: HashMap::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
 pub enum SendMessageShortcut {
     #[default]
@@ -122,6 +153,8 @@ pub struct Config {
     pub resume_interrupted_on_startup: bool,
     #[serde(default)]
     pub auto_error_remediation: AutoErrorRemediationConfig,
+    #[serde(default)]
+    pub new_issue_pipelines: NewIssuePipelineDefaults,
 }
 
 impl Config {
@@ -155,6 +188,7 @@ impl Config {
             host_nickname: None,
             resume_interrupted_on_startup: false,
             auto_error_remediation: AutoErrorRemediationConfig::default(),
+            new_issue_pipelines: NewIssuePipelineDefaults::default(),
         }
     }
 
@@ -213,6 +247,30 @@ impl Default for Config {
             host_nickname: None,
             resume_interrupted_on_startup: false,
             auto_error_remediation: AutoErrorRemediationConfig::default(),
+            new_issue_pipelines: NewIssuePipelineDefaults::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v8_config_without_new_issue_pipelines_gets_basic_default() {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value.as_object_mut().unwrap().remove("new_issue_pipelines");
+        let config: Config = Config::from(value.to_string());
+        assert_eq!(config.new_issue_pipelines.pipeline_ids, vec!["basic"]);
+        assert!(config.new_issue_pipelines.organizations.is_empty());
+        assert!(config.new_issue_pipelines.projects.is_empty());
+    }
+
+    #[test]
+    fn partial_new_issue_pipelines_fills_missing_fields() {
+        let defaults: NewIssuePipelineDefaults =
+            serde_json::from_str(r#"{"pipeline_ids":[]}"#).unwrap();
+        assert!(defaults.pipeline_ids.is_empty());
+        assert!(defaults.projects.is_empty());
     }
 }

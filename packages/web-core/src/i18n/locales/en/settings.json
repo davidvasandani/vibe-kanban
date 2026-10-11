@@ -1079,6 +1079,28 @@
         "resetAllTitle": "Reset all bundled defaults?",
         "resetAllMessage": "This recreates or overwrites all bundled default pipeline files.",
         "resetAllDirtyMessage": "This recreates or overwrites all bundled default pipeline files and discards the open draft."
+      },
+      "newIssueDefaults": {
+        "title": "New issue defaults",
+        "description": "Pipelines enabled by default on new issues, in the New Issue form and for MCP create_issue calls that don't name pipelines. A project override beats its organization's, which beats this machine's default. Stored on this machine.",
+        "machine": {
+          "label": "This machine",
+          "helper": "Used when neither the project nor its organization overrides it."
+        },
+        "organizations": {
+          "label": "Organization overrides",
+          "helper": "Override the machine default for every project in an organization."
+        },
+        "projects": {
+          "label": "Project overrides",
+          "helper": "Override the organization (or machine) default for one project."
+        },
+        "inheritMachine": "Use machine default",
+        "inheritOrganization": "Use organization default",
+        "override": "Override",
+        "noneSelected": "No pipelines: new issues start without a pipeline.",
+        "missing": "{{id}} (missing)",
+        "saveFailed": "Could not save the new issue defaults. Try again."
       }
     }
   },

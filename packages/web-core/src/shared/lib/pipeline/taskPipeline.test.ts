@@ -10,6 +10,7 @@ import {
   orderedEnabledStages,
   parsePipelineSelection,
   parsePipelineStages,
+  seedPipelineIds,
 } from './taskPipeline';
 
 const pipeline: Pipeline = {
@@ -854,5 +855,32 @@ describe('parsePipelineSelection', () => {
       pipelineIds: [],
       enabledIds: [],
     });
+  });
+});
+
+describe('seedPipelineIds', () => {
+  const catalog = [
+    { id: 'basic', name: 'Basic', description: null, stages: [] },
+    { id: 'wikillm', name: 'WikiLLM', description: null, stages: [] },
+    { id: 'speckit', name: 'SpecKit', description: null, stages: [] },
+  ] satisfies Pipeline[];
+
+  it('falls back to basic when no defaults are supplied', () => {
+    expect(seedPipelineIds(catalog, undefined)).toEqual(['basic']);
+  });
+
+  it('falls back to the first pipeline when basic is absent', () => {
+    expect(seedPipelineIds(catalog.slice(1), undefined)).toEqual(['wikillm']);
+    expect(seedPipelineIds([], undefined)).toEqual([]);
+  });
+
+  it('seeds the resolved defaults in order, skipping missing ids', () => {
+    expect(
+      seedPipelineIds(catalog, ['speckit', 'gone', 'wikillm', 'speckit'])
+    ).toEqual(['speckit', 'wikillm']);
+  });
+
+  it('seeds nothing for an empty default list', () => {
+    expect(seedPipelineIds(catalog, [])).toEqual([]);
   });
 });

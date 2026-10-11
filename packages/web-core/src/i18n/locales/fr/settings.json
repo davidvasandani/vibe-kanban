@@ -1079,6 +1079,28 @@
         "resetAllTitle": "Reset all bundled defaults?",
         "resetAllMessage": "This recreates or overwrites all bundled default pipeline files.",
         "resetAllDirtyMessage": "This recreates or overwrites all bundled default pipeline files and discards the open draft."
+      },
+      "newIssueDefaults": {
+        "title": "Valeurs par défaut des nouveaux tickets",
+        "description": "Pipelines activés par défaut sur les nouveaux tickets, dans le formulaire de création et pour les appels MCP create_issue qui ne nomment aucun pipeline. Le remplacement d'un projet l'emporte sur celui de son organisation, qui l'emporte sur la valeur de cette machine. Enregistré sur cette machine.",
+        "machine": {
+          "label": "Cette machine",
+          "helper": "Utilisé lorsque ni le projet ni son organisation ne le remplacent."
+        },
+        "organizations": {
+          "label": "Remplacements par organisation",
+          "helper": "Remplace la valeur de la machine pour tous les projets d'une organisation."
+        },
+        "projects": {
+          "label": "Remplacements par projet",
+          "helper": "Remplace la valeur de l'organisation (ou de la machine) pour un projet."
+        },
+        "inheritMachine": "Utiliser la valeur de la machine",
+        "inheritOrganization": "Utiliser la valeur de l'organisation",
+        "override": "Remplacer",
+        "noneSelected": "Aucun pipeline : les nouveaux tickets démarrent sans pipeline.",
+        "missing": "{{id}} (introuvable)",
+        "saveFailed": "Impossible d'enregistrer les valeurs par défaut. Réessayez."
       }
     }
   },

@@ -131,6 +131,9 @@ export interface KanbanIssuePanelProps {
 
   // Loading states
   isSubmitting?: boolean;
+  // Create mode: keeps the Create button disabled while inputs the submit
+  // depends on (e.g. the pipeline defaults) are still loading.
+  isSubmitBlocked?: boolean;
 
   // Save status for description field
   descriptionSaveStatus?: 'idle' | 'saved';
@@ -198,6 +201,7 @@ export function KanbanIssuePanel({
   renderDescriptionEditor,
   renderPipeline,
   isSubmitting,
+  isSubmitBlocked,
   descriptionSaveStatus,
   titleInputRef,
   onTitleMultiLinePaste,
@@ -551,7 +555,12 @@ export function KanbanIssuePanel({
             <PrimaryButton
               value={t('kanban.createIssue')}
               onClick={onSubmit}
-              disabled={isSubmitting || isUploading || !formData.title.trim()}
+              disabled={
+                isSubmitting ||
+                isSubmitBlocked ||
+                isUploading ||
+                !formData.title.trim()
+              }
               actionIcon={isSubmitting ? 'spinner' : undefined}
               variant="default"
             />

@@ -64,6 +64,12 @@ display-only paths may be loose.
   React Query cache, seed + mount runs share one effect flush, so
   "skip-once ref" workarounds mis-fire). State adjustments belong in the
   event handler (`togglePipeline`), where the cause is known.
+- Create-mode seeding comes from the resolved new-issue defaults
+  (`defaultPipelineIds`; `null` = wait, `undefined` = legacy `basic`), not
+  a hard-coded id. Controls stay disabled until seeded. See
+  [new-issue-pipeline-defaults.md](new-issue-pipeline-defaults.md).
+- The card starts **collapsed**, and its header names the selection. It
+  stays mounted while collapsed because it owns the selection.
 - Pipeline toggles adjust ticks **incrementally**: adding a pipeline
   enables only that pipeline's default stages on top of current ticks;
   removing one drops only stages no longer declared by any selected
@@ -97,3 +103,4 @@ to the TS composer.
 ## Contributed by
 - vk/77eb-vk-pipeline
 - vk/7e4f-auto-error-remed
+- vk/16dc-default-pipeline

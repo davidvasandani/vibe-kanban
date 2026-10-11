@@ -641,7 +641,8 @@
     "addonPlaceholder": "Tick stages above to compose the pipeline block, or type your own.",
     "resetToGenerated": "Reset to generated",
     "updateIssue": "Update Issue",
-    "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue."
+    "editModeDescription": "Stages are stored in the issue description. Changes here apply when you press Update Issue.",
+    "collapsedSummary": "· {{names}}"
   },
   "workspaceCreation": {
     "creatingTitle": "Création de l’espace de travail…",

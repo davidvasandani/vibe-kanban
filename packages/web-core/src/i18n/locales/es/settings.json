@@ -1079,6 +1079,28 @@
         "resetAllTitle": "Reset all bundled defaults?",
         "resetAllMessage": "This recreates or overwrites all bundled default pipeline files.",
         "resetAllDirtyMessage": "This recreates or overwrites all bundled default pipeline files and discards the open draft."
+      },
+      "newIssueDefaults": {
+        "title": "Valores predeterminados para nuevas incidencias",
+        "description": "Pipelines activados por defecto en nuevas incidencias, en el formulario de nueva incidencia y en llamadas MCP create_issue que no indican pipelines. La anulación de un proyecto prevalece sobre la de su organización, que prevalece sobre la de esta máquina. Se guarda en esta máquina.",
+        "machine": {
+          "label": "Esta máquina",
+          "helper": "Se usa cuando ni el proyecto ni su organización lo anulan."
+        },
+        "organizations": {
+          "label": "Anulaciones por organización",
+          "helper": "Anula el valor de la máquina para todos los proyectos de una organización."
+        },
+        "projects": {
+          "label": "Anulaciones por proyecto",
+          "helper": "Anula el valor de la organización (o de la máquina) para un proyecto."
+        },
+        "inheritMachine": "Usar el valor de la máquina",
+        "inheritOrganization": "Usar el valor de la organización",
+        "override": "Anular",
+        "noneSelected": "Sin pipelines: las nuevas incidencias empiezan sin pipeline.",
+        "missing": "{{id}} (no encontrado)",
+        "saveFailed": "No se pudieron guardar los valores predeterminados. Inténtalo de nuevo."
       }
     }
   },
