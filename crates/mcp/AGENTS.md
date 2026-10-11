@@ -122,7 +122,9 @@ Two tools close that gap (`src/task_server/tools/sessions.rs`):
   are pruned from execution metadata before any log is read; the rest load
   sequentially (cold legacy turns share the historical-normalization permit)
   under a 20 s budget. A budget miss returns `complete: false` plus
-  `unscanned_execution_ids` instead of a silently partial answer.
+  `unscanned_execution_ids` instead of a silently partial answer; a turn
+  whose log cannot be read is listed in `unreadable_execution_ids` (also
+  `complete: false`) rather than counted as an empty, searched turn.
 
 All of these are read-only projections of the same normalized-logs pipeline the UI's
 conversation view and `.../normalized-logs/ws` already use

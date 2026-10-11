@@ -325,10 +325,15 @@ struct SearchSessionMessagesResponse {
     #[schemars(description = "True if more matches follow this page; raise offset to read them")]
     has_more: bool,
     #[schemars(
-        description = "False if the request budget ran out before every candidate turn was read; retry or narrow with execution_id/since/until"
+        description = "False if some candidate turn was not searched: see unscanned_execution_ids and unreadable_execution_ids"
     )]
     complete: bool,
+    #[schemars(
+        description = "Turns skipped because the request budget ran out; retry, or narrow with execution_id/since/until"
+    )]
     unscanned_execution_ids: Vec<String>,
+    #[schemars(description = "Turns whose log could not be read, so they were not searched")]
+    unreadable_execution_ids: Vec<String>,
     messages: Vec<SessionHistoryMessage>,
 }
 
@@ -744,7 +749,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Search or page through a session's whole chat log: every coding-agent turn, not just the latest. Filter by time window (since/until, RFC 3339), keyword (case-insensitive substring), roles, or one turn (execution_id), and page with limit/offset. Most agents do not timestamp individual messages, so time filtering is usually per turn (by turn start). Check `complete`: when false, some turns went unscanned within the time budget."
+        description = "Search or page through a session's whole chat log: every coding-agent turn, not just the latest. Filter by time window (since/until, RFC 3339), keyword (case-insensitive substring), roles, or one turn (execution_id), and page with limit/offset. Most agents do not timestamp individual messages, so time filtering is usually per turn (by turn start). Check `complete`: when false, some turns were not searched (budget ran out, or their log was unreadable)."
     )]
     async fn search_session_messages(
         &self,

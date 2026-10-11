@@ -93,10 +93,12 @@ pub struct SessionHistoryResponse {
     pub limit: usize,
     pub order: HistoryOrder,
     pub has_more: bool,
-    /// False when the budget stopped the scan before every candidate turn
-    /// was read; `unscanned_execution_ids` names the turns skipped.
+    /// False when any candidate turn went unsearched: the budget stopped
+    /// the scan (`unscanned_execution_ids`, worth a retry) or its log could
+    /// not be read (`unreadable_execution_ids`).
     pub complete: bool,
     pub unscanned_execution_ids: Vec<String>,
+    pub unreadable_execution_ids: Vec<String>,
     pub messages: Vec<SessionHistoryMessage>,
 }
 
@@ -236,12 +238,14 @@ struct ScanResult {
     matches: Vec<SessionHistoryMessage>,
     turns_scanned: usize,
     unscanned: Vec<Uuid>,
+    unreadable: Vec<Uuid>,
 }
 
 /// Loads candidate turns one at a time: a cold legacy turn competes for the
 /// shared historical-normalization permit, so fanning out would only queue.
 /// Once `budget_spent` reports true, no further turn is loaded and the rest
-/// are reported as unscanned.
+/// are reported as unscanned. A turn whose log could not be read (`None`)
+/// is reported as unreadable rather than counted as an empty, searched turn.
 async fn scan_turns<Load, Fut>(
     turns: &[Turn],
     filter: &HistoryFilter,
@@ -250,7 +254,7 @@ async fn scan_turns<Load, Fut>(
 ) -> ScanResult
 where
     Load: FnMut(Uuid) -> Fut,
-    Fut: Future<Output = Vec<NormalizedEntry>>,
+    Fut: Future<Output = Option<Vec<NormalizedEntry>>>,
 {
     let mut result = ScanResult::default();
     for (position, turn) in turns.iter().enumerate() {
@@ -261,7 +265,10 @@ where
                 .collect();
             break;
         }
-        let entries = load(turn.execution_id).await;
+        let Some(entries) = load(turn.execution_id).await else {
+            result.unreadable.push(turn.execution_id);
+            continue;
+        };
         result.matches.extend(filter.project_turn(turn, &entries));
         result.turns_scanned += 1;
     }
@@ -313,12 +320,7 @@ pub async fn get_session_history(
         &candidates,
         &filter,
         || Instant::now() >= deadline,
-        |execution_id| async move {
-            container
-                .normalized_entries(&execution_id)
-                .await
-                .unwrap_or_default()
-        },
+        |execution_id| async move { container.normalized_entries(&execution_id).await },
     )
     .await;
 
@@ -336,8 +338,9 @@ pub async fn get_session_history(
         limit,
         order: query.order,
         has_more,
-        complete: scan.unscanned.is_empty(),
+        complete: scan.unscanned.is_empty() && scan.unreadable.is_empty(),
         unscanned_execution_ids: scan.unscanned.iter().map(Uuid::to_string).collect(),
+        unreadable_execution_ids: scan.unreadable.iter().map(Uuid::to_string).collect(),
         messages,
     })))
 }
@@ -548,10 +551,10 @@ mod tests {
             |id| {
                 loaded.borrow_mut().push(id);
                 async move {
-                    vec![entry(
+                    Some(vec![entry(
                         NormalizedEntryType::AssistantMessage,
                         &id.to_string(),
-                    )]
+                    )])
                 }
             },
         )
@@ -577,7 +580,7 @@ mod tests {
             || loads.get() >= 1,
             |_| {
                 loads.set(loads.get() + 1);
-                async { vec![entry(NormalizedEntryType::AssistantMessage, "hi")] }
+                async { Some(vec![entry(NormalizedEntryType::AssistantMessage, "hi")]) }
             },
         )
         .await;
@@ -593,5 +596,26 @@ mod tests {
             vec![turns[1].execution_id, turns[2].execution_id]
         );
         assert_eq!(result.matches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_turn_is_reported_not_counted_as_searched() {
+        let turns = vec![turn(0, 1, Some(2)), turn(1, 3, Some(4))];
+        let unreadable = turns[0].execution_id;
+        let result = scan_turns(
+            &turns,
+            &HistoryFilter::default(),
+            || false,
+            |id| async move {
+                (id != unreadable).then(|| vec![entry(NormalizedEntryType::AssistantMessage, "hi")])
+            },
+        )
+        .await;
+
+        assert_eq!(result.unreadable, vec![unreadable]);
+        assert!(result.unscanned.is_empty());
+        assert_eq!(result.turns_scanned, 1);
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].turn_index, 1);
     }
 }

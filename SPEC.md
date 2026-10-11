@@ -89,6 +89,7 @@ Response (`SessionHistoryResponse`):
   "has_more": false,
   "complete": true,
   "unscanned_execution_ids": [],
+  "unreadable_execution_ids": [],
   "messages": [
     { "id": "<exec>:<idx>", "role": "assistant", "text": "…",
       "created_at": "…|null", "turn_started_at": "…",

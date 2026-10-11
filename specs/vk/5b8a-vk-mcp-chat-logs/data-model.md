@@ -28,8 +28,9 @@ No persisted schema changes. Response-only types, in
 | `offset`, `limit` | number | effective (clamped) values |
 | `order` | `asc` \| `desc` | |
 | `has_more` | bool | `offset + messages.len() < total_matches` |
-| `complete` | bool | false when the budget stopped the scan |
+| `complete` | bool | false when any candidate turn went unsearched (budget or unreadable) |
 | `unscanned_execution_ids` | string[] | candidate turns not read due to the budget |
+| `unreadable_execution_ids` | string[] | candidate turns whose log could not be read (`normalized_entries` returned none); also makes `complete` false |
 | `messages` | SessionHistoryMessage[] | |
 
 ## Ordering
