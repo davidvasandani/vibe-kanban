@@ -170,6 +170,7 @@ contributed to it.
   error/recovery callback chain to the navbar banner, why the readiness timeout
   must fall back silently ("falling back is recovery, not an error"), and the
   stable-callback / caching / testing gotchas.
+- [new-issue-pipeline-defaults.md](new-issue-pipeline-defaults.md) — Which pipelines new issues start with (UI and MCP `create_issue`). Defaults are stored per machine in `Config.new_issue_pipelines`, because pipeline ids are per-machine files; cloud columns and TOML flags were rejected. One pure resolver serves both paths (project, then org, then machine). A present-but-empty override means none, MCP `[]` is honoured, and missing ids are skipped. Covers the async-seeding gotchas: wait on `null`, disable the controls, block Create, host-scoped query keys. Also covers the whole-object settings saves and the collapsed-by-default card (`vk/16dc-default-pipeline`).
 - [task-pipeline-block.md](task-pipeline-block.md) — Per-task pipelines as
   a generated `## Pipeline` block in the issue description: the
   compose/parse round-trip contract, why under-recognizing the selection is
