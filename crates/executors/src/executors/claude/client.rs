@@ -102,29 +102,243 @@ pub const UNBOUNDED_WAIT_DENY_REASON: &str = "Unbounded waiting is not supported
 /// Shell keywords that begin a loop with no inherent iteration bound.
 const UNBOUNDED_LOOP_KEYWORDS: &[&str] = &["while", "until"];
 
-/// Bare tokens that are evidence the loop already terminates.
+/// The bash builtin used to build a deadline (`while [ $SECONDS -lt 60 ]`).
 ///
-/// - `SECONDS` is the bash builtin used to build a deadline
-///   (`while [ $SECONDS -lt 60 ]`).
-/// - `read` makes the loop consume a finite input stream
-///   (`while read -r line; do …; sleep 1; done`), which ends when the stream
-///   does. Rate-limited `while read` loops are ordinary and were previously
-///   refused whenever they contained a `sleep`.
-const WAIT_BOUND_TOKENS: &[&str] = &["SECONDS", "read"];
+/// Matched as a token in the *raw* command, quotes included, because
+/// `"$SECONDS"` is the idiomatic way to write it.
+const DEADLINE_VARIABLE: &str = "SECONDS";
 
-/// Arithmetic expansion — the marker for an attempt counter, as in
-/// `n=0; while [ $n -lt 5 ]; do …; n=$((n+1)); done`.
+/// Bash arithmetic — the marker for an attempt counter.
 ///
-/// Matched as a **substring**, since `$((` contains no word characters.
+/// `((` covers both arithmetic expansion (`n=$((n+1))`) and the arithmetic
+/// command (`((n++))`, `while (( n < 5 ))`). Matching only `$((` refused the
+/// second, which is the idiomatic Bash counter and exactly what
+/// [`UNBOUNDED_WAIT_DENY_REASON`] tells the agent to write — so the agent was
+/// refused again for following the advice.
 ///
-/// This replaced a set of bare comparison operators (`-lt`, `-gt`, …). Those
-/// matched anywhere in the command, including inside the *condition* of a
-/// polling loop — `until [ $(grep -c ready "$f") -gt 0 ]; do sleep 5; done` was
-/// read as "bounded" purely because it compares numbers, even though it is
-/// semantically the incident command. An increment is evidence of a counter in
-/// a way a comparison is not, and `$((` does not collide with the plain `$(`
-/// command substitution a polling condition uses.
-const ARITHMETIC_EXPANSION: &str = "$((";
+/// A bare comparison (`-lt`, `-gt`) is deliberately *not* a marker: it reads
+/// the same inside a polling condition, so
+/// `until [ $(grep -c ready "$f") -gt 0 ]; do sleep 5; done` — semantically the
+/// incident command — would read as bounded. An increment separates a counter
+/// from a condition; a comparison does not. `((` also does not collide with
+/// the single `$(` a polling condition uses.
+const ARITHMETIC: &str = "((";
+
+/// Shells whose `-c` argument is a script, as is `eval`'s argument.
+const SCRIPT_SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "ksh", "ash"];
+
+/// How deep nested `bash -c '…'` scripts are followed.
+const MAX_SCRIPT_DEPTH: u8 = 4;
+
+/// One shell word, with quotes removed.
+struct ShellWord {
+    text: String,
+    /// Any part of the word was quoted or escaped. A quoted word is data, never
+    /// a command or a bound marker.
+    quoted: bool,
+}
+
+/// A command as the shell would split it, without executing anything.
+struct ShellScan {
+    /// The command with every quoted or escaped span replaced by `_`.
+    /// Separators outside quotes are kept, so command position is still
+    /// recognisable, but text inside quotes can no longer create a loop
+    /// keyword or a command position. `_` is a word character, so masking never
+    /// manufactures a token boundary.
+    masked: String,
+    words: Vec<ShellWord>,
+}
+
+/// Splits `command` into shell words and a quote-masked copy.
+///
+/// Approximate on purpose. It understands single quotes, double quotes with
+/// backslash escapes, unquoted escapes and line continuations, and treats
+/// `;&|()<>` and backticks as word separators. It does not parse heredocs,
+/// expansions or arrays. That is enough to tell a loop the shell would run
+/// from text that only appears inside a string, which is what this guard needs.
+/// An unterminated quote runs to the end of the input rather than failing.
+fn scan_shell(command: &str) -> ShellScan {
+    fn finish(words: &mut Vec<ShellWord>, text: &mut String, quoted: &mut bool, open: &mut bool) {
+        if *open {
+            words.push(ShellWord {
+                text: std::mem::take(text),
+                quoted: *quoted,
+            });
+        }
+        *quoted = false;
+        *open = false;
+    }
+
+    let mut masked = String::with_capacity(command.len());
+    let mut words = Vec::new();
+    let mut text = String::new();
+    let mut quoted = false;
+    let mut open = false;
+    let mut chars = command.chars();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                for inner in chars.by_ref() {
+                    if inner == '\'' {
+                        break;
+                    }
+                    text.push(inner);
+                }
+                masked.push('_');
+                (quoted, open) = (true, true);
+            }
+            '"' => {
+                while let Some(inner) = chars.next() {
+                    match inner {
+                        '"' => break,
+                        '\\' => text.extend(chars.next()),
+                        _ => text.push(inner),
+                    }
+                }
+                masked.push('_');
+                (quoted, open) = (true, true);
+            }
+            '\\' => match chars.next() {
+                // A line continuation joins lines into one command, so it is a
+                // blank, not the newline separator.
+                Some('\n') => {
+                    masked.push(' ');
+                    finish(&mut words, &mut text, &mut quoted, &mut open);
+                }
+                Some(escaped) => {
+                    masked.push('_');
+                    text.push(escaped);
+                    (quoted, open) = (true, true);
+                }
+                None => {}
+            },
+            c if c.is_whitespace() || ";&|()<>`".contains(c) => {
+                masked.push(c);
+                finish(&mut words, &mut text, &mut quoted, &mut open);
+            }
+            c => {
+                masked.push(c);
+                text.push(c);
+                open = true;
+            }
+        }
+    }
+    finish(&mut words, &mut text, &mut quoted, &mut open);
+    ShellScan { masked, words }
+}
+
+/// Whether the unquoted word at `index` is the `timeout` *command*.
+///
+/// Recognised by its mandatory duration argument: after any options (`-s` and
+/// `-k` take a value), the next word must start with a digit. That accepts
+/// `timeout 30`, `timeout 5m` and `timeout -s KILL 30` however they are reached
+/// — `env timeout`, `sudo timeout`, `nice -n 10 timeout`, `FOO=1 timeout` — and
+/// rejects the word as a search pattern (`grep -q timeout app.log`), a path
+/// (`/tmp/timeout.flag`, never the bare word) or a flag (`--timeout`).
+fn is_timeout_command(words: &[ShellWord], index: usize) -> bool {
+    let word = &words[index];
+    if word.quoted || word.text != "timeout" {
+        return false;
+    }
+    let mut rest = words[index + 1..].iter();
+    while let Some(next) = rest.next() {
+        match next.text.as_str() {
+            "-s" | "-k" => {
+                rest.next();
+            }
+            option if option.starts_with('-') => {}
+            duration => return duration.starts_with(|c: char| c.is_ascii_digit()),
+        }
+    }
+    false
+}
+
+/// Whether the command carries evidence that its author already bounded it.
+///
+/// Markers signal *intent* to bound, not proof of one: a marker anywhere
+/// shadows the whole command, and ambiguity resolves permissively by design.
+fn is_bounded(command: &str, words: &[ShellWord]) -> bool {
+    (0..words.len()).any(|index| is_timeout_command(words, index))
+        // `read` consumes a finite stream, so `while read -r line; …` ends when
+        // its input does. Only the unquoted command counts, not a pattern.
+        || words.iter().any(|word| !word.quoted && word.text == "read")
+        || contains_token(command, DEADLINE_VARIABLE)
+        || command.contains(ARITHMETIC)
+}
+
+/// The literal scripts this command hands to a shell (`bash -c '…'`, `-lc`,
+/// `bash -o pipefail -c '…'`) or to `eval`.
+///
+/// Those scripts run, so they are checked like the outer command. Without this
+/// the incident command escaped simply by being wrapped:
+/// `bash -c 'until grep -q … ; do sleep 5; done'`.
+fn shell_script_payloads(words: &[ShellWord]) -> Vec<&str> {
+    let mut payloads = Vec::new();
+    for (index, word) in words.iter().enumerate() {
+        if word.quoted {
+            continue;
+        }
+        let name = word.text.rsplit('/').next().unwrap_or_default();
+        if name == "eval" {
+            payloads.extend(words.get(index + 1).map(|script| script.text.as_str()));
+            continue;
+        }
+        if !SCRIPT_SHELLS.contains(&name) {
+            continue;
+        }
+        let mut cursor = index + 1;
+        while let Some(option) = words.get(cursor).filter(|option| !option.quoted) {
+            let option = option.text.as_str();
+            if matches!(option, "-o" | "+o" | "-O" | "+O") {
+                cursor += 2;
+            } else if option.starts_with("--") || option.starts_with('+') {
+                cursor += 1;
+            } else if option.starts_with('-') {
+                if option.contains('c') {
+                    payloads.extend(words.get(cursor + 1).map(|script| script.text.as_str()));
+                    break;
+                }
+                cursor += 1;
+            } else {
+                // A script file, not `-c`.
+                break;
+            }
+        }
+    }
+    payloads
+}
+
+/// The predicate behind [`is_unbounded_wait_command`], on a command string.
+fn is_unbounded_wait_script(command: &str, depth: u8) -> bool {
+    let scan = scan_shell(command);
+
+    // `watch` repeats forever by definition. Only as the *leading* word:
+    // matching it anywhere would hit `cargo watch` and `--watch` flags, which
+    // are legitimate dev-server shapes VK handles elsewhere.
+    if scan
+        .words
+        .first()
+        .is_some_and(|first| !first.quoted && first.text == "watch")
+    {
+        return true;
+    }
+    if is_bounded(command, &scan.words) {
+        return false;
+    }
+
+    let has_unbounded_loop = UNBOUNDED_LOOP_KEYWORDS
+        .iter()
+        .any(|keyword| contains_command_keyword(&scan.masked, keyword));
+    if has_unbounded_loop && contains_token(&scan.masked, "sleep") {
+        return true;
+    }
+
+    depth < MAX_SCRIPT_DEPTH
+        && shell_script_payloads(&scan.words)
+            .into_iter()
+            .any(|script| is_unbounded_wait_script(script, depth + 1))
+}
 
 /// Whether `haystack` contains `needle` delimited by non-word characters, so
 /// `sleep` does not match `sleeping` and `while` does not match `awhile`.
@@ -192,12 +406,17 @@ fn contains_command_keyword(haystack: &str, needle: &str) -> bool {
 /// # Known limits
 ///
 /// - **Writing** a script that contains a wait loop (a heredoc into a file) is
-///   refused as though the loop were being run. Left as-is: agents create files
-///   with the `Write`/`Edit` tools, so the heredoc path is rare, and detecting
-///   redirection reliably would mean parsing the shell.
-/// - A wait loop assembled through a variable or `eval` does not match. The
-///   guard targets an agent that stalls in good faith, not an adversary; the
-///   per-command bound still applies.
+///   refused as though the loop were being run, because [`scan_shell`] reads a
+///   heredoc body as shell. Left as-is: agents create files with the
+///   `Write`/`Edit` tools, so the heredoc path is rare. An apostrophe in the
+///   body can also hide what follows it; either error lands on this limit.
+/// - Text inside quotes is data: a search *for* a wait loop
+///   (`grep -E '(while|until).*sleep'`) is not refused. The exception is a
+///   literal script handed to a shell or `eval` (`bash -c '…'`), which runs and
+///   is checked like the outer command.
+/// - A wait loop assembled from a variable (`eval "$cmd"`) or run remotely
+///   (`ssh host '…'`) does not match. The guard targets an agent that stalls in
+///   good faith, not an adversary; the per-command bound still applies.
 /// - A busy loop with no `sleep` (`while true; do :; done`) is allowed by this
 ///   predicate and bounded only by the command timeout.
 /// - A bound marker anywhere in the command shadows the whole loop, so an
@@ -229,33 +448,7 @@ pub fn is_unbounded_wait_command(input: &serde_json::Value) -> bool {
     else {
         return false;
     };
-
-    // `watch` repeats forever by definition. Only as the *leading* token:
-    // matching it anywhere would hit `cargo watch` and `--watch` flags, which
-    // are legitimate dev-server shapes VK handles elsewhere.
-    if command
-        .split_whitespace()
-        .next()
-        .is_some_and(|first| first == "watch")
-    {
-        return true;
-    }
-
-    let has_unbounded_loop = UNBOUNDED_LOOP_KEYWORDS
-        .iter()
-        .any(|keyword| contains_command_keyword(command, keyword));
-    let waits = contains_token(command, "sleep");
-    // `timeout` counts only in *command position*. Matched as a bare token it
-    // also fired on any path or variable containing the word, so
-    // `until test -f /tmp/timeout.flag; do sleep 5; done` read as bounded
-    // because of the file it was polling for.
-    let is_bounded = contains_command_keyword(command, "timeout")
-        || WAIT_BOUND_TOKENS
-            .iter()
-            .any(|marker| contains_token(command, marker))
-        || command.contains(ARITHMETIC_EXPANSION);
-
-    has_unbounded_loop && waits && !is_bounded
+    is_unbounded_wait_script(command, 0)
 }
 
 /// PreToolUse hook response that denies an unbounded foreground wait with an
@@ -1079,13 +1272,127 @@ mod tests {
             "echo start\r\n  while foo",
             "while"
         ));
+    }
 
-        // `timeout` counts as a bound marker only as a command, not in a path.
-        assert!(contains_command_keyword("timeout 300 bash -c x", "timeout"));
-        assert!(!contains_command_keyword(
-            "test -f /tmp/timeout.flag",
-            "timeout"
+    /// Findings from the independent Codex review of the merged guard. Each
+    /// input is quoted from that review.
+    #[test]
+    fn independent_review_findings_are_closed() {
+        let deny = |command: &str| {
+            is_unbounded_wait_command(&bash_hook_input(serde_json::json!({ "command": command })))
+        };
+
+        // 1. Quoted text must not manufacture a loop. A search *for* wait
+        //    loops is read-only and runs nothing.
+        assert!(!deny("grep -R -nE '(while|until).*sleep' crates"));
+        assert!(!deny("rg \"until .*; do sleep\" -n ."));
+
+        // 2. `((n++))` is the idiomatic Bash counter — the shape the denial
+        //    itself recommends. Refusing it sends the agent round in a circle.
+        assert!(!deny("n=0; while (( n < 5 )); do sleep 1; ((n++)); done"));
+        assert!(!deny(
+            "n=0; while [ $n -lt 5 ]; do sleep 1; let n++; ((n+=1)); done"
         ));
+
+        // 3. `timeout` is a deadline however it is reached: through a command
+        //    prefix, an assignment, or its own options.
+        assert!(!deny(
+            "env timeout 30 bash -c 'set -e; until test -f /tmp/ready; do sleep 1; done'"
+        ));
+        assert!(!deny(
+            "FOO=1 timeout 30 bash -c 'until test -f x; do sleep 1; done'"
+        ));
+        assert!(!deny(
+            "sudo timeout -s KILL 30 bash -c 'while true; do sleep 1; done'"
+        ));
+        assert!(!deny(
+            "nice -n 10 timeout 5m sh -c 'until test -f x; do sleep 1; done'"
+        ));
+
+        // 4. A literal script handed to a shell is still a script. The first
+        //    is the incident command, wrapped.
+        assert!(deny(
+            "bash -c 'until grep -q \"### restored:\" /tmp/out.log; do sleep 5; done'"
+        ));
+        assert!(deny("sh -c \"while true; do sleep 5; done\""));
+        assert!(deny("/bin/bash -lc 'until test -f x; do sleep 1; done'"));
+        assert!(deny(
+            "bash -o pipefail -c 'until test -f x; do sleep 1; done'"
+        ));
+        assert!(deny(
+            "docker exec app sh -c 'until test -f x; do sleep 1; done'"
+        ));
+        assert!(deny("eval 'until test -f x; do sleep 1; done'"));
+        // ...and a bound outside or inside the script still counts.
+        assert!(!deny(
+            "bash -c 'timeout 60 sh -c \"until test -f x; do sleep 1; done\"'"
+        ));
+
+        // `timeout` is recognised by its duration argument, so the word used as
+        // a search pattern is not mistaken for a deadline.
+        assert!(deny("until grep -q timeout /tmp/app.log; do sleep 5; done"));
+        assert!(deny("until grep -q timeout -r logs; do sleep 5; done"));
+        assert!(deny(
+            "until grep -q \"timeout\" /tmp/app.log; do sleep 5; done"
+        ));
+        // `read` likewise counts only as the unquoted command.
+        assert!(deny(
+            "until grep -q \"read\" /tmp/app.log; do sleep 5; done"
+        ));
+    }
+
+    #[test]
+    fn scan_shell_masks_quotes_and_splits_words() {
+        let scan = scan_shell("echo 'a; until' \"b\\\"c\" d\\;e; f\\\ng");
+        assert_eq!(scan.masked, "echo _ _ d_e; f g");
+        let words: Vec<_> = scan
+            .words
+            .iter()
+            .map(|word| (word.text.as_str(), word.quoted))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                ("echo", false),
+                ("a; until", true),
+                ("b\"c", true),
+                ("d;e", true),
+                ("f", false),
+                ("g", false),
+            ]
+        );
+
+        // Unterminated quotes and non-ASCII text never panic.
+        let scan = scan_shell("echo \"naïve ünïcode; until");
+        assert_eq!(scan.masked, "echo _");
+        assert!(!scan_shell("it's — ünïcode 'x").masked.is_empty());
+    }
+
+    #[test]
+    fn nested_scripts_are_followed_to_a_bounded_depth() {
+        // Six levels of `bash -c` with the wait loop innermost, past
+        // `MAX_SCRIPT_DEPTH`. Depth is bounded, so this allows rather than
+        // recursing without limit.
+        let mut script = "until test -f x; do sleep 1; done".to_string();
+        for _ in 0..6 {
+            script = format!("bash -c {}", shell_quote(&script));
+        }
+        assert!(!is_unbounded_wait_script(&script, 0));
+
+        // Two levels is well within reach and is refused.
+        let two = format!(
+            "bash -c {}",
+            shell_quote(&format!(
+                "sh -c {}",
+                shell_quote("until test -f x; do sleep 1; done")
+            ))
+        );
+        assert!(is_unbounded_wait_script(&two, 0));
+    }
+
+    /// Single-quotes `text` for a POSIX shell.
+    fn shell_quote(text: &str) -> String {
+        format!("'{}'", text.replace('\'', r"'\''"))
     }
 
     #[tokio::test]
