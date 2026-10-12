@@ -211,6 +211,11 @@ contributed to it.
   `isSyncingRef` rebuild-swallowing gotcha, the In progress Active/Waiting
   split, preference-gated vs semantic workspace signals, name-based
   "In progress" identification.
+- [mobile-issue-list-rows.md](mobile-issue-list-rows.md) — Why list rows
+  overlapped on phones (`shrink-0` clusters in a `justify-between` row), the
+  two-line mobile row behind `isMobile`, keeping the avatar outside the
+  clipped badge box, and rendering real `ui` components at 390px via SSR,
+  real Tailwind and Nix Chromium (`vk/2b39-fix-mobile-ui`).
 - [mobile-kanban-scrolling.md](mobile-kanban-scrolling.md) — Mobile kanban
   board scroll/snap architecture: nested single-axis scrollers, the
   `overflow-y` → `overflow-x` promotion gotcha, gesture routing, history of

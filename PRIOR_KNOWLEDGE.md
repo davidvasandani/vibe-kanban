@@ -1,54 +1,30 @@
-# Prior knowledge: VK MCP session chat history
+# Prior knowledge — vk/2b39-fix-mobile-ui (Fix mobile issue list UI)
 
-Task `vk/5b8a-vk-mcp-chat-logs`. Distilled from `wiki/`, `docs/knowledge-base/`,
-`crates/mcp/AGENTS.md` and earlier task specs. Read-only summary.
+Distilled from `vibe-kanban/wiki/` (read-only). Relevant pages:
 
-## Existing message readers (`vk/29d8-vk-list-all-mess`, `crates/mcp/AGENTS.md`)
+## mobile-kanban-scrolling.md
+- Mobile board uses nested single-axis scrollers. `overflow-y-auto` alone
+  computes `overflow-x` to `auto` → any vertical scroller on mobile must also
+  carry `overflow-x-hidden` (Gotcha 1). Applies to the list view scroller
+  (`KanbanContainer` list wrapper + `IssueListView` root), which today only
+  sets `overflow-y-auto` while rows overflow horizontally.
+- Don't use `touch-action` to fight stolen gestures; constrain `overflow-*`.
+- No touch engine in the task env; `mobile-testing.md` documents phone testing.
+  Manual checks: long-press drag handle still drags; desktop unchanged.
 
-- `list_recent_messages` / `list_all_messages` / `get_execution.final_message`
-  are projections of `ContainerService::normalized_entries` served through
-  `GET /api/execution-processes/{id}/messages` and
-  `GET /api/sessions/{id}/messages`. The session route resolves **only the
-  newest non-dropped `CodingAgent` execution**. That is the gap this task
-  closes.
-- Projection rules to reuse rather than fork: `entry_role` (drops `Loading`
-  and `TokenUsageInfo`), empty-text skip, 4000-char truncation with a
-  `… [truncated]` marker, ids `{execution_id}:{entry_index}`, `parse_roles`.
-- 29d8 clarified that `all` means "the settled normalized projection Vibe
-  Kanban has", including the legacy normalizer's newest-2,000-raw-message
-  safety window and its omission notice. It is not an unbounded raw-log replay.
-  The same caveat applies per turn here.
-- Execution-first precedence when both `session_id` and `execution_id` are
-  given.
+## workspace-context-bar-responsive-visibility.md
+- Layout decisions use `useIsMobile()` (`max-width: 767px`), not UA sniffing.
+- Keep presentational `packages/ui` components layout-agnostic; policy lives in
+  `web-core` and is passed down (here: an optional `isMobile` prop, same as
+  `KanbanFilterBar`, `KanbanCardContent`, `KanbanBoard`).
 
-## Cost of reading turns (`docs/knowledge-base/lazy-loading-normalized-conversation-history.md`, `wiki/awaited-stream-settlement.md`)
+## kanban-items-state-and-activity-grouping.md
+- `items` feeds both the board and `IssueListView`; list-view drags persist
+  `sort_order` from render order, so the row's `Draggable` index/order must not
+  change — layout-only changes inside the row are safe.
 
-- A finished turn with a materialized sidecar is a cheap replay. A legacy
-  turn without one needs a full vendor re-normalization, gated by a per-execution
-  lease plus a **global historical-normalization permit**. A session-wide
-  read should therefore load turns **sequentially**, and should skip turns
-  it can rule out without reading (time-window pruning), not fan out.
-- Running turns are read from the live in-memory `MsgStore` snapshot.
+## frontend-linting.md
+- `pnpm run lint` covers `ui`; no ESLint directive comments allowed. Unused
+  i18n keys are checked — reuse existing `kanban.clearFilters`.
 
-## Timestamps (`specs/vk/a22f-time-stamp-chat`)
-
-- `NormalizedEntry.timestamp` is `Option<String>` and most normalizers leave
-  it `None`. The chat UI falls back to the execution record's time when an
-  entry has none, and never fabricates "now". Date filters should do the same
-  (entry timestamp, else turn `started_at`), so in practice time filtering is
-  turn-granular for most executors.
-
-## MCP conventions (`crates/mcp/AGENTS.md`, `wiki/mcp-pr-tools-and-connection-notices.md`)
-
-- Every session-reading tool fetches the session and calls
-  `scope_allows_workspace` before reading.
-- Tools are registered by name in `tools/mod.rs` (the scoped tool list) as well
-  as through the `#[tool_router]` impl.
-- The MCP talks HTTP to the backend and mirrors response structs locally
-  (e.g. `RecentMessagesPayload`) instead of importing server types.
-
-## Constitution points that apply
-
-- III/VI: extend the existing `/messages` projection; no new store.
-- II: unit-test the pure filter, paging and time logic with `#[cfg(test)]`.
-- IX: unknown or absent timestamps degrade safely.
+No prior page covers the list-view row layout itself; this task should add one.
