@@ -1,30 +1,38 @@
-# Prior knowledge — vk/2b39-fix-mobile-ui (Fix mobile issue list UI)
+# Prior knowledge: show the left drawer until there is no space
 
-Distilled from `vibe-kanban/wiki/` (read-only). Relevant pages:
+Task `vk/dc99-show-left-drawer`. Distilled from `wiki/` (read-only search for
+sidebar / drawer / resizable / scratch / panel).
 
-## mobile-kanban-scrolling.md
-- Mobile board uses nested single-axis scrollers. `overflow-y-auto` alone
-  computes `overflow-x` to `auto` → any vertical scroller on mobile must also
-  carry `overflow-x-hidden` (Gotcha 1). Applies to the list view scroller
-  (`KanbanContainer` list wrapper + `IssueListView` root), which today only
-  sets `overflow-y-auto` while rows overflow horizontally.
-- Don't use `touch-action` to fight stolen gestures; constrain `overflow-*`.
-- No touch engine in the task env; `mobile-testing.md` documents phone testing.
-  Manual checks: long-press drag handle still drags; desktop unchanged.
+## Relevant pages
 
-## workspace-context-bar-responsive-visibility.md
-- Layout decisions use `useIsMobile()` (`max-width: 767px`), not UA sniffing.
-- Keep presentational `packages/ui` components layout-agnostic; policy lives in
-  `web-core` and is passed down (here: an optional `isMobile` prop, same as
-  `KanbanFilterBar`, `KanbanCardContent`, `KanbanBoard`).
+- **settings-drawer.md** — The Settings drawer docks by having the app shells
+  (`SharedAppLayout`, `RemoteAppShell`) reserve its width as `marginRight`.
+  Its dock-or-sheet decision is explicit **space math** (rail + 300px
+  workspaces sidebar + a chat column; sheet below 1240px), and it notes that
+  "the `md` breakpoint alone is not enough, because the viewport does not
+  shrink when the shell does". While Settings is open, `WorkspacesLayout`
+  hides its 300px right sidebar without touching the saved preference.
+  → Measure the workspace area itself, not `window.innerWidth`; the Settings
+  inset is then already excluded. Hiding chrome for layout reasons must not
+  write the user's preference — the same rule this task applies to the left
+  drawer.
+- **workspace-sidebar-filtering.md** — "The preference scratch is typed on
+  the server": `UiPreferencesData` (`crates/db/src/models/scratch.rs`) has no
+  catch-all, so frontend-only fields are silently dropped on save. → New
+  transient store fields (fit result, override) are deliberately *not*
+  persisted; no Rust/scratch change is needed. `is_left_sidebar_visible`
+  already exists and keeps its meaning (user intent).
+- **flexible-collapsible-panel-stacks.md** — The right drawer
+  (`RightSidebar.tsx`) is a fixed 300px column shared with the mobile `git`
+  tab. → Its width is a constant we can use in the fit formula.
+- **appbar-rail-and-org-tiles.md** — The app rail lives in `SharedAppLayout`
+  to the left of the route content, so it is outside the measured workspace
+  area.
 
-## kanban-items-state-and-activity-grouping.md
-- `items` feeds both the board and `IssueListView`; list-view drags persist
-  `sort_order` from render order, so the row's `Draggable` index/order must not
-  change — layout-only changes inside the row are safe.
+## Not covered by the knowledge base
 
-## frontend-linting.md
-- `pnpm run lint` covers `ui`; no ESLint directive comments allowed. Unused
-  i18n keys are checked — reuse existing `kanban.clearFilters`.
-
-No prior page covers the list-view row layout itself; this task should add one.
+Nothing records the `isWideScreen()` (`> 2048px`) auto-collapse in
+`useUiPreferencesStore`, the hover reopen tag/preview
+(`useWorkspaceSidebarPreviewController`), or the ordering hazard between the
+"restore left drawer when right panel closes" effect and scratch hydration.
+These will be recorded after implementation.

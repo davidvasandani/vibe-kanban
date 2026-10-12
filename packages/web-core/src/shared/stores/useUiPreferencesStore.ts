@@ -307,9 +307,6 @@ export const PERSIST_KEYS = {
   repoCard: (repoId: string) => `repo-card-${repoId}` as const,
 } as const;
 
-// Check if screen is wide enough to keep sidebar visible
-const isWideScreen = () => window.innerWidth > 2048;
-
 export type PersistKey =
   | typeof PERSIST_KEYS.workspacesSidebarArchived
   | typeof PERSIST_KEYS.workspacesSidebarAccordionLayout
@@ -364,7 +361,14 @@ type State = {
 
   // Global layout state (applies across all workspaces)
   layoutMode: LayoutMode;
+  // User intent (persisted). Whether the drawer is on screen also depends on
+  // space: see selectIsLeftSidebarShown.
   isLeftSidebarVisible: boolean;
+  // Transient: whether the workspace layout has room for the left drawer, as
+  // last measured by WorkspacesLayout. Never persisted.
+  leftSidebarHasSpace: boolean;
+  // Transient: user asked to show the drawer while there is no space for it.
+  isLeftSidebarForcedOpen: boolean;
   isRightSidebarVisible: boolean;
   isTerminalVisible: boolean;
   previewRefreshKey: number;
@@ -436,6 +440,7 @@ type State = {
     workspaceId?: string
   ) => void;
   setLeftSidebarVisible: (value: boolean) => void;
+  setLeftSidebarHasSpace: (value: boolean) => void;
   setLeftMainPanelVisible: (value: boolean, workspaceId?: string) => void;
   triggerPreviewRefresh: () => void;
 
@@ -501,6 +506,20 @@ type State = {
   setCreateDraftWorkspaceByDefault: (value: boolean) => void;
 };
 
+// Whether the left drawer is on screen: the user wants it and the workspace
+// layout has room for it (or the user asked to show it anyway).
+export function selectIsLeftSidebarShown(
+  s: Pick<
+    State,
+    'isLeftSidebarVisible' | 'leftSidebarHasSpace' | 'isLeftSidebarForcedOpen'
+  >
+): boolean {
+  return (
+    s.isLeftSidebarVisible &&
+    (s.leftSidebarHasSpace || s.isLeftSidebarForcedOpen)
+  );
+}
+
 export const useUiPreferencesStore = create<State>()((set, get) => ({
   // UI preferences state
   repoActions: {},
@@ -513,6 +532,8 @@ export const useUiPreferencesStore = create<State>()((set, get) => ({
   // Global layout state
   layoutMode: 'workspaces' as LayoutMode,
   isLeftSidebarVisible: true,
+  leftSidebarHasSpace: true,
+  isLeftSidebarForcedOpen: false,
   isRightSidebarVisible: true,
   isTerminalVisible: true,
   previewRefreshKey: 0,
@@ -578,8 +599,17 @@ export const useUiPreferencesStore = create<State>()((set, get) => ({
     set((s) => ({
       layoutMode: s.layoutMode === 'workspaces' ? 'kanban' : 'workspaces',
     })),
+  // Acts on what is on screen: hide a shown drawer (saved), otherwise show it,
+  // overriding a lack of space until the space situation changes.
   toggleLeftSidebar: () =>
-    set((s) => ({ isLeftSidebarVisible: !s.isLeftSidebarVisible })),
+    set((s) =>
+      selectIsLeftSidebarShown(s)
+        ? { isLeftSidebarVisible: false, isLeftSidebarForcedOpen: false }
+        : {
+            isLeftSidebarVisible: true,
+            isLeftSidebarForcedOpen: !s.leftSidebarHasSpace,
+          }
+    ),
 
   toggleLeftMainPanel: (workspaceId) => {
     if (!workspaceId) return;
@@ -622,11 +652,7 @@ export const useUiPreferencesStore = create<State>()((set, get) => ({
           rightMainPanelMode: isCurrentlyActive ? null : mode,
         },
       },
-      isLeftSidebarVisible: isCurrentlyActive
-        ? true
-        : isWideScreen()
-          ? state.isLeftSidebarVisible
-          : false,
+      ...(isCurrentlyActive && { isLeftSidebarVisible: true }),
       ...(isMobile &&
         !isCurrentlyActive && { mobileActiveTab: mode as MobileTab }),
     });
@@ -646,16 +672,18 @@ export const useUiPreferencesStore = create<State>()((set, get) => ({
           rightMainPanelMode: mode,
         },
       },
-      ...(mode !== null && {
-        isLeftSidebarVisible: isWideScreen()
-          ? state.isLeftSidebarVisible
-          : false,
-      }),
       ...(isMobile && mode !== null && { mobileActiveTab: mode as MobileTab }),
     });
   },
 
   setLeftSidebarVisible: (value) => set({ isLeftSidebarVisible: value }),
+
+  setLeftSidebarHasSpace: (value) =>
+    set((s) =>
+      s.leftSidebarHasSpace === value
+        ? s
+        : { leftSidebarHasSpace: value, isLeftSidebarForcedOpen: false }
+    ),
 
   setLeftMainPanelVisible: (value, workspaceId) => {
     if (!workspaceId) return;
@@ -1034,10 +1062,9 @@ export function useWorkspacePanelState(workspaceId: string | undefined) {
       : DEFAULT_WORKSPACE_PANEL_STATE
   );
 
-  // Global state (sidebars are global)
-  const isLeftSidebarVisible = useUiPreferencesStore(
-    (s) => s.isLeftSidebarVisible
-  );
+  // Global state (sidebars are global). The left drawer reports whether it
+  // is on screen, which also depends on available space.
+  const isLeftSidebarVisible = useUiPreferencesStore(selectIsLeftSidebarShown);
   const isRightSidebarVisible = useUiPreferencesStore(
     (s) => s.isRightSidebarVisible
   );

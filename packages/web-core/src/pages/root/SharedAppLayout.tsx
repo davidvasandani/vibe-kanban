@@ -15,7 +15,10 @@ import {
 } from '@phosphor-icons/react';
 import { SyncErrorProvider } from '@/shared/providers/SyncErrorProvider';
 import { useIsMobile } from '@/shared/hooks/useIsMobile';
-import { useUiPreferencesStore } from '@/shared/stores/useUiPreferencesStore';
+import {
+  selectIsLeftSidebarShown,
+  useUiPreferencesStore,
+} from '@/shared/stores/useUiPreferencesStore';
 import { cn } from '@/shared/lib/utils';
 import { isTauriMac } from '@/shared/lib/platform';
 
@@ -74,9 +77,9 @@ export function SharedAppLayout() {
   // Reserve room for the docked Settings drawer so it sits beside the app.
   const settingsDrawerInset = useSettingsDrawerInset(isMobile);
   const mobileFontScale = useUiPreferencesStore((s) => s.mobileFontScale);
-  const isLeftSidebarVisible = useUiPreferencesStore(
-    (s) => s.isLeftSidebarVisible
-  );
+  // Whether the workspaces drawer is on screen (it auto-hides when the
+  // workspace layout has no room for it); otherwise offer the hover preview.
+  const isLeftSidebarShown = useUiPreferencesStore(selectIsLeftSidebarShown);
   const { isSignedIn } = useAuth();
   const { appVersion, deploymentTimestamp } = useUserSystem();
   const updateVersion = useAppUpdateStore((s) => s.updateVersion);
@@ -202,7 +205,7 @@ export function SharedAppLayout() {
     ? isExportActive || (isSignedIn && isProjectDestination(currentDestination))
     : false;
   const isWorkspaceSidebarPreviewEnabled =
-    !isMobile && isWorkspacesActive && !isLeftSidebarVisible;
+    !isMobile && isWorkspacesActive && !isLeftSidebarShown;
   const activeProjectId = projectDestination?.projectId ?? null;
   const activeHostId =
     getDestinationHostId(currentDestination) ?? routeHostId ?? null;

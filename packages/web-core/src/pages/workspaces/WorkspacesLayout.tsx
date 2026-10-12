@@ -46,11 +46,13 @@ import { LinkedIssueProvider } from '@/shared/providers/remote/LinkedIssueContex
 import {
   PERSIST_KEYS,
   usePaneSize,
+  useUiPreferencesStore,
   useWorkspacePanelState,
   RIGHT_MAIN_PANEL_MODES,
 } from '@/shared/stores/useUiPreferencesStore';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useSettingsDrawerStore } from '@/shared/stores/useSettingsDrawerStore';
+import { leftSidebarFits } from '@/shared/lib/workspaceLayoutFit';
 import { getWorkspaceMobileTabFallback } from '@/shared/components/ui-new/containers/workspaceMobileTabs';
 
 const WORKSPACES_GUIDE_ID = 'workspaces-guide';
@@ -300,6 +302,60 @@ export function WorkspacesLayout() {
     setLeftSidebarVisible,
     setLeftMainPanelVisible,
   ]);
+
+  const isRightSidebarShown =
+    isRightSidebarVisible && !isCreateMode && !isSettingsDrawerOpen;
+
+  // Show the left drawer only while it fits beside what is open. The root is
+  // measured (not the window) so the app rail and the docked Settings inset
+  // are already excluded, and showing the drawer does not change the reading.
+  // Only the boolean reaches the store, so a resize drag re-renders the
+  // layout only when the drawer actually appears or disappears.
+  const setLeftSidebarHasSpace = useUiPreferencesStore(
+    (s) => s.setLeftSidebarHasSpace
+  );
+  const [layoutRoot, setLayoutRoot] = useState<HTMLDivElement | null>(null);
+  const layoutWidthRef = useRef<number | null>(null);
+  const fitPanelsRef = useRef({
+    isChatShown: isLeftMainPanelVisible,
+    isRightMainPanelOpen: rightMainPanelMode !== null,
+    isRightSidebarShown,
+  });
+
+  const publishLeftSidebarSpace = useCallback(() => {
+    const width = layoutWidthRef.current;
+    setLeftSidebarHasSpace(
+      width === null || leftSidebarFits({ width, ...fitPanelsRef.current })
+    );
+  }, [setLeftSidebarHasSpace]);
+
+  useEffect(() => {
+    fitPanelsRef.current = {
+      isChatShown: isLeftMainPanelVisible,
+      isRightMainPanelOpen: rightMainPanelMode !== null,
+      isRightSidebarShown,
+    };
+    publishLeftSidebarSpace();
+  }, [
+    isLeftMainPanelVisible,
+    rightMainPanelMode,
+    isRightSidebarShown,
+    publishLeftSidebarSpace,
+  ]);
+
+  useEffect(() => {
+    if (!layoutRoot) return;
+    const observer = new ResizeObserver(([entry]) => {
+      layoutWidthRef.current = entry.contentRect.width;
+      publishLeftSidebarSpace();
+    });
+    observer.observe(layoutRoot);
+    return () => {
+      observer.disconnect();
+      layoutWidthRef.current = null;
+      publishLeftSidebarSpace();
+    };
+  }, [layoutRoot, publishLeftSidebarSpace]);
 
   const [rightMainPanelSize, setRightMainPanelSize] = usePaneSize(
     PERSIST_KEYS.rightMainPanel,
@@ -568,7 +624,7 @@ export function WorkspacesLayout() {
             )}
           </Group>
 
-          {isRightSidebarVisible && !isCreateMode && !isSettingsDrawerOpen && (
+          {isRightSidebarShown && (
             <div className="w-[300px] shrink-0 h-full overflow-hidden">
               <LinkedIssueProvider
                 issueId={linkedIssueForWorkspace?.issueId ?? undefined}
@@ -595,7 +651,7 @@ export function WorkspacesLayout() {
   );
 
   return (
-    <div className="flex flex-1 min-h-0 h-full">
+    <div ref={setLayoutRoot} className="flex flex-1 min-h-0 h-full">
       {isLeftSidebarVisible && (
         <div className="w-[300px] shrink-0 h-full overflow-hidden">
           <WorkspacesSidebarContainer onScrollToBottom={handleScrollToBottom} />
