@@ -265,6 +265,7 @@ contributed to it.
   desktop-only fixed chrome in a drawer component also reused on mobile; plus
   discoverable mobile access, stable persisted tab identifiers, truthful button
   semantics, and route-owned availability during async workspace loading.
+- [left-drawer-space-fit.md](left-drawer-space-fit.md) — The workspaces drawer shows while it fits: a measured `ResizeObserver` fit rule over the rendered panels, a derived `selectIsLeftSidebarShown` shared by the layout, the hover reopen tag and the toggle action, and a transient show-anyway override. It never writes layout decisions into the persisted `is_left_sidebar_visible`; the old `isWideScreen()` collapse did, and it outlived resizes and reloads (`vk/dc99-show-left-drawer`).
 - [settings-drawer.md](settings-drawer.md) — Settings as a docked non-modal
   right drawer: keep the nice-modal API, app shells reserve the width, a sheet
   fallback below 1240px, the workspace right sidebar hides, toggle and close
