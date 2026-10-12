@@ -1,0 +1,198 @@
+<!doctype html>
+<!--
+  Mockups for vk/2b39-fix-mobile-ui. Static, self-contained (no network).
+  Colours/spacing mirror the dark theme tokens in
+  packages/web-core/src/app/styles/new/index.css and the Tailwind config
+  (half=4px, base=8px, double=16px; text-base=12px*1.333 root scale omitted).
+  Frames are 390px wide (iPhone 14/15 CSS width). Data mirrors the reported
+  screenshot. Render: open in a browser, or screenshot with agent-browser.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Mobile issue list — mockups</title>
+    <style>
+      :root {
+        --bg-primary: hsl(0 0% 13%);
+        --bg-secondary: hsl(0 0% 11%);
+        --bg-panel: hsl(0 0% 16%);
+        --border: hsl(0 0% 20%);
+        --text-high: hsl(0 0% 96%);
+        --text-normal: hsl(0 0% 77%);
+        --text-low: hsl(0 0% 56%);
+        --brand: hsl(25 82% 54%);
+        --error: hsl(0 59% 57%);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; padding: 24px; background: #111; color: var(--text-normal);
+        font: 15px/1.5 'IBM Plex Sans', system-ui, sans-serif;
+      }
+      h1 { color: #fff; font-size: 20px; margin: 0 0 4px; }
+      .lede { color: #aaa; margin: 0 0 20px; max-width: 1700px; }
+      .frames { display: flex; gap: 24px; align-items: flex-start; }
+      .frame-wrap { width: 390px; flex: none; }
+      .frame-title { color: #fff; font-weight: 600; margin-bottom: 4px; }
+      .frame-title.rec::after {
+        content: 'RECOMMENDED · SHIPPED'; margin-left: 8px; font-size: 11px;
+        background: var(--brand); color: #fff; padding: 1px 6px; border-radius: 3px;
+      }
+      .frame-note { color: #999; font-size: 13px; min-height: 80px; margin-bottom: 8px; }
+      .phone {
+        width: 390px; height: 760px; overflow: hidden; border-radius: 28px;
+        border: 6px solid #333; background: var(--bg-primary);
+      }
+      .nav { height: 44px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); }
+      .head { padding: 8px 8px 0; }
+      .proj { font-size: 18px; color: var(--text-high); font-weight: 500; }
+      .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; margin-top: 8px; }
+      .seg span { padding: 4px 8px; font-size: 14px; color: var(--text-low); }
+      .seg span.on { background: var(--bg-panel); color: var(--text-high); }
+      .filters { display: flex; align-items: center; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
+      .ico { width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; color: var(--brand); font-weight: 700; }
+      .ico.x { color: var(--text-low); }
+      .clear { padding: 3px 8px; background: var(--bg-panel); border-radius: 4px; color: var(--text-normal); font-size: 14px; }
+      .plus { width: 26px; height: 26px; background: var(--brand); color: #fff; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; }
+      .list { padding: 8px 8px 0; }
+      .list.p16 { padding: 8px 16px 0; }
+      .sec {
+        display: flex; align-items: center; justify-content: space-between;
+        height: 32px; padding: 0 16px; background: var(--bg-panel);
+        border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+        color: var(--text-high); font-weight: 500;
+      }
+      .sec .l { display: flex; align-items: center; gap: 8px; }
+      .count { font-size: 13px; color: var(--text-low); background: var(--bg-primary); padding: 0 6px; border-radius: 3px; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+      .handle { width: 16px; flex: none; color: var(--text-low); text-align: center; font-size: 12px; }
+      .id { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 13px; color: var(--text-normal); flex: none; }
+      .title { font-size: 15px; color: var(--text-high); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .age { font-size: 13px; color: var(--text-low); flex: none; }
+      .badge {
+        display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px;
+        background: var(--bg-panel); border-radius: 3px; font-size: 13px; color: var(--text-low);
+        white-space: nowrap; flex: none;
+      }
+      .rel { padding: 0 4px; }
+      .rel.block { background: hsl(0 59% 57% / 0.1); color: var(--error); }
+      .av {
+        width: 22px; height: 22px; border-radius: 50%; flex: none;
+        background: radial-gradient(circle at 50% 38%, #e6c3a8 0 30%, #5a4636 31%);
+        border: 1px solid #555;
+      }
+      .av.none { background: none; border: 1px dashed var(--text-low); }
+
+      /* 0: current single-line layout, reproduced with the real flex rules */
+      .r0 { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 4px 16px; }
+      .r0 .left { display: flex; align-items: center; gap: 16px; flex: 1; min-width: 0; }
+      .r0 .right { display: flex; align-items: center; gap: 8px; flex: none; }
+      .r0 .right .grp { display: flex; gap: 4px; }
+      .r0 .age { width: 20px; text-align: right; }
+
+      /* A: two-line row */
+      .rA { display: flex; flex-direction: column; gap: 4px; padding: 4px 8px; }
+      .rA .l1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+      .rA .l1 .title { flex: 1; min-width: 0; }
+      .rA .l2 { display: flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; padding-left: 24px; }
+      .rA .l2 .av { margin-left: auto; }
+
+      /* B: single line + counters */
+      .rB { display: flex; align-items: center; gap: 8px; padding: 6px 8px; min-width: 0; }
+      .rB .title { flex: 1; min-width: 0; }
+      .chip { font-size: 12px; color: var(--text-low); flex: none; }
+      .chip.block { color: var(--error); }
+
+      /* C: stacked cards */
+      .rC { margin: 6px 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-secondary); }
+      .rC .t { display: flex; align-items: center; gap: 8px; }
+      .rC .title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; margin: 4px 0; }
+      .rC .m { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+      .rC .m .av { margin-left: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>Mobile issue list: mockups</h1>
+    <p class="lede">
+      Each frame is 390px wide and uses the data from the reported screenshot.
+      <b>0</b> reproduces the bug with the current flex rules. The right-hand
+      metadata cluster can't shrink, so it overlaps the id and pushes the age
+      off-screen. <b>A</b> is what shipped. <b>B</b> and <b>C</b> are the
+      alternatives we considered (see <code>../research.md</code> R1).
+    </p>
+    <div class="frames" id="frames"></div>
+
+    <script>
+      const RED = 'hsl(0 59% 57%)', GREEN = 'hsl(117 38% 50%)', ORANGE = 'hsl(32 95% 44%)',
+        PURPLE = 'hsl(265 80% 65%)', BLUE = 'hsl(210 80% 55%)', CYAN = 'hsl(185 70% 70%)';
+      const T = { bug: ['bug', RED], feature: ['feature', GREEN], doc: ['documentation', BLUE], enh: ['enhancement', CYAN] };
+      const sections = [
+        { name: 'In progress', color: ORANGE, rows: [
+          { id: 'SWE-141', title: 'Add Okta SCIM provisioning for the contractor group', tags: ['feature'], rels: [['blocks', 'SWE-142'], ['related', 'SWE-159']], av: 1, age: '52d' },
+          { id: 'SWE-165', title: 'Ring corporate phones when on-call page is unacked', tags: [], rels: [], av: 1, age: '32d' },
+        ]},
+        { name: 'In review', color: PURPLE, rows: [] },
+        { name: 'Done', color: GREEN, rows: [
+          { id: 'SWE-137', title: 'C1 laptop refresh: image + ship to new hires', tags: ['bug'], rels: [], av: 0, age: '52d' },
+          { id: 'SWE-138', title: 'VPN drops every 30 minutes on macOS 15', tags: ['bug'], rels: [['blocks', 'SWE-148'], ['related', 'SWE-160']], av: 1, age: '52d' },
+          { id: 'SWE-143', title: 'Self-serve password reset for Jira service desk', tags: ['feature'], rels: [['blocked_by', 'SWE-144'], ['blocks', 'SWE-154']], av: 1, age: '52d' },
+          { id: 'SWE-155', title: 'Document the new badge access request flow', tags: ['doc'], rels: [], av: 1, age: '52d' },
+          { id: 'SWE-163', title: 'Printer queue stuck after CUPS upgrade', tags: ['bug'], rels: [['blocks', 'SWE-160']], av: 1, age: '46d' },
+          { id: 'SWE-164', title: 'Auto-assign tickets by store region', tags: ['bug'], rels: [], av: 1, age: '46d' },
+          { id: 'SWE-140', title: 'C4 conference room display flickers', tags: ['bug'], rels: [], av: 0, age: '52d' },
+          { id: 'SWE-142', title: 'MFA prompt loops on Safari', tags: ['bug'], rels: [['blocked_by', 'SWE-141']], av: 1, age: '52d' },
+          { id: 'SWE-153', title: 'Slack alert when disk > 90% on file server', tags: ['enh'], rels: [], av: 1, age: '52d' },
+        ]},
+      ];
+      const ICON = { blocks: '↪', blocked_by: '⊘', related: '⇆' };
+      const badge = (k) => `<span class="badge"><span class="dot" style="background:${T[k][1]}"></span>${T[k][0]}</span>`;
+      const rel = ([t, id]) => `<span class="badge rel ${t === 'related' ? '' : 'block'}">${ICON[t]} ${id}</span>`;
+      const av = (r) => `<span class="av ${r.av ? '' : 'none'}"></span>`;
+      const handle = '<span class="handle">⋮⋮</span>';
+
+      const header = (compactClear) => `
+        <div class="nav"></div>
+        <div class="head">
+          <div class="proj">Platform Ops <span style="color:var(--text-low)">···</span></div>
+          <div class="seg"><span>Active</span><span class="on">All</span><span>Slim</span><span>Backlog</span><span>Cancelled</span></div>
+          <div class="filters">
+            <span class="seg" style="margin:0"><span class="on">Team</span><span>Personal</span></span>
+            <span class="ico"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="7" cy="7" r="5"/><path d="M11 11l4 4"/></svg></span><span class="ico"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M1.5 2h13l-5 6v5l-3 1.5V8z"/></svg></span>
+            ${compactClear ? '<span class="ico x" title="Clear filters">✕</span>' : '<span class="clear">Clear filters ✕</span>'}
+            <span class="plus">+</span>
+          </div>
+        </div>`;
+
+      const row = {
+        0: (r, c) => `<div class="r0"><div class="left">${handle}<span class="id">${r.id}</span><span class="dot" style="background:${c}"></span><span class="title">${r.title}</span></div>
+          <div class="right">${r.tags.length ? `<span class="grp">${r.tags.map(badge).join('')}</span>` : ''}${r.rels.length ? `<span class="grp">${r.rels.map(rel).join('')}</span>` : ''}${av(r)}<span class="age">${r.age}</span></div></div>`,
+        A: (r, c) => `<div class="rA"><div class="l1">${handle}<span class="id">${r.id}</span><span class="dot" style="background:${c}"></span><span class="title">${r.title}</span>${r.tags.length || r.rels.length ? '' : av(r)}<span class="age">${r.age}</span></div>
+          ${r.tags.length || r.rels.length ? `<div class="l2">${r.tags.map(badge).join('')}${r.rels.map(rel).join('')}${av(r)}</div>` : ''}</div>`,
+        B: (r, c) => {
+          const blocking = r.rels.filter(([t]) => t !== 'related').length;
+          const chips = [blocking ? `<span class="chip block">⊘${blocking}</span>` : '', r.tags.length ? `<span class="chip">#${r.tags.length}</span>` : ''].join('');
+          return `<div class="rB">${handle}<span class="id">${r.id}</span><span class="dot" style="background:${c}"></span><span class="title">${r.title}</span>${chips}<span class="age">${r.age}</span></div>`;
+        },
+        C: (r, c) => `<div class="rC"><div class="t"><span class="id">${r.id}</span><span class="dot" style="background:${c}"></span><span class="age" style="margin-left:auto">${r.age}</span></div>
+          <div class="title">${r.title}</div><div class="m">${r.tags.map(badge).join('')}${r.rels.map(rel).join('')}${av(r)}</div></div>`,
+      };
+
+      const frames = [
+        ['0', 'Current (broken)', 'One line. Badges paint over the id ("SWE-141" hidden), the title collapses to nothing, and the age is clipped.', false, false],
+        ['A', 'A: two-line row', 'Line 1: id, status, title, age. Line 2 (only when there are tags or relationships): tags, relationships, assignee, cut off at the row edge. Otherwise the assignee sits on line 1. Clear filters becomes an icon.', true, true],
+        ['B', 'B: one line + counters', 'Densest layout. Tags and relationships collapse to counters (⊘ blockers, # tags). It hides which issue blocks this one.', true, false],
+        ['C', 'C: stacked cards', 'Most readable: two-line titles and full metadata. About 3× taller, and it duplicates the Board view.', true, false],
+      ];
+      document.getElementById('frames').innerHTML = frames.map(([k, title, note, compact, rec]) => `
+        <div class="frame-wrap">
+          <div class="frame-title ${rec ? 'rec' : ''}">${title}</div>
+          <div class="frame-note">${note}</div>
+          <div class="phone">${header(compact)}
+            <div class="list ${k === '0' ? 'p16' : ''}">${sections.map((s) => `
+              <div class="sec"><span class="l"><span style="color:var(--text-low)">⌄</span><span class="dot" style="background:${s.color}"></span>${s.name}</span><span class="count">${s.rows.length}</span></div>
+              ${k === 'C' ? '<div style="padding:0 2px">' : '<div>'}${s.rows.map((r) => row[k](r, s.color)).join('')}</div>`).join('')}
+            </div>
+          </div>
+        </div>`).join('');
+    </script>
+  </body>
+</html>

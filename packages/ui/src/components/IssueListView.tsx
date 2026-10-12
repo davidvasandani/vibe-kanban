@@ -27,6 +27,7 @@ export interface IssueListViewProps {
   selectedIssueIds?: Set<string>;
   isMultiSelectActive?: boolean;
   onIssueCheckboxChange?: (issueId: string, checked: boolean) => void;
+  isMobile?: boolean;
   className?: string;
 }
 
@@ -42,10 +43,16 @@ export function IssueListView({
   selectedIssueIds,
   isMultiSelectActive,
   onIssueCheckboxChange,
+  isMobile,
   className,
 }: IssueListViewProps) {
   return (
-    <div className={cn('flex flex-col h-full overflow-y-auto', className)}>
+    <div
+      className={cn(
+        'flex flex-col h-full overflow-y-auto overflow-x-hidden',
+        className
+      )}
+    >
       {statuses.map((status) => (
         <IssueListSection
           key={status.id}
@@ -60,6 +67,7 @@ export function IssueListView({
           selectedIssueIds={selectedIssueIds}
           isMultiSelectActive={isMultiSelectActive}
           onIssueCheckboxChange={onIssueCheckboxChange}
+          isMobile={isMobile}
         />
       ))}
     </div>

@@ -232,14 +232,25 @@ export function KanbanFilterBar<
             <FunnelIcon className="size-icon-sm" weight="bold" />
           </button>
 
-          {hasActiveFilters && (
-            <PrimaryButton
-              variant="tertiary"
-              value={t('kanban.clearFilters', 'Clear filters')}
-              actionIcon={XIcon}
-              onClick={onClearFilters}
-            />
-          )}
+          {hasActiveFilters &&
+            (isMobile ? (
+              <button
+                type="button"
+                onClick={onClearFilters}
+                className="p-half rounded-sm text-low hover:text-normal hover:bg-secondary transition-colors"
+                aria-label={t('kanban.clearFilters', 'Clear filters')}
+                title={t('kanban.clearFilters', 'Clear filters')}
+              >
+                <XIcon className="size-icon-sm" weight="bold" />
+              </button>
+            ) : (
+              <PrimaryButton
+                variant="tertiary"
+                value={t('kanban.clearFilters', 'Clear filters')}
+                actionIcon={XIcon}
+                onClick={onClearFilters}
+              />
+            ))}
 
           {isMobile ? (
             <button

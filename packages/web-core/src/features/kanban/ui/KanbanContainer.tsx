@@ -1262,7 +1262,12 @@ export function KanbanContainer() {
           </div>
         )
       ) : (
-        <div className="flex-1 overflow-y-auto px-double">
+        <div
+          className={cn(
+            'flex-1 overflow-y-auto overflow-x-hidden',
+            isMobile ? 'px-base' : 'px-double'
+          )}
+        >
           <KanbanProvider onDragEnd={handleDragEnd} className="!block !w-full">
             <IssueListView
               statuses={listViewStatuses}
@@ -1278,6 +1283,7 @@ export function KanbanContainer() {
               selectedIssueIds={selectedIssueIds}
               isMultiSelectActive={isMultiSelectActive}
               onIssueCheckboxChange={handleCheckboxChange}
+              isMobile={isMobile}
             />
           </KanbanProvider>
         </div>
