@@ -49,6 +49,7 @@ import {
 import { useDiffViewStore } from '@/shared/stores/useDiffViewStore';
 import { useWorkspaceDiffStore } from '@/shared/stores/useWorkspaceDiffStore';
 import {
+  selectIsLeftSidebarShown,
   useUiPreferencesStore,
   RIGHT_MAIN_PANEL_MODES,
 } from '@/shared/stores/useUiPreferencesStore';
@@ -590,7 +591,7 @@ export const Actions = {
   ToggleLeftSidebar: {
     id: 'toggle-left-sidebar',
     label: () =>
-      useUiPreferencesStore.getState().isLeftSidebarVisible
+      selectIsLeftSidebarShown(useUiPreferencesStore.getState())
         ? 'Hide Left Sidebar'
         : 'Show Left Sidebar',
     icon: SidebarSimpleIcon,

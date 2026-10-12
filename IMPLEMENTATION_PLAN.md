@@ -1,28 +1,39 @@
-# Implementation plan: Fix mobile issue list UI (`vk/2b39-fix-mobile-ui`)
+# Implementation plan: show the left drawer until there is no space
 
-See `SPEC.md`. All changes are frontend; no Rust/type generation.
+Task `vk/dc99-show-left-drawer`. Spec: `SPEC.md`; SpecKit artifacts in
+`specs/vk/dc99-show-left-drawer/`.
 
-1. **Mockups** — `specs/vk/2b39-fix-mobile-ui/mockups/mobile-issue-list.html`:
-   static 390px-wide frames reproducing the screenshot data for
-   (0) current/broken, (A) two-line rows *(recommended)*, (B) single line with
-   collapsed metadata counters, (C) stacked cards. Render to PNG with
-   agent-browser (`mobile-issue-list.png`).
-2. **`IssueListRow`** (`packages/ui/src/components/IssueListRow.tsx`)
-   - Add `isMobile?: boolean`.
-   - Extract the handle/checkbox block and metadata cluster into local
-     render helpers so desktop and mobile share them.
-   - Desktop branch: identical classes/markup to today.
-   - Mobile branch: `flex-col` row; line 1 = handle, priority, id, dot,
-     title (`flex-1 min-w-0 truncate`), age (`shrink-0`, no fixed `w-5`);
-     line 2 only if tags/relationships/assignees exist, indented to align
-     with the id, `overflow-hidden`, assignee `ml-auto`.
-3. **`IssueListSection` / `IssueListView`** — accept and forward `isMobile`.
-   `IssueListView` adds `overflow-x-hidden` to its scroller.
-4. **`KanbanContainer`** — pass `isMobile` to `IssueListView`; list wrapper
-   uses `px-base overflow-x-hidden` on mobile (keep `px-double` on desktop).
-5. **`KanbanFilterBar`** — on mobile render Clear filters as an icon-only
-   `XIcon` button with `aria-label`/`title` = `kanban.clearFilters`.
-6. Verify: `pnpm run format`, `pnpm run check`, `pnpm run lint`; render a
-   390px harness of the real row classes (or the mockup) for visual check.
-7. Codex review → fix → wiki page `mobile-issue-list-rows.md` + INDEX →
-   PR → merge.
+1. **Pure fit helper** — new `packages/web-core/src/shared/lib/workspaceLayoutFit.ts`:
+   constants `LEFT_SIDEBAR_WIDTH = 300`, `RIGHT_SIDEBAR_WIDTH = 300`,
+   `MIN_CHAT_WIDTH = 480`, `MIN_RIGHT_MAIN_PANEL_WIDTH = 400`, and
+   `leftSidebarFits({ width, isChatShown, isRightMainPanelOpen,
+   isRightSidebarShown })`. Unit test it (`workspaceLayoutFit.test.ts`).
+2. **Store** (`useUiPreferencesStore.ts`):
+   - delete `isWideScreen`; stop writing `isLeftSidebarVisible` from
+     `toggleRightMainPanelMode` / `setRightMainPanelMode`;
+   - add transient `leftSidebarHasSpace` (default `true`) and
+     `isLeftSidebarForcedOpen` (default `false`) plus
+     `setLeftSidebarHasSpace(value)` (clears the override when the value
+     changes);
+   - export `selectIsLeftSidebarShown(state)` =
+     `isLeftSidebarVisible && (leftSidebarHasSpace || isLeftSidebarForcedOpen)`;
+   - `toggleLeftSidebar`: shown → preference false + override off; hidden by
+     preference → preference true; hidden for space → override on;
+   - `useWorkspacePanelState` returns the *shown* value as
+     `isLeftSidebarVisible` (layout + action context follow automatically).
+   - Do not touch `useUiPreferencesScratch` — new fields stay unpersisted.
+3. **WorkspacesLayout** — callback ref + `ResizeObserver` on the desktop
+   root to track its width; compute `leftSidebarFits` from the rendered
+   panels (chat visible, right main panel open, right sidebar actually shown
+   = `isRightSidebarVisible && !isCreateMode && !isSettingsDrawerOpen`);
+   publish via `setLeftSidebarHasSpace`; reset to `true` on unmount. Keep the
+   "restore drawer when right panel closes" effect.
+4. **SharedAppLayout** — hover preview enabled when the drawer is not shown
+   (`selectIsLeftSidebarShown`), so an auto-hidden drawer is still reachable.
+5. **Action** — `ToggleLeftSidebar.label` uses `selectIsLeftSidebarShown`.
+6. **Store tests** — `useUiPreferencesStore.leftSidebar.test.ts`: opening a
+   right panel keeps the preference; toggle in all three states; override is
+   cleared when space changes.
+7. **Verify** — `pnpm install --frozen-lockfile`, web-core vitest,
+   `pnpm run check`, `pnpm run lint`, `pnpm run format`; manual check in the
+   dev app with the browser at several widths.

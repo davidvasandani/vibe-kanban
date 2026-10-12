@@ -41,6 +41,10 @@ Width rules:
 - **The workspace right sidebar hides.** `WorkspacesLayout` hides its own 300px
   right sidebar while Settings is open, because Settings takes the right-drawer
   slot. The saved preference is not changed.
+- **The left drawer sees the change too.** The layout root shrinks by the
+  Settings inset. The workspaces drawer re-checks whether it fits on every
+  resize, and it can hide while Settings is open
+  ([[left-drawer-space-fit]]).
 - **No transition on the margin.** The layout has to track a live resize drag
   exactly.
 
@@ -75,3 +79,4 @@ Settings. The drawer focuses itself when it opens.
 ## Contributed by
 
 - vk/4643-move-settings-to
+- vk/dc99-show-left-drawer
