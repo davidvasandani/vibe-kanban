@@ -501,6 +501,55 @@ straight out of the agent's own environment.
 What it still is not: independent review. It is the implementer driving their own
 artifact, which raises confidence that the control *works*, not that it is right.
 
+### What the independent review found, and the lesson in each
+
+The Codex review — blocked for weeks on an expired credential — finally ran
+against the merged guard after both earlier review rounds and the live
+verification above. It found four more defects. All four reproduced live
+against the deployed predicate before any fix was written:
+
+- `grep -R -nE '(while|until).*sleep' crates` was **refused**. A read-only
+  search *for* wait loops.
+- `n=0; while (( n < 5 )); do sleep 1; ((n++)); done` was **refused**.
+- `env timeout 5 bash -c 'set -e; until …; do sleep 1; done'` was **refused**
+  despite its explicit deadline.
+- `bash -c 'until …; do sleep 5; done'` **escaped**. That is the incident
+  command, wrapped.
+
+**Test that your denial's own advice passes your own predicate.** The refusal
+tells the agent to "cap the iterations with a counter". The marker only knew
+`$((n+1))`, so the idiomatic Bash counter `((n++))` was refused again with the
+same advice. That's a denial loop: the agent follows the instructions and gets
+sent back to them. The marker is now `((`, and a regression test asserts the
+recommended shapes are allowed. A rule worth keeping for any agent-facing
+denial: if the reason names a fix, encode that fix as an allow case.
+
+**A syntactic matcher that ignores quoting fails in both directions at once.**
+Findings 1 and 4 have the same root cause. Text inside quotes made up loops
+that weren't there, and hid one that was. Special-casing each symptom would
+have kept growing. The fix is a small quote-aware scanner (`scan_shell`):
+
+- loop keywords and `sleep` are matched only in a quote-masked copy, where
+  quoted spans become `_`. `_` is a word character, so masking can never create
+  a token boundary or a command position;
+- a literal script handed to `bash`/`sh`/`zsh -c` (including `-lc` and
+  `-o pipefail -c`) or to `eval` is checked recursively, to a bounded depth;
+- bound markers stay permissive: `SECONDS` and `((` are matched in the raw
+  text, because `"$SECONDS"` is usually quoted.
+
+**Identify a command by its arguments, not its position.** `timeout` used to
+count only in command position, which missed `env timeout`, `sudo timeout`,
+`nice -n 10 timeout` and `FOO=1 timeout`. Position-plus-prefix-list would keep
+growing. A command is better recognised by its required argument: an
+unquoted `timeout` word followed (after options) by a duration. That accepts
+every wrapper form and still rejects `grep -q timeout app.log`,
+`/tmp/timeout.flag` and `--timeout`.
+
+The tally across rounds: five defects found in self-review after merge, four
+more found by independent review after that, and every one passed the suite
+that existed at the time. A second, different reviewer kept finding things
+the first had stopped seeing.
+
 ## Contributed by
 
 - vk/869c-vk-background-po
