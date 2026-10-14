@@ -141,10 +141,14 @@ async fn terminal_ws(
         .get("PATH")
         .map(std::ffi::OsString::from)
         .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
-    if let Some(path) = utils::shell::append_cli_tools_to_path(&inherited_path) {
-        environment.insert("PATH".into(), path.to_string_lossy().into_owned());
-    }
+    environment.insert(
+        "PATH".into(),
+        utils::shell::agent_path(&inherited_path)
+            .to_string_lossy()
+            .into_owned(),
+    );
     utils::github_auth::apply_github_routing(&mut environment);
+    utils::shell::sync_agent_path(&mut environment);
 
     Ok(ws
         .on_upgrade(move |socket| {

@@ -1,90 +1,91 @@
-# SPEC: Show the left drawer until there is no space
+# Installed az and mgc-beta resolve and run in every agent shell
 
-Task: `vk/dc99-show-left-drawer`. Feature spec, plan and tasks:
-`specs/vk/dc99-show-left-drawer/`.
+Task: `vk/1d4e-fix-az-and-mgc-b`. Spans this repository (the Vibe Kanban
+service) and its deployment in the homelab repository
+(`modules/vibe-kanban-rebuild.nix`, `modules/lib/vibe-kanban-entra.nix`,
+`modules/vibe-kanban.nix`). No other service changes.
 
 ## Problem
 
-In the desktop workspace view (`/workspaces/:id`) the left drawer (the 300px
-workspaces list, `WorkspacesSidebarContainer`) disappears even when the window
-has plenty of room for it. The screen recording shows a ~1300px-wide window
-with only the chat open: the drawer stays hidden (only the hover "reopen" tag
-is visible), and widening the window does not bring it back.
+On a cluster worker (think1, Codex session in workspace `46ed26db…`),
+`command -v az` and `command -v mgc-beta` returned nothing, and the mgc-beta
+wrapper could not start because `VK_ENTRA_DBUS_RUN_SESSION`,
+`VK_ENTRA_KEYRING_DAEMON` and `VK_ENTRA_LIBSECRET_LIB` were unset. At the same
+time the CLI Tools settings page showed mgc-beta as installed (0.2.3). The agent
+concluded the tool was absent.
 
-### Root cause
+## Root causes (reproduced 2026-09-24 on think4)
 
-`useUiPreferencesStore` (`packages/web-core/src/shared/stores/useUiPreferencesStore.ts`)
-collapses the drawer with a fixed, one-shot breakpoint:
+1. **A login shell drops the agent PATH.** Codex runs every command as
+   `/run/current-system/sw/bin/bash -lc '<cmd>'`. The supervised worker/service
+   environment does not carry `__NIXOS_SET_ENVIRONMENT_DONE`, so NixOS
+   `/etc/profile` sources `set-environment`, which *replaces* `PATH` with the
+   system profile. The unit-provided `az` (`systemd…path`) and the appended
+   `managed-cli-tools/bin` both disappear. Reproduced with a real
+   `codex exec`: `command -v az mgc-beta` → nothing. Non-login shells (Claude
+   Code's Bash tool) are unaffected, which is why the failure looked
+   intermittent.
+2. **The Graph CLI toolchain is coupled to the Entra sign-in switch.** The
+   deployment exports the three wrapper variables only when a host sets
+   `entra.enable`, and only think2 (the coordinator) does. Every worker runs
+   agents against the *shared* `managed-cli-tools` directory, whose mgc-beta
+   wrapper needs those variables on every invocation.
+3. **Status is computed in the wrong environment and misclassifies failures.**
+   The CLI Tools status probe runs inside the process that serves the page (the
+   coordinator, where the variables exist) and runs the tool directly, not
+   through the shell an agent uses. A wrapper that aborts on a missing
+   dependency exits non-zero and is reported as *Unauthenticated*.
 
-```ts
-const isWideScreen = () => window.innerWidth > 2048;
-```
+## Required behavior
 
-- `toggleRightMainPanelMode` / `setRightMainPanelMode` write
-  `isLeftSidebarVisible = false` whenever a right main panel (Changes, Logs,
-  Preview, Browser) opens on any window ≤ 2048px — i.e. almost every laptop
-  and most desktop monitors, regardless of how much room is actually free.
-- The value is read once, at the moment the panel opens. Resizing the window
-  never re-evaluates it.
-- `isLeftSidebarVisible` is the *persisted user preference* (synced to the
-  server scratch as `is_left_sidebar_visible`), so the automatic collapse is
-  saved as if the user had hidden the drawer and survives reloads. The
-  `WorkspacesLayout` effect that restores the drawer when the right panel
-  closes only runs when its deps change, so a reload that hydrates the stale
-  `false` after mount leaves the drawer hidden with nothing open — the state
-  in the recording.
+- **R1.** An installed supported CLI (host-provided such as `az`, or
+  app-managed under `managed-cli-tools/bin` such as `mgc-beta`) resolves by
+  command name in agent-spawned login **and** non-login shells, with the same
+  precedence in both (host copies before app-managed copies). No manual PATH
+  edits, Nix-store searches or per-task exports.
+- **R2.** The mgc-beta wrapper gets its D-Bus, keyring and libsecret runtime
+  from the supported service environment on every host that can run agents,
+  independent of whether that host performs Entra sign-in. Its isolated
+  credential storage (wrapper-owned `XDG_DATA_HOME`, keyring password file) and
+  any existing cached authentication are left unchanged.
+- **R3.** When a runtime dependency is missing or no longer exists (for
+  example, a garbage-collected store path), the wrapper fails with a distinct
+  exit status and a sanitized message naming the missing variable. It must
+  never be confused with "not authenticated".
+- **R4.** CLI Tools status adds an **agent check**, computed in the environment
+  real agents receive on that host: the path resolved in a non-login shell, the
+  path resolved in a login shell, and a classification of `available`,
+  `missing`, `login_shell_missing`, `runtime_unavailable` or `failed`, with an
+  actionable message. The authentication state stays a separate fact.
+- **R5.** Cluster workers verify the same agent check for the tools they expose
+  when they start, and log any tool that agents on that host cannot use (name,
+  classification, sanitized reason).
+- **R6.** Behavior survives a workspace restart or resume, a VK service
+  restart, and a NixOS activation, because it is derived from declared unit
+  configuration and not from session state.
+- **R7.** Validation output shows command paths, versions and sanitized failure
+  classifications only. It never shows tokens, keyring passwords or
+  authentication-cache contents.
 
-## Goal
+## Acceptance
 
-The left drawer is shown whenever the layout has room for it next to the
-content that is open, and is hidden automatically only when it does not fit.
-The decision follows the live width of the workspace area, so it reacts to
-window resizes, opening/closing panels and toggling the right sidebar.
+- In a fresh agent session on a worker, `command -v az`, `az version`,
+  `command -v mgc-beta` and `mgc-beta --version` succeed through both
+  `bash -c` and `bash -lc`, without exports or absolute paths.
+- The same checks hold after a workspace restart or resume and after a VK
+  service restart on the worker.
+- Removing a runtime variable makes the wrapper exit with the dedicated status,
+  and CLI Tools reports `runtime_unavailable` with the variable name rather
+  than *Unauthenticated*.
+- Regression tests cover: agent environments carrying the preserved agent PATH;
+  wrapper dependency classification using temporary fixtures (no fixed store
+  hash); probe classification; and the deployment's login-shell hook and
+  runtime variables for a worker host that has no `entra.enable`.
 
-## Requirements
+## Out of scope
 
-- R1 `isLeftSidebarVisible` means only the user's intent. Opening or closing
-  a right main panel no longer writes it; `isWideScreen` is removed.
-- R2 The workspace layout measures its own width (ResizeObserver) and computes
-  whether the drawer fits:
-  `width ≥ LEFT_SIDEBAR_WIDTH + (right sidebar shown ? RIGHT_SIDEBAR_WIDTH : 0)
-  + MIN_CHAT_WIDTH + (right main panel open ? MIN_RIGHT_MAIN_PANEL_WIDTH : 0)`
-  (both sidebars 300px; chat min 480px; right main panel min 400px). Only the
-  panels that are actually rendered count (e.g. a hidden chat panel does not).
-- R3 The drawer is rendered when the user wants it **and** it fits. The result
-  is published to the store (non-persisted) so everything that depends on the
-  drawer being on screen uses the same answer: the hover reopen tag/preview in
-  `SharedAppLayout`, the "Show/Hide Left Sidebar" action label and active
-  state, and `useWorkspacePanelState`.
-- R4 Toggling the drawer (`V S`, navbar, command bar) acts on what is on
-  screen: visible → hide (preference false); hidden by preference → show
-  (preference true); hidden for lack of space → show it anyway (a transient,
-  non-persisted override). The override ends when the space situation changes
-  or the drawer is toggled off.
-- R5 Mobile layout (≤ 767px) is unchanged; the measurement is desktop-only.
-- R6 Stale persisted `false` written by the old auto-collapse is not
-  distinguishable from a real user choice; the existing "restore drawer when
-  the right panel closes" behaviour is kept so closing a panel still brings
-  it back.
-- R7 Unit tests (Vitest) cover the fit calculation and the store's toggle /
-  override / right-panel behaviour.
-
-## Non-goals
-
-- Making the drawer resizable or changing its 300px width.
-- Auto-hiding the right sidebar.
-- Changing the mobile tabs layout or the hover preview's look.
-
-## Acceptance criteria
-
-- AC1 With chat only, right sidebar shown, a window ≥ ~1210px of workspace
-  area shows the drawer; shrinking below hides it; widening again shows it
-  without any click.
-- AC2 Opening Changes on a 1920px screen keeps the drawer; on a 1440px laptop
-  with the right sidebar open it hides, and reappears when the right sidebar
-  or the panel is closed.
-- AC3 Opening a right panel never changes the persisted
-  `is_left_sidebar_visible`.
-- AC4 When the drawer is auto-hidden, the hover reopen tag works and `V S`
-  shows the drawer.
-- AC5 `pnpm run check`, `pnpm run lint`, web-core Vitest pass.
+Azure CLI's `AADSTS65002` for PIM scopes is an OAuth client pre-authorization
+issue, not a PATH issue. No tenant consent, role changes or token copying.
+Surfacing each worker's agent check in the coordinator's settings UI would need
+a cluster-protocol extension. It is recorded as a follow-up. This change covers
+workers through the startup check (R5).

@@ -1206,16 +1206,7 @@ async fn run_job(
     let (working_directory, repo_context_directory) = directories;
     set_state(&job, JobState::Starting, ExecutionEventPayload::Starting).await;
     prepend_workspace_gobin_to_path(&mut environment);
-    let inherited_path = environment
-        .get("PATH")
-        .map(std::ffi::OsString::from)
-        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
-    if let Some(path) = utils::shell::append_cli_tools_to_path(&inherited_path) {
-        environment.insert("PATH".into(), path.to_string_lossy().into_owned());
-    }
-    // GitHub owner routing uses this worker's own shim directory; the
-    // coordinator sends only the resolved tokens and owner manifest.
-    utils::github_auth::apply_github_routing(&mut environment);
+    set_agent_path(&mut environment);
     if let Some(prepared) = &prepared_mcp {
         environment.extend(prepared.environment.clone());
     }
@@ -1363,6 +1354,25 @@ async fn stop_child(job: &WorkerJob) {
         let _ = child.kill().await;
         let _ = child.wait().await;
     }
+}
+
+/// Give the agent this worker's PATH plus the app-managed CLI tools, and the
+/// same value as `VK_AGENT_PATH` so a login shell (Codex runs `bash -lc`) can
+/// restore it after the host profile replaces PATH.
+fn set_agent_path(environment: &mut BTreeMap<String, String>) {
+    let inherited = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+    let path = utils::shell::agent_path(&inherited)
+        .to_string_lossy()
+        .into_owned();
+    environment.insert("PATH".into(), path);
+    // GitHub owner routing uses this worker's own shim directory; the
+    // coordinator sends only the resolved tokens and owner manifest. It
+    // prepends to PATH, so record the agent PATH only after it.
+    utils::github_auth::apply_github_routing(environment);
+    utils::shell::sync_agent_path(environment);
 }
 
 fn prepend_workspace_gobin_to_path(environment: &mut BTreeMap<String, String>) {
@@ -2771,6 +2781,78 @@ mod tests {
             utils::assets::github_auth_bin_dir()
         );
         assert!(!output.contains("synthetic-token"));
+    }
+
+    #[tokio::test]
+    async fn spawned_agents_can_restore_their_path_in_a_login_shell() {
+        // A login shell may replace PATH (NixOS set-environment; Codex runs
+        // `bash -lc`). The spawned process must carry an identical copy for
+        // the host login profile to restore.
+        let (_temp, supervisor, workspace) = fixture();
+        let mut request = dispatch(
+            &workspace,
+            "agent-path",
+            r#"[ -n "$VK_AGENT_PATH" ] && [ "$VK_AGENT_PATH" = "$PATH" ] && printf %s "$VK_AGENT_PATH""#,
+        );
+        request
+            .environment
+            .insert("PATH".into(), "/fixture/bin".into());
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        assert_eq!(summary.state, JobState::Completed);
+
+        let batch = supervisor.events(execution_id, 0).await.unwrap();
+        let output = batch
+            .events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                ExecutionEventPayload::Stdout { data_base64 } => {
+                    BASE64_STANDARD.decode(data_base64).ok()
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(String::from_utf8_lossy(&output).starts_with("/fixture/bin"));
+    }
+
+    #[test]
+    fn a_dispatched_agent_path_cannot_override_the_worker_value() {
+        let mut environment = BTreeMap::from([
+            ("PATH".into(), "/worker/bin".into()),
+            (
+                utils::shell::AGENT_PATH_ENV.into(),
+                "/coordinator/bin".into(),
+            ),
+        ]);
+        set_agent_path(&mut environment);
+        assert_eq!(
+            environment[utils::shell::AGENT_PATH_ENV],
+            environment["PATH"]
+        );
+        assert!(environment["PATH"].starts_with("/worker/bin"));
+    }
+
+    #[test]
+    fn agent_path_includes_the_github_routing_shim() {
+        // The shim must survive a login shell too, or `gh` there would bypass
+        // per-owner token routing.
+        let mut environment = BTreeMap::from([
+            ("PATH".into(), "/worker/bin".into()),
+            (utils::github_auth::OWNERS_ENV.into(), "org-a".into()),
+            (
+                utils::github_auth::token_env_name("org-a"),
+                "synthetic-token".into(),
+            ),
+        ]);
+        set_agent_path(&mut environment);
+        let agent_path = &environment[utils::shell::AGENT_PATH_ENV];
+        assert_eq!(agent_path, &environment["PATH"]);
+        assert_eq!(
+            std::env::split_paths(std::ffi::OsStr::new(agent_path)).next(),
+            Some(utils::assets::github_auth_bin_dir())
+        );
     }
 
     #[tokio::test]
