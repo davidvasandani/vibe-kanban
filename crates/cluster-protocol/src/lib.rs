@@ -141,6 +141,15 @@ pub struct ResourceSnapshot {
     pub load_1m: f64,
     pub available_memory_bytes: u64,
     pub active_execution_count: u32,
+    /// `full avg60` of `/proc/pressure/memory`, in percent of wall time.
+    #[serde(default)]
+    pub memory_pressure_full_avg60: Option<f64>,
+    /// `full avg60` of `/proc/pressure/io`, in percent of wall time.
+    #[serde(default)]
+    pub io_pressure_full_avg60: Option<f64>,
+    /// The worker refuses new dispatches until node pressure subsides.
+    #[serde(default)]
+    pub admission_refusing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

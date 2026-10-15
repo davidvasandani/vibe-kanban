@@ -29,12 +29,11 @@ tokio-util = "0.7"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 utils = { path = "../utils" }
+# killpg(2) for cancellation stragglers; statfs(2) and getloadavg(3) on macOS,
+# which has no /proc.
+libc = "0.2"
 uuid = { version = "1.0", features = ["serde", "v4"] }
 ws-bridge = { path = "../ws-bridge" }
-
-# statfs(2) mount identity and getloadavg(3): macOS has no /proc.
-[target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

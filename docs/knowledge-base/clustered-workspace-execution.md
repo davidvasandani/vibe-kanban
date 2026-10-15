@@ -32,6 +32,37 @@ which covers PTYs, one-off commands and future call sites that bypass the
 helper. Setup failure never stops the worker. It serves on and
 reports `job_cgroup.state = "failed"` on `/health`.
 
+`jobs` is a parent, not a leaf (`vk/f268-harden-cluster-w`). The pre-exec
+hook and the sweep target `jobs/shared`. Each running execution gets
+`jobs/exec-<execution_id>`, with `VK_WORKER_EXECUTION_MEMORY_HIGH` and
+`VK_WORKER_EXECUTION_MEMORY_MAX`, so one runaway build is throttled and
+OOM-killed inside its own execution. The sweep moves the execution's process
+group there. It also moves any descendant whose parent chain leads back to
+the execution, which covers a child that called `setsid`. The cgroup is
+removed once it is empty after the job ends. `VK_WORKER_JOB_CPU_WEIGHT` and
+`VK_WORKER_JOB_IO_WEIGHT` weight `jobs` against the supervisor, on a best
+effort basis. `io.weight` needs BFQ or iocost to take effect.
+
+Two more guards come from the same incident. Neither one needs isolation.
+
+- **Pressure admission.** While PSI `full avg60` for memory or IO is at or
+  above `VK_WORKER_ADMISSION_MAX_PRESSURE` (default 40, 0 disables), new
+  dispatches get a 503 that names the resource. Replays of accepted work
+  still succeed. `/health.pressure` and the heartbeat's
+  `admission_refusing` show the state, and placement ranks a refusing
+  worker last.
+- **Startup-stall reaper.** A coding-agent execution that has written
+  nothing `VK_WORKER_STARTUP_STALL_SECONDS` (default 600, 0 disables) after
+  it started is SIGKILLed, along with its cgroup, and reported `Failed` with
+  a `worker_error` that names the stall. If the spawn itself has not
+  returned, the worker owns no process it could kill, and dropping the
+  spawn could leak an executor's half-started process group. So the job
+  only gets a diagnostic and stays owned and active until the child is
+  handed over. Once that happens it is reaped as usual. A spawn that
+  returns after the job already ended is killed. A
+  process stuck in D-state keeps counting in `active_execution_count` until
+  it exits, but the session is no longer held behind it.
+
 Persist the worker ID on both the workspace and execution job. Never infer
 affinity from the currently selected UI host, and never retry a dispatch on a
 different worker. Dispatch is idempotent by coordinator execution ID so a lost

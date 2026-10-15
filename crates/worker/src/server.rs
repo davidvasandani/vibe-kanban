@@ -19,6 +19,7 @@ use crate::{
     WorkerConfig,
     execution::ExecutionSupervisor,
     mount_health::{MountHealthChecker, SystemMountInspector},
+    pressure::PressureStatus,
 };
 
 const MOUNT_CHALLENGE_PATH: &str = "/api/workers/mount-challenge";
@@ -143,7 +144,10 @@ impl CoordinatorClient {
                 preview: false,
                 persistent_process_adoption: false,
             },
-            resources: resource_snapshot(supervisor.active_execution_count().await),
+            resources: resource_snapshot(
+                supervisor.active_execution_count().await,
+                supervisor.pressure_status(),
+            ),
             labels: BTreeMap::new(),
             mount,
         };
@@ -161,7 +165,10 @@ impl CoordinatorClient {
         let probe: MountProbe = self.get(MOUNT_CHALLENGE_PATH).await?;
         let heartbeat = WorkerHeartbeat {
             authority: authority(config),
-            resources: resource_snapshot(supervisor.active_execution_count().await),
+            resources: resource_snapshot(
+                supervisor.active_execution_count().await,
+                supervisor.pressure_status(),
+            ),
             mount: mount_health(config, &probe),
             jobs: supervisor.inventory().await,
         };
@@ -317,7 +324,7 @@ fn resolve_hostname(env: Option<String>, kernel: Option<String>, etc: Option<Str
         .unwrap_or_else(|| "unknown".into())
 }
 
-fn resource_snapshot(active_execution_count: u32) -> ResourceSnapshot {
+fn resource_snapshot(active_execution_count: u32, pressure: PressureStatus) -> ResourceSnapshot {
     let load_1m = load_average_1m().unwrap_or(0.0);
     let available_memory_bytes = std::fs::read_to_string("/proc/meminfo")
         .ok()
@@ -340,6 +347,9 @@ fn resource_snapshot(active_execution_count: u32) -> ResourceSnapshot {
         load_1m,
         available_memory_bytes,
         active_execution_count,
+        memory_pressure_full_avg60: pressure.memory_full_avg60,
+        io_pressure_full_avg60: pressure.io_full_avg60,
+        admission_refusing: pressure.admission_refusing,
     }
 }
 
@@ -426,6 +436,8 @@ mod tests {
             executor_profiles: vec!["codex".into()],
             state_dir: PathBuf::from("/shared/execution-logs/worker-state/test"),
             job_cgroup: None,
+            admission_max_pressure: None,
+            startup_stall: None,
         };
         let authority = authority(&config);
         assert_eq!(authority.worker_node_id, config.worker_node_id);

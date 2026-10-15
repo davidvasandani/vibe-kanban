@@ -10,10 +10,15 @@ use std::{
 
 use axum::{Json, Router, routing::get};
 use job_cgroup::{
-    JobCgroupConfig, JobCgroupStatus, MemoryLimit, WORKER_JOB_CGROUP_ENV,
-    WORKER_JOB_MEMORY_HIGH_ENV, WORKER_JOB_MEMORY_MAX_ENV,
+    JobCgroupConfig, JobCgroupStatus, MemoryLimit, WORKER_EXECUTION_MEMORY_HIGH_ENV,
+    WORKER_EXECUTION_MEMORY_MAX_ENV, WORKER_JOB_CGROUP_ENV, WORKER_JOB_CPU_WEIGHT_ENV,
+    WORKER_JOB_IO_WEIGHT_ENV, WORKER_JOB_MEMORY_HIGH_ENV, WORKER_JOB_MEMORY_MAX_ENV,
 };
 use node_metrics::{MetricsSampler, types::SamplerConfig};
+use pressure::{
+    AdmissionPressure, DEFAULT_ADMISSION_MAX_PRESSURE, PressureStatus,
+    WORKER_ADMISSION_MAX_PRESSURE_ENV,
+};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -27,6 +32,7 @@ pub mod job_cgroup;
 pub mod journal;
 pub mod mount_health;
 pub mod path_authority;
+pub mod pressure;
 pub mod preview;
 pub mod recovery;
 pub mod server;
@@ -45,6 +51,8 @@ pub const WORKER_EXPECTED_UID_ENV: &str = "VK_WORKER_EXPECTED_UID";
 pub const WORKER_EXPECTED_GID_ENV: &str = "VK_WORKER_EXPECTED_GID";
 pub const WORKER_EXECUTOR_PROFILES_ENV: &str = "VK_WORKER_EXECUTOR_PROFILES";
 pub const WORKER_STATE_DIR_ENV: &str = "VK_WORKER_STATE_DIR";
+pub const WORKER_STARTUP_STALL_SECONDS_ENV: &str = "VK_WORKER_STARTUP_STALL_SECONDS";
+pub const DEFAULT_STARTUP_STALL_SECONDS: u64 = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerConfig {
@@ -63,6 +71,12 @@ pub struct WorkerConfig {
     /// Isolate spawned children from the worker's own cgroup. `None` keeps
     /// the historical single-cgroup layout (local and undelegated runs).
     pub job_cgroup: Option<JobCgroupConfig>,
+    /// Refuse new dispatches while node memory or IO PSI `full avg60` is at
+    /// or above this percentage. `None` disables refusal.
+    pub admission_max_pressure: Option<u8>,
+    /// Reap a coding-agent execution that has produced no output this long
+    /// after it started. `None` disables the reaper.
+    pub startup_stall: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -158,6 +172,25 @@ impl WorkerConfig {
             });
         }
         let job_cgroup = parse_job_cgroup(&lookup)?;
+        let admission_max_pressure = match lookup(WORKER_ADMISSION_MAX_PRESSURE_ENV)
+            .filter(|value| !value.trim().is_empty())
+        {
+            None => Some(DEFAULT_ADMISSION_MAX_PRESSURE),
+            Some(value) => {
+                AdmissionPressure::parse_threshold(&value).ok_or(WorkerConfigError::Invalid {
+                    name: WORKER_ADMISSION_MAX_PRESSURE_ENV,
+                    value,
+                })?
+            }
+        };
+        let startup_stall_seconds = match lookup(WORKER_STARTUP_STALL_SECONDS_ENV)
+            .filter(|value| !value.trim().is_empty())
+        {
+            None => DEFAULT_STARTUP_STALL_SECONDS,
+            Some(value) => parse(WORKER_STARTUP_STALL_SECONDS_ENV, value.trim().to_owned())?,
+        };
+        let startup_stall = (startup_stall_seconds > 0)
+            .then(|| std::time::Duration::from_secs(startup_stall_seconds));
         Ok(Self {
             worker_node_id,
             listen_addr,
@@ -172,6 +205,8 @@ impl WorkerConfig {
             executor_profiles,
             state_dir,
             job_cgroup,
+            admission_max_pressure,
+            startup_stall,
         })
     }
 }
@@ -194,10 +229,20 @@ fn parse_job_cgroup(
             MemoryLimit::parse(&value).ok_or(WorkerConfigError::Invalid { name: env, value })
         }
     };
+    let weight = |env: &'static str| match lookup(env).filter(|value| !value.trim().is_empty()) {
+        None => Ok(None),
+        Some(value) => JobCgroupConfig::parse_weight(&value)
+            .map(Some)
+            .ok_or(WorkerConfigError::Invalid { name: env, value }),
+    };
     Ok(Some(JobCgroupConfig {
         name,
         memory_high: limit(WORKER_JOB_MEMORY_HIGH_ENV)?,
         memory_max: limit(WORKER_JOB_MEMORY_MAX_ENV)?,
+        execution_memory_high: limit(WORKER_EXECUTION_MEMORY_HIGH_ENV)?,
+        execution_memory_max: limit(WORKER_EXECUTION_MEMORY_MAX_ENV)?,
+        cpu_weight: weight(WORKER_JOB_CPU_WEIGHT_ENV)?,
+        io_weight: weight(WORKER_JOB_IO_WEIGHT_ENV)?,
     }))
 }
 
@@ -215,6 +260,7 @@ struct Health {
     admission_draining: bool,
     drain_safe: bool,
     job_cgroup: JobCgroupStatus,
+    pressure: PressureStatus,
 }
 
 impl Health {
@@ -231,7 +277,13 @@ impl Health {
             admission_draining,
             drain_safe: admission_draining && active_execution_count == 0,
             job_cgroup,
+            pressure: PressureStatus::default(),
         }
+    }
+
+    fn with_pressure(mut self, pressure: PressureStatus) -> Self {
+        self.pressure = pressure;
+        self
     }
 }
 
@@ -276,7 +328,12 @@ pub async fn run_with_drain(
         mcp_config_root,
         coordinator_url,
     )
-    .await?;
+    .await?
+    .with_hardening(
+        job_cgroup_handle.clone(),
+        AdmissionPressure::from_host(config.admission_max_pressure),
+        config.startup_stall,
+    );
     let coordinator_task = tokio::spawn(server::registration_loop(
         config.clone(),
         supervisor.clone(),
@@ -305,12 +362,15 @@ pub async fn run_with_drain(
             "/health",
             get(move || async move {
                 let active_execution_count = health_supervisor.active_execution_count().await;
-                Json(Health::new(
-                    worker_node_id,
-                    active_execution_count,
-                    health_admission_draining.load(Ordering::Acquire),
-                    health_job_cgroup.status(),
-                ))
+                Json(
+                    Health::new(
+                        worker_node_id,
+                        active_execution_count,
+                        health_admission_draining.load(Ordering::Acquire),
+                        health_job_cgroup.status(),
+                    )
+                    .with_pressure(health_supervisor.pressure_status()),
+                )
             }),
         )
         .merge(worker_api::router(&config, supervisor, metrics.clone()).await?);
@@ -429,6 +489,10 @@ mod tests {
                 name: "jobs".into(),
                 memory_high: MemoryLimit::Unlimited,
                 memory_max: MemoryLimit::Unlimited,
+                execution_memory_high: MemoryLimit::Unlimited,
+                execution_memory_max: MemoryLimit::Unlimited,
+                cpu_weight: None,
+                io_weight: None,
             })
         );
 
@@ -441,6 +505,76 @@ mod tests {
         let job_cgroup = config.job_cgroup.unwrap();
         assert_eq!(job_cgroup.memory_high, MemoryLimit::PercentOfRam(60));
         assert_eq!(job_cgroup.memory_max, MemoryLimit::Bytes(12 << 30));
+
+        let job_cgroup = parse_with(&[
+            (WORKER_JOB_CGROUP_ENV, "jobs"),
+            (WORKER_EXECUTION_MEMORY_HIGH_ENV, "40%"),
+            (WORKER_EXECUTION_MEMORY_MAX_ENV, "6G"),
+            (WORKER_JOB_CPU_WEIGHT_ENV, "50"),
+            (WORKER_JOB_IO_WEIGHT_ENV, "25"),
+        ])
+        .unwrap()
+        .job_cgroup
+        .unwrap();
+        assert_eq!(
+            job_cgroup.execution_memory_high,
+            MemoryLimit::PercentOfRam(40)
+        );
+        assert_eq!(job_cgroup.execution_memory_max, MemoryLimit::Bytes(6 << 30));
+        assert_eq!(job_cgroup.cpu_weight, Some(50));
+        assert_eq!(job_cgroup.io_weight, Some(25));
+        assert_eq!(
+            parse_with(&[
+                (WORKER_JOB_CGROUP_ENV, "jobs"),
+                (WORKER_JOB_CPU_WEIGHT_ENV, "0")
+            ])
+            .unwrap_err(),
+            WorkerConfigError::Invalid {
+                name: WORKER_JOB_CPU_WEIGHT_ENV,
+                value: "0".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn admission_pressure_and_startup_stall_default_on_and_zero_disables() {
+        let config = parse_with(&[]).unwrap();
+        assert_eq!(config.admission_max_pressure, Some(40));
+        assert_eq!(
+            config.startup_stall,
+            Some(std::time::Duration::from_secs(600))
+        );
+
+        let config = parse_with(&[
+            (WORKER_ADMISSION_MAX_PRESSURE_ENV, "0"),
+            (WORKER_STARTUP_STALL_SECONDS_ENV, "0"),
+        ])
+        .unwrap();
+        assert_eq!(config.admission_max_pressure, None);
+        assert_eq!(config.startup_stall, None);
+
+        let config = parse_with(&[
+            (WORKER_ADMISSION_MAX_PRESSURE_ENV, "25"),
+            (WORKER_STARTUP_STALL_SECONDS_ENV, "300"),
+        ])
+        .unwrap();
+        assert_eq!(config.admission_max_pressure, Some(25));
+        assert_eq!(
+            config.startup_stall,
+            Some(std::time::Duration::from_secs(300))
+        );
+        for (name, value) in [
+            (WORKER_ADMISSION_MAX_PRESSURE_ENV, "101"),
+            (WORKER_STARTUP_STALL_SECONDS_ENV, "-1"),
+        ] {
+            assert_eq!(
+                parse_with(&[(name, value)]).unwrap_err(),
+                WorkerConfigError::Invalid {
+                    name,
+                    value: value.into(),
+                }
+            );
+        }
     }
 
     #[test]
