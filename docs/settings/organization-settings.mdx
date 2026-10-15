@@ -156,9 +156,22 @@ shown without the quotes.
    using a service account with read access to the referenced vault. You can also
    supply it through the Vibe Kanban service environment. The organisation value
    takes precedence, including when it is invalid or empty.
-3. Add your variable with the complete `op://vault/item/field` reference as its
+3. Optional, but recommended when a local
+   [1Password Connect](https://developer.1password.com/docs/connect/) server is
+   available: add `OP_CONNECT_HOST` (the server URL) and `OP_CONNECT_TOKEN` (a
+   Connect access token) as literal organisation environment variables. Set both
+   or neither. Vibe Kanban then reads each reference through Connect first and
+   falls back to `OP_SERVICE_ACCOUNT_TOKEN` only if Connect fails. Connect serves
+   from its own cache, so lookups through it do not use up the service account's
+   request quota. A Connect attempt is limited to 10 seconds. If one times out,
+   Vibe Kanban skips that Connect server for 60 seconds and goes straight to the
+   service account. With Connect
+   configured, `OP_SERVICE_ACCOUNT_TOKEN` is optional. Connect settings are never
+   taken from the Vibe Kanban service environment, so each organisation only
+   resolves references with credentials it supplied itself.
+4. Add your variable with the complete `op://vault/item/field` reference as its
    value. Section-qualified references are supported by the CLI as well.
-4. Start a new agent execution, script, development server, or workspace terminal.
+5. Start a new agent execution, script, development server, or workspace terminal.
    Vibe Kanban reads the field before launch and passes the result through its
    existing environment transport, including to cluster workers.
 
@@ -169,16 +182,19 @@ The bootstrap token itself cannot be a reference. Configured token variables
 retain their existing inheritance into workspace processes.
 
 If an explicit reference cannot be read, the launch fails with a sanitised error
-that names the variable and the cause, for example
-`1Password lookup for GH_TOKEN failed: …`. The cause is worked out from the 1Password
+that names the variable, the credential used, and the cause, for example
+`1Password lookup for GH_TOKEN failed through 1Password Connect (OP_CONNECT_HOST): …`.
+When Connect fails and the service account succeeds, the launch proceeds and the
+Connect failure is only logged. The cause is worked out from the 1Password
 CLI's own error output, which is never shown, logged, or stored:
 
 | Cause in the message | What to do |
 |---|---|
-| rate-limited the service account | The service account's request quota is used up. Every launch reads each reference again, and other tools that share the service account count against the same quota. Retry after it resets; `op service-account ratelimit` shows the remaining requests and the reset time. |
-| rejected the service-account token | Replace `OP_SERVICE_ACCOUNT_TOKEN` with a current, unrevoked token. |
-| not found or is not shared | Fix the vault, item, or field in the reference, or grant the service account access to the vault. |
-| check the reference, service-account token, and vault permissions | Unrecognised failure. Check all three, plus the CLI installation and connectivity. |
+| rate-limited the request | The service account's request quota is used up. Every launch reads each reference again, and other tools that share the service account count against the same quota. Retry after it resets; `op service-account ratelimit` shows the remaining requests and the reset time. Configuring Connect (step 3) avoids this. |
+| rejected the token | Replace the token for the credential named in the message (`OP_SERVICE_ACCOUNT_TOKEN` or `OP_CONNECT_TOKEN`) with a current, unrevoked one. |
+| not found or is not shared with this credential | Fix the vault, item, or field in the reference, or grant that credential access to the vault. |
+| check the reference, token, vault permissions, and connectivity | Unrecognised failure, or Connect did not answer within 10 seconds. Check all of these, plus the CLI installation. |
+| needs both OP_CONNECT_HOST and OP_CONNECT_TOKEN | Only one of the Connect settings is set, or one is a reference. Set both as literals, or remove both. |
 
 The lookup phase has a 30-second limit. Fields must be NUL-free UTF-8 text no
 larger than 64 KiB; whitespace and trailing newlines are preserved. Existing

@@ -299,7 +299,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::services::{environment_secrets::LookupFailure, github_owner_tokens::binding};
+    use crate::services::{
+        environment_secrets::{LookupFailure, Via},
+        github_owner_tokens::binding,
+    };
 
     const OP_REF: &str = "op://Vault/GitHub sweetgreen/credential";
 
@@ -415,6 +418,7 @@ mod tests {
         let failing = |_: String| {
             std::future::ready(Err::<String, _>(EnvironmentSecretError::ReadFailed {
                 variable: None,
+                via: Via::ServiceAccount,
                 cause: LookupFailure::Unknown,
             }))
         };

@@ -84,3 +84,28 @@ reference, the token, the value, or the provider's raw output.
   Display/Debug contains neither the diagnostic nor the value; org path
   includes the variable name; GitHub paths do not include `VALUE`.
 - `cargo test -p services`, `pnpm run format`, clippy clean.
+
+## Follow-up: use the local 1Password Connect proxy (option A)
+
+The VK server never used Connect for org Env Vars. The `vibe-kanban-dev`
+unit unsets `OP_CONNECT_TOKEN` before exec, and the resolver strips every
+`OP_*`. So every launch spent the cloud quota. The user chose **org
+opt-in**:
+
+- An org that sets `OP_CONNECT_HOST` and a literal `OP_CONNECT_TOKEN` gets
+  Connect-first resolution (10 s per attempt), with `OP_SERVICE_ACCOUNT_TOKEN`
+  (org, then ambient) as the fallback. Setting only one of the pair, or one
+  as a reference, is `IncompleteConnect`.
+- Ambient Connect settings are never used. Otherwise any org could read
+  whatever host Connect can see.
+- Each `op read` child gets exactly one credential. A Connect timeout makes
+  a process-wide breaker skip that host for 60 s (a launch resolves Env Vars
+  and each owner token in separate calls), and an `InvalidValue` from Connect is
+  not refetched.
+- Errors name the route: `… failed through 1Password Connect
+  (OP_CONNECT_HOST): …` or `… through the service account
+  (OP_SERVICE_ACCOUNT_TOKEN): …`.
+- GitHub owner-token launch resolution forwards the org's Connect pair too.
+
+Operator action: add `OP_CONNECT_HOST=http://172.16.100.231:8081` and the
+Connect client token to each org that uses references (Sweetgreen first).

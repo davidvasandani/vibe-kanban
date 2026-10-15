@@ -23,12 +23,13 @@ use utils::{
 use uuid::Uuid;
 
 use super::{
-    environment_secrets::{EnvironmentSecretError, resolve_environment_secrets},
+    environment_secrets::{
+        CREDENTIAL_VARIABLES, EnvironmentSecretError, resolve_environment_secrets,
+    },
     mcp_gateway_secrets::McpGatewaySecretStore,
 };
 
 const MAX_VALUE_BYTES: usize = 4 * 1024;
-const OP_TOKEN: &str = "OP_SERVICE_ACCOUNT_TOKEN";
 const RESOLVED_KEY: &str = "VALUE";
 
 /// A configured owner as shown in settings. `reference` is present only when
@@ -225,8 +226,8 @@ pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<(), GitHubOwnerTokenE
 /// Environment for a workspace launch: [`OWNERS_ENV`] plus one resolved token
 /// variable per owner, or an empty map when nothing is configured.
 /// `org_env` is the unresolved organization Env Var map; its literal
-/// `OP_SERVICE_ACCOUNT_TOKEN` takes precedence for 1Password lookups, exactly
-/// as it does for Env Vars. Any configured owner that cannot be read or
+/// `OP_SERVICE_ACCOUNT_TOKEN` and 1Password Connect settings select the
+/// lookup credential, exactly as they do for Env Vars. Any configured owner that cannot be read or
 /// resolved fails the launch.
 pub async fn launch_environment(
     pool: &SqlitePool,
@@ -258,8 +259,10 @@ where
     for (owner, value) in values {
         let token = if normalize_secret_reference(&value).is_some() {
             let mut request = HashMap::from([(RESOLVED_KEY.to_owned(), value)]);
-            if let Some(op_token) = org_env.get(OP_TOKEN) {
-                request.insert(OP_TOKEN.to_owned(), op_token.clone());
+            for name in CREDENTIAL_VARIABLES {
+                if let Some(credential) = org_env.get(name) {
+                    request.insert(name.to_owned(), credential.clone());
+                }
             }
             resolve(request)
                 .await
@@ -294,7 +297,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::services::environment_secrets::LookupFailure;
+
+    const OP_TOKEN: &str = "OP_SERVICE_ACCOUNT_TOKEN";
+    use crate::services::environment_secrets::{LookupFailure, Via};
 
     async fn test_pool() -> SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -459,7 +464,18 @@ mod tests {
                 }
             }
         };
-        let org = HashMap::from([(OP_TOKEN.to_owned(), "synthetic-op".to_owned())]);
+        let org = HashMap::from([
+            (OP_TOKEN.to_owned(), "synthetic-op".to_owned()),
+            (
+                "OP_CONNECT_HOST".to_owned(),
+                "http://connect:8080".to_owned(),
+            ),
+            (
+                "OP_CONNECT_TOKEN".to_owned(),
+                "synthetic-connect".to_owned(),
+            ),
+            ("UNRELATED".to_owned(), "never-forwarded".to_owned()),
+        ]);
         let environment = launch_environment_with(
             vec![
                 ("Org-A".into(), "synthetic-literal".into()),
@@ -476,6 +492,9 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "literals never reach the resolver");
         assert_eq!(seen[0][OP_TOKEN], "synthetic-op");
+        assert_eq!(seen[0]["OP_CONNECT_HOST"], "http://connect:8080");
+        assert_eq!(seen[0]["OP_CONNECT_TOKEN"], "synthetic-connect");
+        assert!(!seen[0].contains_key("UNRELATED"));
         assert_eq!(seen[0][RESOLVED_KEY], "op://Vault/b/credential");
     }
 
@@ -484,6 +503,7 @@ mod tests {
         let unused = |_request: HashMap<String, String>| async {
             Err(EnvironmentSecretError::ReadFailed {
                 variable: Some(RESOLVED_KEY.to_owned()),
+                via: Via::ServiceAccount,
                 cause: LookupFailure::Unknown,
             })
         };
@@ -503,6 +523,7 @@ mod tests {
         let failing = |_request: HashMap<String, String>| async {
             Err(EnvironmentSecretError::ReadFailed {
                 variable: Some(RESOLVED_KEY.to_owned()),
+                via: Via::ServiceAccount,
                 cause: LookupFailure::Unknown,
             })
         };
