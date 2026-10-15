@@ -3610,6 +3610,10 @@ impl LocalContainerService {
                                     }
                                 }
                             }
+                            // Finalize like every other indeterminate path, so
+                            // queued restarts and session restart tracking are
+                            // resolved instead of stranded behind this row.
+                            container.finalize_remote_execution(execution_id).await;
                             container.finish_msg_store(&execution_id).await;
                             return;
                         }

@@ -831,6 +831,9 @@ impl IntoResponse for WorkerApiError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "worker is draining for a release handoff".into(),
             ),
+            Self::Execution(error @ ExecutionError::UnderPressure(_)) => {
+                (StatusCode::SERVICE_UNAVAILABLE, error.to_string())
+            }
             Self::Execution(error) => (StatusCode::BAD_REQUEST, error.to_string()),
         };
         (status, Json(serde_json::json!({"error": message}))).into_response()

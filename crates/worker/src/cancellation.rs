@@ -53,7 +53,7 @@ pub async fn cancel(
     )
     .await?
     {
-        return confirmed(&job, request.execution_id, exit).await;
+        return confirmed(supervisor, &job, request.execution_id, exit).await;
     }
 
     job.transition(
@@ -68,7 +68,7 @@ pub async fn cancel(
     )
     .await?
     {
-        return confirmed(&job, request.execution_id, exit).await;
+        return confirmed(supervisor, &job, request.execution_id, exit).await;
     }
 
     job.transition(
@@ -77,8 +77,10 @@ pub async fn cancel(
     )
     .await;
     signal_kill(&job).await?;
+    // Also reaches descendants that left the process group.
+    supervisor.kill_execution_cgroup(request.execution_id);
     if let Some(exit) = wait_for_exit(&job, Duration::from_secs(2)).await? {
-        return confirmed(&job, request.execution_id, exit).await;
+        return confirmed(supervisor, &job, request.execution_id, exit).await;
     }
 
     job.transition(
@@ -96,10 +98,15 @@ pub async fn cancel(
 }
 
 async fn confirmed(
+    supervisor: &ExecutionSupervisor,
     job: &WorkerJob,
     execution_id: Uuid,
     exit: ExitStatus,
 ) -> Result<CancellationStatus, CancellationError> {
+    // The leader's exit confirms the cancellation, but group members that
+    // ignored the earlier signals, or left the group, may still run.
+    job.kill_group_remainder();
+    supervisor.kill_execution_cgroup(execution_id);
     let evidence = TerminalEvidence {
         state: TerminalState::Killed,
         exit_code: exit.code(),

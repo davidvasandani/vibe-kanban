@@ -39,8 +39,10 @@ use uuid::Uuid;
 
 use crate::{
     interaction::{InteractionBroker, WorkerApprovalService},
+    job_cgroup::JobCgroupHandle,
     journal::{EventJournal, JournalError},
     path_authority::{PathAuthority, PathAuthorityError},
+    pressure::{AdmissionPressure, PressureReading, PressureRefusal, PressureStatus},
     recovery::{RecoveryError, RecoveryStore},
 };
 
@@ -99,6 +101,8 @@ pub enum ExecutionError {
     NotFound(Uuid),
     #[error("worker is draining for a release handoff")]
     Draining,
+    #[error("{0}")]
+    UnderPressure(PressureRefusal),
     #[error("workspace contains a worktree this node cannot use: {detail}")]
     WorktreeUnusable { detail: String },
     #[error(transparent)]
@@ -119,6 +123,14 @@ pub struct ExecutionSupervisor {
     recovery_store: Option<RecoveryStore>,
     admission_draining: Arc<AtomicBool>,
     admitting: Arc<AtomicU32>,
+    job_cgroup: JobCgroupHandle,
+    pressure: AdmissionPressure,
+    /// Reap a coding-agent execution with no output this long after start.
+    startup_stall: Option<Duration>,
+    /// Lets tests exercise the reaper with a plain command, since a real
+    /// coding agent cannot run in a unit test.
+    #[cfg(test)]
+    reap_commands: bool,
 }
 
 pub struct WorkerJob {
@@ -137,6 +149,12 @@ pub struct WorkerJob {
     mcp_refresh: RwLock<Option<McpRefreshHandle>>,
     mcp_refresh_claim: Mutex<()>,
     quiesced_by: Mutex<Option<Uuid>>,
+    /// Any stdout/stderr byte observed. An execution that never sets it never
+    /// started its turn, which is what the startup-stall reaper acts on.
+    output_seen: AtomicBool,
+    /// Process-group id of the spawned child (its leader's pid), 0 before
+    /// spawn. Kept after the leader is reaped so stragglers can be killed.
+    leader_pid: AtomicU32,
 }
 
 struct PreparedMcpConfig {
@@ -343,6 +361,10 @@ impl ExecutionSupervisor {
             recovery_store: None,
             admission_draining: Arc::new(AtomicBool::new(false)),
             admitting: Arc::new(AtomicU32::new(0)),
+            job_cgroup: JobCgroupHandle::disabled(),
+            pressure: AdmissionPressure::with_reader(None, PressureReading::default),
+            startup_stall: None,
+            reap_commands: false,
         }
     }
 
@@ -394,6 +416,11 @@ impl ExecutionSupervisor {
             recovery_store: Some(recovery_store.clone()),
             admission_draining,
             admitting: Arc::new(AtomicU32::new(0)),
+            job_cgroup: JobCgroupHandle::disabled(),
+            pressure: AdmissionPressure::with_reader(None, PressureReading::default),
+            startup_stall: None,
+            #[cfg(test)]
+            reap_commands: false,
         };
         for mut summary in recovery_store.load().await? {
             let evidence = match summary.terminal.clone() {
@@ -432,10 +459,36 @@ impl ExecutionSupervisor {
                     mcp_refresh: RwLock::new(None),
                     mcp_refresh_claim: Mutex::new(()),
                     quiesced_by: Mutex::new(None),
+                    output_seen: AtomicBool::new(false),
+                    leader_pid: AtomicU32::new(0),
                 }),
             );
         }
         Ok(supervisor)
+    }
+
+    /// Per-execution cgroups, pressure admission and the startup-stall reaper
+    /// (constitution LVI).
+    pub fn with_hardening(
+        mut self,
+        job_cgroup: JobCgroupHandle,
+        pressure: AdmissionPressure,
+        startup_stall: Option<Duration>,
+    ) -> Self {
+        self.job_cgroup = job_cgroup;
+        self.pressure = pressure;
+        self.startup_stall = startup_stall;
+        self
+    }
+
+    pub fn pressure_status(&self) -> PressureStatus {
+        self.pressure.status()
+    }
+
+    /// SIGKILL everything in the execution's cgroup, including descendants
+    /// that left its process group. A no-op without job isolation.
+    pub fn kill_execution_cgroup(&self, execution_id: Uuid) {
+        self.job_cgroup.kill_execution(execution_id);
     }
 
     /// Accepts a dispatch exactly once per execution ID. Replays with the same
@@ -456,6 +509,11 @@ impl ExecutionSupervisor {
         if self.admission_draining.load(Ordering::Acquire) {
             return Err(ExecutionError::Draining);
         }
+        // A thrashing node wedges what it admits; refuse new work until the
+        // pressure subsides. Replays of accepted work returned above.
+        self.pressure
+            .check()
+            .map_err(ExecutionError::UnderPressure)?;
         self.admitting.fetch_add(1, Ordering::AcqRel);
         let admission = ExecutionAdmission(self.admitting.clone());
         if self.admission_draining.load(Ordering::Acquire) {
@@ -575,6 +633,15 @@ impl ExecutionSupervisor {
         // turn. The worker never repairs — that authority is the coordinator's.
         verify_worktrees_are_usable(&workspace_path, self.path_authority.shared_root()).await?;
 
+        #[cfg(test)]
+        let reap_commands = self.reap_commands;
+        #[cfg(not(test))]
+        let reap_commands = false;
+        let startup_stall = self.startup_stall.filter(|_| {
+            executor_config_for_action(&action).is_some()
+                || (reap_commands && matches!(action, WorkerAction::Command(_)))
+        });
+
         let worker_job_id = Uuid::new_v4();
         let mut journal = EventJournal::new(dispatch.execution_id, self.journal_capacity)?;
         journal.append(SystemTime::now(), ExecutionEventPayload::Accepted)?;
@@ -594,6 +661,8 @@ impl ExecutionSupervisor {
             mcp_refresh: RwLock::new(None),
             mcp_refresh_claim: Mutex::new(()),
             quiesced_by: Mutex::new(None),
+            output_seen: AtomicBool::new(false),
+            leader_pid: AtomicU32::new(0),
         });
         jobs.insert(dispatch.execution_id, job.clone());
         drop(admission);
@@ -607,7 +676,11 @@ impl ExecutionSupervisor {
             dispatch.environment,
             executor_profile,
             prepared_mcp,
-            dispatch.timeout_seconds,
+            JobLimits {
+                timeout_seconds: dispatch.timeout_seconds,
+                job_cgroup: self.job_cgroup.clone(),
+                startup_stall,
+            },
         ));
         Ok(DispatchAccepted {
             execution_id: dispatch.execution_id,
@@ -1189,6 +1262,25 @@ impl WorkerJob {
         }
     }
 
+    /// SIGKILL whatever is left of the process group once its leader has
+    /// exited. A member that ignores SIGINT (a shell's background job) would
+    /// otherwise outlive a cancellation confirmed by the leader's exit.
+    pub(crate) fn kill_group_remainder(&self) {
+        let pgid = self.leader_pid.load(Ordering::Acquire);
+        #[cfg(unix)]
+        if let Ok(pgid) = libc::pid_t::try_from(pgid)
+            && pgid > 1
+        {
+            // SAFETY: killpg only sends a signal; ESRCH (no such group) is
+            // the expected outcome when nothing is left.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = pgid;
+    }
+
     pub(crate) async fn emit(&self, payload: ExecutionEventPayload) {
         let _ = self.journal.lock().await.append(SystemTime::now(), payload);
     }
@@ -1201,10 +1293,18 @@ async fn run_job(
     mut environment: std::collections::BTreeMap<String, String>,
     executor_profile: Option<ExecutorProfile>,
     prepared_mcp: Option<PreparedMcpConfig>,
-    timeout_seconds: Option<u64>,
+    limits: JobLimits,
 ) {
     let (working_directory, repo_context_directory) = directories;
     set_state(&job, JobState::Starting, ExecutionEventPayload::Starting).await;
+    // Armed before the spawn, so a spawn that never returns is covered too.
+    if let Some(window) = limits.startup_stall {
+        tokio::spawn(reap_if_silent(
+            job.clone(),
+            window,
+            limits.job_cgroup.clone(),
+        ));
+    }
     prepend_workspace_gobin_to_path(&mut environment);
     set_agent_path(&mut environment);
     if let Some(prepared) = &prepared_mcp {
@@ -1270,9 +1370,32 @@ async fn run_job(
     };
     let stdout = child.inner().stdout.take();
     let stderr = child.inner().stderr.take();
-    *job.child.lock().await = Some(child);
-    *job.state.write().await = JobState::Running;
+    let leader_pid = child.id();
+    {
+        // Serialized with cancellation and the reaper: a job they already
+        // ended must not be revived by a spawn that returned late.
+        let _cancellation = job.cancellation_guard().await;
+        if job.state().await.is_terminal() {
+            tracing::warn!(
+                execution_id = %job.execution_id,
+                "spawn returned after the execution ended; killing the late child"
+            );
+            let _ = child.kill().await;
+            return;
+        }
+        *job.child.lock().await = Some(child);
+        job.leader_pid
+            .store(leader_pid.unwrap_or_default(), Ordering::Release);
+        *job.state.write().await = JobState::Running;
+    }
     job.persist().await;
+    let _execution_cgroup = leader_pid.map(|pid| {
+        limits.job_cgroup.register_execution(job.execution_id, pid);
+        ExecutionCgroup {
+            handle: limits.job_cgroup.clone(),
+            execution_id: job.execution_id,
+        }
+    });
 
     if let Some(signal) = mcp_refresh {
         let job = job.clone();
@@ -1288,8 +1411,9 @@ async fn run_job(
     let mut stderr_task =
         stderr.map(|stderr| tokio::spawn(stream_output(job.clone(), stderr, true)));
 
-    let deadline =
-        timeout_seconds.map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
+    let deadline = limits
+        .timeout_seconds
+        .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
     loop {
         if let Some(signal) = exit_signal.as_mut() {
             match signal.try_recv() {
@@ -1347,6 +1471,88 @@ async fn run_job(
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+struct JobLimits {
+    timeout_seconds: Option<u64>,
+    job_cgroup: JobCgroupHandle,
+    /// `Some` only for executions the startup-stall reaper watches.
+    startup_stall: Option<Duration>,
+}
+
+/// Stops per-execution placement when `run_job` returns; the cgroup is
+/// removed by the sweeper once its last process has exited.
+struct ExecutionCgroup {
+    handle: JobCgroupHandle,
+    execution_id: Uuid,
+}
+
+impl Drop for ExecutionCgroup {
+    fn drop(&mut self) {
+        self.handle.release_execution(self.execution_id);
+    }
+}
+
+/// Reap an execution that has written nothing `window` after it started.
+///
+/// On think3 an agent blocked in D-state during startup under node-wide I/O
+/// starvation and stayed `Running` with no output for hours, holding its
+/// session. The worker owns the evidence here: no output was ever observed,
+/// and SIGKILL is sent to the group and the execution cgroup. A process with
+/// SIGKILL pending never runs user code again, even while it waits out its
+/// I/O, so the turn is reported `Failed`. Drain accounting keeps counting the
+/// process until it actually exits. Executions that produced output are never
+/// reaped for being quiet, and neither is one a session transfer has stopped.
+async fn reap_if_silent(job: Arc<WorkerJob>, window: Duration, job_cgroup: JobCgroupHandle) {
+    let mut spawn_reported = false;
+    let _cancellation = loop {
+        tokio::time::sleep(window).await;
+        let cancellation = job.cancellation_guard().await;
+        if job.state().await.is_terminal() || job.output_seen.load(Ordering::Acquire) {
+            return;
+        }
+        // The spawn itself has not returned. Its future cannot be dropped
+        // safely (an executor may already own a process group it would leak)
+        // and no process is ours to kill yet, so nothing terminal is
+        // published: the job stays owned and active, with a visible
+        // diagnostic, and is reaped once the spawn hands over its child.
+        if job.child.lock().await.is_none() {
+            if !spawn_reported {
+                spawn_reported = true;
+                job.emit(ExecutionEventPayload::Structured {
+                    json: serde_json::json!({
+                        "worker_error": format!(
+                            "agent start has not returned after {window:?}; the node may be under memory or IO pressure. The execution stays owned until the start resolves"
+                        )
+                    })
+                    .to_string(),
+                })
+                .await;
+            }
+            continue;
+        }
+        // A session transfer stopped the process on purpose; its silence is
+        // not a stall. Check again one window later.
+        if job.quiesced_by.lock().await.is_none() {
+            break cancellation;
+        }
+    };
+    tracing::warn!(
+        execution_id = %job.execution_id,
+        window = ?window,
+        "execution produced no output since it started; reaping"
+    );
+    if let Some(child) = job.child.lock().await.as_mut() {
+        let _ = child.start_kill();
+    }
+    job_cgroup.kill_execution(job.execution_id);
+    finish_failed(&job, None, startup_stall_reason(window)).await;
+}
+
+fn startup_stall_reason(window: Duration) -> String {
+    format!(
+        "agent produced no output within {window:?} of starting; reaped by the worker (the node may be under memory or IO pressure)"
+    )
 }
 
 async fn stop_child(job: &WorkerJob) {
@@ -1505,6 +1711,7 @@ async fn stream_output(job: Arc<WorkerJob>, mut reader: impl AsyncRead + Unpin, 
         match reader.read(&mut buffer).await {
             Ok(0) => return,
             Ok(size) => {
+                job.output_seen.store(true, Ordering::Release);
                 let data_base64 = BASE64_STANDARD.encode(&buffer[..size]);
                 let payload = if stderr {
                     ExecutionEventPayload::Stderr { data_base64 }
@@ -2411,6 +2618,8 @@ mod tests {
             mcp_refresh: RwLock::new(Some(McpRefreshHandle(control.clone()))),
             mcp_refresh_claim: Mutex::new(()),
             quiesced_by: Mutex::new(None),
+            output_seen: AtomicBool::new(false),
+            leader_pid: AtomicU32::new(0),
         });
         supervisor.jobs.write().await.insert(execution_id, job);
 
@@ -2922,6 +3131,202 @@ mod tests {
                 .await,
             Err(ExecutionError::Draining)
         ));
+    }
+
+    #[tokio::test]
+    async fn pressure_refuses_new_dispatch_but_keeps_idempotent_retries() {
+        let (_temp, supervisor, workspace) = fixture();
+        let refusing = Arc::new(AtomicBool::new(false));
+        let reading = refusing.clone();
+        let supervisor = supervisor.with_hardening(
+            JobCgroupHandle::disabled(),
+            AdmissionPressure::with_reader(Some(40.0), move || PressureReading {
+                memory_full_avg60: Some(1.0),
+                io_full_avg60: Some(if reading.load(Ordering::Acquire) {
+                    78.0
+                } else {
+                    0.0
+                }),
+            }),
+            None,
+        );
+        let accepted = dispatch(&workspace, "accepted-before-pressure", "sleep 0.2");
+        supervisor.dispatch(accepted.clone()).await.unwrap();
+
+        refusing.store(true, Ordering::Release);
+        assert!(supervisor.pressure_status().admission_refusing);
+        assert!(supervisor.dispatch(accepted).await.is_ok());
+        let refused = supervisor
+            .dispatch(dispatch(&workspace, "new-under-pressure", "true"))
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, ExecutionError::UnderPressure(_)));
+        assert!(refused.to_string().contains("io pressure"), "{refused}");
+    }
+
+    fn reaping(supervisor: ExecutionSupervisor, window: Duration) -> ExecutionSupervisor {
+        let mut supervisor = supervisor.with_hardening(
+            JobCgroupHandle::disabled(),
+            AdmissionPressure::with_reader(None, PressureReading::default),
+            Some(window),
+        );
+        supervisor.reap_commands = true;
+        supervisor
+    }
+
+    async fn journal_text(supervisor: &ExecutionSupervisor, execution_id: Uuid) -> String {
+        let batch = supervisor.events(execution_id, 0).await.unwrap();
+        serde_json::to_string(&batch).unwrap()
+    }
+
+    #[tokio::test]
+    async fn silent_execution_is_reaped_with_a_named_cause_and_its_process_killed() {
+        let (_temp, supervisor, workspace) = fixture();
+        let supervisor = reaping(supervisor, Duration::from_millis(200));
+        let request = dispatch(&workspace, "silent", "exec sleep 30");
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        assert_eq!(summary.state, JobState::Failed);
+        assert_eq!(
+            summary.terminal.map(|terminal| terminal.state),
+            Some(TerminalState::Failed)
+        );
+        let journal = journal_text(&supervisor, execution_id).await;
+        assert!(
+            journal.contains("agent produced no output within 200ms of starting; reaped"),
+            "{journal}"
+        );
+
+        // The kill landed: the process exits and drain evidence clears.
+        let job = supervisor.job(execution_id).await.unwrap();
+        for _ in 0..200 {
+            if supervisor.active_execution_count().await == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(supervisor.active_execution_count().await, 0);
+        assert!(matches!(
+            job.child().await.as_mut().unwrap().try_wait(),
+            Ok(Some(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn execution_that_produced_output_is_never_reaped_for_silence() {
+        let (_temp, supervisor, workspace) = fixture();
+        let supervisor = reaping(supervisor, Duration::from_millis(100));
+        let request = dispatch(&workspace, "talkative", "echo started; sleep 0.5");
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        assert_eq!(summary.state, JobState::Completed);
+        assert!(
+            !journal_text(&supervisor, execution_id)
+                .await
+                .contains("reaped")
+        );
+    }
+
+    #[tokio::test]
+    async fn reaper_ignores_actions_it_does_not_watch() {
+        let (_temp, supervisor, workspace) = fixture();
+        let mut supervisor = reaping(supervisor, Duration::from_millis(100));
+        // Without the test opt-in only coding-agent actions are watched.
+        supervisor.reap_commands = false;
+        let request = dispatch(&workspace, "quiet-script", "sleep 0.4");
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+        assert_eq!(
+            wait_terminal(&supervisor, execution_id).await.state,
+            JobState::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_spawn_is_reported_but_never_published_as_terminal() {
+        let execution_id = Uuid::new_v4();
+        let job = Arc::new(WorkerJob {
+            execution_id,
+            worker_job_id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            request_digest: "stalled-spawn".into(),
+            state: RwLock::new(JobState::Starting),
+            journal: Mutex::new(EventJournal::new(execution_id, 16).unwrap()),
+            child: Mutex::new(None),
+            cancellation: Mutex::new(()),
+            acknowledged_sequence: Mutex::new(0),
+            recovery_store: None,
+            interactions: Arc::new(InteractionBroker::default()),
+            mcp_config: Mutex::new(None),
+            mcp_refresh: RwLock::new(None),
+            mcp_refresh_claim: Mutex::new(()),
+            quiesced_by: Mutex::new(None),
+            output_seen: AtomicBool::new(false),
+            leader_pid: AtomicU32::new(0),
+        });
+        let reaper = tokio::spawn(reap_if_silent(
+            job.clone(),
+            Duration::from_millis(20),
+            JobCgroupHandle::disabled(),
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Several windows passed: one diagnostic, still owned and active.
+        let journal = serde_json::to_string(&job.journal.lock().await.replay_after(0)).unwrap();
+        assert_eq!(
+            journal.matches("agent start has not returned").count(),
+            1,
+            "{journal}"
+        );
+        assert_eq!(job.state().await, JobState::Starting);
+        assert!(job.is_active_for_drain().await);
+
+        // Once the job ends some other way, the reaper stops.
+        finish_failed(&job, None, "spawn failed".into()).await;
+        tokio::time::timeout(Duration::from_secs(2), reaper)
+            .await
+            .expect("the reaper exits once the job is terminal")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_spawn_that_returns_after_the_job_ended_is_killed_and_changes_nothing() {
+        let (_temp, supervisor, workspace) = fixture();
+        let request = dispatch(&workspace, "late-spawn", "true");
+        let execution_id = request.execution_id;
+        supervisor.dispatch(request).await.unwrap();
+        let summary = wait_terminal(&supervisor, execution_id).await;
+        let job = supervisor.job(execution_id).await.unwrap();
+
+        // Re-running the job models a spawn that completes after the job was
+        // already made terminal (reaped or cancelled).
+        let action: WorkerAction =
+            serde_json::from_value(json!({"program": "/bin/sh", "args": ["-c", "sleep 30"]}))
+                .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_job(
+                job.clone(),
+                action,
+                (workspace.clone(), workspace.clone()),
+                BTreeMap::new(),
+                None,
+                None,
+                JobLimits {
+                    timeout_seconds: None,
+                    job_cgroup: JobCgroupHandle::disabled(),
+                    startup_stall: None,
+                },
+            ),
+        )
+        .await
+        .expect("a late child is killed instead of supervised");
+        let after = job.summary().await;
+        assert_eq!(after.state, summary.state);
+        assert_eq!(after.last_sequence, summary.last_sequence);
     }
 
     #[tokio::test]

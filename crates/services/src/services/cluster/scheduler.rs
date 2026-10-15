@@ -5,6 +5,9 @@ use uuid::Uuid;
 
 use super::{ClusterConfig, SchedulingWeights};
 
+/// Added to the score of a worker that reports `admission_refusing`.
+const ADMISSION_REFUSING_PENALTY: f64 = 1_000.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IneligibleReason {
     NotOnline,
@@ -81,9 +84,26 @@ impl WorkerScheduler {
         let load = metric(worker, "load_1m");
         let active_executions = metric(worker, "active_execution_count");
 
+        // A worker refusing admission under memory/IO pressure would fail
+        // the workspace's first dispatch; rank it after every other eligible
+        // worker, but keep it eligible so placement never fails merely
+        // because every node is busy.
+        let refusing = worker
+            .resource_snapshot
+            .get("admission_refusing")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let penalty = if refusing {
+            ADMISSION_REFUSING_PENALTY
+        } else {
+            0.0
+        };
+
         match (load, active_executions) {
             (Some(load), Some(active_executions)) => {
-                self.weights.load * load + self.weights.active_executions * active_executions
+                self.weights.load * load
+                    + self.weights.active_executions * active_executions
+                    + penalty
             }
             _ => f64::INFINITY,
         }
@@ -416,6 +436,34 @@ mod tests {
                 .unwrap()
                 .id,
             Uuid::from_u128(2)
+        );
+    }
+
+    #[test]
+    fn a_worker_refusing_admission_is_ranked_last_but_stays_eligible() {
+        let now = Utc::now();
+        let mut thrashing = worker(1, now);
+        thrashing.resource_snapshot = Json(json!({
+            "load_1m": 0.1,
+            "active_execution_count": 0,
+            "admission_refusing": true
+        }));
+        let mut busy = worker(2, now);
+        busy.resource_snapshot = Json(json!({"load_1m": 20.0, "active_execution_count": 6}));
+        let scheduler = WorkerScheduler::with_weights(SchedulingWeights::default());
+        assert_eq!(
+            scheduler
+                .select(&[thrashing.clone(), busy], "codex", None, now)
+                .unwrap()
+                .id,
+            Uuid::from_u128(2)
+        );
+        assert_eq!(
+            scheduler
+                .select(&[thrashing], "codex", None, now)
+                .unwrap()
+                .id,
+            Uuid::from_u128(1)
         );
     }
 
