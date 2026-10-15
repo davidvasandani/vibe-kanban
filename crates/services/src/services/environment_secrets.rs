@@ -42,40 +42,74 @@ impl std::fmt::Display for LookupFailure {
     }
 }
 
-/// Rate limiting is checked first: a throttled request can also carry an
-/// HTTP status that would otherwise read as an authorization failure.
+/// `op` echoes the reference, vault, item and field names into its errors,
+/// and a name such as `token429` must not decide the cause. So quoted
+/// segments are removed, `op`'s own not-found phrasing is checked first (it
+/// only follows a successful, authorized request), and statuses must appear
+/// in the `(NNN)` form `op` prints them in.
 fn classify(stderr: &[u8]) -> LookupFailure {
-    let text = String::from_utf8_lossy(stderr).to_lowercase();
+    let text = without_quoted(&String::from_utf8_lossy(stderr).to_lowercase());
     let any = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
     if any(&[
-        "rate limit",
-        "rate-limit",
-        "ratelimit",
-        "too many requests",
-        "429",
-    ]) {
-        LookupFailure::RateLimited
-    } else if any(&[
-        "unauthorized",
-        "401",
-        "invalid token",
-        "decodesacredentials",
-        "authentication",
-    ]) {
-        LookupFailure::Unauthorized
-    } else if any(&[
         "isn't an item",
         "isn't a vault",
         "isn't a field",
         "does not have a field",
-        "not found",
-        "forbidden",
-        "403",
     ]) {
+        LookupFailure::NotFound
+    } else if any(&[
+        "rate limit",
+        "rate-limit",
+        "ratelimit",
+        "too many requests",
+        "(429)",
+    ]) {
+        LookupFailure::RateLimited
+    } else if any(&[
+        "unauthorized",
+        "(401)",
+        "invalid token",
+        "decodesacredentials",
+    ]) {
+        LookupFailure::Unauthorized
+    } else if any(&["forbidden", "(403)", "(404)", "not found"]) {
         LookupFailure::NotFound
     } else {
         LookupFailure::Unknown
     }
+}
+
+/// Drops text inside matching single or double quotes, where `op` echoes
+/// user-chosen names. An apostrophe inside a word (`isn't`, `David's`) neither
+/// opens nor closes a quote, and an unmatched quote keeps the rest of the text.
+fn without_quoted(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let word = |index: Option<usize>| {
+        index
+            .and_then(|i| chars.get(i))
+            .is_some_and(|c| c.is_alphanumeric())
+    };
+    let is_quote = |i: usize, opening: bool| match chars[i] {
+        '"' => true,
+        '\'' if opening => !word(i.checked_sub(1)),
+        '\'' => !word(Some(i + 1)),
+        _ => false,
+    };
+    let mut kept = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if is_quote(i, true)
+            && let Some(end) =
+                (i + 1..chars.len()).find(|&j| chars[j] == chars[i] && is_quote(j, false))
+        {
+            kept.push(' ');
+            i = end + 1;
+            continue;
+        }
+        kept.push(chars[i]);
+        i += 1;
+    }
+    kept
 }
 
 #[derive(Debug, Error)]
@@ -460,6 +494,27 @@ esac
                 LookupFailure::Unknown,
             ),
             ("", LookupFailure::Unknown),
+            // Names echoed by op never decide the cause.
+            (
+                "[ERROR] could not read secret 'op://Homelab/token429/credential': item 'Homelab/token429' does not have a field 'credential'",
+                LookupFailure::NotFound,
+            ),
+            (
+                "[ERROR] could not get item Homelab/rate limit 401: \"rate limit 401\" isn't an item in the \"Homelab\" vault.",
+                LookupFailure::NotFound,
+            ),
+            (
+                "[ERROR] could not read secret 'op://Unauthorized/x/y': exit status 1",
+                LookupFailure::Unknown,
+            ),
+            (
+                "[ERROR] could not read secret 'op://Homelab/David's (429) PAT/x': item 'Homelab/David's (429) PAT' does not have a field 'x'",
+                LookupFailure::NotFound,
+            ),
+            (
+                "[ERROR] (401) You aren't authorized to read 'Homelab/rate limit'",
+                LookupFailure::Unauthorized,
+            ),
         ] {
             assert_eq!(classify(stderr.as_bytes()), expected, "{stderr}");
         }
