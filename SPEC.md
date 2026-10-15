@@ -49,18 +49,20 @@ reference, the token, the value, or the provider's raw output.
 ## Requirements
 
 1. `op read`'s stderr is captured (bounded to 8 KiB) and classified into a
-   fixed cause; the raw text is never logged, returned or stored.
+   fixed cause. The raw text is never logged, returned or stored. Quoted
+   segments, where `op` echoes vault, item and field names, are removed
+   first, so a name such as `token429` cannot decide the cause. Apostrophes
+   inside a word do not count as quotes. The checks run in this order:
+   - `NotFound`: `op`'s own phrasing, "isn't an item", "isn't a vault",
+     "isn't a field" or "does not have a field". This phrasing only follows
+     an authorized request, so it is checked first.
    - `RateLimited`: "rate limit", "rate-limit", "ratelimit", "too many
-     requests", "429".
-   - `Unauthorized`: token rejected (invalid, expired or revoked):
-     "unauthorized", "401", "invalid token", "decodesacredentials",
-     "authentication".
-   - `NotFound`: vault, item or field missing or not shared: "isn't an item",
-     "isn't a vault", "isn't a field", "does not have a field", "not found",
-     "forbidden", "403".
-   - `Unknown`: anything else, or a spawn/IO failure. It keeps today's advice
-     to check the reference, the token and vault permissions.
-   - Rate limiting is checked first, then token rejection, then not-found.
+     requests" or "(429)".
+   - `Unauthorized`: "unauthorized", "(401)", "invalid token" or
+     "decodesacredentials".
+   - `NotFound`: "forbidden", "(403)", "(404)" or "not found".
+   - `Unknown`: anything else, or a spawn or IO failure. It keeps today's
+     advice.
 2. Organization Env Var failures name the variable:
    `1Password lookup for GH_TOKEN failed: <cause advice>`.
 3. GitHub owner-token paths already name the owner, so they show no internal
