@@ -10,8 +10,25 @@ how to debug one.
 - **Org Env Vars:** `LocalContainerService::resolve_org_env_vars` runs on
   *every* execution start, including follow-ups. The org's literal
   `OP_SERVICE_ACCOUNT_TOKEN` wins over the service's ambient token.
+- **1Password Connect first, when the org opts in.** If the org sets
+  `OP_CONNECT_HOST` and a literal `OP_CONNECT_TOKEN`, each `op read` tries
+  Connect first (10 s limit) and falls back to the service account. This
+  mirrors the homelab `op-read` wrapper.
+  - Each child gets exactly one credential, and every ambient `OP_*` is
+    stripped.
+  - After a Connect timeout, a process-wide breaker skips that host for 60 s.
+    It is not a per-call flag, because one launch resolves Env Vars and each
+    owner token in separate calls (Codex review), and launches overlap.
+  - An `InvalidValue` from Connect is not refetched.
+- **Why Connect is org-only, never ambient.** The coordinator's
+  `vibe-kanban-dev` unit exports `OP_CONNECT_HOST`, but it `unset`s
+  `OP_CONNECT_TOKEN` before exec. If the host's Connect were used
+  automatically, any org admin could resolve anything Connect can see in
+  `Homelab`, even items their own token cannot read. The user chose org
+  opt-in (option A) over host-wide Connect.
 - **GitHub owner tokens at launch** (`github_owner_tokens::launch_environment`)
-  use the org token when one is present. The server-side git and `gh` path
+  copy the org's `CREDENTIAL_VARIABLES` (service-account token and Connect
+  pair) into each single-reference request. The server-side git and `gh` path
   (`github_credentials`) uses the server's token and caches results for 60 s.
 - **Project vs org.** The org that owns a project is not obvious from its
   name. The project "Platform Ops" belongs to the **Sweetgreen** org, not the
@@ -61,6 +78,9 @@ of stderr.
    the op-read fallback off Connect, owner-token resolution and every
    execution start. A failure that later clears with no configuration change
    most likely means this quota was used up (incident 2026-10-15, SWE-278).
+   The fix is to configure the org's Connect pair. The homelab Connect server
+   is `http://172.16.100.231:8081` on think4, and its client token lives at
+   `/var/lib/onepassword-connect-client/token` on think2.
 
 ## Contributed by
 
