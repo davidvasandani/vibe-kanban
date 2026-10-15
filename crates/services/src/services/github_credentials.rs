@@ -115,7 +115,9 @@ fn owners_of<'a>(urls: impl IntoIterator<Item = &'a str>) -> Vec<String> {
 
 async fn resolve_reference(reference: String) -> Result<String, EnvironmentSecretError> {
     let mut resolved =
-        resolve_environment_secrets(HashMap::from([(RESOLVED_KEY.to_owned(), reference)])).await?;
+        resolve_environment_secrets(HashMap::from([(RESOLVED_KEY.to_owned(), reference)]))
+            .await
+            .map_err(EnvironmentSecretError::without_variable)?;
     Ok(resolved.remove(RESOLVED_KEY).unwrap_or_default())
 }
 
@@ -297,7 +299,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::services::github_owner_tokens::binding;
+    use crate::services::{environment_secrets::LookupFailure, github_owner_tokens::binding};
 
     const OP_REF: &str = "op://Vault/GitHub sweetgreen/credential";
 
@@ -410,8 +412,12 @@ mod tests {
     async fn unreadable_configured_tokens_fail_closed() {
         let (_dir, store) = temp_store();
         let (_other_dir, other_store) = temp_store();
-        let failing =
-            |_: String| std::future::ready(Err::<String, _>(EnvironmentSecretError::ReadFailed));
+        let failing = |_: String| {
+            std::future::ready(Err::<String, _>(EnvironmentSecretError::ReadFailed {
+                variable: None,
+                cause: LookupFailure::Unknown,
+            }))
+        };
         // Wrong key (undecryptable), failed 1Password lookup, empty value.
         let credentials = resolve_rows(
             &["a".into(), "b".into(), "c".into()],
