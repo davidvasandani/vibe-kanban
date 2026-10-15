@@ -12,6 +12,105 @@ use super::cli_tools::{CliToolId, effective_binary_for};
 const TOKEN: &str = "OP_SERVICE_ACCOUNT_TOKEN";
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SECRET_BYTES: u64 = 64 * 1024;
+/// Enough for any `op` error line; read only to classify, then dropped.
+const MAX_DIAGNOSTIC_BYTES: u64 = 8 * 1024;
+
+/// Why `op read` failed, derived from its stderr. The stderr itself echoes the
+/// reference and may change between CLI versions, so it is never surfaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LookupFailure {
+    RateLimited,
+    Unauthorized,
+    NotFound,
+    Unknown,
+}
+
+impl std::fmt::Display for LookupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::RateLimited => {
+                "1Password rate-limited the service account (its request quota is used up); retry after the quota resets — `op service-account ratelimit` shows when"
+            }
+            Self::Unauthorized => {
+                "1Password rejected the service-account token; check that OP_SERVICE_ACCOUNT_TOKEN is current and not revoked"
+            }
+            Self::NotFound => {
+                "the vault, item, or field in the reference was not found or is not shared with the service account"
+            }
+            Self::Unknown => "check the reference, service-account token, and vault permissions",
+        })
+    }
+}
+
+/// `op` echoes the reference, vault, item and field names into its errors,
+/// and a name such as `token429` must not decide the cause. So quoted
+/// segments are removed, `op`'s own not-found phrasing is checked first (it
+/// only follows a successful, authorized request), and statuses must appear
+/// in the `(NNN)` form `op` prints them in.
+fn classify(stderr: &[u8]) -> LookupFailure {
+    let text = without_quoted(&String::from_utf8_lossy(stderr).to_lowercase());
+    let any = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
+    if any(&[
+        "isn't an item",
+        "isn't a vault",
+        "isn't a field",
+        "does not have a field",
+    ]) {
+        LookupFailure::NotFound
+    } else if any(&[
+        "rate limit",
+        "rate-limit",
+        "ratelimit",
+        "too many requests",
+        "(429)",
+    ]) {
+        LookupFailure::RateLimited
+    } else if any(&[
+        "unauthorized",
+        "(401)",
+        "invalid token",
+        "decodesacredentials",
+    ]) {
+        LookupFailure::Unauthorized
+    } else if any(&["forbidden", "(403)", "(404)", "not found"]) {
+        LookupFailure::NotFound
+    } else {
+        LookupFailure::Unknown
+    }
+}
+
+/// Drops text inside matching single or double quotes, where `op` echoes
+/// user-chosen names. An apostrophe inside a word (`isn't`, `David's`) neither
+/// opens nor closes a quote, and an unmatched quote keeps the rest of the text.
+fn without_quoted(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let word = |index: Option<usize>| {
+        index
+            .and_then(|i| chars.get(i))
+            .is_some_and(|c| c.is_alphanumeric())
+    };
+    let is_quote = |i: usize, opening: bool| match chars[i] {
+        '"' => true,
+        '\'' if opening => !word(i.checked_sub(1)),
+        '\'' => !word(Some(i + 1)),
+        _ => false,
+    };
+    let mut kept = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if is_quote(i, true)
+            && let Some(end) =
+                (i + 1..chars.len()).find(|&j| chars[j] == chars[i] && is_quote(j, false))
+        {
+            kept.push(' ');
+            i = end + 1;
+            continue;
+        }
+        kept.push(chars[i]);
+        i += 1;
+    }
+    kept
+}
 
 #[derive(Debug, Error)]
 pub enum EnvironmentSecretError {
@@ -24,13 +123,36 @@ pub enum EnvironmentSecretError {
     )]
     MissingCli,
     #[error(
-        "1Password lookup failed; check the reference, service-account token, and vault permissions"
+        "1Password lookup{} failed: {cause}",
+        variable.as_ref().map(|name| format!(" for {name}")).unwrap_or_default()
     )]
-    ReadFailed,
+    ReadFailed {
+        /// Env var name (never its value or reference); `None` when the caller
+        /// names the input itself.
+        variable: Option<String>,
+        cause: LookupFailure,
+    },
     #[error("1Password lookup timed out; check service connectivity and retry")]
     TimedOut,
     #[error("1Password field must be NUL-free UTF-8 text of at most 64 KiB")]
     InvalidValue,
+}
+
+impl EnvironmentSecretError {
+    fn read_failed(cause: LookupFailure) -> Self {
+        Self::ReadFailed {
+            variable: None,
+            cause,
+        }
+    }
+
+    /// For single-reference callers whose map key is an internal placeholder.
+    pub fn without_variable(self) -> Self {
+        match self {
+            Self::ReadFailed { cause, .. } => Self::read_failed(cause),
+            other => other,
+        }
+    }
 }
 
 /// Literal-only environments do not require a token or an installed CLI.
@@ -92,11 +214,23 @@ async fn resolve_with_binary(
     token: &str,
     binary: &Path,
 ) -> Result<HashMap<String, String>, EnvironmentSecretError> {
-    for value in values.values_mut() {
+    for (name, value) in values.iter_mut() {
         // Values saved before quote normalization may still carry the quotes
         // 1Password adds when copying a reference; read the bare reference.
         if let Some(reference) = normalize_secret_reference(value) {
-            *value = read_reference(binary, token, &reference).await?;
+            *value =
+                read_reference(binary, token, &reference)
+                    .await
+                    .map_err(|error| match error {
+                        EnvironmentSecretError::ReadFailed { cause, .. } => {
+                            tracing::warn!(variable = %name, ?cause, "1Password lookup failed");
+                            EnvironmentSecretError::ReadFailed {
+                                variable: Some(name.clone()),
+                                cause,
+                            }
+                        }
+                        other => other,
+                    })?;
         }
     }
     Ok(values)
@@ -116,7 +250,7 @@ fn read_command(binary: &Path, token: &str, reference: &str) -> Command {
         .env(TOKEN, token)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     command
 }
@@ -126,28 +260,36 @@ async fn read_reference(
     token: &str,
     reference: &str,
 ) -> Result<String, EnvironmentSecretError> {
+    let unknown = || EnvironmentSecretError::read_failed(LookupFailure::Unknown);
     let mut child = read_command(binary, token, reference)
         .spawn()
-        .map_err(|_| EnvironmentSecretError::ReadFailed)?;
-    let mut bytes = Vec::new();
-    child
+        .map_err(|_| unknown())?;
+    let (stdout, stderr) = child
         .stdout
         .take()
-        .ok_or(EnvironmentSecretError::ReadFailed)?
-        .take(MAX_SECRET_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| EnvironmentSecretError::ReadFailed)?;
+        .zip(child.stderr.take())
+        .ok_or_else(unknown)?;
+    // Read both pipes together so a full stderr pipe cannot stall stdout. Each
+    // future owns its pipe and closes it at its bound, so a child writing past
+    // either bound gets a broken pipe instead of blocking the other read.
+    let mut bytes = Vec::new();
+    let mut diagnostics = Vec::new();
+    let (output, diagnostics_read) = (&mut bytes, &mut diagnostics);
+    let (read, _) = tokio::join!(
+        async move { stdout.take(MAX_SECRET_BYTES + 1).read_to_end(output).await },
+        async move {
+            stderr
+                .take(MAX_DIAGNOSTIC_BYTES)
+                .read_to_end(diagnostics_read)
+                .await
+        },
+    );
+    read.map_err(|_| unknown())?;
     if bytes.len() as u64 > MAX_SECRET_BYTES {
         return Err(EnvironmentSecretError::InvalidValue);
     }
-    if !child
-        .wait()
-        .await
-        .map_err(|_| EnvironmentSecretError::ReadFailed)?
-        .success()
-    {
-        return Err(EnvironmentSecretError::ReadFailed);
+    if !child.wait().await.map_err(|_| unknown())?.success() {
+        return Err(EnvironmentSecretError::read_failed(classify(&diagnostics)));
     }
     if bytes.contains(&0) {
         return Err(EnvironmentSecretError::InvalidValue);
@@ -297,12 +439,160 @@ esac
         )
         .await;
         let error = result.unwrap_err();
-        assert!(matches!(error, EnvironmentSecretError::ReadFailed));
+        assert!(matches!(
+            &error,
+            EnvironmentSecretError::ReadFailed {
+                variable: Some(name),
+                cause: LookupFailure::Unknown,
+            } if name == "A"
+        ));
         assert!(!format!("{error:?} {error}").contains("private-"));
         assert!(matches!(
             read_reference(Path::new("/nonexistent/vk-op"), "token", "op://v/i/f").await,
-            Err(EnvironmentSecretError::ReadFailed)
+            Err(EnvironmentSecretError::ReadFailed {
+                variable: None,
+                cause: LookupFailure::Unknown,
+            })
         ));
+    }
+
+    #[test]
+    fn classifies_op_diagnostics_without_keeping_them() {
+        // Messages as printed by op 2.34, plus the throttling forms 1Password
+        // documents for service accounts.
+        for (stderr, expected) in [
+            (
+                "[ERROR] could not read secret 'op://Homelab/x/credential': could not get item Homelab/x: \"x\" isn't an item in the \"Homelab\" vault.",
+                LookupFailure::NotFound,
+            ),
+            (
+                "[ERROR] could not get item V/x: \"V\" isn't a vault in this account.",
+                LookupFailure::NotFound,
+            ),
+            (
+                "[ERROR] item 'Homelab/x' does not have a field 'nosuchfield'",
+                LookupFailure::NotFound,
+            ),
+            (
+                "[ERROR] error initializing client: Validation: (failed to session.DecodeSACredentials)",
+                LookupFailure::Unauthorized,
+            ),
+            (
+                "[ERROR] (401) Unauthorized: You aren't authorized",
+                LookupFailure::Unauthorized,
+            ),
+            (
+                "[ERROR] (429) Too Many Requests: rate limit exceeded",
+                LookupFailure::RateLimited,
+            ),
+            (
+                "[ERROR] Too many requests. Your client has been rate-limited.",
+                LookupFailure::RateLimited,
+            ),
+            (
+                "[ERROR] cannot create directory \"/x/.config/op\": permission denied",
+                LookupFailure::Unknown,
+            ),
+            ("", LookupFailure::Unknown),
+            // Names echoed by op never decide the cause.
+            (
+                "[ERROR] could not read secret 'op://Homelab/token429/credential': item 'Homelab/token429' does not have a field 'credential'",
+                LookupFailure::NotFound,
+            ),
+            (
+                "[ERROR] could not get item Homelab/rate limit 401: \"rate limit 401\" isn't an item in the \"Homelab\" vault.",
+                LookupFailure::NotFound,
+            ),
+            (
+                "[ERROR] could not read secret 'op://Unauthorized/x/y': exit status 1",
+                LookupFailure::Unknown,
+            ),
+            (
+                "[ERROR] could not read secret 'op://Homelab/David's (429) PAT/x': item 'Homelab/David's (429) PAT' does not have a field 'x'",
+                LookupFailure::NotFound,
+            ),
+            (
+                "[ERROR] (401) You aren't authorized to read 'Homelab/rate limit'",
+                LookupFailure::Unauthorized,
+            ),
+        ] {
+            assert_eq!(classify(stderr.as_bytes()), expected, "{stderr}");
+        }
+    }
+
+    #[test]
+    fn messages_name_the_variable_only_when_given_and_keep_the_cause() {
+        let named = EnvironmentSecretError::ReadFailed {
+            variable: Some("GH_TOKEN".into()),
+            cause: LookupFailure::RateLimited,
+        };
+        let message = named.to_string();
+        assert!(message.starts_with("1Password lookup for GH_TOKEN failed: "));
+        assert!(message.contains("rate-limited"));
+        let unnamed = named.without_variable().to_string();
+        assert!(unnamed.starts_with("1Password lookup failed: "));
+        assert!(unnamed.contains("rate-limited"));
+        assert_eq!(
+            EnvironmentSecretError::read_failed(LookupFailure::Unknown).to_string(),
+            "1Password lookup failed: check the reference, service-account token, and vault permissions"
+        );
+        assert!(matches!(
+            EnvironmentSecretError::TimedOut.without_variable(),
+            EnvironmentSecretError::TimedOut
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rate_limited_reader_names_the_variable_and_hides_provider_output() {
+        let (_dir, binary) = fake_op(
+            "printf 'private-value'; printf '[ERROR] (429) Too Many Requests for op://private/ref\\n' >&2; exit 1",
+        );
+        let error = resolve_with_binary(
+            values(&[("GH_TOKEN", "op://private/ref/field"), ("B", "literal")]),
+            "private-token",
+            &binary,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            &error,
+            EnvironmentSecretError::ReadFailed {
+                variable: Some(name),
+                cause: LookupFailure::RateLimited,
+            } if name == "GH_TOKEN"
+        ));
+        let rendered = format!("{error:?} {error}");
+        for private in ["private-", "op://", "Too Many", "429"] {
+            assert!(!rendered.contains(private), "{private} leaked: {rendered}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verbose_diagnostics_cannot_stall_the_reader() {
+        // Far past the stderr bound and the pipe buffer, then a failing exit.
+        let (_dir, binary) = fake_op(
+            "i=0; while [ $i -lt 20000 ]; do echo 'rate limit noise' >&2; i=$((i+1)); done; exit 1",
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            read_reference(&binary, "token", "op://v/i/f"),
+        )
+        .await
+        .expect("reader must not block on a full stderr pipe");
+        assert!(matches!(
+            result,
+            Err(EnvironmentSecretError::ReadFailed { .. })
+        ));
+        let (_dir, binary) = fake_op("exec yes private-value");
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            read_reference(&binary, "token", "op://v/i/f"),
+        )
+        .await
+        .expect("reader must not block on endless output");
+        assert!(matches!(result, Err(EnvironmentSecretError::InvalidValue)));
     }
 
     #[cfg(unix)]

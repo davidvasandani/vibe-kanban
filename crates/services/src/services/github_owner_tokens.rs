@@ -265,7 +265,8 @@ where
                 .await
                 .map_err(|source| GitHubOwnerTokenError::Resolve {
                     owner: owner.clone(),
-                    source,
+                    // The request key is a placeholder; the owner names the input.
+                    source: source.without_variable(),
                 })?
                 .remove(RESOLVED_KEY)
                 .unwrap_or_default()
@@ -293,6 +294,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::services::environment_secrets::LookupFailure;
 
     async fn test_pool() -> SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -479,8 +481,12 @@ mod tests {
 
     #[tokio::test]
     async fn an_owner_named_like_the_manifest_keeps_its_token() {
-        let unused =
-            |_request: HashMap<String, String>| async { Err(EnvironmentSecretError::ReadFailed) };
+        let unused = |_request: HashMap<String, String>| async {
+            Err(EnvironmentSecretError::ReadFailed {
+                variable: Some(RESOLVED_KEY.to_owned()),
+                cause: LookupFailure::Unknown,
+            })
+        };
         let environment = launch_environment_with(
             vec![("owners".into(), "synthetic-owners".into())],
             &HashMap::new(),
@@ -494,8 +500,12 @@ mod tests {
 
     #[tokio::test]
     async fn launch_environment_names_the_failing_owner() {
-        let failing =
-            |_request: HashMap<String, String>| async { Err(EnvironmentSecretError::ReadFailed) };
+        let failing = |_request: HashMap<String, String>| async {
+            Err(EnvironmentSecretError::ReadFailed {
+                variable: Some(RESOLVED_KEY.to_owned()),
+                cause: LookupFailure::Unknown,
+            })
+        };
         let error = launch_environment_with(
             vec![("org-b".into(), "op://Vault/b/credential".into())],
             &HashMap::new(),
@@ -507,6 +517,7 @@ mod tests {
         assert!(message.contains("org-b"), "{message}");
         assert!(message.contains("1Password lookup failed"), "{message}");
         assert!(!message.contains("op://"));
+        assert!(!message.contains(RESOLVED_KEY), "{message}");
 
         let empty = |_request: HashMap<String, String>| async {
             Ok(HashMap::from([(RESOLVED_KEY.to_owned(), " ".to_owned())]))

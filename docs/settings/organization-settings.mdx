@@ -168,8 +168,18 @@ strings are unchanged; embedded references and returned values are not expanded.
 The bootstrap token itself cannot be a reference. Configured token variables
 retain their existing inheritance into workspace processes.
 
-If an explicit reference cannot be read, the launch fails with a sanitised error.
-Check the reference, token, vault permissions, CLI installation, and connectivity.
+If an explicit reference cannot be read, the launch fails with a sanitised error
+that names the variable and the cause, for example
+`1Password lookup for GH_TOKEN failed: …`. The cause is worked out from the 1Password
+CLI's own error output, which is never shown, logged, or stored:
+
+| Cause in the message | What to do |
+|---|---|
+| rate-limited the service account | The service account's request quota is used up. Every launch reads each reference again, and other tools that share the service account count against the same quota. Retry after it resets; `op service-account ratelimit` shows the remaining requests and the reset time. |
+| rejected the service-account token | Replace `OP_SERVICE_ACCOUNT_TOKEN` with a current, unrevoked token. |
+| not found or is not shared | Fix the vault, item, or field in the reference, or grant the service account access to the vault. |
+| check the reference, service-account token, and vault permissions | Unrecognised failure. Check all three, plus the CLI installation and connectivity. |
+
 The lookup phase has a 30-second limit. Fields must be NUL-free UTF-8 text no
 larger than 64 KiB; whitespace and trailing newlines are preserved. Existing
 best-effort fetching of organisation settings is unchanged: when the settings
