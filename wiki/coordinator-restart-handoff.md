@@ -241,3 +241,4 @@ again after a restart; an agent blocked on approval rarely emits any.
 - vk/80c1-tasks-should-sur
 - vk/ec43-run-a-vibe-kanba (colocated worker on the coordinator host)
 - vk/9c15-stopped-job-look (journal regression after an undrained worker restart)
+- vk/f268-harden-cluster-w (a worker `Indeterminate` event now finalizes; see worker-execution-hardening.md)
