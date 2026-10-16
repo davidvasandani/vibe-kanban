@@ -358,7 +358,7 @@ contributed to it.
   any part of a session's chat log through the MCP (`search_session_messages`,
   `GET /api/sessions/{id}/history`): every coding-agent turn, time, keyword,
   role and turn filters, and paging. Covers why time filtering is effectively
-  per turn (entry timestamps are mostly unset), keyword matching on
+  per event for new live logs, with explicit turn fallback for legacy logs, keyword matching on
   untruncated text, metadata pruning before any log read, sequential loading
   under a budget, and why an unreadable turn must not count as a searched
   empty one. Also how it differs from global search (`vk/5b8a-vk-mcp-chat-logs`).

@@ -24,15 +24,16 @@ are per-execution: with only a `session_id` they resolve the session's
   because settled turns are immutable and a running turn only grows at the
   end.
 
-## Timestamps are mostly per turn
+## Event timestamps and legacy turn fallback
 
-`NormalizedEntry.timestamp` exists, but the normalizers rarely set it. The
-effective time is the entry's RFC 3339 timestamp, else the turn's
+Fresh executions now fill missing `NormalizedEntry.timestamp` at first live
+normalization (vk/77a2-session-step-tim); completed sidecars retain it. Legacy
+and reattached raw-log replay can still lack event times. The effective time is the entry's RFC 3339 timestamp, else the turn's
 `started_at`. The response keeps `created_at` (the entry's own value, often
-null) separate from `turn_started_at`, so the fallback is visible and no time
-is invented. In practice `since`/`until` select whole turns. If a normalizer
-starts emitting timestamps, the filter becomes per message with no route
-change.
+null for legacy logs) separate from `turn_started_at`, so the fallback is visible
+and no time is invented. New timestamped entries filter per message; legacy
+entries still filter per turn. Unlike this explicit search fallback, chat step
+rows no longer substitute turn start for unknown event time.
 
 ## Bounding the cost
 
@@ -73,3 +74,5 @@ other. Their snippet helpers differ on purpose: global search's fixed
 ## Contributed by
 
 - vk/5b8a-vk-mcp-chat-logs
+
+- vk/77a2-session-step-tim (live event timestamp behavior)
