@@ -1324,3 +1324,7 @@ Applied `/speckit.constitution`: existing II, III, IX and XI govern this fix.
 Event timestamps must remain evidence: process start and historical replay time
 are not step occurrence time. Preserve source timestamps and stable entry
 identity; test both live updates and historical reads. No new principle needed.
+
+## Review: vk/e831-remember-filter
+
+Applied `/speckit.constitution`: existing II (test the contract), III (reuse existing persistence), IV (both shared frontend consumers), and LI (one default resolver with explicit override precedence) govern this change. Remembered user choices must not become implicit site-wide defaults. No new principle or version amendment required.
