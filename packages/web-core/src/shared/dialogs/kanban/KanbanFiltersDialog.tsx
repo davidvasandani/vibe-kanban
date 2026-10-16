@@ -45,6 +45,19 @@ const SORT_OPTIONS: PropertyDropdownOption<KanbanSortField>[] = [
 ];
 
 interface KanbanFiltersDialogProps {
+  preferences?: {
+    ready: boolean;
+    saving: boolean;
+    canSavePersonal: boolean;
+    canSaveSite: boolean;
+    hasPersonalDefault: boolean;
+    hasSiteDefault: boolean;
+    browserOnlyDefaults: boolean;
+    error: string | null;
+    message: string | null;
+    saveDefault: (scope: 'personal' | 'site', clear?: boolean) => Promise<void>;
+    update: (value: undefined) => void;
+  };
   open: boolean;
   onOpenChange: (open: boolean) => void;
   projectId: string;
@@ -68,6 +81,7 @@ interface KanbanFiltersDialogProps {
 }
 
 export function KanbanFiltersDialog({
+  preferences,
   open,
   onOpenChange,
   projectId,
@@ -311,6 +325,86 @@ export function KanbanFiltersDialog({
             </div>
           </div>
         </div>
+        {preferences && (
+          <div className="space-y-base border-t border-border px-double py-base">
+            <p className="text-sm text-low">
+              {t(
+                'kanban.rememberFilters',
+                'Changes are remembered for you in this browser. Defaults apply to this view across projects; tags apply only in their original project.'
+              )}
+              {preferences.browserOnlyDefaults &&
+                ' ' +
+                  t(
+                    'kanban.browserDefaultOnly',
+                    'In the cloud app, personal defaults are saved in this browser only.'
+                  )}
+            </p>
+            <div className="flex flex-wrap gap-base">
+              {preferences.canSavePersonal && (
+                <button
+                  type="button"
+                  className="rounded-sm bg-secondary px-base py-half text-normal disabled:opacity-50"
+                  disabled={!preferences.ready || preferences.saving}
+                  onClick={() => void preferences.saveDefault('personal')}
+                >
+                  {t('kanban.saveMyDefault', 'Save as my default')}
+                </button>
+              )}
+              {preferences.canSaveSite && (
+                <button
+                  type="button"
+                  className="rounded-sm bg-secondary px-base py-half text-normal disabled:opacity-50"
+                  disabled={!preferences.ready || preferences.saving}
+                  onClick={() => void preferences.saveDefault('site')}
+                >
+                  {t('kanban.saveSiteDefault', 'Save site-wide default')}
+                </button>
+              )}
+              <button
+                type="button"
+                className="rounded-sm bg-secondary px-base py-half text-normal"
+                onClick={() => preferences.update(undefined)}
+              >
+                {t('kanban.restoreDefaults', 'Use saved defaults')}
+              </button>
+              {preferences.hasPersonalDefault && (
+                <button
+                  type="button"
+                  className="text-sm text-low disabled:opacity-50"
+                  disabled={!preferences.ready || preferences.saving}
+                  onClick={() => void preferences.saveDefault('personal', true)}
+                >
+                  {t('kanban.removeMyDefault', 'Remove my default')}
+                </button>
+              )}
+              {preferences.hasSiteDefault && preferences.canSaveSite && (
+                <button
+                  type="button"
+                  className="text-sm text-low disabled:opacity-50"
+                  disabled={!preferences.ready || preferences.saving}
+                  onClick={() => void preferences.saveDefault('site', true)}
+                >
+                  {t('kanban.removeSiteDefault', 'Remove site-wide default')}
+                </button>
+              )}
+            </div>
+            {preferences.saving && (
+              <p role="status" className="text-sm text-low">
+                {t('kanban.savingDefault', 'Saving default…')}
+              </p>
+            )}
+            {preferences.error && (
+              <p role="alert" className="text-sm text-error">
+                {preferences.error}
+              </p>
+            )}
+            {preferences.message && (
+              <p role="status" className="text-sm text-normal">
+                {preferences.message}
+              </p>
+            )}
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );

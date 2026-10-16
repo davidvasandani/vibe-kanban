@@ -30,6 +30,40 @@ Rejected alternatives: changing the Team default (it clutters every board); a "N
 
 `useKanbanFilters.test.ts` calls `filterKanbanIssues` with plain fixtures in the node Vitest environment; no React is needed. When a test asserts that something is absent (for example, hide blocked excluding a result), pair it with a positive case (the blocker resolved, so the result appears). A test that only expects `[]` also passes against the old code, so it proves nothing.
 
+## Remembered choices and explicit defaults
+
+`useKanbanPreferences` now owns the board's effective preferences. The old
+`useUiPreferencesScratch` UUID 1 is shared by everyone and must not be used
+as personal storage. It still owns unrelated UI preferences.
+
+- Remembered board choices and Team/Personal selection are browser-local,
+  keyed by host, user, project and view (`vk-board-preferences:v1`).
+- Explicit personal defaults use a dedicated `UI_PREFERENCES` scratch with
+  the authenticated user UUID. Site defaults use reserved UUID
+  `00000000-0000-0000-0000-000000000002`. Each contains independent defaults
+  for Team and Personal in `kanban_project_view_preferences`.
+- Resolution is remembered view > personal default > site default > built-in.
+  Empty arrays and false toggles remain authoritative. **Use saved defaults**
+  removes the remembered override; removing a personal default reveals the
+  site default after the remembered override is cleared.
+- Defaults carry their source project. Tags apply only in that project;
+  sorting, priorities, assignees and visibility toggles apply across projects.
+  `__self__` continues to mean the current viewer.
+- Local-web scratch is server-backed. Remote-web scratch is browser-backed,
+  so the dialog labels its personal defaults as browser-only and hides the
+  site-wide action. Existing trusted-instance scratch permissions are unchanged.
+
+Two review regressions worth preserving: search must be separate transient
+state, not merely stripped during serialization (otherwise typing pins a
+copy of inherited defaults); validate the enclosing default record before
+indexing its map, because browser JSON can be malformed. Keep resolved
+preference references stable so unrelated renders do not repeatedly rebuild
+the board. Saved responses are scoped by host/user and bridge stream latency.
+
+The model, hook and rendered dialog tests cover precedence, persistence,
+user isolation, explicit save/reset, storage errors and these review cases.
+
 ## Contributed by
 
 - vk/eaef-missing-issues
+- vk/e831-remember-filter

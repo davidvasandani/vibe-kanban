@@ -1,9 +1,8 @@
-# Prior knowledge — vk/77a2-session-step-tim
+# Prior knowledge — vk/e831-remember-filter
 
-Read-only search of `vibe-kanban/wiki` and `vibe-kanban/docs/knowledge-base` for timestamps and normalized logs found:
+Searched vibe-kanban/wiki and docs/knowledge-base for board filters, preferences, and defaults. Relevant pages: wiki/kanban-board-filtering.md, wiki/new-issue-pipeline-defaults.md, wiki/workspace-sidebar-filtering.md.
 
-- `docs/knowledge-base/conversation-timestamp-provenance.md`: the shared ConversationTimestamp boundary prefers entry time but falls back to process creation time. Most normalizers omit timestamps; this explains repeated start times. Never stamp replay/render time. Preserve metadata through aggregation and hide timestamps for invisible entries.
-- `wiki/session-chat-history-search.md`: normalized timestamps are mostly missing; session search explicitly separates event and turn time. Ordering must remain turn/index, not timestamp.
-- `wiki/awaited-stream-settlement.md` and `docs/knowledge-base/lazy-loading-normalized-conversation-history.md`: completed history uses materialized normalized sidecars, while active entries stream patches. Any fix must behave consistently across both paths and avoid inventing times when replaying historical logs.
-
-These findings refine SPEC.md: investigate durable capture-time metadata at the shared normalization/persistence boundary; make legacy unknown event time honest.
+- One pure filter function serves board and list layouts in both frontends. Preserve explicit-search visibility of sub-issues and the relative Me token.
+- Defaults require one precedence resolver; an explicitly empty override must remain authoritative. Removing an override restores inheritance.
+- Existing UI scratch persists project/view preferences; inspect its ownership and hydration before extending it. Host configuration is distinct from user settings.
+- Avoid copying project tag identifiers to unrelated projects. Test positive and negative cases, hydration, and isolation.
