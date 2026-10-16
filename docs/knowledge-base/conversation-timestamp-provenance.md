@@ -35,7 +35,7 @@ entries; new unknown timestamps remain unset if full.
 
 Synthetic prompt and script rows are created after raw history is projected.
 They must copy the same process creation time explicitly, both into the
-normalised entry and its keyed-patch fallback metadata.
+normalised entry and its keyed-patch parent metadata.
 
 ## Format only at the shared row boundary
 

@@ -361,4 +361,5 @@ contributed to it.
   per event for new live logs, with explicit turn fallback for legacy logs, keyword matching on
   untruncated text, metadata pruning before any log read, sequential loading
   under a budget, and why an unreadable turn must not count as a searched
-  empty one. Also how it differs from global search (`vk/5b8a-vk-mcp-chat-logs`).
+  empty one. Also how it differs from global search (`vk/5b8a-vk-mcp-chat-logs`,
+  `vk/77a2-session-step-tim`).
