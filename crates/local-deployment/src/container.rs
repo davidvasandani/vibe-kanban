@@ -3056,8 +3056,12 @@ impl LocalContainerService {
     /// following the file as the process appends to it. Replays from the
     /// start of the file so the store's history is complete even when the
     /// process was adopted from a previous server instance.
-    async fn track_raw_file_msgs_in_store(&self, id: Uuid, path: PathBuf) {
-        let store = Arc::new(MsgStore::new());
+    async fn track_raw_file_msgs_in_store(&self, id: Uuid, path: PathBuf, replay: bool) {
+        let store = Arc::new(if replay {
+            MsgStore::new()
+        } else {
+            MsgStore::live()
+        });
         self.msg_stores.write().await.insert(id, store.clone());
 
         let handle = tokio::spawn(async move {
@@ -3109,7 +3113,7 @@ impl LocalContainerService {
     }
 
     async fn track_child_msgs_in_store(&self, id: Uuid, child: &mut AsyncGroupChild) {
-        let store = Arc::new(MsgStore::new());
+        let store = Arc::new(MsgStore::live());
 
         // stdout/stderr may be absent when re-tracking a warm-reused child: its
         // original streams were consumed by the first turn's forwarder (a warm
@@ -3242,7 +3246,11 @@ impl LocalContainerService {
             match (resume_from, stores.get(&execution_id)) {
                 (Some(_), Some(seeded)) => seeded.clone(),
                 _ => {
-                    let store = Arc::new(MsgStore::new());
+                    let store = Arc::new(if resume_from.is_none() {
+                        MsgStore::live()
+                    } else {
+                        MsgStore::new()
+                    });
                     stores.insert(execution_id, store.clone());
                     store
                 }
@@ -5586,7 +5594,7 @@ impl ContainerService for LocalContainerService {
         }
 
         if let Some(path) = dev_server_raw_log {
-            self.track_raw_file_msgs_in_store(execution_process.id, path)
+            self.track_raw_file_msgs_in_store(execution_process.id, path, false)
                 .await;
         } else {
             self.track_child_msgs_in_store(execution_process.id, &mut spawned.child)
@@ -6053,7 +6061,7 @@ impl ContainerService for LocalContainerService {
                 .write()
                 .await
                 .insert(process.id, pgid as i32);
-            self.track_raw_file_msgs_in_store(process.id, raw_log_path)
+            self.track_raw_file_msgs_in_store(process.id, raw_log_path, true)
                 .await;
             let watcher = self.spawn_adopted_exit_watcher(process.id, pgid as i32);
             self.add_exit_monitor_handle(process.id, watcher).await;

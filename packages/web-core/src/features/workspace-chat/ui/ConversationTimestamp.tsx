@@ -81,7 +81,8 @@ function timestampForAtomicEntry(entry: DisplayEntry): string | null {
     return eventTimestamp;
   }
 
-  return entry.processCreatedAt ?? null;
+  // Process creation is not evidence of when an individual step occurred.
+  return null;
 }
 
 export function getDisplayEntryTimestamp(entry: DisplayEntry): string | null {

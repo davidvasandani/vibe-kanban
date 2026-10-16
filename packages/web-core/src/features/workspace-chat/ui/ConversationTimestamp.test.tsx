@@ -58,7 +58,7 @@ describe('conversation timestamps', () => {
     expect(formatConversationTimestamp('not-a-date')).toBeNull();
   });
 
-  it('falls back to the authoritative process time when event time is absent', () => {
+  it('omits unknown event time even when process time is available', () => {
     expect(
       getDisplayEntryTimestamp(
         normalizedEntry(
@@ -68,10 +68,10 @@ describe('conversation timestamps', () => {
           '2026-09-16T09:30:00Z'
         )
       )
-    ).toBe('2026-09-16T09:30:00Z');
+    ).toBeNull();
   });
 
-  it('falls back to the process time when an event time is malformed', () => {
+  it('omits malformed event time even when process time is available', () => {
     expect(
       getDisplayEntryTimestamp(
         normalizedEntry(
@@ -81,7 +81,7 @@ describe('conversation timestamps', () => {
           '2026-09-16T09:30:00Z'
         )
       )
-    ).toBe('2026-09-16T09:30:00Z');
+    ).toBeNull();
   });
 
   it('uses the latest valid timestamp in an aggregate', () => {
@@ -184,6 +184,39 @@ describe('ConversationTimestamp', () => {
     expect(time?.getAttribute('datetime')).toBe(sourceTimestamp);
     expect(time?.getAttribute('title')).toBeTruthy();
     expect(time?.getAttribute('aria-label')).toBe(time?.getAttribute('title'));
+  });
+
+  it('updates for distinct steps and preserves logged times after remount', () => {
+    const first = normalizedEntry('2026-10-16T09:19:00Z');
+    const later = normalizedEntry('2026-10-16T10:34:00Z');
+    for (const entry of [first, later]) {
+      act(() => root.render(<ConversationTimestamp entry={entry} />));
+      expect(container.querySelector('time')?.getAttribute('datetime')).toBe(
+        entry.type === 'NORMALIZED_ENTRY' ? entry.content.timestamp : null
+      );
+    }
+    act(() => root.unmount());
+    root = createRoot(container);
+    act(() => root.render(<ConversationTimestamp entry={later} />));
+    expect(container.querySelector('time')?.getAttribute('datetime')).toBe(
+      '2026-10-16T10:34:00Z'
+    );
+  });
+
+  it('does not render a legacy step using its parent start time', () => {
+    act(() =>
+      root.render(
+        <ConversationTimestamp
+          entry={normalizedEntry(
+            null,
+            'system_message',
+            'process:0',
+            '2026-10-16T09:19:00Z'
+          )}
+        />
+      )
+    );
+    expect(container.querySelector('time')).toBeNull();
   });
 
   it('renders nothing for invalid time', () => {
