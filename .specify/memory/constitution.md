@@ -1317,3 +1317,10 @@ which never started is reaped by its owner. The homelab constitution named
 by the command template was not changed, because this project only manages
 the Vibe Kanban repository. The worker unit's cgroup delegation in homelab
 is deployment configuration for this service.
+
+## Review: vk/77a2-session-step-tim
+
+Applied `/speckit.constitution`: existing II, III, IX and XI govern this fix.
+Event timestamps must remain evidence: process start and historical replay time
+are not step occurrence time. Preserve source timestamps and stable entry
+identity; test both live updates and historical reads. No new principle needed.

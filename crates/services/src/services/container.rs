@@ -3081,7 +3081,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join("execution.normalized.jsonl");
 
-        let store = utils::msg_store::MsgStore::new();
+        let store = utils::msg_store::MsgStore::live();
         let entry = super::NormalizedEntry {
             timestamp: None,
             entry_type: super::NormalizedEntryType::AssistantMessage,
@@ -3108,6 +3108,10 @@ mod tests {
             .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, entry.content);
+        let observed = entries[0].timestamp.as_ref().expect("live step has a time");
+        assert!(chrono::DateTime::parse_from_rfc3339(observed).is_ok());
+        let live = normalized_entries_from_history(&Uuid::new_v4(), &store).expect("live snapshot");
+        assert_eq!(live[0].timestamp.as_ref(), Some(observed));
     }
 
     /// A store with nothing to say (e.g. a turn that errored before any
